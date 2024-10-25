@@ -81,14 +81,7 @@ def init_summa_algo(m, n, p, i, j, world_size):
 
     return Aij, Bij, Cij, A, B
 
-def init_mpi():
-    comm = MPI.COMM_WORLD
 
-    rank = comm.Get_rank() # rank is from 0 to 3
-    world_size = comm.Get_size()
-    i = int(rank // np.sqrt(world_size)) # 0/2
-    j = int(rank % np.sqrt(world_size))
-    return comm, i, j
 
 
 def mul_summa(Aij, Bij, rank, world_size, comm):
@@ -291,9 +284,9 @@ def gather(Cij, comm, world_size):
     return C_collective
         
 
-def ABT(Aij, Bij,  n, rank, world_size, comm):
+def ABT(Aij, Bij, rank, world_size, comm):
     sqrtp = int(np.sqrt(world_size))
-    subset_size = int(n//np.sqrt(world_size))
+    
     i = int(rank // np.sqrt(world_size)) # 0/2
     j = int(rank % np.sqrt(world_size))
 
@@ -316,7 +309,7 @@ def ABT(Aij, Bij,  n, rank, world_size, comm):
     for r in range(world_size):
         rank_dict_transpose[transpose(sqrtp, r)] = [k * sqrtp + int(r % np.sqrt(world_size)) for k in range(sqrtp)]
 
-    A_k = torch.zeros(subset_size, subset_size)
+    A_k = torch.zeros_like(Aij)
     
     for k in range(sqrtp):
         # Broadcast submatrix of A along the row
@@ -350,10 +343,9 @@ def ABT(Aij, Bij,  n, rank, world_size, comm):
 
     return Cij
 
-def ATB(Aij, Bij, n, rank, world_size, comm):
+def ATB(Aij, Bij, rank, world_size, comm):
     
     sqrtp = int(np.sqrt(world_size))
-    subset_size = int(n//np.sqrt(world_size))
     i = int(rank // np.sqrt(world_size)) # 0/2
     j = int(rank % np.sqrt(world_size))
 
@@ -378,8 +370,8 @@ def ATB(Aij, Bij, n, rank, world_size, comm):
     #if rank == 0:
     #    print(rank_dict_transpose)
 
-    A_k = torch.zeros(subset_size, subset_size)
-    B_k = torch.zeros(subset_size, subset_size)
+    A_k = torch.zeros_like(Aij)
+    B_k = torch.zeros_like(Bij)
 
     for k in range(sqrtp):
         # Broadcast submatrix of A along the row

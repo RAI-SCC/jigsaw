@@ -3,9 +3,8 @@ import torch.optim as optim
 import summa_dist
 from mpi4py import MPI
 import numpy as np
-from torch.nn import GELU, Dropout
-from lineartest import MyLinearFunction
-
+from torch.nn import ReLU, Dropout
+import utils
 
 class DistributedLinear(torch.nn.Module):
     def __init__(self, in_dim, out_dim, comm):
@@ -19,11 +18,7 @@ class DistributedLinear(torch.nn.Module):
         self.world_size = self.comm.Get_size()
         self.summa = SUMMA().apply
     
-    # def get_weights(self):
-    #     return self.weights_ij
-    
     def forward(self, x):
-        #Cij = summa_dist.mul_summa(x, self.weights_ij, self.rank, self.world_size, self.comm)
         Cij = self.summa(x, self.weights_ij, self.comm)
         
         return Cij
@@ -34,7 +29,7 @@ class SUMMA(torch.autograd.Function):
         ctx.save_for_backward(x, W)
         ctx.comm = comm
         
-        return summa_dist.ABT(x, W, n, rank, world_size, comm)
+        return summa_dist.ABT(x, W, rank, world_size, comm)
     
     @staticmethod
     def backward(ctx, grad_output):
@@ -42,7 +37,7 @@ class SUMMA(torch.autograd.Function):
         comm2 = ctx.comm
         #print(f"grad output {grad_output.shape}, weight {weight.shape}")
         grad_input = summa_dist.mul_summa(grad_output, weight, rank, world_size, comm)
-        grad_weight = summa_dist.ATB(grad_output, input, n=n, rank=rank, world_size=world_size, comm=comm2).clone()
+        grad_weight = summa_dist.ATB(grad_output, input, rank=rank, world_size=world_size, comm=comm2).clone()
         
         return grad_input, grad_weight, None
         
@@ -53,7 +48,7 @@ class DistributedMLP(torch.nn.Module):
         self.linear1 = DistributedLinear(in_dim, hidden_dim, comm)
         self.linear2 = DistributedLinear(hidden_dim, hidden_dim, comm)
         self.linear3 = DistributedLinear(hidden_dim, out_dim, comm)
-        self.activation = GELU()
+        self.activation = ReLU()
         self.drop = Dropout(p=1e-6)
 
     def forward(self, x):
@@ -66,9 +61,7 @@ class DistributedMLP(torch.nn.Module):
         #x = self.drop(x)
         return x
 
-
-
-comm, i, j = summa_dist.init_mpi()
+comm, i, j = utils.init_mpi()
 m, n, p = 4, 2, 2
 world_size = comm.Get_size()
 rank = comm.Get_rank()
@@ -84,13 +77,7 @@ goal_i = goal[i*subset_size_m:(i+1)*subset_size_m, j*subset_size_p:(j+1)*subset_
 
 loss_fn = torch.nn.MSELoss()
 
-
-
 mlp = DistributedMLP(1, 6, 1, comm)
-
-#if rank == 0:
-#    for param in mlp.parameters():
-#        print(param.shape)
 
 lr = 1e-3
 
