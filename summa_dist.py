@@ -291,13 +291,13 @@ def gather(Cij, comm, world_size):
     return C_collective
         
 
-def ABT(Aij, Bij, Cij, n, rank, world_size, comm):
+def ABT(Aij, Bij,  n, rank, world_size, comm):
     sqrtp = int(np.sqrt(world_size))
     subset_size = int(n//np.sqrt(world_size))
     i = int(rank // np.sqrt(world_size)) # 0/2
     j = int(rank % np.sqrt(world_size))
 
-    Cij = 0
+    Cij = torch.zeros(Aij.shape[0], Bij.shape[0])
     
     # Create process groups for row and column communications
     row_group_ranks = [i * sqrtp + k for k in range(sqrtp)]
