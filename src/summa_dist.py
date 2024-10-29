@@ -2,62 +2,6 @@ from mpi4py import MPI
 import numpy as np
 import torch
 
-def canons_algo():
-    n = 8
-    A = torch.arange(n*n).reshape(n, n)
-    B = torch.arange(n*n).reshape(n, n)
-    p = 4 # = world_size
-    sqrtp = int(np.sqrt(p))
-    subset_size = int(n//np.sqrt(p))
-    C = torch.zeros((n, n))
-
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank() # rank is from 0 to 3
-
-    i = int(rank // np.sqrt(p)) # 0/2
-    j = int(rank % np.sqrt(p))
-
-    i_start = (i - sqrtp + j) % sqrtp
-    j_start = (j - sqrtp + i) % sqrtp
-
-    Aij = torch.tensor(A[i*subset_size:(i+1)*subset_size, j_start*subset_size:(j_start+1)*subset_size].clone().detach()).to(torch.float32)
-    Aij.requires_grad = True
-    Bij = torch.tensor(B[(i_start)*subset_size:(i_start+1)*subset_size, j*subset_size:(j+1)*subset_size].clone().detach()).to(torch.float32)
-
-    Cij = torch.matmul(Aij, Bij)
-    #Cij = np.zeros((subset_size, subset_size))
-    i_target = (i - 1) % sqrtp
-    j_target = (j - 1) % sqrtp
-
-    A_target = int((i*sqrtp + j_target%sqrtp)%p)
-    B_target = int((i_target*sqrtp + j)%p)
-
-    A_src = int((i*sqrtp + (j+1) % sqrtp)%p)
-    B_src = int(((i+1)*sqrtp + j) % p)
-
-    for step in range(sqrtp-1):
-        # Send 
-        comm.isend(Aij, dest=A_target, tag=13)
-        comm.isend(Bij, dest=B_target, tag=14)
-
-        Aij_data = torch.zeros(subset_size, subset_size)
-
-        req = comm.irecv(source=A_src, tag=13)
-        req2 = comm.irecv(source=B_src, tag=14)
-        Aij_data = req.wait()
-        Bij_data = req2.wait()
-
-        Cij = Cij + torch.matmul(Aij_data, Bij_data)
-
-
-    C[i*subset_size:(i+1)*subset_size, j*subset_size:(j+1)*subset_size] = Cij
-
-    if rank == 0:
-        print(torch.matmul(A, B))
-
-    print(C)
-
-
 def init_summa_algo(m, n, p, i, j, world_size):
     # n: side-length of matrix
     # i, j: row and column of rank/block matrix
@@ -80,7 +24,6 @@ def init_summa_algo(m, n, p, i, j, world_size):
     Cij = torch.zeros(subset_size_m, subset_size_p)
 
     return Aij, Bij, Cij, A, B
-
 
 
 
@@ -115,7 +58,7 @@ def mul_summa(Aij, Bij, rank, world_size, comm):
         # Broadcast submatrix of A along the row
         
         if j == k: # Broadcast horizontally
-            A_k = Aij.clone().detach()  # i = 0; --> 0, 3, 6
+            A_k = Aij.clone()  # i = 0; --> 0, 3, 6
         #root = (j*sqrtp+k)%p
         A_k = row_comm.bcast(A_k, root=k) 
 
@@ -123,7 +66,7 @@ def mul_summa(Aij, Bij, rank, world_size, comm):
         B_k = torch.zeros(subset_size_n, subset_size_p)
         
         if i == k: # broadcast across rows
-            B_k = Bij.clone().detach()
+            B_k = Bij.clone()
         
         B_k = col_comm.bcast(B_k, root=k)
         
@@ -165,14 +108,12 @@ def ABT_manual(Aij, Bij, Cij, n, rank, world_size, comm):
     # Broadcast submatrix of A along the row
     if j == 0: # Broadcast horizontally
         A_k = Aij.clone().detach()  # i = 0; --> 0, 3, 6
-    #root = (j*sqrtp+k)%p
-    #A_k = Aij.clone().detach()
     B_k = Bij.clone().detach()
 
     A_k = row_comm.bcast(A_k, root=0) 
 
 
-# SYNTAX    comm.isend(Bij, dest=B_target, tag=14)
+    
      #for k = 0:
     if rank == 0:
         comm.isend(Bij, dest=2, tag=14)
@@ -309,14 +250,17 @@ def ABT(Aij, Bij, rank, world_size, comm):
     for r in range(world_size):
         rank_dict_transpose[transpose(sqrtp, r)] = [k * sqrtp + int(r % np.sqrt(world_size)) for k in range(sqrtp)]
 
-    A_k = torch.zeros_like(Aij)
+    A_k = torch.zeros_like(Aij).detach()
     
+    buffer = np.empty_like(Bij.cpu().numpy())
+
     for k in range(sqrtp):
         # Broadcast submatrix of A along the row
         if j == k: # Broadcast horizontally
             A_k = Aij.clone().detach()  # i = 0; --> 0, 3, 6
 
         B_k = Bij.clone().detach()
+        
 
         A_k = row_comm.bcast(A_k, root=k) 
 
@@ -329,17 +273,22 @@ def ABT(Aij, Bij, rank, world_size, comm):
             targets = rank_dict_transpose[rank]
             for target in targets: 
                 if rank != target:
-                    comm.isend(Bij, dest=target, tag=14)    
+                    comm.Isend(Bij.numpy(), dest=target, tag=30)    
+                    
         
         # receiving
         for root_rank in root_ranks:
             if root_rank != rank:
                 for target in rank_dict_transpose[root_rank]:
                     if rank == target:
-                        req = comm.irecv(source=root_rank, tag=14)
-                        B_k = req.wait()
-    
-        Cij += A_k @ B_k.T
+                        req = comm.Irecv(buffer, source=root_rank, tag=30)
+                        req.wait()
+                        B_k = torch.from_numpy(buffer).to(Bij.device) 
+
+        
+        Cij = Cij + A_k @ B_k.T
+
+
 
     return Cij
 
@@ -373,9 +322,12 @@ def ATB(Aij, Bij, rank, world_size, comm):
     A_k = torch.zeros_like(Aij)
     B_k = torch.zeros_like(Bij)
 
+    buffer = np.empty_like(Aij.cpu().numpy())
+
+    
     for k in range(sqrtp):
         # Broadcast submatrix of A along the row
-        A_k = Aij.clone().detach()
+        A_k = Aij.clone()
 
         # for k = 0
         # "root" ranks: [0, 1]
@@ -386,18 +338,19 @@ def ATB(Aij, Bij, rank, world_size, comm):
         if rank in root_ranks:
             targets = rank_dict_transpose[rank]
             for target in targets: 
-                comm.isend(Aij, dest=target, tag=14)    
+                comm.Isend(Aij, dest=target, tag=14)    
         
         # receiving
         for root_rank in root_ranks:
             
             for target in rank_dict_transpose[root_rank]:
                 if rank == target:
-                    req = comm.irecv(source=root_rank, tag=14)
-                    A_k = req.wait()
+                    req = comm.Irecv(buffer, source=root_rank, tag=14)
+                    req.wait()
+                    A_k = torch.from_numpy(buffer).to(Aij.device)
 
         if i == k: # Broadcast horizontally
-            B_k = Bij.clone().detach()  # i = 0; --> 0, 3, 6
+            B_k = Bij.clone()  # i = 0; --> 0, 3, 6
 
         B_k = col_comm.bcast(B_k, root=k) 
     
