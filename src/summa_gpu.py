@@ -6,19 +6,22 @@ import torch.distributed as dist
 
 def mul_summa(Aij, Bij, rank, world_size, device):
     
-    assert(Aij.shape[1] == Bij.shape[0])
-    m, n, p = Aij.shape[0], Aij.shape[1], Bij.shape[1] 
+    #assert(Aij.shape[1] == Bij.shape[0])
+    #m, n, p = Aij.shape[0], Aij.shape[1], Bij.shape[1] 
        
-    Cij = torch.zeros(m, p).to(device)
+    #Cij = torch.zeros(m, p).to(device)
     
     sqrtp = int(np.sqrt(world_size))
-    subset_size_m, subset_size_n, subset_size_p = m//sqrtp, n//sqrtp, p//sqrtp
+    #subset_size_m, subset_size_n, subset_size_p = m//sqrtp, n//sqrtp, p//sqrtp
     
     i = int(rank // np.sqrt(world_size)) # 0/2
     j = int(rank % np.sqrt(world_size))
+
     
     # Empty allocation of A_k per process
-    A_k = torch.zeros(subset_size_m, subset_size_n)
+    A_k = torch.zeros_like(Aij).detach().to(device)
+    
+    Cij = torch.zeros(Aij.shape[0], Bij.shape[1]).to(device)
 
     bufferA = torch.zeros_like(Aij)#.detach().to(device)
     bufferB = torch.zeros_like(Bij)
@@ -140,10 +143,9 @@ def ABT(Aij, Bij, rank, world_size, device):
         rank_dict_transpose[transpose(sqrtp, r)] = [k * sqrtp + int(r % np.sqrt(world_size)) for k in range(sqrtp)]
         rank_dict_norm[r] = [k * sqrtp + int(r % np.sqrt(world_size)) for k in range(sqrtp)]
 
-
     A_k = torch.zeros_like(Aij).detach().to(device)
-    
-    Cij = torch.zeros(Aij.shape[0], Bij.shape[0]).to(device)
+
+    Cij = torch.zeros(*Aij.shape[:-1], Bij.shape[0]).to(device)
     
     bufferA = torch.zeros_like(Aij)#.detach().to(device)
     bufferB = torch.zeros_like(Bij)
@@ -155,7 +157,6 @@ def ABT(Aij, Bij, rank, world_size, device):
         A_k = distribute_A(Aij, k, rank, bufferA, device)
         
         B_k = Bij.clone().detach()
-        
         
         root_ranks = np.arange(sqrtp)*sqrtp + k
 
@@ -208,7 +209,12 @@ def ATB(Aij, Bij, rank, world_size, device):
 
     A_k = torch.zeros_like(Aij)
     B_k = torch.zeros_like(Bij)
-    Cij = torch.zeros(Aij.shape[1], Bij.shape[1]).to(B_k.device)
+
+    
+    # TODO matmul dimensions currently fixed. need to generalize?
+    # TODO : VERY INEFFICIENT, hacky way of getting correct shape
+    Cij = torch.zeros((A_k.mT @ B_k).shape).to(B_k.device)
+    #Cij = torch.zeros(Aij.shape[:len_Aij-2], Bij.shape[0]).to(device).to(B_k.device)
 
 
     buffer  = torch.zeros_like(Aij)
@@ -242,17 +248,6 @@ def ATB(Aij, Bij, rank, world_size, device):
 
 
         B_k = distribute_B(Bij, k, rank, bufferB, device)
-        
-    
-        Cij = Cij + A_k.T @ B_k
-        #if k == 0:
-        #    print(f"Rank {rank}, k {k}, A_k {A_k}, B_k {B_k}")
+        Cij = Cij + A_k.mT @ B_k
 
     return Cij
-
-#n = 4           # problem size
-#comm, i, j = init_mpi()
-#world_size = comm.Get_size()
-#Aij, Bij, Cij, A, B = init_summa_algo(m=2, n=2, p=2, i=i, j=j, world_size=world_size)
-#Cij = ATB(Aij, Bij, n, comm.Get_rank(), world_size, comm)
-#verifyATB(A, B, Cij, comm, world_size, n)

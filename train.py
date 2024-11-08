@@ -4,100 +4,86 @@ import torch
 import torch.optim as optim
 import sys
 sys.path.insert(1, 'src/')
-from Linear import DistributedLinear, DistributedMLP
+from Linear import DistributedLinear, DistributedMLP, MLPDimension
+import Linear as linear
+import TestModel
 import summa_dist
 from mpi4py import MPI
 from torch.utils.data import DataLoader, TensorDataset
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+comm = MPI.COMM_WORLD
+mpi_rank = comm.Get_rank()
+mpi_size = comm.Get_size()
+
+device, slurm_localid, torch_rank, world_size = utils.init_CUDA()
 
 
-comm, i, j = utils.init_mpi()
-device, slurm_localid, rank, world_size = utils.init_CUDA()
-
-m, n, p = 4, 2, 2
-world_size = comm.Get_size()
-rank = comm.Get_rank()
-Xij, _, Cij, A, B = summa_dist.init_summa_algo(m=m, n=n, p=p, i=i, j=j, world_size=world_size)
-
-subset_size_m = int(m//np.sqrt(world_size))
-subset_size_n = int(n//np.sqrt(world_size))
-subset_size_p = int(p//np.sqrt(world_size))
-
-#goal = torch.tensor([0, 3, 0, -1, 3, 6, 3, 0, 1, 2, 1, 0, -1, 1, -1, -1]).reshape(m, p).to(torch.float32)
-goal = torch.tensor([0, 1, 3, 6, 1, 2, -1, -1]).reshape(m, p).to(torch.float32)
-goal_i = goal[i*subset_size_m:(i+1)*subset_size_m, j*subset_size_p:(j+1)*subset_size_p]
-
-loss_fn = torch.nn.MSELoss()
+loss_fn = torch.nn.L1Loss()
 
 config_dict = {'data': {'dt': 6, 
                         'train_data_path': '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/1959-2023_01_10-wb13-6h-1440x721.zarr',
                         'valid_data_path': '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/1959-2023_01_10-wb13-6h-1440x721.zarr',
-                        'prefetch_factor': 6,
-                        'num_workers': 1
+                        'prefetch_factor': 4,
+                        'num_workers': 2
                         }
                }
 
-if rank == 0:
-    dataloader = utils.get_dataloader(config_dict)
-else:
-    dataloader = None
+#if mpi_rank == 0:
+#    dataloader = utils.get_dataloader(config_dict)
+#else:
+#    dataloader = None
 
-#data = torch.arange(100, dtype=torch.float32).reshape(-1,1)
-#dataset = TensorDataset(data)
-#dataloader = DataLoader(dataset, batch_size=8)  # Adjust batch size as needed
+dataloader = utils.get_dataloader(config_dict, distributed=True)
 
-#mlp = DistributedMLP(1, 6, 1, comm)
-dim = 720
-mlp = DistributedLinear(dim, dim, comm).to(torch.float32)
+#mlp = DistributedMLP(dim, dim//2, dim, comm, device, torch_rank).to(torch.float32).to(device)
+#mlp = DistributedLinear(dim, dim, comm, device, torch_rank).to(torch.float16).to(device)
+#mlp = linear.TestModel(720, 360, 720, comm, device, torch_rank).to(torch.float32).to(device)
+mlp = TestModel.Model(device, comm, torch_rank).to(torch.float32).to(device)
+#mlp = DDP(
+#    mlp,
+#    device_ids=[slurm_localid],
+#    output_device=slurm_localid
+#)
 
-lr = 1e-4
+lr = 1e-5
+
+optimizer = optim.Adam(mlp.parameters(), lr=lr)
 
 
-optimizer = optim.SGD(mlp.parameters(), lr=lr)
+if slurm_localid == 0:
+    print(f"model has {utils.count_parameters(mlp)/1e6} million parameters")
 
-# Iterate through batches on rank 0 and scatter each batch to other ranks
-for batch_idx in range(1000):#: if rank == 0 else 0):
-    if rank == 0:
-        # Get the batch data on rank 0
-        batch_data = next(iter(dataloader))
-        batch_data[0] = batch_data[0].reshape(1, 69, 360, 2, 720, 2).permute(3, 5, 0, 1, 2, 4).reshape(-1, 69, 360, 720) # [1, 69, 360, 720]
-        batch_data[1] = batch_data[1][0].reshape(1, 69, 360, 2, 720, 2).permute(3, 5, 0, 1, 2, 4).reshape(-1, 69, 360, 720) # [1, 69, 720, 1440]
-        #batch_data = []
-        #batch_data.append(torch.normal(mean=0, std=1, size=(4, 5, 10, dim)))
-        #batch_data.append(batch_data[0])
-        # Split batch data among ranks
-        batch_split_in = torch.chunk(batch_data[0], 4, dim=0)
-        batch_split_out = torch.chunk(batch_data[1], 4, dim=0)
-    else:
-        batch_split_in  = None  # No data on other ranks initially
-        batch_split_out = None
+# Completely DDP model, no model parallelism
+for epoch in range(100):
+    for i, data in enumerate(dataloader):
+    ## Get the batch data on rank 0
+        input_data  = data[0].to(torch.float32).to(device)
+        target_data = data[1][0].to(torch.float32).to(device)
+        
+        optimizer.zero_grad()
+        output = mlp(input_data)
 
-    # Scatter the current batch split to all ranks
-    
-    scattered_batch_in = comm.scatter(batch_split_in, root=0)
-    scattered_batch_out = comm.scatter(batch_split_out, root=0)
+        # output: n_batch, 720, 1440, 72//4
+        
+        # target data shape: (n_batch, 69, 720, 1440)
+        fraction = 72 // 4
+        target_data = target_data.permute(0, 2, 3, 1)
+        # target data: [n_batch, 720, 1440, 69]
 
-    # shape (1, 69, 360, 720),
-    scattered_batch_in  = scattered_batch_in.reshape(69*360, -1)
-    scattered_batch_out = scattered_batch_in.reshape(69*360, -1)
-    
+        if torch_rank != 3:
+            loss = loss_fn(output, target_data[:, :, :, torch_rank*fraction:(torch_rank+1)*fraction])
+        else:
+            loss = loss_fn(output[:,:,:,:15], target_data[:,:,:,:15])
+        
+        torch.distributed.all_reduce(loss/4)
 
-#    print(f"rank {rank}, data shape {scattered_batch_in.shape}, {scattered_batch_out.shape}")
+        if mpi_rank == 0:
+            print(f"iter {i}, loss: {loss.detach()}")
 
-    optimizer.zero_grad()
-    
-    output = mlp(scattered_batch_in)
-    #.reshape(1, 69, 360, 720)
+        loss.backward()
 
-    
-    loss = loss_fn(output, scattered_batch_out)
-    loss = comm.allreduce(loss) / world_size
-    #
-    loss.backward()
-    optimizer.step()
-    if rank == 0:
-        print(loss.detach())
-#
-            #if i % 1000 == 0:
-            #    for param in mlp.parameters():
-            #        print(f"rank {rank}, output {output})#, param {param[0]}")
+        optimizer.step()
 
+
+torch.distributed.destroy_process_group()
