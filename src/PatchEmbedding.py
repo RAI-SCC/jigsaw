@@ -142,7 +142,7 @@ class DistributedPatchEmbedding(torch.nn.Module):
     self.patch_size = patch_size
     self.var_in = var_in
     self.embed_dim = embed_dim
-    self.patch_embed = Linear.DistributedLinear(patch_size[0]*patch_size[1]*var_in//4, embed_dim//4, comm, device, torch_rank)
+    self.patch_embed = Linear.DistributedXWT(patch_size[0]*patch_size[1]*var_in//2, embed_dim//2, comm, device, torch_rank)
     self.device = device
     self.land_mask, self.soil_type, self.topography = load_constant_mask_2d(self.patch_size)
     self.land_mask = self.land_mask.to(self.device)
@@ -171,9 +171,17 @@ class DistributedPatchEmbedding(torch.nn.Module):
     # current x shape: (n_batch, n_lat/p0, n_lon/p1, p0, p1, vars)
     x_shape = x.shape
     x = x.reshape(x_shape[0], x_shape[1]*x_shape[2], self.patch_size[0]*self.patch_size[1]*self.var_in)
-    fraction = x.shape[-1] // 4
+    fraction_1 = x.shape[-2] // 2
+    fraction_2 = x.shape[-1] // 2
     # apply MLP/convolution
-    x = self.patch_embed(x[:, :,  self.torch_rank*fraction:(self.torch_rank+1)*fraction].contiguous())
+    if self.torch_rank == 0:
+      x = self.patch_embed(x[:, :fraction_1,  :fraction_2].contiguous())
+    elif self.torch_rank == 1:
+      x = self.patch_embed(x[:, :fraction_1,  fraction_2:].contiguous())
+    elif self.torch_rank == 2:
+      x = self.patch_embed(x[:, fraction_1:,  :fraction_2].contiguous())
+    elif self.torch_rank == 3:
+      x = self.patch_embed(x[:, :fraction_1,  :fraction_2].contiguous())
 
     # x shape: (n_batch, n_lat/p0, n_lon/01, embed_dim)
     return x
@@ -199,7 +207,7 @@ class DistributedPatchRecovery(torch.nn.Module):
     """
     super().__init__()
     # Here we use two transposed convolutions to recover data
-    self.conv = Linear.DistributedLinear(embed_dim//4, patch_size[0]*patch_size[1]*out_channels//4, comm, device, torch_rank)
+    self.conv = Linear.DistributedXWT(embed_dim//2, patch_size[0]*patch_size[1]*out_channels//2, comm, device, torch_rank)
     self.patch_size = patch_size
     self.out_channels = out_channels
 

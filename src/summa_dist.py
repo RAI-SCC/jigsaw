@@ -231,7 +231,7 @@ def ABT(Aij, Bij, rank, world_size, comm):
     i = int(rank // np.sqrt(world_size)) # 0/2
     j = int(rank % np.sqrt(world_size))
 
-    Cij = torch.zeros(Aij.shape[0], Bij.shape[0])
+    
     
     # Create process groups for row and column communications
     row_group_ranks = [i * sqrtp + k for k in range(sqrtp)]
@@ -251,6 +251,7 @@ def ABT(Aij, Bij, rank, world_size, comm):
         rank_dict_transpose[transpose(sqrtp, r)] = [k * sqrtp + int(r % np.sqrt(world_size)) for k in range(sqrtp)]
 
     A_k = torch.zeros_like(Aij).detach()
+    Cij = torch.zeros(Aij.shape[0], Bij.shape[0]).to(A_k.device)
     
     buffer = np.empty_like(Bij.cpu().numpy())
 
@@ -273,7 +274,7 @@ def ABT(Aij, Bij, rank, world_size, comm):
             targets = rank_dict_transpose[rank]
             for target in targets: 
                 if rank != target:
-                    comm.Isend(Bij.numpy(), dest=target, tag=30)    
+                    comm.Isend(Bij.cpu().numpy(), dest=target, tag=30)    
                     
         
         # receiving
@@ -283,11 +284,11 @@ def ABT(Aij, Bij, rank, world_size, comm):
                     if rank == target:
                         req = comm.Irecv(buffer, source=root_rank, tag=30)
                         req.wait()
-                        B_k = torch.from_numpy(buffer).to(Bij.device) 
+                        B_k = torch.from_numpy(buffer).to(A_k.device) 
 
-        
+
+        #print(f"Cij device {Cij.device}, A_k device {A_k.device}, B_k device {B_k.device}")
         Cij = Cij + A_k @ B_k.T
-
 
 
     return Cij
@@ -298,7 +299,6 @@ def ATB(Aij, Bij, rank, world_size, comm):
     i = int(rank // np.sqrt(world_size)) # 0/2
     j = int(rank % np.sqrt(world_size))
 
-    Cij = torch.zeros(Aij.shape[1], Bij.shape[1])
     
     # Create process groups for row and column communications
     col_group_ranks = [k * sqrtp + j for k in range(sqrtp)]
@@ -321,6 +321,8 @@ def ATB(Aij, Bij, rank, world_size, comm):
 
     A_k = torch.zeros_like(Aij)
     B_k = torch.zeros_like(Bij)
+    Cij = torch.zeros(Aij.shape[1], Bij.shape[1]).to(B_k.device)
+
 
     buffer = np.empty_like(Aij.cpu().numpy())
 
@@ -347,14 +349,14 @@ def ATB(Aij, Bij, rank, world_size, comm):
                 if rank == target:
                     req = comm.Irecv(buffer, source=root_rank, tag=14)
                     req.wait()
-                    A_k = torch.from_numpy(buffer).to(Aij.device)
+                    A_k = torch.from_numpy(buffer).to(B_k.device)
 
         if i == k: # Broadcast horizontally
             B_k = Bij.clone()  # i = 0; --> 0, 3, 6
 
         B_k = col_comm.bcast(B_k, root=k) 
     
-        Cij += A_k.T @ B_k
+        Cij = Cij + A_k.T @ B_k
         #if k == 0:
         #    print(f"Rank {rank}, k {k}, A_k {A_k}, B_k {B_k}")
 
