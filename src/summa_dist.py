@@ -26,6 +26,21 @@ def init_summa_algo(m, n, p, i, j, world_size):
     return Aij, Bij, Cij, A, B
 
 
+def init_summa_vert(m, n, rank):
+    # n: side-length of matrix
+    # i, j: row and column of rank/block matrix
+    # world_size
+    A = torch.tensor([1, 2, 3, 4, 0, 3, 4, 5]).reshape(m, n).to(torch.float32)
+    Bij = torch.normal(0, 1, size=(1, 2))
+
+    Aij = A[:, rank]
+    
+    if rank == 0:
+        Cij = torch.tensor([20, 15, 23, 16, 55, 50, 15, 10]).reshape(4, 2)
+    Cij = torch.zeros(1, 1)
+
+    return Aij, Bij, Cij, A
+
 
 def mul_summa(Aij, Bij, rank, world_size, comm):
 
@@ -44,8 +59,6 @@ def mul_summa(Aij, Bij, rank, world_size, comm):
     row_group_ranks = [i * sqrtp + k for k in range(sqrtp)]
     col_group_ranks = [k * sqrtp + j for k in range(sqrtp)]
 
-    #row_group = dist.new_group(row_group_ranks)
-    #col_group = dist.new_group(col_group_ranks)
     row_group = comm.group.Incl(row_group_ranks)
     row_comm  = comm.Create_group(row_group)
     

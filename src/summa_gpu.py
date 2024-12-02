@@ -3,7 +3,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-
 def AB(Aij, Bij, rank, world_size, device):
     
     #assert(Aij.shape[1] == Bij.shape[0])
@@ -14,17 +13,12 @@ def AB(Aij, Bij, rank, world_size, device):
     sqrtp = int(np.sqrt(world_size))
     #subset_size_m, subset_size_n, subset_size_p = m//sqrtp, n//sqrtp, p//sqrtp
     
-    i = int(rank // np.sqrt(world_size)) # 0/2
-    j = int(rank % np.sqrt(world_size))
-
-    
     # Empty allocation of A_k per process
     A_k = torch.zeros_like(Aij).detach().to(device)
-    
-    Cij = torch.zeros(*Aij.shape[:-2], Bij.shape[0]).to(device)
+    Cij = torch.zeros(*Aij.shape[:-1], Bij.shape[-1]).to(device)
 
-    bufferA = torch.zeros_like(Aij)#.detach().to(device)
-    bufferB = torch.zeros_like(Bij)
+    bufferA = torch.zeros_like(Aij).contiguous()
+    bufferB = torch.zeros_like(Bij).contiguous()
 
     for k in range(sqrtp):
         # Broadcast submatrix of A along the row
@@ -37,9 +31,39 @@ def AB(Aij, Bij, rank, world_size, device):
         Cij = Cij + torch.matmul(A_k, B_k)
         
     return Cij
+
+
+def ABT_vert(Aij, Bij):
+    
+    Cij = Aij @ Bij.mT
+
+    torch.distributed.all_reduce(Cij) 
+        
+    return Cij
+
+def AB_vert(Aij, Bij):
+    Cij = Aij @ Bij
+
+    tensor_out = torch.zeros(4, *Cij.shape).to(Aij.device)
+    torch.distributed.all_gather_into_tensor(tensor_out, Cij) # [4, n_batch, patches, 36]
+    tensor_out = tensor_out.permute(1, 2, 0, 3)
+    tensor_out = tensor_out.reshape(Aij.shape[0], -1, Bij.shape[-1])
+    
+    return tensor_out
+
+
+def ATB_vert(Aij, Bij):
+    Cij = Aij.mT @ Bij
+    
+    tensor_out = torch.zeros(4, *Cij.shape).to(Aij.device)
+    torch.distributed.all_gather_into_tensor(tensor_out, Cij) # [4, n_batch, patches, 36]
+    tensor_out = tensor_out.permute(1, 2, 0, 3)
+    tensor_out = tensor_out.reshape(Cij.shape[0], -1, Bij.shape[-1])
+    
+    return tensor_out
     
 def transpose(n, rank):
-    C = torch.arange(n*n).reshape(n, n).T.reshape(-1)
+    C = torch.arange(n*n).reshape(n, n).mT.reshape(-1)
     transpose_index = int(C[rank])
     return transpose_index
     
@@ -90,6 +114,7 @@ def distribute_A(Aij, k, rank, bufferA, device):
     return A_k
 
 def distribute_B(Bij, k, rank, bufferB, device):
+    Bij = Bij.contiguous()
     B_k = Bij.clone().detach()
     if k == 0:
         if rank == 0:
@@ -143,11 +168,6 @@ def matrix_transpose(X, rank, device):
 def ABT(Aij, Bij, rank, world_size, device):
     sqrtp = int(np.sqrt(world_size))
     
-    i = int(rank // np.sqrt(world_size)) # 0/2
-    j = int(rank % np.sqrt(world_size))
-
-    
-    
     rank_dict_transpose = {}
     rank_dict_norm = {}
     """
@@ -163,11 +183,11 @@ def ABT(Aij, Bij, rank, world_size, device):
         rank_dict_norm[r] = [k * sqrtp + int(r % np.sqrt(world_size)) for k in range(sqrtp)]
     
     A_k = torch.zeros_like(Aij).detach().to(device)
-
-    Cij = torch.zeros(*Aij.shape[:-1], Bij.shape[0]).to(device)
     
-    bufferA = torch.zeros_like(Aij)#.detach().to(device)
-    bufferB = torch.zeros_like(Bij)
+    Cij = None 
+    
+    bufferA = torch.zeros_like(Aij).contiguous()
+    bufferB = torch.zeros_like(Bij).contiguous()
 
     for k in range(sqrtp):
         # Broadcast submatrix of A along the row
@@ -183,7 +203,7 @@ def ABT(Aij, Bij, rank, world_size, device):
             targets = rank_dict_transpose[rank]
             for target in targets: 
                 if rank != target:
-                    dist.isend(Bij, dst=target)#, tag=30)    
+                    dist.isend(Bij.contiguous(), dst=target)
                     
         
         # receiving
@@ -191,14 +211,14 @@ def ABT(Aij, Bij, rank, world_size, device):
             if root_rank != rank:
                 for target in rank_dict_transpose[root_rank]:
                     if rank == target:
-                        #req = comm.Irecv(buffer, source=root_rank, tag=30)
                         req = dist.irecv(bufferB, src=root_rank)
                         req.wait()
                         B_k = bufferB.to(A_k.device) 
-                         
-
-        #print(f"Cij device {Cij.device}, A_k device {A_k.device}, B_k device {B_k.device}")
-        Cij = Cij + A_k @ B_k.mT
+        
+        if Cij is None:
+            Cij = A_k @ B_k.mT
+        else:
+            Cij = Cij + A_k @ B_k.mT
     
 
     return Cij

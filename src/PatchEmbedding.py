@@ -104,6 +104,8 @@ class PatchRecovery2D(torch.nn.Module):
     super().__init__()
     # Here we use two transposed convolutions to recover data
     self.conv = ConvTranspose2d(in_channels=dim, out_channels=out_channels, kernel_size=patch_size, stride=patch_size)
+    self.out_channels = out_channels
+    self.patch_size = patch_size
 
   def forward(self, x, n_patch_lat, n_patch_lon):
     """
@@ -131,6 +133,12 @@ class PatchRecovery2D(torch.nn.Module):
 
     # Call the transposed convolution
     output = self.conv(x)
+    output_shape = output.shape
+    output = output.reshape(output_shape[0], n_patch_lat, n_patch_lon, self.patch_size[0], self.patch_size[1], self.out_channels)
+    output = output.permute(0, 1, 3, 2, 4, 5)
+    output_shape = output.shape
+    output = output.reshape(output_shape[0], output_shape[1]*output_shape[2], output_shape[3]*output_shape[4], output_shape[5])
+
 
     # Note: Output is still padded. Cropping only occurs outside of training loop.
     return output
@@ -145,10 +153,11 @@ class DistributedPatchEmbedding(torch.nn.Module):
     self.patch_embed = Linear.DistributedXWT(patch_size[0]*patch_size[1]*var_in//2, embed_dim//2, comm, device, torch_rank)
     self.device = device
     self.land_mask, self.soil_type, self.topography = load_constant_mask_2d(self.patch_size)
-    self.land_mask = self.land_mask.to(self.device)
-    self.soil_type = self.soil_type.to(self.device)
-    self.topography = self.topography.to(self.device)
+    self.land_mask = self.land_mask
+    self.soil_type = self.soil_type
+    self.topography = self.topography
     self.torch_rank = torch_rank
+    self.layernorm = torch.nn.LayerNorm(self.patch_size[0]*self.patch_size[1]*self.var_in)
 
   def forward(self, x):
     """
@@ -163,8 +172,10 @@ class DistributedPatchEmbedding(torch.nn.Module):
     x = torch.cat((x, land_mask, soil_type, topography), dim=1)
     
     # Rearrange x to have "windows"
-    # current x shape: (n_batch, vars, n_lat, n_lon)
+    #print(f"x_shape in patch embed {x.shape}")
+    # Each GPU holds: [n_batch, n_var, n_lat, n_lon]
     x_shape = x.shape
+    
     x = x.reshape(x_shape[0], x_shape[1], x_shape[2] // self.patch_size[0], self.patch_size[0], x_shape[3] // self.patch_size[1], self.patch_size[1])
     # current x shape: (n_batch, vars, n_lat/p0, p0, n_lon/p1, p1)
     x = x.permute(0, 2, 4, 3, 5, 1)
@@ -173,16 +184,17 @@ class DistributedPatchEmbedding(torch.nn.Module):
     x = x.reshape(x_shape[0], x_shape[1]*x_shape[2], self.patch_size[0]*self.patch_size[1]*self.var_in)
     fraction_1 = x.shape[-2] // 2
     fraction_2 = x.shape[-1] // 2
+    #x = self.layernorm(x)
     # apply MLP/convolution
     if self.torch_rank == 0:
-      x = self.patch_embed(x[:, :fraction_1,  :fraction_2].contiguous())
+      x = self.patch_embed(x[:, :fraction_1,  :fraction_2].contiguous().to(self.device))
     elif self.torch_rank == 1:
-      x = self.patch_embed(x[:, :fraction_1,  fraction_2:].contiguous())
+      x = self.patch_embed(x[:, :fraction_1,  fraction_2:].contiguous().to(self.device))
     elif self.torch_rank == 2:
-      x = self.patch_embed(x[:, fraction_1:,  :fraction_2].contiguous())
+      x = self.patch_embed(x[:, fraction_1:,  :fraction_2].contiguous().to(self.device))
     elif self.torch_rank == 3:
-      x = self.patch_embed(x[:, :fraction_1,  :fraction_2].contiguous())
-
+      x = self.patch_embed(x[:, :fraction_1,  :fraction_2].contiguous().to(self.device))
+    
     # x shape: (n_batch, n_lat/p0, n_lon/01, embed_dim)
     return x
 
