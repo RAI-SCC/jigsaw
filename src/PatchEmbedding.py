@@ -246,11 +246,15 @@ class DistributedPatchRecovery(torch.nn.Module):
     output = self.conv(x)
 
     output_shape = output.shape
-    output = output.reshape(output_shape[0], n_patch_lat, n_patch_lon, self.patch_size[0], self.patch_size[1], self.out_channels//4)
+    # [4, n_patch_lat*n_patch_lon, out_channels//2]
+    
+    # TODO: START HERE
+    output = output.reshape(output_shape[0], n_patch_lat, n_patch_lon//2, self.patch_size[0], self.patch_size[1], self.out_channels//2)
     output = output.permute(0, 1, 3, 2, 4, 5)
     output_shape = output.shape
-    output = output.reshape(output_shape[0], output_shape[1]*output_shape[2], output_shape[3]*output_shape[4], output_shape[5])
+    output = output.reshape(output_shape[0], output_shape[1]*output_shape[2]*output_shape[3]*output_shape[4], output_shape[5])
 
     # goal: x: (n_batch, vars, n_lat, n_lon)
 
+    # output shape: [n_batch, n_patch/2, n_var/2]
     return output

@@ -19,12 +19,12 @@ class Model(torch.nn.Module):
         else:
             self.num_variables = 18
             
-        self.layer_norm2 = torch.nn.LayerNorm(self.num_variables)    
-        self.layer_norm3 = torch.nn.LayerNorm(36)    
+        self.layer_norm2 = torch.nn.LayerNorm(self.num_variables*2)    
+        self.layer_norm3 = torch.nn.LayerNorm(36*2)    
         
         # 72 = 69 ROUNDED TO NEAREST MULTLIPLE OF 4
         self.recovery = PatchEmbedding.DistributedPatchRecovery(self.patch_size, hidden_dimension, 72, comm, device, torch_rank)
-        self.linearlayer = Linear.DistributedXWT_vert(self.num_variables*2, self.num_variables*4, comm, device, torch_rank)
+        self.linearlayer = Linear.DistributedXWT(self.num_variables*4, self.num_variables*2, comm, device, torch_rank)
         
         self.activation = torch.nn.GELU()
         self.device = device
@@ -39,10 +39,21 @@ class Model(torch.nn.Module):
         # x_res shape: [n_batch, n_var, n_lat, n_lon]
         x_res = x_res.permute(0, 2, 3, 1)
         # x_res shape after: [n_batch, n_lat, n_lon, n_var]
-        if self.torch_rank == 3:
-            x_res = torch.nn.functional.pad(x_res, (0,3)) 
         
-        x_res = x_res[:, :, :, self.torch_rank*fraction:(self.torch_rank+1)*fraction].to(self.device)
+        x_res = x_res.reshape(x_res.shape[0], -1, x_res.shape[-1])
+        x_res = torch.nn.functional.pad(x_res, (0,3)) 
+                
+        fraction_1 = x_res.shape[-2] // 2
+        fraction_2 = 72 // 2
+        if self.torch_rank == 0:
+            x_res = x_res[:, :fraction_1,  :fraction_2].contiguous().to(self.device)
+        elif self.torch_rank == 1:
+            x_res = x_res[:, :fraction_1,  fraction_2:].contiguous().to(self.device)
+        elif self.torch_rank == 2:
+            x_res = x_res[:, fraction_1:,  fraction_2:].contiguous().to(self.device)
+        elif self.torch_rank == 3:
+            x_res = x_res[:, :fraction_1,  :fraction_2].contiguous().to(self.device)
+
         # x res for each GPU: [n_batch, n_lat, n_lon, n_var//4]
         # x_shape [n_batch, n_var, 720, 1440]
         x = self.embedding(x.to('cpu'))
@@ -52,29 +63,29 @@ class Model(torch.nn.Module):
 
         for i in range(self.n_blocks):
             x = self.blocks[i](x)
-        print(f"x.shape after block {x.shape}")
+        
         x = self.layer_norm(x + x_res2)
         
         # After MLP-mixing blocks: [n_batch, n_patch_lat * n_patch_lon, embed_dim]
         x = self.recovery(x, self.n_lat, self.n_lon) 
-        # After recovery: [n_batch, n_lat, n_lon, n_var//4]
+        # After recovery: [n_batch, n_lat*n_lon//2, n_var//2]
         
         x = self.layer_norm2(x) # layer norm must go before concat 
-        x = torch.concat((x, x_res), dim=3)
+        
+  #      print(f"{self.device} x shape {x.shape}, x_res shape {x_res.shape}")
+        # TODO: START HERE
+        x = torch.concat((x, x_res), dim=2)
         # After recovery: [n_batch, n_lat, n_lon, n_var]
 
         x = self.layer_norm3(x)
-        x = x.reshape(x.shape[0], 720*1440, 2*self.num_variables)
+        #x = x.reshape(x.shape[0], 720*1440//2, 2*self.num_variables)
         
+ #       print(f"x.shape before lin layer {x.shape}")
         x = self.linearlayer(x)
+#        print(f"x.shape after lin layer {x.shape}")
+        # [n_batch, ]
 
-        # x shape
-        x = x.reshape(x.shape[0], 720, 1440, -1)
 
-        if self.torch_rank == 3:
-            x = x[:,:,:,54:69] 
-        else:
-            x = x[:,:,:,self.torch_rank*fraction:(self.torch_rank+1)*fraction]
         
 
         #print(f"my rank is {self.torch_rank}; x_res shape {x_res.shape}; x shape {x.shape}")       

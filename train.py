@@ -79,8 +79,19 @@ for epoch in range(100):
         # target data: [n_batch, 720, 1440, 69]
         
         if model_parallel:
-            fraction = 72 // 4
-            loss = loss_fn(output, target_data[:, :, :, torch_rank*fraction:(torch_rank+1)*fraction])
+            fraction_1 = 720*1440//2
+            fraction_2 = 72 // 2
+            target_data = target_data.reshape(target_data.shape[0], -1, target_data.shape[3])
+            target_data = torch.nn.functional.pad(target_data, (0,3)) 
+            if torch_rank == 0:
+                loss = loss_fn(output, target_data[:, :fraction_1,  :fraction_2])
+            elif torch_rank == 1:
+                loss = loss_fn(output, target_data[:, :fraction_1,  fraction_2:])
+            elif torch_rank == 2:
+                loss = loss_fn(output, target_data[:, fraction_1:,  fraction_2:])
+            elif torch_rank == 3:
+                loss = loss_fn(output, target_data[:, :fraction_1,  :fraction_2])
+
         else:
             loss = loss_fn(output, target_data)
 
@@ -99,7 +110,7 @@ for epoch in range(100):
         frequency = 100
         
         if i % frequency == 0:# and (i != 0):
-            eval.get_validation_mse(mlp, valid_dataloader, device, torch_rank, epoch, file_path=save_path, model_parallel=model_parallel)
+            #eval.get_validation_mse(mlp, valid_dataloader, device, torch_rank, epoch, file_path=save_path, model_parallel=model_parallel)
 #            gather_list = [torch.empty(output.shape).cuda(torch_rank) for _ in range(world_size)] 
 #
 #            # Perform gather operation
