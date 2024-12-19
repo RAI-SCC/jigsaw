@@ -6,7 +6,6 @@ from torch.utils.data import Dataset
 
 class ERA5Dataset(Dataset):
     """Define 3D dataset."""
-    
     def __init__(self, config, file_path, mode, patch_size, forecast_length=1, normalize=True):
         """
         initialize.
@@ -32,7 +31,7 @@ class ERA5Dataset(Dataset):
         if config['data']['train_data_path'] == '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/1959-2023_01_10-wb13-6h-1440x721.zarr':        
             self.deltaTDivisor = 6
         else:
-            self.deltaTDivisor = 1
+            self.deltaTDivisor = 6
         self.forecast_length = forecast_length
         self.normalize = normalize
         
@@ -53,28 +52,25 @@ class ERA5Dataset(Dataset):
         self.s_std  = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/surface_zarr.npy', allow_pickle=True)[1].reshape(4, 1, 1)
         
         self.patch_size = patch_size
-        
-        if self.normalize:
-            self.fs_mean = torch.tensor(np.load('/hkfs/work/workspace/scratch/ke4365-fcn/sfno_rai/modes_exp/normalization/mean_sh.npy')).reshape(69, 120, 1, 2)
-            self.fs_std  = np.load('/hkfs/work/workspace/scratch/ke4365-fcn/sfno_rai/modes_exp/normalization/std_sh.npy').reshape(69, 120, 1, 2)
-            self.fs_std[self.fs_std==0] = 1000
-
+        self.xlat = config['data']['xlat']
         
     def _get_files_stats(self, mode='train'):
         """Filter desired time points based on parameters and return file statistics."""
-        
+
         self.zarr_data = xr.open_dataset(self.file_path, engine='zarr')
         times = pd.to_datetime(self.zarr_data['time'].values)
         if mode == 'train': # training case, lite
-            train_years = times[(times.year<2017) & (times.year > 2010)] 
+            train_years = times[(times.year<2017) & (times.year > 2006) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))] 
             self.zarr_data = self.zarr_data.sel(time=train_years)
         elif mode == 'validation':           # validation
-            validation_years = times[(times.year == 2018)]
+            validation_years = times[(times.year == 2018) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
             self.zarr_data = self.zarr_data.sel(time=validation_years)
         elif mode == 'testing':           # validation
             validation_years = times[(times.year == 2020) | (times.year == 2021)] 
             self.zarr_data = self.zarr_data.sel(time=validation_years)
-            
+        elif mode == 'verify':
+            validation_years = times[(times.year == 2020) & (times.month == 1) & (times.day == 1) & (times.hour == 0)]
+            self.zarr_data = self.zarr_data.sel(time=validation_years)
             
         self.n_samples_total = len(self.zarr_data['time'])
         self.img_shape_x     = len(self.zarr_data['latitude'])
@@ -111,9 +107,9 @@ class ERA5Dataset(Dataset):
         # WeatherBench data stores from low --> high pressure levels
         # We convert to high --> low
         input_pressure = self.zarr_data.isel(time=global_idx, level=self.level_ordering)[['geopotential', 'specific_humidity', 'temperature', 'u_component_of_wind', 'v_component_of_wind']]
-        input_surface  = self.zarr_data.isel(time=global_idx, level=self.level_ordering)[['mean_sea_level_pressure', '10m_u_component_of_wind', '10m_v_component_of_wind', '2m_temperature']]
+        input_surface  = self.zarr_data.isel(time=global_idx)[['mean_sea_level_pressure', '10m_u_component_of_wind', '10m_v_component_of_wind', '2m_temperature']]
         target_pressure_ds = self.zarr_data.isel(time=target_file_idxs, level=self.level_ordering)[['geopotential', 'specific_humidity', 'temperature', 'u_component_of_wind', 'v_component_of_wind']]
-        target_surface_ds  = self.zarr_data.isel(time=target_file_idxs, level=self.level_ordering)[['mean_sea_level_pressure', '10m_u_component_of_wind', '10m_v_component_of_wind', '2m_temperature']]
+        target_surface_ds  = self.zarr_data.isel(time=target_file_idxs)[['mean_sea_level_pressure', '10m_u_component_of_wind', '10m_v_component_of_wind', '2m_temperature']]
             
         # Stack and convert to numpy array
         input_pressure = np.stack([input_pressure['geopotential'].values, input_pressure['specific_humidity'].values, input_pressure['temperature'].values, input_pressure['u_component_of_wind'].values, input_pressure['v_component_of_wind'].values], axis=0)
@@ -121,8 +117,8 @@ class ERA5Dataset(Dataset):
         input_pressure = (input_pressure - self.p_mean) / self.p_std
         input_surface  = (input_surface  - self.s_mean) / self.s_std
         input_pressure = np.reshape(input_pressure, (-1, 721, 1440))
-        input_surface  = input_surface[:, :720]
-        input_pressure = input_pressure[:, :720]
+        input_surface  = input_surface[:, :self.xlat]
+        input_pressure = input_pressure[:, :self.xlat]
         
         input = np.concatenate([input_surface, input_pressure], axis=0)
         target = []
@@ -136,11 +132,10 @@ class ERA5Dataset(Dataset):
             target_pressure[i], target_surface[i] = torch.tensor(target_pressure[i]), torch.tensor(target_surface[i])
             
             target_pressure[i] = target_pressure[i].reshape(-1, 721, 1440)
-            target_pressure[i] = target_pressure[i][:, :720]
-            target_surface[i] = target_surface[i][:, :720]
+            target_pressure[i] = target_pressure[i][:, :self.xlat]
+            target_surface[i] = target_surface[i][:, :self.xlat]
             target.append(torch.concat([target_surface[i], target_pressure[i]], axis=0))
 
         input = torch.tensor(input)
                         
-        return input, target
-    
+        return input, target[0]    

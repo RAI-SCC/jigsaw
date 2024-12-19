@@ -1,13 +1,13 @@
 import torch
 from torch import permute, reshape
 from torch.nn import Conv2d, ConvTranspose2d
-from utils import load_constant_mask_2d
+from utils import load_constant_mask_2d, getPositionEncoding
 import Linear
 
 class PatchEmbedding2D(torch.nn.Module):
   """2D Patch Embedding operation."""
 
-  def __init__(self, patch_size, dim, device, in_channels=72):
+  def __init__(self, patch_size, dim, device,  in_channels=72, padding=(0,0), stride=(8,8), xlat=721):
     """
     Initialize patch embedding operation.
     
@@ -28,10 +28,16 @@ class PatchEmbedding2D(torch.nn.Module):
     # Here we use convolution to partition data into cubes
     # in_channels = 13 pressure levels x 5 fields + 4 variables + 3 masks
     # i.e., fields are (Z, Q, T, U, V)
-    self.conv_surface = Conv2d(in_channels=in_channels, out_channels=dim, kernel_size=patch_size, stride=patch_size)
+    if padding[0] == patch_size and padding[1] == patch_size:
+      padding = (0,0)
+    self.stride = stride
+
+    
+    self.conv_surface = Conv2d(in_channels=in_channels, out_channels=dim, kernel_size=patch_size, stride=self.stride, padding=padding)
 
     # Load constant masks from the disc
-    self.land_mask, self.soil_type, self.topography = load_constant_mask_2d(patch_size)
+    
+    self.land_mask, self.soil_type, self.topography = load_constant_mask_2d(patch_size, xlat=xlat)
     self.land_mask = self.land_mask.to(device)
     self.soil_type = self.soil_type.to(device)
     self.topography = self.topography.to(device)
@@ -86,7 +92,7 @@ class PatchEmbedding2D(torch.nn.Module):
 class PatchRecovery2D(torch.nn.Module):
   """2D Patch recovery option."""
 
-  def __init__(self, patch_size, dim, out_channels=69):
+  def __init__(self, patch_size, dim, out_channels=69, padding=(0,0), stride=(8,8)):
     """
     2D Patch recovery.
 
@@ -103,11 +109,12 @@ class PatchRecovery2D(torch.nn.Module):
     """
     super().__init__()
     # Here we use two transposed convolutions to recover data
-    self.conv = ConvTranspose2d(in_channels=dim, out_channels=out_channels, kernel_size=patch_size, stride=patch_size)
+    
+    self.conv = ConvTranspose2d(in_channels=dim, out_channels=out_channels, kernel_size=patch_size, stride=stride, padding=padding)
     self.out_channels = out_channels
     self.patch_size = patch_size
 
-  def forward(self, x, n_patch_lat, n_patch_lon):
+  def forward(self, x, n_patch_lat, n_patch_lon, output_size):
     """
     2D inverse operation of the patch embedding operation.
     
@@ -129,18 +136,14 @@ class PatchRecovery2D(torch.nn.Module):
     # Dimensions: (nData, pressure level * latitude * longitude, fields)
     x = permute(x, (0, 2, 1))
     # Dimensions: (nData, fields, pressure level, latitude, longitude)
+    
     x = reshape(x, shape=(x.shape[0], x.shape[1], n_patch_lat, n_patch_lon))
 
     # Call the transposed convolution
-    output = self.conv(x)
-    output_shape = output.shape
-    output = output.reshape(output_shape[0], n_patch_lat, n_patch_lon, self.patch_size[0], self.patch_size[1], self.out_channels)
-    output = output.permute(0, 1, 3, 2, 4, 5)
-    output_shape = output.shape
-    output = output.reshape(output_shape[0], output_shape[1]*output_shape[2], output_shape[3]*output_shape[4], output_shape[5])
+    output = self.conv(x, output_size=output_size)
+    output = output.permute(0, 2, 3, 1)
 
-
-    # Note: Output is still padded. Cropping only occurs outside of training loop.
+    # output shape: [n_batch, n_lat, n_lon, fields]
     return output
   
 class DistributedPatchEmbedding(torch.nn.Module):
@@ -176,12 +179,17 @@ class DistributedPatchEmbedding(torch.nn.Module):
     # Each GPU holds: [n_batch, n_var, n_lat, n_lon]
     x_shape = x.shape
     
-    x = x.reshape(x_shape[0], x_shape[1], x_shape[2] // self.patch_size[0], self.patch_size[0], x_shape[3] // self.patch_size[1], self.patch_size[1])
-    # current x shape: (n_batch, vars, n_lat/p0, p0, n_lon/p1, p1)
-    x = x.permute(0, 2, 4, 3, 5, 1)
-    # current x shape: (n_batch, n_lat/p0, n_lon/p1, p0, p1, vars)
-    x_shape = x.shape
-    x = x.reshape(x_shape[0], x_shape[1]*x_shape[2], self.patch_size[0]*self.patch_size[1]*self.var_in)
+    
+    # chatgpt 
+    x_patches = torch.nn.functional.unfold(x, kernel_size=self.patch_size, stride=self.patch_size)
+    x = x_patches.permute(0, 2, 3, 1, 4, 5).reshape(x_shape[0], -1, 72 * 16 * 16)
+
+    #x = x.reshape(x_shape[0], x_shape[1], x_shape[2] // self.patch_size[0], self.patch_size[0], x_shape[3] // self.patch_size[1], self.patch_size[1])
+    ## current x shape: (n_batch, vars, n_lat/p0, p0, n_lon/p1, p1)
+    #x = x.permute(0, 2, 4, 3, 5, 1)
+    ## current x shape: (n_batch, n_lat/p0, n_lon/p1, p0, p1, vars)
+    #x_shape = x.shape
+    #x = x_patches.reshape(x_shape[0], x_shape[1]*x_shape[2], self.patch_size[0]*self.patch_size[1]*self.var_in)
     fraction_1 = x.shape[-2] // 2
     fraction_2 = x.shape[-1] // 2
     #x = self.layernorm(x)
@@ -219,7 +227,7 @@ class DistributedPatchRecovery(torch.nn.Module):
     """
     super().__init__()
     # Here we use two transposed convolutions to recover data
-    self.conv = Linear.DistributedXWT(embed_dim//2, patch_size[0]*patch_size[1]*out_channels//2, comm, device, torch_rank)
+    self.conv = Linear.DistributedXWT(embed_dim//2, patch_size[0]*patch_size[1]*out_channels, comm, device, torch_rank)
     self.patch_size = patch_size
     self.out_channels = out_channels
 
@@ -243,18 +251,21 @@ class DistributedPatchRecovery(torch.nn.Module):
     """
     
     # Call the transposed convolution
+    #print(f"1 - x shape {x.shape}")
     output = self.conv(x)
 
+    #print(f"2 - conv shape {output.shape}")
     output_shape = output.shape
-    # [4, n_patch_lat*n_patch_lon, out_channels//2]
-    
-    # TODO: START HERE
-    output = output.reshape(output_shape[0], n_patch_lat, n_patch_lon//2, self.patch_size[0], self.patch_size[1], self.out_channels//2)
-    output = output.permute(0, 1, 3, 2, 4, 5)
-    output_shape = output.shape
-    output = output.reshape(output_shape[0], output_shape[1]*output_shape[2]*output_shape[3]*output_shape[4], output_shape[5])
+    # [4, n_patch_lat*n_patch_lon/2, patch_size_1*patch_size2*n_vars//2]
+  
 
-    # goal: x: (n_batch, vars, n_lat, n_lon)
+
+    # TODO
+
+    output = output.view(output_shape[0], n_patch_lat, n_patch_lon//2, self.patch_size[0], self.patch_size[1], self.out_channels)
+    output = output.permute(0, 1, 3, 2, 4, 5).contiguous()
+    output_shape = output.shape
+    output = output.view(output_shape[0], output_shape[1]*output_shape[2]*output_shape[3]*output_shape[4], output_shape[5])
 
     # output shape: [n_batch, n_patch/2, n_var/2]
     return output
