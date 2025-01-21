@@ -28,10 +28,14 @@ class ERA5Dataset(Dataset):
         self.file_path = file_path
         self.mode = mode
         self.dt = config['data']['dt']
+        self.lite = config['data']['lite']
         if config['data']['train_data_path'] == '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/1959-2023_01_10-wb13-6h-1440x721.zarr':        
             self.deltaTDivisor = 6
         else:
-            self.deltaTDivisor = 6
+            if self.lite:
+                self.deltaTDivisor = 6
+            else:
+                self.deltaTDivisor = 1
         self.forecast_length = forecast_length
         self.normalize = normalize
         
@@ -60,10 +64,16 @@ class ERA5Dataset(Dataset):
         self.zarr_data = xr.open_dataset(self.file_path, engine='zarr')
         times = pd.to_datetime(self.zarr_data['time'].values)
         if mode == 'train': # training case, lite
-            train_years = times[(times.year<2017) & (times.year > 2006) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))] 
+            if self.lite:
+                train_years = times[(times.year<2017) & (times.year > 2006) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))] 
+            else:
+                train_years = times[(times.year<2017) & (times.year > 1979)]
             self.zarr_data = self.zarr_data.sel(time=train_years)
         elif mode == 'validation':           # validation
-            validation_years = times[(times.year == 2018) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
+            if self.lite:
+                validation_years = times[(times.year == 2018) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
+            else:
+                validation_years = times[(times.year == 2018)]
             self.zarr_data = self.zarr_data.sel(time=validation_years)
         elif mode == 'testing':           # validation
             validation_years = times[(times.year == 2020) | (times.year == 2021)] 
@@ -138,4 +148,4 @@ class ERA5Dataset(Dataset):
 
         input = torch.tensor(input)
                         
-        return input, target[0]    
+        return input, target    

@@ -68,7 +68,6 @@ def transpose(n, rank):
     return transpose_index
     
 
-    
 def gather(Cij, comm, world_size):
     rank = comm.Get_rank()
     p = int(np.sqrt(world_size))

@@ -13,10 +13,12 @@ sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/network
 from networks.PanguLite2DAttentionPosEmbed import PanguModel as TwoDimPosEmbLite
 
 
-def set_all_seeds(seed):
-    os.environ["PL_GLOBAL_SEED"] = str(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+def set_all_seeds(seed, rank=None):
+    if rank is None:
+        rank = 0
+    os.environ["PL_GLOBAL_SEED"] = str(seed + rank)
+    torch.manual_seed(seed + rank)
+    torch.cuda.manual_seed_all(seed + rank)
 
 def init_mpi():
     comm = MPI.COMM_WORLD
@@ -29,20 +31,17 @@ def init_mpi():
 
 def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distributed=False, batch_size=1, normalize=True):
       
-    dataset = ERA5Dataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), forecast_length=1, normalize=normalize)
+    dataset = ERA5Dataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), forecast_length=config_dict['model']['latent_rollout'], normalize=normalize)
     if subset_size != 0:
         subset_indices = torch.randperm(len(dataset))[:subset_size]
         dataset = Subset(dataset, subset_indices)
     sampler    = DistributedSampler(dataset, shuffle=True) if distributed else None
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=(sampler is None), sampler=sampler, drop_last=True, pin_memory=torch.cuda.is_available(), prefetch_factor=config_dict['data']['prefetch_factor'], num_workers=config_dict['data']['num_workers'])
+    if mode == 'validation' and config_dict['model']['model_parallel']:
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, sampler=None, drop_last=True, pin_memory=torch.cuda.is_available(), prefetch_factor=config_dict['data']['prefetch_factor'], num_workers=config_dict['data']['num_workers'])
+    else:
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=(sampler is None), sampler=sampler, drop_last=True, pin_memory=torch.cuda.is_available(), prefetch_factor=config_dict['data']['prefetch_factor'], num_workers=config_dict['data']['num_workers'])
 
     return dataloader
-
-def set_all_seeds(seed):
-    os.environ["PL_GLOBAL_SEED"] = str(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
 
 def init_CUDA():
     """
@@ -71,6 +70,8 @@ def init_CUDA():
         print(f"Rank {rank}/{world_size}: Process group initialized with torch rank {torch.distributed.get_rank()} and torch world size {torch.distributed.get_world_size()}.")
     else:
         print(f"Rank {rank} not initialized")
+
+    
     return device, slurm_localid, rank, world_size
 
 def count_parameters(model):
@@ -121,14 +122,14 @@ def load_constant_mask_2d(
     ), "Shapes of the three constant masks are not equal."
 
     # Now that the shapes are equal, use land_mask as the actual shapes
-    x1_pad = (patch_size[0] - (land_mask.shape[0] % patch_size[0])) % patch_size[0] // 2
-    x2_pad = (patch_size[0] - (land_mask.shape[0] % patch_size[0])) % patch_size[
-        0
-    ] - x1_pad
-    y1_pad = (patch_size[1] - (land_mask.shape[1] % patch_size[1])) % patch_size[1] // 2
-    y2_pad = (patch_size[1] - (land_mask.shape[1] % patch_size[1])) % patch_size[
-        1
-    ] - y1_pad
+    #x1_pad = (patch_size[0] - (land_mask.shape[0] % patch_size[0])) % patch_size[0] // 2
+    #x2_pad = (patch_size[0] - (land_mask.shape[0] % patch_size[0])) % patch_size[
+    #    0
+    #] - x1_pad
+    #y1_pad = (patch_size[1] - (land_mask.shape[1] % patch_size[1])) % patch_size[1] // 2
+    #y2_pad = (patch_size[1] - (land_mask.shape[1] % patch_size[1])) % patch_size[
+    #    1
+    #] - y1_pad
 
     land_mask = land_mask[:xlat]
     soil_type = soil_type[:xlat]
@@ -166,9 +167,12 @@ def save_model(model, optimizer, file_path, rank, epoch, distributed=True):
 def load_model(model, optimizer, file_path, rank, model_parallel=False):
     if not model_parallel:
         rank = 0
-    state = torch.load(f"{file_path}/model_{rank}.pt", map_location='cpu')
+    if model_parallel:
+        file_path = f'{file_path}/model_{rank}.pt'
+    state = torch.load(f"{file_path}", map_location='cpu')
     model.load_state_dict(state['model_state'])
     optimizer.load_state_dict(state['optimizer_state'])
+
     epoch = state['epoch']
     return model, optimizer, epoch
 
@@ -179,7 +183,6 @@ def load_pretrained_convolution(mlp_model, config_dict):
     try:
         mlp_model.state_dict()['module.embedding.conv_surface.weight'][:config_dict['model']['hidden_dim']] = model_pretrained_state['module._input_layer.conv_surface.weight']
         mlp_model.state_dict()['module.embedding.conv_surface.bias'][:config_dict['model']['hidden_dim']] = model_pretrained_state['module._input_layer.conv_surface.bias']
-        
     except Exception as err:
         print(err)
     return mlp_model
@@ -189,13 +192,27 @@ def load_pretrained_embedding(mlp_model, config_dict):
     model_pretrained_state = state['model_state']
     
     try:
-        mlp_model.state_dict()['module.params.embedding.conv_surface.weight'] = model_pretrained_state['module.embedding.conv_surface.weight']
-        mlp_model.state_dict()['module.params.embedding.conv_surface.bias'] = model_pretrained_state['module.embedding.conv_surface.bias']
-        mlp_model.state_dict()['module.params.recovery.conv_surface.weight'] = model_pretrained_state['module.recovery.conv.weight']
-        mlp_model.state_dict()['module.params.recovery.conv_surface.bias'] = model_pretrained_state['module.recovery.conv.bias']
+        mlp_model.load_state_dict({
+            **mlp_model.state_dict(),
+            'module.embedding.conv_surface.weight': model_pretrained_state['module.embed.weight'],
+            'module.recovery.conv.weight': model_pretrained_state['module.recover.weight'],
+        })
+        
+        embed =  mlp_model.state_dict()['module.embedding.conv_surface.weight'].reshape(1152, -1)
+        recover = mlp_model.state_dict()['module.recovery.conv.weight'].reshape(1152, -1)
+        print("embed, recover", recover.mT @ embed)
+
+        #mlp_model.state_dict()['module.params.embedding.conv_surface.weight'] = model_pretrained_state['module.embedding.conv_surface.weight']
+        #mlp_model.state_dict()['module.params.embedding.conv_surface.bias'] = model_pretrained_state['module.embedding.conv_surface.bias']
+        #mlp_model.state_dict()['module.params.recovery.conv_surface.weight'] = model_pretrained_state['module.recovery.conv.weight']
+        #mlp_model.state_dict()['module.params.recovery.conv_surface.bias'] = model_pretrained_state['module.recovery.conv.bias']
+        #mlp_model.state_dict()['module.params.layer_norm3.weight'] = model_pretrained_state['module.layer_norm3.weight']
+        #mlp_model.state_dict()['module.params.layer_norm3.bias'] = model_pretrained_state['module.layer_norm3.bias']        
+        #mlp_model.state_dict()['module.params.linearlayer.bias'] = model_pretrained_state['module.linearlayer.bias']
         
     except Exception as err:
         print(f"unable to load: {err}")
+
     return mlp_model
 
 
@@ -206,5 +223,5 @@ def getPositionEncoding(seq_len, d, n=10000):
             denominator = np.power(n, 2*i/d)
             P[k, 2*i] = np.sin(k/denominator)
             P[k, 2*i+1] = np.cos(k/denominator)
-    P = torch.tensor(P)
+    P = torch.tensor(P).to(torch.float32)
     return P

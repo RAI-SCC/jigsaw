@@ -3,98 +3,222 @@ import PatchEmbedding
 from Linear import MixerBlock, MixerBlockSequential
 import Linear
 import utils
+import numpy as np
+
 
 class Model(torch.nn.Module):
-    def __init__(self, device, comm, torch_rank):
+    def __init__(self, config_dict, device, comm, torch_rank):
         super().__init__()
         self.torch_rank = torch_rank
-        hidden_dimension = 2000
-        self.patch_size = (16, 16)
-        self.n_lat, self.n_lon = 720//self.patch_size[0], 1440//self.patch_size[1]
-        self.embedding = PatchEmbedding.DistributedPatchEmbedding(720, 1440, self.patch_size, 72, hidden_dimension, comm, device, torch_rank)
-        self.n_blocks = 0
+        self.device = device
+        
+        hidden_dimension = config_dict['model']['hidden_dim']
+        self.patch_size = (config_dict['model']['patch_size'], config_dict['model']['patch_size'])
+        self.xlat, self.xlon = config_dict['data']['xlat'], config_dict['data']['xlon']
+        self.n_lat, self.n_lon = self.xlat//self.patch_size[0], self.xlon//self.patch_size[1]
+        self.embedding = PatchEmbedding.DistributedPatchEmbedding(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension, comm, device, torch_rank, xlat=self.xlat)
+        self.n_blocks = config_dict['model']['mixing_blocks']
         self.blocks = torch.nn.ModuleList([MixerBlock(self.n_lat*self.n_lon//2, hidden_dimension//2, hidden_dimension//2, comm, device, torch_rank) for i in range(self.n_blocks)])
-        self.layer_norm = torch.nn.LayerNorm(hidden_dimension//2)
+        self.layer_norm = Linear.DistributedLayerNorm(hidden_dimension//2, self.torch_rank, self.device)
+        
         if self.torch_rank == 3:
             self.num_variables = 36
         else:
             self.num_variables = 36
             
-        self.layer_norm2 = torch.nn.LayerNorm(self.num_variables)    
-        self.layer_norm3 = torch.nn.LayerNorm(36*2)    
+        self.layer_norm2 = Linear.DistributedLayerNorm(self.num_variables, self.torch_rank, self.device)    
+        self.layer_norm3 = Linear.DistributedLayerNorm(36*2, self.torch_rank, self.device)    
         
         # 72 = 69 ROUNDED TO NEAREST MULTLIPLE OF 4
         self.recovery = PatchEmbedding.DistributedPatchRecovery(self.patch_size, hidden_dimension, self.num_variables, comm, device, torch_rank)
         self.linearlayer = Linear.DistributedXWT(self.num_variables*2, self.num_variables*1, comm, device, torch_rank)
         
         self.activation = torch.nn.GELU()
-        self.device = device
         
         
-    def forward(self, x):
+    def forward(self, x, rollout_=0):
         
         x_shape = x.shape
-        x_res = x
+        x_res = x.clone()
         fraction = 72 // 4
         
         # x_res shape: [n_batch, n_var, n_lat, n_lon]
         x_res = x_res.permute(0, 2, 3, 1)
         # x_res shape after: [n_batch, n_lat, n_lon, n_var]
         
-        x_res = x_res.reshape(x_res.shape[0], -1, x_res.shape[-1])
-        x_res = torch.nn.functional.pad(x_res, (0,3)) 
-                
-        fraction_1 = x_res.shape[-2] // 2
-        fraction_2 = 72 // 2
-        if self.torch_rank == 0:
-            x_res = x_res[:, :fraction_1,  :fraction_2].contiguous().to(self.device)
-        elif self.torch_rank == 1:
-            x_res = x_res[:, :fraction_1,  fraction_2:].contiguous().to(self.device)
-        elif self.torch_rank == 2:
-            x_res = x_res[:, fraction_1:,  fraction_2:].contiguous().to(self.device)
-        elif self.torch_rank == 3:
-            x_res = x_res[:, :fraction_1,  :fraction_2].contiguous().to(self.device)
 
+        #x_res = x_res.reshape(x_res.shape[0], -1, x_res.shape[-1])
+        x_res = torch.nn.functional.pad(x_res, (0,3))
+                       
+        fraction_1 = 1440 // 2
+        fraction_2 = 72 // 2
+        
+        if self.torch_rank == 0:
+            x_res = x_res[:, :, :fraction_1,  :fraction_2].contiguous().to(self.device)
+        elif self.torch_rank == 1:
+            x_res = x_res[:, :, :fraction_1,  fraction_2:].contiguous().to(self.device)
+        elif self.torch_rank == 2:
+            x_res = x_res[:, :, fraction_1:,  :fraction_2].contiguous().to(self.device)
+        elif self.torch_rank == 3:
+            x_res = x_res[:, :, fraction_1:,  fraction_2:].contiguous().to(self.device)
+        
+        x_res = x_res.reshape(x_res.shape[0], -1, x_res.shape[-1])
         # x res for each GPU: [n_batch, n_lat, n_lon, n_var//4]
         # x_shape [n_batch, n_var, 720, 1440]
-        x = self.embedding(x.to('cpu'))
-        
+        x = x.to(self.device)
+        x = self.embedding(x)
+
         # After embedding: x_shape [n_batch, n_patch_lat * n_patch_lon, embed_dim]
         x_res2 = x.clone()
 
         for i in range(self.n_blocks):
             x = self.blocks[i](x)
         
-        x = self.layer_norm(x + x_res2)
+        x = self.layer_norm(x + x_res2, self.torch_rank, self.device)
+        
         
         # After MLP-mixing blocks: [n_batch, n_patch_lat * n_patch_lon/2, embed_dim/2]
         x = self.recovery(x, self.n_lat, self.n_lon) 
         
+        x = x.reshape(x.shape[0], -1, x.shape[-1])
         
+
         # After recovery: [n_batch, n_lat*n_lon//2, n_var//2]
-        
-        x = self.layer_norm2(x) # layer norm must go before concat 
-        
+        x = self.layer_norm2(x, self.torch_rank, self.device) # layer norm must go before concat 
+        #
         x = torch.concat((x, x_res), dim=2)
-
-        # After recovery: [n_batch, n_lat, n_lon, n_var]
-
-        x = self.layer_norm3(x)
-        #x = x.reshape(x.shape[0], 720*1440//2, 2*self.num_variables)
-        
- #       print(f"x.shape before lin layer {x.shape}")
+##
+        ### After recovery: [n_batch, n_lat, n_lon, n_var]
+##
+        x = self.layer_norm3(x, self.torch_rank, self.device)
+        x = x.reshape(x.shape[0], -1, x.shape[-1])
+        #
         x = self.linearlayer(x)
-#        print(f"x.shape after lin layer {x.shape}")
-        # [n_batch, ]
-
-
-        
-
-        #print(f"my rank is {self.torch_rank}; x_res shape {x_res.shape}; x shape {x.shape}")       
-        # x shape: [n_batch, 720, 1440, 72//4]
-        return x 
+        return  x  
     
 class ModelSequential(torch.nn.Module):
+    def __init__(self, config_dict, device, torch_rank):
+        super().__init__()
+        self.torch_rank = torch_rank
+        hidden_dimension = config_dict['model']['hidden_dim']
+        
+        self.stride = config_dict['model']['stride']
+        self.xlat, self.xlon = config_dict['data']['xlat'], config_dict['data']['xlon']
+
+        #padding = ((self.xlat+self.patch_size[0]-self.stride)%self.stride, (self.xlon+self.patch_size[1]-self.stride)%self.stride)
+        padding = (0, 0)
+        
+        
+        if config_dict['model']['patch_embed'] == 1:
+            self.patch_size = config_dict['model']['patch_size']
+            self.n_lat = 720 // 1 # (self.xlat+2*padding[0]-1*(self.patch_size[0]-1)-1)//self.stride+1
+            self.n_lon = 1440 // self.patch_size # (self.xlon+2*padding[1]-1*(self.patch_size[1]-1)-1)//self.stride+1
+            self.dropout = config_dict['model']['dropout']
+            self.embedding = PatchEmbedding.PatchEmbedding1D(self.patch_size, hidden_dimension, device=device,in_channels=72, padding=padding, stride=self.stride, xlat=self.xlat)
+            self.n_blocks = config_dict['model']['mixing_blocks']
+            self.blocks = torch.nn.ModuleList([MixerBlockSequential(720*1440//self.patch_size, hidden_dimension, hidden_dimension, self.dropout) for i in range(self.n_blocks)])
+        else:    
+            self.patch_size = (config_dict['model']['patch_size'], config_dict['model']['patch_size'])
+            self.embedding = PatchEmbedding.PatchEmbedding2D(self.patch_size, hidden_dimension, device=device,in_channels=72, padding=padding, stride=self.stride, xlat=self.xlat)
+            self.n_blocks = config_dict['model']['mixing_blocks']
+            self.n_lat = (self.xlat+2*padding[0]-1*(self.patch_size[0]-1)-1)//self.stride+1
+            self.n_lon = (self.xlon+2*padding[1]-1*(self.patch_size[1]-1)-1)//self.stride+1
+            self.blocks = torch.nn.ModuleList([MixerBlockSequential(self.n_lat*self.n_lon, hidden_dimension, hidden_dimension, self.dropout) for i in range(self.n_blocks)])
+        self.pos_encoding = config_dict['model']['positional_encoding']
+    
+        if self.pos_encoding:  
+            self.positional_encoding = utils.getPositionEncoding(self.n_lat*self.n_lon, hidden_dimension, n=10000).to(device)
+        
+        self.latent_rollout = config_dict['model']['latent_rollout']
+
+        self.layer_norm = torch.nn.LayerNorm(hidden_dimension)
+        if self.torch_rank == 3:
+            self.num_variables = 69
+        else:
+            self.num_variables = 69
+        
+        self.add = config_dict['model']['add']
+        self.concat = config_dict['model']['concat']
+        self.linear_residual = config_dict['model']['linear_residual']
+        if self.linear_residual:    
+            self.layer_norm2 = torch.nn.LayerNorm(self.num_variables)    
+            self.layer_norm3 = torch.nn.LayerNorm(69*2)    
+            self.linearlayer = torch.nn.Linear(self.num_variables*2, self.num_variables)
+        
+        # 72 = 69 ROUNDED TO NEAREST MULTLIPLE OF 4
+        if config_dict['model']['patch_embed'] == 1:
+            if self.concat:
+                self.recovery = PatchEmbedding.PatchRecovery1D(self.patch_size, hidden_dimension, padding=padding, stride=self.stride, out_channels=69, concat=True)
+            else:
+                self.recovery = PatchEmbedding.PatchRecovery1D(self.patch_size, hidden_dimension, padding=padding, stride=self.stride, out_channels=69, concat=False)
+        else:
+            if self.concat:
+                self.recovery = PatchEmbedding.PatchRecovery2D(self.patch_size, hidden_dimension, padding=padding, stride=self.stride, out_channels=69, concat=True)
+            else:
+                self.recovery = PatchEmbedding.PatchRecovery2D(self.patch_size, hidden_dimension, padding=padding, stride=self.stride, out_channels=69, concat=False)
+        
+        
+        self.activation = torch.nn.GELU()
+  
+        if self.linear_residual:
+            self.params = torch.nn.ModuleDict({
+            'embedding': torch.nn.ModuleList([self.embedding]),
+            'recovery': torch.nn.ModuleList([self.recovery]),
+            'common': torch.nn.ModuleList([self.blocks, self.layer_norm, self.layer_norm2, self.layer_norm3, self.linearlayer])
+            }
+            )       
+        else:
+            self.params = torch.nn.ModuleDict({
+            'embedding': torch.nn.ModuleList([self.embedding]),
+            'recovery': torch.nn.ModuleList([self.recovery]),
+            'common': torch.nn.ModuleList([self.blocks, self.layer_norm])
+            }
+            )
+        
+    def forward(self, x, rollout_=1):
+        
+        x_shape = x.shape
+        x_res = x.clone()
+        x_res = x_res.permute(0, 2, 3, 1)
+        
+        # x shape: [1, 69, 720, 1440]
+        x = self.embedding(x) # x: latent_t
+        # x: shape [1, n_patches, hidden_dim]
+        if self.pos_encoding:
+            x = x + self.positional_encoding # is this a good idea?
+            
+        #x_res2 = self.layer_norm(x).clone()
+        x_res2 = x.clone()
+
+        # x shape: [1, 1152, 2000]
+        for rollout in torch.arange(rollout_):
+            for i in range(self.n_blocks):
+                x = self.blocks[i](x)   # x: latent_tplus1
+
+        if self.concat:
+            x = self.layer_norm(x)
+            x = torch.concat((x, x_res2), dim=2)
+        else:
+            x = self.layer_norm(x + x_res2)
+        
+        x = self.recovery(x, self.n_lat, self.n_lon, output_size=(x_res.shape[0], x_res.shape[3], x_res.shape[1], x_res.shape[2]))   # decoded_tplus1
+        
+
+        if self.add:
+            x = x.reshape(x_shape[0], self.xlat, self.xlon,self.num_variables)
+            
+            return x + x_res
+
+        if self.linear_residual:
+            x = self.layer_norm2(x) # layer norm must go before concat 
+            x = torch.concat((x[:,:,:,:self.num_variables], x_res), dim=3)
+            x = self.layer_norm3(x)
+            x = x.reshape(x_shape[0], self.xlat*self.xlon, self.num_variables*2)
+            x = self.linearlayer(x)
+            x = x.reshape(x_shape[0], self.xlat, self.xlon, self.num_variables)
+        return x
+            
+class ModelUPT(torch.nn.Module):
     def __init__(self, config_dict, device, torch_rank):
         super().__init__()
         self.torch_rank = torch_rank
@@ -108,16 +232,17 @@ class ModelSequential(torch.nn.Module):
         self.n_lat = (self.xlat+2*padding[0]-1*(self.patch_size[0]-1)-1)//self.stride+1
         self.n_lon = (self.xlon+2*padding[1]-1*(self.patch_size[1]-1)-1)//self.stride+1
         
-        self.embedding = PatchEmbedding.PatchEmbedding2D(self.patch_size, hidden_dimension, device=device,in_channels=72, padding=padding, stride=self.stride, xlat=self.xlat, n_patches=self.n_lat*self.n_lon)
+        self.embedding = PatchEmbedding.PatchEmbedding2D(self.patch_size, hidden_dimension, device=device,in_channels=72, padding=padding, stride=self.stride, xlat=self.xlat)
         
         self.pos_encoding = config_dict['model']['positional_encoding']
     
         if self.pos_encoding:  
             self.positional_encoding = utils.getPositionEncoding(self.n_lat*self.n_lon, hidden_dimension, n=10000).to(device)
         
+        self.latent_rollout = config_dict['model']['latent_rollout']
+
         self.n_blocks = config_dict['model']['mixing_blocks']
         self.blocks = torch.nn.ModuleList([MixerBlockSequential(self.n_lat*self.n_lon, hidden_dimension, hidden_dimension) for i in range(self.n_blocks)])
-        self.layer_norm = torch.nn.LayerNorm(hidden_dimension)
         if self.torch_rank == 3:
             self.num_variables = 69
         else:
@@ -125,14 +250,7 @@ class ModelSequential(torch.nn.Module):
         
         self.add = config_dict['model']['add']
 
-        if not self.add:    
-            self.layer_norm2 = torch.nn.LayerNorm(self.num_variables)    
-            self.layer_norm3 = torch.nn.LayerNorm(69*2)    
-        
-        # 72 = 69 ROUNDED TO NEAREST MULTLIPLE OF 4
         self.recovery = PatchEmbedding.PatchRecovery2D(self.patch_size, hidden_dimension, padding=padding, stride=self.stride, out_channels=69)
-        if not self.add:
-            self.linearlayer = torch.nn.Linear(self.num_variables*2, self.num_variables)
         
         self.activation = torch.nn.GELU()
 
@@ -140,7 +258,7 @@ class ModelSequential(torch.nn.Module):
             self.params = torch.nn.ModuleDict({
             'embedding': torch.nn.ModuleList([self.embedding]),
             'recovery': torch.nn.ModuleList([self.recovery]),
-            'common': torch.nn.ModuleList([self.blocks, self.layer_norm])
+            'common': torch.nn.ModuleList([self.blocks])
             }
             )
         else:
@@ -151,39 +269,34 @@ class ModelSequential(torch.nn.Module):
             }
             )       
         
-    def forward(self, x):
+    def forward(self, x, rollout_=1):
         
         x_shape = x.shape
         x_res = x.clone()
+
         x_res = x_res.permute(0, 2, 3, 1)
         
-        
         # x shape: [1, 69, 720, 1440]
-        x = self.embedding(x)
+        latent_t = self.embedding(x) # x: latent_t
         # x: shape [1, n_patches, hidden_dim]
         if self.pos_encoding:
-            x = x + self.positional_encoding # is this a good idea?
-            
-        #x_res2 = self.layer_norm(x).clone()
-        x_res2 = x.clone()
-        # x shape: [1, 1152, 2000]
-        for i in range(self.n_blocks):
-            x = self.blocks[i](x)
+            latent_t = latent_t + self.positional_encoding # is this a good idea?
+                
+        x_res2 = latent_t.clone()
 
-        x = self.layer_norm(x + x_res2)
+        # x shape: [1, 1152, 2000]
         
-        x = self.recovery(x, self.n_lat, self.n_lon, output_size=(x_res.shape[0], x_res.shape[3], x_res.shape[1], x_res.shape[2])) 
+        for i in range(self.n_blocks):
+            latent_t = self.blocks[i](latent_t)   # x: latent_tplus1
         
-        if not self.add:
-        #x[:,:,:,:self.num_variables] + x_res
-            x = self.layer_norm2(x) # layer norm must go before concat 
-        #
-            x = torch.concat((x[:,:,:,:self.num_variables], x_res), dim=3)
-            x = self.layer_norm3(x)
-            x = x.reshape(x_shape[0], self.xlat*self.xlon, self.num_variables*2)
-            x = self.linearlayer(x)
-            x = x.reshape(x_shape[0], self.xlat, self.xlon,self.num_variables)
-            return x 
-        else:
-            x = x.reshape(x_shape[0], self.xlat, self.xlon,self.num_variables)
-            return x + x_res
+        latent_t = x_res2 + latent_t
+
+        latent_tplus1 = latent_t.clone()
+      
+        decoded_t = self.recovery(x_res2, self.n_lat, self.n_lon, output_size=(x_res.shape[0], x_res.shape[3], x_res.shape[1], x_res.shape[2]))  # decoded_t
+
+        decoded_tplus1 = self.recovery(latent_t, self.n_lat, self.n_lon, output_size=(x_res.shape[0], x_res.shape[3], x_res.shape[1], x_res.shape[2]))   # decoded_tplus1
+        decoded_tplus1 = decoded_tplus1.reshape(x_shape[0], self.xlat, self.xlon,self.num_variables) # No adding; decoded_tplus1
+        inverse_encoded = self.embedding(decoded_tplus1.permute(0, 3, 1, 2)) # compare x_encoder with x_approximator_out # inverse_encoded
+                
+        return decoded_tplus1, decoded_t.permute(0, 3, 1, 2), inverse_encoded, latent_tplus1

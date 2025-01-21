@@ -43,11 +43,9 @@ def get_var_names(prepend_variable=['epoch']):
 def gen_plots(config_dict, input_data, tensor_out, target_data, rank, file_path, epoch, model_parallel=False):
     xlat, xlon = config_dict['data']['xlat'], config_dict['data']['xlon']
     if model_parallel:
-        fraction = 72//4
-                    
         input_print, output_print, target_print = input_data[0].cpu(), tensor_out[0].cpu(), target_data[0].cpu()
         input_print  = input_print.reshape(xlat,  xlon, 69).permute(2, 0, 1).cpu()
-        output_print = output_print.reshape(xlat, xlon, 72)[:, :, :69].permute(2, 0, 1).cpu()
+        output_print = output_print.reshape(xlat, xlon, 69).permute(2, 0, 1).cpu()
         target_print = target_print.reshape(xlat, xlon, 69).permute(2, 0, 1).cpu()
 
         if rank == 0:
@@ -79,139 +77,185 @@ def gen_plots(config_dict, input_data, tensor_out, target_data, rank, file_path,
         save_path = f"{file_path}/Z500_{epoch}.png"
         utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=9)
 
-def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file_path, mse_file_path='rmse.csv', acc_file_path='acc.csv', model_parallel=True):
-    
-    rollout_time = config_dict['model']['latent_rollout']
+def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file_path, mse_file_path='rmse.csv', acc_file_path='acc.csv', model_parallel=True, world_size=4):
+    loss = torch.zeros(1).to(device)
 
+    rollout_time = config_dict['model']['latent_rollout']
+    dt = config_dict['data']['dt']
+    rollout_time = (np.arange(rollout_time) + 1) * dt
     var_names = get_var_names(prepend_variable=['epoch', 'rollout_time'])
-        
+    
     rmse, rmse_persistence = {}, {}
     acc, acc_persistence = {}, {}
-    rmse['epoch'], acc['epoch'] = epoch, epoch
-    rmse_persistence['epoch'], acc_persistence['epoch'] = -1, -1
-    
-    for var in var_names[1:]:
-        rmse[var] = torch.tensor([0]).to(torch.float32).to(device)
-        acc[var]  = torch.tensor([0]).to(torch.float32).to(device)
-        rmse_persistence[var] = torch.tensor([0]).to(torch.float32).to(device)
-        acc_persistence[var]  = torch.tensor([0]).to(torch.float32).to(device)
+    for rollout in rollout_time:
+        rmse[rollout], rmse_persistence[rollout] = {}, {}
+        acc[rollout], acc_persistence[rollout] = {}, {}
+        rmse[rollout]['epoch'], acc[rollout]['epoch'] = epoch, epoch
+        rmse_persistence[rollout]['epoch'], acc_persistence[rollout]['epoch'] = -1, -1
+        rmse[rollout]['rollout_time'], rmse_persistence[rollout]['rollout_time'] = rollout, rollout
+        acc[rollout]['rollout_time'], acc[rollout]['rollout_time'] = rollout, rollout
         
+        # each df has [epoch, rollout_time] as first two values
+    
+        for var in var_names[1:]:
+            rmse[rollout][var] = torch.tensor([0]).to(torch.float32).to(device)
+            acc[rollout][var]  = torch.tensor([0]).to(torch.float32).to(device)
+            rmse_persistence[rollout][var] = torch.tensor([0]).to(torch.float32).to(device)
+            acc_persistence[rollout][var]  = torch.tensor([0]).to(torch.float32).to(device)
+            
     total_samples = torch.tensor([0]).to(device)
 
     start_validation_time = time.perf_counter()
 
     weights = torch.tensor(calc_weight(721)).to(torch.float32)[:config_dict['data']['xlat']].to(device)
+
+    surface_weights  = torch.tensor([1.5, 0.77, 0.66, 3.0])*.25
+    pressure_weights = torch.tensor([3.00, 0.6, 1.5, 0.77, 0.54]).unsqueeze(1).expand(5, 13).flatten()
+    weights_loss = torch.concat([surface_weights, pressure_weights]).view(1, 69).to(device)
+
     if 'rollout_time' in var_names:
         index_offset = 2
     else:
         index_offset = 1
 
     for batch, data in enumerate(dataloader):
-        for rollout in rollout_time:
+        for step, rollout in enumerate(rollout_time):
             input_data  = data[0].to(torch.float32).to(device)
-            target_data = data[1][0].to(torch.float32).to(device)
+            target_data = data[1][step].to(torch.float32).to(device)
             target_data = target_data.permute(0, 2, 3, 1)
             
-            output = model(input_data)
+            if config_dict['model']['model_parallel']:
+                torch.distributed.broadcast(input_data, src=0)
+                torch.distributed.broadcast(target_data.contiguous(), src=0)
+
+                        
+            if config_dict['model']['upt']:
+                output, _, _, _ = model(input_data, rollout_=step+1)
+            else:
+                output = model(input_data, rollout_=step+1)
             input_data = input_data.permute(0, 2, 3, 1) # Permute input data for mse calculation
             
+            #print(f' I am device {device}, target value {target_data[0,351,1000,3]}')
             if model_parallel:
-                tensor_out = torch.zeros(4, *output.shape).to(device)
-                torch.distributed.all_gather_into_tensor(tensor_out, output)
-                # Shape of tensor_out:
+                output = output.reshape(output.shape[0], 720, 720, output.shape[-1])
+                tensor_gather = torch.zeros(4, *output.shape).to(device)
+                #list_gather = [torch.zeros(*target_data_local.shape).to(device) for _ in range(4)]
+                #torch.distributed.all_gather(list_gather, target_data_local)
+                #torch.distributed.barrier()
                 
-                # 0:4 = MSP, U10, V10, T2M
-                # Z, Q, T, U, V
-                # heights 1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50
-                # 4: Z1000, Q: 17, T: 30, U:43, V: 56
-                # 
-                # We want: T850, Z500, U850, V850, Q850, U10, V10, MSL, T2M
+                torch.distributed.all_gather_into_tensor(tensor_gather, output)
+                
+                # tensor_out shape: [4, 1, 720*720, 36]
 
-                tensor_out = tensor_out.reshape(2, 2, *output.shape).permute(2, 3, 0, 4, 1).reshape(output.shape[0], config_dict['data']['xlat'], config_dict['data']['xlon'], 72)
+                # output shape: [n_batch, n_x, n_y, n_variables]
+                #print(tensor_out.shape)
+                #tensor_out = tensor_out.reshape(4, 1, 720*720, 36)
+                # Shape of tensor_out: [2, 2, n_batch, n_x, n_y, n_variables]
+                #print(tensor_out[0].shape)
+                #print(tensor_out[1].shape)
+                
+                                
+                top_row = torch.cat([tensor_gather[0], tensor_gather[1]], dim=3)
+                bottom_row = torch.cat([tensor_gather[2], tensor_gather[3]], dim=3)
+                # left/right side shape: [1, 720, 720, 72]
+                tensor_out = torch.cat([top_row, bottom_row], dim=2)[:,:,:,:69]#.reshape(1, 720, 1440, 72)#.reshape(output.shape[0], config_dict['data']['xlat'], config_dict['data']['xlon'], 72)
+                loss_fn = torch.nn.MSELoss()
+                loss[0] = loss[0] + (loss_fn(tensor_out*weights_loss, target_data*weights_loss)).item()
+                #tensor_out = tensor_out.reshape(2, 2, *output.shape).permute(2, 0, 3, 1, 4).reshape(output.shape[0], config_dict['data']['xlat'], config_dict['data']['xlon'], 72)
             else:
                 tensor_out = output
-
+                loss_fn = torch.nn.MSELoss()
+                loss[0] = loss[0] + (loss_fn(tensor_out*weights_loss, target_data*weights_loss)).item()
                 # calculate rmse for all variables
                 for i, var in enumerate(var_names):
-                    if i > 0:
+                    if i > index_offset-1:
                         # Only test on surface variables and pressure heights 850, 500
                         # due to saving time 
-                        if i in [1, 2, 3, 4, 7, 10, 20, 23, 33, 36, 46, 49, 59, 62]:
-                            rmse[var] = rmse[var] + calc_mse_single_variable(config_dict, target_data, tensor_out, device, weights, index=(i-index_offset), norm=True)
-                            acc[var]  = acc[var] + calc_acc_single_variable(config_dict, target_data, tensor_out, device, weights, index=(i-index_offset1), norm=True)
+                        if i in (np.array([0, 1, 2, 3, 6, 9, 19, 22, 32, 35, 45, 48, 58, 61]) + index_offset):
+                            rmse[rollout][var] = rmse[rollout][var] + calc_mse_single_variable(config_dict, target_data, tensor_out, device, weights, index=(i-index_offset), norm=True)
+                            acc[rollout][var]  = acc[rollout][var] + calc_acc_single_variable(config_dict, target_data, tensor_out, device, weights, index=(i-index_offset), norm=True)
                         else:
-                            rmse[var] += 0.
-                            acc[var]  += 0.
+                            rmse[rollout][var] = rmse[rollout][var] + 0.
+                            acc[rollout][var]  = acc[rollout][var]  + 0.
 
-                if epoch == 0:
-                    for i, var in enumerate(var_names):
-                        if i > 0:
-                            if i in [1, 2, 3, 4, 7, 10, 20, 23, 33, 36, 46, 49, 59, 62]:
-                                rmse_persistence[var] = rmse[var] + calc_mse_single_variable(config_dict, target_data, input_data, device, weights, index=(i-index_offset), norm=True)
-                                acc_persistence[var]  = acc[var] + calc_acc_single_variable(config_dict, target_data, input_data, device, weights, index=(i-index_offset), norm=True)
-                            else:
-                                rmse[var] = rmse[var] + 0.
-                                acc[var]  = acc[var] + 0.
+                #if epoch == 0:
+                #    for i, var in enumerate(var_names):
+                #        if i > 0:
+                #            if i in [1, 2, 3, 4, 7, 10, 20, 23, 33, 36, 46, 49, 59, 62]:
+                #                rmse_persistence[rollout][var] = rmse[rollout][var] + calc_mse_single_variable(config_dict, target_data, input_data, device, weights, index=(i-1), norm=True)
+                #                acc_persistence[rollout][var]  = acc[rollout][var] + calc_acc_single_variable(config_dict, target_data, input_data, device, weights, index=(i-1), norm=True)
+                #            else:
+                #                rmse[rollout][var] = rmse[rollout][var] + 0.
+                #                acc[rollout][var]  = acc[rollout][var] + 0.
 
-                total_samples[0] = total_samples[0] + input_data.shape[0]
+        total_samples[0] = total_samples[0] + input_data.shape[0]
 
-            if rank == 0:
-                if not model_parallel:
-                    tensor_out = output
+        if rank == 0:
+            if not model_parallel:
+                tensor_out = output
 
-                if batch == 0 and rollout == 6: # if first shuffle # TODO GENERALIZE ROLLOUT variable
-                    print(f"rank {rank}, input data shape {input_data.shape}")
-                    gen_plots(config_dict, input_data, tensor_out, target_data, rank, file_path, epoch, model_parallel=model_parallel)
+            if batch == 0: # if first shuffle # TODO GENERALIZE ROLLOUT variable
+                print(f"rank {rank}, input data shape {input_data.shape}")
+                gen_plots(config_dict, input_data, tensor_out, target_data, rank, file_path, epoch, model_parallel=model_parallel)
                     
-    torch.distributed.all_reduce(total_samples)
+    if not config_dict['model']['model_parallel']:
+        torch.distributed.all_reduce(total_samples)
+        torch.distributed.all_reduce(loss)
+    loss /= world_size # average the loss for world size
+    loss /= len(dataloader)
+    print(f"total samples {total_samples}")
         
-    for variable in var_names[1:]:
-        torch.distributed.all_reduce(rmse[variable])
-        torch.distributed.all_reduce(acc[variable])
-        if epoch == 0:
-            torch.distributed.all_reduce(rmse_persistence[variable])
-            torch.distributed.all_reduce(acc_persistence[variable])
+    for variable in var_names[index_offset:]:
+        for rollout in rollout_time:
+            torch.distributed.all_reduce(rmse[rollout][variable])
+            torch.distributed.all_reduce(acc[rollout][variable])
+            #if epoch == 0:
+            #    torch.distributed.all_reduce(rmse_persistence[rollout][variable])
+            #    torch.distributed.all_reduce(acc_persistence[rollout][variable])
     
     end_validation_time = time.perf_counter()
 
     if rank == 0:
-        print(f"Validation time [min]: {(end_validation_time - start_validation_time)/60}")
+        print(f"Validation time [min]: {(end_validation_time - start_validation_time)/60}, validation loss {loss.item()}")
 
-        for variable in var_names[1:]:
-            rmse[variable] = torch.sqrt(rmse[variable]/total_samples[0])
-            acc[variable]  = acc[variable] / total_samples[0]
-            if epoch == 0:
-                rmse_persistence[variable] = torch.sqrt(rmse_persistence[variable] / total_samples[0])
-                acc_persistence[variable]  = acc_persistence[variable] / total_samples[0]
+        for variable in var_names[index_offset:]:
+            for rollout in rollout_time:
+                rmse[rollout][variable] = torch.sqrt(rmse[rollout][variable]/total_samples[0])
+                acc[rollout][variable]  = acc[rollout][variable] / total_samples[0]
+                #if epoch == 0:
+                #    rmse_persistence[rollout][variable] = torch.sqrt(rmse_persistence[rollout][variable] / total_samples[0])
+                #    acc_persistence[rollout][variable]  = acc_persistence[rollout][variable] / total_samples[0]
 
-            if variable[0] == 'q':
-                rmse[variable] = rmse[variable]*1000
-                rmse_persistence[variable] = rmse_persistence[variable]*1000
+                if variable[0] == 'q':
+                    rmse[rollout][variable] = rmse[rollout][variable]*1000
+                    rmse_persistence[rollout][variable] = rmse_persistence[rollout][variable]*1000
                 
     # write to file
     if rank == 0:
         rmse_file, acc_file = Path(mse_file_path), Path(acc_file_path)
 
-        rmse_values = {key: float(value) for key, value in rmse.items()}
-        acc_values  = {key: float(value) for key, value in acc.items()}
-        if epoch == 0:
-            rmse_persistence_values = {key: float(value) for key, value in rmse_persistence.items()}
-            acc_persistence_values  = {key: float(value) for key, value in acc_persistence.items()}
-            df_rmse = pd.DataFrame([rmse_persistence_values, rmse_values])
-            df_acc  = pd.DataFrame([acc_persistence_values, acc_values])
-        else:
+        for rollout in rollout_time:
+            rmse_values = {key: float(value) for key, value in rmse[rollout].items()}
+            acc_values  = {key: float(value) for key, value in acc[rollout].items()}
+            #if epoch == 0:
+            #    rmse_persistence_values = {key: float(value) for key, value in rmse_persistence[rollout].items()}
+            #    acc_persistence_values  = {key: float(value) for key, value in acc_persistence[rollout].items()}
+            #    df_rmse = pd.DataFrame([rmse_persistence_values, rmse_values])
+            #    df_acc  = pd.DataFrame([acc_persistence_values, acc_values])
+            #else:
             df_rmse = pd.DataFrame([rmse_values])
             df_acc  = pd.DataFrame([acc_values])
 
-        if rmse_file.is_file():
-            df_rmse.to_csv(mse_file_path, mode='a', header=False)
-        else:
-            df_rmse.to_csv(mse_file_path)
+            if rmse_file.is_file():
+                df_rmse.to_csv(mse_file_path, mode='a', header=False)
+            else:
+                df_rmse.to_csv(mse_file_path)
 
-        if acc_file.is_file():
-            df_acc.to_csv(acc_file_path, mode='a', header=False)
-        else:
-            df_acc.to_csv(acc_file_path)
+            if acc_file.is_file():
+                df_acc.to_csv(acc_file_path, mode='a', header=False)
+            else:
+                df_acc.to_csv(acc_file_path)
+    return loss.item()
 
 def load_averages():
     static_slevel = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/surface_zarr.npy')
