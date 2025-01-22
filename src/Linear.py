@@ -1,11 +1,9 @@
 import torch
-import torch.distributed
 import summa_gpu
 from mpi4py import MPI
 import numpy as np
 from torch.nn import GELU, Dropout
-from einops import rearrange
-import math
+
 class DistributedXW(torch.nn.Module):
     def __init__(self, in_dim, out_dim, comm, device, torch_rank):
         super().__init__()
@@ -45,7 +43,7 @@ class SUMMA_AB(torch.autograd.Function):
         world_size = ctx.world_size
 
         grad_input = summa_gpu.ABT(grad_output, weight, rank=torch_rank, world_size=world_size, device=device)
-        grad_weight = summa_gpu.ATB(input, grad_output, rank=torch_rank, world_size=world_size, device=device).clone()
+        grad_weight = summa_gpu.ATB(input, grad_output, rank=torch_rank, world_size=world_size, device=device)
         
         return grad_input, grad_weight, None, None, None
          
@@ -85,22 +83,23 @@ class SUMMA_ATB(torch.autograd.Function):
         ctx.world_size = 4
         #assert(x.shape[-1] == W.shape[0]) # TODO ASSERT
         xw = summa_gpu.ATB(x, W, torch_rank, ctx.world_size, device)    
-        b = torch.broadcast_to(b, xw.shape).to(device)
 
-        return xw + b
+        return xw.add(b)
     
     @staticmethod
     def backward(ctx, grad_output):
         input, weight = ctx.saved_tensors
         
-        device=ctx.device        
+        device = ctx.device        
         torch_rank = ctx.torch_rank
         world_size = ctx.world_size
-
+        
+        
         grad_input = summa_gpu.ABT(weight, grad_output, rank=torch_rank, world_size=world_size, device=device)
         grad_weight = summa_gpu.AB(input, grad_output, rank=torch_rank, world_size=world_size, device=device)
+        grad_b = grad_output.sum(dim=0) 
         
-        return grad_input, grad_weight, grad_output, None, None, None
+        return grad_input, grad_weight, grad_b, None, None, None
     
 class DistributedLayerNorm(torch.nn.Module):
     def __init__(self, dim, rank, device):
@@ -144,7 +143,6 @@ class DistributedXWT(torch.nn.Module):
         else:
             self.bias = None
         
-            
         self.comm = comm
         self.device = device
         self.torch_rank = torch_rank
@@ -170,8 +168,7 @@ class SUMMA_ABT(torch.autograd.Function):
         #print(f"Forward pass, my device {device}, world size {torch.cuda.device_count()}, my_torch_rank {torch_rank}")
         xw = summa_gpu.ABT(x, W, torch_rank, ctx.world_size, device)
         if b is not None:
-            b = torch.broadcast_to(b, xw.shape).to(device)
-            return xw + b
+            return xw.add(b)
         else:
             return xw
     
@@ -182,11 +179,11 @@ class SUMMA_ABT(torch.autograd.Function):
         device=ctx.device        
         torch_rank = ctx.torch_rank
         world_size = ctx.world_size
-        
+        grad_b = grad_output.sum(dim=0) 
         grad_input = summa_gpu.AB(grad_output, weight, rank=torch_rank, world_size=world_size, device=device)
         grad_weight = summa_gpu.ATB(grad_output, input, rank=torch_rank, world_size=world_size, device=device)
         
-        return grad_input, grad_weight, grad_output, None, None, None
+        return grad_input, grad_weight, grad_b, None, None, None
 
 
 class DistributedTranspose(torch.nn.Module):

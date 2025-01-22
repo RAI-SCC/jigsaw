@@ -179,7 +179,6 @@ def ABT(Aij, Bij, rank, world_size, device):
             targets = rank_dict_transpose[rank]
             for target in targets: 
                 if rank != target:
-                    #Bij = Bij.contiguous()
                     dist.isend(Bij, dst=target)
                     
         # receiving

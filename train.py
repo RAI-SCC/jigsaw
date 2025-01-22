@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.optim as optim
 from timm.scheduler.cosine_lr import CosineLRScheduler
+from timm.scheduler.step_lr import StepLRScheduler
 import sys
 sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-summa/')
 sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-summa/src')
@@ -17,7 +18,6 @@ def get_groups():
     group_0_2 = torch.distributed.new_group(ranks=[0, 2])
     group_1_3 = torch.distributed.new_group(ranks=[1, 3])
     return [group_0_2, group_1_3]
-
 
 
 def training_loop(config_dict, device, slurm_localid, rank):
@@ -120,13 +120,18 @@ def training_loop(config_dict, device, slurm_localid, rank):
     pressure_weights = torch.tensor([3.00, 0.6, 1.5, 0.77, 0.54]).unsqueeze(1).expand(5, 13).flatten()
     weights = torch.concat([surface_weights, pressure_weights]).view(1, 69).to(device)
     xlat = config_dict['data']['xlat']
-    
-    scheduler = CosineLRScheduler(optimizer, t_initial=100, lr_min=1e-5, cycle_decay=0.5, cycle_mul=1, cycle_limit=10)
+
+    if config_dict['training']['lr_constant']:
+        scheduler = StepLRScheduler(optimizer, decay_rate=1., decay_t=100)
+    else:
+        scheduler = CosineLRScheduler(optimizer, t_initial=100, lr_min=1e-5, cycle_decay=0.5, cycle_mul=1, cycle_limit=10)
     scheduler.step(epoch)
     
     start_lr = 1e-6
     if config_dict['model']['model_parallel']:
         groups = get_groups()
+        layer_norm_indices = [i for i, k in enumerate(mlp_ddp.state_dict().keys()) if 'layer_norm' in k]
+    
     
     for epoch in range(epoch, 200):
         if not config_dict['model']['model_parallel']:
@@ -139,6 +144,7 @@ def training_loop(config_dict, device, slurm_localid, rank):
         start_time = time.perf_counter()
 
         mlp_ddp.train()
+        
         for i, data in enumerate(train_dataloader):
         ## Get the batch data on rank 0
             if epoch == 0:
@@ -186,10 +192,11 @@ def training_loop(config_dict, device, slurm_localid, rank):
                 elif rank == 3:
                     target_data_local = target_data[:, :, fraction_1:,  fraction_2:].reshape(target_data.shape[0], -1, fraction_2)
                 
+
                 model_loss = loss_fn(output, target_data_local)
                 
                 loss = model_loss
-                torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG)
+                
                 
             else:
                 if config_dict['model']['upt']:
@@ -228,30 +235,29 @@ def training_loop(config_dict, device, slurm_localid, rank):
                             param.grad.div_(2.)  # Average the gradient
 
                 for param_group in optimizer.param_groups:
-                    for param in param_group['params']:
+                    for index, param in enumerate(param_group['params']):
                         if param is None:
                             continue
-                        # Skip if this param has no state
-                        state = optimizer.state.get(param, None)
+                        
+                        if index in layer_norm_indices:
+                            # Skip if this param has no state
+                            state = optimizer.state.get(param, None)
 
-                        if not state:
-                            continue
+                            if not state:
+                                continue
 
-                        # 'exp_avg' = first moment of gradient
-                        if 'exp_avg' in state:
-                            exp_avg = state['exp_avg']
-                            if len(exp_avg.shape) == 1:
+                            # 'exp_avg' = first moment of gradient
+                            if 'exp_avg' in state:
+                                exp_avg = state['exp_avg']
+                                
                                 if rank in [0, 2]:
                                     torch.distributed.all_reduce(exp_avg, op=torch.distributed.torch.distributed.ReduceOp.SUM, group=groups[0])
                                 else:
                                     torch.distributed.all_reduce(exp_avg, op=torch.distributed.torch.distributed.ReduceOp.SUM, group=groups[1])
-                                # Optionally average
                                 exp_avg /= 2.
 
-                        # 'exp_avg_sq' = second moment of gradient
-                        if 'exp_avg_sq' in state:
-                            exp_avg_sq = state['exp_avg_sq']
-                            if len(exp_avg_sq.shape) == 1:
+                            if 'exp_avg_sq' in state:
+                                exp_avg_sq = state['exp_avg_sq']
                                 if rank in [0, 2]:
                                     torch.distributed.all_reduce(exp_avg_sq, op=torch.distributed.ReduceOp.SUM, group=groups[0])
                                 else:
@@ -259,9 +265,12 @@ def training_loop(config_dict, device, slurm_localid, rank):
                                 # Optionally average
                                 exp_avg_sq /= 2.
                 
-            optimizer.step()
             torch.distributed.all_reduce(loss)
-            loss = loss / world_size 
+            optimizer.step()
+            
+            if not config_dict['model']['model_parallel']:
+                loss = loss / world_size 
+            
             if rank == 0:
                 if config_dict['training']['identity']:
                     print(f"{rank}:  {epoch}, after Step {i}/{len(train_dataloader)}. rollout {forecast_leadtime} loss: {loss.detach()}, {identity_loss.detach()}")
