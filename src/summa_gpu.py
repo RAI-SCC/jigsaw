@@ -24,7 +24,6 @@ def AB(Aij, Bij, rank, world_size, device):
         # Broadcast submatrix of A along the row
         # Manual send of A
         A_k = distribute_A(Aij, k, rank, bufferA, device)
-
         B_k = distribute_B(Bij, k, rank, bufferB, device)
         
         ## Perform local multiplication and accumulate
@@ -33,35 +32,7 @@ def AB(Aij, Bij, rank, world_size, device):
     return Cij
 
 
-def ABT_vert(Aij, Bij):
-    
-    Cij = Aij @ Bij.mT
 
-    torch.distributed.all_reduce(Cij) 
-        
-    return Cij
-
-def AB_vert(Aij, Bij):
-    Cij = Aij @ Bij
-
-    tensor_out = torch.zeros(4, *Cij.shape).to(Aij.device)
-    torch.distributed.all_gather_into_tensor(tensor_out, Cij) # [4, n_batch, patches, 36]
-    tensor_out = tensor_out.permute(1, 2, 0, 3)
-    tensor_out = tensor_out.reshape(Aij.shape[0], -1, Bij.shape[-1])
-    
-    return tensor_out
-
-
-def ATB_vert(Aij, Bij):
-    Cij = Aij.mT @ Bij
-    
-    tensor_out = torch.zeros(4, *Cij.shape).to(Aij.device)
-    torch.distributed.all_gather_into_tensor(tensor_out, Cij) # [4, n_batch, patches, 36]
-    tensor_out = tensor_out.permute(1, 2, 0, 3)
-    tensor_out = tensor_out.reshape(Cij.shape[0], -1, Bij.shape[-1])
-    
-    return tensor_out
-    
 def transpose(n, rank):
     C = torch.arange(n*n).reshape(n, n).mT.reshape(-1)
     transpose_index = int(C[rank])
@@ -82,86 +53,92 @@ def gather(Cij, comm, world_size):
     return C_collective
         
 def distribute_A(Aij, k, rank, bufferA, device):
-    A_k = Aij.clone().detach()
-
     if k == 0:
         if rank == 0:
             dist.isend(Aij, dst=1)
+            A_k = Aij
         elif rank == 1:
             req2 = dist.irecv(bufferA, src=0)
             req2.wait()
-            A_k = bufferA.to(device)
+            A_k = bufferA
         elif rank == 2:
             dist.isend(Aij, dst=3)
+            A_k = Aij
         else:
             req2 = dist.irecv(bufferA, src=2)
             req2.wait()
-            A_k = bufferA.to(device)
+            A_k = bufferA
     elif k == 1:
         if rank == 0:
             req2 = dist.irecv(bufferA, src=1)
             req2.wait()
-            A_k = bufferA.to(device)
+            A_k = bufferA
         elif rank == 1:
             dist.isend(Aij, dst=0)
+            A_k = Aij
         elif rank == 2:
             req2 = dist.irecv(bufferA, src=3)
             req2.wait()
-            A_k = bufferA.to(device)
+            A_k = bufferA
         else:
             dist.isend(Aij, dst=2)
+            A_k = Aij
+        
     return A_k
 
 def distribute_B(Bij, k, rank, bufferB, device):
-    Bij = Bij.contiguous()
-    B_k = Bij.clone().detach()
     if k == 0:
         if rank == 0:
             dist.isend(Bij, dst=1)
+            B_k = Bij
         elif rank == 1:
             req2 = dist.irecv(bufferB, src=0)
             req2.wait()
-            B_k = bufferB.to(device)
+            B_k = bufferB
         elif rank == 2:
             dist.isend(Bij, dst=3)
+            B_k = Bij
         else:
             req2 = dist.irecv(bufferB, src=2)
             req2.wait()
-            B_k = bufferB.to(device)
+            B_k = bufferB
     elif k == 1:
         if rank == 0:
             req2 = dist.irecv(bufferB, src=1)
             req2.wait()
-            B_k = bufferB.to(device)
+            B_k = bufferB
         elif rank == 1:
             dist.isend(Bij, dst=0)
+            B_k = Bij
         elif rank == 2:
             req2 = dist.irecv(bufferB, src=3)
             req2.wait()
-            B_k = bufferB.to(device)
+            B_k = bufferB
         else:
             dist.isend(Bij, dst=2)
+            B_k = Bij
     return B_k
 
 def matrix_transpose(X, rank, device):
-    X_T = X.clone().detach()
-    buffer = torch.zeros_like(X.mT).contiguous()
-    if rank == 0 or rank == 3:
-        X_T = X.mT
-    elif rank == 1:
-        req_send = dist.isend(X.mT.contiguous(), dst=2)
+    
+    buffer = torch.zeros(X.shape).to(device)
+    
+    if rank == 1:
+        req_send = dist.isend(X, dst=2)
         req_recv = dist.irecv(buffer, src=2)
         req_recv.wait()
         req_send.wait()
-        X_T = buffer.to(device)
+        X_T = buffer
     elif rank == 2:
         req_recv = dist.irecv(buffer, src=1)
-        req_send = dist.isend(X.mT.contiguous(), dst=1)
+        req_send = dist.isend(X, dst=1)
         req_recv.wait()
         req_send.wait()
-        X_T = buffer.to(device)
+        X_T = buffer
+    else:
+        X_T = X
     
-    return X_T
+    return X_T.mT
 
 
 def ABT(Aij, Bij, rank, world_size, device):
@@ -185,8 +162,8 @@ def ABT(Aij, Bij, rank, world_size, device):
     
     Cij = None 
     
-    bufferA = torch.zeros_like(Aij).contiguous()
-    bufferB = torch.zeros_like(Bij).contiguous()
+    bufferA = torch.zeros(Aij.shape).to(device)
+    bufferB = torch.zeros(Bij.shape).to(device)
 
     for k in range(sqrtp):
         # Broadcast submatrix of A along the row
@@ -202,9 +179,9 @@ def ABT(Aij, Bij, rank, world_size, device):
             targets = rank_dict_transpose[rank]
             for target in targets: 
                 if rank != target:
-                    dist.isend(Bij.contiguous(), dst=target)
+                    #Bij = Bij.contiguous()
+                    dist.isend(Bij, dst=target)
                     
-        
         # receiving
         for root_rank in root_ranks:
             if root_rank != rank:
@@ -212,7 +189,7 @@ def ABT(Aij, Bij, rank, world_size, device):
                     if rank == target:
                         req = dist.irecv(bufferB, src=root_rank)
                         req.wait()
-                        B_k = bufferB.to(A_k.device) 
+                        B_k = bufferB
         
         if Cij is None:
             Cij = A_k @ B_k.mT
@@ -243,18 +220,13 @@ def ATB(Aij, Bij, rank, world_size, device):
     #if rank == 0:
     #    print(rank_dict_transpose)
 
-    A_k = torch.zeros_like(Aij)
-    B_k = torch.zeros_like(Bij)
+    A_k = torch.zeros(Aij.shape)
+    B_k = torch.zeros(Bij.shape)
 
+    Cij = None 
     
-    # TODO matmul dimensions currently fixed. need to generalize?
-    # TODO : VERY INEFFICIENT, hacky way of getting correct shape
-    Cij = torch.zeros((A_k.mT @ B_k).shape).to(B_k.device)
-    #Cij = torch.zeros(Aij.shape[:len_Aij-2], Bij.shape[0]).to(device).to(B_k.device)
-
-
-    buffer  = torch.zeros_like(Aij)
-    bufferB = torch.zeros_like(Bij)
+    buffer  = torch.zeros(Aij.shape).to(device)
+    bufferB = torch.zeros(Bij.shape).to(device)
 
     
     for k in range(sqrtp):
@@ -280,10 +252,13 @@ def ATB(Aij, Bij, rank, world_size, device):
                     if rank == target:
                         req = dist.irecv(buffer, src=root_rank)
                         req.wait()
-                        A_k = buffer.to(device)
+                        A_k = buffer
 
 
         B_k = distribute_B(Bij, k, rank, bufferB, device)
-        Cij = Cij + A_k.mT @ B_k
+        if Cij is None:
+            Cij = A_k.mT @ B_k
+        else:
+            Cij = Cij + A_k.mT @ B_k
 
     return Cij
