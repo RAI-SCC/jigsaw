@@ -36,9 +36,6 @@ def training_loop(config_dict, device, slurm_localid, rank):
     if valid_subset < 0:
         valid_subset = None
 
-    train_dataloader = utils.get_dataloader(config_dict, config_dict['data']['train_data_path'], mode='train', distributed=(not model_parallel), batch_size=config_dict['training']['train_batch'], subset_size=train_subset, rank=rank)
-    valid_dataloader = utils.get_dataloader(config_dict, config_dict['data']['valid_data_path'], mode='validation', distributed=(not model_parallel), batch_size=config_dict['training']['valid_batch'], subset_size=valid_subset, rank=rank)
-
     best_val_loss = 1e5
     
     if not model_parallel:
@@ -73,7 +70,12 @@ def training_loop(config_dict, device, slurm_localid, rank):
         mlp_ddp = mlp
         optimizer = optim.Adam(mlp_ddp.parameters(), lr=lr, weight_decay=3e-6)
 
+    if config_dict['model']['model_parallel']:
+        utils.set_all_seeds(1, rank=None) # Set all GPUs to the same seed so that they read the same data           
     
+    train_dataloader = utils.get_dataloader(config_dict, config_dict['data']['train_data_path'], mode='train', distributed=(not model_parallel), batch_size=config_dict['training']['train_batch'], subset_size=train_subset, rank=rank)
+    valid_dataloader = utils.get_dataloader(config_dict, config_dict['data']['valid_data_path'], mode='validation', distributed=(not model_parallel), batch_size=config_dict['training']['valid_batch'], subset_size=valid_subset, rank=rank)
+
     if slurm_localid == 0:
         print(f"model has {utils.count_parameters(mlp_ddp)/1e6} million parameters")
 
@@ -97,7 +99,6 @@ def training_loop(config_dict, device, slurm_localid, rank):
         if config_dict['training']['preload'] and epoch == 0:
             if config_dict['training']['preload_embedding']:
                 mlp_ddp = utils.load_pretrained_embedding(mlp_ddp, config_dict)
-                
                 
             else: # Loading from pangu model
                 mlp_ddp = utils.load_pretrained_convolution(mlp_ddp, config_dict)
@@ -132,13 +133,11 @@ def training_loop(config_dict, device, slurm_localid, rank):
     start_lr = 1e-6
     if config_dict['model']['model_parallel']:
         groups = get_groups()
-    #    layer_norm_indices = [i for i, k in enumerate(mlp_ddp.state_dict().keys()) if 'layer_norm' in k]
+    
     batch_size = config_dict['training']['train_batch']
     
     for epoch in range(epoch, 200):
-        if config_dict['model']['model_parallel']:
-            utils.set_all_seeds(epoch, rank=None) # Set all GPUs to the same seed so that they read the same data
-        else:
+        if not config_dict['model']['model_parallel']:
             train_dataloader.sampler.set_epoch(epoch)
         
         epoch_average_loss = 0
@@ -165,30 +164,15 @@ def training_loop(config_dict, device, slurm_localid, rank):
             
             if config_dict['model']['model_parallel']:
                 # Defining senders and receivers # [0, 1] send, or [2, 3] send
-                sender = utils.get_sender(i, rank)
-                
-                # load data on sender ranks
-                buffer  = torch.zeros(batch_size, 36, 720, 720).to(torch.float32).to(device)
-                if rank == sender:
-                    input_data = data[0].to(torch.float32).to(torch.float32).to(device)
-                    input_data_list = [input_data[:,:,:,:720], input_data[:,:,:,720:]] # use scatter
-                else:
-                    input_data_list = None
-                    #target_data = data[1][forecast_leadtime].to(torch.float32).to(device)
-                #else: # initialize
-                #    input_data  = torch.zeros(batch_size, 36, 720, 1440).to(torch.float32).to(device)
-                #    target_data = torch.zeros(batch_size, 36, 720, 1440).to(torch.float32).to(device)
-                if rank in [0, 2]:
-                    #torch.distributed.broadcast(input_data, src=sender, group=groups[0])
-                    torch.distributed.scatter(buffer, input_data_list, src=sender, group=groups[0])
-                    input_data = buffer
-                else:
-                    #torch.distributed.broadcast(input_data, src=sender, group=groups[1])
-                    torch.distributed.scatter(buffer, input_data_list, src=sender, group=groups[1])
-                    input_data = buffer
+
+                buffer = torch.zeros(config_dict['training']['train_batch'], 36, 720, 720).to(device)
+                if config_dict['model_parallel']['split'] == 2:
+                    input_data = utils.send_data_twoway(data[0], i, buffer, rank, device, groups)
+                elif config_dict['model_parallel']['split'] == 4:
+                    input_data = data[0].permute(0, 2, 3, 1).to(device)
             else:
-                input_data  = data[0].to(torch.float32).to(torch.float32).to(device)
-                target_data = data[1][0].to(torch.float32).to(torch.float32).to(device)
+                input_data  = data[0].to(torch.float32).to(device)
+                target_data = data[1][0].to(torch.float32).to(device)
                             
             if config_dict['model']['upt']:
                 output,  decoded_t, inverse_encoded, latent_tplus1_ = mlp_ddp(input_data, rollout_=forecast_leadtime+1)
@@ -201,29 +185,12 @@ def training_loop(config_dict, device, slurm_localid, rank):
             
             if model_parallel:
                 # load data on sender ranks
-                if rank == sender:
-                    target_data = data[1][forecast_leadtime].to(torch.float32).to(device)
-                else: # initialize
-                    target_data = torch.zeros(batch_size, 36, 720, 1440).to(torch.float32).to(device)
-                if rank in [0, 2]:
-                    torch.distributed.broadcast(target_data, src=sender, group=groups[0])
-                else:
-                    torch.distributed.broadcast(target_data, src=sender, group=groups[1])
-                
-                fraction_1 = 1440 // 2
-                target_data = target_data.permute(0, 2, 3, 1) # TODO: WHERE TO EFFICIENTLY PUT THE PERMUTES?
-                target_data = target_data.reshape(target_data.shape[0], 720, 1440, target_data.shape[3])
-                #target_data = torch.nn.functional.pad(target_data, (0,3)) 
-                #print(f'I am rank {rank} and my target data has shape {target_data.shape}')
-                if rank == 0:
-                    target_data_local = target_data[:, :, :fraction_1].flatten(start_dim=1, end_dim=2)
-                elif rank == 1:
-                    target_data_local = target_data[:, :, :fraction_1].flatten(start_dim=1, end_dim=2)
-                elif rank == 2:
-                    target_data_local = target_data[:, :, fraction_1:].flatten(start_dim=1, end_dim=2)
-                elif rank == 3:
-                    target_data_local = target_data[:, :, fraction_1:].flatten(start_dim=1, end_dim=2)
-            #
+                if config_dict['model_parallel']['split'] == 2:
+                    target_data = utils.send_data_twoway(data[1][forecast_leadtime], i, buffer, rank, device, groups)
+                elif config_dict['model_parallel']['split'] == 4:
+                    target_data = data[1][forecast_leadtime].permute(0, 2, 3, 1).to(device)
+                target_data = target_data.flatten(start_dim=1, end_dim=2)
+
                 #fraction_1 = 1440 // 2
                 #fraction_2 = 72 // 2
                 #target_data = target_data.reshape(target_data.shape[0], 720, 1440, target_data.shape[3])
@@ -239,7 +206,7 @@ def training_loop(config_dict, device, slurm_localid, rank):
                 #    target_data_local = target_data[:, :, fraction_1:,  fraction_2:].reshape(target_data.shape[0], -1, fraction_2)
 #
                 #print(f'Output shape {output.shape}, target data shape {target_data_local.shape}')
-                model_loss = loss_fn(output, target_data_local)
+                model_loss = loss_fn(output, target_data)
                 loss = model_loss
             else:
                 target_data = target_data.permute(0, 2, 3, 1)

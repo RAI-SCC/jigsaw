@@ -2,8 +2,11 @@ import numpy as np
 import pandas as pd
 import torch
 import xarray as xr
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Subset, DataLoader, Sampler
 import os
+from multiprocessing import Value
+import threading
+
 class ERA5Dataset(Dataset):
     """Define 3D dataset."""
     def __init__(self, config, file_path, mode, patch_size, forecast_length=1, normalize=True):
@@ -152,7 +155,7 @@ class ERA5Dataset(Dataset):
 
 class ERA5DatasetDistributed(Dataset):
     """Define 3D dataset."""
-    def __init__(self, config, file_path, mode, patch_size, rank, forecast_length=1, normalize=True, split=2):
+    def __init__(self, config, file_path, mode, patch_size, rank, forecast_length=1, normalize=True, batch_counter=None):
         """
         initialize.
 
@@ -205,10 +208,11 @@ class ERA5DatasetDistributed(Dataset):
         
         self.patch_size = patch_size
         self.xlat, self.xlon = config['data']['xlat'], config['data']['xlon']
+        self.batch_size = config['training']['train_batch']
 
         self.land_mask, self.soil_type, self.topography = load_constant_mask_2d(self.patch_size, xlat=self.xlat)
         
-        self.split = split
+        self.split = config['model_parallel']['split']
         if self.split == 4:
             if self.rank in [0, 1]:
                 self.start, self.end = 0, 720
@@ -221,7 +225,18 @@ class ERA5DatasetDistributed(Dataset):
         self.land_mask = torch.unsqueeze(self.land_mask[:,self.start:self.end], 0)
         self.soil_type = torch.unsqueeze(self.soil_type[:,self.start:self.end], 0)
         self.topography = torch.unsqueeze(self.topography[:,self.start:self.end], 0)
+
         
+    def update_index_order(self, index_order):
+        self.index_order = index_order
+        
+    def find_batch_index(self,idx):
+        
+        for i, batch in enumerate(self.index_order):
+            if idx in batch:
+                return i
+        return -1  
+
     def _get_files_stats(self, mode='train'):
         """Filter desired time points based on parameters and return file statistics."""
 
@@ -258,6 +273,13 @@ class ERA5DatasetDistributed(Dataset):
         """Return total number of samples."""
         return self.n_samples_total - self.forecast_length * self.dt // self.deltaTDivisor  # -1 to avoid last data point
     
+    def __get_current_skipped_ranks__(self):
+        with self.batch_counter.get_lock():  # Ensure thread-safe access
+            if self.batch_counter.value % 2 == 0:
+                return [0, 1]  # Even batches
+            else:
+                return [2, 3]  # Odd batches
+        
     def __getitem__(self, global_idx):
         """
         Return single input, target.
@@ -265,8 +287,35 @@ class ERA5DatasetDistributed(Dataset):
         global_idx: int
                 global index of item
         """
+        #worker_info = torch.utils.data.get_worker_info()
+        #
+        #if worker_info is not None:
+        #    # Get the worker's unique counter
+        #    worker_id = worker_info.id    
+        #    batch_counter = worker_state["batch_counter"]
+#
+        #    with batch_counter.get_lock():  # Thread-safe counter access
+        #        current_batch = batch_counter.value
+        #        # Alternate source ranks based on the worker's counter
+        #        skipped_ranks = [2,3] if current_batch % (2*self.batch_size) < self.batch_size else [0,1]
+        #        #skipped_ranks = [2,3] if current_batch % 2 < self.batch_size else [0,1]
+        #        print(f'I am rank {self.rank}, id {worker_id}, iter {batch_counter.value}, idx {global_idx} skip ranks are {skipped_ranks}')
+        #        batch_counter.value += 1  # Increment worker's counter
+        #        
+        #else:
+        #    # No multiprocessing (e.g., num_workers=0), use a default
+        #    current_batch = 0
+
+        #skipped_ranks = [2, 3] if self.iteration % 2 == 0 else [0,1]
+        #batch_index = global_idx // self.batch_size
+        #skipped_ranks = [2, 3] if batch_index % 2 == 0 else [0,1]
         
-        target_pressure = []
+        if self.split == 2:
+            # If two-way split, half of the ranks should not read any of the data
+            skipped_ranks = [2, 3]    
+            if self.rank in skipped_ranks: # 0, 1 always senders
+                return [torch.zeros(1), torch.zeros(1)], [torch.zeros(1), torch.zeros(1)]
+        
         target_surface  = []
         step = self.dt
         # if forecast_length = 3, target_file_idx = global_idx + range(1, forecast_length+1)*step // 6
@@ -286,7 +335,6 @@ class ERA5DatasetDistributed(Dataset):
             
         target = []
 
-        
         if self.rank in [0, 2]: # first half of data
             # Input data
             # Stack and convert to numpy array
@@ -324,15 +372,18 @@ class ERA5DatasetDistributed(Dataset):
                 u10  = surface_ds['10m_u_component_of_wind'][:self.xlat,self.start:self.end].values
                 v10  = surface_ds['10m_v_component_of_wind'][:self.xlat,self.start:self.end].values
                 t2m  = surface_ds['2m_temperature'][:self.xlat,self.start:self.end].values
-                target_pressure.append(np.concatenate([geopotential, humidity, temperature], axis=0))
+                temp = np.concatenate([geopotential, humidity, temperature], axis=0)
                 target_surface.append(np.stack([mslp, u10, v10, t2m], axis=0))
 
-                target_pressure[i] = (target_pressure[i] - self.p_mean[:32]) / self.p_std[:32]
+                temp = (temp - self.p_mean[:32]) / self.p_std[:32]
                 target_surface[i]  = (target_surface[i] - self.s_mean) / self.s_std
-                target_pressure[i], target_surface[i] = torch.tensor(target_pressure[i]), torch.tensor(target_surface[i])
+                temp = temp.reshape(-1, self.xlat, self.end-self.start)
                 
-                target_pressure[i] = target_pressure[i].reshape(-1, self.xlat, self.end-self.start)
-                target.append(torch.concat([target_surface[i], target_pressure[i]], axis=0))
+                temp = np.concatenate([target_surface[i], temp], axis=0)
+                if self.split == 2:
+                    target.append([torch.tensor(temp[:,:,:720]), torch.tensor(temp[:,:,720:])])
+                else:
+                    target.append(torch.tensor(temp)) 
         else:
             temperature = input_pressure['temperature'][6:,:self.xlat,self.start:self.end].values
             u_velocity  = input_pressure['u_component_of_wind'][:,:self.xlat,self.start:self.end].values
@@ -353,15 +404,69 @@ class ERA5DatasetDistributed(Dataset):
                 u_velocity  = pressure_ds['u_component_of_wind'][:,:self.xlat,self.start:self.end].values
                 v_velocity = pressure_ds['v_component_of_wind'][:,:self.xlat,self.start:self.end].values
                 
-                target.append(np.concatenate([temperature, u_velocity, v_velocity], axis=0))
-                target[i] = (target[i] - self.p_mean[32:]) / self.p_std[32:]
+                temp = np.concatenate([temperature, u_velocity, v_velocity], axis=0)
                 
-                target[i] = target[i].reshape(-1, self.xlat, self.end-self.start) 
-                target[i] = torch.nn.functional.pad(torch.tensor(target[i]), (0, 0, 0, 0, 0, 3))
-        input = torch.tensor(input)
+                temp = (temp - self.p_mean[32:]) / self.p_std[32:]
+                
+                temp = temp.reshape(-1, self.xlat, self.end-self.start) 
+                
+                if self.split == 2:
+                    target.append([torch.nn.functional.pad(torch.tensor(temp[:,:,:720]), (0, 0, 0, 0, 0, 3)), 
+                                   torch.nn.functional.pad(torch.tensor(temp[:,:,720:]), (0, 0, 0, 0, 0, 3))])
+                else:
+                    target.append(torch.nn.functional.pad(torch.tensor(temp), (0, 0, 0, 0, 0, 3))) 
+                    
+                
+        if self.split == 2:
+            input = [torch.tensor(input[:,:,:720]), torch.tensor(input[:,:,720:])]
+        else:
+            input = torch.tensor(input)
+
                         
         return input, target    
 
+
+
+class CustomDataLoader(DataLoader):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.current_indices = []
+        self.shuffle = kwargs.get('shuffle', False)
+        self.generator = kwargs.get('generator', None)
+
+    def __iter__(self):
+        # Get indices at the start of each epoch
+        sampler = self.batch_sampler.sampler
+        if isinstance(sampler, Sampler):
+            self.current_indices = list(sampler)
+        else:
+            raise ValueError("Cannot extract indices from non-standard samplers.")
+
+        # Shuffle the indices if required
+        
+        # Create the batch sampler with shuffled or ordered indices
+#        self.batch_sampler = torch.utils.data.BatchSampler(
+#            torch.utils.data.SubsetRandomSampler(self.current_indices) if self.shuffle else torch.utils.data.SequentialSampler(self.current_indices),
+#            batch_size=self.batch_size,
+#            drop_last=self.drop_last
+#        )
+        self.iterator = super().__iter__()
+        return self.iterator
+
+    def get_indices(self):
+        """
+        Return the indices of the dataset used in the current epoch.
+        """
+        return self.current_indices
+
+    def reset_iterator(self):
+        """
+        Reset the iterator to start from the beginning.
+        """
+        self.iterator = iter(self)
+        return self.iterator
+
+    
 def load_constant_mask_2d(
     patch_size,
     folder_path="/hkfs/work/workspace/scratch/ke4365-summa/constant_masks/",
@@ -406,15 +511,6 @@ def load_constant_mask_2d(
         land_mask.shape == soil_type.shape == topography.shape
     ), "Shapes of the three constant masks are not equal."
 
-    # Now that the shapes are equal, use land_mask as the actual shapes
-    #x1_pad = (patch_size[0] - (land_mask.shape[0] % patch_size[0])) % patch_size[0] // 2
-    #x2_pad = (patch_size[0] - (land_mask.shape[0] % patch_size[0])) % patch_size[
-    #    0
-    #] - x1_pad
-    #y1_pad = (patch_size[1] - (land_mask.shape[1] % patch_size[1])) % patch_size[1] // 2
-    #y2_pad = (patch_size[1] - (land_mask.shape[1] % patch_size[1])) % patch_size[
-    #    1
-    #] - y1_pad
 
     land_mask = land_mask[:xlat]
     soil_type = soil_type[:xlat]
@@ -422,3 +518,15 @@ def load_constant_mask_2d(
 
     
     return land_mask, soil_type, topography
+
+# Worker initialization function
+def worker_init_fn(worker_id, shared_batch_counter):
+    global worker_state
+    worker_state = {
+        "batch_counter": shared_batch_counter  # Assign the shared counter to all workers
+    }
+
+
+
+# Worker state is stored globally
+worker_state = {"batch_counters": {}}

@@ -529,39 +529,14 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
     x: (n_batch, vars, n_lat, n_lon)
     """
     # Load constant masks from the disc
-    x_shape = x.shape
-#    land_mask  = torch.broadcast_to(self.land_mask,   (x_shape[0], 1, x_shape[2], x_shape[3]))
-#    soil_type  = torch.broadcast_to(self.soil_type,   (x_shape[0], 1, x_shape[2], x_shape[3]))
-#    topography = torch.broadcast_to(self.topography,  (x_shape[0], 1, x_shape[2], x_shape[3]))  
-#
- #   x = torch.cat((x, land_mask, soil_type, topography), dim=1).permute(0, 2, 3, 1)
- #   
- #   x_shape = x.shape
     
-    n_batch, n_x, n_y, n_var = x_shape[0], x_shape[1], x_shape[2], x_shape[3]    
+    n_batch, n_x, n_y, n_var = x.shape
     
-    fraction_1 = x.shape[2]//2 # num_patches_lon
-    
-    fraction_2 = x.shape[3]//2 # num_variables
-    
-    #if self.torch_rank == 0:
-    #  x = x[:, :, :fraction_1]
-    #elif self.torch_rank == 1:
-    #  x = x[:, :, fraction_1:]
-    #elif self.torch_rank == 2:
-    #  x = x[:, :, :fraction_1]
-    #elif self.torch_rank == 3:
-    #  x = x[:, :, fraction_1:]
-
-    x_local = x.permute(0, 2, 3, 1)
-    
-    n_x = x_local.shape[1] # 720
-    n_y = x_local.shape[2] # 
-    fraction_2 = x_local.shape[3] # num_variables
     # x_local: [n_batch, n_lat, n_lon, variables]
-    x_patches_local = (x_local.reshape(n_batch, x_local.shape[1], x_local.shape[2] // self.patch_size, self.patch_size, x_local.shape[3])) # Shape of x_patches: [n_batches, num_patch_x, num_patch_y, size_patch, n_var]
+    x_patches_local = (x.reshape(n_batch, n_x, n_y // self.patch_size, self.patch_size, n_var)) # Shape of x_patches: [n_batches, num_patch_x, num_patch_y, size_patch, n_var]
+    x_patches_local = x_patches_local.flatten(start_dim=1, end_dim=2)
+    x_patches_local = x_patches_local.flatten(start_dim=2, end_dim=3)
     
-    x_patches_local = x_patches_local.reshape(n_batch, n_x * n_y // self.patch_size, self.patch_size * fraction_2)
     x = self.patch_embed(x_patches_local)
     
     # x shape: (n_batch, n_lat/p0, n_lon/01, embed_dim)

@@ -1,13 +1,14 @@
 from mpi4py import MPI
 import numpy as np
-from Dataset import ERA5Dataset, ERA5DatasetDistributed
+from Dataset import ERA5Dataset, ERA5DatasetDistributed, worker_init_fn, CustomDataLoader
 import torch
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Subset
 import torch.distributed as dist
 import os
 from torch.utils.data.distributed import DistributedSampler
 import matplotlib.pyplot as plt
 import sys
+from multiprocessing import Value
 sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/')
 sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/networks')
 from networks.PanguLite2DAttentionPosEmbed import PanguModel as TwoDimPosEmbLite
@@ -34,19 +35,52 @@ def get_sender(iteration, rank):
         sender = rank % 2 # rank 0, 2 receive 0; Rank 1, 3 receive from 1 
     else:
         sender = (rank % 2) + 2 # rank 0, 2 receive from 2, rank 1, 3 receive from 3
-    return sender
+    return sender % 2
+
+def send_data_twoway(data, iteration, buffer, rank, device, groups):
+    sender = get_sender(iteration, rank)
+                
+    if rank == sender:
+        input_data_list = [data[0].to(torch.float32).to(device), data[1].to(torch.float32).to(device)]
+    else:
+        input_data_list = None
+    if rank in [0, 2]:
+        torch.distributed.scatter(buffer, input_data_list, src=sender, group=groups[0])
+    else:
+        torch.distributed.scatter(buffer, input_data_list, src=sender, group=groups[1])
+    input_data = buffer.permute(0, 2, 3, 1)
+    return input_data
+
 
 def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distributed=False, batch_size=1, normalize=True, rank=0):
     if config_dict['model']['model_parallel']:
-        dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize)
+        batch_counter = Value('i', 0)  # Shared integer for batch counter (process-safe)
+        dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, batch_counter=batch_counter)
     else:
         dataset = ERA5Dataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), forecast_length=config_dict['model']['latent_rollout'], normalize=normalize)
     if subset_size != 0:
         subset_indices = torch.randperm(len(dataset))[:subset_size]
-        dataset = Subset(dataset, subset_indices)
-    sampler    = DistributedSampler(dataset, shuffle=True) if distributed else None
+        if config_dict['model']['model_parallel']:
+            #dataset = CustomSubset(dataset, subset_indices)
+            dataset = dataset
+        else:
+            dataset = Subset(dataset, subset_indices)
+    sampler    = DistributedSampler(dataset, shuffle=False) if distributed else None
     if mode == 'validation' and config_dict['model']['model_parallel']:
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, sampler=None, drop_last=True, pin_memory=torch.cuda.is_available(), prefetch_factor=config_dict['data']['prefetch_factor'], num_workers=config_dict['data']['num_workers'])
+    elif config_dict['model']['model_parallel']:
+        shared_batch_counter = Value('i', 0)  # Shared counter for all workers in the rank
+
+        dataloader = DataLoader(dataset, 
+                                batch_size=batch_size, 
+                                shuffle=False,#(sampler is None), 
+                                sampler=sampler, drop_last=True, 
+                                pin_memory=torch.cuda.is_available(), 
+                                prefetch_factor=config_dict['data']['prefetch_factor'], 
+                                num_workers=config_dict['data']['num_workers'],
+                                worker_init_fn = lambda worker_id: worker_init_fn(worker_id, shared_batch_counter)
+                                )
+        #dataloader = PeekableDataLoader(dataloader)
     else:
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=(sampler is None), sampler=sampler, drop_last=True, pin_memory=torch.cuda.is_available(), prefetch_factor=config_dict['data']['prefetch_factor'], num_workers=config_dict['data']['num_workers'])
 
