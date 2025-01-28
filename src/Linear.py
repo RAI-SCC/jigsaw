@@ -5,7 +5,23 @@ import numpy as np
 from torch.nn import GELU, Dropout
 
 class DistributedXW(torch.nn.Module):
-    def __init__(self, in_dim, out_dim, comm, device, torch_rank):
+    """
+    Torch Module to run distributed matrix-matrix multiplication.
+    """
+    def __init__(self, in_dim, out_dim, comm, device, rank):
+        """
+        Initialize distributed matrix-matrix multiplication module.
+
+        in_dim: int
+            input dimension of local weight matrix
+        out_dim: int
+            output dimension of local weight matrix
+        comm: MPI communicator
+        device: string
+            name of device
+        rank: int
+            GPU rank        
+        """
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
@@ -14,41 +30,66 @@ class DistributedXW(torch.nn.Module):
         self.weights_ij = torch.nn.parameter.Parameter(torch.uniform(-stdev, stdev, size=(in_dim, out_dim)))
         self.comm = comm
         self.device = device
-        self.torch_rank = torch_rank
+        self.rank = rank
         self.summa = SUMMA_AB().apply
     
     def forward(self, x):
-        Cij = self.summa(x, self.weights_ij, self.comm, self.device, self.torch_rank)
+        """
+        Forward pass.
+
+        x: Tensor
+            local input tensor of shape (B, x_in, x_out)
+
+        Returns
+        -------
+        C: Tensor
+            of shape (B, x_in, out_dim)
+        """
+        Cij = self.summa(x, self.weights_ij, self.comm, self.device, self.rank)
         
         return Cij
     
 class SUMMA_AB(torch.autograd.Function):
+    """
+    Autograd function of forward pass for distributed matrix-matrix multiplication
+    """
     @staticmethod
-    def forward(ctx, x, W, comm, device, torch_rank):
+    def forward(ctx, x, W, comm, device, rank):
+        """
+        forward call.
+
+        x: Tensor
+            of shape (B, in_dim, out_dim)
+        W: Tensor
+            of shape (out_dim, out_dim2)
+        device: String
+        rank: 
+            
+        """
         ctx.save_for_backward(x, W)
         ctx.comm = comm
         ctx.device = device
-        ctx.torch_rank = torch_rank
+        ctx.rank = rank
         ctx.world_size = 4
         assert(x.shape[-1] == W.shape[0])
-        #print(f"Forward pass, my device {device}, world size {torch.cuda.device_count()}, my_torch_rank {torch_rank}")
-        return summa_gpu.AB(x, W, torch_rank, ctx.world_size, device)
+        
+        return summa_gpu.AB(x, W, rank, ctx.world_size, device)
     
     @staticmethod
     def backward(ctx, grad_output):
         input, weight = ctx.saved_tensors
         
         device=ctx.device        
-        torch_rank = ctx.torch_rank
+        rank = ctx.rank
         world_size = ctx.world_size
 
-        grad_input = summa_gpu.ABT(grad_output, weight, rank=torch_rank, world_size=world_size, device=device)
-        grad_weight = summa_gpu.ATB(input, grad_output, rank=torch_rank, world_size=world_size, device=device)
+        grad_input = summa_gpu.ABT(grad_output, weight, rank=rank, world_size=world_size, device=device)
+        grad_weight = summa_gpu.ATB(input, grad_output, rank=rank, world_size=world_size, device=device)
         
         return grad_input, grad_weight, None, None, None
          
 class DistributedXTW(torch.nn.Module):
-    def __init__(self, in_dim, out_dim, comm, device, torch_rank, n_channels=72, bias=True, init_method='linear'):
+    def __init__(self, in_dim, out_dim, comm, device, rank, n_channels=72, bias=True, init_method='linear'):
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
@@ -64,25 +105,25 @@ class DistributedXTW(torch.nn.Module):
             self.bias = None
         self.comm = comm
         self.device = device
-        self.torch_rank = torch_rank
+        self.rank = rank
         self.world_size = 4
         self.summa = SUMMA_ATB().apply
     
     def forward(self, x):
-        Cij = self.summa(x, self.weights_ij, self.bias, self.comm, self.device, self.torch_rank) 
+        Cij = self.summa(x, self.weights_ij, self.bias, self.comm, self.device, self.rank) 
         
         return Cij
     
 class SUMMA_ATB(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, W, b, comm, device, torch_rank):
+    def forward(ctx, x, W, b, comm, device, rank):
         ctx.save_for_backward(x, W)
         ctx.comm = comm
         ctx.device = device
-        ctx.torch_rank = torch_rank
+        ctx.rank = rank
         ctx.world_size = 4
         #assert(x.shape[-1] == W.shape[0]) # TODO ASSERT
-        xw = summa_gpu.ATB(x, W, torch_rank, ctx.world_size, device)    
+        xw = summa_gpu.ATB(x, W, rank, ctx.world_size, device)    
 
         return xw.add(b)
     
@@ -91,12 +132,11 @@ class SUMMA_ATB(torch.autograd.Function):
         input, weight = ctx.saved_tensors
         
         device = ctx.device        
-        torch_rank = ctx.torch_rank
+        rank = ctx.rank
         world_size = ctx.world_size
         
-        
-        grad_input = summa_gpu.ABT(weight, grad_output, rank=torch_rank, world_size=world_size, device=device)
-        grad_weight = summa_gpu.AB(input, grad_output, rank=torch_rank, world_size=world_size, device=device)
+        grad_input = summa_gpu.ABT(weight, grad_output, rank=rank, world_size=world_size, device=device)
+        grad_weight = summa_gpu.AB(input, grad_output, rank=rank, world_size=world_size, device=device)
         grad_b = grad_output.sum(dim=0) 
         
         return grad_input, grad_weight, grad_b, None, None, None
@@ -124,11 +164,11 @@ class DistributedLN(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         # super backward
-        return grad_output, None, None, None
+        return grad_output, None, None
 
     
 class DistributedXWT(torch.nn.Module):
-    def __init__(self, in_dim, out_dim, comm, device, torch_rank, n_channels=1, bias=True, stdev=None, init_method='linear'):
+    def __init__(self, in_dim, out_dim, comm, device, rank, n_channels=1, bias=True, stdev=None, init_method='linear'):
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
@@ -145,28 +185,28 @@ class DistributedXWT(torch.nn.Module):
         
         self.comm = comm
         self.device = device
-        self.torch_rank = torch_rank
+        self.rank = rank
         self.world_size = 4
         self.summa = SUMMA_ABT().apply
     
     def forward(self, x):
         
-        Cij = self.summa(x, self.weights_ij, self.bias, self.comm, self.device, self.torch_rank)
+        Cij = self.summa(x, self.weights_ij, self.bias, self.comm, self.device, self.rank)
         
         return Cij
     
 
 class SUMMA_ABT(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, W, b, comm, device, torch_rank):
+    def forward(ctx, x, W, b, comm, device, rank):
         ctx.save_for_backward(x, W)
         ctx.comm = comm
         ctx.device = device
-        ctx.torch_rank = torch_rank
+        ctx.rank = rank
         ctx.world_size = 4
         assert(x.shape[-1] == W.shape[-1])
-        #print(f"Forward pass, my device {device}, world size {torch.cuda.device_count()}, my_torch_rank {torch_rank}")
-        xw = summa_gpu.ABT(x, W, torch_rank, ctx.world_size, device)
+        #print(f"Forward pass, my device {device}, world size {torch.cuda.device_count()}, my_rank {rank}")
+        xw = summa_gpu.ABT(x, W, rank, ctx.world_size, device)
         if b is not None:
             return xw.add(b)
         else:
@@ -177,12 +217,12 @@ class SUMMA_ABT(torch.autograd.Function):
         input, weight = ctx.saved_tensors
         
         device=ctx.device        
-        torch_rank = ctx.torch_rank
+        rank = ctx.rank
         world_size = ctx.world_size
+        grad_input = summa_gpu.AB(grad_output, weight, rank=rank, world_size=world_size, device=device)
+        grad_weight = summa_gpu.ATB(grad_output, input, rank=rank, world_size=world_size, device=device)
         grad_b = grad_output.sum(dim=0) 
-        grad_input = summa_gpu.AB(grad_output, weight, rank=torch_rank, world_size=world_size, device=device)
-        grad_weight = summa_gpu.ATB(grad_output, input, rank=torch_rank, world_size=world_size, device=device)
-        
+
         return grad_input, grad_weight, grad_b, None, None, None
 
 
@@ -211,14 +251,14 @@ class DistributedXT(torch.autograd.Function):
         return grad_output, None, None
 
 class DistributedMLP(torch.nn.Module):
-    def __init__(self, in_dim, hidden_dim, out_dim, comm, device, torch_rank, bias=True):
+    def __init__(self, in_dim, hidden_dim, out_dim, comm, device, rank, bias=True):
         super().__init__()
-        self.linear1 = DistributedXWT(in_dim, hidden_dim, comm, device, torch_rank, bias=bias, init_method='linear')
-        self.linear2 = DistributedXWT(hidden_dim, out_dim, comm, device, torch_rank, bias=bias, init_method='linear')
+        self.linear1 = DistributedXWT(in_dim, hidden_dim, comm, device, rank, bias=bias, init_method='linear')
+        self.linear2 = DistributedXWT(hidden_dim, out_dim, comm, device, rank, bias=bias, init_method='linear')
         self.activation = GELU()
         self.drop = Dropout(p=1e-6)
         self.drop2 = Dropout(p=1e-6)
-        self.rank = torch_rank
+        self.rank = rank
 
     def forward(self, x):
         x = self.linear1(x)
@@ -230,10 +270,10 @@ class DistributedMLP(torch.nn.Module):
         return x
 
 class DistributedXTWMLP(torch.nn.Module):
-    def __init__(self, in_dim, hidden_dim, out_dim, comm, device, torch_rank, bias=True):
+    def __init__(self, in_dim, hidden_dim, out_dim, comm, device, rank, bias=True):
         super().__init__()
-        self.linear1 = DistributedXTW(in_dim, hidden_dim, comm, device, torch_rank, bias=bias, init_method='linear')
-        self.linear2 = DistributedXTW(hidden_dim, out_dim, comm, device, torch_rank, bias=bias, init_method='linear')
+        self.linear1 = DistributedXTW(in_dim, hidden_dim, comm, device, rank, bias=bias, init_method='linear')
+        self.linear2 = DistributedXTW(hidden_dim, out_dim, comm, device, rank, bias=bias, init_method='linear')
         self.activation = GELU()
         self.drop = Dropout(p=1e-6)
         self.drop2 = Dropout(p=1e-6)
@@ -251,12 +291,12 @@ class MixerBlock(torch.nn.Module):
     """
     Mixer Block
     """
-    def __init__(self, tokens_mlp_dim, channels_mlp_dim, hidden_dim, comm, device, torch_rank):
+    def __init__(self, tokens_mlp_dim, channels_mlp_dim, hidden_dim, comm, device, rank):
         super(MixerBlock, self).__init__()
-        self.token_mixing = DistributedXTWMLP(tokens_mlp_dim, hidden_dim, tokens_mlp_dim, comm, device, torch_rank) # TODO: for now, Linear
-        self.channel_mixing = DistributedMLP(channels_mlp_dim, hidden_dim, channels_mlp_dim, comm, device, torch_rank)
+        self.token_mixing = DistributedXTWMLP(tokens_mlp_dim, hidden_dim, tokens_mlp_dim, comm, device, rank) # TODO: for now, Linear
+        self.channel_mixing = DistributedMLP(channels_mlp_dim, hidden_dim, channels_mlp_dim, comm, device, rank)
         self.transpose = DistributedTranspose()
-        self.rank = torch_rank
+        self.rank = rank
         self.device = device
         
         self.layer_norm1 = DistributedLayerNorm(channels_mlp_dim, self.rank, self.device)
@@ -270,7 +310,7 @@ class MixerBlock(torch.nn.Module):
         y = self.layer_norm1(x, self.rank, self.device)
         
         y = self.token_mixing(y)
-#        y = self.layer_norm_mix(y)
+
         y = self.transpose(y, self.rank, self.device)
        
         x = x_res + y

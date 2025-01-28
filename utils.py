@@ -1,6 +1,6 @@
 from mpi4py import MPI
 import numpy as np
-from Dataset import ERA5Dataset
+from Dataset import ERA5Dataset, ERA5DatasetDistributed
 import torch
 from torch.utils.data import DataLoader, Dataset, Subset
 import torch.distributed as dist
@@ -29,9 +29,18 @@ def init_mpi():
     j = int(rank % np.sqrt(world_size))
     return comm, i, j
 
-def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distributed=False, batch_size=1, normalize=True):
-      
-    dataset = ERA5Dataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), forecast_length=config_dict['model']['latent_rollout'], normalize=normalize)
+def get_sender(iteration, rank):
+    if iteration % 2 == 0:
+        sender = rank % 2 # rank 0, 2 receive 0; Rank 1, 3 receive from 1 
+    else:
+        sender = (rank % 2) + 2 # rank 0, 2 receive from 2, rank 1, 3 receive from 3
+    return sender
+
+def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distributed=False, batch_size=1, normalize=True, rank=0):
+    if config_dict['model']['model_parallel']:
+        dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize)
+    else:
+        dataset = ERA5Dataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), forecast_length=config_dict['model']['latent_rollout'], normalize=normalize)
     if subset_size != 0:
         subset_indices = torch.randperm(len(dataset))[:subset_size]
         dataset = Subset(dataset, subset_indices)
@@ -171,7 +180,7 @@ def load_model(model, optimizer, file_path, rank, model_parallel=False):
         file_path = f'{file_path}/model_{rank}.pt'
     state = torch.load(f"{file_path}", map_location='cpu')
     model.load_state_dict(state['model_state'])
-    optimizer.load_state_dict(state['optimizer_state'])
+#    optimizer.load_state_dict(state['optimizer_state'])
 
     epoch = state['epoch']
     return model, optimizer, epoch

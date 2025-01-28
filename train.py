@@ -13,6 +13,7 @@ import time
 from torch.nn.parallel import DistributedDataParallel as DDP
 import argparse
 import yaml
+import matplotlib.pyplot as plt
 
 def get_groups():
     group_0_2 = torch.distributed.new_group(ranks=[0, 2])
@@ -35,8 +36,8 @@ def training_loop(config_dict, device, slurm_localid, rank):
     if valid_subset < 0:
         valid_subset = None
 
-    train_dataloader = utils.get_dataloader(config_dict, config_dict['data']['train_data_path'], mode='train', distributed=(not model_parallel), batch_size=config_dict['training']['train_batch'], subset_size=train_subset)
-    valid_dataloader = utils.get_dataloader(config_dict, config_dict['data']['valid_data_path'], mode='validation', distributed=(not model_parallel), batch_size=config_dict['training']['valid_batch'], subset_size=valid_subset)
+    train_dataloader = utils.get_dataloader(config_dict, config_dict['data']['train_data_path'], mode='train', distributed=(not model_parallel), batch_size=config_dict['training']['train_batch'], subset_size=train_subset, rank=rank)
+    valid_dataloader = utils.get_dataloader(config_dict, config_dict['data']['valid_data_path'], mode='validation', distributed=(not model_parallel), batch_size=config_dict['training']['valid_batch'], subset_size=valid_subset, rank=rank)
 
     best_val_loss = 1e5
     
@@ -116,10 +117,11 @@ def training_loop(config_dict, device, slurm_localid, rank):
     except Exception as err:
         loss_fn = torch.nn.MSELoss()
     
-    surface_weights  = torch.tensor([1.5, 0.77, 0.66, 3.0])*.25
+    xlat = config_dict['data']['xlat']
+    surface_weights  = torch.tensor([1.5, 0.77, 0.66, 3.0])
     pressure_weights = torch.tensor([3.00, 0.6, 1.5, 0.77, 0.54]).unsqueeze(1).expand(5, 13).flatten()
     weights = torch.concat([surface_weights, pressure_weights]).view(1, 69).to(device)
-    xlat = config_dict['data']['xlat']
+    area_weights = torch.tensor(eval.calc_weight(xlat)).to(device)
 
     if config_dict['training']['lr_constant']:
         scheduler = StepLRScheduler(optimizer, decay_rate=1., decay_t=100)
@@ -130,11 +132,13 @@ def training_loop(config_dict, device, slurm_localid, rank):
     start_lr = 1e-6
     if config_dict['model']['model_parallel']:
         groups = get_groups()
-        layer_norm_indices = [i for i, k in enumerate(mlp_ddp.state_dict().keys()) if 'layer_norm' in k]
-    
+    #    layer_norm_indices = [i for i, k in enumerate(mlp_ddp.state_dict().keys()) if 'layer_norm' in k]
+    batch_size = config_dict['training']['train_batch']
     
     for epoch in range(epoch, 200):
-        if not config_dict['model']['model_parallel']:
+        if config_dict['model']['model_parallel']:
+            utils.set_all_seeds(epoch, rank=None) # Set all GPUs to the same seed so that they read the same data
+        else:
             train_dataloader.sampler.set_epoch(epoch)
         
         epoch_average_loss = 0
@@ -146,27 +150,46 @@ def training_loop(config_dict, device, slurm_localid, rank):
         mlp_ddp.train()
         
         for i, data in enumerate(train_dataloader):
-        ## Get the batch data on rank 0
+            # learning rate ramp-up in first iteration
             if epoch == 0:
                 for g in optimizer.param_groups:
                     g['lr'] = i * (lr-start_lr) / len(train_dataloader) + start_lr
 
             # randomize forecast output
-
             forecast_leadtime = torch.tensor(np.random.randint(0, config_dict['model']['latent_rollout'])).to(device)
             if config_dict['model']['latent_rollout'] > 1:
                 torch.distributed.broadcast(forecast_leadtime, 0) 
                 forecast_leadtime = forecast_leadtime.item() 
             
-            input_data  = data[0].to(torch.float32).to(torch.float32).to(device)
-            target_data = data[1][forecast_leadtime].to(torch.float32).to(device)
-            
             optimizer.zero_grad()
-
-            if config_dict['model']['model_parallel']:
-                torch.distributed.broadcast(input_data, src=0)
-                torch.distributed.broadcast(target_data, src=0)
             
+            if config_dict['model']['model_parallel']:
+                # Defining senders and receivers # [0, 1] send, or [2, 3] send
+                sender = utils.get_sender(i, rank)
+                
+                # load data on sender ranks
+                buffer  = torch.zeros(batch_size, 36, 720, 720).to(torch.float32).to(device)
+                if rank == sender:
+                    input_data = data[0].to(torch.float32).to(torch.float32).to(device)
+                    input_data_list = [input_data[:,:,:,:720], input_data[:,:,:,720:]] # use scatter
+                else:
+                    input_data_list = None
+                    #target_data = data[1][forecast_leadtime].to(torch.float32).to(device)
+                #else: # initialize
+                #    input_data  = torch.zeros(batch_size, 36, 720, 1440).to(torch.float32).to(device)
+                #    target_data = torch.zeros(batch_size, 36, 720, 1440).to(torch.float32).to(device)
+                if rank in [0, 2]:
+                    #torch.distributed.broadcast(input_data, src=sender, group=groups[0])
+                    torch.distributed.scatter(buffer, input_data_list, src=sender, group=groups[0])
+                    input_data = buffer
+                else:
+                    #torch.distributed.broadcast(input_data, src=sender, group=groups[1])
+                    torch.distributed.scatter(buffer, input_data_list, src=sender, group=groups[1])
+                    input_data = buffer
+            else:
+                input_data  = data[0].to(torch.float32).to(torch.float32).to(device)
+                target_data = data[1][0].to(torch.float32).to(torch.float32).to(device)
+                            
             if config_dict['model']['upt']:
                 output,  decoded_t, inverse_encoded, latent_tplus1_ = mlp_ddp(input_data, rollout_=forecast_leadtime+1)
             else:
@@ -174,35 +197,61 @@ def training_loop(config_dict, device, slurm_localid, rank):
 
             # output: n_batch, 720, 1440, 72//4
             # target data shape: (n_batch, 69, 720, 1440)        
-            target_data = target_data.permute(0, 2, 3, 1)
             # target data: [n_batch, 720, 1440, 69]
             
             if model_parallel:
+                # load data on sender ranks
+                if rank == sender:
+                    target_data = data[1][forecast_leadtime].to(torch.float32).to(device)
+                else: # initialize
+                    target_data = torch.zeros(batch_size, 36, 720, 1440).to(torch.float32).to(device)
+                if rank in [0, 2]:
+                    torch.distributed.broadcast(target_data, src=sender, group=groups[0])
+                else:
+                    torch.distributed.broadcast(target_data, src=sender, group=groups[1])
+                
                 fraction_1 = 1440 // 2
-                fraction_2 = 72 // 2
+                target_data = target_data.permute(0, 2, 3, 1) # TODO: WHERE TO EFFICIENTLY PUT THE PERMUTES?
                 target_data = target_data.reshape(target_data.shape[0], 720, 1440, target_data.shape[3])
-                target_data = torch.nn.functional.pad(target_data, (0,3)) 
-                
+                #target_data = torch.nn.functional.pad(target_data, (0,3)) 
+                #print(f'I am rank {rank} and my target data has shape {target_data.shape}')
                 if rank == 0:
-                    target_data_local = target_data[:, :, :fraction_1,  :fraction_2].reshape(target_data.shape[0], -1, fraction_2)
+                    target_data_local = target_data[:, :, :fraction_1].flatten(start_dim=1, end_dim=2)
                 elif rank == 1:
-                    target_data_local = target_data[:, :, :fraction_1,  fraction_2:].reshape(target_data.shape[0], -1, fraction_2)
+                    target_data_local = target_data[:, :, :fraction_1].flatten(start_dim=1, end_dim=2)
                 elif rank == 2:
-                    target_data_local = target_data[:, :, fraction_1:,  :fraction_2].reshape(target_data.shape[0], -1, fraction_2)
+                    target_data_local = target_data[:, :, fraction_1:].flatten(start_dim=1, end_dim=2)
                 elif rank == 3:
-                    target_data_local = target_data[:, :, fraction_1:,  fraction_2:].reshape(target_data.shape[0], -1, fraction_2)
-                
-
+                    target_data_local = target_data[:, :, fraction_1:].flatten(start_dim=1, end_dim=2)
+            #
+                #fraction_1 = 1440 // 2
+                #fraction_2 = 72 // 2
+                #target_data = target_data.reshape(target_data.shape[0], 720, 1440, target_data.shape[3])
+                #target_data = torch.nn.functional.pad(target_data, (0,3)) 
+                #
+                #if rank == 0:
+                #    target_data_local = target_data[:, :, :fraction_1,  :fraction_2].reshape(target_data.shape[0], -1, fraction_2)
+                #elif rank == 1:
+                #    target_data_local = target_data[:, :, :fraction_1,  fraction_2:].reshape(target_data.shape[0], -1, fraction_2)
+                #elif rank == 2:
+                #    target_data_local = target_data[:, :, fraction_1:,  :fraction_2].reshape(target_data.shape[0], -1, fraction_2)
+                #elif rank == 3:
+                #    target_data_local = target_data[:, :, fraction_1:,  fraction_2:].reshape(target_data.shape[0], -1, fraction_2)
+#
+                #print(f'Output shape {output.shape}, target data shape {target_data_local.shape}')
                 model_loss = loss_fn(output, target_data_local)
-                
                 loss = model_loss
-                
-                
             else:
+                target_data = target_data.permute(0, 2, 3, 1)
                 if config_dict['model']['upt']:
                     loss = loss_fn(output*weights, target_data*weights) + loss_fn(decoded_t, input_data) + loss_fn(inverse_encoded, latent_tplus1_)
                 else:
-                    model_loss = loss_fn(output*weights, target_data*weights)          
+                    
+                    if config_dict['training']['area_weighted']:
+#                        model_loss = loss_fn(torch.einsum('bxyz, x->bxyz', output, area_weights)*weights, torch.einsum('bxyz, x->bxyz', target_data, area_weights)*weights)          
+                        model_loss = loss_fn(torch.einsum('bxyz, x->bxyz', output, area_weights)*weights, torch.einsum('bxyz, x->bxyz', target_data, area_weights)*weights)         
+                    else:
+                        model_loss = loss_fn(output, target_data)         
                     
                     loss = model_loss
                                 
@@ -228,48 +277,14 @@ def training_loop(config_dict, device, slurm_localid, rank):
                         
                         if 'layer_norm' in name:
                             if rank in [0, 2]:
-                                torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.SUM, group=groups[0])
+                                torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.AVG, group=groups[0])
                             else:
-                                torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.SUM, group=groups[1])
-                            
-                            param.grad.div_(2.)  # Average the gradient
-
-                for param_group in optimizer.param_groups:
-                    for index, param in enumerate(param_group['params']):
-                        if param is None:
-                            continue
-                        
-                        if index in layer_norm_indices:
-                            # Skip if this param has no state
-                            state = optimizer.state.get(param, None)
-
-                            if not state:
-                                continue
-
-                            # 'exp_avg' = first moment of gradient
-                            if 'exp_avg' in state:
-                                exp_avg = state['exp_avg']
-                                
-                                if rank in [0, 2]:
-                                    torch.distributed.all_reduce(exp_avg, op=torch.distributed.torch.distributed.ReduceOp.SUM, group=groups[0])
-                                else:
-                                    torch.distributed.all_reduce(exp_avg, op=torch.distributed.torch.distributed.ReduceOp.SUM, group=groups[1])
-                                exp_avg /= 2.
-
-                            if 'exp_avg_sq' in state:
-                                exp_avg_sq = state['exp_avg_sq']
-                                if rank in [0, 2]:
-                                    torch.distributed.all_reduce(exp_avg_sq, op=torch.distributed.ReduceOp.SUM, group=groups[0])
-                                else:
-                                    torch.distributed.all_reduce(exp_avg_sq, op=torch.distributed.ReduceOp.SUM, group=groups[1])
-                                # Optionally average
-                                exp_avg_sq /= 2.
-                
+                                torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.AVG, group=groups[1])
+                                            
             torch.distributed.all_reduce(loss)
             optimizer.step()
             
-            if not config_dict['model']['model_parallel']:
-                loss = loss / world_size 
+            loss = loss / world_size 
             
             if rank == 0:
                 if config_dict['training']['identity']:

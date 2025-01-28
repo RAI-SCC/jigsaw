@@ -122,12 +122,11 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
         for step, rollout in enumerate(rollout_time):
             input_data  = data[0].to(torch.float32).to(device)
             target_data = data[1][step].to(torch.float32).to(device)
-            target_data = target_data.permute(0, 2, 3, 1)
+            target_data = target_data.permute(0, 2, 3, 1).contiguous()
             
             if config_dict['model']['model_parallel']:
                 torch.distributed.broadcast(input_data, src=0)
-                torch.distributed.broadcast(target_data.contiguous(), src=0)
-
+                torch.distributed.broadcast(target_data, src=0)
                         
             if config_dict['model']['upt']:
                 output, _, _, _ = model(input_data, rollout_=step+1)
@@ -137,31 +136,19 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
             
             #print(f' I am device {device}, target value {target_data[0,351,1000,3]}')
             if model_parallel:
-                output = output.reshape(output.shape[0], 720, 720, output.shape[-1])
+                output = output.reshape(output.shape[0], 720, 720, 36)
                 tensor_gather = torch.zeros(4, *output.shape).to(device)
-                #list_gather = [torch.zeros(*target_data_local.shape).to(device) for _ in range(4)]
-                #torch.distributed.all_gather(list_gather, target_data_local)
-                #torch.distributed.barrier()
-                
+
                 torch.distributed.all_gather_into_tensor(tensor_gather, output)
                 
-                # tensor_out shape: [4, 1, 720*720, 36]
-
-                # output shape: [n_batch, n_x, n_y, n_variables]
-                #print(tensor_out.shape)
-                #tensor_out = tensor_out.reshape(4, 1, 720*720, 36)
-                # Shape of tensor_out: [2, 2, n_batch, n_x, n_y, n_variables]
-                #print(tensor_out[0].shape)
-                #print(tensor_out[1].shape)
-                
-                                
                 top_row = torch.cat([tensor_gather[0], tensor_gather[1]], dim=3)
                 bottom_row = torch.cat([tensor_gather[2], tensor_gather[3]], dim=3)
                 # left/right side shape: [1, 720, 720, 72]
                 tensor_out = torch.cat([top_row, bottom_row], dim=2)[:,:,:,:69]#.reshape(1, 720, 1440, 72)#.reshape(output.shape[0], config_dict['data']['xlat'], config_dict['data']['xlon'], 72)
                 loss_fn = torch.nn.MSELoss()
-                loss[0] = loss[0] + (loss_fn(tensor_out*weights_loss, target_data*weights_loss)).item()
-                #tensor_out = tensor_out.reshape(2, 2, *output.shape).permute(2, 0, 3, 1, 4).reshape(output.shape[0], config_dict['data']['xlat'], config_dict['data']['xlon'], 72)
+                
+                loss[0] = loss[0] + (loss_fn(tensor_out, target_data)).item()
+    
             else:
                 tensor_out = output
                 loss_fn = torch.nn.MSELoss()
@@ -201,7 +188,7 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
     if not config_dict['model']['model_parallel']:
         torch.distributed.all_reduce(total_samples)
         torch.distributed.all_reduce(loss)
-    loss /= world_size # average the loss for world size
+        loss /= world_size # average the loss for world size
     loss /= len(dataloader)
     print(f"total samples {total_samples}")
         
