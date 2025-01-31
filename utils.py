@@ -32,33 +32,32 @@ def init_mpi():
     return comm, i, j
 
 def get_sender(iteration, rank):
-    if iteration % 2 == 0:
-        sender = rank % 2 # rank 0, 2 receive 0; Rank 1, 3 receive from 1 
-    else:
-        sender = (rank % 2) + 2 # rank 0, 2 receive from 2, rank 1, 3 receive from 3
+    # rank 0, 2 receive 0; Rank 1, 3 receive from 1 
+    # rank 0, 2 receive from 2, rank 1, 3 receive from 3
+    sender = rank % 2 if (iteration % 2 == 0) else (rank % 2 + 2)
+    
     return sender 
 
 def send_data_twoway(data, iteration, buffer, rank, device, groups, alt_sender=True):
-    if alt_sender:
-        sender = get_sender(iteration, rank)
-    else:
-        sender = rank % 2
-    if rank == sender:
-        input_data_list = [data[0].to(torch.float32).to(device), data[1].to(torch.float32).to(device)]
-    else:
-        input_data_list = None
-    if rank in [0, 2]:
-        torch.distributed.scatter(buffer, input_data_list, src=sender, group=groups[0])
-    else:
-        torch.distributed.scatter(buffer, input_data_list, src=sender, group=groups[1])
+    sender = get_sender(iteration, rank) if alt_sender else rank % 2   
+    data_list = [d.to(torch.float32).to(device) for d in data] if rank == sender else None
+    torch.distributed.scatter(buffer, data_list, src=sender, group=groups[rank % 2])
+    data = buffer.permute(0, 2, 3, 1)
+
+    return data
+
+def send_data_fourway(data, buffer, rank, device):
+    sender = 0
+    input_data_list = [d.to(torch.float32).to(device) for d in data] if rank == sender else None
+    
+    torch.distributed.scatter(buffer, input_data_list, src=sender)
+    
     input_data = buffer.permute(0, 2, 3, 1)
     return input_data
-
 
 class AlternatingRandomSampler(Sampler):
     def __init__(self, dataset_size, rank, batch_size=3):
         self.dataset_size = dataset_size
-#        self.num_replicas = num_replicas
         self.rank = rank
         self.batch_size = batch_size
         self.indices = list(range(dataset_size))
@@ -82,11 +81,14 @@ class AlternatingRandomSampler(Sampler):
         # Approximately half the dataset goes to  each rank pair
         return (self.dataset_size + 1) // 2
     
-def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distributed=False, batch_size=1, normalize=True, rank=0):
+def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distributed=False, batch_size=1, normalize=True, rank=None):
     if config_dict['model']['model_parallel']:
+
         if config_dict['model_parallel']['alt_sender']:
             batch_counter = Value('i', 0)  # Shared integer for batch counter (process-safe)
             dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, batch_counter=batch_counter)
+        elif config_dict['model_parallel']['split'] == 1:
+            dataset = ERA5Dataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, rank=rank)    
         else:
             dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, batch_counter=None)
     else:
@@ -98,12 +100,19 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
     #if config_dict['model']['model_parallel']:
     #    sampler = AlternatingRandomSampler(dataset_size=len(dataset), rank=rank, batch_size=batch_size)
     if mode == 'validation' and config_dict['model']['model_parallel']:
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, sampler=None, drop_last=True, pin_memory=torch.cuda.is_available(), prefetch_factor=config_dict['data']['prefetch_factor'], num_workers=config_dict['data']['num_workers'])
+        dataloader = DataLoader(dataset, 
+                                batch_size=batch_size, 
+                                shuffle=False, 
+                                sampler=sampler, 
+                                drop_last=True, 
+                                pin_memory=torch.cuda.is_available(), 
+                                prefetch_factor=config_dict['data']['prefetch_factor'], 
+                                num_workers=config_dict['data']['num_workers']
+                                )
     if config_dict['model']['model_parallel']:
         if config_dict['model_parallel']['alt_sender']:
             shared_batch_counter = Value('i', 0)  # Shared counter for all workers in the rank
             dataloader = DataLoader(dataset, 
-                                    #batch_size=batch_size, 
                                     shuffle=(sampler is None), 
                                     sampler=sampler, 
                                     drop_last=True, 

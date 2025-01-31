@@ -9,7 +9,7 @@ import threading
 
 class ERA5Dataset(Dataset):
     """Define 3D dataset."""
-    def __init__(self, config, file_path, mode, patch_size, forecast_length=1, normalize=True):
+    def __init__(self, config, file_path, mode, patch_size, forecast_length=1, normalize=True, rank=None):
         """
         initialize.
 
@@ -60,6 +60,14 @@ class ERA5Dataset(Dataset):
         
         self.patch_size = patch_size
         self.xlat = config['data']['xlat']
+        self.rank = rank
+        if self.rank is not None:
+            self.land_mask, self.soil_type, self.topography = load_constant_mask_2d(self.patch_size, xlat=self.xlat)
+            self.land_mask = torch.unsqueeze(self.land_mask, 0)
+            self.soil_type = torch.unsqueeze(self.soil_type, 0)
+            self.topography = torch.unsqueeze(self.topography, 0)
+        
+        
         
     def _get_files_stats(self, mode='train'):
         """Filter desired time points based on parameters and return file statistics."""
@@ -104,6 +112,10 @@ class ERA5Dataset(Dataset):
         global_idx: int
                 global index of item
         """
+        skipped_ranks = [1, 2, 3]    
+        if self.rank is not None:
+            if self.rank in skipped_ranks: # 0, 1 always senders
+                return [torch.zeros(1), torch.zeros(1)], [torch.zeros(1), torch.zeros(1)]
         
         target_pressure = []
         target_surface  = []
@@ -132,7 +144,11 @@ class ERA5Dataset(Dataset):
         input_surface  = input_surface[:, :self.xlat]
         input_pressure = input_pressure[:, :self.xlat]
         
-        input = np.concatenate([input_surface, input_pressure], axis=0)
+        if self.rank is None: # in serial case
+            input = np.concatenate([input_surface, input_pressure], axis=0)
+        else: # in parallel case
+            input = np.concatenate([input_surface, input_pressure, self.land_mask, self.soil_type, self.topography], axis=0)
+        
         target = []
         for i in range(self.forecast_length):
             pressure_ds = target_pressure_ds.isel(time=i)
@@ -149,10 +165,16 @@ class ERA5Dataset(Dataset):
             target.append(torch.concat([target_surface[i], target_pressure[i]], axis=0))
 
         input = torch.tensor(input)
-                        
-        return input, target    
+        if self.rank is None:
+            return input, target    
+        else:
+            temp = torch.nn.functional.pad(target[0], (0, 0, 0, 0, 0, 3))
+            
+            input = [input[:36, :, :720], input[36:, :, :720], input[:36, :, 720:], input[36:, :, 720:]]
 
-
+            target_list = [temp[:36, :, :720], temp[36:, :, :720], temp[:36, :, 720:], temp[36:, :, 720:]]
+            
+            return input, target_list
 class ERA5DatasetDistributed(Dataset):
     """Define 3D dataset."""
     def __init__(self, config, file_path, mode, patch_size, rank, forecast_length=1, normalize=True, batch_counter=None):
@@ -201,17 +223,14 @@ class ERA5DatasetDistributed(Dataset):
         else: # baseline assuption is subsampled WB2 data
             self.level_ordering = range(13-1, -1, -1)
 
-        self.p_mean = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/pressure_zarr.npy', allow_pickle=True)[0].reshape(1, 65, 1, 1)
-        self.p_std  = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/pressure_zarr.npy', allow_pickle=True)[1].reshape(1, 65, 1, 1)
-        self.s_mean = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/surface_zarr.npy', allow_pickle=True)[0].reshape(1, 4, 1, 1)
-        self.s_std  = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/surface_zarr.npy', allow_pickle=True)[1].reshape(1, 4, 1, 1)
+        self.p_mean = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/pressure_zarr.npy', allow_pickle=True)[0].reshape(65, 1, 1)
+        self.p_std  = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/pressure_zarr.npy', allow_pickle=True)[1].reshape(65, 1, 1)
+        self.s_mean = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/surface_zarr.npy', allow_pickle=True)[0].reshape(4, 1, 1)
+        self.s_std  = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/surface_zarr.npy', allow_pickle=True)[1].reshape(4, 1, 1)
         
         self.patch_size = patch_size
         self.xlat, self.xlon = config['data']['xlat'], config['data']['xlon']
         self.batch_size = config['training']['train_batch']
-
-        self.land_mask, self.soil_type, self.topography = load_constant_mask_2d(self.patch_size, xlat=self.xlat)
-        
         self.split = config['model_parallel']['split']
         if self.split == 4:
             if self.rank in [0, 1]:
@@ -222,9 +241,13 @@ class ERA5DatasetDistributed(Dataset):
         else: 
             self.start, self.end = 0, 1440
         self.alt_sender = config['model_parallel']['alt_sender']
-        self.land_mask = torch.unsqueeze(self.land_mask[:,self.start:self.end], 0).unsqueeze(0)
-        self.soil_type = torch.unsqueeze(self.soil_type[:,self.start:self.end], 0).unsqueeze(0)
-        self.topography = torch.unsqueeze(self.topography[:,self.start:self.end], 0).unsqueeze(0)
+        
+        self.land_mask, self.soil_type, self.topography = load_constant_mask_2d(self.patch_size, xlat=self.xlat)
+        self.land_mask = torch.unsqueeze(self.land_mask[:,self.start:self.end], 0)
+        self.soil_type = torch.unsqueeze(self.soil_type[:,self.start:self.end], 0)
+        self.topography = torch.unsqueeze(self.topography[:,self.start:self.end], 0)
+
+        
 
         
     def update_index_order(self, index_order):
@@ -281,42 +304,42 @@ class ERA5DatasetDistributed(Dataset):
         global_idx: int
                 global index of item
         """
-        #if self.split == 2:
-        #    if self.alt_sender:
-        #        worker_info = torch.utils.data.get_worker_info()
-        #        
-        #        if worker_info is not None:
-        #            # Get the worker's unique counter
-        #            batch_counter = worker_state["batch_counter"]
-        #            with batch_counter.get_lock():  # Thread-safe counter access
-        #                current_batch = batch_counter.value
-        #                # Alternate source ranks based on the worker's counter
-#       #                 print(f'{self.rank} current_batch {current_batch}, ')
-        #                skipped_ranks = [2,3] if current_batch % (2*self.batch_size) < self.batch_size else [0,1]
-        #                #skipped_ranks = [2,3] if current_batch % 2 < self.batch_size else [0,1]  
-        #                batch_counter.value += 1  # Increment worker's counter
-        #                
-        #        else:
-        #            # No multiprocessing (e.g., num_workers=0), use a default
-        #            current_batch = 0
-        #    else: 
-        #        # If two-way split, half of the ranks should not read any of the data
-        #        
-        #        skipped_ranks = [2, 3]    
-        #    if self.rank in skipped_ranks: # 0, 1 always senders
-        #        return [torch.zeros(1), torch.zeros(1)], [torch.zeros(1), torch.zeros(1)]
         if self.split == 2:
-            if not self.alt_sender:
-                skipped_ranks = [2,3]
+            if self.alt_sender:
+                worker_info = torch.utils.data.get_worker_info()
+                
+                if worker_info is not None:
+                    # Get the worker's unique counter
+                    batch_counter = worker_state["batch_counter"]
+                    with batch_counter.get_lock():  # Thread-safe counter access
+                        current_batch = batch_counter.value
+                        # Alternate source ranks based on the worker's counter
+#                        print(f'{self.rank} current_batch {current_batch}, ')
+                        skipped_ranks = [2,3] if current_batch % (2*self.batch_size) < self.batch_size else [0,1]
+                        #skipped_ranks = [2,3] if current_batch % 2 < self.batch_size else [0,1]  
+                        batch_counter.value += 1  # Increment worker's counter
+                        
+                else:
+                    # No multiprocessing (e.g., num_workers=0), use a default
+                    current_batch = 0
             else: 
-                skipped_ranks = []
-            if self.rank in skipped_ranks:
+                # If two-way split, half of the ranks should not read any of the data
+                skipped_ranks = [2, 3]    
+            if self.rank in skipped_ranks: # 0, 1 always senders
                 return [torch.zeros(1), torch.zeros(1)], [torch.zeros(1), torch.zeros(1)]
-        worker_info = torch.utils.data.get_worker_info()
         
-        if global_idx.numel() == 0:
-            return [torch.zeros(1), torch.zeros(1)], [torch.zeros(1), torch.zeros(1)]
+        #if self.split == 2:
+        #    if not self.alt_sender:
+        #        skipped_ranks = [2,3]
+        #    else: 
+        #        skipped_ranks = []
+        #    if self.rank in skipped_ranks:
+        #        return [torch.zeros(1), torch.zeros(1)], [torch.zeros(1), torch.zeros(1)]
+        #worker_info = torch.utils.data.get_worker_info()
         
+        #if global_idx.numel() == 0:
+        #    return [torch.zeros(1), torch.zeros(1)], [torch.zeros(1), torch.zeros(1)]
+        #
         target_surface  = []
         step = self.dt
         # if forecast_length = 3, target_file_idx = global_idx + range(1, forecast_length+1)*step // 6
@@ -341,88 +364,88 @@ class ERA5DatasetDistributed(Dataset):
             # Stack and convert to numpy array
 
 
-            geopotential = input_pressure['geopotential'][:,:,:self.xlat,self.start:self.end].values
-            humidity = input_pressure['specific_humidity'][:,:,:self.xlat,self.start:self.end].values
-            temperature = input_pressure['temperature'][:,:6,:self.xlat,self.start:self.end].values
+            geopotential = input_pressure['geopotential'][:,:self.xlat,self.start:self.end].values
+            humidity = input_pressure['specific_humidity'][:,:self.xlat,self.start:self.end].values
+            temperature = input_pressure['temperature'][:6,:self.xlat,self.start:self.end].values
             
-            mslp = input_surface['mean_sea_level_pressure'][:,:self.xlat,self.start:self.end].values
-            u10  = input_surface['10m_u_component_of_wind'][:,:self.xlat,self.start:self.end].values
-            v10  = input_surface['10m_v_component_of_wind'][:,:self.xlat,self.start:self.end].values
-            t2m  = input_surface['2m_temperature'][:,:self.xlat,self.start:self.end].values
+            mslp = input_surface['mean_sea_level_pressure'][:self.xlat,self.start:self.end].values
+            u10  = input_surface['10m_u_component_of_wind'][:self.xlat,self.start:self.end].values
+            v10  = input_surface['10m_v_component_of_wind'][:self.xlat,self.start:self.end].values
+            t2m  = input_surface['2m_temperature'][:self.xlat,self.start:self.end].values
             
         
-            input_pressure = np.concatenate([geopotential, humidity, temperature], axis=1)
-            input_surface  = np.stack([mslp, u10, v10, t2m], axis=1)
-            input_pressure = (input_pressure - self.p_mean[0,:32]) / self.p_std[0,:32]
+            input_pressure = np.concatenate([geopotential, humidity, temperature], axis=0)
+            input_surface  = np.stack([mslp, u10, v10, t2m], axis=0)
+            input_pressure = (input_pressure - self.p_mean[:32]) / self.p_std[:32]
             input_surface  = (input_surface  - self.s_mean) / self.s_std
-            input_pressure = np.reshape(input_pressure, (input_surface.shape[0], -1, self.xlat, self.end-self.start))
+            input_pressure = np.reshape(input_pressure, (-1, self.xlat, self.end-self.start))
             
-            input = np.concatenate([input_surface, input_pressure], axis=1)
+            input = np.concatenate([input_surface, input_pressure], axis=0)
             
             # Output data
             for i in range(self.forecast_length):
 
-                pressure_ds = target_pressure_ds
-                surface_ds  = target_surface_ds
+                pressure_ds = target_pressure_ds.isel(time=i)
+                surface_ds  = target_surface_ds.isel(time=i)
                 
-                geopotential = pressure_ds['geopotential'][:,:,:self.xlat,self.start:self.end].values
-                humidity = pressure_ds['specific_humidity'][:,:,:self.xlat,self.start:self.end].values
-                temperature = pressure_ds['temperature'][:,:6,:self.xlat,self.start:self.end].values
+                geopotential = pressure_ds['geopotential'][:,:self.xlat,self.start:self.end].values
+                humidity = pressure_ds['specific_humidity'][:,:self.xlat,self.start:self.end].values
+                temperature = pressure_ds['temperature'][:6,:self.xlat,self.start:self.end].values
                 
-                mslp = surface_ds['mean_sea_level_pressure'][:,:self.xlat,self.start:self.end].values
-                u10  = surface_ds['10m_u_component_of_wind'][:,:self.xlat,self.start:self.end].values
-                v10  = surface_ds['10m_v_component_of_wind'][:,:self.xlat,self.start:self.end].values
-                t2m  = surface_ds['2m_temperature'][:,:self.xlat,self.start:self.end].values
-                temp = np.concatenate([geopotential, humidity, temperature], axis=1)
-                target_surface.append(np.stack([mslp, u10, v10, t2m], axis=1))
+                mslp = surface_ds['mean_sea_level_pressure'][:self.xlat,self.start:self.end].values
+                u10  = surface_ds['10m_u_component_of_wind'][:self.xlat,self.start:self.end].values
+                v10  = surface_ds['10m_v_component_of_wind'][:self.xlat,self.start:self.end].values
+                t2m  = surface_ds['2m_temperature'][:self.xlat,self.start:self.end].values
+                temp = np.concatenate([geopotential, humidity, temperature], axis=0)
+                target_surface.append(np.stack([mslp, u10, v10, t2m], axis=0))
 
-                temp = (temp - self.p_mean[:,:32]) / self.p_std[:,:32]
+                temp = (temp - self.p_mean[:32]) / self.p_std[:32]
                 target_surface[i]  = (target_surface[i] - self.s_mean) / self.s_std
-                #temp = temp.reshape(-1, self.xlat, self.end-self.start)
+                temp = temp.reshape(-1, self.xlat, self.end-self.start)
                 
-                temp = np.concatenate([target_surface[i], temp], axis=1)
+                temp = np.concatenate([target_surface[i], temp], axis=0)
                 if self.split == 2:
-                    target.append([torch.tensor(temp[:,:,:,:720]), torch.tensor(temp[:,:,:,720:])])
+                    target.append([torch.tensor(temp[:,:,:720]), torch.tensor(temp[:,:,720:])])
                 else:
                     target.append(torch.tensor(temp)) 
         else:
-            temperature = input_pressure['temperature'][:,6:,:self.xlat,self.start:self.end].values
-            u_velocity  = input_pressure['u_component_of_wind'][:,:,:self.xlat,self.start:self.end].values
-            v_velocity = input_pressure['v_component_of_wind'][:,:,:self.xlat,self.start:self.end].values
+            temperature = input_pressure['temperature'][6:,:self.xlat,self.start:self.end].values
+            u_velocity  = input_pressure['u_component_of_wind'][:,:self.xlat,self.start:self.end].values
+            v_velocity = input_pressure['v_component_of_wind'][:,:self.xlat,self.start:self.end].values
         
             
-            input = np.concatenate([temperature, u_velocity, v_velocity], axis=1)
+            input = np.concatenate([temperature, u_velocity, v_velocity], axis=0)
             
-            input = (input - self.p_mean[:,32:]) / self.p_std[:,32:]
-            input = np.reshape(input, (temperature.shape[0], -1, self.xlat, self.end-self.start))
+            input = (input - self.p_mean[32:]) / self.p_std[32:]
+            input = np.reshape(input, ( -1, self.xlat, self.end-self.start))
             
-            self.land_mask = self.land_mask.broadcast_to(input.shape[0], *self.land_mask.shape[1:])
-            self.soil_type = self.land_mask.broadcast_to(input.shape[0], *self.land_mask.shape[1:])
-            self.topography = self.land_mask.broadcast_to(input.shape[0], *self.land_mask.shape[1:])
-            input = np.concatenate([input, self.land_mask, self.soil_type, self.topography], axis=1)
+            #self.land_mask = self.land_mask.broadcast_to(input.shape[0], *self.land_mask.shape[1:])
+            #self.soil_type = self.land_mask.broadcast_to(input.shape[0], *self.land_mask.shape[1:])
+            #self.topography = self.land_mask.broadcast_to(input.shape[0], *self.land_mask.shape[1:])
+            input = np.concatenate([input, self.land_mask, self.soil_type, self.topography], axis=0)
 
             for i in range(self.forecast_length):
 
-                pressure_ds = target_pressure_ds
-                temperature = pressure_ds['temperature'][:,6:,:self.xlat,self.start:self.end].values
-                u_velocity  = pressure_ds['u_component_of_wind'][:,:,:self.xlat,self.start:self.end].values
-                v_velocity = pressure_ds['v_component_of_wind'][:,:,:self.xlat,self.start:self.end].values
+                pressure_ds = target_pressure_ds.isel(time=i)
+                temperature = pressure_ds['temperature'][6:,:self.xlat,self.start:self.end].values
+                u_velocity  = pressure_ds['u_component_of_wind'][:,:self.xlat,self.start:self.end].values
+                v_velocity = pressure_ds['v_component_of_wind'][:,:self.xlat,self.start:self.end].values
                 
-                temp = np.concatenate([temperature, u_velocity, v_velocity], axis=1)
+                temp = np.concatenate([temperature, u_velocity, v_velocity], axis=0)
                 
-                temp = (temp - self.p_mean[:,32:]) / self.p_std[:,32:]
+                temp = (temp - self.p_mean[32:]) / self.p_std[32:]
                 
-                temp = temp.reshape(temperature.shape[0], -1, self.xlat, self.end-self.start) 
+                temp = temp.reshape(-1, self.xlat, self.end-self.start) 
                 
                 if self.split == 2:
-                    target.append([torch.nn.functional.pad(torch.tensor(temp[:,:,:,:720]), (0, 0, 0, 0, 0, 3)), 
-                                   torch.nn.functional.pad(torch.tensor(temp[:,:,:,720:]), (0, 0, 0, 0, 0, 3))])
+                    target.append([torch.nn.functional.pad(torch.tensor(temp[:,:,:720]), (0, 0, 0, 0, 0, 3)), 
+                                   torch.nn.functional.pad(torch.tensor(temp[:,:,720:]), (0, 0, 0, 0, 0, 3))])
                 else:
                     target.append(torch.nn.functional.pad(torch.tensor(temp), (0, 0, 0, 0, 0, 3))) 
                     
                 
         if self.split == 2:
-            input = [torch.tensor(input[:,:,:,:720]), torch.tensor(input[:,:,:,720:])]
+            input = [torch.tensor(input[:,:,:720]), torch.tensor(input[:,:,720:])]
         else:
             input = torch.tensor(input)
 

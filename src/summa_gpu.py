@@ -11,10 +11,11 @@ def AB(Aij, Bij, rank, world_size, device):
     A_k = torch.zeros_like(Aij).detach().to(device)
     Cij = torch.zeros(*Aij.shape[:-1], Bij.shape[-1]).to(device)
 
-    bufferA = torch.zeros_like(Aij).contiguous()
-    bufferB = torch.zeros_like(Bij).contiguous()
-
     for k in range(sqrtp):
+
+        bufferA = torch.zeros_like(Aij).contiguous()
+        bufferB = torch.zeros_like(Bij).contiguous()
+
         # Broadcast submatrix of A along the row
         # Manual send of A
         A_k = distribute_A(Aij, k, rank, bufferA)
@@ -155,12 +156,11 @@ def ABT(Aij, Bij, rank, world_size, device):
     
     Cij = None 
     
-    bufferA = torch.zeros(Aij.shape).to(device)
-
     for k in range(sqrtp):
         # Broadcast submatrix of A along the row
         # Manual send of A
         root_ranks = np.arange(sqrtp)*sqrtp + k
+        bufferA = torch.zeros(Aij.shape).to(device)
         A_k = distribute_A(Aij, k, rank, bufferA)
         
         B_k = Bij.clone().detach()
@@ -217,7 +217,7 @@ def ATB(Aij, Bij, rank, world_size, device):
     Cij = None 
     
     
-    bufferB = torch.zeros(Bij.shape).to(device)
+    
 
     
     for k in range(sqrtp):
@@ -226,7 +226,7 @@ def ATB(Aij, Bij, rank, world_size, device):
         # "root" ranks: [0, 1]
         # for k = 1, root_ranks [2, 3]
         root_ranks = np.arange(sqrtp*k, sqrtp*(k+1))
-        
+        bufferB = torch.zeros(Bij.shape).to(device)
         if rank in root_ranks:
             targets = rank_dict_transpose[rank]
             for target in targets: 
