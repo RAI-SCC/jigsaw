@@ -22,6 +22,14 @@ def set_all_seeds(seed, rank=None):
     torch.manual_seed(seed + rank)
     torch.cuda.manual_seed_all(seed + rank)
 
+def set_all_seeds_local_rank(seed, rank=None):
+    if rank is None:
+        rank = 0
+    os.environ["PL_GLOBAL_SEED"] = str(seed + rank//4) # 0, 1, 2, 3 get same data. # 4, 5, 6, 7 get same data.
+    torch.manual_seed(seed + rank//4)
+    torch.cuda.manual_seed_all(seed + rank//4)
+
+
 def init_mpi():
     comm = MPI.COMM_WORLD
 
@@ -214,20 +222,9 @@ def load_constant_mask_2d(
         land_mask.shape == soil_type.shape == topography.shape
     ), "Shapes of the three constant masks are not equal."
 
-    # Now that the shapes are equal, use land_mask as the actual shapes
-    #x1_pad = (patch_size[0] - (land_mask.shape[0] % patch_size[0])) % patch_size[0] // 2
-    #x2_pad = (patch_size[0] - (land_mask.shape[0] % patch_size[0])) % patch_size[
-    #    0
-    #] - x1_pad
-    #y1_pad = (patch_size[1] - (land_mask.shape[1] % patch_size[1])) % patch_size[1] // 2
-    #y2_pad = (patch_size[1] - (land_mask.shape[1] % patch_size[1])) % patch_size[
-    #    1
-    #] - y1_pad
-
     land_mask = land_mask[:xlat]
     soil_type = soil_type[:xlat]
     topography = topography[:xlat]
-
     
     return land_mask, soil_type, topography
 

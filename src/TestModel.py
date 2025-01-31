@@ -10,6 +10,7 @@ class Model(torch.nn.Module):
     def __init__(self, config_dict, device, comm, torch_rank):
         super().__init__()
         self.torch_rank = torch_rank
+        print(f'My rank is {self.torch_rank}')
         self.device = device
         
         hidden_dimension = config_dict['model']['hidden_dim']
@@ -55,36 +56,18 @@ class Model(torch.nn.Module):
         
     def forward(self, x, rollout_=0):
         #print(f'I am rank {self.torch_rank} and x has shape {x.shape}')
-        x_res = x.clone()
-        fraction = 72 // 4
+        x_res = x.clone() 
         
-        
-        # x_res shape: [n_batch, n_var, n_lat, n_lon]
-        x_res = x_res.permute(0, 2, 3, 1)
-        # x_res shape after: [n_batch, n_lat, n_lon, n_var]
-        
-        #print(f'MODEL FORWARD rank {self.torch_rank}, xres_shape {x_res.shape}')
-        
-        #x_res = torch.nn.functional.pad(x_res, (0,3)) # No need to pad if we consider the x_res in the input
-                       
-        fraction_1 = 1440 // 2
-        fraction_2 = 72 // 2
-        
-        #if self.torch_rank == 0:
-        #    x_res = x_res[:, :, :fraction_1]#.contiguous().to(self.device)
-        #elif self.torch_rank == 1:
-        #    x_res = x_res[:, :, :fraction_1]#.contiguous().to(self.device)
-        #elif self.torch_rank == 2:
-        #    x_res = x_res[:, :, fraction_1:]#.contiguous().to(self.device)
-        #elif self.torch_rank == 3:
-        #    x_res = x_res[:, :, fraction_1:]#.contiguous().to(self.device)
         
         x_res = x_res.flatten(start_dim=1, end_dim=2)
+        
         # x res for each GPU: [n_batch, n_lat, n_lon, n_var//4]
         # x_shape [n_batch, n_var, 720, 1440]
         
         #x = x.to(self.device)
+        
         x = self.embedding(x)
+        
         
         # After embedding: x_shape [n_batch, n_patch_lat * n_patch_lon, embed_dim]
         x_res2 = x.clone()

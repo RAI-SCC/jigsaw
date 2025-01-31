@@ -83,8 +83,8 @@ class SUMMA_AB(torch.autograd.Function):
         rank = ctx.rank
         world_size = ctx.world_size
 
-        grad_input = summa_gpu.ABT(grad_output, weight, rank=rank, world_size=world_size, device=device)
-        grad_weight = summa_gpu.ATB(input, grad_output, rank=rank, world_size=world_size, device=device)
+        grad_input = summa_gpu.ABT(grad_output, weight, rank=rank, n_gpus_per_node=world_size, device=device)
+        grad_weight = summa_gpu.ATB(input, grad_output, rank=rank, n_gpus_per_node=world_size, device=device)
         
         return grad_input, grad_weight, None, None, None
          
@@ -135,8 +135,8 @@ class SUMMA_ATB(torch.autograd.Function):
         rank = ctx.rank
         world_size = ctx.world_size
         
-        grad_input = summa_gpu.ABT(weight, grad_output, rank=rank, world_size=world_size, device=device)
-        grad_weight = summa_gpu.AB(input, grad_output, rank=rank, world_size=world_size, device=device)
+        grad_input = summa_gpu.ABT(weight, grad_output, rank=rank, n_gpus_per_node=world_size, device=device)
+        grad_weight = summa_gpu.AB(input, grad_output, rank=rank, n_gpus_per_node=world_size, device=device)
         grad_b = grad_output.sum(dim=0) 
         
         return grad_input, grad_weight, grad_b, None, None, None
@@ -219,8 +219,8 @@ class SUMMA_ABT(torch.autograd.Function):
         device=ctx.device        
         rank = ctx.rank
         world_size = ctx.world_size
-        grad_input = summa_gpu.AB(grad_output, weight, rank=rank, world_size=world_size, device=device)
-        grad_weight = summa_gpu.ATB(grad_output, input, rank=rank, world_size=world_size, device=device)
+        grad_input = summa_gpu.AB(grad_output, weight, rank=rank, n_gpus_per_node=world_size, device=device)
+        grad_weight = summa_gpu.ATB(grad_output, input, rank=rank, n_gpus_per_node=world_size, device=device)
         grad_b = grad_output.sum(dim=0) 
 
         return grad_input, grad_weight, grad_b, None, None, None

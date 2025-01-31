@@ -63,7 +63,7 @@ def gen_plots(config_dict, input_data, output, target_data, rank, file_path, epo
     else:
         
         input_print  = input_data[0].reshape(xlat, xlon, 69).permute(2, 0, 1)
-        output_print = tensor_out[0].reshape(xlat, xlon, 69).permute(2, 0, 1)
+        output_print = output[0].reshape(xlat, xlon, 69).permute(2, 0, 1)
         target_print = target_data[0].reshape(xlat, xlon, 69).permute(2, 0, 1)
 
         save_path = f"{file_path}/u10_{epoch}.png"
@@ -99,7 +99,6 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
         acc[rollout]['rollout_time'], acc[rollout]['rollout_time'] = rollout, rollout
         
         # each df has [epoch, rollout_time] as first two values
-    
         for var in var_names[1:]:
             rmse[rollout][var] = torch.tensor([0]).to(torch.float32).to(device)
             acc[rollout][var]  = torch.tensor([0]).to(torch.float32).to(device)
@@ -123,8 +122,7 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
             if not config_dict['model']['model_parallel']:
                 input_data  = data[0].to(torch.float32).to(device)
                 target_data = data[1][step].to(torch.float32).to(device)
-                input_data = input_data.permute(0, 2, 3, 1) # Permute input data for mse calculation
-                target_data = target_data.permute(0, 2, 3, 1).contiguous()
+                
             else:
                 buffer = torch.zeros(config_dict['training']['valid_batch'], 36, xlat, xlon//2).to(device)
                 
@@ -164,6 +162,8 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
                                 acc[rollout][var]  = acc[rollout][var] + calc_acc_single_variable_parallel(config_dict, target_data, output, device, area_weights, index=(i-index_offset - norm_offset), norm=True, norm_offset=norm_offset, rank=rank)
     
             else:
+                input_data = input_data.permute(0, 2, 3, 1) # Permute input data for mse calculation
+                target_data = target_data.permute(0, 2, 3, 1).contiguous()
                 loss_fn = torch.nn.MSELoss()
 
                 if config_dict['training']['area_weighted']:
@@ -234,7 +234,7 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
             elif rank == 0:
                 
                 print(f"rank {rank}, input data shape {input_data.shape}")
-                gen_plots(config_dict, input_data_gathered, output, target_data, rank, file_path, epoch, model_parallel=model_parallel)
+                gen_plots(config_dict, input_data, output, target_data, rank, file_path, epoch, model_parallel=model_parallel)
         
     if not config_dict['model']['model_parallel']:
         torch.distributed.all_reduce(total_samples)
