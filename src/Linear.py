@@ -348,8 +348,7 @@ class MixerBlockSequential(torch.nn.Module):
         self.channel_mixing = SequentialMLP(channels_mlp_dim, hidden_dim, channels_mlp_dim, dropout=dropout)
         self.layer_norm1 = torch.nn.LayerNorm(channels_mlp_dim)
         self.layer_norm2 = torch.nn.LayerNorm(channels_mlp_dim)
-
-
+        
     def forward(self, x):
         
         x_res = x.clone()

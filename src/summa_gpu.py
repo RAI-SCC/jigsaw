@@ -8,13 +8,13 @@ def AB(Aij, Bij, rank, n_gpus_per_node, device):
     sqrtp = int(np.sqrt(n_gpus_per_node))
         
     # Empty allocation of A_k per process
-    A_k = torch.zeros_like(Aij).detach().to(device)
-    Cij = torch.zeros(*Aij.shape[:-1], Bij.shape[-1]).to(device)
+    # A_k = torch.zeros_like(Aij).detach().to(device)
+    Cij = None #torch.zeros(*Aij.shape[:-1], Bij.shape[-1]).to(device)
 
     for k in range(sqrtp):
 
-        bufferA = torch.zeros_like(Aij).contiguous()
-        bufferB = torch.zeros_like(Bij).contiguous()
+        bufferA = torch.zeros_like(Aij).to(torch.float32).contiguous()
+        bufferB = torch.zeros_like(Bij).to(torch.float32).contiguous()
 
         # Broadcast submatrix of A along the row
         # Manual send of A
@@ -22,11 +22,12 @@ def AB(Aij, Bij, rank, n_gpus_per_node, device):
         B_k = distribute_B(Bij, k, rank, bufferB)
         
         ## Perform local multiplication and accumulate
-        Cij = Cij + torch.matmul(A_k, B_k)
+        if Cij is None:
+            Cij = torch.matmul(A_k, B_k)
+        else:
+            Cij = Cij + torch.matmul(A_k, B_k)
         
     return Cij
-
-
 
 def transpose(n, rank):
     C = torch.arange(n*n).reshape(n, n).mT.reshape(-1)
@@ -49,85 +50,93 @@ def gather(Cij, comm, world_size):
         
 def distribute_A(Aij, k, rank, bufferA):
     if k == 0:
-        if rank % 4 == 0:
-            dist.isend(Aij, dst=rank+1)
-            A_k = Aij
-        elif rank % 4 == 1:
-            req2 = dist.irecv(bufferA, src=rank-1)
-            req2.wait()
-            A_k = bufferA
-        elif rank % 4 == 2:
-            dist.isend(Aij, dst=rank+1)
-            A_k = Aij
+        if rank % 4 in [0,2]:
+            send_op = dist.P2POp(dist.isend, Aij, peer=rank+1)
+            reqs = dist.batch_isend_irecv([send_op])
+            bufferA = Aij
         else:
-            req2 = dist.irecv(bufferA, src=rank-1)
-            req2.wait()
-            A_k = bufferA
-    elif k == 1:
-        if rank % 4 == 0:
-            req2 = dist.irecv(bufferA, src=rank+1)
-            req2.wait()
-            A_k = bufferA
-        elif rank % 4 == 1:
-            dist.isend(Aij, dst=rank-1)
-            A_k = Aij
-        elif rank % 4 == 2:
-            req2 = dist.irecv(bufferA, src=rank+1)
-            req2.wait()
-            A_k = bufferA
+            recv_op = dist.P2POp(dist.irecv, bufferA, peer=rank-1)
+            reqs = dist.batch_isend_irecv([recv_op])
+    else:
+        if rank % 4 in [1,3]:
+            send_op = dist.P2POp(dist.isend, Aij, peer=rank-1)
+            reqs = dist.batch_isend_irecv([send_op])
+            bufferA = Aij
         else:
-            dist.isend(Aij, dst=rank-1)
-            A_k = Aij
+            recv_op = dist.P2POp(dist.irecv, bufferA, peer=rank+1)
+            reqs = dist.batch_isend_irecv([recv_op])
+    for req in reqs:
+        req.wait()
+    A_k = bufferA
         
     return A_k
 
 def distribute_B(Bij, k, rank, bufferB):
+    #if k == 0:
+    #    if rank % 4 == 0:
+    #        dist.send(Bij, dst=rank+2)
+    #        B_k = Bij
+    #    elif rank % 4 == 1:
+    #        dist.send(Bij, dst=rank+2)
+    #        B_k = Bij
+    #    elif rank % 4 == 2:
+    #        req2 = dist.recv(bufferB, src=rank-2)
+    #        #req2.wait()
+    #        B_k = bufferB
+    #    else:
+    #        req2 = dist.recv(bufferB, src=rank-2)
+#   #         req2.wait()
+    #        B_k = bufferB
+    #elif k == 1:
+    #    if rank % 4 == 0:
+    #        req2 = dist.recv(bufferB, src=rank+2)
+    #        #req2.wait()
+    #        B_k = bufferB
+    #    elif rank % 4 == 1:
+    #        req2 = dist.recv(bufferB, src=rank+2)
+    #        #req2.wait()
+    #        B_k = bufferB
+    #    elif rank % 4 == 2:
+    #        dist.send(Bij, dst=rank-2)
+    #        B_k = Bij
+    #    else:
+    #        dist.send(Bij, dst=rank-2)
+    #        B_k = Bij
     if k == 0:
-        if rank % 4 == 0:
-            dist.isend(Bij, dst=rank+2)
-            B_k = Bij
-        elif rank % 4 == 1:
-            dist.isend(Bij, dst=rank+2)
-            B_k = Bij
-        elif rank % 4 == 2:
-            req2 = dist.irecv(bufferB, src=rank-2)
-            req2.wait()
-            B_k = bufferB
+        if rank % 4 in [0,1]:
+            send_op = dist.P2POp(dist.isend, Bij, peer=rank+2)
+            reqs = dist.batch_isend_irecv([send_op])
+            bufferB = Bij
         else:
-            req2 = dist.irecv(bufferB, src=rank-2)
-            req2.wait()
-            B_k = bufferB
-    elif k == 1:
-        if rank % 4 == 0:
-            req2 = dist.irecv(bufferB, src=rank+2)
-            req2.wait()
-            B_k = bufferB
-        elif rank % 4 == 1:
-            req2 = dist.irecv(bufferB, src=rank+2)
-            req2.wait()
-            B_k = bufferB
-        elif rank % 4 == 2:
-            dist.isend(Bij, dst=rank-2)
-            B_k = Bij
+            recv_op = dist.P2POp(dist.irecv, bufferB, peer=rank-2)
+            reqs = dist.batch_isend_irecv([recv_op])
+    else:
+        if rank % 4 in [2,3]:
+            send_op = dist.P2POp(dist.isend, Bij, peer=rank-2)
+            reqs = dist.batch_isend_irecv([send_op])
+            bufferB = Bij
         else:
-            dist.isend(Bij, dst=rank-2)
-            B_k = Bij
+            recv_op = dist.P2POp(dist.irecv, bufferB, peer=rank+2)
+            reqs = dist.batch_isend_irecv([recv_op])
+    for req in reqs:
+        req.wait()
+    B_k = bufferB
     return B_k
 
 def matrix_transpose(X, rank, device):
     if rank % 4 == 1:
-        buffer = torch.zeros(X.shape).to(device)
-        req_send = dist.isend(X, dst=rank+1)
-        req_recv = dist.irecv(buffer, src=rank+1)
-        req_recv.wait()
-        req_send.wait()
+        buffer = torch.zeros(X.shape).to(torch.float32).to(device)
+        req_send = dist.send(X, dst=rank+1)
+        req_recv = dist.recv(buffer, src=rank+1)
+        #req_recv.wait()
+        #req_send.wait()
         X_T = buffer
     elif rank % 4 == 2:
-        buffer = torch.zeros(X.shape).to(device)
-        req_recv = dist.irecv(buffer, src=rank-1)
-        req_send = dist.isend(X, dst=rank-1)
-        req_recv.wait()
-        req_send.wait()
+        buffer = torch.zeros(X.shape).to(torch.float32).to(device)
+        req_recv = dist.recv(buffer, src=rank-1)
+        req_send = dist.send(X, dst=rank-1)
+        #req_recv.wait()
+        #req_send.wait()
         X_T = buffer
     else:
         X_T = X
@@ -159,7 +168,7 @@ def ABT(Aij, Bij, rank, n_gpus_per_node, device):
         # Broadcast submatrix of A along the row
         # Manual send of A
         root_ranks = np.arange(sqrtp)*sqrtp + k + node_rank * n_gpus_per_node
-        bufferA = torch.zeros(Aij.shape).to(device)
+        bufferA = torch.zeros(Aij.shape).to(torch.float32).to(device)
         A_k = distribute_A(Aij, k, rank, bufferA)
         
         B_k = Bij.clone().detach()
@@ -171,16 +180,16 @@ def ABT(Aij, Bij, rank, n_gpus_per_node, device):
             targets = rank_dict_transpose[rank]
             for target in targets: 
                 if rank != target:
-                    dist.isend(Bij, dst=target)
+                    dist.send(Bij, dst=target)
                     
         # receiving
         for root_rank in root_ranks:
             if root_rank != rank:
                 for target in rank_dict_transpose[root_rank]:
                     if rank == target:
-                        bufferB = torch.zeros(Bij.shape).to(device)
-                        req = dist.irecv(bufferB, src=root_rank)
-                        req.wait()
+                        bufferB = torch.zeros(Bij.shape).to(torch.float32).to(device)
+                        req = dist.recv(bufferB, src=root_rank)
+                        #req.wait()
                         B_k = bufferB
         
         if Cij is None:
@@ -221,12 +230,12 @@ def ATB(Aij, Bij, rank, n_gpus_per_node, device):
         # "root" ranks: [0, 1]
         # for k = 1, root_ranks [2, 3]
         root_ranks = np.arange(sqrtp*k, sqrtp*(k+1)) + node_rank * n_gpus_per_node
-        bufferB = torch.zeros(Bij.shape).to(device)
+        bufferB = torch.zeros(Bij.shape).to(torch.float32).to(device)
         if rank in root_ranks:
             targets = rank_dict_transpose[rank]
             for target in targets: 
                 if rank != target:
-                    dist.isend(Aij, dst=target)    
+                    dist.send(Aij, dst=target)    
                     A_k = Aij
         
         # receiving
@@ -234,9 +243,9 @@ def ATB(Aij, Bij, rank, n_gpus_per_node, device):
             if root_rank != rank:
                 for target in rank_dict_transpose[root_rank]:
                     if rank == target:
-                        buffer  = torch.zeros(Aij.shape).to(device)
-                        req = dist.irecv(buffer, src=root_rank)
-                        req.wait()
+                        buffer  = torch.zeros(Aij.shape).to(torch.float32).to(device)
+                        req = dist.recv(buffer, src=root_rank)
+                        #req.wait()
                         A_k = buffer
 
 
