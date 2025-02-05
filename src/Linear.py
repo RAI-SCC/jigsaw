@@ -73,7 +73,7 @@ class SUMMA_AB(torch.autograd.Function):
         ctx.world_size = 4
         assert(x.shape[-1] == W.shape[0])
         
-        return summa_gpu.AB(x, W, rank, ctx.world_size, device)
+        return summa_gpu.AB_custom(x, W, rank, ctx.world_size, device)
     
     @staticmethod
     def backward(ctx, grad_output):
@@ -83,8 +83,8 @@ class SUMMA_AB(torch.autograd.Function):
         rank = ctx.rank
         world_size = ctx.world_size
 
-        grad_input = summa_gpu.ABT(grad_output, weight, rank=rank, n_gpus_per_node=world_size, device=device)
-        grad_weight = summa_gpu.ATB(input, grad_output, rank=rank, n_gpus_per_node=world_size, device=device)
+        grad_input = summa_gpu.ABT_custom(grad_output, weight, rank=rank, n_gpus_per_node=world_size, device=device)
+        grad_weight = summa_gpu.ATB_custom(input, grad_output, rank=rank, n_gpus_per_node=world_size, device=device)
         
         return grad_input, grad_weight, None, None, None
          
@@ -123,7 +123,7 @@ class SUMMA_ATB(torch.autograd.Function):
         ctx.rank = rank
         ctx.world_size = 4
         #assert(x.shape[-1] == W.shape[0]) # TODO ASSERT
-        xw = summa_gpu.ATB(x, W, rank, ctx.world_size, device)    
+        xw = summa_gpu.ATB_custom(x, W, rank, ctx.world_size, device)    
 
         return xw.add(b)
     
@@ -135,8 +135,8 @@ class SUMMA_ATB(torch.autograd.Function):
         rank = ctx.rank
         world_size = ctx.world_size
         
-        grad_input = summa_gpu.ABT(weight, grad_output, rank=rank, n_gpus_per_node=world_size, device=device)
-        grad_weight = summa_gpu.AB(input, grad_output, rank=rank, n_gpus_per_node=world_size, device=device)
+        grad_input = summa_gpu.ABT_custom(weight, grad_output, rank=rank, n_gpus_per_node=world_size, device=device)
+        grad_weight = summa_gpu.AB_custom(input, grad_output, rank=rank, n_gpus_per_node=world_size, device=device)
         grad_b = grad_output.sum(dim=0) 
         
         return grad_input, grad_weight, grad_b, None, None, None
@@ -206,7 +206,7 @@ class SUMMA_ABT(torch.autograd.Function):
         ctx.world_size = 4
         assert(x.shape[-1] == W.shape[-1])
         #print(f"Forward pass, my device {device}, world size {torch.cuda.device_count()}, my_rank {rank}")
-        xw = summa_gpu.ABT(x, W, rank, ctx.world_size, device)
+        xw = summa_gpu.ABT_custom(x, W, rank, ctx.world_size, device)
         if b is not None:
             return xw.add(b)
         else:
@@ -219,8 +219,8 @@ class SUMMA_ABT(torch.autograd.Function):
         device=ctx.device        
         rank = ctx.rank
         world_size = ctx.world_size
-        grad_input = summa_gpu.AB(grad_output, weight, rank=rank, n_gpus_per_node=world_size, device=device)
-        grad_weight = summa_gpu.ATB(grad_output, input, rank=rank, n_gpus_per_node=world_size, device=device)
+        grad_input = summa_gpu.AB_custom(grad_output, weight, rank=rank, n_gpus_per_node=world_size, device=device)
+        grad_weight = summa_gpu.ATB_custom(grad_output, input, rank=rank, n_gpus_per_node=world_size, device=device)
         grad_b = grad_output.sum(dim=0) 
 
         return grad_input, grad_weight, grad_b, None, None, None
