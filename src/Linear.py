@@ -1,6 +1,6 @@
 import torch
 import summa_gpu
-from mpi4py import MPI
+#from mpi4py import MPI
 import numpy as np
 from torch.nn import GELU, Dropout
 
@@ -122,7 +122,7 @@ class SUMMA_ATB(torch.autograd.Function):
         ctx.device = device
         ctx.rank = rank
         ctx.world_size = 4
-        #assert(x.shape[-1] == W.shape[0]) # TODO ASSERT
+        
         xw = summa_gpu.ATB_custom_precompute(x, W, rank, ctx.world_size, device)    
 
         return xw.add(b)

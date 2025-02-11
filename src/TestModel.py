@@ -10,14 +10,10 @@ class Model(torch.nn.Module):
     def __init__(self, config_dict, device, comm, torch_rank):
         super().__init__()
         self.torch_rank = torch_rank
-        print(f'My rank is {self.torch_rank}')
         self.device = device
-        
-        hidden_dimension = config_dict['model']['hidden_dim']
-        
+        hidden_dimension = config_dict['model']['hidden_dim']        
         self.xlat, self.xlon = config_dict['data']['xlat'], config_dict['data']['xlon']
 
-        
         if config_dict['model']['patch_embed'] == 1:
             self.patch_size = config_dict['model']['patch_size']
             self.stride = config_dict['model']['stride']
@@ -58,7 +54,6 @@ class Model(torch.nn.Module):
         #print(f'I am rank {self.torch_rank} and x has shape {x.shape}')
         x_res = x.clone() 
         
-        
         x_res = x_res.flatten(start_dim=1, end_dim=2)
         
         # x res for each GPU: [n_batch, n_lat, n_lon, n_var//4]
@@ -67,13 +62,13 @@ class Model(torch.nn.Module):
         #x = x.to(self.device)
         
         x = self.embedding(x)
-        
-        
         # After embedding: x_shape [n_batch, n_patch_lat * n_patch_lon, embed_dim]
         x_res2 = x.clone()
+        
         for i in range(self.n_blocks):
             x = self.blocks[i](x)
         
+
         # After MLP-mixing blocks: [n_batch, n_patch_lat * n_patch_lon/2, embed_dim/2]
         # After recovery: [n_batch, n_lat*n_lon//2, n_var//2]
         if self.concat:

@@ -77,7 +77,7 @@ def gen_plots(config_dict, input_data, output, target_data, rank, file_path, epo
         save_path = f"{file_path}/Z500_{epoch}.png"
         utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=9)
 
-def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file_path, mse_file_path='rmse.csv', acc_file_path='acc.csv', model_parallel=True, world_size=4, groups=None):
+def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file_path, mse_file_path='rmse.csv', acc_file_path='acc.csv', model_parallel=True, world_size=4, groups=None, node_groups=None):
     if config_dict['model']['model_parallel']:
         mse_file_path = f'rmse_{rank}.csv'
         acc_file_path = f'acc_{rank}.csv'
@@ -100,45 +100,58 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
         
         # each df has [epoch, rollout_time] as first two values
         for var in var_names[1:]:
-            rmse[rollout][var] = torch.tensor([0]).to(torch.float32).to(device)
-            acc[rollout][var]  = torch.tensor([0]).to(torch.float32).to(device)
-            rmse_persistence[rollout][var] = torch.tensor([0]).to(torch.float32).to(device)
-            acc_persistence[rollout][var]  = torch.tensor([0]).to(torch.float32).to(device)
+            rmse[rollout][var] = torch.tensor([0], device=device)
+            acc[rollout][var]  = torch.tensor([0], device=device)
+            rmse_persistence[rollout][var] = torch.tensor([0],device=device)
+            acc_persistence[rollout][var]  = torch.tensor([0],device=device)
             
     total_samples = torch.tensor([0]).to(device)
     start_validation_time = time.perf_counter()
     area_weights = torch.tensor(calc_weight(721)).to(torch.float32)[:config_dict['data']['xlat']].to(device)
-    surface_weights  = torch.tensor([1.5, 0.77, 0.66, 3.0])
-    pressure_weights = torch.tensor([3.00, 0.6, 1.5, 0.77, 0.54]).unsqueeze(1).expand(5, 13).flatten()
+    surface_weights  = torch.tensor([1.5, 0.77, 0.77, 3.0]) * 2
+    pressure_weights = torch.tensor([3.00, 0.6, 1.5, 0.77, 0.77]).unsqueeze(1).expand(5, 13).flatten()
     weights_loss = torch.concat([surface_weights, pressure_weights]).view(1, 69).to(device)
     xlat, xlon = config_dict['data']['xlat'], config_dict['data']['xlon']
 
     index_offset = 2 if 'rollout_time' in var_names else 1
     
     loss_fn = torch.nn.MSELoss()
+    buffer  = torch.zeros(config_dict['training']['valid_batch'], xlat, xlon//2, 36).to(device)
+    buffer2 = torch.zeros(config_dict['training']['valid_batch'], xlat, xlon//2, 36).to(device)
 
     for batch, data in enumerate(dataloader):
         for step, rollout in enumerate(rollout_time):
             if not config_dict['model']['model_parallel']:
-                input_data  = data[0].to(torch.float32).to(device)
-                target_data = data[1][step].to(torch.float32).to(device)
-                
+                input_data  = data[0].to(device)
+                target_data = data[1][step].to(device)
             else:
-                buffer = torch.zeros(config_dict['training']['valid_batch'], 36, xlat, xlon//2).to(device)
+                
                 
                 if config_dict['model_parallel']['split'] == 2:
-                    input_data = utils.send_data_twoway(data[0], batch, buffer, rank, device, groups, config_dict['model_parallel']['alt_sender'])
+                    buffer.zero_()
+                    input_data_handle, buffer = utils.send_data_twoway(data[0], batch, buffer, rank, device, groups, config_dict['model_parallel']['alt_sender'])
+                    buffer2.zero_()
+                    target_data_handle, buffer2 = utils.send_data_twoway(data[1][step], batch, buffer2, rank, device, groups,config_dict['model_parallel']['alt_sender'])
                 elif config_dict['model_parallel']['split'] == 4:
-                    input_data = data[0].permute(0, 2, 3, 1).to(device)
+                    input_data = data[0].to(device)
+                else:
+                    buffer.zero_()
+                    input_data = utils.send_data_fourway(data[1], buffer, rank, device)
              
+                input_data_handle.wait()
+                input_data = buffer
             output = model(input_data, rollout_=step+1)
             
             if model_parallel:
                 if config_dict['model_parallel']['split'] == 2:
-                    buffer2 = torch.zeros(config_dict['training']['valid_batch'], 36, xlat, xlon//2).to(device)
-                    target_data = utils.send_data_twoway(data[1][step], batch, buffer2, rank, device, groups,config_dict['model_parallel']['alt_sender'])
+                    #buffer2 = torch.zeros(config_dict['training']['valid_batch'], 36, xlat, xlon//2).to(device)
+                    target_data_handle.wait()
+                    target_data = buffer2
                 elif config_dict['model_parallel']['split'] == 4:
                     target_data = data[1].permute(0, 2, 3, 1).to(device)
+                else:
+                    buffer.zero_()
+                    target_data = utils.send_data_fourway(data[1], buffer, rank, device)
                 target_data = target_data.flatten(start_dim=1, end_dim=2)
 
                 loss_   = loss_fn(output, target_data)
@@ -193,41 +206,41 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
                 #                acc[rollout][var]  = acc[rollout][var] + 0.
 
         total_samples[0] = total_samples[0] + input_data.shape[0]
-
+        torch.backends.cuda.matmul.allow_tf32 = True
         if batch == 0:
-            if model_parallel:
+            if model_parallel  and rank < 4: # only needs to happen once
                 # Gather input data
                 # input data has shape [nvar, lat, lon]
                 input_data, output, target_data = input_data[0].contiguous(), output[0].contiguous(), target_data[0].contiguous()
                 
                 input_tensor_gather = torch.zeros(4, *input_data.shape).to(device)
-                torch.distributed.all_gather_into_tensor(input_tensor_gather, input_data)
+                torch.distributed.all_gather_into_tensor(input_tensor_gather, input_data, group=node_groups)
                 
                 top_row = torch.cat([input_tensor_gather[0], input_tensor_gather[1]], dim=2)
                 bottom_row = torch.cat([input_tensor_gather[2], input_tensor_gather[3]], dim=2)
                 
                 # left/right side shape: [1, 720, 720, 72]
-                input_data_gathered = torch.cat([top_row, bottom_row], dim=1)[:,:,:69]#.reshape(1, 720, 1440, 72)#.reshape(output.shape[0], config_dict['data']['xlat'], config_dict['data']['xlon'], 72)
+                input_data_gathered = torch.cat([top_row, bottom_row], dim=1)[:,:,:69]
                 
                 # gather first sample to rank 0
                 output_tensor_gather = torch.zeros(4, *output.shape).to(device)
                 
-                torch.distributed.all_gather_into_tensor(output_tensor_gather, output)
+                torch.distributed.all_gather_into_tensor(output_tensor_gather, output, group=node_groups)
                 
                 top_row2 = torch.cat([output_tensor_gather[0], output_tensor_gather[1]], dim=2)
                 bottom_row2 = torch.cat([output_tensor_gather[2], output_tensor_gather[3]], dim=2)
                 # left/right side shape: [1, 720, 720, 72]
-                output_gathered = torch.cat([top_row2, bottom_row2], dim=1)[:,:,:69] #.reshape(1, 720, 1440, 72)#.reshape(output.shape[0], config_dict['data']['xlat'], config_dict['data']['xlon'], 72)
+                output_gathered = torch.cat([top_row2, bottom_row2], dim=1)[:,:,:69] 
                 
                 # Gather target data. Currently split between 4 devices as well.
                 target_tensor_gather = torch.zeros(4, *target_data.shape).to(device)
                 target_data = target_data.contiguous()
-                torch.distributed.all_gather_into_tensor(target_tensor_gather, target_data)
+                torch.distributed.all_gather_into_tensor(target_tensor_gather, target_data, group=node_groups)
                 
                 top_row = torch.cat([target_tensor_gather[0], target_tensor_gather[1]], dim=2)
                 bottom_row = torch.cat([target_tensor_gather[2], target_tensor_gather[3]], dim=2)
                 # left/right side shape: [1, 720, 720, 72]
-                target_data_gathered = torch.cat([top_row, bottom_row], dim=1)[:,:,:69]#.reshape(1, 720, 1440, 72)#.reshape(output.shape[0], config_dict['data']['xlat'], config_dict['data']['xlon'], 72)
+                target_data_gathered = torch.cat([top_row, bottom_row], dim=1)[:,:,:69]
                 
                 if rank == 0:
                     gen_plots(config_dict, input_data_gathered, output_gathered, target_data_gathered, rank, file_path, epoch, model_parallel=model_parallel)    
@@ -337,16 +350,15 @@ def calc_mse_single_variable(config_dict, target, result, device, weights, index
     _, std = load_averages()
     std    = std.to(device)
 
-    if not norm:
-        std[index] = 1
+    std_multiplier = std[index] if norm else 1.0
     
     # MSE = ((target - result) * stdev) ** 2
     if len(target.shape) == 4:
         mean_squared_error = ((target[:, :, :, index] - result[:, :, :, index]) * 
-                std[index].flatten() / divisor
+                std_multiplier.flatten() / divisor
             )**2
     else:
-        mean_squared_error = ((target - result) * std[index].flatten() / divisor)**2
+        mean_squared_error = ((target - result) * std_multiplier / divisor)**2
 
     mean_squared_error = torch.einsum('i, aij->ai', weights, mean_squared_error).sum(dim=1)
     mean_squared_error = mean_squared_error.flatten().sum() 
@@ -432,29 +444,24 @@ def calc_acc_single_variable_parallel(config_dict, target, result, device, weigh
         n_lon = 1440
         n_lat = 721
     else:
-        n_lon = config_dict['data']['xlon']
+        n_lon = config_dict['data']['xlon'] // 2
         n_lat = config_dict['data']['xlat']
     # per process: target has shape [n_patches, nlat, nlon//2, nvar/2]
     target_ = target[:,:,:,index]
     result_ = result[:,:,:,index]
 
-
     mean, std = load_averages()
     mean, std = mean.to(device), std.to(device)
-    if rank == 0:
-        climatology = get_climatology()[:n_lat, :720, index+norm_offset].to(device)
-    elif rank == 1:
-        climatology = get_climatology()[:n_lat, :720, index+norm_offset].to(device)
-    elif rank == 2:
-        climatology = get_climatology()[:n_lat, 720:, index+norm_offset].to(device)
-    elif rank == 3:
-        climatology = get_climatology()[:n_lat, 720:, index+norm_offset].to(device)
+    if rank % 4 == 0:
+        climatology = get_climatology()[:n_lat, :n_lon, index+norm_offset].to(device)
+    elif rank % 4 == 1:
+        climatology = get_climatology()[:n_lat, :n_lon, index+norm_offset].to(device)
+    elif rank % 4== 2:
+        climatology = get_climatology()[:n_lat, n_lon:, index+norm_offset].to(device)
+    elif rank % 4 == 3:
+        climatology = get_climatology()[:n_lat, n_lon:, index+norm_offset].to(device)
         
-    if not norm:
-        std_multiplier = 1.0
-    else:
-        std_multiplier = std[index+norm_offset]
-    
+    std_multiplier = std[index+norm_offset] if norm else 1.0
     
     target_anomoly = (target_ * std_multiplier - climatology)
     result_anomoly = (result_ * std_multiplier - climatology)

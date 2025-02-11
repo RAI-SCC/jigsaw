@@ -6,7 +6,8 @@ from torch.utils.data import Dataset, Subset, DataLoader, Sampler
 import os
 from multiprocessing import Value
 import threading
-
+import time
+import os, psutil
 class ERA5Dataset(Dataset):
     """Define 3D dataset."""
     def __init__(self, config, file_path, mode, patch_size, forecast_length=1, normalize=True, rank=None):
@@ -165,14 +166,15 @@ class ERA5Dataset(Dataset):
             target.append(torch.concat([target_surface[i], target_pressure[i]], axis=0))
 
         input = torch.tensor(input)
+        
         if self.rank is None:
             return input, target    
         else:
-            temp = torch.nn.functional.pad(target[0], (0, 0, 0, 0, 0, 3))
-            
-            input = [input[:36, :, :720], input[36:, :, :720], input[:36, :, 720:], input[36:, :, 720:]]
+            temp = torch.nn.functional.pad(target[0], (0, 0, 0, 0, 0, 3)).permute(1,2,0)
+            input = input.permute(1,2,0)
+            input = [input[:, :720, :36], input[:, :720, 36:], input[:, 720:, :36], input[:, 720:, 36:]]
 
-            target_list = [temp[:36, :, :720], temp[36:, :, :720], temp[:36, :, 720:], temp[36:, :, 720:]]
+            target_list = [temp[:, :720, :36], temp[:, :720, 36:], temp[:, 720:, :36], temp[:, 720:, 36:]]
             
             return input, target_list
 class ERA5DatasetDistributed(Dataset):
@@ -201,6 +203,7 @@ class ERA5DatasetDistributed(Dataset):
         self.dt = config['data']['dt']
         self.lite = config['data']['lite']
         self.rank = rank
+        self.node_rank = rank // 4
 
         if config['data']['train_data_path'] == '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/1959-2023_01_10-wb13-6h-1440x721.zarr':        
             self.deltaTDivisor = 6
@@ -247,9 +250,6 @@ class ERA5DatasetDistributed(Dataset):
         self.soil_type = torch.unsqueeze(self.soil_type[:,self.start:self.end], 0)
         self.topography = torch.unsqueeze(self.topography[:,self.start:self.end], 0)
 
-        
-
-        
     def update_index_order(self, index_order):
         self.index_order = index_order
         
@@ -324,22 +324,10 @@ class ERA5DatasetDistributed(Dataset):
                     current_batch = 0
             else: 
                 # If two-way split, half of the ranks should not read any of the data
-                skipped_ranks = [2, 3]    
+                skipped_ranks = [2,3,6,7]    
             if self.rank in skipped_ranks: # 0, 1 always senders
-                return [torch.zeros(1), torch.zeros(1)], [torch.zeros(1), torch.zeros(1)]
+                return [torch.zeros(1)], [torch.zeros(1)]
         
-        #if self.split == 2:
-        #    if not self.alt_sender:
-        #        skipped_ranks = [2,3]
-        #    else: 
-        #        skipped_ranks = []
-        #    if self.rank in skipped_ranks:
-        #        return [torch.zeros(1), torch.zeros(1)], [torch.zeros(1), torch.zeros(1)]
-        #worker_info = torch.utils.data.get_worker_info()
-        
-        #if global_idx.numel() == 0:
-        #    return [torch.zeros(1), torch.zeros(1)], [torch.zeros(1), torch.zeros(1)]
-        #
         target_surface  = []
         step = self.dt
         # if forecast_length = 3, target_file_idx = global_idx + range(1, forecast_length+1)*step // 6
@@ -358,8 +346,9 @@ class ERA5DatasetDistributed(Dataset):
         target_surface_ds  = self.zarr_data.isel(time=target_file_idxs)[['mean_sea_level_pressure', '10m_u_component_of_wind', '10m_v_component_of_wind', '2m_temperature']]
             
         target = []
+        rank_profile_start = time.perf_counter()
 
-        if self.rank in [0, 2]: # first half of data
+        if self.rank in [0,2]: # first half of data
             # Input data
             # Stack and convert to numpy array
 
@@ -405,10 +394,11 @@ class ERA5DatasetDistributed(Dataset):
                 
                 temp = np.concatenate([target_surface[i], temp], axis=0)
                 if self.split == 2:
-                    target.append([torch.tensor(temp[:,:,:720]), torch.tensor(temp[:,:,720:])])
+                    target.append([torch.tensor(temp[:,:,:720]).permute(1, 2, 0), torch.tensor(temp[:,:,720:]).permute(1, 2, 0)])
                 else:
-                    target.append(torch.tensor(temp)) 
+                    target.append(torch.tensor(temp).permute(1, 2, 0))
         else:
+            rank1_profile_start = time.perf_counter()
             temperature = input_pressure['temperature'][6:,:self.xlat,self.start:self.end].values
             u_velocity  = input_pressure['u_component_of_wind'][:,:self.xlat,self.start:self.end].values
             v_velocity = input_pressure['v_component_of_wind'][:,:self.xlat,self.start:self.end].values
@@ -418,10 +408,6 @@ class ERA5DatasetDistributed(Dataset):
             
             input = (input - self.p_mean[32:]) / self.p_std[32:]
             input = np.reshape(input, ( -1, self.xlat, self.end-self.start))
-            
-            #self.land_mask = self.land_mask.broadcast_to(input.shape[0], *self.land_mask.shape[1:])
-            #self.soil_type = self.land_mask.broadcast_to(input.shape[0], *self.land_mask.shape[1:])
-            #self.topography = self.land_mask.broadcast_to(input.shape[0], *self.land_mask.shape[1:])
             input = np.concatenate([input, self.land_mask, self.soil_type, self.topography], axis=0)
 
             for i in range(self.forecast_length):
@@ -438,19 +424,20 @@ class ERA5DatasetDistributed(Dataset):
                 temp = temp.reshape(-1, self.xlat, self.end-self.start) 
                 
                 if self.split == 2:
-                    target.append([torch.nn.functional.pad(torch.tensor(temp[:,:,:720]), (0, 0, 0, 0, 0, 3)), 
-                                   torch.nn.functional.pad(torch.tensor(temp[:,:,720:]), (0, 0, 0, 0, 0, 3))])
+                    target.append([torch.nn.functional.pad(torch.tensor(temp[:,:,:720]), (0, 0, 0, 0, 0, 3)).permute(1, 2, 0), 
+                                   torch.nn.functional.pad(torch.tensor(temp[:,:,720:]), (0, 0, 0, 0, 0, 3)).permute(1, 2, 0)])
                 else:
-                    target.append(torch.nn.functional.pad(torch.tensor(temp), (0, 0, 0, 0, 0, 3))) 
-                    
+                    target.append(torch.nn.functional.pad(torch.tensor(temp), (0, 0, 0, 0, 0, 3)).permute(1, 2, 0)) 
+            
                 
         if self.split == 2:
-            input = [torch.tensor(input[:,:,:720]), torch.tensor(input[:,:,720:])]
+            input = [torch.tensor(input[:,:,:720]).permute(1,2,0), torch.tensor(input[:,:,720:]).permute(1,2,0)]
         else:
-            input = torch.tensor(input)
+            input = torch.tensor(input).permute(1,2,0)
 
-                        
-        return input, target    
+        rank_profile_end = time.perf_counter()
+
+        return input, target
 
 
 

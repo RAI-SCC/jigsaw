@@ -169,7 +169,7 @@ class PatchEmbedding1D(torch.nn.Module):
     """
     super().__init__()
     self.patch_size = patch_size#patch_size[0]*patch_size[1] # sq
-    self.dim = self.patch_size*in_channels#patch_size[0]*patch_size[1]*in_channels
+    self.dim = dim#patch_size[0]*patch_size[1]*in_channels
     # Here we use convolution to partition data into cubes
     # in_channels = 13 pressure levels x 5 fields + 4 variables + 3 masks
     # i.e., fields are (Z, Q, T, U, V)
@@ -258,9 +258,9 @@ class PatchRecovery1D(torch.nn.Module):
     self.patch_size = patch_size
     self.stride = stride
     if concat:
-      self.conv = torch.nn.ConvTranspose1d(in_channels=self.patch_size*72*2, out_channels=69, kernel_size=self.patch_size, stride=self.stride)
+      self.conv = torch.nn.ConvTranspose1d(in_channels=dim*2, out_channels=69, kernel_size=self.patch_size, stride=self.stride)
     else:
-      self.conv = torch.nn.ConvTranspose1d(in_channels=self.patch_size*72, out_channels=69, kernel_size=self.patch_size, stride=self.stride)
+      self.conv = torch.nn.ConvTranspose1d(in_channels=dim, out_channels=69, kernel_size=self.patch_size, stride=self.stride)
     self.out_channels = out_channels
     self.patch_size = patch_size
     self.xlat, self.xlon = xlat, xlon
@@ -652,7 +652,6 @@ class Distributed1DPatchRecovery(torch.nn.Module):
     # Call the transposed convolution
     output = self.conv(x) # distributed 
     
-      
     #print(f"2 - conv shape {output.shape}")
     # [4, n_patch_lat*n_patch_lon/2, patch_size_1*patch_size2*n_vars//2]
     output = output.view(output.shape[0], n_patch_lat, n_patch_lon//2, self.patch_size, self.out_channels)

@@ -1,4 +1,4 @@
-from mpi4py import MPI
+#from mpi4py import MPI
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -36,9 +36,9 @@ def AB_custom(Aij, Bij, rank, n_gpus_per_node, device):
     # A_k = torch.zeros_like(Aij).detach().to(device)
     Cij = None #torch.zeros(*Aij.shape[:-1], Bij.shape[-1]).to(device)
     mod = rank % 4
-    bufferA = torch.zeros_like(Aij).to(torch.float32).contiguous()
-    bufferB = torch.zeros_like(Bij).to(torch.float32).contiguous()
-
+    bufferA = get_preallocated_buffer(Aij.shape, Aij.dtype, device)
+    bufferB = get_preallocated_buffer(Bij.shape, Bij.dtype, device)
+    
     if mod == 0: 
         # Rank 0 send A, B to 1 and 2. Receives A, B from 1 and 2.
         send_A_1 = dist.P2POp(dist.isend, Aij, peer=rank+1)
@@ -235,14 +235,16 @@ def distribute_B(Bij, k, rank, bufferB):
 
 def matrix_transpose(X, rank, device):
     if rank % 4 == 1:
-        buffer = torch.zeros(X.shape).to(torch.float32).to(device)
+        #buffer = torch.zeros(X.shape).to(torch.float32).to(device)
+        buffer = get_preallocated_buffer(X.shape, X.dtype, device)
         req_send = dist.send(X, dst=rank+1)
         req_recv = dist.recv(buffer, src=rank+1)
         #req_recv.wait()
         #req_send.wait()
         X_T = buffer
     elif rank % 4 == 2:
-        buffer = torch.zeros(X.shape).to(torch.float32).to(device)
+        #buffer = torch.zeros(X.shape).to(torch.float32).to(device)
+        buffer = get_preallocated_buffer(X.shape, X.dtype, device)
         req_recv = dist.recv(buffer, src=rank-1)
         req_send = dist.send(X, dst=rank-1)
         #req_recv.wait()
@@ -375,7 +377,7 @@ def ABT_custom(Aij, Bij, rank, n_gpus_per_node, device):
             Cij = torch.matmul(Aij, bufferB3.mT) + torch.matmul(bufferA, bufferB2.mT)
         else:
             Cij = torch.matmul(Aij, bufferB0.mT) + torch.matmul(bufferA, bufferB1.mT)
-
+    
     return Cij
 
 
@@ -387,9 +389,9 @@ def ABT_custom_precompute(Aij, Bij, rank, n_gpus_per_node, device):
     
     if mod == 0: 
         if len(Aij.shape) > 2:
-            bufferAB = torch.zeros(*Aij.shape[:-1], Bij.shape[0]).to(Aij.dtype).to(device)
+            bufferAB = get_preallocated_buffer((*Aij.shape[:-1], Bij.shape[0]), Aij.dtype, device)
         else:
-            bufferAB = torch.zeros(Bij.shape[0], Aij.shape[0], Bij.shape[-2]).to(Aij.dtype).to(device)
+            bufferAB = get_preallocated_buffer((Bij.shape[0], Aij.shape[0], Bij.shape[-2]), Aij.dtype, device)
         
         # Rank 0 send A, B to 1 and 2. Receives A, B from 1 and 2.
         send_A_1 = dist.P2POp(dist.isend, Aij, peer=rank+1)
@@ -403,9 +405,9 @@ def ABT_custom_precompute(Aij, Bij, rank, n_gpus_per_node, device):
         
     elif mod == 1:
 
-        bufferA = torch.zeros(Aij.shape).to(Aij.dtype).to(device)
-        bufferB2 = torch.zeros(Bij.shape).to(Bij.dtype).to(device)
-        bufferB3 = torch.zeros(Bij.shape).to(Bij.dtype).to(device)
+        bufferA  = get_preallocated_buffer(Aij.shape, Aij.dtype, device)
+        bufferB2 = get_preallocated_buffer(Bij.shape, Bij.dtype, device) 
+        bufferB3 = get_preallocated_buffer(Bij.shape, Bij.dtype, device) 
 
         send_B_2 = dist.P2POp(dist.isend, Bij, peer=rank+1)
 
@@ -421,9 +423,9 @@ def ABT_custom_precompute(Aij, Bij, rank, n_gpus_per_node, device):
         
                   
     elif mod == 2:
-        bufferA  = torch.zeros(Aij.shape).to(Aij.dtype).to(device)
-        bufferB0 = torch.zeros(Bij.shape).to(Bij.dtype).to(device)
-        bufferB1 = torch.zeros(Bij.shape).to(Bij.dtype).to(device)
+        bufferA  = get_preallocated_buffer(Aij.shape, Aij.dtype, device)
+        bufferB0 = get_preallocated_buffer(Bij.shape, Bij.dtype, device) 
+        bufferB1 = get_preallocated_buffer(Bij.shape, Bij.dtype, device) 
         
         
         send_B_1 = dist.P2POp(dist.isend, Bij, peer=rank-1)
@@ -438,9 +440,9 @@ def ABT_custom_precompute(Aij, Bij, rank, n_gpus_per_node, device):
 
     else:
         if len(Aij.shape) > 2:
-            bufferAB = torch.zeros(*Aij.shape[:-1], Bij.shape[0]).to(Aij.dtype).to(device)
+            bufferAB = get_preallocated_buffer((*Aij.shape[:-1], Bij.shape[0]), Aij.dtype, device)
         else:
-            bufferAB = torch.zeros(Bij.shape[0], Aij.shape[0], Bij.shape[-2]).to(Aij.dtype).to(device)
+            bufferAB = get_preallocated_buffer((Bij.shape[0], Aij.shape[0], Bij.shape[-2]), Aij.dtype, device)
         
         send_A_2  = dist.P2POp(dist.isend, Aij, peer=rank-1)
         send_B_1  = dist.P2POp(dist.isend, Bij, peer=rank-2)
@@ -460,7 +462,7 @@ def ABT_custom_precompute(Aij, Bij, rank, n_gpus_per_node, device):
         Cij = torch.matmul(Aij, bufferB3.mT) + torch.matmul(bufferA, bufferB2.mT)
     else:
         Cij = torch.matmul(Aij, bufferB0.mT) + torch.matmul(bufferA, bufferB1.mT)
-
+    
     return Cij
 
 def ABT_custom_isend(Aij, Bij, rank, n_gpus_per_node, device):
@@ -654,19 +656,13 @@ def ATB_custom_precompute(Aij, Bij, rank, n_gpus_per_node, device):
     # A_k = torch.zeros_like(Aij).detach().to(device)
     Cij = None #torch.zeros(*Aij.shape[:-1], Bij.shape[-1]).to(device)
     mod = rank % 4
-    beginning_time = time.perf_counter()
+    
     if mod == 0: 
         if len(Aij.shape) > 2:
-            bufferAB = torch.zeros(Aij.shape[0], Aij.shape[-1], Bij.shape[-1]).to(Aij.dtype)
-            #bufferAB = get_preallocated_buffer((Aij.shape[0], Aij.shape[-1], Bij.shape[-1]), Aij.dtype, device)
-            
-            bufferAB = bufferAB.to(device)
-            #message_to_buffer = time.perf_counter()
-
+            bufferAB = get_preallocated_buffer((Aij.shape[0], Aij.shape[-1], Bij.shape[-1]), Aij.dtype, device)
         else:
-            bufferAB = torch.zeros(Bij.shape[0], Aij.shape[-1], Bij.shape[-1]).to(Aij.dtype)
-            bufferAB = bufferAB.to(device)
-        
+            bufferAB = get_preallocated_buffer(Bij.shape[0], Aij.shape[-1], Bij.shape[-1]).to(Aij.dtype)
+                    
 
         # Rank 0 send A, B to 1 and 2. Receives A, B from 1 and 2.
         send_A_1  = dist.P2POp(dist.isend, Aij, peer=rank+1)
@@ -678,9 +674,9 @@ def ATB_custom_precompute(Aij, Bij, rank, n_gpus_per_node, device):
         reqs1 = dist.batch_isend_irecv([recv_AB_2])
 
     elif mod == 1:
-        bufferA0 = torch.zeros(Aij.shape).to(Aij.dtype).to(device)
-        bufferA2 = torch.zeros(Aij.shape).to(Aij.dtype).to(device)
-        bufferB3 = torch.zeros(Bij.shape).to(Bij.dtype).to(device)
+        bufferA0 = get_preallocated_buffer((Aij.shape), Aij.dtype, device)
+        bufferA2 = get_preallocated_buffer((Aij.shape), Aij.dtype, device)
+        bufferB3 = get_preallocated_buffer((Bij.shape), Bij.dtype, device)
 
         
         send_A_2  = dist.P2POp(dist.isend, Aij, peer=rank+1)
@@ -689,14 +685,15 @@ def ATB_custom_precompute(Aij, Bij, rank, n_gpus_per_node, device):
         recv_A_2 = dist.P2POp(dist.irecv, bufferA2, peer=rank+1)
         recv_B_3 = dist.P2POp(dist.irecv, bufferB3, peer=rank+2)
         reqs0 = dist.batch_isend_irecv([send_A_2, recv_A_0, recv_A_2, recv_B_3])
+    
         AB = torch.matmul(Aij.mT, Bij)
         send_AB_3 = dist.P2POp(dist.isend, AB, peer=rank+2)
         reqs1 = dist.batch_isend_irecv([send_AB_3])
 
     elif mod == 2:
-        bufferA1 = torch.zeros(Aij.shape).to(Aij.dtype).to(device)
-        bufferA3 = torch.zeros(Aij.shape).to(Aij.dtype).to(device)
-        bufferB0 = torch.zeros(Bij.shape).to(Bij.dtype).to(device)
+        bufferA1 = get_preallocated_buffer((Aij.shape), Aij.dtype, device)
+        bufferA3 = get_preallocated_buffer((Aij.shape), Aij.dtype, device)
+        bufferB0 = get_preallocated_buffer((Bij.shape), Bij.dtype, device)
         
         send_A_1  = dist.P2POp(dist.isend, Aij, peer=rank-1)
         
@@ -709,9 +706,9 @@ def ATB_custom_precompute(Aij, Bij, rank, n_gpus_per_node, device):
         reqs1 = dist.batch_isend_irecv([send_AB_0])
     else:
         if len(Aij.shape) > 2:
-            bufferAB = torch.zeros(Aij.shape[0], Aij.shape[-1], Bij.shape[-1]).to(Aij.dtype).to(device)
+            bufferAB = get_preallocated_buffer((Aij.shape[0], Aij.shape[-1], Bij.shape[-1]), Aij.dtype, device)
         else:
-            bufferAB = torch.zeros(Bij.shape[0], Aij.shape[-1], Bij.shape[-1]).to(Aij.dtype).to(device)
+            bufferAB = get_preallocated_buffer((Bij.shape[0], Aij.shape[-1], Bij.shape[-1]), Aij.dtype, device)
         
         send_A_2  = dist.P2POp(dist.isend, Aij, peer=rank-1)
         send_B_1  = dist.P2POp(dist.isend, Bij, peer=rank-2)
@@ -720,15 +717,12 @@ def ATB_custom_precompute(Aij, Bij, rank, n_gpus_per_node, device):
         reqs0 = dist.batch_isend_irecv([send_A_2, send_B_1])
         Cij = torch.matmul(Aij.mT, Bij)
         reqs1 = dist.batch_isend_irecv([recv_AB_1])
-    wait_start = time.perf_counter()
-                
+
     for req in reqs0:
         req.wait()
     for req in reqs1:
         req.wait()
-    wait_end = time.perf_counter()
-
-    
+   
             
     if mod in [0, 3]:
         Cij = Cij + bufferAB
@@ -736,12 +730,13 @@ def ATB_custom_precompute(Aij, Bij, rank, n_gpus_per_node, device):
         Cij = torch.matmul(bufferA0.mT, Bij) + torch.matmul(bufferA2.mT, bufferB3) 
     else:
         Cij = torch.matmul(bufferA3.mT, Bij) + torch.matmul(bufferA1.mT, bufferB0) 
-    mat_end = time.perf_counter()
+    
 
-    if rank == 0:
-        print(f'Rank {rank}: {round(message_to_buffer - beginning_time, 4)} s to allocate buffer; {round(wait_end - wait_start, 6)} s to receive;  {round(mat_end - wait_end, 6)} s multiply {round(mat_end - beginning_time, 5)} s total')
-    elif rank == 1:
-        print(f'Rank {rank}, {round(mat_end - beginning_time, 5)} s total')
+    #if rank == 0:
+    #    #print(f'Rank {rank}: {round(message_to_buffer - beginning_time, 4)} s to allocate buffer; {round(wait_end - wait_start, 6)} s to receive;  {round(mat_end - wait_end, 6)} s multiply {round(mat_end - beginning_time, 5)} s total')
+    #    print(f'Rank {rank}, {round(mat_end - beginning_time, 5)} s total')
+    #elif rank == 1:
+    #    print(f'Rank {rank}, {round(mat_end - beginning_time, 5)} s total')
     
     return Cij
 
@@ -754,92 +749,120 @@ def ATB_custom_isend(Aij, Bij, rank, n_gpus_per_node, device):
     mod = rank % 4
     
     if mod == 0: 
-        bufferA2 = torch.zeros(Aij.shape).to(torch.float32).to(device)
-        bufferB2 = torch.zeros(Bij.shape).to(torch.float32).to(device)
+        if len(Aij.shape) > 2:
+            bufferAB = get_preallocated_buffer((Aij.shape[0], Aij.shape[-1], Bij.shape[-1]), Aij.dtype, device)
+        else:
+            bufferAB = torch.zeros(Bij.shape[0], Aij.shape[-1], Bij.shape[-1]).to(Aij.dtype)
+            bufferAB = bufferAB.to(device)
         # Rank 0 send A, B to 1 and 2. Receives A, B from 1 and 2.
-        send_A_1 = dist.P2POp(dist.isend, Aij, peer=rank+1)
-        send_B_2 = dist.P2POp(dist.isend, Bij, peer=rank+2)
-        recv_A_2 = dist.P2POp(dist.irecv, bufferA2, peer=rank+2)
-        recv_B_2 = dist.P2POp(dist.irecv, bufferB2, peer=rank+2)
+        send_A_1  = dist.P2POp(dist.isend, Aij, peer=rank+1)
+        send_B_2  = dist.P2POp(dist.isend, Bij, peer=rank+2)
+        recv_AB_2 = dist.P2POp(dist.irecv, bufferAB, peer=rank+2)
+        
+        reqs0 = dist.batch_isend_irecv([send_A_1, send_B_2])
 
-        reqs0 = dist.batch_isend_irecv([send_A_1])
         Cij = torch.matmul(Aij.mT, Bij)
         for req in reqs0:
             req.wait()
-
-        reqs1 = dist.batch_isend_irecv([send_B_2, recv_A_2, recv_B_2])
+            
+        reqs1 = dist.batch_isend_irecv([recv_AB_2])
+        print(f'Here rank 0')
+        
         for req in reqs1:
             req.wait()
-
     elif mod == 1:
-        bufferA0 = torch.zeros(Aij.shape).to(torch.float32).to(device)
-        bufferA2 = torch.zeros(Aij.shape).to(torch.float32).to(device)
-        bufferB3 = torch.zeros(Bij.shape).to(torch.float32).to(device)
+        bufferA0 = get_preallocated_buffer((Aij.shape), Aij.dtype, device)
+        bufferA2 = get_preallocated_buffer((Aij.shape), Aij.dtype, device)
+        bufferB3 = get_preallocated_buffer((Bij.shape), Bij.dtype, device)
 
         send_A_2 = dist.P2POp(dist.isend, Aij, peer=rank+1)
-        send_A_3 = dist.P2POp(dist.isend, Aij, peer=rank+2)
-        send_B_3 = dist.P2POp(dist.isend, Bij, peer=rank+2)
-
+        
         recv_A_0 = dist.P2POp(dist.irecv, bufferA0, peer=rank-1)
         recv_A_2 = dist.P2POp(dist.irecv, bufferA2, peer=rank+1)
         recv_B_3 = dist.P2POp(dist.irecv, bufferB3, peer=rank+2)
 
         reqs0 = dist.batch_isend_irecv([recv_A_0])
+        # Do local computation
+        AB = torch.matmul(Aij.mT, Bij)
+        send_AB_3 = dist.P2POp(dist.isend, AB, peer=rank+2)
+        print(f'Here rank 1')
         for req in reqs0:
             req.wait()
+        reqs1 = dist.batch_isend_irecv([send_AB_3])
+        
         Cij = torch.matmul(bufferA0.mT, Bij)  
-        reqs1 = dist.batch_isend_irecv([send_A_2, send_A_3, send_B_3, recv_A_2, recv_B_3])
+        
+        reqs2 = dist.batch_isend_irecv([send_A_2, recv_A_2, recv_B_3])
+        for req in reqs2:
+            req.wait()
         for req in reqs1:
             req.wait()
+
     elif mod == 2:
-        bufferA1 = torch.zeros(Aij.shape).to(torch.float32).to(device)
-        bufferA3 = torch.zeros(Aij.shape).to(torch.float32).to(device)
-        bufferB0 = torch.zeros(Bij.shape).to(torch.float32).to(device)
+        bufferA1 = get_preallocated_buffer((Aij.shape), Aij.dtype, device)
+        bufferA3 = get_preallocated_buffer((Aij.shape), Aij.dtype, device)
+        bufferB0 = get_preallocated_buffer((Bij.shape), Bij.dtype, device)
         
-        send_A_0 = dist.P2POp(dist.isend, Aij, peer=rank-2)
+        #send_A_0 = dist.P2POp(dist.isend, Aij, peer=rank-2)
         send_A_1 = dist.P2POp(dist.isend, Aij, peer=rank-1)
-        send_B_0 = dist.P2POp(dist.isend, Bij, peer=rank-2)
+        #send_B_0 = dist.P2POp(dist.isend, Bij, peer=rank-2)
 
         recv_A_1 = dist.P2POp(dist.irecv, bufferA1, peer=rank-1)
         recv_A_3 = dist.P2POp(dist.irecv, bufferA3, peer=rank+1)
         recv_B_0 = dist.P2POp(dist.irecv, bufferB0, peer=rank-2)
         
         reqs0 = dist.batch_isend_irecv([recv_A_3])
+        AB = torch.matmul(Aij.mT, Bij)
+        send_AB_0 = dist.P2POp(dist.isend, AB, peer=rank-2)
 
         for req in reqs0:
             req.wait()
+
+        reqs1 = dist.batch_isend_irecv([send_AB_0])
+        print(f'here rank 2')
+
+        for req in reqs0:
+            req.wait()
+
         Cij = torch.matmul(bufferA3.mT, Bij) 
 
-        reqs1 = dist.batch_isend_irecv([send_A_0, send_A_1, send_B_0, recv_A_1, recv_B_0])
+        reqs2 = dist.batch_isend_irecv([send_A_1, recv_A_1, recv_B_0])
         for req in reqs1:
             req.wait()
+        for req in reqs2:
+            req.wait()
     else:
-        bufferA1 = torch.zeros(Aij.shape).to(torch.float32).to(device)
-        bufferB1 = torch.zeros(Bij.shape).to(torch.float32).to(device)
+        if len(Aij.shape) > 2:
+            bufferAB = get_preallocated_buffer((Aij.shape[0], Aij.shape[-1], Bij.shape[-1]), Aij.dtype, device)
+        else:
+            bufferAB = get_preallocated_buffer((Bij.shape[0], Aij.shape[-1], Bij.shape[-1]), Aij.dtype, device)
         
-        send_A_2 = dist.P2POp(dist.isend, Aij, peer=rank-1)
-        send_B_1 = dist.P2POp(dist.isend, Bij, peer=rank-2)
-        recv_A_1 = dist.P2POp(dist.irecv, bufferA1, peer=rank-2)
-        recv_B_1 = dist.P2POp(dist.irecv, bufferB1, peer=rank-2)
+        send_A_2  = dist.P2POp(dist.isend, Aij, peer=rank-1)
+        send_B_1  = dist.P2POp(dist.isend, Bij, peer=rank-2)
+        recv_AB_1 = dist.P2POp(dist.irecv, bufferAB, peer=rank-2)
 
-        reqs0 = dist.batch_isend_irecv([send_A_2])
-        
+        reqs0 = dist.batch_isend_irecv([send_A_2, send_B_1])
+
         Cij = torch.matmul(Aij.mT, Bij)
+
         for req in reqs0:
             req.wait()
-        reqs1 = dist.batch_isend_irecv([send_B_1, recv_A_1, recv_B_1])
+        print(f'here rank 3')
+        
+        reqs1 = dist.batch_isend_irecv([recv_AB_1])
+
         for req in reqs1:
             req.wait()
     
     if mod == 0:
-        Cij = Cij + torch.matmul(bufferA2.mT, bufferB2)    
+        Cij = Cij + bufferAB #torch.matmul(bufferA2.mT, bufferB2)    
     elif mod == 1:
         Cij = Cij + torch.matmul(bufferA2.mT, bufferB3) 
     elif mod == 2:
         Cij = Cij + torch.matmul(bufferA1.mT, bufferB0) 
     else:
-        Cij = Cij + torch.matmul(bufferA1.mT, bufferB1)             
-    
+        Cij = Cij + bufferAB
+    print(f'Rank {rank} made it')
     return Cij
 
 def ATB(Aij, Bij, rank, n_gpus_per_node, device):

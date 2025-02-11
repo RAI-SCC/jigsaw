@@ -1,4 +1,3 @@
-from mpi4py import MPI
 import numpy as np
 from Dataset import ERA5Dataset, ERA5DatasetDistributed, worker_init_fn
 import torch
@@ -14,6 +13,53 @@ sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/')
 sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/networks')
 from networks.PanguLite2DAttentionPosEmbed import PanguModel as TwoDimPosEmbLite
 import random
+import time
+
+def get_local_groups(rank):
+    # Rank 4, 6 should be in group together
+    gpus_per_node = 4 # horeka- specific
+    node_rank     = rank // gpus_per_node # if rank between 0 and 3, node_rank = 0 
+                                          # if rank between 4 and 7, node_rank = 1
+    n_groups = torch.distributed.get_world_size() // gpus_per_node
+    local_groups = []
+
+    for node in range(n_groups):
+        base = node * gpus_per_node
+        local_groups.append(
+            torch.distributed.new_group(ranks=[base, base + 2])
+        )
+        local_groups.append(
+            torch.distributed.new_group(ranks=[base + 1, base + 3])
+        )
+
+    return local_groups
+
+def get_global_groups():
+    # Ranks 0, 4, ... should be in a group
+    gpus_per_node = 4
+    n_nodes = torch.distributed.get_world_size() // gpus_per_node
+    # 
+    global_group_list = []
+    global_groups     = []
+
+    for node in np.arange(gpus_per_node):
+        global_group_list.append(((np.arange(n_nodes)*gpus_per_node+node)).tolist())
+               
+    for global_group in global_group_list:
+        global_groups.append(torch.distributed.new_group(ranks=global_group))
+    
+    return global_groups
+
+def get_local_group_per_node(rank):
+    # [0, 1, 2, 3]
+    # Rank 4, 6 should be in group together
+    gpus_per_node = 4 # horeka- specific
+    node_rank     = rank // gpus_per_node # if rank between 0 and 3, node_rank = 0 
+                                    # if rank between 4 and 7, node_rank = 1
+    starting_group_index = node_rank
+    local_group_per_node = torch.distributed.new_group(ranks=[starting_group_index, starting_group_index+1, starting_group_index+2, starting_group_index+3])
+    return local_group_per_node
+
 
 def set_all_seeds(seed, rank=None):
     if rank is None:
@@ -30,14 +76,13 @@ def set_all_seeds_local_rank(seed, rank=None):
     torch.cuda.manual_seed_all(seed + rank//4)
 
 
-def init_mpi():
-    comm = MPI.COMM_WORLD
-
-    rank = comm.Get_rank() # rank is from 0 to 3
-    world_size = comm.Get_size()
-    i = int(rank // np.sqrt(world_size)) # 0/2
-    j = int(rank % np.sqrt(world_size))
-    return comm, i, j
+#def init_mpi():
+#    comm = MPI.COMM_WORLD
+#
+#    rank = comm.Get_rank() # rank is from 0 to 3
+#    world_size = comm.Get_size()
+#    
+#    return comm, rank
 
 def get_sender(iteration, rank):
     # rank 0, 2 receive 0; Rank 1, 3 receive from 1 
@@ -46,21 +91,50 @@ def get_sender(iteration, rank):
     
     return sender 
 
-def send_data_twoway(data, iteration, buffer, rank, device, groups, alt_sender=True):
-    sender = get_sender(iteration, rank) if alt_sender else rank % 2   
-    data_list = [d.to(torch.float32).to(device) for d in data] if rank == sender else None
-    torch.distributed.scatter(buffer, data_list, src=sender, group=groups[rank % 2])
-    data = buffer.permute(0, 2, 3, 1)
+#def get_comm_groups()
 
-    return data
+
+def send_data_twoway(data, iteration, buffer, rank, device, groups, alt_sender=True):
+    
+    #print(f'Rank {rank} in send_data_twoway') # TODO check send_data_twoway to ensure diff ranks get different data
+    node_rank = rank // 4
+    sender = get_sender(iteration, rank) if alt_sender else rank % 2 + node_rank * 4
+    data_list = [d.to(device, non_blocking=True) for d in data] if rank == sender else None
+    
+    handle = torch.distributed.scatter(buffer, data_list, src=sender, group=groups[rank % 2 + node_rank * 2], async_op=True)
+    
+    return handle, buffer
+
+def send_target_data_twoway(data, iteration, buffer, rank, device, groups, alt_sender=True):
+    
+    node_rank = rank // 4
+    sender = get_sender(iteration, rank) if alt_sender else rank % 2 + node_rank * 4
+    #data_list = [d.to(device, non_blocking=True) for d in data] if rank == sender else None
+    # shape of data: [n_batch, 720, :720, 36]
+
+    #handle = torch.distributed.scatter(buffer, data_list, src=sender, group=groups[rank % 2 + node_rank * 2], async_op=True)
+
+    if rank in [0,2]:
+        print(data[0].shape)
+        results = torch.nn.parallel.comm.scatter(
+            data[0],
+            devices=['cuda:0', 'cuda:2']
+        )
+    else:
+        results = torch.nn.parallel.comm.scatter(
+            data[0],
+            devices=['cuda:1', 'cuda:3']
+        )
+    #print(f'Rank {rank} {results[1].shape}')
+    return results[0]
 
 def send_data_fourway(data, buffer, rank, device):
     sender = 0
-    input_data_list = [d.to(torch.float32).to(device) for d in data] if rank == sender else None
+    input_data_list = [d.to(device) for d in data] if rank == sender else None
     
     torch.distributed.scatter(buffer, input_data_list, src=sender)
     
-    input_data = buffer.permute(0, 2, 3, 1)
+    input_data = buffer
     return input_data
 
 class AlternatingRandomSampler(Sampler):
@@ -88,7 +162,8 @@ class AlternatingRandomSampler(Sampler):
     def __len__(self):
         # Approximately half the dataset goes to  each rank pair
         return (self.dataset_size + 1) // 2
-    
+
+
 def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distributed=False, batch_size=1, normalize=True, rank=None):
     if config_dict['model']['model_parallel']:
 
@@ -101,9 +176,18 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
             dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, batch_counter=None)
     else:
         dataset = ERA5Dataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), forecast_length=config_dict['model']['latent_rollout'], normalize=normalize)
-    if subset_size != 0:
+    if subset_size != 0: 
         subset_indices = torch.randperm(len(dataset))[:subset_size]
-        dataset = Subset(dataset, subset_indices)
+        if torch.distributed.get_world_size() > 4: 
+            # n_partitions: if 4 GPUs, 1. If 8 GPUs, 2
+            n_partitions = torch.distributed.get_world_size() // 4  # TODO: should be a ceiling operation for completeness
+            size_partition = len(subset_indices) // n_partitions
+            node_rank = rank // 4 # if 0-3, node_rank=0. If 4-7, node_rank=1
+            subset_indices = subset_indices[node_rank*size_partition:(node_rank+1)*size_partition]
+            dataset = Subset(dataset, subset_indices)
+            # start index
+        else:
+            dataset = Subset(dataset, subset_indices)
     sampler    = DistributedSampler(dataset, shuffle=False) if distributed else None
     #if config_dict['model']['model_parallel']:
     #    sampler = AlternatingRandomSampler(dataset_size=len(dataset), rank=rank, batch_size=batch_size)
@@ -116,7 +200,8 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
                                 pin_memory=torch.cuda.is_available(), 
                                 prefetch_factor=config_dict['data']['prefetch_factor'], 
                                 num_workers=config_dict['data']['num_workers']
-                                )
+                                ) 
+        return dataloader
     if config_dict['model']['model_parallel']:
         if config_dict['model_parallel']['alt_sender']:
             shared_batch_counter = Value('i', 0)  # Shared counter for all workers in the rank
@@ -130,9 +215,10 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
                                     worker_init_fn = lambda worker_id: worker_init_fn(worker_id, shared_batch_counter)
                                     )
         else:
+            #num_workers = config_dict['data']['num_workers'] if rank == 0 else 1
             dataloader = DataLoader(dataset, 
                                     batch_size=batch_size, 
-                                    shuffle=(sampler is None), 
+                                    shuffle=False, 
                                     sampler=sampler, 
                                     drop_last=True, 
                                     pin_memory=torch.cuda.is_available(), 
@@ -140,7 +226,16 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
                                     num_workers=config_dict['data']['num_workers']
                                     )
     else:
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=(sampler is None), sampler=sampler, drop_last=True, pin_memory=torch.cuda.is_available(), prefetch_factor=config_dict['data']['prefetch_factor'], num_workers=config_dict['data']['num_workers'])
+        rank = torch.distributed.get_rank()
+        pin_memory = True if rank == 0 else False
+        dataloader = DataLoader(dataset, 
+                                batch_size=batch_size, 
+                                shuffle=(sampler is None), 
+                                sampler=sampler, 
+                                drop_last=True, 
+                                pin_memory=pin_memory,#torch.cuda.is_available(), 
+                                prefetch_factor=config_dict['data']['prefetch_factor'], 
+                                num_workers=config_dict['data']['num_workers'])
 
     return dataloader
 
@@ -315,3 +410,4 @@ def getPositionEncoding(seq_len, d, n=10000):
             P[k, 2*i+1] = np.cos(k/denominator)
     P = torch.tensor(P).to(torch.float32)
     return P
+
