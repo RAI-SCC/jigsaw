@@ -23,7 +23,7 @@ def training_loop(config_dict, device, localid, rank):
     model_parallel = config_dict['model']['model_parallel']
     parallelism = config_dict['model_parallel']['parallelism'] if model_parallel else 1
     
-    utils.set_all_seeds(1, rank=(rank%4)) if model_parallel else utils.set_all_seeds(1, rank=None) # ensure ranks 0, 4, ...8... have the same initial parameters
+    utils.set_all_seeds(1, rank=(rank%4)) if parallelism > 1 else utils.set_all_seeds(1, rank=None) # ensure ranks 0, 4, ...8... have the same initial parameters
     
     train_subset, valid_subset = config_dict['data']['train_subset'], config_dict['data']['valid_subset']
     train_subset = None if train_subset < 0 else train_subset
@@ -37,29 +37,31 @@ def training_loop(config_dict, device, localid, rank):
     variable_weights = torch.concat([surface_weights, pressure_weights]).view(1, 69).to(device)
     area_weights = torch.tensor(eval.calc_weight(xlat)).to(device)
 
-    if config_dict['model']['model_parallel'] and parallelism == 4:
+    if parallelism == 1:
+        local_groups = None
+        node_groups = None
+    elif parallelism == 2:
+        local_group = utils.get_local_groups_twoway(rank)
+        local_groups = None
+        node_groups = None
+        global_groups = utils.get_ddp_groups()
+        variable_weights = torch.nn.functional.pad(variable_weights, (0,3))
+        variable_weights = variable_weights[0,:36] if rank in [0, 2] else variable_weights[0,36:]
+        node_rank     = rank // parallelism
+    elif  parallelism == 4:
         local_groups  = utils.get_local_groups_fourway(rank) # groups are [[0, 2], [1, 3], [4, 6], [5, 7]]
                                                          # group [0, 2]: index 0. group [1, 3]: index 1. group [4, 6]: index 3. 
-                                                         # index = rank % 2 + node_rank
-        
-        global_groups = utils.get_global_groups()
+                                                         # index = rank % 2 + node_rank    
+        global_groups = utils.get_ddp_groups()
         node_groups   = utils.get_local_group_per_node(rank)
-        node_rank     = rank // 4  
+        node_rank     = rank // parallelism  
 #        layer_norm_indices = [i for i, k in enumerate(mlp_ddp.state_dict().keys()) if 'layer_norm' in k]
         # weights
         variable_weights = torch.nn.functional.pad(variable_weights, (0,3))
         variable_weights = variable_weights[0,:36] if rank in [0, 2] else variable_weights[0,36:]
-    elif config_dict['model']['model_parallel'] and parallelism == 2:
-        local_group = utils.get_local_groups_twoway(rank)
-        global_groups = utils.get_global_groups()
-        variable_weights = torch.nn.functional.pad(variable_weights, (0,3))
-        variable_weights = variable_weights[0,:36] if rank in [0, 2] else variable_weights[0,36:]
-    else:
-        local_groups = None
-        node_groups = None
 
     # Define model
-    if not model_parallel:
+    if parallelism == 1:
         mlp = Model.ModelSequential(config_dict, device, rank).to(torch.float32).to(device)
 
         mlp_ddp = DDP(
@@ -67,11 +69,11 @@ def training_loop(config_dict, device, localid, rank):
             device_ids=[localid],
             output_device=localid
         )
+    elif parallelism == 2:
+        mlp = Model.Model_twoway(config_dict, device, comm, rank, local_group).to(device)
     elif parallelism == 4:
         mlp = Model.Model(config_dict, device, comm, rank).to(device)
-    else:
-        mlp = Model.Model_twoway(config_dict, device, comm, rank, local_group).to(device)
-
+    
     lr = config_dict['training']['lr']
     save_path = config_dict['training']['save_dir']
     
@@ -83,13 +85,13 @@ def training_loop(config_dict, device, localid, rank):
             ], 
             lr=lr, weight_decay=3e-6
         )
-    elif not model_parallel:
+    elif parallelism == 1:
         optimizer = optim.Adam(mlp_ddp.parameters(), lr=lr, weight_decay=3e-6)
     else:
         mlp_ddp = mlp
         optimizer = optim.Adam(mlp_ddp.parameters(), lr=lr, weight_decay=3e-6)
 
-    if config_dict['model']['model_parallel'] and parallelism == 4:
+    if parallelism == 4: # TODO set proper seeds for model parallelism
         utils.set_all_seeds_local_rank(1, rank=rank) # Set all GPUs to the same seed so that they read the same data           
     else:
         utils.set_all_seeds(1, rank=rank) # Set all GPUs to the same seed so that they read the same data           
@@ -151,15 +153,13 @@ def training_loop(config_dict, device, localid, rank):
     torch.backends.cuda.matmul.allow_tf32 = True
 
     
-    
     handles = []
     
     buffer  = torch.zeros(config_dict['training']['train_batch'], xlat, xlon//2, 36, device=device)
     buffer2 = torch.zeros(config_dict['training']['train_batch'], xlat, xlon//2, 36, device=device)
     
     for epoch in range(epoch, 200):
-        torch.backends.cuda.matmul.allow_tf32 = True
-        if not config_dict['model']['model_parallel']:
+        if parallelism == 1:
             train_dataloader.sampler.set_epoch(epoch)
         
         epoch_average_loss = 0
@@ -184,66 +184,35 @@ def training_loop(config_dict, device, localid, rank):
                 forecast_leadtime = forecast_leadtime.item() 
 
             section_start = time.perf_counter()
-            if config_dict['model']['model_parallel']:
-                # Defining senders and receivers # [0, 1] send, or [2, 3] send
-                if config_dict['model_parallel']['split'] == 2 and parallelism == 4:
-                    buffer.zero_()                    
-                    input_data_handle, buffer = utils.send_data_twoway(data[0], i, buffer, rank, device, local_groups)
-                elif config_dict['model_parallel']['split'] == 4 and parallelism == 4:
-                    input_data = data[0].to(device)
-                elif config_dict['model_parallel']['split'] == 1 and parallelism == 4:
-                    buffer.zero_()
-                    input_data = utils.send_data_fourway(data[0], buffer, rank, device)
-                elif parallelism == 2:
-                    input_data = data[0].to(device)
-                if config_dict['model_parallel']['split'] == 2 and parallelism == 4:
-                    buffer2.zero_()
-                    target_data_handle, buffer2 = utils.send_data_twoway(data[1][0], i, buffer2, rank, device, local_groups)
-                elif parallelism == 2:
-                    target_data = data[1][0].to(device, non_blocking=True)
-                
-                for h in handles:
-                    h.wait()
-                if parallelism == 4:
-                    input_data_handle.wait()
-                    input_data = buffer
-                
-                optimizer.step()
-                optimizer.zero_grad()
-            else:
+            if parallelism == 1:
                 optimizer.zero_grad() # zero gradient
                 input_data  = data[0].to(device)
-                pid = os.getpid()
-                cpu = psutil.Process(pid).cpu_num()
-                
-            section_end = time.perf_counter()
-            output = mlp_ddp(input_data, rollout_=forecast_leadtime+1) # output shape [n_batch, 720, 720, 36]
-  
+            else:
+                # Loading data: Always with async ops and handles
+                input_data_or_handle,  async_input = utils.load_and_push_data(config_dict, data[0], parallelism, buffer, rank, device, local_groups)
+                target_data_or_handle, async_target = utils.load_and_push_data(config_dict, data[1][0], parallelism, buffer2, rank, device, local_groups)
 
+                # DDP and layer norm handles
+                for h in handles:
+                    h.wait()
+                
+                if async_input:
+                    input_data_or_handle.wait()
+                    input_data = buffer
+                else:
+                    input_data = input_data_or_handle
+                
+                # Optimizer step and zero grad 
+                optimizer.step()
+                optimizer.zero_grad()
+                            
+            output = mlp_ddp(input_data, rollout_=forecast_leadtime+1) # output shape [n_batch, 720, 720, 36]
             
             # output: n_batch, 720, 1440, 72//4
             # target data shape: (n_batch, 69, 720, 1440)        
             # target data: [n_batch, 720, 1440, 69]
             
-            if config_dict['model']['model_parallel']:
-                # load data on sender ranks
-                if config_dict['model_parallel']['split'] == 4:
-                    target_data = data[1][forecast_leadtime].to(device)
-                elif config_dict['model_parallel']['split'] == 1:
-                    buffer2.zero_()
-                    target_data = utils.send_data_fourway(data[1], buffer2, rank, device)
-                elif config_dict['model_parallel']['split'] == 2 and parallelism == 4:
-                    target_data_handle.wait()
-                    target_data = buffer2
-                if parallelism == 4:
-                    output = output.reshape(output.shape[0], xlat, xlon//2, 36)                
-                
-                
-                if config_dict['training']['area_weighted']:
-                    loss = loss_fn(torch.einsum('bxyz, x->bxyz', output, area_weights)*variable_weights, torch.einsum('bxyz, x->bxyz', target_data, area_weights)*variable_weights) 
-                else:
-                    loss = loss_fn(output*variable_weights, target_data*variable_weights)
-            else:
+            if parallelism == 1:
                 target_data = data[1][forecast_leadtime].to(device)
             
                 target_data = target_data.permute(0, 2, 3, 1)
@@ -251,23 +220,34 @@ def training_loop(config_dict, device, localid, rank):
                     loss = loss_fn(torch.einsum('bxyz, x->bxyz', output, area_weights)*variable_weights, torch.einsum('bxyz, x->bxyz', target_data, area_weights)*variable_weights)         
                 else:
                     loss = loss_fn(output*variable_weights, target_data*variable_weights)         
+            else:
+                if async_target:
+                    target_data_or_handle.wait()
+                    target_data = buffer2
+                else:
+                    target_data = target_data_or_handle
+
+                # Reshape output
+                output = (
+                            output.reshape(output.shape[0], xlat, xlon//2, 36) 
+                            if parallelism == 4 
+                            else output.reshape(output.shape[0], xlat, xlon, 36)
+                         )                
+                
+                
+                if config_dict['training']['area_weighted']:
+                    loss = loss_fn(torch.einsum('bxyz, x->bxyz', output, area_weights)*variable_weights, torch.einsum('bxyz, x->bxyz', target_data, area_weights)*variable_weights) 
+                else:
+                    loss = loss_fn(output*variable_weights, target_data*variable_weights)
+
 
             #backward_start = time.perf_counter()
             loss.backward()
 
-
             torch.nn.utils.clip_grad_norm_(mlp_ddp.parameters(), config_dict['training']['grad_clip'])
-            handles = []
-            if config_dict['model']['model_parallel'] and parallelism == 4:
-                # Now manually all-reduce each parameter's grad
-                for name, param in mlp_ddp.named_parameters():
-                    if param.grad is not None:
-                        if 'layer_norm' in name:
-                            h = torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.AVG, group=local_groups[rank % 2 + node_rank*2], async_op=True)
-                            handles.append(h)
-                        if world_size > 4:
-                            h = torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.AVG, group=global_groups[rank % 4], async_op=True) # reduce over ranks
-                            handles.append(h)
+
+            if parallelism > 1:
+                handles = utils.reduce_ddp_layernorms(parallelism, mlp_ddp, local_groups, global_groups, rank, node_rank)
 
                 #for param_group in optimizer.param_groups:
                 #    for index, param in enumerate(param_group['params']):
@@ -293,12 +273,10 @@ def training_loop(config_dict, device, localid, rank):
                 # 
               #  backward_end = time.perf_counter()
                 #print(f'Rank {rank}: Section {round(section_end - section_start,3)} ; Forward {round(forward_end - forward_start,3)}; Backward {round(backward_end - backward_start,3)}')                
-            else:
+            elif parallelism == 1:
+                loss = loss / world_size 
                 torch.distributed.all_reduce(loss)    
                 optimizer.step()
-            #optimizer.step()
-            
-                loss = loss / world_size 
             
             if rank == 0:
                 print(f"{rank}:  {epoch}, after Step {i}/{len(train_dataloader)}. rollout {forecast_leadtime} loss: {loss.detach()}")
@@ -311,11 +289,12 @@ def training_loop(config_dict, device, localid, rank):
             epoch_average_loss = epoch_average_loss / len(train_dataloader)
             print(f"Epoch {epoch} time [min]: {(end_time - start_time)/60.}, average loss {epoch_average_loss}")
         torch.cuda.synchronize()
+        val_loss = 1e7
         val_loss = eval.get_validation_mse(config_dict, mlp_ddp, valid_dataloader, device, rank, epoch, file_path=save_path, model_parallel=model_parallel, world_size=world_size, groups=local_groups, node_groups=node_groups)
     
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            if not model_parallel:
+            if parallelism == 1:
                 if rank == 0:
                     utils.save_model(mlp_ddp, optimizer, save_path, rank, epoch)
                 else:

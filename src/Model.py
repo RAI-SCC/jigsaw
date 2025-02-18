@@ -49,6 +49,21 @@ class Model(torch.nn.Module):
         
         self.activation = torch.nn.GELU()
         
+        if self.linear_residual:
+            self.params = torch.nn.ModuleDict({
+            'embedding': torch.nn.ModuleList([self.embedding]),
+            'recovery': torch.nn.ModuleList([self.recovery]),
+            'common': torch.nn.ModuleList([self.blocks, self.layer_norm, self.layer_norm2, self.layer_norm3, self.linearlayer])
+            }
+            )       
+        else:
+            self.params = torch.nn.ModuleDict({
+            'embedding': torch.nn.ModuleList([self.embedding]),
+            'recovery': torch.nn.ModuleList([self.recovery]),
+            'common': torch.nn.ModuleList([self.blocks, self.layer_norm])
+            }
+            )
+        
         
     def forward(self, x, rollout_=0):
         #print(f'I am rank {self.rank} and x has shape {x.shape}')
@@ -58,8 +73,6 @@ class Model(torch.nn.Module):
         
         # x res for each GPU: [n_batch, n_lat, n_lon, n_var//4]
         # x_shape [n_batch, n_var, 720, 1440]
-        
-        #x = x.to(self.device)
         
         x = self.embedding(x)
         # After embedding: x_shape [n_batch, n_patch_lat * n_patch_lon, embed_dim]
@@ -100,18 +113,19 @@ class Model_twoway(torch.nn.Module):
         self.device = device
         hidden_dimension = config_dict['model']['hidden_dim']        
         self.xlat, self.xlon = config_dict['data']['xlat'], config_dict['data']['xlon']
-
+        self.group = group # Local groups [0,1], [2,3]...
+        
         if config_dict['model']['patch_embed'] == 1:
             self.patch_size = config_dict['model']['patch_size']
             self.stride = config_dict['model']['stride']
             self.n_lat, self.n_lon = self.xlat, self.xlon//self.patch_size
             self.embedding = PatchEmbedding.Distributed1DPatchEmbedding_twoway(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension, comm, device, rank, xlat=self.xlat)
-        else:
-            self.patch_size = (config_dict['model']['patch_size'], config_dict['model']['patch_size'])
-            self.n_lat, self.n_lon = self.xlat//self.patch_size[0], self.xlon//self.patch_size[1]
-            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding_twoway(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension, comm, device, rank, xlat=self.xlat)
+        #else:
+        #    self.patch_size = (config_dict['model']['patch_size'], config_dict['model']['patch_size'])
+        #    self.n_lat, self.n_lon = self.xlat//self.patch_size[0], self.xlon//self.patch_size[1]
+            #self.embedding = PatchEmbedding.Distributed1DPatchEmbedding_twoway(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension, comm, device, rank, xlat=self.xlat, group=group)
         self.n_blocks = config_dict['model']['mixing_blocks']
-        self.blocks = torch.nn.ModuleList([MixerBlock_twoway(self.n_lat*self.n_lon, hidden_dimension, hidden_dimension, comm, device, rank, group) for i in range(self.n_blocks)])
+        self.blocks = torch.nn.ModuleList([MixerBlock_twoway(self.n_lat*self.n_lon, hidden_dimension, hidden_dimension, comm, device, rank) for i in range(self.n_blocks)])
         self.layer_norm = Linear.torch.nn.LayerNorm(hidden_dimension//2)#, self.rank, self.device)
         
         if self.rank == 3:
@@ -119,7 +133,7 @@ class Model_twoway(torch.nn.Module):
         else:
             self.num_variables = 72
             
-        self.layer_norm2 = torch.nn.LayerNorm(self.num_variables)    
+        self.layer_norm2 = torch.nn.LayerNorm(self.num_variables//2)    
         self.layer_norm3 = torch.nn.LayerNorm(36*2)    
         self.concat = config_dict['model']['concat']
         self.linear_residual = config_dict['model']['linear_residual']
@@ -131,11 +145,27 @@ class Model_twoway(torch.nn.Module):
                 self.recovery = PatchEmbedding.Distributed1DPatchRecovery_twoway(self.patch_size, hidden_dimension, self.num_variables, comm, device, rank, concat=True)
             else:
                 self.recovery = PatchEmbedding.Distributed1DPatchRecovery_twoway(self.patch_size, hidden_dimension, self.num_variables, comm, device, rank, concat=False)
-        else:
-            self.recovery = PatchEmbedding.DistributedPatchRecovery(self.patch_size, hidden_dimension, self.num_variables, comm, device, rank)
+        #else:
+#            self.recovery = PatchEmbedding.DistributedPatchRecovery(self.patch_size, hidden_dimension, self.num_variables, comm, device, rank)
         self.linearlayer = Linear.DistributedXWT_twoway(self.num_variables, self.num_variables*1, comm, device, rank)
         
         self.activation = torch.nn.GELU()
+
+        if self.linear_residual:
+            self.params = torch.nn.ModuleDict({
+            'embedding': torch.nn.ModuleList([self.embedding]),
+            'recovery': torch.nn.ModuleList([self.recovery]),
+            'common': torch.nn.ModuleList([self.blocks, self.layer_norm, self.layer_norm2, self.layer_norm3, self.linearlayer])
+            }
+            )       
+        else:
+            self.params = torch.nn.ModuleDict({
+            'embedding': torch.nn.ModuleList([self.embedding]),
+            'recovery': torch.nn.ModuleList([self.recovery]),
+            'common': torch.nn.ModuleList([self.blocks, self.layer_norm])
+            }
+            )
+        self.group = group
         
         
     def forward(self, x, rollout_=0):
@@ -168,6 +198,7 @@ class Model_twoway(torch.nn.Module):
         if self.add:
             return x + x_res
         if self.linear_residual:
+            x = self.layer_norm2(x)
             x = torch.concat((x, x_res), dim=2)
 
             ### After recovery: [n_batch, n_lat, n_lon, n_var]

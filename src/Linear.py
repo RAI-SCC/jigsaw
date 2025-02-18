@@ -74,7 +74,7 @@ class AB_fourway(torch.autograd.Function):
         ctx.world_size = 4
         assert(x.shape[-1] == W.shape[0])
         AB = summa_gpu.AB_custom(x, W, rank, ctx.world_size, device)
-        if b is None:
+        if b is not None:
             return AB.add(b)
         else:
             return AB
@@ -96,7 +96,7 @@ class DistributedXW_twoway(torch.nn.Module):
     """
     Torch Module to run distributed matrix-matrix multiplication.
     """
-    def __init__(self, in_dim, out_dim, comm, device, rank, n_channels=1, bias=False, stdev=None, init_method='linear'):
+    def __init__(self, in_dim, out_dim, comm, device, rank, n_channels=1, bias=True, stdev=None, init_method='linear'):
         """
         Initialize distributed matrix-matrix multiplication module.
 
@@ -118,6 +118,7 @@ class DistributedXW_twoway(torch.nn.Module):
         self.weights = torch.nn.parameter.Parameter(torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev))
         self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev)) if bias else None
         self.AB_twoway = AB_twoway().apply
+        
         self.device = device
         self.rank = rank
     
@@ -159,7 +160,7 @@ class AB_twoway(torch.autograd.Function):
         ctx.rank = rank
         
         if b is not None:
-            return summa_gpu.AB_twoway(x, W, device, rank)#.add(b) TODO: ADD BIASES
+            return summa_gpu.AB_twoway(x, W, device, rank).add(b)
         else:
             return summa_gpu.AB_twoway(x, W, device, rank)
     
@@ -171,9 +172,9 @@ class AB_twoway(torch.autograd.Function):
 
         grad_input  = summa_gpu.ABT_twoway(grad_output, weight, rank=rank, device=device)
         grad_weight = summa_gpu.ATB_twoway(input, grad_output, rank=rank, device=device)
-        #grad_bias   = grad_output.sum(dim=0)
+        grad_bias   = grad_output.sum(dim=0)
 
-        return grad_input, grad_weight, None, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None
          
 class DistributedXTW_fourway(torch.nn.Module):
     def __init__(self, in_dim, out_dim, comm, device, rank, n_channels=72, bias=True, init_method='linear'):
@@ -184,7 +185,7 @@ class DistributedXTW_fourway(torch.nn.Module):
             stdev = 1. / np.sqrt(in_dim*2)
             self.weights = torch.nn.parameter.Parameter(torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev))
         elif init_method == 'conv':
-            stdev = np.sqrt(6.0)/(8*8*n_channels)
+            stdev = np.sqrt(6.0)/(60*n_channels)
             self.weights = torch.nn.parameter.Parameter(torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev))
         if bias:
             self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev))
@@ -229,7 +230,7 @@ class ATB_four_way(torch.autograd.Function):
         return grad_input, grad_weight, grad_b, None, None, None
     
 class DistributedXTW_twoway(torch.nn.Module):
-    def __init__(self, in_dim, out_dim, comm, device, rank, n_channels=72, bias=False, init_method='linear'):
+    def __init__(self, in_dim, out_dim, comm, device, rank, n_channels=72, bias=True, init_method='linear'):
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
@@ -237,7 +238,7 @@ class DistributedXTW_twoway(torch.nn.Module):
             stdev = 1. / np.sqrt(in_dim*2)
             self.weights = torch.nn.parameter.Parameter(torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev))
         elif init_method == 'conv':
-            stdev = np.sqrt(6.0)/(8*8*n_channels)
+            stdev = np.sqrt(6.0)/(60*n_channels)
             self.weights = torch.nn.parameter.Parameter(torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev))
         if bias:
             self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev))
@@ -247,10 +248,12 @@ class DistributedXTW_twoway(torch.nn.Module):
         self.device = device
         self.rank = rank
         self.world_size = 2
+        
         self.ATB_twoway = ATB_twoway().apply
     
     def forward(self, x):
-        Cij = self.ATB_twoway(x, self.weights, self.bias, self.device, self.rank) 
+        
+        Cij = self.ATB_twoway(x, self.weights, self.bias, self.device, self.rank )
         
         return Cij
     
@@ -261,9 +264,10 @@ class ATB_twoway(torch.autograd.Function):
         ctx.device = device
         ctx.rank = rank
         
+        
         xw = summa_gpu.ATB_twoway(x, W, device, rank)    
 
-        return xw #.add(b) #TODO  bias 
+        return xw.add(b) 
     
     @staticmethod
     def backward(ctx, grad_output):
@@ -272,10 +276,11 @@ class ATB_twoway(torch.autograd.Function):
         input, weight = ctx.saved_tensors        
         device = ctx.device
         rank = ctx.rank 
+
         grad_input = summa_gpu.ABT_twoway(weight, grad_output, device, rank)
         grad_weight = summa_gpu.AB_twoway(input, grad_output, device, rank)
-        #grad_b = grad_output.sum(dim=0) 
-        return grad_input, grad_weight, None, None, None
+        grad_b = grad_output.sum(dim=0) 
+        return grad_input, grad_weight, grad_b, None, None
     
 class DistributedLayerNorm(torch.nn.Module):
     def __init__(self, dim, rank, device):
@@ -360,7 +365,7 @@ class ABT_fourway(torch.autograd.Function):
         return grad_input, grad_weight, grad_b, None, None, None
 
 class DistributedXWT_twoway(torch.nn.Module):
-    def __init__(self, in_dim, out_dim, comm, device, rank, n_channels=1, bias=False, stdev=None, init_method='linear'):
+    def __init__(self, in_dim, out_dim, comm, device, rank, n_channels=1, bias=True, stdev=None, init_method='linear'):
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
@@ -370,12 +375,11 @@ class DistributedXWT_twoway(torch.nn.Module):
         elif init_method == 'conv':
             stdev = np.sqrt(6.0)/(8*8*n_channels)
             self.weights = torch.nn.parameter.Parameter(torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev))
-#            self.weights = torch.nn.parameter.Parameter(torch.ones(out_dim, in_dim))
         if bias:
-            self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev))
+            self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim//2).uniform_(-stdev, stdev))
         else:
             self.bias = None
-        
+
         self.comm = comm
         self.device = device
         self.rank = rank
@@ -383,7 +387,6 @@ class DistributedXWT_twoway(torch.nn.Module):
         self.ABT = ABT_twoway().apply
     
     def forward(self, x):
-        
         Cij = self.ABT(x, self.weights, self.bias, self.device, self.rank)
         
         return Cij
@@ -395,10 +398,10 @@ class ABT_twoway(torch.autograd.Function):
         ctx.save_for_backward(x, W)
         ctx.device = device
         ctx.rank = rank
-
+        
         xw = summa_gpu.ABT_twoway(x, W, device, rank)
         if b is not None:
-            return xw#.add(b)
+            return xw.add(b)
         else:
             return xw
     
@@ -410,9 +413,9 @@ class ABT_twoway(torch.autograd.Function):
         
         grad_input  = summa_gpu.AB_twoway(grad_output, weight, device=device, rank=rank)
         grad_weight = summa_gpu.ATB_twoway(grad_output, input, device=device, rank=rank)
-        #grad_b = grad_output.sum(dim=0) 
+        grad_b = grad_output.sum(dim=0) 
 
-        return grad_input, grad_weight, None, None, None
+        return grad_input, grad_weight, grad_b, None, None, None
 
 class DistributedTranspose(torch.nn.Module):
     def __init__(self):
@@ -464,7 +467,7 @@ class DistributedXT_twoway(torch.autograd.Function):
 
 
 class DistributedMLP(torch.nn.Module):
-    def __init__(self, in_dim, hidden_dim, out_dim, comm, device, rank, parallelism=4, bias=True, group=None):
+    def __init__(self, in_dim, hidden_dim, out_dim, comm, device, rank, parallelism=4, bias=True):
         super().__init__()
         if parallelism == 4:
             self.linear1 = DistributedXWT_fourway(in_dim, hidden_dim, comm, device, rank, bias=bias, init_method='linear')
@@ -487,7 +490,7 @@ class DistributedMLP(torch.nn.Module):
         return x
 
 class DistributedXTWMLP(torch.nn.Module):
-    def __init__(self, in_dim, hidden_dim, out_dim, comm, device, rank, parallelism=4, bias=True, group=None):
+    def __init__(self, in_dim, hidden_dim, out_dim, comm, device, rank, parallelism=4, bias=True):
         super().__init__()
         if parallelism == 4:
             self.linear1 = DistributedXTW_fourway(in_dim, hidden_dim, comm, device, rank, bias=bias, init_method='linear')
@@ -549,15 +552,15 @@ class MixerBlock_twoway(torch.nn.Module):
     """
     Mixer Block
     """
-    def __init__(self, tokens_mlp_dim, channels_mlp_dim, hidden_dim, comm, device, rank, group):
+    def __init__(self, tokens_mlp_dim, channels_mlp_dim, hidden_dim, comm, device, rank):
         super(MixerBlock_twoway, self).__init__()
-        self.token_mixing = DistributedXTWMLP(tokens_mlp_dim, hidden_dim, tokens_mlp_dim, comm, device, rank, parallelism=2, group=group) 
-        self.channel_mixing = DistributedMLP(channels_mlp_dim, hidden_dim, channels_mlp_dim, comm, device, rank, parallelism=2, group=group)
+        self.token_mixing = DistributedXTWMLP(tokens_mlp_dim, hidden_dim, tokens_mlp_dim, comm, device, rank, parallelism=2)
+        self.channel_mixing = DistributedMLP(channels_mlp_dim, hidden_dim, channels_mlp_dim, comm, device, rank, parallelism=2)
         self.transpose = DistributedTranspose_twoway()
         self.rank = rank
         self.device = device
-        self.layer_norm1 = torch.nn.LayerNorm(1000) # TODO: HALF EMBEDDING DIM
-        self.layer_norm2 = torch.nn.LayerNorm(1000) # TODO: HALF EMBEDDING DIM
+        self.layer_norm1 = torch.nn.LayerNorm(hidden_dim//2) 
+        self.layer_norm2 = torch.nn.LayerNorm(hidden_dim//2) 
  
     def forward(self, x):
         

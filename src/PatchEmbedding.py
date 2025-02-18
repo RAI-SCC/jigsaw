@@ -669,7 +669,6 @@ class Distributed1DPatchEmbedding_twoway(torch.nn.Module):
     self.patch_size = patch_size
     self.var_in = var_in
     self.embed_dim = embed_dim
-    
     self.patch_embed = Linear.DistributedXWT_twoway(patch_size*var_in//2, embed_dim, comm, device, rank, n_channels=var_in, init_method='conv')
     
     self.device = device
@@ -702,7 +701,7 @@ class Distributed1DPatchEmbedding_twoway(torch.nn.Module):
 class Distributed1DPatchRecovery_twoway(torch.nn.Module):
   """2D Patch recovery option."""
 
-  def __init__(self, patch_size, embed_dim, out_channels, comm, device, rank, concat=False):
+  def __init__(self, patch_size, embed_dim, out_channels, comm, device, rank, concat=False, group=None):
     """
     1D Patch recovery.
     A transpose convolution operation is performed over the pressure and surface outputs to recover the forecasted fields.
@@ -717,6 +716,7 @@ class Distributed1DPatchRecovery_twoway(torch.nn.Module):
     """
     super().__init__()
     # Here we use two transposed convolutions to recover data
+    self.group = group
     self.concat = concat
     if self.concat:
       self.conv = Linear.DistributedXWT_twoway(embed_dim, patch_size*out_channels, comm, device, rank, n_channels=embed_dim, init_method='conv')
