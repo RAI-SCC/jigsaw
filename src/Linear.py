@@ -185,7 +185,7 @@ class DistributedXTW_fourway(torch.nn.Module):
             stdev = 1. / np.sqrt(in_dim*2)
             self.weights = torch.nn.parameter.Parameter(torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev))
         elif init_method == 'conv':
-            stdev = np.sqrt(6.0)/(60*n_channels)
+            stdev = np.sqrt(6.0)/(64*n_channels)
             self.weights = torch.nn.parameter.Parameter(torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev))
         if bias:
             self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev))

@@ -33,8 +33,8 @@ def training_loop(config_dict, device, localid, rank):
     best_val_loss = 1e5
     
     xlat, xlon = config_dict['data']['xlat'], config_dict['data']['xlon']
-    surface_weights  = torch.tensor([1.5, 0.77, 0.77, 3.0]) * 2
-    pressure_weights = torch.tensor([3.00, 0.6, 1.5, 0.77, 0.77]).unsqueeze(1).expand(5, 13).flatten()
+    surface_weights  = torch.tensor([1.5, 0.77, 0.77, 3.0]) * 4
+    pressure_weights = torch.tensor([3.00, 0.6, 1.5, 0.9, 0.9]).unsqueeze(1).expand(5, 13).flatten()
     variable_weights = torch.concat([surface_weights, pressure_weights]).view(1, 69).to(device)
     area_weights = torch.tensor(eval.calc_weight(xlat)).to(device)
 
@@ -72,6 +72,13 @@ def training_loop(config_dict, device, localid, rank):
         )
     elif parallelism == 2:
         mlp = Model.Model_twoway(config_dict, device, comm, rank, local_group).to(device)
+        mlp = DDP(
+            mlp,
+            device_ids=[localid],
+            output_device=localid,
+            process_group=global_groups[rank % parallelism]
+        )
+
     elif parallelism == 4:
         mlp = Model.Model(config_dict, device, comm, rank).to(device)
     
@@ -80,19 +87,21 @@ def training_loop(config_dict, device, localid, rank):
     
     if parallelism > 1:
         optimizer = optim.Adam([
-                {'params': mlp.params.embedding.parameters(), 'lr': config_dict['training']['lr_embedding']},
-                {'params': mlp.params.recovery.parameters(), 'lr': config_dict['training']['lr_recovery']},
-                {'params': mlp.params.common.parameters()}
+                {'params': mlp.module.params.embedding.parameters(), 'lr': config_dict['training']['lr_embedding']},
+                {'params': mlp.module.params.recovery.parameters(), 'lr': config_dict['training']['lr_recovery']},
+                {'params': mlp.module.params.common.parameters()}
                 ], 
-                lr=lr, weight_decay=3e-6
+                lr=lr, 
+                weight_decay=3e-6
     )
     else:
         optimizer = optim.Adam([
-            {'params': mlp.module.params.embedding.parameters(), 'lr': config_dict['training']['lr_embedding']},
-            {'params': mlp.module.params.recovery.parameters(), 'lr': config_dict['training']['lr_recovery']},
-            {'params': mlp.module.params.common.parameters()}
+            {'params': mlp.params.embedding.parameters(), 'lr': config_dict['training']['lr_embedding']},
+            {'params': mlp.params.recovery.parameters(), 'lr': config_dict['training']['lr_recovery']},
+            {'params': mlp.params.common.parameters()}
             ], 
-            lr=lr, weight_decay=3e-6
+            lr=lr, 
+            weight_decay=3e-6
         )
     #if config_dict['training']['preload']:
     #    optimizer = optim.Adam([
@@ -109,7 +118,7 @@ def training_loop(config_dict, device, localid, rank):
     #    optimizer = optim.Adam(mlp_ddp.parameters(), lr=lr, weight_decay=3e-6)
 
     if parallelism > 1: # TODO set proper seeds for model parallelism
-        utils.set_all_seeds_local_rank(1, rank=rank) # Set all GPUs to the same seed so that they read the same data           
+        utils.set_all_seeds_local_rank(1, rank=rank, parallelism=parallelism) # Set all GPUs to the same seed so that they read the same data           
     else:
         utils.set_all_seeds(1, rank=rank)
     
@@ -176,7 +185,7 @@ def training_loop(config_dict, device, localid, rank):
     buffer2 = torch.zeros(config_dict['training']['train_batch'], xlat, xlon//2, 36, device=device)
     
     for epoch in range(epoch, 200):
-        if parallelism == 1:
+        if parallelism < 4 :
             train_dataloader.sampler.set_epoch(epoch)
         
         epoch_average_loss = 0
@@ -211,13 +220,17 @@ def training_loop(config_dict, device, localid, rank):
                 input_data_or_handle,  async_input = utils.load_and_push_data(config_dict, data[0], parallelism, buffer, rank, device, local_groups)
 
                 # DDP and layer norm handles
-                for h in handles:
-                    h.wait()
-                #vector_to_parameters(flat_grad, gradients)
-                # Optimizer step and zero grad 
+                #for h in handles:
+                #    h.wait()
+                #if i > 0 :
+                #    handles.wait() # ddp
+                #
+                #    vector_to_parameters(flat_grad, gradients)
+                #   # Optimizer step and zero grad 
+
                 optimizer.step()
                 optimizer.zero_grad()
-                
+                    
                 
                 if async_input:
                     input_data_or_handle.wait()
@@ -268,15 +281,15 @@ def training_loop(config_dict, device, localid, rank):
             #backward_start = time.perf_counter()
             
             loss.backward()
-            
+            #
             torch.nn.utils.clip_grad_norm_(mlp.parameters(), config_dict['training']['grad_clip'])
 
             if parallelism > 1:
+                x=1
+                #handles, flat_grad, gradients = utils.reduce_ddp_layernorm_flat(parallelism, mlp, local_groups, global_groups, rank, node_rank)
                 
-                handles = utils.reduce_ddp_layernorms(parallelism, mlp, local_groups, global_groups, rank, node_rank)
-                
-                loss = loss / world_size
-                torch.distributed.all_reduce(loss)    
+                #loss = loss / world_size
+                #torch.distributed.all_reduce(loss)    
                 
                 #for param_group in optimizer.param_groups:
                 #    for index, param in enumerate(param_group['params']):
@@ -320,7 +333,7 @@ def training_loop(config_dict, device, localid, rank):
 
         torch.cuda.synchronize()
         val_loss = 1e7
-        val_loss = eval.get_validation_mse(config_dict, mlp, valid_dataloader, device, rank, epoch, file_path=save_path, model_parallel=model_parallel, world_size=world_size, groups=local_groups, node_groups=node_groups)
+     #   val_loss = eval.get_validation_mse(config_dict, mlp, valid_dataloader, device, rank, epoch, file_path=save_path, model_parallel=model_parallel, world_size=world_size, groups=local_groups, node_groups=node_groups)
     #
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -332,6 +345,8 @@ def training_loop(config_dict, device, localid, rank):
             else:
                 # For now, save model on every rank, so we can compare the weights.
                 utils.save_model(mlp, optimizer, save_path,  rank, epoch)
+        # TODO: stop saving @ every epoch
+        utils.save_model(mlp, optimizer, save_path,  rank, epoch)
 
         scheduler.step(epoch)    
         torch.distributed.barrier()

@@ -42,26 +42,9 @@ def get_var_names(prepend_variable=['epoch']):
     
 def gen_plots(config_dict, input_data, output, target_data, rank, file_path, epoch, model_parallel=False):
     xlat, xlon = config_dict['data']['xlat'], config_dict['data']['xlon']
-    if model_parallel:
-        input_print, output_print, target_print = input_data.cpu(), output.cpu(), target_data.cpu()
-        input_print  = input_print.reshape(xlat,  xlon, 69).permute(2, 0, 1).cpu()
-        output_print = output_print.reshape(xlat, xlon, 69).permute(2, 0, 1).cpu()
-        target_print = target_print.reshape(xlat, xlon, 69).permute(2, 0, 1).cpu()
-
-        if rank == 0:
-            save_path = f"{file_path}/u10_{epoch}.png"
-            utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=1)
-            save_path = f"{file_path}/T2M_{epoch}.png"
-            utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=3)
-            save_path = f"{file_path}/T850_{epoch}.png"
-            utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=32)
-            save_path = f"{file_path}/U850_{epoch}.png"
-            utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=45)
-            save_path = f"{file_path}/Z500_{epoch}.png"
-            utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=9)
-
-    else:
-        
+    parallelism = config_dict['model_parallel']['parallelism']
+    
+    if parallelism == 1:
         input_print  = input_data[0].reshape(xlat, xlon, 69).permute(2, 0, 1)
         output_print = output[0].reshape(xlat, xlon, 69).permute(2, 0, 1)
         target_print = target_data[0].reshape(xlat, xlon, 69).permute(2, 0, 1)
@@ -76,6 +59,43 @@ def gen_plots(config_dict, input_data, output, target_data, rank, file_path, epo
         utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=45)
         save_path = f"{file_path}/Z500_{epoch}.png"
         utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=9)
+    elif parallelism == 2:
+        input_print, output_print, target_print = input_data, output, target_data
+        input_print  = input_print.reshape(xlat,  xlon, 36).permute(2, 0, 1)
+        output_print = output_print.reshape(xlat, xlon, 36).permute(2, 0, 1)
+        target_print = target_print.reshape(xlat, xlon, 36).permute(2, 0, 1)
+        
+        if rank == 0:
+            save_path = f"{file_path}/u10_{epoch}.png"
+            utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=1)
+            save_path = f"{file_path}/T2M_{epoch}.png"
+            utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=3)
+            save_path = f"{file_path}/T850_{epoch}.png"
+            utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=32)
+            save_path = f"{file_path}/Z500_{epoch}.png"
+            utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=9)
+        if rank == 1:
+            save_path = f"{file_path}/U850_{epoch}.png"
+            utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=45-36)
+        
+    elif parallelism == 4:
+        input_print, output_print, target_print = input_data, output, target_data
+        input_print  = input_print.reshape(xlat,  xlon, 69).permute(2, 0, 1)
+        output_print = output_print.reshape(xlat, xlon, 69).permute(2, 0, 1)
+        target_print = target_print.reshape(xlat, xlon, 69).permute(2, 0, 1)
+        
+        if rank == 0:
+            save_path = f"{file_path}/u10_{epoch}.png"
+            utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=1)
+            save_path = f"{file_path}/T2M_{epoch}.png"
+            utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=3)
+            save_path = f"{file_path}/T850_{epoch}.png"
+            utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=32)
+            save_path = f"{file_path}/U850_{epoch}.png"
+            utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=45)
+            save_path = f"{file_path}/Z500_{epoch}.png"
+            utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=9)
+        
 
 def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file_path, mse_file_path='rmse.csv', acc_file_path='acc.csv', model_parallel=True, world_size=4, groups=None, node_groups=None):
     if config_dict['model']['model_parallel']:
@@ -108,9 +128,13 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
     total_samples = torch.tensor([0]).to(device)
     start_validation_time = time.perf_counter()
     area_weights = torch.tensor(calc_weight(721)).to(torch.float32)[:config_dict['data']['xlat']].to(device)
-    surface_weights  = torch.tensor([1.5, 0.77, 0.77, 3.0]) * 2
+    surface_weights  = torch.tensor([1.5, 0.77, 0.77, 3.0]) * 4
     pressure_weights = torch.tensor([3.00, 0.6, 1.5, 0.77, 0.77]).unsqueeze(1).expand(5, 13).flatten()
     weights_loss = torch.concat([surface_weights, pressure_weights]).view(1, 69).to(device)
+    if model_parallel:
+        mod = rank % 4
+        weights_loss = weights_loss[0,:36] if mod in [0, 2] else torch.nn.functional.pad(weights_loss[0,36:], (0,3))
+
     xlat, xlon = config_dict['data']['xlat'], config_dict['data']['xlon']
 
     index_offset = 2 if 'rollout_time' in var_names else 1
@@ -118,62 +142,71 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
     loss_fn = torch.nn.MSELoss()
     buffer  = torch.zeros(config_dict['training']['valid_batch'], xlat, xlon//2, 36).to(device)
     buffer2 = torch.zeros(config_dict['training']['valid_batch'], xlat, xlon//2, 36).to(device)
-
+    parallelism = config_dict['model_parallel']['parallelism']
+    
+    torch.backends.cuda.matmul.allow_tf32 = True
     for batch, data in enumerate(dataloader):
         for step, rollout in enumerate(rollout_time):
+            # Input and target data loading
             if not config_dict['model']['model_parallel']:
                 input_data  = data[0].to(device)
                 target_data = data[1][step].to(device)
             else:
-                
-                
-                if config_dict['model_parallel']['split'] == 2:
-                    buffer.zero_()
-                    input_data_handle, buffer = utils.send_data_twoway(data[0], batch, buffer, rank, device, groups, config_dict['model_parallel']['alt_sender'])
-                    buffer2.zero_()
-                    target_data_handle, buffer2 = utils.send_data_twoway(data[1][step], batch, buffer2, rank, device, groups,config_dict['model_parallel']['alt_sender'])
-                elif config_dict['model_parallel']['split'] == 4:
-                    input_data = data[0].to(device)
+                if config_dict['model_parallel']['parallelism'] == 4:
+                    input_data_or_handle,  async_input = utils.load_and_push_data(config_dict, data[0], parallelism, buffer, rank, device, groups)
+                    target_data_or_handle, async_target = utils.load_and_push_data(config_dict, data[1][step], parallelism, buffer2, rank, device, groups)
+                    if async_input:
+                        input_data_or_handle.wait()
+                        input_data = buffer
+                    else:
+                        input_data = input_data_or_handle
+                    if async_target:
+                        target_data_or_handle.wait()
+                        target_data = buffer2
+                    else:
+                        target_data = target_data_or_handle
                 else:
-                    buffer.zero_()
-                    input_data = utils.send_data_fourway(data[1], buffer, rank, device)
-             
-                input_data_handle.wait()
-                input_data = buffer
+                    input_data = data[0].to(device)
+                    target_data = data[1][step].to(device)
+
             output = model(input_data, rollout_=step+1)
             
             if model_parallel:
-                if config_dict['model_parallel']['split'] == 2:
-                    #buffer2 = torch.zeros(config_dict['training']['valid_batch'], 36, xlat, xlon//2).to(device)
-                    target_data_handle.wait()
-                    target_data = buffer2
-                elif config_dict['model_parallel']['split'] == 4:
-                    target_data = data[1].permute(0, 2, 3, 1).to(device)
+                if parallelism == 4:
+                    output = output.reshape(output.shape[0], xlat, xlon//2, 36)
                 else:
-                    buffer.zero_()
-                    target_data = utils.send_data_fourway(data[1], buffer, rank, device)
-                target_data = target_data.flatten(start_dim=1, end_dim=2)
+                    output = output.reshape(output.shape[0], xlat, xlon, 36)
+                
+                if config_dict['training']['area_weighted']:
+                    loss[0] = loss[0] + (loss_fn(torch.einsum('bxyz, x->bxyz', output, area_weights)*weights_loss, torch.einsum('bxyz, x->bxyz', target_data, area_weights)*weights_loss))
+                else:
+                    loss[0] = loss[0] + (loss_fn(output*weights_loss, target_data*weights_loss))
 
                 loss_   = loss_fn(output, target_data)
                 
                 loss[0] = loss[0] + loss_.item()
 
-                output = output.reshape(output.shape[0], xlat, xlon//2, 36)
-                target_data = target_data.reshape(target_data.shape[0], xlat, xlon//2, 36)
                 
                 for i, var in enumerate(var_names):
                     if i > index_offset-1:
                         # Only test on surface variables and pressure heights 850, 500 due to compute time
                         if rank in [0, 2]: # first half of variables
-                            if i in (np.array([0, 1, 2, 3, 6, 9, 19, 22]) + index_offset):
+                            if i in (np.array([0, 1, 2, 3, 6, 9, 19, 22,32, 35]) + index_offset):
                                 rmse[rollout][var] = rmse[rollout][var] + calc_mse_single_variable_parallel(config_dict, target_data, output, device, area_weights, index=(i-index_offset), norm=True, norm_offset=0)
-                                acc[rollout][var]  = acc[rollout][var] + calc_acc_single_variable_parallel(config_dict, target_data, output, device, area_weights, index=(i-index_offset), norm=True, norm_offset=0, rank=rank)
+                                if parallelism == 4:
+                                    acc[rollout][var]  = acc[rollout][var] + calc_acc_single_variable_parallel(config_dict, target_data, output, device, area_weights, index=(i-index_offset), norm=True, norm_offset=0, rank=rank)
+                                else:
+                                    acc[rollout][var]  = acc[rollout][var] + calc_acc_single_variable(target_data, output, device, area_weights, index=(i-index_offset), norm=True)
                         else:
-                            if i in (np.array([32, 35, 45, 48, 58, 61]) + index_offset):
-                                norm_offset = 32
+                            if i in (np.array([ 45, 48, 58, 61]) + index_offset):
+                                norm_offset = 36
                                 rmse[rollout][var] = rmse[rollout][var] + calc_mse_single_variable_parallel(config_dict, target_data, output, device, area_weights, index=(i-index_offset - norm_offset), norm=True, norm_offset=norm_offset)
-                                acc[rollout][var]  = acc[rollout][var] + calc_acc_single_variable_parallel(config_dict, target_data, output, device, area_weights, index=(i-index_offset - norm_offset), norm=True, norm_offset=norm_offset, rank=rank)
-    
+                                if parallelism == 4:
+                                    acc[rollout][var]  = acc[rollout][var] + calc_acc_single_variable_parallel(config_dict, target_data, output, device, area_weights, index=(i-index_offset - norm_offset), norm=True, norm_offset=norm_offset, rank=rank)
+                                else:
+                                    acc[rollout][var]  = acc[rollout][var] + calc_acc_single_variable(target_data, output, device, area_weights, index=(i-index_offset - norm_offset), norm=True)
+          
+                                
             else:
                 input_data = input_data.permute(0, 2, 3, 1) # Permute input data for mse calculation
                 target_data = target_data.permute(0, 2, 3, 1).contiguous()
@@ -190,7 +223,7 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
                         # due to saving time 
                         if i in (np.array([0, 1, 2, 3, 6, 9, 19, 22, 32, 35, 45, 48, 58, 61]) + index_offset):
                             rmse[rollout][var] = rmse[rollout][var] + calc_mse_single_variable(config_dict, target_data, output, device, area_weights, index=(i-index_offset), norm=True)
-                            acc[rollout][var]  = acc[rollout][var] + calc_acc_single_variable(config_dict, target_data, output, device, area_weights, index=(i-index_offset), norm=True)
+                            acc[rollout][var]  = acc[rollout][var] + calc_acc_single_variable(target_data, output, device, area_weights, index=(i-index_offset), norm=True)
                         else:
                             rmse[rollout][var] = rmse[rollout][var] + 0.
                             acc[rollout][var]  = acc[rollout][var]  + 0.
@@ -200,15 +233,15 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
                 #        if i > 0:
                 #            if i in [1, 2, 3, 4, 7, 10, 20, 23, 33, 36, 46, 49, 59, 62]:
                 #                rmse_persistence[rollout][var] = rmse[rollout][var] + calc_mse_single_variable(config_dict, target_data, input_data, device, weights, index=(i-1), norm=True)
-                #                acc_persistence[rollout][var]  = acc[rollout][var] + calc_acc_single_variable(config_dict, target_data, input_data, device, weights, index=(i-1), norm=True)
+                #                acc_persistence[rollout][var]  = acc[rollout][var] + calc_acc_single_variable(target_data, input_data, device, weights, index=(i-1), norm=True)
                 #            else:
                 #                rmse[rollout][var] = rmse[rollout][var] + 0.
                 #                acc[rollout][var]  = acc[rollout][var] + 0.
 
         total_samples[0] = total_samples[0] + input_data.shape[0]
-        torch.backends.cuda.matmul.allow_tf32 = True
+
         if batch == 0:
-            if model_parallel  and rank < 4: # only needs to happen once
+            if model_parallel and rank < 4 and parallelism == 4: # only needs to happen once
                 # Gather input data
                 # input data has shape [nvar, lat, lon]
                 input_data, output, target_data = input_data[0].contiguous(), output[0].contiguous(), target_data[0].contiguous()
@@ -245,7 +278,6 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
                 if rank == 0:
                     gen_plots(config_dict, input_data_gathered, output_gathered, target_data_gathered, rank, file_path, epoch, model_parallel=model_parallel)    
             elif rank == 0:
-                
                 print(f"rank {rank}, input data shape {input_data.shape}")
                 gen_plots(config_dict, input_data, output, target_data, rank, file_path, epoch, model_parallel=model_parallel)
         
@@ -263,7 +295,7 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
         
     for variable in var_names[index_offset:]:
         for rollout in rollout_time:
-            if config_dict['model']['model_parallel']: # when paralle, need to reduce among groups
+            if config_dict['model']['model_parallel'] and parallelism == 4: # when parallel, need to reduce among groups
                 torch.distributed.all_reduce(rmse[rollout][variable], group=groups[rank%2]) # Adding MSE of two ranks together
                 torch.distributed.all_reduce(acc[rollout][variable], group=groups[rank%2], op=torch.distributed.ReduceOp.AVG)
             #if epoch == 0:
@@ -363,7 +395,7 @@ def calc_mse_single_variable(config_dict, target, result, device, weights, index
     mean_squared_error = torch.einsum('i, aij->ai', weights, mean_squared_error).sum(dim=1)
     mean_squared_error = mean_squared_error.flatten().sum() 
     
-    return mean_squared_error.item()
+    return mean_squared_error
        
 
 def calc_mse_single_variable_parallel(config_dict, target, result, device, weights, index=0, norm=False, norm_offset=0):
@@ -393,28 +425,10 @@ def calc_mse_single_variable_parallel(config_dict, target, result, device, weigh
     mean_squared_error = torch.einsum('i, aij->ai', weights, mean_squared_error).sum(dim=1)
     mean_squared_error = mean_squared_error.flatten().sum() 
     
-    return mean_squared_error.item()
+    return mean_squared_error
        
-        
-def calc_mse_single_variable_nonorm(target, result, device, weights, index=0):
-    n_lon = 1440
-    n_lat = len(weights)
 
-    divisor = torch.sqrt(torch.tensor([n_lon*n_lat])).to(device)
-
-    _, std = load_averages()
-    std    = std.to(device)
-
-    # MSE = ((target - result) * stdev) ** 2
-    mean_squared_error = ((target[:, :, :, index] - result[:, :, :, index])/ divisor)**2
-
-    mean_squared_error = torch.einsum('i, aij->ai', weights, mean_squared_error).sum(dim=1)
-    mean_squared_error = mean_squared_error.flatten().sum() 
-    
-    return mean_squared_error.item()
-    
-
-def calc_acc_single_variable(config_dict, target, result, device, weights, index=0, norm=True):
+def calc_acc_single_variable(target, result, device, weights, index=0, norm=True):
     mean, std = load_averages()
     mean, std = mean.to(device), std.to(device)
 
@@ -437,7 +451,7 @@ def calc_acc_single_variable(config_dict, target, result, device, weights, index
     acc_vec   = numerator/(torch.sqrt(torch.mul(denom1, denom2)))
     acc_sum   = torch.sum(acc_vec)
     
-    return acc_sum.item()
+    return acc_sum
 
 def calc_acc_single_variable_parallel(config_dict, target, result, device, weights, index=0, norm=False, norm_offset=0, rank=0):
     if config_dict is None:
@@ -472,4 +486,4 @@ def calc_acc_single_variable_parallel(config_dict, target, result, device, weigh
     
     acc_vec   = numerator/(torch.sqrt(torch.mul(denom1, denom2)))
     acc_sum   = torch.sum(acc_vec)
-    return acc_sum.item()
+    return acc_sum

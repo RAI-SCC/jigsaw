@@ -38,8 +38,8 @@ def AB_custom(Aij, Bij, rank, n_gpus_per_node, device):
     # A_k = torch.zeros_like(Aij).detach().to(device)
     Cij = None #torch.zeros(*Aij.shape[:-1], Bij.shape[-1]).to(device)
     mod = rank % 4
-    bufferA = get_preallocated_buffer(Aij.shape, Aij.dtype, device, rank)
-    bufferB = get_preallocated_buffer(Bij.shape, Bij.dtype, device, rank)
+    bufferA = get_preallocated_buffer(Aij.shape, Aij.dtype, device, rank, 0)
+    bufferB = get_preallocated_buffer(Bij.shape, Bij.dtype, device, rank, 1)
     
     if mod == 0: 
         # Rank 0 send A, B to 1 and 2. Receives A, B from 1 and 2.
@@ -237,22 +237,31 @@ def matrix_transpose(X, rank, device):
     mod = rank % 4
     if mod == 1:
         buffer = get_preallocated_buffer(X.shape, X.dtype, device, rank)
-        send_transpose = dist.P2POp(dist.isend, X, peer=rank+1)
-        recv_transpose = dist.P2POp(dist.irecv, buffer, peer=rank+1)
-        reqs = dist.batch_isend_irecv([send_transpose, recv_transpose])
+        send_transpose = torch.distributed.isend(X, dst=rank+1)
+        recv_transpose = torch.distributed.irecv(buffer, src=rank+1)
+        #send_transpose = dist.P2POp(dist.isend, X, peer=rank+1)
+        #recv_transpose = dist.P2POp(dist.irecv, buffer, peer=rank+1)
+        #reqs = dist.batch_isend_irecv([send_transpose, recv_transpose])
+        send_transpose.wait()
+        recv_transpose.wait()
         X_T = buffer
     elif rank % 4 == 2:
         buffer = get_preallocated_buffer(X.shape, X.dtype, device, rank)
-        send_transpose = dist.P2POp(dist.isend, X, peer=rank-1)
-        recv_transpose = dist.P2POp(dist.irecv, buffer, peer=rank-1)
-        reqs = dist.batch_isend_irecv([send_transpose, recv_transpose])
+        recv_transpose = torch.distributed.irecv(buffer, src=rank-1)
+        send_transpose = torch.distributed.isend(X, dst=rank-1)
+
+        send_transpose.wait()
+        recv_transpose.wait()
+        #send_transpose = dist.P2POp(dist.isend, X, peer=rank-1)
+        #recv_transpose = dist.P2POp(dist.irecv, buffer, peer=rank-1)
+        #reqs = dist.batch_isend_irecv([send_transpose, recv_transpose])
         X_T = buffer
     else:
         X_T = X
 
-    if mod in [1,2]:
-        for req in reqs:
-            req.wait()
+#    if mod in [1,2]:
+#        for req in reqs:
+#            req.wait()
 
     return X_T.mT
 
@@ -268,17 +277,18 @@ def matrix_transpose_twoway(X, rank, device):
     
     if mod == 0: 
         # Rank 0 send A, B to 1 and 2. Receives A, B from 1 and 2.
-        send_B_1 = dist.P2POp(dist.isend, X1, peer=rank+1)
-        recv_B_1 = dist.P2POp(dist.irecv, bufferX, peer=rank+1)
-        reqs = dist.batch_isend_irecv([send_B_1, recv_B_1])
+        send_B_1 = torch.distributed.isend(X1, dst=rank+1)
+        recv_B_1 = torch.distributed.irecv(bufferX, src=rank+1)
+        recv_B_1.wait()
+        send_B_1.wait()
     elif mod == 1:
-           
-        send_B_0 = dist.P2POp(dist.isend, X0, peer=rank-1)
-        recv_B_0 = dist.P2POp(dist.irecv, bufferX, peer=rank-1)
-        reqs = dist.batch_isend_irecv([send_B_0, recv_B_0])
-    
-    for req in reqs:
-        req.wait()
+        
+        recv_transpose = torch.distributed.irecv(bufferX, src=rank-1)
+        send_transpose = torch.distributed.isend(X0, dst=rank-1)
+
+        send_transpose.wait()
+        recv_transpose.wait()
+        
     if mod == 0:
         XT = torch.concat([X0.mT, bufferX.mT], dim=-2)
     elif mod == 1:
@@ -435,9 +445,9 @@ def ABT_custom_precompute(Aij, Bij, rank, n_gpus_per_node, device):
         
     elif mod == 1:
 
-        bufferA  = get_preallocated_buffer(Aij.shape, Aij.dtype, device, rank)
-        bufferB2 = get_preallocated_buffer(Bij.shape, Bij.dtype, device, rank) 
-        bufferB3 = get_preallocated_buffer(Bij.shape, Bij.dtype, device, rank) 
+        bufferA  = get_preallocated_buffer(Aij.shape, Aij.dtype, device, rank, 0)
+        bufferB2 = get_preallocated_buffer(Bij.shape, Bij.dtype, device, rank, 1) 
+        bufferB3 = get_preallocated_buffer(Bij.shape, Bij.dtype, device, rank, 2) 
 
         send_B_2 = dist.P2POp(dist.isend, Bij, peer=rank+1)
 
@@ -453,9 +463,9 @@ def ABT_custom_precompute(Aij, Bij, rank, n_gpus_per_node, device):
         
                   
     elif mod == 2:
-        bufferA  = get_preallocated_buffer(Aij.shape, Aij.dtype, device, rank)
-        bufferB0 = get_preallocated_buffer(Bij.shape, Bij.dtype, device, rank) 
-        bufferB1 = get_preallocated_buffer(Bij.shape, Bij.dtype, device, rank) 
+        bufferA  = get_preallocated_buffer(Aij.shape, Aij.dtype, device, rank, 0)
+        bufferB0 = get_preallocated_buffer(Bij.shape, Bij.dtype, device, rank, 1) 
+        bufferB1 = get_preallocated_buffer(Bij.shape, Bij.dtype, device, rank, 2) 
         
         
         send_B_1 = dist.P2POp(dist.isend, Bij, peer=rank-1)
@@ -497,10 +507,8 @@ def ABT_custom_precompute(Aij, Bij, rank, n_gpus_per_node, device):
 
 _prealloc_buffers = {}
 
-def get_preallocated_buffer(shape, dtype, device, rank):
-    #global _prealloc_buffer, _prealloc_numel
-
-    key = (dtype, rank)
+def get_preallocated_buffer(shape, dtype, device, rank, index=0):
+    key = (dtype, rank, index)
     if key not in _prealloc_buffers:
         _prealloc_buffers[key] = (None, 0)
 
@@ -522,29 +530,6 @@ def get_preallocated_buffer(shape, dtype, device, rank):
         out = out.flatten()[:needed].view(*shape)
         out.zero_()
         return out
-
-#_prealloc_buffer = None
-#_prealloc_numel = 0
-#
-#def get_preallocated_buffer(shape, dtype, device):
-#    global _prealloc_buffer, _prealloc_numel
-#
-#    needed = 1
-#    #_prealloc_numel = 1
-#    for dim in shape: 
-#        needed *= dim
-#    
-#    # Reallocate if buffer is None or too small
-#    if _prealloc_buffer is None or needed > _prealloc_numel:
-#        print(f'Allocating new buffer to  {device}')
-#        _prealloc_buffer = torch.zeros(shape, dtype=dtype, device=device)
-#        _prealloc_numel = needed
-#        return _prealloc_buffer
-#    else:        
-#        out = _prealloc_buffer.flatten()[:needed].view(*shape)
-#        out.zero_()
-#        return out
-
 
 def ATB_custom_precompute(Aij, Bij, rank, n_gpus_per_node, device):
     # Empty allocation of A_k per process
@@ -569,9 +554,9 @@ def ATB_custom_precompute(Aij, Bij, rank, n_gpus_per_node, device):
         reqs1 = dist.batch_isend_irecv([recv_AB_2])
 
     elif mod == 1:
-        bufferA0 = get_preallocated_buffer((Aij.shape), Aij.dtype, device, rank)
-        bufferA2 = get_preallocated_buffer((Aij.shape), Aij.dtype, device, rank)
-        bufferB3 = get_preallocated_buffer((Bij.shape), Bij.dtype, device, rank)
+        bufferA0 = get_preallocated_buffer((Aij.shape), Aij.dtype, device, rank, 0)
+        bufferA2 = get_preallocated_buffer((Aij.shape), Aij.dtype, device, rank, 1)
+        bufferB3 = get_preallocated_buffer((Bij.shape), Bij.dtype, device, rank, 2)
 
         
         send_A_2  = dist.P2POp(dist.isend, Aij, peer=rank+1)
@@ -586,9 +571,9 @@ def ATB_custom_precompute(Aij, Bij, rank, n_gpus_per_node, device):
         reqs1 = dist.batch_isend_irecv([send_AB_3])
 
     elif mod == 2:
-        bufferA1 = get_preallocated_buffer((Aij.shape), Aij.dtype, device, rank)
-        bufferA3 = get_preallocated_buffer((Aij.shape), Aij.dtype, device, rank)
-        bufferB0 = get_preallocated_buffer((Bij.shape), Bij.dtype, device, rank)
+        bufferA1 = get_preallocated_buffer((Aij.shape), Aij.dtype, device, rank, 0)
+        bufferA3 = get_preallocated_buffer((Aij.shape), Aij.dtype, device, rank, 1)
+        bufferB0 = get_preallocated_buffer((Bij.shape), Bij.dtype, device, rank, 2)
         
         send_A_1  = dist.P2POp(dist.isend, Aij, peer=rank-1)
         
@@ -601,9 +586,9 @@ def ATB_custom_precompute(Aij, Bij, rank, n_gpus_per_node, device):
         reqs1 = dist.batch_isend_irecv([send_AB_0])
     else:
         if len(Aij.shape) > 2:
-            bufferAB = get_preallocated_buffer((Aij.shape[0], Aij.shape[-1], Bij.shape[-1]), Aij.dtype, device, rank)
+            bufferAB = get_preallocated_buffer((Aij.shape[0], Aij.shape[-1], Bij.shape[-1]), Aij.dtype, device, rank, 0)
         else:
-            bufferAB = get_preallocated_buffer((Bij.shape[0], Aij.shape[-1], Bij.shape[-1]), Aij.dtype, device, rank)
+            bufferAB = get_preallocated_buffer((Bij.shape[0], Aij.shape[-1], Bij.shape[-1]), Aij.dtype, device, rank, 0)
         
         send_A_2  = dist.P2POp(dist.isend, Aij, peer=rank-1)
         send_B_1  = dist.P2POp(dist.isend, Bij, peer=rank-2)

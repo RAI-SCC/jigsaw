@@ -1,5 +1,6 @@
 import numpy as np
-from Dataset import ERA5Dataset, ERA5DatasetDistributed, worker_init_fn
+import torch.distributed
+from Dataset import ERA5Dataset, ERA5DatasetDistributed
 import torch
 from torch.utils.data import DataLoader, Subset
 import torch.distributed as dist
@@ -14,8 +15,9 @@ sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/network
 from networks.PanguLite2DAttentionPosEmbed import PanguModel as TwoDimPosEmbLite
 import random
 import time
+from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
-def get_local_groups(rank):
+def get_local_groups_fourway(rank):
     # Rank 4, 6 should be in group together
     gpus_per_node = 4 # horeka- specific
     node_rank     = rank // gpus_per_node # if rank between 0 and 3, node_rank = 0 
@@ -34,21 +36,28 @@ def get_local_groups(rank):
 
     return local_groups
 
-def get_global_groups():
+def get_ddp_groups(parallelism):
     # Ranks 0, 4, ... should be in a group
-    gpus_per_node = 4
-    n_nodes = torch.distributed.get_world_size() // gpus_per_node
+    
+    n_nodes = torch.distributed.get_world_size() // parallelism
     # 
     global_group_list = []
     global_groups     = []
 
-    for node in np.arange(gpus_per_node):
-        global_group_list.append(((np.arange(n_nodes)*gpus_per_node+node)).tolist())
+    for node in np.arange(parallelism):
+        global_group_list.append(((np.arange(n_nodes)*parallelism+node)).tolist())
                
     for global_group in global_group_list:
         global_groups.append(torch.distributed.new_group(ranks=global_group))
-    
+
     return global_groups
+
+def get_local_groups_twoway(rank):
+    # [0,1] --> one group
+    # [2,3] --> another group
+    local_pair_start_rank = rank // 2 * 2
+    local_group_twoway = torch.distributed.new_group(ranks=[local_pair_start_rank, local_pair_start_rank+1])
+    return local_group_twoway
 
 def get_local_group_per_node(rank):
     # [0, 1, 2, 3]
@@ -68,65 +77,23 @@ def set_all_seeds(seed, rank=None):
     torch.manual_seed(seed + rank)
     torch.cuda.manual_seed_all(seed + rank)
 
-def set_all_seeds_local_rank(seed, rank=None):
+def set_all_seeds_local_rank(seed, rank=None, parallelism=4):
     if rank is None:
         rank = 0
-    os.environ["PL_GLOBAL_SEED"] = str(seed + rank//4) # 0, 1, 2, 3 get same data. # 4, 5, 6, 7 get same data.
-    torch.manual_seed(seed + rank//4)
-    torch.cuda.manual_seed_all(seed + rank//4)
+    os.environ["PL_GLOBAL_SEED"] = str(seed + rank//parallelism) # 0, 1, 2, 3 get same data. # 4, 5, 6, 7 get same data.
+    torch.manual_seed(seed + rank//parallelism)
+    torch.cuda.manual_seed_all(seed + rank//parallelism)
 
 
-#def init_mpi():
-#    comm = MPI.COMM_WORLD
-#
-#    rank = comm.Get_rank() # rank is from 0 to 3
-#    world_size = comm.Get_size()
-#    
-#    return comm, rank
 
-def get_sender(iteration, rank):
-    # rank 0, 2 receive 0; Rank 1, 3 receive from 1 
-    # rank 0, 2 receive from 2, rank 1, 3 receive from 3
-    sender = rank % 2 if (iteration % 2 == 0) else (rank % 2 + 2)
-    
-    return sender 
-
-#def get_comm_groups()
-
-
-def send_data_twoway(data, iteration, buffer, rank, device, groups, alt_sender=True):
-    
-    #print(f'Rank {rank} in send_data_twoway') # TODO check send_data_twoway to ensure diff ranks get different data
+def send_data_twoway(data, buffer, rank, device, groups):
     node_rank = rank // 4
-    sender = get_sender(iteration, rank) if alt_sender else rank % 2 + node_rank * 4
+    sender = rank % 2 + node_rank * 4
     data_list = [d.to(device, non_blocking=True) for d in data] if rank == sender else None
     
     handle = torch.distributed.scatter(buffer, data_list, src=sender, group=groups[rank % 2 + node_rank * 2], async_op=True)
     
-    return handle, buffer
-
-def send_target_data_twoway(data, iteration, buffer, rank, device, groups, alt_sender=True):
-    
-    node_rank = rank // 4
-    sender = get_sender(iteration, rank) if alt_sender else rank % 2 + node_rank * 4
-    #data_list = [d.to(device, non_blocking=True) for d in data] if rank == sender else None
-    # shape of data: [n_batch, 720, :720, 36]
-
-    #handle = torch.distributed.scatter(buffer, data_list, src=sender, group=groups[rank % 2 + node_rank * 2], async_op=True)
-
-    if rank in [0,2]:
-        print(data[0].shape)
-        results = torch.nn.parallel.comm.scatter(
-            data[0],
-            devices=['cuda:0', 'cuda:2']
-        )
-    else:
-        results = torch.nn.parallel.comm.scatter(
-            data[0],
-            devices=['cuda:1', 'cuda:3']
-        )
-    #print(f'Rank {rank} {results[1].shape}')
-    return results[0]
+    return handle 
 
 def send_data_fourway(data, buffer, rank, device):
     sender = 0
@@ -137,61 +104,38 @@ def send_data_fourway(data, buffer, rank, device):
     input_data = buffer
     return input_data
 
-class AlternatingRandomSampler(Sampler):
-    def __init__(self, dataset_size, rank, batch_size=3):
-        self.dataset_size = dataset_size
-        self.rank = rank
-        self.batch_size = batch_size
-        self.indices = list(range(dataset_size))
-        random.seed(0)
-        random.shuffle(self.indices)
-        # Group shuffled indices into batches of size batch_size
-        self.batches = [self.indices[i:i+batch_size]
-                        for i in range(0, dataset_size, batch_size)]
-        
-    def __iter__(self):
-        # Alternate active ranks [0,1] vs. [2,3] each batch
-        for i, batch in enumerate(self.batches):
-            active_ranks = [0,1] if i % 2 == 0 else [2,3]
-            if self.rank in active_ranks:
-                yield batch
-            else:
-                # Yield empty so that DataLoader sees "no real samples"
-                yield []
-
-    def __len__(self):
-        # Approximately half the dataset goes to  each rank pair
-        return (self.dataset_size + 1) // 2
-
 
 def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distributed=False, batch_size=1, normalize=True, rank=None):
-    if config_dict['model']['model_parallel']:
-
-        if config_dict['model_parallel']['alt_sender']:
-            batch_counter = Value('i', 0)  # Shared integer for batch counter (process-safe)
-            dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, batch_counter=batch_counter)
-        elif config_dict['model_parallel']['split'] == 1:
-            dataset = ERA5Dataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, rank=rank)    
-        else:
-            dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, batch_counter=None)
-    else:
+    model_parallel = config_dict['model']['model_parallel']
+    parallelism = config_dict['model_parallel']['parallelism']
+    if parallelism == 1:
         dataset = ERA5Dataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), forecast_length=config_dict['model']['latent_rollout'], normalize=normalize)
+    elif parallelism == 4 and config_dict['model_parallel']['split'] == 1:
+        dataset = ERA5Dataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, rank=rank)    
+    else:
+        dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize)
+    
     if subset_size != 0: 
         subset_indices = torch.randperm(len(dataset))[:subset_size]
-        if torch.distributed.get_world_size() > 4: 
+        if parallelism < 4:
+            dataset = Subset(dataset, subset_indices)            
+        else: #torch.distributed.get_world_size() > parallelism and parallelism > 1: 
             # n_partitions: if 4 GPUs, 1. If 8 GPUs, 2
-            n_partitions = torch.distributed.get_world_size() // 4  # TODO: should be a ceiling operation for completeness
+            n_partitions = torch.distributed.get_world_size() // parallelism  # TODO: should be a ceiling operation for completeness
             size_partition = len(subset_indices) // n_partitions
-            node_rank = rank // 4 # if 0-3, node_rank=0. If 4-7, node_rank=1
+            node_rank = rank // parallelism # if 0-3, node_rank=0. If 4-7, node_rank=1
             subset_indices = subset_indices[node_rank*size_partition:(node_rank+1)*size_partition]
             dataset = Subset(dataset, subset_indices)
             # start index
-        else:
-            dataset = Subset(dataset, subset_indices)
-    sampler    = DistributedSampler(dataset, shuffle=False) if distributed else None
-    #if config_dict['model']['model_parallel']:
-    #    sampler = AlternatingRandomSampler(dataset_size=len(dataset), rank=rank, batch_size=batch_size)
-    if mode == 'validation' and config_dict['model']['model_parallel']:
+        
+
+    sampler    = DistributedSampler(dataset, 
+                                    shuffle=False,
+                                    num_replicas=(torch.distributed.get_world_size()//parallelism),
+                                    rank=rank//parallelism
+                                    ) if parallelism < 4 else None #TODO
+    
+    if mode == 'validation' and parallelism > 1:
         dataloader = DataLoader(dataset, 
                                 batch_size=batch_size, 
                                 shuffle=False, 
@@ -202,40 +146,16 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
                                 num_workers=config_dict['data']['num_workers']
                                 ) 
         return dataloader
-    if config_dict['model']['model_parallel']:
-        if config_dict['model_parallel']['alt_sender']:
-            shared_batch_counter = Value('i', 0)  # Shared counter for all workers in the rank
-            dataloader = DataLoader(dataset, 
-                                    shuffle=(sampler is None), 
-                                    sampler=sampler, 
-                                    drop_last=True, 
-                                    pin_memory=torch.cuda.is_available(), 
-                                    prefetch_factor=config_dict['data']['prefetch_factor'], 
-                                    num_workers=config_dict['data']['num_workers'],
-                                    worker_init_fn = lambda worker_id: worker_init_fn(worker_id, shared_batch_counter)
-                                    )
-        else:
-            #num_workers = config_dict['data']['num_workers'] if rank == 0 else 1
-            dataloader = DataLoader(dataset, 
-                                    batch_size=batch_size, 
-                                    shuffle=False, 
-                                    sampler=sampler, 
-                                    drop_last=True, 
-                                    pin_memory=torch.cuda.is_available(), 
-                                    prefetch_factor=config_dict['data']['prefetch_factor'], 
-                                    num_workers=config_dict['data']['num_workers']
-                                    )
     else:
-        rank = torch.distributed.get_rank()
-        pin_memory = True if rank == 0 else False
         dataloader = DataLoader(dataset, 
                                 batch_size=batch_size, 
                                 shuffle=(sampler is None), 
                                 sampler=sampler, 
                                 drop_last=True, 
-                                pin_memory=pin_memory,#torch.cuda.is_available(), 
+                                pin_memory=torch.cuda.is_available(), 
                                 prefetch_factor=config_dict['data']['prefetch_factor'], 
-                                num_workers=config_dict['data']['num_workers'])
+                                num_workers=config_dict['data']['num_workers']
+                                )
 
     return dataloader
 
@@ -328,12 +248,15 @@ def plot_fields(input, output, target, save_path, index=1):
     output_print = output[index].detach().cpu()
     target_print = target[index].detach().cpu()
 
+    vmin = target_print.min()
+    vmax = target_print.max()
+
     fig, (ax0, ax1, ax2) = plt.subplots(1, 3, figsize=(15, 5))
     c0 = ax0.pcolormesh(input_print)
     fig.colorbar(c0, ax=ax0)
-    c1 = ax1.pcolormesh(output_print)
+    c1 = ax1.pcolormesh(output_print, vmin=vmin, vmax=vmax)
     fig.colorbar(c1, ax=ax1)
-    c2 = ax2.pcolormesh(target_print)
+    c2 = ax2.pcolormesh(target_print, vmin=vmin, vmax=vmax)
     fig.colorbar(c2, ax=ax2)
     plt.tight_layout()
     plt.savefig(save_path)
@@ -411,3 +334,69 @@ def getPositionEncoding(seq_len, d, n=10000):
     P = torch.tensor(P).to(torch.float32)
     return P
 
+def load_and_push_data(config_dict, data, parallelism, buffer, rank, device, local_groups):
+    """
+    Reads input data and pushes to device. 
+    
+    Returns [data, False] or [async_wait_handle, True, buffer]
+    """
+    # Case: 2-way split
+    # Need wait handle.
+    if parallelism == 2:
+        #print(f'I am rank {rank} pushing to device {device}')
+        pushed_data = data.to(device, non_blocking=True) # Non-blocking is possible when pinned memory is used
+        return pushed_data, False
+
+    # Case: 4-way split
+    # Cases 1, 4 will automatically push data. Case 2 will wait.
+    elif parallelism == 4:
+        data_split = config_dict['model_parallel']['split'] # how many processes the data is sharded over
+        if data_split == 1:
+            buffer.zero_()
+            input_data = send_data_fourway(data, buffer, rank, device)
+            return input_data, False
+        elif data_split == 2: # default
+            buffer.zero_()
+            input_data_handle = send_data_twoway(data, buffer, rank, device, local_groups)
+            return input_data_handle, True
+        elif data_split == 4:
+            input_data = data[0].to(device, non_blocking=True)
+            return input_data, False
+
+        
+def reduce_ddp_layernorms(parallelism, mlp, local_groups, global_groups, rank, node_rank):
+    # Now manually all-reduce each parameter's grad
+    handles = []
+    #gradients = [param.grad for name, param in mlp.named_parameters() if param.grad is not None]
+    for name, param in mlp.named_parameters():
+        if param.grad is not None:
+            if 'layer_norm' in name and parallelism == 4: 
+                h = torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.AVG, group=local_groups[rank % 2 + node_rank*2], async_op=True)
+                handles.append(h)
+            if torch.distributed.get_world_size() > parallelism:
+                h = torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.AVG, group=global_groups[rank % parallelism], async_op=True) # reduce over ranks
+                handles.append(h)
+    
+    return handles#, flat_grad, gradients
+
+def reduce_ddp_layernorm_flat(parallelism, mlp, local_groups, global_groups, rank, node_rank):
+    # Now manually all-reduce each parameter's grad
+    #handles = []
+    gradients = [param.grad for name, param in mlp.named_parameters() if param.grad is not None]
+    #for name, param in mlp.named_parameters():
+    #    if param.grad is not None:
+    #        if 'layer_norm' in name and parallelism == 4: 
+    #            h = torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.AVG, group=local_groups[rank % 2 + node_rank*2], async_op=True)
+    #            handles.append(h)
+    #        if torch.distributed.get_world_size() > parallelism:
+    #            h = torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.AVG, group=global_groups[rank % parallelism], async_op=True) # reduce over ranks
+    #            handles.append(h)
+    flat_grad = parameters_to_vector(gradients)
+    handles = torch.distributed.all_reduce(
+        flat_grad, 
+        op=torch.distributed.ReduceOp.AVG,
+        group=global_groups[rank % parallelism],
+        async_op=True
+    )
+    
+    return handles, flat_grad, gradients

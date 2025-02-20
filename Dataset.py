@@ -179,7 +179,7 @@ class ERA5Dataset(Dataset):
             return input, target_list
 class ERA5DatasetDistributed(Dataset):
     """Define 3D dataset."""
-    def __init__(self, config, file_path, mode, patch_size, rank, forecast_length=1, normalize=True, batch_counter=None):
+    def __init__(self, config, file_path, mode, patch_size, rank, forecast_length=1, normalize=True):
         """
         initialize.
 
@@ -235,30 +235,23 @@ class ERA5DatasetDistributed(Dataset):
         self.xlat, self.xlon = config['data']['xlat'], config['data']['xlon']
         self.batch_size = config['training']['train_batch']
         self.split = config['model_parallel']['split']
-        if self.split == 4:
-            if self.rank in [0, 1]:
-                self.start, self.end = 0, 720
-            else:
-                self.start, self.end = 720, 1440
+        self.parallelism = config['model_parallel']['parallelism']
+        if self.parallelism == 4:
+            if self.split == 4:
+                if self.rank in [0, 1]:
+                    self.start, self.end = 0, self.xlon//2
+                else:
+                    self.start, self.end = self.xlon//2, self.xlon
 
-        else: 
-            self.start, self.end = 0, 1440
-        self.alt_sender = config['model_parallel']['alt_sender']
-        
+            else: 
+                self.start, self.end = 0, self.xlon
+        else:
+            self.start, self.end = 0, self.xlon
+               
         self.land_mask, self.soil_type, self.topography = load_constant_mask_2d(self.patch_size, xlat=self.xlat)
         self.land_mask = torch.unsqueeze(self.land_mask[:,self.start:self.end], 0)
         self.soil_type = torch.unsqueeze(self.soil_type[:,self.start:self.end], 0)
         self.topography = torch.unsqueeze(self.topography[:,self.start:self.end], 0)
-
-    def update_index_order(self, index_order):
-        self.index_order = index_order
-        
-    def find_batch_index(self,idx):
-        
-        for i, batch in enumerate(self.index_order):
-            if idx in batch:
-                return i
-        return -1  
 
     def _get_files_stats(self, mode='train'):
         """Filter desired time points based on parameters and return file statistics."""
@@ -304,27 +297,8 @@ class ERA5DatasetDistributed(Dataset):
         global_idx: int
                 global index of item
         """
-        if self.split == 2:
-            if self.alt_sender:
-                worker_info = torch.utils.data.get_worker_info()
-                
-                if worker_info is not None:
-                    # Get the worker's unique counter
-                    batch_counter = worker_state["batch_counter"]
-                    with batch_counter.get_lock():  # Thread-safe counter access
-                        current_batch = batch_counter.value
-                        # Alternate source ranks based on the worker's counter
-#                        print(f'{self.rank} current_batch {current_batch}, ')
-                        skipped_ranks = [2,3] if current_batch % (2*self.batch_size) < self.batch_size else [0,1]
-                        #skipped_ranks = [2,3] if current_batch % 2 < self.batch_size else [0,1]  
-                        batch_counter.value += 1  # Increment worker's counter
-                        
-                else:
-                    # No multiprocessing (e.g., num_workers=0), use a default
-                    current_batch = 0
-            else: 
-                # If two-way split, half of the ranks should not read any of the data
-                skipped_ranks = [2,3,6,7]    
+        if self.split == 2 and self.parallelism == 4:
+            skipped_ranks = [2,3,6,7]    
             if self.rank in skipped_ranks: # 0, 1 always senders
                 return [torch.zeros(1)], [torch.zeros(1)]
         
@@ -346,8 +320,6 @@ class ERA5DatasetDistributed(Dataset):
         target_surface_ds  = self.zarr_data.isel(time=target_file_idxs)[['mean_sea_level_pressure', '10m_u_component_of_wind', '10m_v_component_of_wind', '2m_temperature']]
             
         target = []
-        rank_profile_start = time.perf_counter()
-
         if self.rank in [0,2]: # first half of data
             # Input data
             # Stack and convert to numpy array
@@ -393,16 +365,14 @@ class ERA5DatasetDistributed(Dataset):
                 temp = temp.reshape(-1, self.xlat, self.end-self.start)
                 
                 temp = np.concatenate([target_surface[i], temp], axis=0)
-                if self.split == 2:
+                if self.split == 2 and self.parallelism == 4:
                     target.append([torch.tensor(temp[:,:,:720]).permute(1, 2, 0), torch.tensor(temp[:,:,720:]).permute(1, 2, 0)])
                 else:
                     target.append(torch.tensor(temp).permute(1, 2, 0))
         else:
-            rank1_profile_start = time.perf_counter()
             temperature = input_pressure['temperature'][6:,:self.xlat,self.start:self.end].values
             u_velocity  = input_pressure['u_component_of_wind'][:,:self.xlat,self.start:self.end].values
             v_velocity = input_pressure['v_component_of_wind'][:,:self.xlat,self.start:self.end].values
-        
             
             input = np.concatenate([temperature, u_velocity, v_velocity], axis=0)
             
@@ -423,19 +393,16 @@ class ERA5DatasetDistributed(Dataset):
                 
                 temp = temp.reshape(-1, self.xlat, self.end-self.start) 
                 
-                if self.split == 2:
+                if self.split == 2 and self.parallelism == 4:
                     target.append([torch.nn.functional.pad(torch.tensor(temp[:,:,:720]), (0, 0, 0, 0, 0, 3)).permute(1, 2, 0), 
                                    torch.nn.functional.pad(torch.tensor(temp[:,:,720:]), (0, 0, 0, 0, 0, 3)).permute(1, 2, 0)])
                 else:
                     target.append(torch.nn.functional.pad(torch.tensor(temp), (0, 0, 0, 0, 0, 3)).permute(1, 2, 0)) 
-            
-                
-        if self.split == 2:
+                            
+        if self.split == 2 and  self.parallelism == 4:
             input = [torch.tensor(input[:,:,:720]).permute(1,2,0), torch.tensor(input[:,:,720:]).permute(1,2,0)]
         else:
             input = torch.tensor(input).permute(1,2,0)
-
-        rank_profile_end = time.perf_counter()
 
         return input, target
 
@@ -492,14 +459,3 @@ def load_constant_mask_2d(
 
     
     return land_mask, soil_type, topography
-
-# Worker initialization function
-def worker_init_fn(worker_id, shared_batch_counter):
-    global worker_state
-    worker_state = {
-        "batch_counter": shared_batch_counter  # Assign the shared counter to all workers
-    }
-    #worker_info = torch.utils.data.get_worker_info()
-    
-# Worker state is stored globally
-worker_state = {"batch_counters": {}}
