@@ -97,151 +97,211 @@ def gen_plots(config_dict, input_data, output, target_data, rank, file_path, epo
             utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=9)
         
 
-def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file_path, mse_file_path='rmse.csv', acc_file_path='acc.csv', model_parallel=True, world_size=4, groups=None, node_groups=None):
+def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file_path, mse_file_path='rmse.csv', acc_file_path='acc.csv', model_parallel=True, world_size=4, local_groups=None, node_groups=None, global_groups=None):
     if config_dict['model']['model_parallel']:
         mse_file_path = f'rmse_{rank}.csv'
         acc_file_path = f'acc_{rank}.csv'
     loss = torch.zeros(1).to(device)
-
+    parallelism = config_dict['model_parallel']['parallelism']
     rollout_time = config_dict['model']['latent_rollout']
     dt = config_dict['data']['dt']
     rollout_time = (np.arange(rollout_time) + 1) * dt
     var_names = get_var_names(prepend_variable=['epoch', 'rollout_time'])
+    n_lat, n_lon = config_dict['data']['xlat'], config_dict['data']['xlon']
+
+    rmse, acc = {}, {}
     
-    rmse, rmse_persistence = {}, {}
-    acc, acc_persistence = {}, {}
     for rollout in rollout_time:
-        rmse[rollout], rmse_persistence[rollout] = {}, {}
-        acc[rollout], acc_persistence[rollout] = {}, {}
-        rmse[rollout]['epoch'], acc[rollout]['epoch'] = epoch, epoch
-        rmse_persistence[rollout]['epoch'], acc_persistence[rollout]['epoch'] = -1, -1
-        rmse[rollout]['rollout_time'], rmse_persistence[rollout]['rollout_time'] = rollout, rollout
-        acc[rollout]['rollout_time'], acc[rollout]['rollout_time'] = rollout, rollout
+        rmse[rollout] = {}
+        acc[rollout] = {}
+        rmse[rollout]['epoch'] = epoch
+        acc[rollout]['epoch']  = epoch
+        
+        rmse[rollout]['rollout_time'] = rollout
+        acc[rollout]['rollout_time']  = rollout
         
         # each df has [epoch, rollout_time] as first two values
-        for var in var_names[1:]:
-            rmse[rollout][var] = torch.tensor([0], device=device)
-            acc[rollout][var]  = torch.tensor([0], device=device)
-            rmse_persistence[rollout][var] = torch.tensor([0],device=device)
-            acc_persistence[rollout][var]  = torch.tensor([0],device=device)
+        rmse[rollout] = torch.zeros(len(var_names), device=device)
+        acc[rollout]  = torch.zeros(len(var_names), device=device)
+            
             
     total_samples = torch.tensor([0]).to(device)
     start_validation_time = time.perf_counter()
-    area_weights = torch.tensor(calc_weight(721)).to(torch.float32)[:config_dict['data']['xlat']].to(device)
-    surface_weights  = torch.tensor([1.5, 0.77, 0.77, 3.0]) * 4
-    pressure_weights = torch.tensor([3.00, 0.6, 1.5, 0.77, 0.77]).unsqueeze(1).expand(5, 13).flatten()
-    weights_loss = torch.concat([surface_weights, pressure_weights]).view(1, 69).to(device)
-    if model_parallel:
+
+    surface_weights = torch.tensor([0.6, 0.8, 0.8, 2])*4
+    pressure_weights = torch.tensor([0.6, 0.5, 1.0, 0.8, 0.8]).unsqueeze(1).expand(5, 13).flatten()
+    surface_upper_pressure_weights = torch.concat(
+        [torch.tensor([1, 1, 1, 1]), # surface variables
+        torch.tensor([1, 1, 1, 1, 1, 1, 0.8, 0.1, .7, .1, .6, .1, .5]).repeat(5)]
+    ).view(1, 69)
+
+    variable_weights = ((torch.concat([surface_weights, pressure_weights]).view(1, 1, 1, 69))*surface_upper_pressure_weights).to(device)
+    
+    # underground mask
+    weights = torch.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/kangu_finetuning/finetuning_weights/feature_weights.pt', map_location='cpu')
+    underground_mask = weights['pressure_mask_lower'] # shape [5, 724, 1440]
+    underground_mask = underground_mask.permute(1, 2, 0)[1:-2][:n_lat].unsqueeze(-1).expand(-1, -1, -1, 13).reshape(1, n_lat, n_lon, 65) # shape is [1, xlat, xlon, 65]
+
+    area_weights = torch.tensor(calc_weight(n_lat)).view(1, n_lat, 1, 1).to(device)
+    
+    # Load climatology
+    if parallelism < 4:
+        climatology = get_climatology()[:n_lat]
+    elif parallelism == 4:
+        n_lon = n_lon//2
         mod = rank % 4
-        weights_loss = weights_loss[0,:36] if mod in [0, 2] else torch.nn.functional.pad(weights_loss[0,36:], (0,3))
+        if rank in [0, 1]:
+            climatology = get_climatology()[:n_lat, :n_lon]
+        else:
+            climatology = get_climatology()[:n_lat, n_lon:]
+
+
+    if parallelism == 1:
+        underground_mask = underground_mask.to(device)
+    elif parallelism == 2:
+        variable_weights = torch.nn.functional.pad(variable_weights, (0,3))
+        variable_weights = variable_weights[0,0,0,:36] if rank % parallelism == 0 else variable_weights[0,0,0,36:]
+        underground_mask = torch.nn.functional.pad(underground_mask, (0,3)) # [1, xlat, xlon, 68]
+        underground_mask = underground_mask[:,:,:,:32] if rank % parallelism == 0 else underground_mask[:,:,:,32:]
+        underground_mask = underground_mask.to(device)
+    else:
+        mod = rank % parallelism
+        variable_weights = torch.nn.functional.pad(variable_weights, (0,3))
+        variable_weights = variable_weights[0,0,0,:36] if rank % parallelism in [0, 2] else variable_weights[0,0,0,36:]
+        underground_mask = torch.nn.functional.pad(underground_mask, (0,3)) # [1, xlat, xlon, 68]
+        if mod == 0:             
+            underground_mask = underground_mask[:,:,:720,:32].to(device)
+        elif mod == 1:
+            underground_mask = underground_mask[:,:,:720,32:].to(device)
+        elif mod == 2:
+            underground_mask = underground_mask[:,:,720:,:32].to(device)
+        else:
+            underground_mask = underground_mask[:,:,720:,32:].to(device)
 
     xlat, xlon = config_dict['data']['xlat'], config_dict['data']['xlon']
 
     index_offset = 2 if 'rollout_time' in var_names else 1
+    mean, std = load_averages()
     
     loss_fn = torch.nn.MSELoss()
-    buffer  = torch.zeros(config_dict['training']['valid_batch'], xlat, xlon//2, 36).to(device)
-    buffer2 = torch.zeros(config_dict['training']['valid_batch'], xlat, xlon//2, 36).to(device)
     parallelism = config_dict['model_parallel']['parallelism']
+    if parallelism == 4:
+        buffer  = torch.zeros(config_dict['training']['valid_batch'], xlat, xlon//2, 36).to(device)
+        buffer2 = torch.zeros(config_dict['training']['valid_batch'], xlat, xlon//2, 36).to(device)
+    else:
+        buffer, buffer2 = None, None
+    
     
     torch.backends.cuda.matmul.allow_tf32 = True
+    loss_fn = torch.nn.MSELoss()
+
+    # Specify indices to calculate RMSE
+    indices = np.array([0, 1, 2, 3, 6, 9, 19, 22, 32, 35, 45, 48, 58, 61])
+    indices_key = indices + index_offset
+
+    model.eval()
+
     for batch, data in enumerate(dataloader):
         for step, rollout in enumerate(rollout_time):
+            # Write epoch 
+            rmse[rollout][0] = epoch
+            acc[rollout][0]  = epoch
+            rmse[rollout][1] = step
+            acc[rollout][1] = step
+    
             # Input and target data loading
-            if not config_dict['model']['model_parallel']:
-                input_data  = data[0].to(device)
-                target_data = data[1][step].to(device)
+            if parallelism == 1:
+                input_data  = data[0].to(device, non_blocking=True)
+                target_data = data[1][step].to(device, non_blocking=True)
             else:
                 if config_dict['model_parallel']['parallelism'] == 4:
-                    input_data_or_handle,  async_input = utils.load_and_push_data(config_dict, data[0], parallelism, buffer, rank, device, groups)
-                    target_data_or_handle, async_target = utils.load_and_push_data(config_dict, data[1][step], parallelism, buffer2, rank, device, groups)
+                    input_data_or_handle,  async_input = utils.load_and_push_data(config_dict, data[0], parallelism, buffer, rank, device, local_groups)
+                    target_data_or_handle, async_target = utils.load_and_push_data(config_dict, data[1][step], parallelism, buffer2, rank, device, local_groups)
                     if async_input:
                         input_data_or_handle.wait()
                         input_data = buffer
                     else:
                         input_data = input_data_or_handle
-                    if async_target:
-                        target_data_or_handle.wait()
-                        target_data = buffer2
-                    else:
-                        target_data = target_data_or_handle
                 else:
-                    input_data = data[0].to(device)
-                    target_data = data[1][step].to(device)
+                    input_data  = data[0].to(device, non_blocking=True)
+                    
 
             output = model(input_data, rollout_=step+1)
-            
-            if model_parallel:
-                if parallelism == 4:
-                    output = output.reshape(output.shape[0], xlat, xlon//2, 36)
-                else:
-                    output = output.reshape(output.shape[0], xlat, xlon, 36)
-                
-                if config_dict['training']['area_weighted']:
-                    loss[0] = loss[0] + (loss_fn(torch.einsum('bxyz, x->bxyz', output, area_weights)*weights_loss, torch.einsum('bxyz, x->bxyz', target_data, area_weights)*weights_loss))
-                else:
-                    loss[0] = loss[0] + (loss_fn(output*weights_loss, target_data*weights_loss))
+            output = output.detach()
 
-                loss_   = loss_fn(output, target_data)
-                
-                loss[0] = loss[0] + loss_.item()
-
-                
-                for i, var in enumerate(var_names):
-                    if i > index_offset-1:
-                        # Only test on surface variables and pressure heights 850, 500 due to compute time
-                        if rank in [0, 2]: # first half of variables
-                            if i in (np.array([0, 1, 2, 3, 6, 9, 19, 22,32, 35]) + index_offset):
-                                rmse[rollout][var] = rmse[rollout][var] + calc_mse_single_variable_parallel(config_dict, target_data, output, device, area_weights, index=(i-index_offset), norm=True, norm_offset=0)
-                                if parallelism == 4:
-                                    acc[rollout][var]  = acc[rollout][var] + calc_acc_single_variable_parallel(config_dict, target_data, output, device, area_weights, index=(i-index_offset), norm=True, norm_offset=0, rank=rank)
-                                else:
-                                    acc[rollout][var]  = acc[rollout][var] + calc_acc_single_variable(target_data, output, device, area_weights, index=(i-index_offset), norm=True)
-                        else:
-                            if i in (np.array([ 45, 48, 58, 61]) + index_offset):
-                                norm_offset = 36
-                                rmse[rollout][var] = rmse[rollout][var] + calc_mse_single_variable_parallel(config_dict, target_data, output, device, area_weights, index=(i-index_offset - norm_offset), norm=True, norm_offset=norm_offset)
-                                if parallelism == 4:
-                                    acc[rollout][var]  = acc[rollout][var] + calc_acc_single_variable_parallel(config_dict, target_data, output, device, area_weights, index=(i-index_offset - norm_offset), norm=True, norm_offset=norm_offset, rank=rank)
-                                else:
-                                    acc[rollout][var]  = acc[rollout][var] + calc_acc_single_variable(target_data, output, device, area_weights, index=(i-index_offset - norm_offset), norm=True)
-          
-                                
-            else:
+            if parallelism == 1:
                 input_data = input_data.permute(0, 2, 3, 1) # Permute input data for mse calculation
-                target_data = target_data.permute(0, 2, 3, 1).contiguous()
-                loss_fn = torch.nn.MSELoss()
+                target_data = target_data.permute(0, 2, 3, 1)
 
-                if config_dict['training']['area_weighted']:
-                    loss[0] = loss[0] + (loss_fn(torch.einsum('bxyz, x->bxyz', output, area_weights)*weights_loss, torch.einsum('bxyz, x->bxyz', target_data, area_weights)*weights_loss)).item()
+                target_data[:,:,:,4:] = target_data[:,:,:,4:] * underground_mask
+                output[:,:,:,4:]      = output[:,:,:,4:] * underground_mask
+                
+                # Calculate RMSE and ACC
+                rmse[rollout][indices_key] = rmse[rollout][indices_key] + calc_mse_variable(target_data, output, device, area_weights, std=std, indices=indices).to(torch.float32)
+                acc[rollout][indices_key]  = acc[rollout][indices_key] + calc_acc_variable(target_data, output, device, area_weights, mean=mean, std=std, climatology=climatology, indices=indices).to(torch.float32)
+                
+                output_loss = output * area_weights * variable_weights
+                target_loss = target_data * area_weights *variable_weights
+
+                loss = loss + loss_fn(output_loss, target_loss)
+            elif parallelism == 2:
+                output = output.reshape(output.shape[0], xlat, xlon, 36)
+                
+                if rank % parallelism == 0:
+                    norm_offset = 0
+                    indices = np.array([0, 1, 2, 3, 6, 9, 19, 22, 32, 35])
+                    target_data = data[1][step].to(device, non_blocking=True)
+                elif rank % parallelism == 1:
+                    norm_offset = 36
+                    indices = np.array([45, 48, 58, 61]) - norm_offset
+                    target_data = data[1][step].to(device, non_blocking=True)
+                
+                if rank % parallelism in [0,2]:
+                    target_data[:,:,:,4:] = target_data[:,:,:,4:] * underground_mask
+                    output[:,:,:,4:]      = output[:,:,:,4:] * underground_mask
                 else:
-                    loss[0] = loss[0] + (loss_fn(output*weights_loss, target_data*weights_loss)).item()
-                # calculate rmse for all variables
-                for i, var in enumerate(var_names):
-                    if i > index_offset-1:
-                        # Only test on surface variables and pressure heights 850, 500
-                        # due to saving time 
-                        if i in (np.array([0, 1, 2, 3, 6, 9, 19, 22, 32, 35, 45, 48, 58, 61]) + index_offset):
-                            rmse[rollout][var] = rmse[rollout][var] + calc_mse_single_variable(config_dict, target_data, output, device, area_weights, index=(i-index_offset), norm=True)
-                            acc[rollout][var]  = acc[rollout][var] + calc_acc_single_variable(target_data, output, device, area_weights, index=(i-index_offset), norm=True)
-                        else:
-                            rmse[rollout][var] = rmse[rollout][var] + 0.
-                            acc[rollout][var]  = acc[rollout][var]  + 0.
+                    target_data = target_data * underground_mask
+                    output      = output * underground_mask
 
-                #if epoch == 0:
-                #    for i, var in enumerate(var_names):
-                #        if i > 0:
-                #            if i in [1, 2, 3, 4, 7, 10, 20, 23, 33, 36, 46, 49, 59, 62]:
-                #                rmse_persistence[rollout][var] = rmse[rollout][var] + calc_mse_single_variable(config_dict, target_data, input_data, device, weights, index=(i-1), norm=True)
-                #                acc_persistence[rollout][var]  = acc[rollout][var] + calc_acc_single_variable(target_data, input_data, device, weights, index=(i-1), norm=True)
-                #            else:
-                #                rmse[rollout][var] = rmse[rollout][var] + 0.
-                #                acc[rollout][var]  = acc[rollout][var] + 0.
+                rmse[rollout][indices + norm_offset + index_offset] = rmse[rollout][indices + norm_offset + index_offset] + calc_mse_variable(target_data, output, device, area_weights, std=std, indices=indices, norm_offset=norm_offset).to(torch.float32)
+                acc[rollout][indices + norm_offset + index_offset]  = acc[rollout][indices + norm_offset + index_offset]  + calc_acc_variable(target_data, output, device, area_weights, mean=mean, std=std, climatology=climatology, indices=indices, norm_offset=norm_offset).to(torch.float32)
+                # loss calculation
+                target_loss = target_data * area_weights * variable_weights
+                output_loss = output * area_weights * variable_weights
+                loss = loss + loss_fn(output_loss, target_loss)
 
-        total_samples[0] = total_samples[0] + input_data.shape[0]
+            elif parallelism == 4:
+                output = output.reshape(output.shape[0], xlat, xlon//2, 36)               
+                # Wait for target data to be pushed if necessary
+                if async_target:
+                    target_data_or_handle.wait()
+                    target_data = buffer2
+                else:
+                   target_data = target_data_or_handle
 
+                if rank % parallelism in [0,2]: # 0 and 2 handle the first half of the output variables
+                    norm_offset = 0
+                    indices = np.array([0, 1, 2, 3, 6, 9, 19, 22, 32, 35])
+                    output[:,:,:,4:] = output[:,:,:,4:] * underground_mask
+                elif rank % parallelism in [1,3]: # 1 and 3 handle the second half of the output variables
+                    norm_offset = 36
+                    indices = np.array([45, 48, 58, 61]) - norm_offset
+                    output  = output * underground_mask
+
+                # Each process contains its half of the squarred error
+                rmse[rollout][indices + norm_offset +  index_offset] = rmse[rollout][indices + norm_offset + index_offset] + calc_mse_variable(target_data, output, device, area_weights, std=std, indices=indices, norm_offset=norm_offset).to(torch.float32)
+                acc[rollout][indices + norm_offset + index_offset]   = acc[rollout][indices + norm_offset + index_offset]  + calc_acc_variable_parallel(target_data, output, device, area_weights, mean=mean, std=std, climatology=climatology, indices=indices, norm_offset=norm_offset, group=local_groups, rank=rank).to(torch.float32)
+                
+                output_loss = output * area_weights * variable_weights
+                target_loss = target_data * area_weights * variable_weights
+                
+                loss = loss + loss_fn(output_loss, target_loss)
+
+
+        total_samples = total_samples + input_data.shape[0]
+        
         if batch == 0:
-            if model_parallel and rank < 4 and parallelism == 4: # only needs to happen once
+            if  rank < 4 and parallelism == 4: # only needs to happen once
                 # Gather input data
                 # input data has shape [nvar, lat, lon]
                 input_data, output, target_data = input_data[0].contiguous(), output[0].contiguous(), target_data[0].contiguous()
@@ -281,72 +341,56 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
                 print(f"rank {rank}, input data shape {input_data.shape}")
                 gen_plots(config_dict, input_data, output, target_data, rank, file_path, epoch, model_parallel=model_parallel)
         
-    if not config_dict['model']['model_parallel']:
+    if parallelism == 1:
         torch.distributed.all_reduce(total_samples)
         torch.distributed.all_reduce(loss)
         loss /= world_size # average the loss for world size
         loss /= len(dataloader)
-    else:
+    else: # parallel
         total_samples = [len(dataloader.dataset)]
-        torch.distributed.all_reduce(loss)
-        loss /= world_size
+        loss = loss / world_size / total_samples[0]
+        torch.distributed.all_reduce(loss)    
     
-    print(f"total samples {total_samples}")
-        
-    for variable in var_names[index_offset:]:
-        for rollout in rollout_time:
-            if config_dict['model']['model_parallel'] and parallelism == 4: # when parallel, need to reduce among groups
-                torch.distributed.all_reduce(rmse[rollout][variable], group=groups[rank%2]) # Adding MSE of two ranks together
-                torch.distributed.all_reduce(acc[rollout][variable], group=groups[rank%2], op=torch.distributed.ReduceOp.AVG)
-            #if epoch == 0:
-            #    torch.distributed.all_reduce(rmse_persistence[rollout][variable])
-            #    torch.distributed.all_reduce(acc_persistence[rollout][variable])
-            else:
-                torch.distributed.all_reduce(rmse[rollout][variable])
-                torch.distributed.all_reduce(acc[rollout][variable])
+    for rollout in rollout_time:
+        if parallelism == 1:
+            torch.distributed.all_reduce(rmse[rollout][2:]) 
+            torch.distributed.all_reduce(acc[rollout][2:]) 
+        elif parallelism == 2:
+            # Each process has squared error of a certain variable. Need to add over the appropriate DDP groups = global groups.
+            torch.distributed.all_reduce(rmse[rollout][2:], group=global_groups[rank%2]) 
+            torch.distributed.all_reduce(acc[rollout][2:], group=global_groups[rank%2])  
+        elif parallelism == 4:
+            # First reduce over local groups --> [0,2], [1,3], [4,6]...
+            torch.distributed.all_reduce(rmse[rollout][2:], group=local_groups[rank%2]) # Adding MSE of two "partner" ranks together
+            torch.distributed.all_reduce(rmse[rollout][2:], group=global_groups[rank%4]) # Then reduce over global ddp groups
+            torch.distributed.all_reduce(acc[rollout][2:], group=global_groups[rank%4])
     
+            
+    for rollout in rollout_time:
+        rmse[rollout][2:] = torch.sqrt(rmse[rollout][2:]/total_samples[0])
+        acc[rollout][2:]  = acc[rollout][2:] / total_samples[0]
+
+        if rank == 0:
+            rmse[rollout][21:25] = rmse[rollout][21:25]*1000
+
     end_validation_time = time.perf_counter()
 
     if rank == 0:
         print(f"Validation time [min]: {(end_validation_time - start_validation_time)/60}, validation loss {loss.item()}")
-
-        for variable in var_names[index_offset:]:
-            for rollout in rollout_time:
-                rmse[rollout][variable] = torch.sqrt(rmse[rollout][variable]/total_samples[0])
-                acc[rollout][variable]  = acc[rollout][variable] / total_samples[0]
-                #if epoch == 0:
-                #    rmse_persistence[rollout][variable] = torch.sqrt(rmse_persistence[rollout][variable] / total_samples[0])
-                #    acc_persistence[rollout][variable]  = acc_persistence[rollout][variable] / total_samples[0]
-
-                if variable[0] == 'q':
-                    rmse[rollout][variable] = rmse[rollout][variable]*1000
-                    rmse_persistence[rollout][variable] = rmse_persistence[rollout][variable]*1000
-                
+        
     # write to file
-    if rank == 0:
+    
+    if (parallelism > 1 and rank < 2) or (parallelism == 1 and rank == 0):
         rmse_file, acc_file = Path(mse_file_path), Path(acc_file_path)
-
         for rollout in rollout_time:
-            rmse_values = {key: float(value) for key, value in rmse[rollout].items()}
-            acc_values  = {key: float(value) for key, value in acc[rollout].items()}
-            #if epoch == 0:
-            #    rmse_persistence_values = {key: float(value) for key, value in rmse_persistence[rollout].items()}
-            #    acc_persistence_values  = {key: float(value) for key, value in acc_persistence[rollout].items()}
-            #    df_rmse = pd.DataFrame([rmse_persistence_values, rmse_values])
-            #    df_acc  = pd.DataFrame([acc_persistence_values, acc_values])
-            #else:
-            df_rmse = pd.DataFrame([rmse_values])
-            df_acc  = pd.DataFrame([acc_values])
+            rmse_values = dict(zip(var_names, rmse[rollout].cpu().tolist()))
+            acc_values  = dict(zip(var_names, acc[rollout].cpu().tolist()))
+            
+            df_rmse, df_acc = pd.DataFrame([rmse_values]), pd.DataFrame([acc_values])
+            
+            df_rmse.to_csv(mse_file_path, mode='a', header=False) if rmse_file.is_file() else df_rmse.to_csv(mse_file_path)
+            df_acc.to_csv(acc_file_path, mode='a', header=False) if acc_file.is_file() else df_acc.to_csv(acc_file_path)
 
-            if rmse_file.is_file():
-                df_rmse.to_csv(mse_file_path, mode='a', header=False)
-            else:
-                df_rmse.to_csv(mse_file_path)
-
-            if acc_file.is_file():
-                df_acc.to_csv(acc_file_path, mode='a', header=False)
-            else:
-                df_acc.to_csv(acc_file_path)
     return loss.item()
 
 def load_averages():
@@ -369,121 +413,77 @@ def get_climatology():
     # climatology [721, 1440, variables]
     return climatology
 
-def calc_mse_single_variable(config_dict, target, result, device, weights, index=0, norm=False):
-    if config_dict is None:
-        n_lon = 1440
-        n_lat = 721
-    else:
-        n_lon = config_dict['data']['xlon']
-        n_lat = config_dict['data']['xlat']
 
+def calc_mse_variable(target, result, device, area_weights, std, indices, norm_offset=0):
+    n_lon = 1440
+    n_lat = area_weights.numel()
+
+    # target shape [n_batch, 721, 1440, vars]
     divisor = torch.sqrt(torch.tensor([n_lon*n_lat])).to(device)
-
-    _, std = load_averages()
-    std    = std.to(device)
-
-    std_multiplier = std[index] if norm else 1.0
     
-    # MSE = ((target - result) * stdev) ** 2
-    if len(target.shape) == 4:
-        mean_squared_error = ((target[:, :, :, index] - result[:, :, :, index]) * 
-                std_multiplier.flatten() / divisor
-            )**2
-    else:
-        mean_squared_error = ((target - result) * std_multiplier / divisor)**2
-
-    mean_squared_error = torch.einsum('i, aij->ai', weights, mean_squared_error).sum(dim=1)
-    mean_squared_error = mean_squared_error.flatten().sum() 
+    std_multiplier = std[indices+norm_offset].view(1, 1, 1, len(indices)).to(device)
+    area_weights = area_weights.view(1, n_lat, 1, 1)
     
+    mean_squared_error = ((target[:, :,:,indices] - result[:, :,:,indices]) * 
+            std_multiplier.flatten() / divisor
+        )**2
+    
+    # MSE will have shape [n_batch, n_vars, ]
+    mean_squared_error = mean_squared_error.sum(dim=(0,1,2))  # TODO: check dimensions to sum over
+
     return mean_squared_error
-       
 
-def calc_mse_single_variable_parallel(config_dict, target, result, device, weights, index=0, norm=False, norm_offset=0):
-    if config_dict is None:
-        n_lon = 1440
-        n_lat = 721
-    else:
-        n_lon = config_dict['data']['xlon']
-        n_lat = config_dict['data']['xlat']
-    # per process: target has shape [n_patches, nlat, nlon//2, nvar/2]
-    target_ = target[:,:,:,index]
-    result_ = result[:,:,:,index]
 
-    divisor = torch.sqrt(torch.tensor([n_lon*n_lat])).to(device)
-
-    _, std = load_averages()
-    std    = std.to(device)
-
-    if not norm:
-        std_multiplier = 1.0
-    else:
-        std_multiplier = std[index+norm_offset]
-    # MSE = ((target - result) * stdev) ** 2
+def calc_acc_variable(target, result, device, weights, mean, std, climatology, indices=0, norm_offset=0):
     
-    mean_squared_error = ((target_ - result_) * std_multiplier / divisor)**2 # MSE has shape [n_patches, n_lat, n_lon]
-    
-    mean_squared_error = torch.einsum('i, aij->ai', weights, mean_squared_error).sum(dim=1)
-    mean_squared_error = mean_squared_error.flatten().sum() 
-    
-    return mean_squared_error
-       
+    mean, std = mean[indices+norm_offset].to(device), std[indices+norm_offset].flatten().to(device)
 
-def calc_acc_single_variable(target, result, device, weights, index=0, norm=True):
-    mean, std = load_averages()
-    mean, std = mean.to(device), std.to(device)
-
-    climatology = get_climatology()[:len(weights)].to(device)
-    climatology = climatology - mean
-    
-    # If we do not need to normalize, the value of standard deviation is 1, does not affect results.
-    if not norm:
-        std[index] = 1
-
-    if len(target.shape) == 4:
-        target_anomoly = (target[:,:,:,index] * std[index].flatten() - climatology[:, :, index])
-        result_anomoly = (result[:,:,:,index] * std[index].flatten() - climatology[:, :, index])
-    else:
-        target_anomoly = (target * std[index].flatten() - climatology[:, :, index])
-        result_anomoly = (result * std[index].flatten() - climatology[:, :, index])
-    numerator = torch.sum(torch.einsum('i,aij->ai', weights, torch.mul(target_anomoly, result_anomoly)), dim=(1))
-    denom1    = torch.sum(torch.einsum('i,aij->ai', weights, target_anomoly**2), dim=(1))
-    denom2    = torch.sum(torch.einsum('i,aij->ai', weights, result_anomoly**2), dim=(1))
-    acc_vec   = numerator/(torch.sqrt(torch.mul(denom1, denom2)))
-    acc_sum   = torch.sum(acc_vec)
-    
-    return acc_sum
-
-def calc_acc_single_variable_parallel(config_dict, target, result, device, weights, index=0, norm=False, norm_offset=0, rank=0):
-    if config_dict is None:
-        n_lon = 1440
-        n_lat = 721
-    else:
-        n_lon = config_dict['data']['xlon'] // 2
-        n_lat = config_dict['data']['xlat']
-    # per process: target has shape [n_patches, nlat, nlon//2, nvar/2]
-    target_ = target[:,:,:,index]
-    result_ = result[:,:,:,index]
-
-    mean, std = load_averages()
-    mean, std = mean.to(device), std.to(device)
-    if rank % 4 == 0:
-        climatology = get_climatology()[:n_lat, :n_lon, index+norm_offset].to(device)
-    elif rank % 4 == 1:
-        climatology = get_climatology()[:n_lat, :n_lon, index+norm_offset].to(device)
-    elif rank % 4== 2:
-        climatology = get_climatology()[:n_lat, n_lon:, index+norm_offset].to(device)
-    elif rank % 4 == 3:
-        climatology = get_climatology()[:n_lat, n_lon:, index+norm_offset].to(device)
+    # climatology has shape [var, 721,1440] mean has shape    
+    climatology = climatology[:,:,indices+norm_offset].to(device)
+    climatology = (climatology - mean.view(1, 1, len(indices))).unsqueeze(0)
         
-    std_multiplier = std[index+norm_offset] if norm else 1.0
+    std_multiplier = std.view(1, 1, 1, len(indices)).to(device)
     
-    target_anomoly = (target_ * std_multiplier - climatology)
-    result_anomoly = (result_ * std_multiplier - climatology)
-    
-    numerator = torch.sum(torch.einsum('i,aij->ai', weights, torch.mul(target_anomoly, result_anomoly)), dim=(1))
-    denom1    = torch.sum(torch.einsum('i,aij->ai', weights, target_anomoly**2), dim=(1))
-    denom2    = torch.sum(torch.einsum('i,aij->ai', weights, result_anomoly**2), dim=(1))
-    
+    target_anomoly = (target[:, :, :, indices] * std_multiplier) - climatology
+    result_anomoly = (result[:, :, :, indices] * std_multiplier) - climatology
+
+    weights = weights.view(1, weights.numel(), 1, 1)
+    # numerator has shape [batch_size, vars, n_lat, n_lon]
+    numerator = torch.sum(weights * torch.mul(target_anomoly, result_anomoly), dim=(1,2)) # TODO: check summing dimension
+    denom1    = torch.sum(weights * target_anomoly**2, dim=(1,2))
+    denom2    = torch.sum(weights * result_anomoly**2, dim=(1,2))
     acc_vec   = numerator/(torch.sqrt(torch.mul(denom1, denom2)))
-    acc_sum   = torch.sum(acc_vec)
+    
+    acc_sum   = torch.sum(acc_vec, dim=(0))
+    
+    return acc_sum # should be a vector of length (indices)
+
+
+def calc_acc_variable_parallel(target, result, device, weights, mean, std, climatology, indices=0, norm_offset=0, group=None, rank=0):
+    # per process: target has shape [n_patches, nlat, nlon//2, nvar/2]
+    
+    mean, std = mean[indices+norm_offset].to(device), std[indices+norm_offset].flatten().to(device)
+    
+    climatology = climatology[:,:,indices+norm_offset].to(device)
+    climatology = (climatology - mean.view(1, 1, len(indices))).unsqueeze(0)
+    std_multiplier = std.view(1, 1, 1, len(indices)).to(device)
+    
+
+    target_anomoly = (target[:, :, :, indices] * std_multiplier) - climatology
+    result_anomoly = (result[:, :, :, indices] * std_multiplier) - climatology
+
+    weights = weights.view(1, weights.numel(), 1, 1)
+    
+    
+    numerator = torch.sum(weights * torch.mul(target_anomoly, result_anomoly), dim=(1,2))
+    denom1    = torch.sum(weights * target_anomoly**2, dim=(1,2))
+    denom2    = torch.sum(weights * result_anomoly**2, dim=(1,2))
+    
+    torch.distributed.all_reduce(numerator, group=group[rank%2])
+    torch.distributed.all_reduce(denom1, group=group[rank%2])
+    torch.distributed.all_reduce(denom2, group=group[rank%2])
+
+    acc_vec   = numerator/(torch.sqrt(torch.mul(denom1, denom2)))
+    acc_sum   = torch.sum(acc_vec, dim=0)
+
     return acc_sum
