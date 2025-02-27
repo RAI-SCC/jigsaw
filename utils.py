@@ -49,26 +49,38 @@ def get_ddp_groups(parallelism):
                
     for global_group in global_group_list:
         global_groups.append(torch.distributed.new_group(ranks=global_group))
-
+    
     return global_groups
 
 def get_local_groups_twoway(rank):
     # [0,1] --> one group
     # [2,3] --> another group
-    local_pair_start_rank = rank // 2 * 2
-    local_group_twoway = torch.distributed.new_group(ranks=[local_pair_start_rank, local_pair_start_rank+1])
-    return local_group_twoway
+    local_groups = []
+    
+
+    for i in range(torch.distributed.get_world_size() // 2):
+        # 8 --> [0, 4]
+        local_pair_start_rank = i * 2
+        local_groups.append(
+                torch.distributed.new_group(ranks=[local_pair_start_rank, local_pair_start_rank+1]
+                                            )
+            )
+    
+    return local_groups[rank//2]
 
 def get_local_group_per_node(rank):
     # [0, 1, 2, 3]
     # Rank 4, 6 should be in group together
-    gpus_per_node = 4 # horeka- specific
-    node_rank     = rank // gpus_per_node # if rank between 0 and 3, node_rank = 0 
-                                    # if rank between 4 and 7, node_rank = 1
-    starting_group_index = node_rank
-    local_group_per_node = torch.distributed.new_group(ranks=[starting_group_index, starting_group_index+1, starting_group_index+2, starting_group_index+3])
-    return local_group_per_node
-
+    local_groups = []
+    for i in range(torch.distributed.get_world_size() // 4):
+        local_pair_start_rank = i * 4
+        local_groups.append(
+                torch.distributed.new_group(
+                    ranks=[local_pair_start_rank, local_pair_start_rank+1, local_pair_start_rank+2, local_pair_start_rank+3]
+                )
+        )
+    
+    return local_groups[rank//4]
 
 def set_all_seeds(seed, rank=None):
     if rank is None:
@@ -117,23 +129,14 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
     
     if subset_size != 0: 
         subset_indices = torch.randperm(len(dataset))[:subset_size]
-        if parallelism < 4:
-            dataset = Subset(dataset, subset_indices)            
-        else: #torch.distributed.get_world_size() > parallelism and parallelism > 1: 
-            # n_partitions: if 4 GPUs, 1. If 8 GPUs, 2
-            n_partitions = torch.distributed.get_world_size() // parallelism  # TODO: should be a ceiling operation for completeness
-            size_partition = len(subset_indices) // n_partitions
-            node_rank = rank // parallelism # if 0-3, node_rank=0. If 4-7, node_rank=1
-            subset_indices = subset_indices[node_rank*size_partition:(node_rank+1)*size_partition]
-            dataset = Subset(dataset, subset_indices)
-            # start index
-        
+        dataset = Subset(dataset, subset_indices)            
+
 
     sampler    = DistributedSampler(dataset, 
                                     shuffle=False,
                                     num_replicas=(torch.distributed.get_world_size()//parallelism),
                                     rank=rank//parallelism
-                                    ) if parallelism < 4 else None #TODO
+                                    ) 
     
     if mode == 'validation' and parallelism > 1:
         dataloader = DataLoader(dataset, 
@@ -180,7 +183,10 @@ def init_CUDA():
     torch.cuda.set_device(slurm_localid)
     
     # Initialize DistributedDataParallel.
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size, init_method="env://")
+    dist.init_process_group(backend="nccl", 
+                            rank=rank, 
+                            world_size=world_size, 
+                            init_method="env://")
     
     if dist.is_initialized(): 
         print(f"Rank {rank}/{world_size}: Process group initialized with torch rank {torch.distributed.get_rank()} and torch world size {torch.distributed.get_world_size()}.")
@@ -356,11 +362,11 @@ def load_and_push_data(config_dict, data, parallelism, buffer, rank, device, loc
             input_data = send_data_fourway(data, buffer, rank, device)
             return input_data, False
         elif data_split == 2: # default
-            buffer.zero_()
             input_data_handle = send_data_twoway(data, buffer, rank, device, local_groups)
             return input_data_handle, True
         elif data_split == 4:
-            input_data = data[0].to(device, non_blocking=True)
+            input_data = data.to(device, non_blocking=True)
+            
             return input_data, False
 
         
@@ -368,16 +374,16 @@ def reduce_ddp_layernorms(parallelism, mlp, local_groups, global_groups, rank, n
     # Now manually all-reduce each parameter's grad
     handles = []
     #gradients = [param.grad for name, param in mlp.named_parameters() if param.grad is not None]
-    for name, param in mlp.named_parameters():
-        if param.grad is not None:
-            if 'layer_norm' in name and parallelism == 4: 
-                h = torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.AVG, group=local_groups[rank % 2 + node_rank*2], async_op=True)
-                handles.append(h)
-            if torch.distributed.get_world_size() > parallelism:
-                h = torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.AVG, group=global_groups[rank % parallelism], async_op=True) # reduce over ranks
-                handles.append(h)
-    
-    return handles#, flat_grad, gradients
+    gradients = [param.grad for name, param in mlp.named_parameters() if (param.grad is not None and 'layer_norm' in name)]
+    flat_grad = parameters_to_vector(gradients)
+    handles = torch.distributed.all_reduce(
+        flat_grad, 
+        op=torch.distributed.ReduceOp.AVG,
+        group=local_groups[rank % 2 + node_rank*2],
+        async_op=True
+    )
+            
+    return handles, flat_grad, gradients
 
 def reduce_ddp_layernorm_flat(parallelism, mlp, local_groups, global_groups, rank, node_rank):
     # Now manually all-reduce each parameter's grad

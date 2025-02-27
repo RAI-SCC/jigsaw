@@ -297,9 +297,8 @@ class ERA5DatasetDistributed(Dataset):
         global_idx: int
                 global index of item
         """
-        if self.split == 2 and self.parallelism == 4:
-            skipped_ranks = [2,3,6,7]    
-            if self.rank in skipped_ranks: # 0, 1 always senders
+        if self.parallelism == 4 and self.split == 2:
+            if self.rank % self.parallelism > 1:
                 return [torch.zeros(1)], [torch.zeros(1)]
         
         target_surface  = []
@@ -320,7 +319,7 @@ class ERA5DatasetDistributed(Dataset):
         target_surface_ds  = self.zarr_data.isel(time=target_file_idxs)[['mean_sea_level_pressure', '10m_u_component_of_wind', '10m_v_component_of_wind', '2m_temperature']]
             
         target = []
-        if self.rank in [0,2]: # first half of data
+        if self.rank % 2 == 0: # first half of data
             # Input data
             # Stack and convert to numpy array
 
@@ -403,7 +402,7 @@ class ERA5DatasetDistributed(Dataset):
             input = [torch.tensor(input[:,:,:720]).permute(1,2,0), torch.tensor(input[:,:,720:]).permute(1,2,0)]
         else:
             input = torch.tensor(input).permute(1,2,0)
-
+        
         return input, target
 
 

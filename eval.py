@@ -34,7 +34,7 @@ def get_var_names(prepend_variable=['epoch']):
     pressure_variables = ['z', 'q', 't', 'u', 'v']
     pressure_levels = [1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50]
 
-    var_names = prepend_variable # list
+    var_names = prepend_variable # lis
     var_names.extend(surface_variables)
     for pvar in pressure_variables:
         var_names.extend(pvar + str(pl) for pl in pressure_levels)
@@ -128,8 +128,8 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
     total_samples = torch.tensor([0]).to(device)
     start_validation_time = time.perf_counter()
 
-    surface_weights = torch.tensor([0.6, 0.8, 0.8, 2])*4
-    pressure_weights = torch.tensor([0.6, 0.5, 1.0, 0.8, 0.8]).unsqueeze(1).expand(5, 13).flatten()
+    surface_weights = torch.tensor([0.6, 0.8, 0.8, 3])*4
+    pressure_weights = torch.tensor([0.6, 0.5, 1.5, 0.8, 0.8]).unsqueeze(1).expand(5, 13).flatten()
     surface_upper_pressure_weights = torch.concat(
         [torch.tensor([1, 1, 1, 1]), # surface variables
         torch.tensor([1, 1, 1, 1, 1, 1, 0.8, 0.1, .7, .1, .6, .1, .5]).repeat(5)]
@@ -150,7 +150,7 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
     elif parallelism == 4:
         n_lon = n_lon//2
         mod = rank % 4
-        if rank in [0, 1]:
+        if mod in [0, 1]:
             climatology = get_climatology()[:n_lat, :n_lon]
         else:
             climatology = get_climatology()[:n_lat, n_lon:]
@@ -193,13 +193,13 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
     
     
     torch.backends.cuda.matmul.allow_tf32 = True
-    loss_fn = torch.nn.MSELoss()
-
+    
     # Specify indices to calculate RMSE
     indices = np.array([0, 1, 2, 3, 6, 9, 19, 22, 32, 35, 45, 48, 58, 61])
     indices_key = indices + index_offset
 
     model.eval()
+    loss = torch.tensor([0]).to(device)
 
     for batch, data in enumerate(dataloader):
         for step, rollout in enumerate(rollout_time):
@@ -232,9 +232,13 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
             if parallelism == 1:
                 input_data = input_data.permute(0, 2, 3, 1) # Permute input data for mse calculation
                 target_data = target_data.permute(0, 2, 3, 1)
-
+                input_data[:,:,:, 4:] = input_data[:,:,:,4:] * underground_mask
                 target_data[:,:,:,4:] = target_data[:,:,:,4:] * underground_mask
                 output[:,:,:,4:]      = output[:,:,:,4:] * underground_mask
+
+                if batch == 0: # PLOT BEFORE MODIFYING
+                    gen_plots(config_dict, input_data, output, target_data, rank, file_path, epoch, model_parallel=model_parallel)
+                
                 
                 # Calculate RMSE and ACC
                 rmse[rollout][indices_key] = rmse[rollout][indices_key] + calc_mse_variable(target_data, output, device, area_weights, std=std, indices=indices).to(torch.float32)
@@ -243,7 +247,6 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
                 output_loss = output * area_weights * variable_weights
                 target_loss = target_data * area_weights *variable_weights
 
-                loss = loss + loss_fn(output_loss, target_loss)
             elif parallelism == 2:
                 output = output.reshape(output.shape[0], xlat, xlon, 36)
                 
@@ -265,10 +268,14 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
 
                 rmse[rollout][indices + norm_offset + index_offset] = rmse[rollout][indices + norm_offset + index_offset] + calc_mse_variable(target_data, output, device, area_weights, std=std, indices=indices, norm_offset=norm_offset).to(torch.float32)
                 acc[rollout][indices + norm_offset + index_offset]  = acc[rollout][indices + norm_offset + index_offset]  + calc_acc_variable(target_data, output, device, area_weights, mean=mean, std=std, climatology=climatology, indices=indices, norm_offset=norm_offset).to(torch.float32)
+                
+                if batch == 0: # PLOT BEFORE FURTHER MODIFICATIONS
+                    gen_plots(config_dict, input_data, output, target_data, rank, file_path, epoch, model_parallel=model_parallel)
+                
                 # loss calculation
                 target_loss = target_data * area_weights * variable_weights
                 output_loss = output * area_weights * variable_weights
-                loss = loss + loss_fn(output_loss, target_loss)
+                
 
             elif parallelism == 4:
                 output = output.reshape(output.shape[0], xlat, xlon//2, 36)               
@@ -283,69 +290,69 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
                     norm_offset = 0
                     indices = np.array([0, 1, 2, 3, 6, 9, 19, 22, 32, 35])
                     output[:,:,:,4:] = output[:,:,:,4:] * underground_mask
+                    input_data[:,:,:,4:] = input_data[:,:,:,4:] * underground_mask
+                    target_data[:,:,:,4:] = target_data[:,:,:,4:] * underground_mask
                 elif rank % parallelism in [1,3]: # 1 and 3 handle the second half of the output variables
                     norm_offset = 36
                     indices = np.array([45, 48, 58, 61]) - norm_offset
                     output  = output * underground_mask
+                    input_data = input_data * underground_mask
+                    target_data = target_data * underground_mask
 
                 # Each process contains its half of the squarred error
                 rmse[rollout][indices + norm_offset +  index_offset] = rmse[rollout][indices + norm_offset + index_offset] + calc_mse_variable(target_data, output, device, area_weights, std=std, indices=indices, norm_offset=norm_offset).to(torch.float32)
                 acc[rollout][indices + norm_offset + index_offset]   = acc[rollout][indices + norm_offset + index_offset]  + calc_acc_variable_parallel(target_data, output, device, area_weights, mean=mean, std=std, climatology=climatology, indices=indices, norm_offset=norm_offset, group=local_groups, rank=rank).to(torch.float32)
-                
+
+                if batch == 0:
+                    if  rank < 4 and parallelism == 4: # only needs to happen once
+                        # Gather input data
+                        # input data has shape [nvar, lat, lon]
+                        input_data, output, target_data = input_data[0].contiguous(), output[0].contiguous(), target_data[0].contiguous()
+                        
+                        input_tensor_gather = torch.zeros(4, *input_data.shape).to(device)
+                        torch.distributed.all_gather_into_tensor(input_tensor_gather, input_data, group=node_groups)
+                        
+                        top_row = torch.cat([input_tensor_gather[0], input_tensor_gather[1]], dim=2)
+                        bottom_row = torch.cat([input_tensor_gather[2], input_tensor_gather[3]], dim=2)
+                        
+                        # left/right side shape: [1, 720, 720, 72]
+                        input_data_gathered = torch.cat([top_row, bottom_row], dim=1)[:,:,:69]
+                        
+                        # gather first sample to rank 0
+                        output_tensor_gather = torch.zeros(4, *output.shape).to(device)
+                        
+                        torch.distributed.all_gather_into_tensor(output_tensor_gather, output, group=node_groups)
+                        
+                        top_row2 = torch.cat([output_tensor_gather[0], output_tensor_gather[1]], dim=2)
+                        bottom_row2 = torch.cat([output_tensor_gather[2], output_tensor_gather[3]], dim=2)
+                        # left/right side shape: [1, 720, 720, 72]
+                        output_gathered = torch.cat([top_row2, bottom_row2], dim=1)[:,:,:69] 
+                        
+                        # Gather target data. Currently split between 4 devices as well.
+                        target_tensor_gather = torch.zeros(4, *target_data.shape).to(device)
+                        target_data = target_data.contiguous()
+                        torch.distributed.all_gather_into_tensor(target_tensor_gather, target_data, group=node_groups)
+                        
+                        top_row = torch.cat([target_tensor_gather[0], target_tensor_gather[1]], dim=2)
+                        bottom_row = torch.cat([target_tensor_gather[2], target_tensor_gather[3]], dim=2)
+                        # left/right side shape: [1, 720, 720, 72]
+                        target_data_gathered = torch.cat([top_row, bottom_row], dim=1)[:,:,:69]
+                        
+                        if rank == 0:
+                            gen_plots(config_dict, input_data_gathered, output_gathered, target_data_gathered, rank, file_path, epoch, model_parallel=model_parallel)    
+                    
                 output_loss = output * area_weights * variable_weights
                 target_loss = target_data * area_weights * variable_weights
                 
-                loss = loss + loss_fn(output_loss, target_loss)
-
+            iter_loss = loss_fn(output_loss, target_loss)
+            loss = loss + iter_loss.detach()
 
         total_samples = total_samples + input_data.shape[0]
-        
-        if batch == 0:
-            if  rank < 4 and parallelism == 4: # only needs to happen once
-                # Gather input data
-                # input data has shape [nvar, lat, lon]
-                input_data, output, target_data = input_data[0].contiguous(), output[0].contiguous(), target_data[0].contiguous()
-                
-                input_tensor_gather = torch.zeros(4, *input_data.shape).to(device)
-                torch.distributed.all_gather_into_tensor(input_tensor_gather, input_data, group=node_groups)
-                
-                top_row = torch.cat([input_tensor_gather[0], input_tensor_gather[1]], dim=2)
-                bottom_row = torch.cat([input_tensor_gather[2], input_tensor_gather[3]], dim=2)
-                
-                # left/right side shape: [1, 720, 720, 72]
-                input_data_gathered = torch.cat([top_row, bottom_row], dim=1)[:,:,:69]
-                
-                # gather first sample to rank 0
-                output_tensor_gather = torch.zeros(4, *output.shape).to(device)
-                
-                torch.distributed.all_gather_into_tensor(output_tensor_gather, output, group=node_groups)
-                
-                top_row2 = torch.cat([output_tensor_gather[0], output_tensor_gather[1]], dim=2)
-                bottom_row2 = torch.cat([output_tensor_gather[2], output_tensor_gather[3]], dim=2)
-                # left/right side shape: [1, 720, 720, 72]
-                output_gathered = torch.cat([top_row2, bottom_row2], dim=1)[:,:,:69] 
-                
-                # Gather target data. Currently split between 4 devices as well.
-                target_tensor_gather = torch.zeros(4, *target_data.shape).to(device)
-                target_data = target_data.contiguous()
-                torch.distributed.all_gather_into_tensor(target_tensor_gather, target_data, group=node_groups)
-                
-                top_row = torch.cat([target_tensor_gather[0], target_tensor_gather[1]], dim=2)
-                bottom_row = torch.cat([target_tensor_gather[2], target_tensor_gather[3]], dim=2)
-                # left/right side shape: [1, 720, 720, 72]
-                target_data_gathered = torch.cat([top_row, bottom_row], dim=1)[:,:,:69]
-                
-                if rank == 0:
-                    gen_plots(config_dict, input_data_gathered, output_gathered, target_data_gathered, rank, file_path, epoch, model_parallel=model_parallel)    
-            elif rank == 0:
-                print(f"rank {rank}, input data shape {input_data.shape}")
-                gen_plots(config_dict, input_data, output, target_data, rank, file_path, epoch, model_parallel=model_parallel)
         
     if parallelism == 1:
         torch.distributed.all_reduce(total_samples)
         torch.distributed.all_reduce(loss)
-        loss /= world_size # average the loss for world size
-        loss /= len(dataloader)
+        loss /= total_samples
     else: # parallel
         total_samples = [len(dataloader.dataset)]
         loss = loss / world_size / total_samples[0]
