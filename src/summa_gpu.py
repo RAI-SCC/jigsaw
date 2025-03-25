@@ -7,17 +7,17 @@ import time
 import torch.distributed
 
 
-def AB_custom_isend(Aij, Bij, rank,  device, model_group):
+def XW_fourway(Xij, Wij, rank,  device, model_group):
     
     """
     Perform non-blocking send and receive operations for distributed matrix multiplication.
     
     Parameters
     ----------
-    Aij : torch.Tensor
-        The local part of matrix A.
-    Bij : torch.Tensor
-        The local part of matrix B.
+    Xij : torch.Tensor
+        The local part of matrix X.
+    Wij : torch.Tensor
+        The local part of matrix W.
     rank : int
         The rank of the current process.
     device : torch.device
@@ -32,56 +32,56 @@ def AB_custom_isend(Aij, Bij, rank,  device, model_group):
     """
 
     mod = rank % 4
-    bufferA = get_preallocated_buffer(Aij.shape, Aij.dtype, device, rank, 0)
-    bufferB = get_preallocated_buffer(Bij.shape, Bij.dtype, device, rank, 1)
+    bufferX = get_preallocated_buffer(Xij.shape, Xij.dtype, device, rank, 0)
+    bufferW = get_preallocated_buffer(Wij.shape, Wij.dtype, device, rank, 1)
     
     if mod == 0: 
         # Rank 0 send A, B to 1 and 2. Receives A, B from 1 and 2.
-        req1 = dist.isend(tensor=Aij, dst=rank+1, group=model_group)
-        req2 = dist.irecv(tensor=bufferA, src=rank+1, group=model_group)
-        req3 = dist.isend(tensor=Bij, dst=rank+2, group=model_group)
-        req4 = dist.irecv(tensor=bufferB, src=rank+2, group=model_group)
-        Cij = torch.matmul(Aij, Bij)
+        req1 = dist.isend(tensor=Xij, dst=rank+1, group=model_group)
+        req2 = dist.irecv(tensor=bufferX, src=rank+1, group=model_group)
+        req3 = dist.isend(tensor=Wij, dst=rank+2, group=model_group)
+        req4 = dist.irecv(tensor=bufferW, src=rank+2, group=model_group)
+        Cij = torch.matmul(Xij, Wij)
         req1.wait()
         req2.wait()
         req3.wait()
         req4.wait()
-        Cij = Cij + torch.matmul(bufferA, bufferB)   
+        Cij = Cij + torch.matmul(bufferX, bufferW)   
     elif mod == 1:
-        req1 = dist.irecv(tensor=bufferA, src=rank-1, group=model_group) 
-        req2 = dist.isend(tensor=Aij, dst=rank-1, group=model_group)
+        req1 = dist.irecv(tensor=bufferX, src=rank-1, group=model_group) 
+        req2 = dist.isend(tensor=Xij, dst=rank-1, group=model_group)
         req1.wait()
         req2.wait()
-        Cij = torch.matmul(bufferA, Bij)
-        req3 = dist.isend(tensor=Bij, dst=rank+2, group=model_group)
-        req4 = dist.irecv(tensor=bufferB, src=rank+2, group=model_group)
+        Cij = torch.matmul(bufferX, Wij)
+        req3 = dist.isend(tensor=Wij, dst=rank+2, group=model_group)
+        req4 = dist.irecv(tensor=bufferW, src=rank+2, group=model_group)
         req3.wait()
         req4.wait()
-        Cij = Cij + torch.matmul(Aij, bufferB) 
+        Cij = Cij + torch.matmul(Xij, bufferW) 
     elif mod == 2:
-        req1 = dist.isend(tensor=Aij, dst=rank+1, group=model_group)
-        req2 = dist.irecv(tensor=bufferA, src=rank+1, group=model_group)
+        req1 = dist.isend(tensor=Xij, dst=rank+1, group=model_group)
+        req2 = dist.irecv(tensor=bufferX, src=rank+1, group=model_group)
         req1.wait()
         req2.wait()
-        Cij = torch.matmul(bufferA, Bij)
-        req3 = dist.irecv(tensor=bufferB, src=rank-2, group=model_group)
-        req4 = dist.isend(tensor=Bij, dst=rank-2, group=model_group)
+        Cij = torch.matmul(bufferX, Wij)
+        req3 = dist.irecv(tensor=bufferW, src=rank-2, group=model_group)
+        req4 = dist.isend(tensor=Wij, dst=rank-2, group=model_group)
         req4.wait()
         req3.wait()
         
-        Cij = Cij + torch.matmul(Aij, bufferB)      
+        Cij = Cij + torch.matmul(Xij, bufferW)      
     else:
-        req1 = dist.irecv(tensor=bufferA, src=rank-1, group=model_group)
-        req2 = dist.isend(tensor=Aij, dst=rank-1, group=model_group)
+        req1 = dist.irecv(tensor=bufferX, src=rank-1, group=model_group)
+        req2 = dist.isend(tensor=Xij, dst=rank-1, group=model_group)
         
-        req3 = dist.irecv(tensor=bufferB, src=rank-2, group=model_group)
-        req4 = dist.isend(tensor=Bij, dst=rank-2, group=model_group)
-        Cij = torch.matmul(Aij, Bij)
+        req3 = dist.irecv(tensor=bufferW, src=rank-2, group=model_group)
+        req4 = dist.isend(tensor=Wij, dst=rank-2, group=model_group)
+        Cij = torch.matmul(Xij, Wij)
         req1.wait()
         req2.wait()
         req4.wait()
         req3.wait()
-        Cij = Cij + torch.matmul(bufferA, bufferB)   
+        Cij = Cij + torch.matmul(bufferX, bufferW)   
         
     return Cij
 
@@ -200,16 +200,16 @@ def matrix_transpose_twoway(X, rank, device, model_group):
 
 
 
-def ABT_custom_precompute_isend(Aij, Bij, rank,  device, model_group):
+def XWT_fourway(Xij, Wij, rank,  device, model_group):
     
     """
-    Perform precomputation and asynchronous send/receive operations for distributed ABT matrix multiplication.
+    Perform precomputation and asynchronous send/receive operations for distributed XWT matrix multiplication.
     Parameters
     ----------
-    Aij : torch.Tensor
-        The input tensor A.
-    Bij : torch.Tensor
-        The input tensor B.
+    Xij : torch.Tensor
+        The input tensor X.
+    Wij : torch.Tensor
+        The input tensor W.
     rank : int
         The rank of the current process in the distributed group.
     device : torch.device
@@ -225,16 +225,16 @@ def ABT_custom_precompute_isend(Aij, Bij, rank,  device, model_group):
     mod = rank % 4
     
     if mod == 0: 
-        if len(Aij.shape) > 2:
-            bufferAB = get_preallocated_buffer((*Aij.shape[:-1], Bij.shape[0]), Aij.dtype, device, rank)
+        if len(Xij.shape) > 2:
+            bufferXW = get_preallocated_buffer((*Xij.shape[:-1], Wij.shape[0]), Xij.dtype, device, rank)
         else:
-            bufferAB = get_preallocated_buffer((Bij.shape[0], Aij.shape[0], Bij.shape[-2]), Aij.dtype, device, rank)
+            bufferXW = get_preallocated_buffer((Wij.shape[0], Xij.shape[0], Wij.shape[-2]), Xij.dtype, device, rank)
         
         # Rank 0 send A, B to 1 and 2. Receives A, B from 1 and 2.
-        req_1 = dist.isend(Aij, dst=rank+1, group=model_group)
-        req_2 = dist.isend(Bij, dst=rank+2, group=model_group)
-        req_3 = dist.irecv(bufferAB, src=rank+1, group=model_group)
-        Cij = torch.matmul(Aij, Bij.mT)
+        req_1 = dist.isend(Xij, dst=rank+1, group=model_group)
+        req_2 = dist.isend(Wij, dst=rank+2, group=model_group)
+        req_3 = dist.irecv(bufferXW, src=rank+1, group=model_group)
+        Cij = torch.matmul(Xij, Wij.mT)
         req_1.wait()
         req_2.wait()
         req_3.wait()
@@ -242,66 +242,66 @@ def ABT_custom_precompute_isend(Aij, Bij, rank,  device, model_group):
         
     elif mod == 1:
 
-        bufferA  = get_preallocated_buffer(Aij.shape, Aij.dtype, device, rank, 0)
-        bufferB2 = get_preallocated_buffer(Bij.shape, Bij.dtype, device, rank, 1) 
-        bufferB3 = get_preallocated_buffer(Bij.shape, Bij.dtype, device, rank, 2) 
+        bufferX  = get_preallocated_buffer(Xij.shape, Xij.dtype, device, rank, 0)
+        bufferW2 = get_preallocated_buffer(Wij.shape, Wij.dtype, device, rank, 1) 
+        bufferW3 = get_preallocated_buffer(Wij.shape, Wij.dtype, device, rank, 2) 
         
-        req_1 = dist.irecv(bufferA, src=rank-1, group=model_group)
-        req_2 = dist.isend(Bij, dst=rank+1, group=model_group)
-        req_3 = dist.irecv(bufferB2, src=rank+1, group=model_group)
-        req_4 = dist.irecv(bufferB3, src=rank+2, group=model_group)
+        req_1 = dist.irecv(bufferX, src=rank-1, group=model_group)
+        req_2 = dist.isend(Wij, dst=rank+1, group=model_group)
+        req_3 = dist.irecv(bufferW2, src=rank+1, group=model_group)
+        req_4 = dist.irecv(bufferW3, src=rank+2, group=model_group)
         
-        AB = torch.matmul(Aij, Bij.mT)
-        req_5 = dist.isend(AB, dst=rank-1, group=model_group)
+        XW = torch.matmul(Xij, Wij.mT)
+        req_5 = dist.isend(XW, dst=rank-1, group=model_group)
         req_2.wait()
         req_5.wait()
         req_4.wait()
-        Cij = torch.matmul(Aij, bufferB3.mT)
+        Cij = torch.matmul(Xij, bufferW3.mT)
         req_1.wait()
         req_3.wait()
                           
     elif mod == 2:
-        bufferA  = get_preallocated_buffer(Aij.shape, Aij.dtype, device, rank, 0)
-        bufferB0 = get_preallocated_buffer(Bij.shape, Bij.dtype, device, rank, 1) 
-        bufferB1 = get_preallocated_buffer(Bij.shape, Bij.dtype, device, rank, 2) 
-        req_1  = dist.irecv(tensor=bufferA,  src=rank+1, group=model_group)
-        req_2 = dist.irecv(tensor=bufferB0, src=rank-2, group=model_group)
-        req_3 = dist.irecv(tensor=bufferB1, src=rank-1, group=model_group)
-        req_4 = dist.isend(Bij, dst=rank-1, group=model_group)
+        bufferX  = get_preallocated_buffer(Xij.shape, Xij.dtype, device, rank, 0)
+        bufferW0 = get_preallocated_buffer(Wij.shape, Wij.dtype, device, rank, 1) 
+        bufferW1 = get_preallocated_buffer(Wij.shape, Wij.dtype, device, rank, 2) 
+        req_1  = dist.irecv(tensor=bufferX,  src=rank+1, group=model_group)
+        req_2 = dist.irecv(tensor=bufferW0, src=rank-2, group=model_group)
+        req_3 = dist.irecv(tensor=bufferW1, src=rank-1, group=model_group)
+        req_4 = dist.isend(Wij, dst=rank-1, group=model_group)
         
-        AB = torch.matmul(Aij, Bij.mT)
+        XW = torch.matmul(Xij, Wij.mT)
 
-        req_5 = dist.isend(tensor=AB, dst=rank+1, group=model_group)
+        req_5 = dist.isend(tensor=XW, dst=rank+1, group=model_group)
         req_4.wait()
         req_5.wait()
         req_2.wait()
-        Cij = torch.matmul(Aij, bufferB0.mT) 
+        Cij = torch.matmul(Xij, bufferW0.mT) 
         req_1.wait()
         req_3.wait()
         
 
     else:
-        if len(Aij.shape) > 2:
-            bufferAB = get_preallocated_buffer((*Aij.shape[:-1], Bij.shape[0]), Aij.dtype, device, rank)
+        if len(Xij.shape) > 2:
+            bufferXW = get_preallocated_buffer((*Xij.shape[:-1], Wij.shape[0]), Xij.dtype, device, rank)
         else:
-            bufferAB = get_preallocated_buffer((Bij.shape[0], Aij.shape[0], Bij.shape[-2]), Aij.dtype, device, rank)
+            bufferXW = get_preallocated_buffer((Wij.shape[0], Xij.shape[0], Wij.shape[-2]), Xij.dtype, device, rank)
         
-        req_1  = dist.isend(tensor=Aij, dst=rank-1, group=model_group)
-        req_2  = dist.isend(tensor=Bij, dst=rank-2, group=model_group)
-        req_3  = dist.irecv(tensor=bufferAB, src=rank-1, group=model_group)
+        req_1  = dist.isend(tensor=Xij, dst=rank-1, group=model_group)
+        req_2  = dist.isend(tensor=Wij, dst=rank-2, group=model_group)
+        req_3  = dist.irecv(tensor=bufferXW, src=rank-1, group=model_group)
         
-        Cij   = torch.matmul(Aij, Bij.mT)
+        Cij   = torch.matmul(Xij, Wij.mT)
         
         req_1.wait()
         req_2.wait()
         req_3.wait()
 
     if mod in [0, 3]:
-        Cij = Cij + bufferAB
+        Cij = Cij + bufferXW
     elif mod == 1:
-        Cij = Cij + torch.matmul(bufferA, bufferB2.mT)
+        Cij = Cij + torch.matmul(bufferX, bufferW2.mT)
     else:
-        Cij = Cij + torch.matmul(bufferA, bufferB1.mT)
+        Cij = Cij + torch.matmul(bufferX, bufferW1.mT)
     
     return Cij
 
@@ -352,14 +352,14 @@ def get_preallocated_buffer(shape, dtype, device, rank, index=0):
         return out
 
 
-def ATB_custom_precompute_isend(Aij, Bij, rank, device, model_group):
+def XTW_fourway(Xij, Wij, rank, device, model_group):
     """
-    Precomputes the product of Aij and Bij with custom communication patterns using non-blocking sends and receives. Calculate ATB matrix--matrix multiplication.
+    Precomputes the product of Xij and Wij with custom communication patterns using non-blocking sends and receives. Calculate ATB matrix--matrix multiplication.
     Parameters
     ----------
-    Aij : torch.Tensor
+    Xij : torch.Tensor
         The matrix Aij to be multiplied.
-    Bij : torch.Tensor
+    Wij : torch.Tensor
         The matrix Bij to be multiplied.
     rank : int
         The rank of the current process in the distributed group.
@@ -376,95 +376,93 @@ def ATB_custom_precompute_isend(Aij, Bij, rank, device, model_group):
     mod = rank % 4
     
     if mod == 0: 
-        if len(Aij.shape) > 2:
-            bufferAB = get_preallocated_buffer((Aij.shape[0], Aij.shape[-1], Bij.shape[-1]), Aij.dtype, device, rank)
+        if len(Xij.shape) > 2:
+            bufferXW = get_preallocated_buffer((Xij.shape[0], Xij.shape[-1], Wij.shape[-1]), Xij.dtype, device, rank)
         else:
-            bufferAB = get_preallocated_buffer(Bij.shape[0], Aij.shape[-1], Bij.shape[-1], rank)
+            bufferXW = get_preallocated_buffer(Wij.shape[0], Xij.shape[-1], Wij.shape[-1], rank)
         
-        # Send Aij to rank+1.
-        req_1 = dist.isend(tensor=Aij, dst=rank+1, group=model_group)
-        # Send Bij to rank+2.
-        req_2 = dist.isend(tensor=Bij, dst=rank+2, group=model_group)
-        req_3 = dist.irecv(tensor=bufferAB, src=rank+2, group=model_group)
+        req_1 = dist.isend(tensor=Xij, dst=rank+1, group=model_group)
+        req_2 = dist.isend(tensor=Wij, dst=rank+2, group=model_group)
+        req_3 = dist.irecv(tensor=bufferXW, src=rank+2, group=model_group)
         
-        Cij = torch.matmul(Aij.mT, Bij)
+        Cij = torch.matmul(Xij.mT, Wij)
 
         req_1.wait()
         req_2.wait()
         req_3.wait()
 
     elif mod == 1:
-        bufferA0 = get_preallocated_buffer(Aij.shape, Aij.dtype, device, rank, 0)
-        bufferA2 = get_preallocated_buffer(Aij.shape, Aij.dtype, device, rank, 1)
-        bufferB3 = get_preallocated_buffer(Bij.shape, Bij.dtype, device, rank, 2)
+        bufferX0 = get_preallocated_buffer(Xij.shape, Xij.dtype, device, rank, 0)
+        bufferX2 = get_preallocated_buffer(Xij.shape, Xij.dtype, device, rank, 1)
+        bufferW3 = get_preallocated_buffer(Wij.shape, Wij.dtype, device, rank, 2)
         
-        req_1 = dist.irecv(tensor=bufferA0, src=rank-1, group=model_group)
-        req_2 = dist.irecv(tensor=bufferA2, src=rank+1, group=model_group)
-        req_3 = dist.isend(tensor=Aij, dst=rank+1, group=model_group)
-        req_4 = dist.irecv(tensor=bufferB3, src=rank+2, group=model_group)
+        req_1 = dist.irecv(tensor=bufferX0, src=rank-1, group=model_group)
+        req_2 = dist.irecv(tensor=bufferX2, src=rank+1, group=model_group)
+        req_3 = dist.isend(tensor=Xij, dst=rank+1, group=model_group)
+        req_4 = dist.irecv(tensor=bufferW3, src=rank+2, group=model_group)
 
-        AB = torch.matmul(Aij.mT, Bij)
-        req_5 = dist.isend(tensor=AB, dst=rank+2, group=model_group)
+        XW = torch.matmul(Xij.mT, Wij)
+        req_5 = dist.isend(tensor=XW, dst=rank+2, group=model_group)
         req_3.wait()
         req_5.wait()
         req_1.wait()
-        Cij = torch.matmul(bufferA0.mT, Bij)
+        Cij = torch.matmul(bufferX0.mT, Wij)
         req_2.wait()
         req_4.wait()
         
         
         
     elif mod == 2:
-        bufferA1 = get_preallocated_buffer(Aij.shape, Aij.dtype, device, rank, 0)
-        bufferA3 = get_preallocated_buffer(Aij.shape, Aij.dtype, device, rank, 1)
-        bufferB0 = get_preallocated_buffer(Bij.shape, Bij.dtype, device, rank, 2)
-        req_1 = dist.isend(tensor=Aij, dst=rank-1, group=model_group)
-        req_2 = dist.irecv(tensor=bufferA1, src=rank-1, group=model_group)
-        req_3 = dist.irecv(tensor=bufferB0, src=rank-2, group=model_group)
-        req_4 = dist.irecv(tensor=bufferA3, src=rank+1, group=model_group)
+        bufferX1 = get_preallocated_buffer(Xij.shape, Xij.dtype, device, rank, 0)
+        bufferX3 = get_preallocated_buffer(Xij.shape, Xij.dtype, device, rank, 1)
+        bufferW0 = get_preallocated_buffer(Wij.shape, Wij.dtype, device, rank, 2)
+        req_1 = dist.isend(tensor=Xij, dst=rank-1, group=model_group)
+        req_2 = dist.irecv(tensor=bufferX1, src=rank-1, group=model_group)
+        req_3 = dist.irecv(tensor=bufferW0, src=rank-2, group=model_group)
+        req_4 = dist.irecv(tensor=bufferX3, src=rank+1, group=model_group)
 
-        AB = torch.matmul(Aij.mT, Bij)
-        req_5 = dist.isend(tensor=AB, dst=rank-2, group=model_group)
+        XW = torch.matmul(Xij.mT, Wij)
+        req_5 = dist.isend(tensor=XW, dst=rank-2, group=model_group)
 
         req_1.wait()
         req_5.wait()
         req_4.wait()
-        Cij = torch.matmul(bufferA3.mT, Bij) 
+        Cij = torch.matmul(bufferX3.mT, Wij) 
         req_2.wait()
         req_3.wait()
         
     else:
-        if len(Aij.shape) > 2:
-            bufferAB = get_preallocated_buffer((Aij.shape[0], Aij.shape[-1], Bij.shape[-1]), Aij.dtype, device, rank, 0)
+        if len(Xij.shape) > 2:
+            bufferXW = get_preallocated_buffer((Xij.shape[0], Xij.shape[-1], Wij.shape[-1]), Xij.dtype, device, rank, 0)
         else:
-            bufferAB = get_preallocated_buffer((Bij.shape[0], Aij.shape[-1], Bij.shape[-1]), Aij.dtype, device, rank, 0)
+            bufferXW = get_preallocated_buffer((Wij.shape[0], Xij.shape[-1], Wij.shape[-1]), Xij.dtype, device, rank, 0)
         
-        req_1 = dist.isend(tensor=Aij, dst=rank-1, group=model_group)
-        req_2 = dist.isend(tensor=Bij, dst=rank-2, group=model_group)
-        req_3 = dist.irecv(tensor=bufferAB, src=rank-2, group=model_group)
+        req_1 = dist.isend(tensor=Xij, dst=rank-1, group=model_group)
+        req_2 = dist.isend(tensor=Wij, dst=rank-2, group=model_group)
+        req_3 = dist.irecv(tensor=bufferXW, src=rank-2, group=model_group)
         
-        Cij = torch.matmul(Aij.mT, Bij)
+        Cij = torch.matmul(Xij.mT, Wij)
         req_1.wait()
         req_2.wait()
         req_3.wait()
 
     if mod in [0, 3]:
-        Cij = Cij + bufferAB
+        Cij = Cij + bufferXW
     elif mod == 1:
-        Cij = Cij + torch.matmul(bufferA2.mT, bufferB3) 
+        Cij = Cij + torch.matmul(bufferX2.mT, bufferW3) 
     else:
-        Cij = Cij + torch.matmul(bufferA1.mT, bufferB0) 
+        Cij = Cij + torch.matmul(bufferX1.mT, bufferW0) 
     
     return Cij
 
-def AB_twoway(Aij, Bij, device, rank, model_group=None):
+def XW_twoway(Xij, Wij, device, rank, model_group=None):
     """
     Perform a two-way matrix multiplication with communication between ranks.
     Parameters
     ----------
-    Aij : torch.Tensor
+    Xij : torch.Tensor
         The input matrix A.
-    Bij : torch.Tensor
+    Wij : torch.Tensor
         The input matrix B.
     device : torch.device
         The device to perform computations on.
@@ -479,46 +477,45 @@ def AB_twoway(Aij, Bij, device, rank, model_group=None):
     """
     
     mod = rank % 2
-    B0, B1 = torch.split(Bij, Bij.shape[-2]//2, dim=-2)
-    bufferA = get_preallocated_buffer(Aij.shape, torch.float32, device, rank) 
+    W0, W1 = torch.split(Wij, Wij.shape[-2]//2, dim=-2)
+    bufferX = get_preallocated_buffer(Xij.shape, torch.float32, device, rank) 
     if mod == 0: 
-    
         # Rank 0 send A, B to 1 and 2. Receives A, B from 1 and 2.
-        send_B_1 = torch.distributed.isend(Aij, dst=rank+1, group=None)
-        recv_B_1 = torch.distributed.irecv(bufferA, src=rank+1, group=None)
+        send_W_1 = torch.distributed.isend(Xij, dst=rank+1, group=None)
+        recv_W_1 = torch.distributed.irecv(bufferX, src=rank+1, group=None)
 
-        Cij = torch.matmul(Aij, B0)
-        send_B_1.wait()
-        recv_B_1.wait()
+        Cij = torch.matmul(Xij, W0)
+        send_W_1.wait()
+        recv_W_1.wait()
     elif mod == 1:
-        recv_B_0 = torch.distributed.irecv(bufferA, src=rank-1, group=None)
-        send_B_0 = torch.distributed.isend(Aij, dst=rank-1, group=None)
+        recv_W_0 = torch.distributed.irecv(bufferX, src=rank-1, group=None)
+        send_W_0 = torch.distributed.isend(Xij, dst=rank-1, group=None)
         
-        Cij = torch.matmul(Aij, B1)
-        send_B_0.wait()
-        recv_B_0.wait()
+        Cij = torch.matmul(Xij, W1)
+        send_W_0.wait()
+        recv_W_0.wait()
     
     
     if mod == 0:
-        Cij = Cij + torch.matmul(bufferA, B1)
+        Cij = Cij + torch.matmul(bufferX, W1)
     elif mod == 1:
-        Cij = Cij + torch.matmul(bufferA, B0)
+        Cij = Cij + torch.matmul(bufferX, W0)
     return Cij 
 
 
-def ABT_twoway(Aij, Bij, device, rank, model_group=None):
+def XWT_twoway(Xij, Wij, device, rank, model_group=None):
     """
-    Perform a two-way asynchronous block transfer (ABT) matrix multiplication.
+    Perform a two-way asynchronous block transfer (XWT) matrix multiplication.
     This function performs a two-way asynchronous block transfer matrix multiplication
     using PyTorch's distributed communication primitives. It splits the input matrix `Bij`
     into two parts, performs matrix multiplications, and exchanges the results between
     neighboring ranks.
     Parameters
     ----------
-    Aij : torch.Tensor
-        The input matrix A.
-    Bij : torch.Tensor
-        The input matrix B.
+    Xij : torch.Tensor
+        The input matrix X.
+    Wij : torch.Tensor
+        The input matrix W.
     device : torch.device
         The device on which the tensors are allocated.
     rank : int
@@ -531,50 +528,49 @@ def ABT_twoway(Aij, Bij, device, rank, model_group=None):
         The resulting matrix after performing the  matrix multiplication.
     """
 
-    Cij = None 
     mod = rank % 2
     
     
-    B0, B1 = torch.split(Bij, Bij.shape[-2]//2, dim=-2)
+    W0, W1 = torch.split(Wij, Wij.shape[-2]//2, dim=-2)
     
-    bufferAB = get_preallocated_buffer((*Aij.shape[:-1], B0.shape[-2]), torch.float32, device, rank) 
+    bufferXW = get_preallocated_buffer((*Xij.shape[:-1], W0.shape[-2]), torch.float32, device, rank) 
     
     if mod == 0: 
-        ab = torch.matmul(Aij, B1.mT)
-        send_B_1 = torch.distributed.isend(ab, dst=rank+1, group=None)
-        recv_B_1 = torch.distributed.irecv(bufferAB, src=rank+1, group=None)
+        XW = torch.matmul(Xij, W1.mT)
+        send_B_1 = torch.distributed.isend(XW, dst=rank+1, group=None)
+        recv_B_1 = torch.distributed.irecv(bufferXW, src=rank+1, group=None)
         
-        Cij = torch.matmul(Aij, B0.mT)
+        Cij = torch.matmul(Xij, W0.mT)
         send_B_1.wait()
         recv_B_1.wait()
         
     elif mod == 1:
-        ab = torch.matmul(Aij, B0.mT)
-        recv_B_0 = torch.distributed.irecv(bufferAB, src=rank-1, group=None)
-        send_B_0 = torch.distributed.isend(ab, dst=rank-1, group=None)
+        XW = torch.matmul(Xij, W0.mT)
+        recv_B_0 = torch.distributed.irecv(bufferXW, src=rank-1, group=None)
+        send_B_0 = torch.distributed.isend(XW, dst=rank-1, group=None)
         
-        Cij = torch.matmul(Aij, B1.mT)
+        Cij = torch.matmul(Xij, W1.mT)
 
         send_B_0.wait()
         recv_B_0.wait()
 
     if mod == 0:
-        Cij = Cij + bufferAB
+        Cij = Cij + bufferXW
     else:
-        Cij = Cij + bufferAB
+        Cij = Cij + bufferXW
     
     return Cij
 
 
-def ATB_twoway(Aij, Bij, device, rank, model_group=None):
+def XTW_twoway(Xij, Wij, device, rank, model_group=None):
     """
     Perform a two-way asynchronous tensor broadcast and matrix multiplication.
     Parameters
     ----------
-    Aij : torch.Tensor
-        The input tensor A.
-    Bij : torch.Tensor
-        The input tensor B.
+    Xij : torch.Tensor
+        The input tensor X.
+    Wij : torch.Tensor
+        The input tensor W.
     device : torch.device
         The device on which to perform the operations.
     rank : int
@@ -590,30 +586,28 @@ def ATB_twoway(Aij, Bij, device, rank, model_group=None):
     
     mod = rank % 2
 
-    bufferA = get_preallocated_buffer(Aij.shape, torch.float32, device, rank)
+    bufferX = get_preallocated_buffer(Xij.shape, torch.float32, device, rank)
     
     if mod == 0: 
-        send_B_1 =torch.distributed.isend(Aij, dst=rank+1, group=None)
-        recv_B_1 = torch.distributed.irecv(bufferA, src=rank+1, group=None)
+        send_B_1 =torch.distributed.isend(Xij, dst=rank+1, group=None)
+        recv_B_1 = torch.distributed.irecv(bufferX, src=rank+1, group=None)
 
-        Cij_top = torch.matmul(Aij.mT, Bij)
+        Cij_top = torch.matmul(Xij.mT, Wij)
         send_B_1.wait()
         recv_B_1.wait()
         
     elif mod == 1:
-        
-        recv_B_0 = torch.distributed.irecv(bufferA, src=rank-1, group=None)
-        send_B_0 = torch.distributed.isend(Aij, dst=rank-1, group=None)
+        recv_B_0 = torch.distributed.irecv(bufferX, src=rank-1, group=None)
+        send_B_0 = torch.distributed.isend(Xij, dst=rank-1, group=None)
 
-        Cij_bottom = torch.matmul(Aij.mT, Bij)
+        Cij_bottom = torch.matmul(Xij.mT, Wij)
         send_B_0.wait()
         recv_B_0.wait()
-        
 
     if mod == 0:
-        Cij_bottom = torch.matmul(bufferA.mT, Bij)
+        Cij_bottom = torch.matmul(bufferX.mT, Wij)
     else:
-        Cij_top = torch.matmul(bufferA.mT, Bij)
+        Cij_top = torch.matmul(bufferX.mT, Wij)
 
     Cij = torch.concat([Cij_top, Cij_bottom], dim=-2)
     return Cij

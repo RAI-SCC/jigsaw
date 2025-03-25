@@ -29,7 +29,7 @@ class DistributedXW_fourway(torch.nn.Module):
         self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev)) if bias else None
         self.device = device
         self.rank = rank
-        self.AB = AB_fourway().apply
+        self.XW = XW_fourway().apply
     
     def forward(self, x, model_group):
         """
@@ -43,11 +43,11 @@ class DistributedXW_fourway(torch.nn.Module):
         C: Tensor
             of shape (B, x_in, out_dim)
         """
-        Cij = self.AB(x, self.weights, self.bias, self.device, self.rank, model_group)
+        Cij = self.XW(x, self.weights, self.bias, self.device, self.rank, model_group)
         
         return Cij
     
-class AB_fourway(torch.autograd.Function):
+class XW_fourway(torch.autograd.Function):
     """
     Autograd function of forward pass for distributed matrix-matrix multiplication
     """
@@ -84,9 +84,9 @@ class AB_fourway(torch.autograd.Function):
         ctx.device = device
         ctx.rank = rank
         ctx.model_group = model_group
-        AB = summa_gpu.AB_custom_isend(x, W, rank,  device, model_group)
+        XW = summa_gpu.XW_fourway(x, W, rank,  device, model_group)
         
-        return AB.add(b)
+        return XW.add(b)
         
     
     @staticmethod
@@ -116,8 +116,8 @@ class AB_fourway(torch.autograd.Function):
         rank = ctx.rank
         model_group = ctx.model_group
 
-        grad_input  = summa_gpu.ABT_custom_precompute_isend(grad_output, weight, rank=rank, device=device, model_group=model_group)
-        grad_weight = summa_gpu.ATB_custom_precompute_isend(input, grad_output, rank=rank, device=device, model_group=model_group)
+        grad_input  = summa_gpu.XWT_fourway(grad_output, weight, rank=rank, device=device, model_group=model_group)
+        grad_weight = summa_gpu.XTW_fourway(input, grad_output, rank=rank, device=device, model_group=model_group)
         grad_b      = grad_output
         return grad_input, grad_weight, grad_b, None, None, None
     
@@ -146,7 +146,7 @@ class DistributedXW_twoway(torch.nn.Module):
         
         self.weights = torch.nn.parameter.Parameter(torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev))
         self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev)) if bias else None
-        self.AB_twoway = AB_twoway().apply
+        self.XW_twoway = XW_twoway().apply
         
         self.device = device
         self.rank = rank
@@ -163,11 +163,11 @@ class DistributedXW_twoway(torch.nn.Module):
         C: Tensor
             of shape (B, x_in, out_dim)
         """
-        Cij = self.AB_twoway(x, self.weights, self.bias, self.device, self.rank, model_group)
+        Cij = self.XW_twoway(x, self.weights, self.bias, self.device, self.rank, model_group)
         
         return Cij
     
-class AB_twoway(torch.autograd.Function):
+class XW_twoway(torch.autograd.Function):
     """
     Autograd function of forward pass for distributed matrix-matrix multiplication
     """
@@ -190,7 +190,7 @@ class AB_twoway(torch.autograd.Function):
         ctx.model_group = model_group
         
         
-        return summa_gpu.AB_twoway(x, W, device, rank, model_group).add(b)
+        return summa_gpu.XW_twoway(x, W, device, rank, model_group).add(b)
         
     @staticmethod
     def backward(ctx, grad_output):
@@ -213,8 +213,8 @@ class AB_twoway(torch.autograd.Function):
         device = ctx.device
         model_group = ctx.model_group
 
-        grad_input  = summa_gpu.ABT_twoway(grad_output, weight, rank=rank, device=device, model_group=model_group)
-        grad_weight = summa_gpu.ATB_twoway(input, grad_output, rank=rank, device=device, model_group=model_group)
+        grad_input  = summa_gpu.XWT_twoway(grad_output, weight, rank=rank, device=device, model_group=model_group)
+        grad_weight = summa_gpu.XTW_twoway(input, grad_output, rank=rank, device=device, model_group=model_group)
         grad_bias   = grad_output#.sum(dim=0)
 
         return grad_input, grad_weight, grad_bias, None, None, None
@@ -252,7 +252,7 @@ class DistributedXTW_fourway(torch.nn.Module):
         The device on which to perform computations.
     rank : int
         The rank of the current process in distributed computation.
-    ATB : callable
+    XTW : callable
         The function to perform the four-way tensor multiplication.
     Methods
     -------
@@ -261,42 +261,42 @@ class DistributedXTW_fourway(torch.nn.Module):
     """
 
     def __init__(self, in_dim, out_dim,  device, rank, n_channels=72, bias=True, init_method='linear'):
-        def __init__(self, in_dim, out_dim, device, rank, n_channels=72, bias=True, init_method='linear'):
-            """
-            Initialize the Linear layer.
-            Parameters
-            ----------
-            in_dim : int
-                The number of input dimensions.
-            out_dim : int
-                The number of output dimensions.
-            device : torch.device
-                The device on which to allocate the tensors.
-            rank : int
-                The rank of the tensor.
-            n_channels : int, optional
-                The number of channels (default is 72).
-            bias : bool, optional
-                If True, adds a learnable bias to the output (default is True).
-            init_method : str, optional
-                The method to initialize the weights, either 'linear' or 'conv' (default is 'linear').
-            Attributes
-            ----------
-            in_dim : int
-                The number of input dimensions.
-            out_dim : int
-                The number of output dimensions.
-            weights : torch.nn.parameter.Parameter
-                The learnable weights of the layer.
-            bias : torch.nn.parameter.Parameter or None
-                The learnable bias of the layer, if bias is True. Otherwise, None.
-            device : torch.device
-                The device on which the tensors are allocated.
-            rank : int
-                The rank of the tensor.
-            ATB : callable
-                The ATB_four_way function applied to the layer.
-            """
+        
+        """
+        Initialize the Linear layer.
+        Parameters
+        ----------
+        in_dim : int
+            The number of input dimensions.
+        out_dim : int
+            The number of output dimensions.
+        device : torch.device
+            The device on which to allocate the tensors.
+        rank : int
+            The rank of the tensor.
+        n_channels : int, optional
+            The number of channels (default is 72).
+        bias : bool, optional
+            If True, adds a learnable bias to the output (default is True).
+        init_method : str, optional
+            The method to initialize the weights, either 'linear' or 'conv' (default is 'linear').
+        Attributes
+        ----------
+        in_dim : int
+            The number of input dimensions.
+        out_dim : int
+            The number of output dimensions.
+        weights : torch.nn.parameter.Parameter
+            The learnable weights of the layer.
+        bias : torch.nn.parameter.Parameter or None
+            The learnable bias of the layer, if bias is True. Otherwise, None.
+        device : torch.device
+            The device on which the tensors are allocated.
+        rank : int
+            The rank of the tensor.
+        XTW : callable
+            The XTW_fourway function applied to the layer.
+        """
 
         super().__init__()
         self.in_dim = in_dim
@@ -314,7 +314,7 @@ class DistributedXTW_fourway(torch.nn.Module):
         
         self.device = device
         self.rank = rank
-        self.ATB = ATB_four_way().apply
+        self.XTW = XTW_fourway().apply
     
     def forward(self, x, model_group):
         """
@@ -331,17 +331,17 @@ class DistributedXTW_fourway(torch.nn.Module):
             The result of the linear transformation.
         """
 
-        Cij = self.ATB(x, self.weights, self.bias, self.device, self.rank, model_group) 
+        Cij = self.XTW(x, self.weights, self.bias, self.device, self.rank, model_group) 
         
         return Cij
     
-class ATB_four_way(torch.autograd.Function):
+class XTW_fourway(torch.autograd.Function):
     """
-    Custom autograd function for a four-way ATB operation with precompute and isend.
+    Custom autograd function for a four-way XTW operation with precompute and isend.
     Methods
     -------
     forward(ctx, x, W, b, device, rank, model_group)
-        Performs the forward pass of the ATB operation.
+        Performs the forward pass of the XTW operation.
     backward(ctx, grad_output)
         Computes the gradients for the backward pass.
     Parameters
@@ -363,20 +363,17 @@ class ATB_four_way(torch.autograd.Function):
     Returns
     -------
     torch.Tensor
-        Result of the ATB operation with bias added.
+        Result of the XTW operation with bias added.
     """
 
     @staticmethod
     def forward(ctx, x, W, b,  device, rank, model_group):
-
-        
         ctx.save_for_backward(x, W)
         ctx.device = device
         ctx.rank = rank
         ctx.model_group = model_group
 
-        xw = summa_gpu.ATB_custom_precompute_isend(x, W, rank, device, model_group)    
-
+        xw = summa_gpu.XTW_fourway(x, W, rank, device, model_group)
         return xw.add(b)
     
     @staticmethod
@@ -401,8 +398,8 @@ class ATB_four_way(torch.autograd.Function):
         rank = ctx.rank
         model_group = ctx.model_group
 
-        grad_input = summa_gpu.ABT_custom_precompute_isend(weight, grad_output, rank=rank, device=device, model_group=model_group)
-        grad_weight = summa_gpu.AB_custom_isend(input, grad_output, rank=rank, device=device, model_group=model_group)
+        grad_input = summa_gpu.XWT_fourway(weight, grad_output, rank=rank, device=device, model_group=model_group)
+        grad_weight = summa_gpu.XW_fourway(input, grad_output, rank=rank, device=device, model_group=model_group)
         grad_b = grad_output
         
         return grad_input, grad_weight, grad_b, None, None, None
@@ -426,17 +423,16 @@ class DistributedXTW_twoway(torch.nn.Module):
         
         self.device = device
         self.rank = rank
-        self.world_size = 2
         
-        self.ATB_twoway = ATB_twoway().apply
+        self.XTW_twoway = XTW_twoway().apply
     
     def forward(self, x, model_group):
         
-        Cij = self.ATB_twoway(x, self.weights, self.bias, self.device, self.rank, model_group)
+        Cij = self.XTW_twoway(x, self.weights, self.bias, self.device, self.rank, model_group)
         
         return Cij
     
-class ATB_twoway(torch.autograd.Function):
+class XTW_twoway(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, W, b, device, rank, model_group):
         """
@@ -468,7 +464,7 @@ class ATB_twoway(torch.autograd.Function):
         ctx.rank = rank
         ctx.model_group = model_group
         
-        xw = summa_gpu.ATB_twoway(x, W, device, rank, model_group)    
+        xw = summa_gpu.XTW_twoway(x, W, device, rank, model_group)    
 
         return xw.add(b) 
     
@@ -478,7 +474,7 @@ class ATB_twoway(torch.autograd.Function):
         Perform the backward pass for the linear layer.
         Parameters
         ----------
-        ctx : object
+        ctx : torch.autograd.Function
             The context object containing saved tensors and other information.
         grad_output : torch.Tensor
             The gradient of the loss with respect to the output of the layer.
@@ -487,20 +483,29 @@ class ATB_twoway(torch.autograd.Function):
         tuple
             A tuple containing the gradients with respect to the input, weight, and bias.
         """
-
-
         input, weight = ctx.saved_tensors        
         device = ctx.device
         rank = ctx.rank 
         model_group = ctx.model_group 
 
-        grad_input = summa_gpu.ABT_twoway(weight, grad_output, device, rank, model_group)
-        grad_weight = summa_gpu.AB_twoway(input, grad_output, device, rank, model_group)
+        grad_input = summa_gpu.XWT_twoway(weight, grad_output, device, rank, model_group)
+        grad_weight = summa_gpu.XW_twoway(input, grad_output, device, rank, model_group)
         grad_b = grad_output
         return grad_input, grad_weight, grad_b, None, None, None
     
 class DistributedLayerNorm(torch.nn.Module):
     def __init__(self, dim, rank, device):
+        """
+        Initialize the Linear layer with layer normalization.
+        Parameters
+        ----------
+        dim : int
+            The dimension of the input features.
+        rank : int
+            The rank of the distributed layer normalization.
+        device : torch.device
+            The device to which the layer should be moved.
+        """
 
         super().__init__()
         
@@ -516,13 +521,10 @@ class DistributedLayerNorm(torch.nn.Module):
 class DistributedLN(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, rank, device):
-        ctx.device = device
-        ctx.rank = rank
         return x
     
     @staticmethod
     def backward(ctx, grad_output):
-        # super backward
         return grad_output, None, None
 
     
@@ -564,10 +566,9 @@ class DistributedXWT_fourway(torch.nn.Module):
         else:
             self.bias = None
         
-        
         self.device = device
         self.rank = rank
-        self.ABT = ABT_fourway().apply
+        self.XWT = XWT_fourway().apply
     
     def forward(self, x, model_group):
         """
@@ -584,12 +585,12 @@ class DistributedXWT_fourway(torch.nn.Module):
             The result of the linear transformation.
         """
         
-        Cij = self.ABT(x, self.weights, self.bias, self.device, self.rank, model_group)
+        Cij = self.XWT(x, self.weights, self.bias, self.device, self.rank, model_group)
         
         return Cij
     
 
-class ABT_fourway(torch.autograd.Function):
+class XWT_fourway(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, W, b, device, rank, model_group):
         """
@@ -620,9 +621,9 @@ class ABT_fourway(torch.autograd.Function):
         ctx.device = device
         ctx.rank = rank
         ctx.model_group = model_group
-        xw = summa_gpu.ABT_custom_precompute_isend(x, W, rank, device, model_group)
+        xwt = summa_gpu.XWT_fourway(x, W, rank, device, model_group)
         
-        return xw.add(b)
+        return xwt.add(b)
         
     
     @staticmethod
@@ -631,7 +632,7 @@ class ABT_fourway(torch.autograd.Function):
         Computes the gradients of the input, weight, and bias during the backward pass.
         Parameters
         ----------
-        ctx : object
+        ctx : torch.autograd.Function
             Context object containing saved tensors and other information.
         grad_output : torch.Tensor
             Gradient of the loss with respect to the output of the layer.
@@ -646,8 +647,8 @@ class ABT_fourway(torch.autograd.Function):
         device=ctx.device        
         rank = ctx.rank
         model_group = ctx.model_group
-        grad_input = summa_gpu.AB_custom_isend(grad_output, weight, rank=rank,  device=device, model_group=model_group)
-        grad_weight = summa_gpu.ATB_custom_precompute_isend(grad_output, input, rank=rank, device=device, model_group=model_group)
+        grad_input = summa_gpu.XW_fourway(grad_output, weight, rank=rank,  device=device, model_group=model_group)
+        grad_weight = summa_gpu.XTW_fourway(grad_output, input, rank=rank, device=device, model_group=model_group)
         grad_b = grad_output
 
         return grad_input, grad_weight, grad_b, None, None, None
@@ -690,12 +691,10 @@ class DistributedXWT_twoway(torch.nn.Module):
             self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim//2).uniform_(-stdev, stdev))
         else:
             self.bias = None
-
         
         self.device = device
         self.rank = rank
-        self.world_size = 4
-        self.ABT = ABT_twoway().apply
+        self.XWT = XWT_twoway().apply
     
     def forward(self, x, model_group):
         """
@@ -712,12 +711,12 @@ class DistributedXWT_twoway(torch.nn.Module):
             Resulting tensor after applying the linear transformation.
         """
 
-        Cij = self.ABT(x, self.weights, self.bias, self.device, self.rank, model_group)
+        Cij = self.XWT(x, self.weights, self.bias, self.device, self.rank, model_group)
         
         return Cij
     
 
-class ABT_twoway(torch.autograd.Function):
+class XWT_twoway(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, W, b,  device, rank, model_group):
         """
@@ -748,7 +747,7 @@ class ABT_twoway(torch.autograd.Function):
         ctx.device = device
         ctx.rank = rank
         
-        xw = summa_gpu.ABT_twoway(x, W, device, rank, model_group)
+        xw = summa_gpu.XWT_twoway(x, W, device, rank, model_group)
         
         return xw.add(b)
         
@@ -773,8 +772,8 @@ class ABT_twoway(torch.autograd.Function):
         device = ctx.device
         rank = ctx.rank
         
-        grad_input  = summa_gpu.AB_twoway(grad_output, weight, device=device, rank=rank)
-        grad_weight = summa_gpu.ATB_twoway(grad_output, input, device=device, rank=rank)
+        grad_input  = summa_gpu.XW_twoway(grad_output, weight, device=device, rank=rank)
+        grad_weight = summa_gpu.XTW_twoway(grad_output, input, device=device, rank=rank)
         grad_b = grad_output
 
         return grad_input, grad_weight, grad_b, None, None, None
@@ -844,7 +843,7 @@ class DistributedXT(torch.autograd.Function):
         Computes the gradient of the loss with respect to the input of the layer.
         Parameters
         ----------
-        ctx : object
+        ctx : torch.autograd.Function
             Context object containing information about the forward pass.
         grad_output : tensor
             Gradient of the loss with respect to the output of the layer.
@@ -908,7 +907,7 @@ class DistributedXT_twoway(torch.autograd.Function):
         Performs the forward pass of the linear layer.
         Parameters
         ----------
-        ctx : object
+        ctx : torch.autograd.Function
             The context object to store information for backward computation.
         x : torch.Tensor
             The input tensor.
@@ -937,7 +936,7 @@ class DistributedXT_twoway(torch.autograd.Function):
         Perform the backward pass for the linear layer.
         Parameters
         ----------
-        ctx : object
+        ctx : torch.autograd.Function
             Context object containing information from the forward pass.
         grad_output : tensor
             Gradient of the loss with respect to the output of the layer.
@@ -1108,28 +1107,28 @@ class MixerBlock(torch.nn.Module):
     
 
 class MixerBlock_twoway(torch.nn.Module):
-    class MixerBlock_twoway:
-        """
-        A two-way Mixer Block for neural networks.
-        Parameters
-        ----------
-        tokens_mlp_dim : int
-            Dimension of the tokens MLP.
-        channels_mlp_dim : int
-            Dimension of the channels MLP.
-        spatial_hidden_dim_fraction : float
-            Fraction of the hidden dimension for spatial mixing.
-        channels_hidden_dim_fraction : float
-            Fraction of the hidden dimension for channel mixing.
-        device : torch.device
-            Device to run the computations on.
-        rank : int
-            Rank for distributed computations.
-        Methods
-        -------
-        forward(x, model_group)
-            Forward pass through the Mixer Block.
-        """
+    
+    """
+    A two-way Mixer Block for neural networks.
+    Parameters
+    ----------
+    tokens_mlp_dim : int
+        Dimension of the tokens MLP.
+    channels_mlp_dim : int
+        Dimension of the channels MLP.
+    spatial_hidden_dim_fraction : float
+        Fraction of the hidden dimension for spatial mixing.
+    channels_hidden_dim_fraction : float
+        Fraction of the hidden dimension for channel mixing.
+    device : torch.device
+        Device to run the computations on.
+    rank : int
+        Rank for distributed computations.
+    Methods
+    -------
+    forward(x, model_group)
+        Forward pass through the Mixer Block.
+    """
     
     def __init__(self, tokens_mlp_dim, channels_mlp_dim, spatial_hidden_dim_fraction, channels_hidden_dim_fraction, device, rank):
         super(MixerBlock_twoway, self).__init__()
@@ -1211,7 +1210,7 @@ class SequentialMLP(torch.nn.Module):
 
 class MixerBlockSequential(torch.nn.Module):
     """
-    A sequential mixer block for token and channel mixing.
+    A sequential Mixer block for token and channel mixing.
     Parameters
     ----------
     tokens_mlp_dim : int
@@ -1219,20 +1218,19 @@ class MixerBlockSequential(torch.nn.Module):
     channels_mlp_dim : int
         Dimension of the channel MLP.
     spatial_hidden_dim_fraction : float
-        Fraction of the token MLP dimension for the hidden layer.
+        Fraction to determine the hidden dimension size for the token MLP.
     channels_hidden_dim_fraction : float
-        Fraction of the channel MLP dimension for the hidden layer.
+        Fraction to determine the hidden dimension size for the channel MLP.
     dropout : float, optional
         Dropout rate, by default 1e-6.
     Methods
     -------
     forward(x)
-        Forward pass through the mixer block.
+        Forward pass through the Mixer block.
     """
     
     def __init__(self, tokens_mlp_dim, channels_mlp_dim, spatial_hidden_dim_fraction, channels_hidden_dim_fraction, dropout=1e-6):
         super(MixerBlockSequential, self).__init__()
-
         
         self.token_mixing = SequentialMLP(tokens_mlp_dim, int(tokens_mlp_dim * spatial_hidden_dim_fraction), tokens_mlp_dim, dropout=dropout)
         self.channel_mixing = SequentialMLP(channels_mlp_dim, int(channels_mlp_dim * channels_hidden_dim_fraction), channels_mlp_dim, dropout=dropout)
@@ -1240,6 +1238,17 @@ class MixerBlockSequential(torch.nn.Module):
         self.layer_norm2 = torch.nn.LayerNorm(channels_mlp_dim)
         
     def forward(self, x):
+        """
+        Perform the forward pass of the model.
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor.
+        Returns
+        -------
+        torch.Tensor
+            Output tensor after applying layer normalization, token mixing, and channel mixing.
+        """
         
         x_res = x.clone()
         y = self.layer_norm1(x)
