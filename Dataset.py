@@ -35,11 +35,13 @@ class ERA5Dataset(Dataset):
         self.lite = config['data']['lite']
         if config['data']['train_data_path'] == '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/1959-2023_01_10-wb13-6h-1440x721.zarr':        
             self.deltaTDivisor = 6
+        elif config['data']['train_data_path'] == '/hkfs/work/workspace/scratch/ke4365-era5_data/era5_subset.zarr':        
+            self.deltaTDivisor = 6
         else:
             if self.lite:
                 self.deltaTDivisor = 6
             else:
-                self.deltaTDivisor = 1
+                self.deltaTDivisor = 6
         self.forecast_length = forecast_length
         self.normalize = normalize
         
@@ -54,10 +56,10 @@ class ERA5Dataset(Dataset):
         else: # baseline assuption is subsampled WB2 data
             self.level_ordering = range(13-1, -1, -1)
 
-        self.p_mean = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/pressure_zarr.npy', allow_pickle=True)[0].reshape(5, 13, 1, 1)
-        self.p_std  = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/pressure_zarr.npy', allow_pickle=True)[1].reshape(5, 13, 1, 1)
-        self.s_mean = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/surface_zarr.npy', allow_pickle=True)[0].reshape(4, 1, 1)
-        self.s_std  = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/surface_zarr.npy', allow_pickle=True)[1].reshape(4, 1, 1)
+        self.p_mean = np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/pressure_zarr.npy', allow_pickle=True)[0].reshape(5, 13, 1, 1)
+        self.p_std  = np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/pressure_zarr.npy', allow_pickle=True)[1].reshape(5, 13, 1, 1)
+        self.s_mean = np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/surface_zarr.npy', allow_pickle=True)[0].reshape(4, 1, 1)
+        self.s_std  = np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/surface_zarr.npy', allow_pickle=True)[1].reshape(4, 1, 1)
         
         self.patch_size = patch_size
         self.xlat = config['data']['xlat']
@@ -79,13 +81,11 @@ class ERA5Dataset(Dataset):
             if self.lite:
                 train_years = times[(times.year<2017) & (times.year > 2006) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))] 
             else:
-                train_years = times[(times.year<2017) & (times.year > 1979)]
+                train_years = times[(times.year<2017) & (times.year > 1979) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
             self.zarr_data = self.zarr_data.sel(time=train_years)
         elif mode == 'validation':           # validation
-            if self.lite:
-                validation_years = times[(times.year == 2018) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
-            else:
-                validation_years = times[(times.year == 2018)]
+            validation_years = times[(times.year == 2018) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
+            
             self.zarr_data = self.zarr_data.sel(time=validation_years)
         elif mode == 'testing':           # validation
             validation_years = times[(times.year == 2020) | (times.year == 2021)] 
@@ -135,15 +135,18 @@ class ERA5Dataset(Dataset):
         input_surface  = self.zarr_data.isel(time=global_idx)[['mean_sea_level_pressure', '10m_u_component_of_wind', '10m_v_component_of_wind', '2m_temperature']]
         target_pressure_ds = self.zarr_data.isel(time=target_file_idxs, level=self.level_ordering)[['geopotential', 'specific_humidity', 'temperature', 'u_component_of_wind', 'v_component_of_wind']]
         target_surface_ds  = self.zarr_data.isel(time=target_file_idxs)[['mean_sea_level_pressure', '10m_u_component_of_wind', '10m_v_component_of_wind', '2m_temperature']]
-            
+        #print(input_surface['2m_temperature'].values)    
         # Stack and convert to numpy array
         input_pressure = np.stack([input_pressure['geopotential'].values, input_pressure['specific_humidity'].values, input_pressure['temperature'].values, input_pressure['u_component_of_wind'].values, input_pressure['v_component_of_wind'].values], axis=0)
         input_surface  = np.stack([input_surface['mean_sea_level_pressure'].values, input_surface['10m_u_component_of_wind'].values, input_surface['10m_v_component_of_wind'].values, input_surface['2m_temperature'].values], axis=0)
+        
         input_pressure = (input_pressure - self.p_mean) / self.p_std
         input_surface  = (input_surface  - self.s_mean) / self.s_std
         input_pressure = np.reshape(input_pressure, (-1, 721, 1440))
         input_surface  = input_surface[:, :self.xlat]
         input_pressure = input_pressure[:, :self.xlat]
+        
+        
         
         if self.rank is None: # in serial case
             input = np.concatenate([input_surface, input_pressure], axis=0)
@@ -170,11 +173,15 @@ class ERA5Dataset(Dataset):
         if self.rank is None:
             return input, target    
         else:
-            temp = torch.nn.functional.pad(target[0], (0, 0, 0, 0, 0, 3)).permute(1,2,0)
             input = input.permute(1,2,0)
             input = [input[:, :720, :36], input[:, :720, 36:], input[:, 720:, :36], input[:, 720:, 36:]]
 
-            target_list = [temp[:, :720, :36], temp[:, :720, 36:], temp[:, 720:, :36], temp[:, 720:, 36:]]
+            target_list = []
+            for i in range(self.forecast_length):
+                temp = torch.nn.functional.pad(target[i], (0, 0, 0, 0, 0, 3)).permute(1,2,0)
+            
+            target_list.append([temp[:, :720, :36], temp[:, :720, 36:], temp[:, 720:, :36], temp[:, 720:, 36:]])
+
             
             return input, target_list
 class ERA5DatasetDistributed(Dataset):
@@ -203,7 +210,7 @@ class ERA5DatasetDistributed(Dataset):
         self.dt = config['data']['dt']
         self.lite = config['data']['lite']
         self.rank = rank
-        self.node_rank = rank // 4
+        
 
         if config['data']['train_data_path'] == '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/1959-2023_01_10-wb13-6h-1440x721.zarr':        
             self.deltaTDivisor = 6
@@ -211,7 +218,7 @@ class ERA5DatasetDistributed(Dataset):
             if self.lite:
                 self.deltaTDivisor = 6
             else:
-                self.deltaTDivisor = 1
+                self.deltaTDivisor = 6
         self.forecast_length = forecast_length
         self.normalize = normalize
         
@@ -226,10 +233,10 @@ class ERA5DatasetDistributed(Dataset):
         else: # baseline assuption is subsampled WB2 data
             self.level_ordering = range(13-1, -1, -1)
 
-        self.p_mean = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/pressure_zarr.npy', allow_pickle=True)[0].reshape(65, 1, 1)
-        self.p_std  = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/pressure_zarr.npy', allow_pickle=True)[1].reshape(65, 1, 1)
-        self.s_mean = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/surface_zarr.npy', allow_pickle=True)[0].reshape(4, 1, 1)
-        self.s_std  = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/surface_zarr.npy', allow_pickle=True)[1].reshape(4, 1, 1)
+        self.p_mean = np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/pressure_zarr.npy', allow_pickle=True)[0].reshape(65, 1, 1)
+        self.p_std  = np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/pressure_zarr.npy', allow_pickle=True)[1].reshape(65, 1, 1)
+        self.s_mean = np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/surface_zarr.npy', allow_pickle=True)[0].reshape(4, 1, 1)
+        self.s_std  = np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/surface_zarr.npy', allow_pickle=True)[1].reshape(4, 1, 1)
         
         self.patch_size = patch_size
         self.xlat, self.xlon = config['data']['xlat'], config['data']['xlon']
@@ -262,13 +269,13 @@ class ERA5DatasetDistributed(Dataset):
             if self.lite:
                 train_years = times[(times.year<2017) & (times.year > 2006) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))] 
             else:
-                train_years = times[(times.year<2017) & (times.year > 1979)]
+                train_years = times[(times.year<2017) & (times.year > 1979)& ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
             self.zarr_data = self.zarr_data.sel(time=train_years)
         elif mode == 'validation':           # validation
             if self.lite:
                 validation_years = times[(times.year == 2018) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
             else:
-                validation_years = times[(times.year == 2018)]
+                validation_years = times[(times.year == 2018)& ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
             self.zarr_data = self.zarr_data.sel(time=validation_years)
         elif mode == 'testing':           # validation
             validation_years = times[(times.year == 2020) | (times.year == 2021)] 
@@ -322,8 +329,6 @@ class ERA5DatasetDistributed(Dataset):
         if self.rank % 2 == 0: # first half of data
             # Input data
             # Stack and convert to numpy array
-
-
             geopotential = input_pressure['geopotential'][:,:self.xlat,self.start:self.end].values
             humidity = input_pressure['specific_humidity'][:,:self.xlat,self.start:self.end].values
             temperature = input_pressure['temperature'][:6,:self.xlat,self.start:self.end].values

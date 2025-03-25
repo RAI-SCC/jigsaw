@@ -1,7 +1,7 @@
 import torch
 from torch import permute, reshape
 from torch.nn import Conv2d, ConvTranspose2d
-from utils import load_constant_mask_2d, getPositionEncoding
+from utils import load_constant_mask_2d
 import Linear
 
 class PatchEmbedding2D(torch.nn.Module):
@@ -225,7 +225,7 @@ class PatchEmbedding1D(torch.nn.Module):
     input_surface = input_surface.reshape(input_shape[0], input_shape[1]+3, -1)
     
     input_surface = self.conv_surface(input_surface)
-
+    
     # Reshape x for calculation of linear projections
     # Dimensions: (nData, latitude, longitude, fields)
     x = permute(input_surface, (0, 2, 1))
@@ -509,17 +509,21 @@ class DistributedPatchEmbedding(torch.nn.Module):
 
 
 class Distributed1DPatchEmbedding(torch.nn.Module):
-  def __init__(self, n_lat, n_lon, patch_size, var_in, embed_dim,  device, rank, xlat=720):
+  def __init__(self, n_lat, n_lon, patch_size, var_in, embed_dim,  device, rank, xlat=720, stride=None):
     super().__init__()
     self.n_lat, self.n_lon = n_lat, n_lon
     self.patch_size = patch_size
     self.var_in = var_in
     self.embed_dim = embed_dim
+
+    if stride is None:
+      self.stride = patch_size
+    else:
+      self.stride = stride
     
     self.patch_embed = Linear.DistributedXWT_fourway(patch_size*var_in//2, embed_dim//2, device, rank, n_channels=var_in, init_method='conv')
     
-    self.device = device
-    
+    self.device = device    
     self.rank = rank
 
   def forward(self, x, model_group):
@@ -535,6 +539,13 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
     x_patches_local = x_patches_local.flatten(start_dim=1, end_dim=2)
     x_patches_local = x_patches_local.flatten(start_dim=2, end_dim=3)
     
+    if self.stride < self.patch_size:
+      x_rolled = x.roll(self.stride, dims=2)
+      x_rolled_local = x_rolled.reshape(n_batch, n_x, n_y // self.patch_size, self.patch_size, n_var)
+      x_rolled_local = x_rolled_local.flatten(start_dim=1, end_dim=2)
+      x_rolled_local = x_rolled_local.flatten(start_dim=2, end_dim=3)
+      x_patches_local = torch.cat([x_patches_local, x_rolled_local], dim=1)
+
     x = self.patch_embed(x_patches_local, model_group)
     
     # x shape: (n_batch, n_lat/p0, n_lon/01, embed_dim)
@@ -603,7 +614,7 @@ class DistributedPatchRecovery(torch.nn.Module):
 class Distributed1DPatchRecovery(torch.nn.Module):
   """2D Patch recovery option."""
 
-  def __init__(self, patch_size, embed_dim, out_channels, device, rank, concat=False):
+  def __init__(self, patch_size, embed_dim, out_channels, device, rank, concat=False, stride=None):
     """
     1D Patch recovery.
 
@@ -621,10 +632,22 @@ class Distributed1DPatchRecovery(torch.nn.Module):
     super().__init__()
     # Here we use two transposed convolutions to recover data
     self.concat = concat
-    if self.concat:
-      self.conv = Linear.DistributedXWT_fourway(embed_dim, patch_size*out_channels, device, rank, n_channels=embed_dim, init_method='conv')
+    
+    if stride is None:
+      self.stride = self.patch_size
     else:
-      self.conv = Linear.DistributedXWT_fourway(embed_dim//2, patch_size*out_channels, device, rank, n_channels=embed_dim, init_method='conv')
+      self.stride = stride
+    
+    if self.stride < patch_size:
+      if self.concat:
+        self.conv = Linear.DistributedXWT_fourway(embed_dim, patch_size*out_channels//2, device, rank, n_channels=embed_dim, init_method='conv')
+      else:
+        self.conv = Linear.DistributedXWT_fourway(embed_dim//2, patch_size*out_channels//2, device, rank, n_channels=embed_dim, init_method='conv')
+    else:
+      if self.concat:
+        self.conv = Linear.DistributedXWT_fourway(embed_dim, patch_size*out_channels, device, rank, n_channels=embed_dim, init_method='conv')
+      else:
+        self.conv = Linear.DistributedXWT_fourway(embed_dim//2, patch_size*out_channels, device, rank, n_channels=embed_dim, init_method='conv')
     self.patch_size = patch_size
     self.out_channels = out_channels
 
@@ -650,8 +673,6 @@ class Distributed1DPatchRecovery(torch.nn.Module):
     # Call the transposed convolution
     output = self.conv(x, model_group) # distributed 
     
-    #print(f"2 - conv shape {output.shape}")
-    # [4, n_patch_lat*n_patch_lon/2, patch_size_1*patch_size2*n_vars//2]
     output = output.view(output.shape[0], n_patch_lat, n_patch_lon//2, self.patch_size, self.out_channels)
     output_shape = output.shape
     
@@ -661,12 +682,18 @@ class Distributed1DPatchRecovery(torch.nn.Module):
     return output
 
 class Distributed1DPatchEmbedding_twoway(torch.nn.Module):
-  def __init__(self, n_lat, n_lon, patch_size, var_in, embed_dim, device, rank, xlat=720):
+  def __init__(self, n_lat, n_lon, patch_size, var_in, embed_dim, device, rank, xlat=720, stride=None):
     super().__init__()
+
     self.n_lat, self.n_lon = n_lat, n_lon
     self.patch_size = patch_size
     self.var_in = var_in
     self.embed_dim = embed_dim
+    if stride is None:
+      self.stride=patch_size
+    else:
+      self.stride=stride
+
     self.patch_embed = Linear.DistributedXWT_twoway(patch_size*var_in//2, embed_dim,  device, rank, n_channels=var_in, init_method='conv')
     
     self.device = device
@@ -683,23 +710,28 @@ class Distributed1DPatchEmbedding_twoway(torch.nn.Module):
     # Load constant masks from the disc
     
     n_batch, n_x, n_y, n_var = x.shape
-    # [1, 720, 1440, 36]
-    
     # x_local: [n_batch, n_lat, n_lon, variables]
-    x_patches_local = (x.reshape(n_batch, n_x, n_y // self.patch_size, self.patch_size, n_var)) # Shape of x_patches: [n_batches, num_patch_x, num_patch_y, size_patch, n_var]
+    x_patches_local = x.reshape(n_batch, n_x, n_y // self.patch_size, self.patch_size, n_var) # Shape of x_patches: [n_batches, num_patch_x, num_patch_y, size_patch, n_var]
     x_patches_local = x_patches_local.flatten(start_dim=1, end_dim=2)
     x_patches_local = x_patches_local.flatten(start_dim=2, end_dim=3)
     
+    # Roll for stride
+    if self.stride < self.patch_size:
+      x_rolled = x.roll(self.stride, dims=2)
+      x_rolled_local = x_rolled.reshape(n_batch, n_x, n_y // self.patch_size, self.patch_size, n_var) # Shape of x_patches: [n_batches, num_patch_x, num_patch_y, size_patch, n_var]
+      x_rolled_local = x_rolled_local.flatten(start_dim=1, end_dim=2)
+      x_rolled_local = x_rolled_local.flatten(start_dim=2, end_dim=3)
+      x_patches_local = torch.cat([x_patches_local, x_rolled_local], dim=1)
+
     x = self.patch_embed(x_patches_local, model_group)
     
-    # x shape: (n_batch, n_lat/p0, n_lon/01, embed_dim)
     return x
 
 
 class Distributed1DPatchRecovery_twoway(torch.nn.Module):
   """2D Patch recovery option."""
 
-  def __init__(self, patch_size, embed_dim, out_channels, device, rank, concat=False, group=None):
+  def __init__(self, patch_size, embed_dim, out_channels, device, rank, concat=False, group=None, stride=None):
     """
     1D Patch recovery.
     A transpose convolution operation is performed over the pressure and surface outputs to recover the forecasted fields.
@@ -716,10 +748,20 @@ class Distributed1DPatchRecovery_twoway(torch.nn.Module):
     # Here we use two transposed convolutions to recover data
     self.group = group
     self.concat = concat
-    if self.concat:
-      self.conv = Linear.DistributedXWT_twoway(embed_dim, patch_size*out_channels, device, rank, n_channels=embed_dim, init_method='conv')
+    if stride is None:
+      self.stride = self.patch_size
     else:
-      self.conv = Linear.DistributedXWT_twoway(embed_dim//2, patch_size*out_channels, device, rank, n_channels=embed_dim, init_method='conv')
+      self.stride = stride
+    if self.stride < patch_size:      
+      if self.concat:
+        self.conv = Linear.DistributedXWT_twoway(embed_dim, patch_size*out_channels//2, device, rank, n_channels=embed_dim, init_method='conv')
+      else:
+        self.conv = Linear.DistributedXWT_twoway(embed_dim//2, patch_size*out_channels//2, device, rank, n_channels=embed_dim, init_method='conv')
+    else:
+      if self.concat:
+        self.conv = Linear.DistributedXWT_twoway(embed_dim, patch_size*out_channels, device, rank, n_channels=embed_dim, init_method='conv')
+      else:
+        self.conv = Linear.DistributedXWT_twoway(embed_dim//2, patch_size*out_channels, device, rank, n_channels=embed_dim, init_method='conv')
     self.patch_size = patch_size
     self.out_channels = out_channels // 2
 
@@ -744,11 +786,7 @@ class Distributed1DPatchRecovery_twoway(torch.nn.Module):
     
     # Call the transposed convolution
     output = self.conv(x, model_group) # distributed 
-      
-    #print(f"2 - conv shape {output.shape}")
-    # [4, n_patch_lat*n_patch_lon/2, patch_size_1*patch_size2*n_vars//2]
     output = output.view(output.shape[0], n_patch_lat, n_patch_lon, self.patch_size, self.out_channels)
-    #output = x.view(x.shape[0], n_patch_lat, n_patch_lon, self.patch_size, self.out_channels)
     output_shape = output.shape
     
     output = output.view(output_shape[0], output_shape[1], output_shape[2]*output_shape[3], output_shape[4])

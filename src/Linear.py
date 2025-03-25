@@ -1,6 +1,5 @@
 import torch
 import summa_gpu
-#from mpi4py import MPI
 import numpy as np
 from torch.nn import GELU, Dropout
 
@@ -109,7 +108,7 @@ class DistributedXW_twoway(torch.nn.Module):
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
-        stdev = 1. / np.sqrt(in_dim*out_dim*4)
+        stdev = 1. / np.sqrt(in_dim*out_dim*2)
         
         self.weights = torch.nn.parameter.Parameter(torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev))
         self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev)) if bias else None
@@ -576,15 +575,15 @@ class SequentialMLP(torch.nn.Module):
         self.linear1 = torch.nn.Linear(in_dim, hidden_dim)
         self.linear2 = torch.nn.Linear(hidden_dim, out_dim)
         self.activation = GELU()
-        self.drop = Dropout(p=dropout)
-        self.drop2 = Dropout(p=dropout)
+        #self.drop = Dropout(p=dropout)
+        #self.drop2 = Dropout(p=dropout)
 
     def forward(self, x):
         x = self.linear1(x)
         x = self.activation(x)
-        x = self.drop(x)
+        #x = self.drop(x)
         x = self.linear2(x)
-        x = self.drop2(x)
+        #x = self.drop2(x)
         
         return x
 

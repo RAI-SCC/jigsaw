@@ -150,7 +150,7 @@ def training_loop(config_dict, device, localid, rank):
     # load
     try:
         file_path = config_dict['training']['load_path']
-        mlp, optimizer, epoch = utils.load_model(mlp, optimizer=optimizer, file_path=file_path, rank=rank, model_parallel=model_parallel)
+        mlp, optimizer, epoch = utils.load_model(mlp, optimizer=optimizer, file_path=file_path, rank=rank, model_parallel=model_parallel, parallelism=parallelism)
         epoch = epoch + 1
         
     except Exception as err:
@@ -208,7 +208,9 @@ def training_loop(config_dict, device, localid, rank):
         mlp.train()
         
         start_time = time.perf_counter()
-
+        for i in length(dataset):
+            if i % 3 = 0:
+                data = next(train_dataloader)
         for i, data in enumerate(train_dataloader):
             # learning rate ramp-up in first iteration
             if epoch == 0:

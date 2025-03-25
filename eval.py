@@ -128,8 +128,8 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
     total_samples = torch.tensor([0]).to(device)
     start_validation_time = time.perf_counter()
 
-    surface_weights = torch.tensor([0.6, 0.8, 0.8, 3])*4
-    pressure_weights = torch.tensor([0.6, 0.5, 1.5, 0.8, 0.8]).unsqueeze(1).expand(5, 13).flatten()
+    surface_weights = torch.tensor([0.6, 0.8, 0.8, 4]) * 4
+    pressure_weights = torch.tensor([0.6, 0.2, 1.5, 0.8, 0.8]).unsqueeze(1).expand(5, 13).flatten()
     surface_upper_pressure_weights = torch.concat(
         [torch.tensor([1, 1, 1, 1]), # surface variables
         torch.tensor([1, 1, 1, 1, 1, 1, 0.8, 0.1, .7, .1, .6, .1, .5]).repeat(5)]
@@ -138,7 +138,7 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
     variable_weights = ((torch.concat([surface_weights, pressure_weights]).view(1, 1, 1, 69))*surface_upper_pressure_weights).to(device)
     
     # underground mask
-    weights = torch.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/kangu_finetuning/finetuning_weights/feature_weights.pt', map_location='cpu')
+    weights = torch.load('/hkfs/work/workspace/scratch/ke4365-kangu/kangu_finetuning/finetuning_weights/feature_weights.pt', map_location='cpu')
     underground_mask = weights['pressure_mask_lower'] # shape [5, 724, 1440]
     underground_mask = underground_mask.permute(1, 2, 0)[1:-2][:n_lat].unsqueeze(-1).expand(-1, -1, -1, 13).reshape(1, n_lat, n_lon, 65) # shape is [1, xlat, xlon, 65]
 
@@ -260,9 +260,11 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
                     target_data = data[1][step].to(device, non_blocking=True)
                 
                 if rank % parallelism in [0,2]:
+                    input_data[:,:,:,4:] = input_data[:,:,:,4:] * underground_mask
                     target_data[:,:,:,4:] = target_data[:,:,:,4:] * underground_mask
                     output[:,:,:,4:]      = output[:,:,:,4:] * underground_mask
                 else:
+                    input_data = input_data * underground_mask
                     target_data = target_data * underground_mask
                     output      = output * underground_mask
 
@@ -401,8 +403,8 @@ def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file
     return loss.item()
 
 def load_averages():
-    static_slevel = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/surface_zarr.npy')
-    static_plevel = np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/pressure_zarr.npy')
+    static_slevel = np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/surface_zarr.npy')
+    static_plevel = np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/pressure_zarr.npy')
     mean_slevel   = torch.tensor(static_slevel[0].reshape(4))
     std_slevel    = torch.tensor(static_slevel[1].reshape(4))
     mean_plevel   = torch.tensor(static_plevel[0].reshape(65))
@@ -413,8 +415,8 @@ def load_averages():
     return mean, std
     
 def get_climatology():
-    climatology_plevel = torch.tensor(np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/pressure_climatology.npy')).reshape(65, 721, 1440)
-    climatology_slevel = torch.tensor(np.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/constant_masks/surface_climatology.npy'))
+    climatology_plevel = torch.tensor(np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/pressure_climatology.npy')).reshape(65, 721, 1440)
+    climatology_slevel = torch.tensor(np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/surface_climatology.npy'))
 
     climatology = torch.concatenate([climatology_slevel, climatology_plevel], axis=0).permute(1, 2, 0)
     # climatology [721, 1440, variables]

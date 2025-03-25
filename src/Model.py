@@ -18,13 +18,18 @@ class Model(torch.nn.Module):
             self.patch_size = config_dict['model']['patch_size']
             self.stride = config_dict['model']['stride']
             self.n_lat, self.n_lon = self.xlat, self.xlon//self.patch_size
-            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension, device, rank, xlat=self.xlat)
+            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension, device, rank, xlat=self.xlat, stride=self.stride)
         else:
             self.patch_size = (config_dict['model']['patch_size'], config_dict['model']['patch_size'])
             self.n_lat, self.n_lon = self.xlat//self.patch_size[0], self.xlon//self.patch_size[1]
             self.embedding = PatchEmbedding.DistributedPatchEmbedding(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension,  device, rank, xlat=self.xlat)
+
         self.n_blocks = config_dict['model']['mixing_blocks']
-        self.blocks = torch.nn.ModuleList([MixerBlock(self.n_lat*self.n_lon//2, hidden_dimension//2, config_dict['model']['spatial_hidden_dim_fraction'], config_dict['model']['features_hidden_dim_fraction'], device, rank, parallelism=config_dict['model_parallel']['parallelism']) for i in range(self.n_blocks)])
+
+        if self.stride < self.patch_size:
+            self.blocks = torch.nn.ModuleList([MixerBlock(self.n_lat*self.n_lon, hidden_dimension//2, config_dict['model']['spatial_hidden_dim_fraction'], config_dict['model']['features_hidden_dim_fraction'], device, rank, parallelism=config_dict['model_parallel']['parallelism']) for i in range(self.n_blocks)])
+        else:
+            self.blocks = torch.nn.ModuleList([MixerBlock(self.n_lat*self.n_lon//2, hidden_dimension//2, config_dict['model']['spatial_hidden_dim_fraction'], config_dict['model']['features_hidden_dim_fraction'], device, rank, parallelism=config_dict['model_parallel']['parallelism']) for i in range(self.n_blocks)])
         self.layer_norm = Linear.DistributedLayerNorm(hidden_dimension//2, self.rank, self.device)
         
         if self.rank == 3:
@@ -40,9 +45,9 @@ class Model(torch.nn.Module):
         self.add = config_dict['model']['add']
         if config_dict['model']['patch_embed'] == 1:
             if self.concat:
-                self.recovery = PatchEmbedding.Distributed1DPatchRecovery(self.patch_size, hidden_dimension, self.num_variables, device, rank, concat=True)
+                self.recovery = PatchEmbedding.Distributed1DPatchRecovery(self.patch_size, hidden_dimension, self.num_variables, device, rank, concat=True, stride=self.stride)
             else:
-                self.recovery = PatchEmbedding.Distributed1DPatchRecovery(self.patch_size, hidden_dimension, self.num_variables, device, rank, concat=False)
+                self.recovery = PatchEmbedding.Distributed1DPatchRecovery(self.patch_size, hidden_dimension, self.num_variables, device, rank, concat=False, stride=self.stride)
         else:
             self.recovery = PatchEmbedding.DistributedPatchRecovery(self.patch_size, hidden_dimension, self.num_variables, device, rank)
         self.linearlayer = Linear.DistributedXWT_fourway(self.num_variables*2, self.num_variables*1, device, rank)
@@ -94,6 +99,7 @@ class Model(torch.nn.Module):
         
         if self.add:
             return x + x_res
+        
         if self.linear_residual:
             x = self.layer_norm2(x, self.rank, self.device)
             x = torch.concat((x, x_res), dim=2)
@@ -119,13 +125,16 @@ class Model_twoway(torch.nn.Module):
             self.patch_size = config_dict['model']['patch_size']
             self.stride = config_dict['model']['stride']
             self.n_lat, self.n_lon = self.xlat, self.xlon//self.patch_size
-            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding_twoway(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension,  device, rank, xlat=self.xlat)
+            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding_twoway(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension,  device, rank, xlat=self.xlat, stride=self.stride)
         #else:
         #    self.patch_size = (config_dict['model']['patch_size'], config_dict['model']['patch_size'])
         #    self.n_lat, self.n_lon = self.xlat//self.patch_size[0], self.xlon//self.patch_size[1]
             #self.embedding = PatchEmbedding.Distributed1DPatchEmbedding_twoway(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension, comm, device, rank, xlat=self.xlat, group=group)
         self.n_blocks = config_dict['model']['mixing_blocks']
-        self.blocks = torch.nn.ModuleList([MixerBlock_twoway(self.n_lat*self.n_lon, hidden_dimension, config_dict['model']['spatial_hidden_dim_fraction'], config_dict['model']['features_hidden_dim_fraction'], device, rank) for i in range(self.n_blocks)])
+        if self.stride < self.patch_size:
+            self.blocks = torch.nn.ModuleList([MixerBlock_twoway(self.n_lat*self.n_lon*2, hidden_dimension, config_dict['model']['spatial_hidden_dim_fraction'], config_dict['model']['features_hidden_dim_fraction'], device, rank) for i in range(self.n_blocks)])
+        else:
+            self.blocks = torch.nn.ModuleList([MixerBlock_twoway(self.n_lat*self.n_lon, hidden_dimension, config_dict['model']['spatial_hidden_dim_fraction'], config_dict['model']['features_hidden_dim_fraction'], device, rank) for i in range(self.n_blocks)])
         self.layer_norm = Linear.torch.nn.LayerNorm(hidden_dimension//2)#, self.rank, self.device)
         
         if self.rank == 3:
@@ -134,7 +143,8 @@ class Model_twoway(torch.nn.Module):
             self.num_variables = 72
             
         self.layer_norm2 = torch.nn.LayerNorm(self.num_variables//2)    
-        self.layer_norm3 = torch.nn.LayerNorm(36*2)    
+        self.layer_norm3 = torch.nn.LayerNorm(36*2)
+
         self.concat = config_dict['model']['concat']
         self.linear_residual = config_dict['model']['linear_residual']
         
@@ -142,11 +152,10 @@ class Model_twoway(torch.nn.Module):
         self.add = config_dict['model']['add']
         if config_dict['model']['patch_embed'] == 1:
             if self.concat:
-                self.recovery = PatchEmbedding.Distributed1DPatchRecovery_twoway(self.patch_size, hidden_dimension, self.num_variables, device, rank, concat=True)
+                self.recovery = PatchEmbedding.Distributed1DPatchRecovery_twoway(self.patch_size, hidden_dimension, self.num_variables, device, rank, concat=True, stride=self.stride)
             else:
-                self.recovery = PatchEmbedding.Distributed1DPatchRecovery_twoway(self.patch_size, hidden_dimension, self.num_variables,  device, rank, concat=False)
-        #else:
-#            self.recovery = PatchEmbedding.DistributedPatchRecovery(self.patch_size, hidden_dimension, self.num_variables, comm, device, rank)
+                self.recovery = PatchEmbedding.Distributed1DPatchRecovery_twoway(self.patch_size, hidden_dimension, self.num_variables,  device, rank, concat=False, stride=self.stride)
+        
         self.linearlayer = Linear.DistributedXWT_twoway(self.num_variables, self.num_variables*1, device, rank)
         
         self.activation = torch.nn.GELU()
@@ -309,6 +318,7 @@ class ModelSequential(torch.nn.Module):
         
         # x shape: [1, 69, 720, 1440]
         x = self.embedding(x) # x: latent_t
+        
         # x: shape [1, n_patches, hidden_dim]
         if self.pos_encoding:
             x = x + self.positional_encoding # is this a good idea?

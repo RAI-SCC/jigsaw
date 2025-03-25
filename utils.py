@@ -10,9 +10,6 @@ from torch.utils.data import Sampler
 import matplotlib.pyplot as plt
 import sys
 from multiprocessing import Value
-sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/')
-sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/networks')
-from networks.PanguLite2DAttentionPosEmbed import PanguModel as TwoDimPosEmbLite
 import random
 import time
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
@@ -133,7 +130,7 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
 
 
     sampler    = DistributedSampler(dataset, 
-                                    shuffle=False,
+                                    shuffle=True,
                                     num_replicas=(torch.distributed.get_world_size()//parallelism),
                                     rank=rank//parallelism
                                     ) 
@@ -278,14 +275,15 @@ def save_model(model, optimizer, file_path, rank, epoch, distributed=True):
     }
     torch.save(state, file_path)
 
-def load_model(model, optimizer, file_path, rank, model_parallel=False):
+def load_model(model, optimizer, file_path, rank, model_parallel=False, parallelism=2):
     if not model_parallel:
         rank = 0
     if model_parallel:
-        file_path = f'{file_path}/model_{rank}.pt'
+        load_rank = rank % parallelism
+        file_path = f'{file_path}/model_{load_rank}.pt'
     state = torch.load(f"{file_path}", map_location='cpu')
     model.load_state_dict(state['model_state'])
-#    optimizer.load_state_dict(state['optimizer_state'])
+    optimizer.load_state_dict(state['optimizer_state'])
 
     epoch = state['epoch']
     return model, optimizer, epoch
@@ -350,7 +348,7 @@ def load_and_push_data(config_dict, data, parallelism, buffer, rank, device, loc
     # Need wait handle.
     if parallelism == 2:
         #print(f'I am rank {rank} pushing to device {device}')
-        pushed_data = data.to(device, non_blocking=True) # Non-blocking is possible when pinned memory is used
+        pushed_data = data.to(device, non_blocking=False) # Non-blocking is possible when pinned memory is used
         return pushed_data, False
 
     # Case: 4-way split
@@ -365,7 +363,7 @@ def load_and_push_data(config_dict, data, parallelism, buffer, rank, device, loc
             input_data_handle = send_data_twoway(data, buffer, rank, device, local_groups)
             return input_data_handle, True
         elif data_split == 4:
-            input_data = data.to(device, non_blocking=True)
+            input_data = data.to(device, non_blocking=False)
             
             return input_data, False
 
