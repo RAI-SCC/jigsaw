@@ -49,9 +49,11 @@ class ERA5Dataset(Dataset):
         
         # If data is downloaded from weatherbench, the 6-hourly subsampled data is stored in the reverse pressure level order.
         # Need to reverse so that the 0th presssure level is 1000 hPa, 1st is 925 hPa, etc.
-        if config['data']['train_data_path'] == '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/1959-2023_01_10-wb13-6h-1440x721.zarr':
+        if (config['data']['train_data_path'] == '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/1959-2023_01_10-wb13-6h-1440x721.zarr' or 
+            config['data']['train_data_path'] == '/hkfs/work/workspace/scratch/ke4365-era5_data/era5_subset.zarr'):
             self.level_ordering = range(13-1, -1, -1)
-        elif config['data']['train_data_path'] == '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/era5.zarr':
+        elif (config['data']['train_data_path'] == '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/era5.zarr' or 
+              config['data']['train_data_path'] == '/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr'):
             self.level_ordering = range(0, 13)
         else: # baseline assuption is subsampled WB2 data
             self.level_ordering = range(13-1, -1, -1)
@@ -95,16 +97,11 @@ class ERA5Dataset(Dataset):
             self.zarr_data = self.zarr_data.sel(time=validation_years)
             
         self.n_samples_total = len(self.zarr_data['time'])
-        self.img_shape_x     = len(self.zarr_data['latitude'])
-        self.img_shape_y     = len(self.zarr_data['longitude'])
-        
-        # N channels
-        self.n_in_channels   = len(self.zarr_data.data_vars)
         
         
     def __len__(self):
         """Return total number of samples."""
-        return self.n_samples_total - self.forecast_length * self.dt // self.deltaTDivisor  # -1 to avoid last data point
+        return self.n_samples_total - self.forecast_length * self.dt // self.deltaTDivisor  - 1 # -1 to avoid last data point
     
     def __getitem__(self, global_idx):
         """
@@ -120,7 +117,8 @@ class ERA5Dataset(Dataset):
         
         target_pressure = []
         target_surface  = []
-        step = self.dt
+        step = self.dt 
+
         # if forecast_length = 3, target_file_idx = global_idx + range(1, forecast_length+1)*step // 6
         target_file_idxs = global_idx + torch.div(torch.arange(1, self.forecast_length+1)*step, self.deltaTDivisor , rounding_mode='trunc')
             
@@ -135,7 +133,6 @@ class ERA5Dataset(Dataset):
         input_surface  = self.zarr_data.isel(time=global_idx)[['mean_sea_level_pressure', '10m_u_component_of_wind', '10m_v_component_of_wind', '2m_temperature']]
         target_pressure_ds = self.zarr_data.isel(time=target_file_idxs, level=self.level_ordering)[['geopotential', 'specific_humidity', 'temperature', 'u_component_of_wind', 'v_component_of_wind']]
         target_surface_ds  = self.zarr_data.isel(time=target_file_idxs)[['mean_sea_level_pressure', '10m_u_component_of_wind', '10m_v_component_of_wind', '2m_temperature']]
-        #print(input_surface['2m_temperature'].values)    
         # Stack and convert to numpy array
         input_pressure = np.stack([input_pressure['geopotential'].values, input_pressure['specific_humidity'].values, input_pressure['temperature'].values, input_pressure['u_component_of_wind'].values, input_pressure['v_component_of_wind'].values], axis=0)
         input_surface  = np.stack([input_surface['mean_sea_level_pressure'].values, input_surface['10m_u_component_of_wind'].values, input_surface['10m_v_component_of_wind'].values, input_surface['2m_temperature'].values], axis=0)
@@ -145,7 +142,6 @@ class ERA5Dataset(Dataset):
         input_pressure = np.reshape(input_pressure, (-1, 721, 1440))
         input_surface  = input_surface[:, :self.xlat]
         input_pressure = input_pressure[:, :self.xlat]
-        
         
         
         if self.rank is None: # in serial case
@@ -186,7 +182,7 @@ class ERA5Dataset(Dataset):
             return input, target_list
 class ERA5DatasetDistributed(Dataset):
     """Define 3D dataset."""
-    def __init__(self, config, file_path, mode, patch_size, rank, forecast_length=1, normalize=True):
+    def __init__(self, config, file_path, mode, patch_size, rank, forecast_length=1, normalize=True, dt=None):
         """
         initialize.
 
@@ -207,18 +203,24 @@ class ERA5DatasetDistributed(Dataset):
         """
         self.file_path = file_path
         self.mode = mode
-        self.dt = config['data']['dt']
+        self.dt = dt if dt is not None else config['data']['dt']
+        print(f'dt is {self.dt}')
         self.lite = config['data']['lite']
         self.rank = rank
-        
+        self.datapath = config['data']['train_data_path']     
 
         if config['data']['train_data_path'] == '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/1959-2023_01_10-wb13-6h-1440x721.zarr':        
             self.deltaTDivisor = 6
+        elif config['data']['train_data_path'] == '/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr' and not self.lite:
+            self.deltaTDivisor = 1
+        elif config['data']['train_data_path'] == '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/era5.zarr' and not self.lite:
+            self.deltaTDivisor = 1
         else:
             if self.lite:
-                self.deltaTDivisor = 6
+                self.deltaTDivisor = 1 # TODO
             else:
                 self.deltaTDivisor = 6
+
         self.forecast_length = forecast_length
         self.normalize = normalize
         
@@ -230,9 +232,12 @@ class ERA5DatasetDistributed(Dataset):
             self.level_ordering = range(13-1, -1, -1)
         elif config['data']['train_data_path'] == '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/era5.zarr':
             self.level_ordering = range(0, 13)
+        elif config['data']['train_data_path'] == '/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr':
+            self.level_ordering = range(0, 13)
         else: # baseline assuption is subsampled WB2 data
             self.level_ordering = range(13-1, -1, -1)
 
+        # normalization for pressure levels and standard deviation
         self.p_mean = np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/pressure_zarr.npy', allow_pickle=True)[0].reshape(65, 1, 1)
         self.p_std  = np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/pressure_zarr.npy', allow_pickle=True)[1].reshape(65, 1, 1)
         self.s_mean = np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/surface_zarr.npy', allow_pickle=True)[0].reshape(4, 1, 1)
@@ -243,13 +248,13 @@ class ERA5DatasetDistributed(Dataset):
         self.batch_size = config['training']['train_batch']
         self.split = config['model_parallel']['split']
         self.parallelism = config['model_parallel']['parallelism']
+
         if self.parallelism == 4:
             if self.split == 4:
-                if self.rank in [0, 1]:
+                if self.rank % 4 in [0, 1]:
                     self.start, self.end = 0, self.xlon//2
                 else:
                     self.start, self.end = self.xlon//2, self.xlon
-
             else: 
                 self.start, self.end = 0, self.xlon
         else:
@@ -267,13 +272,17 @@ class ERA5DatasetDistributed(Dataset):
         times = pd.to_datetime(self.zarr_data['time'].values)
         if mode == 'train': # training case, lite
             if self.lite:
-                train_years = times[(times.year<2017) & (times.year > 2006) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))] 
+                train_years = times[(times.year<2018) & (times.year > 2006) ]#& ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))] 
+            elif self.datapath == '/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr' and not self.lite:
+                train_years = times[(times.year<2017) & (times.year > 1979)]
             else:
-                train_years = times[(times.year<2017) & (times.year > 1979)& ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
+                train_years = times[(times.year<2017) & (times.year > 1979) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
             self.zarr_data = self.zarr_data.sel(time=train_years)
         elif mode == 'validation':           # validation
             if self.lite:
-                validation_years = times[(times.year == 2018) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
+                validation_years = times[(times.year == 2018)]# & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
+            elif (not self.lite) and self.datapath == '/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr':
+                validation_years = times[(times.year == 2018)]
             else:
                 validation_years = times[(times.year == 2018)& ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
             self.zarr_data = self.zarr_data.sel(time=validation_years)
@@ -285,8 +294,6 @@ class ERA5DatasetDistributed(Dataset):
             self.zarr_data = self.zarr_data.sel(time=validation_years)
             
         self.n_samples_total = len(self.zarr_data['time'])
-        self.img_shape_x     = len(self.zarr_data['latitude'])
-        self.img_shape_y     = len(self.zarr_data['longitude'])
         
         # N channels
         self.n_in_channels   = len(self.zarr_data.data_vars)
@@ -294,7 +301,7 @@ class ERA5DatasetDistributed(Dataset):
         
     def __len__(self):
         """Return total number of samples."""
-        return self.n_samples_total - self.forecast_length * self.dt // self.deltaTDivisor  # -1 to avoid last data point
+        return self.n_samples_total - self.forecast_length * self.dt // self.deltaTDivisor  
     
         
     def __getitem__(self, global_idx):
@@ -312,7 +319,6 @@ class ERA5DatasetDistributed(Dataset):
         step = self.dt
         # if forecast_length = 3, target_file_idx = global_idx + range(1, forecast_length+1)*step // 6
         target_file_idxs = global_idx + torch.div(torch.arange(1, self.forecast_length+1)*step, self.deltaTDivisor , rounding_mode='trunc')
-        
         for target_idx in target_file_idxs:
             if target_idx >= self.__len__(): 
                 target_idx = self.__len__() - 1
@@ -385,7 +391,6 @@ class ERA5DatasetDistributed(Dataset):
             input = np.concatenate([input, self.land_mask, self.soil_type, self.topography], axis=0)
 
             for i in range(self.forecast_length):
-
                 pressure_ds = target_pressure_ds.isel(time=i)
                 temperature = pressure_ds['temperature'][6:,:self.xlat,self.start:self.end].values
                 u_velocity  = pressure_ds['u_component_of_wind'][:,:self.xlat,self.start:self.end].values

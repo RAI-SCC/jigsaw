@@ -5,11 +5,11 @@ from torch.nn import GELU, Dropout
 
 class DistributedXW_fourway(torch.nn.Module):
     """
-    Torch Module to run distributed matrix-matrix multiplication.
+    Distributed matrix-matrix (XW) multiplication sharded across four processes.
     """
     def __init__(self, in_dim, out_dim, device, rank, bias=True):
         """
-        Initialize distributed matrix-matrix multiplication module.
+        Initialize distributed XW multiplication.
 
         in_dim: int
             input dimension of local weight matrix
@@ -49,7 +49,8 @@ class DistributedXW_fourway(torch.nn.Module):
     
 class XW_fourway(torch.autograd.Function):
     """
-    Autograd function of forward pass for distributed matrix-matrix multiplication
+    Autograd function of forward pass for distributed matrix-matrix (XW) multiplication
+    sharded across four processes
     """
     @staticmethod
     def forward(ctx, x, W, b, device, rank, model_group):
@@ -76,7 +77,7 @@ class XW_fourway(torch.autograd.Function):
         Returns
         -------
         Tensor
-            Result of the linear transformation with bias added.
+            Result of XW + b.
         """
         
         ctx.save_for_backward(x, W)
@@ -123,7 +124,8 @@ class XW_fourway(torch.autograd.Function):
     
 class DistributedXW_twoway(torch.nn.Module):
     """
-    Torch Module to run distributed matrix-matrix multiplication.
+    Torch Module to run distributed matrix-matrix multiplication
+    sharded across two processes.
     """
     def __init__(self, in_dim, out_dim, device, rank, n_channels=1, bias=True, stdev=None, init_method='linear'):
         """
@@ -170,6 +172,7 @@ class DistributedXW_twoway(torch.nn.Module):
 class XW_twoway(torch.autograd.Function):
     """
     Autograd function of forward pass for distributed matrix-matrix multiplication
+    sharded across two processes
     """
     @staticmethod
     def forward(ctx, x, W, b, device, rank, model_group):
@@ -221,13 +224,14 @@ class XW_twoway(torch.autograd.Function):
          
 class DistributedXTW_fourway(torch.nn.Module):
     """
-    A PyTorch module for distributed four-way tensor multiplication with optional bias.
+    A PyTorch module for distributed XTW matrix--matrix multiplication 
+    sharded across four processes.
     Parameters
     ----------
     in_dim : int
-        The input dimension size.
+        The local input dimension size.
     out_dim : int
-        The output dimension size.
+        The local output dimension size.
     device : torch.device
         The device on which to perform computations.
     rank : int
@@ -319,6 +323,7 @@ class DistributedXTW_fourway(torch.nn.Module):
     def forward(self, x, model_group):
         """
         Perform the forward pass of the linear model.
+
         Parameters
         ----------
         x : torch.Tensor
@@ -337,7 +342,9 @@ class DistributedXTW_fourway(torch.nn.Module):
     
 class XTW_fourway(torch.autograd.Function):
     """
-    Custom autograd function for a four-way XTW operation with precompute and isend.
+    Custom autograd function for a XTW operation
+    sharded across four processes.
+
     Methods
     -------
     forward(ctx, x, W, b, device, rank, model_group)
@@ -349,11 +356,11 @@ class XTW_fourway(torch.autograd.Function):
     ctx : torch.autograd.Function
         Context object to save information for backward computation.
     x : torch.Tensor
-        Input tensor.
+        Local input tensor.
     W : torch.Tensor
-        Weight tensor.
+        Local weight tensor.
     b : torch.Tensor
-        Bias tensor.
+        Local bias tensor.
     device : torch.device
         Device on which to perform the computation.
     rank : int
@@ -392,8 +399,7 @@ class XTW_fourway(torch.autograd.Function):
             Gradients with respect to the input, weight, and bias, respectively.
         """
 
-        input, weight = ctx.saved_tensors
-        
+        input, weight = ctx.saved_tensors        
         device = ctx.device        
         rank = ctx.rank
         model_group = ctx.model_group
@@ -406,6 +412,20 @@ class XTW_fourway(torch.autograd.Function):
     
 class DistributedXTW_twoway(torch.nn.Module):
     def __init__(self, in_dim, out_dim, device, rank, n_channels=72, bias=True, init_method='linear'):
+        """
+        in_dim : int
+            Input dimension of the linear layer.
+        out_dim : int
+            Output dimension of the linear layer.
+            Device on which computations will be performed.
+            Rank of the layer, used for specific computations.
+        n_channels : int, optional
+            Number of channels for weight initialization in 'conv' mode. Default is 72.
+        bias : bool, optional
+            Whether to include a bias term. Default is True.
+        init_method : str, optional
+            Initialization method for weights ('linear' or 'conv'). Default is 'linear'.
+        """
         
         super().__init__()
         self.in_dim = in_dim
@@ -436,7 +456,9 @@ class XTW_twoway(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, W, b, device, rank, model_group):
         """
-        Performs the forward pass of the linear layer.
+        Performs the forward pass of the XTW linear layer
+        sharded across two processes.
+
         Parameters
         ----------
         ctx : torch.autograd.Function
@@ -471,7 +493,7 @@ class XTW_twoway(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         """
-        Perform the backward pass for the linear layer.
+        Perform the backward pass for the XTW linear layer.
         Parameters
         ----------
         ctx : torch.autograd.Function
@@ -513,14 +535,14 @@ class DistributedLayerNorm(torch.nn.Module):
         self.layer_norm_apply = DistributedLN.apply
     
     def forward(self, x, rank, device):
-        x = self.layer_norm_apply(x, rank, device)
+        x = self.layer_norm_apply(x)
         x = self.layer_norm(x)
 
         return x
     
 class DistributedLN(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, rank, device):
+    def forward(ctx, x):
         return x
     
     @staticmethod
@@ -531,7 +553,8 @@ class DistributedLN(torch.autograd.Function):
 class DistributedXWT_fourway(torch.nn.Module):
     def __init__(self, in_dim, out_dim, device, rank, n_channels=1, bias=True, stdev=None, init_method='linear'):
         """
-        Initialize the Linear layer.
+        Initialize the XWT linear layer
+        sharded over four processes.
         Parameters
         ----------
         in_dim : int
@@ -572,7 +595,7 @@ class DistributedXWT_fourway(torch.nn.Module):
     
     def forward(self, x, model_group):
         """
-        Perform the forward pass of the linear transformation.
+        Perform the forward pass of the linear XWT transformation.
         Parameters
         ----------
         x : torch.Tensor
@@ -594,7 +617,7 @@ class XWT_fourway(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, W, b, device, rank, model_group):
         """
-        Performs the forward pass of the linear layer.
+        Performs the forward pass of the XWT linear layer.
         Parameters
         ----------
         ctx : torch.autograd.Function
@@ -630,6 +653,7 @@ class XWT_fourway(torch.autograd.Function):
     def backward(ctx, grad_output):
         """
         Computes the gradients of the input, weight, and bias during the backward pass.
+
         Parameters
         ----------
         ctx : torch.autograd.Function
@@ -638,8 +662,7 @@ class XWT_fourway(torch.autograd.Function):
             Gradient of the loss with respect to the output of the layer.
         Returns
         -------
-        tuple
-            Gradients with respect to the input, weight, and bias, respectively.
+        Gradients with respect to the input, weight, and bias, respectively.
         """
 
         input, weight = ctx.saved_tensors
@@ -657,19 +680,20 @@ class DistributedXWT_twoway(torch.nn.Module):
     
     def __init__(self, in_dim, out_dim,  device, rank, n_channels=1, bias=True, stdev=None, init_method='linear'):
         """
-        Initialize the Linear layer.
+        Initialize the XWT Linear layer sharded over two processes.
+
         Parameters
         ----------
         in_dim : int
-            The number of input dimensions.
+            The number of local input dimensions.
         out_dim : int
-            The number of output dimensions.
+            The number of local output dimensions.
         device : torch.device
             The device on which to allocate the tensors.
         rank : int
             The rank of the process in distributed training.
         n_channels : int, optional
-            The number of channels (default is 1).
+            The number of channels (default is 1). Only used for parameter initialization.
         bias : bool, optional
             If True, adds a learnable bias to the output (default is True).
         stdev : float, optional
@@ -698,7 +722,8 @@ class DistributedXWT_twoway(torch.nn.Module):
     
     def forward(self, x, model_group):
         """
-        Perform the forward pass of the linear model.
+        Perform the forward pass of the XWT linear model.
+
         Parameters
         ----------
         x : torch.Tensor
@@ -720,7 +745,8 @@ class XWT_twoway(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, W, b,  device, rank, model_group):
         """
-        Performs the forward pass of the linear layer.
+        Performs the forward pass of the XWT linear layer sharded over two processes.
+
         Parameters
         ----------
         ctx : torch.autograd.Function
@@ -756,6 +782,7 @@ class XWT_twoway(torch.autograd.Function):
     def backward(ctx, grad_output):
         """
         Computes the gradients of the input, weight, and bias during the backward pass.
+        
         Parameters
         ----------
         ctx : torch.autograd.Function
@@ -781,11 +808,11 @@ class XWT_twoway(torch.autograd.Function):
 class DistributedTranspose(torch.nn.Module):
     def __init__(self):
         """
-        Initializes the Linear class.
+        Initializes the class for Distributed transpose sharded across four processes.
         Attributes
         ----------
         transpose : function
-            A function that applies the DistributedXT transformation.
+            A function that applies a distributed transpose transformation.
         """
 
         super().__init__()
@@ -793,7 +820,8 @@ class DistributedTranspose(torch.nn.Module):
 
     def forward(self, X, rank, device):
         """
-        Perform the forward pass by transposing the input tensor.
+        Perform the forward pass of distributed transpose.
+
         Parameters
         ----------
         X : torch.Tensor
@@ -815,7 +843,8 @@ class DistributedXT(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, rank, device):
         """
-        Performs the forward pass of the linear layer.
+        Performs the forward pass of a distributed transpose.
+
         Parameters
         ----------
         ctx : torch.autograd.Function
@@ -860,7 +889,8 @@ class DistributedXT(torch.autograd.Function):
 
 class DistributedTranspose_twoway(torch.nn.Module):
     """
-    A PyTorch module for distributed two-way transpose operation.
+    A PyTorch module for distributed transpose operation sharded across two processes.
+
     Methods
     -------
     forward(X, rank, device, model_group)
@@ -904,7 +934,8 @@ class DistributedXT_twoway(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, rank, device, model_group):
         """
-        Performs the forward pass of the linear layer.
+        Performs the forward pass of distributed transpose sharded across two processes.
+
         Parameters
         ----------
         ctx : torch.autograd.Function
@@ -933,7 +964,8 @@ class DistributedXT_twoway(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         """
-        Perform the backward pass for the linear layer.
+        Perform the backward pass for the matrix transpose.
+
         Parameters
         ----------
         ctx : torch.autograd.Function
@@ -954,13 +986,14 @@ class DistributedXT_twoway(torch.autograd.Function):
         return grad_output, None, None, None
 
 class DistributedMLP(torch.nn.Module):
-    def __init__(self, in_dim, hidden_dim, out_dim,  device, rank, parallelism=4, bias=True):
+    def __init__(self, in_dim, hidden_dim, out_dim,  device, rank, parallelism=4, bias=True, dropout=1e-3):
         """
-        Initialize the Linear module with distributed weight tensors.
+        Initialize the MLP module for either two- or four-way model parallelism.
+
         Parameters
         ----------
         in_dim : int
-            Input dimension size.
+            Local input dimension size.
         hidden_dim : int
             Hidden layer dimension size.
         out_dim : int
@@ -980,11 +1013,13 @@ class DistributedMLP(torch.nn.Module):
             self.linear1 = DistributedXWT_fourway(in_dim, hidden_dim, device, rank, bias=bias, init_method='linear')
             self.linear2 = DistributedXWT_fourway(hidden_dim, out_dim, device, rank, bias=bias, init_method='linear')
         else:
+            # in, hidden, out dim are global sizes for two-way model parallelism
+            # required to maintain partitioning across final dimension
             self.linear1 = DistributedXWT_twoway(in_dim//2, hidden_dim, device, rank, bias=bias, init_method='linear')
             self.linear2 = DistributedXWT_twoway(hidden_dim//2, out_dim, device, rank, bias=bias, init_method='linear')
         self.activation = GELU()
-        self.drop = Dropout(p=1e-6)
-        self.drop2 = Dropout(p=1e-6)
+        self.drop = Dropout(p=dropout)
+        self.drop2 = Dropout(p=dropout)
         self.rank = rank
         
     def forward(self, x, model_group):
@@ -997,9 +1032,10 @@ class DistributedMLP(torch.nn.Module):
         return x
 
 class DistributedXTWMLP(torch.nn.Module):
-    def __init__(self, in_dim, hidden_dim, out_dim, device, rank, parallelism=4, bias=True, dropout=1e-6):
+    def __init__(self, in_dim, hidden_dim, out_dim, device, rank, parallelism=4, bias=True, dropout=1e-3):
         """
-        Initialize the Linear module with distributed layers.
+        Initialize the transposed XTW MLP module for either two- or four-way model parallelism.
+
         Parameters
         ----------
         in_dim : int
@@ -1012,7 +1048,7 @@ class DistributedXTWMLP(torch.nn.Module):
             The device to run the computations on.
         rank : int
             The rank of the current process in distributed training.
-        parallelism : int, optiona
+        parallelism : int, optional
             The level of parallelism (default is 4).
         bias : bool, optional
             If True, adds a learnable bias to the output (default is True).
@@ -1045,9 +1081,9 @@ class MixerBlock(torch.nn.Module):
     Parameters
     ----------
     tokens_mlp_dim : int
-        Dimension of the token MLP.
+        Local dimension of the token MLP.
     channels_mlp_dim : int
-        Dimension of the channel MLP.
+        Local dimension of the channel MLP.
     spatial_hidden_dim_fraction : float
         Fraction to determine the hidden dimension for token mixing.
     channels_hidden_dim_fraction : float
@@ -1174,7 +1210,8 @@ class MixerBlock_twoway(torch.nn.Module):
 
 class SequentialMLP(torch.nn.Module):
     """
-    A simple sequential Multi-Layer Perceptron (MLP) with one hidden layer.
+    Multi-Layer Perceptron (MLP) with one hidden layer.
+    
     Parameters
     ----------
     in_dim : int
@@ -1229,7 +1266,7 @@ class MixerBlockSequential(torch.nn.Module):
         Forward pass through the Mixer block.
     """
     
-    def __init__(self, tokens_mlp_dim, channels_mlp_dim, spatial_hidden_dim_fraction, channels_hidden_dim_fraction, dropout=1e-6):
+    def __init__(self, tokens_mlp_dim, channels_mlp_dim, spatial_hidden_dim_fraction, channels_hidden_dim_fraction, dropout=1e-3):
         super(MixerBlockSequential, self).__init__()
         
         self.token_mixing = SequentialMLP(tokens_mlp_dim, int(tokens_mlp_dim * spatial_hidden_dim_fraction), tokens_mlp_dim, dropout=dropout)

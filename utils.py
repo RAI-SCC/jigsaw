@@ -114,15 +114,15 @@ def send_data_fourway(data, buffer, rank, device):
     return input_data
 
 
-def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distributed=False, batch_size=1, normalize=True, rank=None):
-    model_parallel = config_dict['model']['model_parallel']
+def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distributed=False, batch_size=1, normalize=True, rank=None, dt=None):
     parallelism = config_dict['model_parallel']['parallelism']
+    dt = config_dict['data']['dt'] if dt is None else dt
     if parallelism == 1:
         dataset = ERA5Dataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), forecast_length=config_dict['model']['latent_rollout'], normalize=normalize)
     elif parallelism == 4 and config_dict['model_parallel']['split'] == 1:
         dataset = ERA5Dataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, rank=rank)    
     else:
-        dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize)
+        dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
     
     if subset_size != 0: 
         subset_indices = torch.randperm(len(dataset))[:subset_size]
@@ -288,46 +288,6 @@ def load_model(model, optimizer, file_path, rank, model_parallel=False, parallel
     epoch = state['epoch']
     return model, optimizer, epoch
 
-def load_pretrained_convolution(mlp_model, config_dict):
-    state = torch.load(config_dict['training']['preload_path'], map_location='cpu')
-    model_pretrained_state = state['model_state']
-    
-    try:
-        mlp_model.state_dict()['module.embedding.conv_surface.weight'][:config_dict['model']['hidden_dim']] = model_pretrained_state['module._input_layer.conv_surface.weight']
-        mlp_model.state_dict()['module.embedding.conv_surface.bias'][:config_dict['model']['hidden_dim']] = model_pretrained_state['module._input_layer.conv_surface.bias']
-    except Exception as err:
-        print(err)
-    return mlp_model
-
-def load_pretrained_embedding(mlp_model, config_dict):
-    state = torch.load(config_dict['training']['preload_path'], map_location='cpu')
-    model_pretrained_state = state['model_state']
-    
-    try:
-        mlp_model.load_state_dict({
-            **mlp_model.state_dict(),
-            'module.embedding.conv_surface.weight': model_pretrained_state['module.embed.weight'],
-            'module.recovery.conv.weight': model_pretrained_state['module.recover.weight'],
-        })
-        
-        embed =  mlp_model.state_dict()['module.embedding.conv_surface.weight'].reshape(1152, -1)
-        recover = mlp_model.state_dict()['module.recovery.conv.weight'].reshape(1152, -1)
-        print("embed, recover", recover.mT @ embed)
-
-        #mlp_model.state_dict()['module.params.embedding.conv_surface.weight'] = model_pretrained_state['module.embedding.conv_surface.weight']
-        #mlp_model.state_dict()['module.params.embedding.conv_surface.bias'] = model_pretrained_state['module.embedding.conv_surface.bias']
-        #mlp_model.state_dict()['module.params.recovery.conv_surface.weight'] = model_pretrained_state['module.recovery.conv.weight']
-        #mlp_model.state_dict()['module.params.recovery.conv_surface.bias'] = model_pretrained_state['module.recovery.conv.bias']
-        #mlp_model.state_dict()['module.params.layer_norm3.weight'] = model_pretrained_state['module.layer_norm3.weight']
-        #mlp_model.state_dict()['module.params.layer_norm3.bias'] = model_pretrained_state['module.layer_norm3.bias']        
-        #mlp_model.state_dict()['module.params.linearlayer.bias'] = model_pretrained_state['module.linearlayer.bias']
-        
-    except Exception as err:
-        print(f"unable to load: {err}")
-
-    return mlp_model
-
-
 def getPositionEncoding(seq_len, d, n=10000):
     P = np.zeros((seq_len, d))
     for k in range(seq_len):
@@ -338,7 +298,7 @@ def getPositionEncoding(seq_len, d, n=10000):
     P = torch.tensor(P).to(torch.float32)
     return P
 
-def load_and_push_data(config_dict, data, parallelism, buffer, rank, device, local_groups):
+def load_and_push_data(config_dict, data, parallelism, buffer, rank, device, local_groups, non_blocking=False):
     """
     Reads input data and pushes to device. 
     
@@ -347,8 +307,7 @@ def load_and_push_data(config_dict, data, parallelism, buffer, rank, device, loc
     # Case: 2-way split
     # Need wait handle.
     if parallelism == 2:
-        #print(f'I am rank {rank} pushing to device {device}')
-        pushed_data = data.to(device, non_blocking=False) # Non-blocking is possible when pinned memory is used
+        pushed_data = data.to(device, non_blocking=non_blocking) # Non-blocking is possible when pinned memory is used
         return pushed_data, False
 
     # Case: 4-way split
@@ -363,8 +322,7 @@ def load_and_push_data(config_dict, data, parallelism, buffer, rank, device, loc
             input_data_handle = send_data_twoway(data, buffer, rank, device, local_groups)
             return input_data_handle, True
         elif data_split == 4:
-            input_data = data.to(device, non_blocking=False)
-            
+            input_data = data.to(device, non_blocking=non_blocking)
             return input_data, False
 
         
@@ -381,26 +339,4 @@ def reduce_ddp_layernorms(parallelism, mlp, local_groups, global_groups, rank, n
         async_op=True
     )
             
-    return handles, flat_grad, gradients
-
-def reduce_ddp_layernorm_flat(parallelism, mlp, local_groups, global_groups, rank, node_rank):
-    # Now manually all-reduce each parameter's grad
-    #handles = []
-    gradients = [param.grad for name, param in mlp.named_parameters() if param.grad is not None]
-    #for name, param in mlp.named_parameters():
-    #    if param.grad is not None:
-    #        if 'layer_norm' in name and parallelism == 4: 
-    #            h = torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.AVG, group=local_groups[rank % 2 + node_rank*2], async_op=True)
-    #            handles.append(h)
-    #        if torch.distributed.get_world_size() > parallelism:
-    #            h = torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.AVG, group=global_groups[rank % parallelism], async_op=True) # reduce over ranks
-    #            handles.append(h)
-    flat_grad = parameters_to_vector(gradients)
-    handles = torch.distributed.all_reduce(
-        flat_grad, 
-        op=torch.distributed.ReduceOp.AVG,
-        group=global_groups[rank % parallelism],
-        async_op=True
-    )
-    
     return handles, flat_grad, gradients

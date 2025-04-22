@@ -83,8 +83,9 @@ class Model(torch.nn.Module):
         # After embedding: x_shape [n_batch, n_patch_lat * n_patch_lon, embed_dim]
         x_res2 = x
         
-        for i in range(self.n_blocks):
-            x = self.blocks[i](x, self.model_group)
+        for j in range(rollout_):
+            for i in range(self.n_blocks):
+                x = self.blocks[i](x, self.model_group)
         
         # After MLP-mixing blocks: [n_batch, n_patch_lat * n_patch_lon/2, embed_dim/2]
         # After recovery: [n_batch, n_lat*n_lon//2, n_var//2]
@@ -188,8 +189,9 @@ class Model_twoway(torch.nn.Module):
         # After embedding: x_shape [n_batch, n_patch_lat * n_patch_lon, embed_dim]
         x_res2 = x#.clone()
         
-        for i in range(self.n_blocks):
-            x = self.blocks[i](x, self.model_group)
+        for rollout in torch.arange(rollout_):
+            for i in range(self.n_blocks):
+                x = self.blocks[i](x, self.model_group)
         
         # After MLP-mixing blocks: [n_batch, n_patch_lat * n_patch_lon/2, embed_dim/2]
         # After recovery: [n_batch, n_lat*n_lon//2, n_var//2]
