@@ -40,8 +40,6 @@ def training_loop(config_dict, device, localid, rank):
     surface_weights  = torch.tensor([1.5, 0.77, 0.77, 3.0]) * 4
     # [z, q, t, u, v]
     pressure_weights = torch.tensor([3.00, 0.6, 1.5, 0.9, 0.9]).unsqueeze(1).expand(5, 13).flatten()
-    #surface_weights = torch.tensor([0.6, 0.8, 0.8, 4]) * 4
-    #pressure_weights = torch.tensor([0.6, 0.2, 1.5, 0.8, 0.8]).unsqueeze(1).expand(5, 13).flatten()
     surface_upper_pressure_weights = torch.concat(
         [torch.tensor([1, 1, 1, 1]), # surface variables
         torch.tensor([1, 1, 1, 1, 1, 1, 0.9, 0.8, .7, .6, .5, .4, .3]).repeat(5)]
@@ -49,11 +47,6 @@ def training_loop(config_dict, device, localid, rank):
 
     variable_weights = ((torch.concat([surface_weights, pressure_weights]).view(1, 1, 1, 69))*surface_upper_pressure_weights).to(device)
     
-    # underground mask
-    #weights = torch.load('/hkfs/work/workspace/scratch/ke4365-kangu/kangu_finetuning/finetuning_weights/feature_weights.pt', map_location='cpu')
-    #underground_mask = weights['pressure_mask_lower'] # shape [5 pressure levels, 724, 1440]
-    #underground_mask = underground_mask.permute(1, 2, 0)[1:-2][:xlat].unsqueeze(-1).expand(-1, -1, -1, 13).reshape(1, xlat, xlon, 65) # shape is [1, xlat, xlon, 65]
-
     area_weights = torch.tensor(eval.calc_weight(xlat)).view(1, xlat, 1, 1).to(device)
 
     
@@ -151,7 +144,7 @@ def training_loop(config_dict, device, localid, rank):
         
     epoch_average_loss = torch.tensor([0]).to(device)
 
-    for epoch in range(epoch, 200):
+    for epoch in range(epoch, 100):
         train_dataloader.sampler.set_epoch(epoch)
         epoch_average_loss[0] = 0
 

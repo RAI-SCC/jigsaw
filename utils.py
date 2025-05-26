@@ -126,16 +126,14 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
     
     if subset_size != 0: 
         subset_indices = torch.randperm(len(dataset))[:subset_size]
-        dataset = Subset(dataset, subset_indices)            
-
-
-    sampler    = DistributedSampler(dataset, 
-                                    shuffle=True,
+        dataset = Subset(dataset, subset_indices)              
+    
+    if mode == 'validation' and parallelism > 1:
+        sampler    = DistributedSampler(dataset, 
+                                    shuffle=False,
                                     num_replicas=(torch.distributed.get_world_size()//parallelism),
                                     rank=rank//parallelism
                                     ) 
-    
-    if mode == 'validation' and parallelism > 1:
         dataloader = DataLoader(dataset, 
                                 batch_size=batch_size, 
                                 shuffle=False, 
@@ -147,6 +145,11 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
                                 ) 
         return dataloader
     else:
+        sampler    = DistributedSampler(dataset, 
+                                    shuffle=True,
+                                    num_replicas=(torch.distributed.get_world_size()//parallelism),
+                                    rank=rank//parallelism
+                                    ) 
         dataloader = DataLoader(dataset, 
                                 batch_size=batch_size, 
                                 shuffle=(sampler is None), 

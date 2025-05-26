@@ -47,9 +47,9 @@ def training_loop(config_dict, device, localid, rank):
     variable_weights = ((torch.concat([surface_weights, pressure_weights]).view(1, 1, 1, 69))*surface_upper_pressure_weights).to(device)
     
     # underground mask
-    weights = torch.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/kangu_finetuning/finetuning_weights/feature_weights.pt', map_location='cpu')
-    underground_mask = weights['pressure_mask_lower'] # shape [5, 724, 1440]
-    underground_mask = underground_mask.permute(1, 2, 0)[1:-2][:xlat].unsqueeze(-1).expand(-1, -1, -1, 13).reshape(1, xlat, xlon, 65) # shape is [1, xlat, xlon, 65]
+    #weights = torch.load('/hkfs/work/workspace/scratch/ke4365-pgw/PanguWeather/kangu_finetuning/finetuning_weights/feature_weights.pt', map_location='cpu')
+    #underground_mask = weights['pressure_mask_lower'] # shape [5, 724, 1440]
+    #underground_mask = underground_mask.permute(1, 2, 0)[1:-2][:xlat].unsqueeze(-1).expand(-1, -1, -1, 13).reshape(1, xlat, xlon, 65) # shape is [1, xlat, xlon, 65]
 
     area_weights = torch.tensor(eval.calc_weight(xlat)).view(1, xlat, 1, 1).to(device)
 
@@ -57,7 +57,7 @@ def training_loop(config_dict, device, localid, rank):
         local_groups = None
         node_groups = None
         global_groups = None
-        underground_mask = underground_mask.to(device)
+        #underground_mask = underground_mask.to(device)
     elif parallelism == 2:
         local_group = utils.get_local_groups_twoway(rank)
         local_groups = None
@@ -65,9 +65,9 @@ def training_loop(config_dict, device, localid, rank):
         global_groups = utils.get_ddp_groups(parallelism)
         variable_weights = torch.nn.functional.pad(variable_weights, (0,3))
         variable_weights = variable_weights[0,0,0,:36] if rank % parallelism == 0 else variable_weights[0,0,0,36:]
-        underground_mask = torch.nn.functional.pad(underground_mask, (0,3)) # [1, xlat, xlon, 68]
-        underground_mask = underground_mask[:,:,:,:32] if rank % parallelism == 0 else underground_mask[:,:,:,32:]
-        underground_mask = underground_mask.to(device)
+        #underground_mask = torch.nn.functional.pad(underground_mask, (0,3)) # [1, xlat, xlon, 68]
+        #underground_mask = underground_mask[:,:,:,:32] if rank % parallelism == 0 else underground_mask[:,:,:,32:]
+        #underground_mask = underground_mask.to(device)
         node_rank     = rank // parallelism
         
     elif  parallelism == 4:
@@ -82,15 +82,15 @@ def training_loop(config_dict, device, localid, rank):
         mod = rank % parallelism
         variable_weights = torch.nn.functional.pad(variable_weights, (0,3))
         variable_weights = variable_weights[0,0,0,:36] if rank % parallelism in [0, 2] else variable_weights[0,0,0,36:]
-        underground_mask = torch.nn.functional.pad(underground_mask, (0,3)) # [1, xlat, xlon, 68]
-        if mod == 0:             
-            underground_mask = underground_mask[:,:,:720,:32].to(device)
-        elif mod == 1:
-            underground_mask = underground_mask[:,:,:720,32:].to(device)
-        elif mod == 2:
-            underground_mask = underground_mask[:,:,720:,:32].to(device)
-        else:
-            underground_mask = underground_mask[:,:,720:,32:].to(device)
+        #underground_mask = torch.nn.functional.pad(underground_mask, (0,3)) # [1, xlat, xlon, 68]
+        #if mod == 0:             
+        #    underground_mask = underground_mask[:,:,:720,:32].to(device)
+        #elif mod == 1:
+        #    underground_mask = underground_mask[:,:,:720,32:].to(device)
+        #elif mod == 2:
+        #    underground_mask = underground_mask[:,:,720:,:32].to(device)
+        #else:
+        #    underground_mask = underground_mask[:,:,720:,32:].to(device)
         
 
     # Define model
@@ -195,108 +195,114 @@ def training_loop(config_dict, device, localid, rank):
         buffer2 = torch.zeros(config_dict['training']['train_batch'], xlat, xlon//2, 36, device=device)
     else:
         buffer, buffer2 = None, None
-    
-    for epoch in range(epoch, 200):
-        #if parallelism < 4 :
-        train_dataloader.sampler.set_epoch(epoch)
+    with torch.profiler.profile(
+        schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler('./log'),
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True
+    ) as prof:
         
-        epoch_average_loss = 0
+        for epoch in range(epoch, 200):
+        
+            train_dataloader.sampler.set_epoch(epoch)
+            
+            epoch_average_loss = 0
 
-        if rank == 0:
-            print(f"Epoch {epoch}, learning rate {scheduler._get_lr(epoch)}")
-            
-        mlp.train()
-        
-        start_time = time.perf_counter()
-        for i in length(dataset):
-            if i % 3 = 0:
-                data = next(train_dataloader)
-        for i, data in enumerate(train_dataloader):
-            # learning rate ramp-up in first iteration
-            if epoch == 0:
-                for g in optimizer.param_groups:
-                    g['lr'] = i * (lr-start_lr) / len(train_dataloader) + start_lr
-                    
-            if parallelism == 1:
-                optimizer.zero_grad() # zero gradient
-                input_data  = data[0].to(device)
-            else:
-                # Loading data: Always with async ops and handles
-                input_data_or_handle,  async_input = utils.load_and_push_data(config_dict, data[0], parallelism, buffer, rank, device, local_groups)
-                target_data_or_handle, async_target = utils.load_and_push_data(config_dict, data[1][0], parallelism, buffer2, rank, device, local_groups)
-            # DDP and layer norm handles
-                if i > 0 and parallelism == 4:
-                    handles.wait() # layer norm 
-                    vector_to_parameters(flat_grad, gradients)
-                # Optimizer step and zero grad 
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-                    
-                if async_input:
-                    input_data_or_handle.wait()
-                    input_data = buffer
-                else:
-                    input_data = input_data_or_handle
-               
-            output = mlp(input_data, rollout_=0+1) # output shape [n_batch, 720, 720, 36]
-                       
-                # output: n_batch, 720, 1440, 72//4
-                # target data shape: (n_batch, 69, 720, 1440)        
-                # target data: [n_batch, 720, 1440, 69]
-                    
-            if parallelism == 1:
-                target_data = data[1][0].to(device)
-            
-                target_data = target_data.permute(0, 2, 3, 1)
+            if rank == 0:
+                print(f"Epoch {epoch}, learning rate {scheduler._get_lr(epoch)}")
                 
-                output_loss = output * area_weights * variable_weights
-                target_loss = target_data * area_weights *variable_weights
-                output_loss[:,:,:,4:] = output_loss[:,:,:,4:] * underground_mask
-                target_loss[:,:,:,4:] = target_loss[:,:,:,4:] * underground_mask
-                loss = loss_fn(output_loss, target_loss)
-            else:
-                if async_target:
-                    target_data_or_handle.wait()
-                    target_data = buffer2
-                else:
-                    target_data = target_data_or_handle
-                
-                target_loss = target_data * area_weights * variable_weights
+            mlp.train()
+            
+            start_time = time.perf_counter()
+            
+            for i, data in enumerate(train_dataloader):
+                prof.step()
+                # learning rate ramp-up in first iteration
+                if epoch == 0:
+                    for g in optimizer.param_groups:
+                        g['lr'] = i * (lr-start_lr) / len(train_dataloader) + start_lr
                         
-                if rank % parallelism in [0,2]:
-                    target_loss[:,:,:,4:] = target_loss[:,:,:,4:] * underground_mask
-                else:
-                    target_loss = target_loss * underground_mask
-                # Reshape output
-                output = (
-                            output.reshape(output.shape[0], xlat, xlon//2, 36) 
-                            if parallelism == 4 
-                            else output.reshape(output.shape[0], xlat, xlon, 36)
-                        )                
-                    
-                output_loss = output * area_weights * variable_weights
-                    
-                if rank % parallelism in [0,2]:
-                    output_loss[:,:,:,4:] = output_loss[:,:,:,4:] * underground_mask
-                else:
-                    output_loss = output_loss * underground_mask
-                
-                loss = loss_fn(output_loss, target_loss)
-                
-                loss.backward()
-                
-                torch.nn.utils.clip_grad_norm_(mlp.parameters(), config_dict['training']['grad_clip'])
-                if parallelism == 4:
-                    handles, flat_grad, gradients = utils.reduce_ddp_layernorms(parallelism, mlp, local_groups, global_groups, rank, node_rank)
-                    
                 if parallelism == 1:
-                    loss = loss / world_size 
-                
-                    optimizer.step()
-                        
+                    optimizer.zero_grad() # zero gradient
+                    input_data  = data[0].to(device)
                 else:
-                    loss = loss / world_size
+                    # Loading data: Always with async ops and handles
+                    input_data_or_handle,  async_input = utils.load_and_push_data(config_dict, data[0], parallelism, buffer, rank, device, local_groups)
+                    target_data_or_handle, async_target = utils.load_and_push_data(config_dict, data[1][0], parallelism, buffer2, rank, device, local_groups)
+                # DDP and layer norm handles
+                    if i > 0 and parallelism == 4:
+                        handles.wait() # layer norm 
+                        vector_to_parameters(flat_grad, gradients)
+                    # Optimizer step and zero grad 
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                        
+                    if async_input:
+                        input_data_or_handle.wait()
+                        input_data = buffer
+                    else:
+                        input_data = input_data_or_handle
                 
+                output = mlp(input_data, rollout_=0+1) # output shape [n_batch, 720, 720, 36]
+                        
+                    # output: n_batch, 720, 1440, 72//4
+                    # target data shape: (n_batch, 69, 720, 1440)        
+                    # target data: [n_batch, 720, 1440, 69]
+                        
+                if parallelism == 1:
+                    target_data = data[1][0].to(device)
+                
+                    target_data = target_data.permute(0, 2, 3, 1) # [batch, lat, lon, variables]
+                    
+                    output_loss = output * area_weights * variable_weights
+                    target_loss = target_data * area_weights *variable_weights
+                    output_loss[:,:,:,4:] = output_loss[:,:,:,4:] #* underground_mask
+                    target_loss[:,:,:,4:] = target_loss[:,:,:,4:] #* underground_mask
+                    loss = loss_fn(output_loss, target_loss)
+                else:
+                    if async_target:
+                        target_data_or_handle.wait()
+                        target_data = buffer2
+                    else:
+                        target_data = target_data_or_handle
+                    
+                    target_loss = target_data * area_weights * variable_weights
+                            
+                    if rank % parallelism in [0,2]:
+                        target_loss[:,:,:,4:] = target_loss[:,:,:,4:]# * underground_mask
+                    else:
+                        target_loss = target_loss #* underground_mask
+                    # Reshape output
+                    output = (
+                                output.reshape(output.shape[0], xlat, xlon//2, 36) 
+                                if parallelism == 4 
+                                else output.reshape(output.shape[0], xlat, xlon, 36)
+                            )                
+                        
+                    output_loss = output * area_weights * variable_weights
+                        
+                    if rank % parallelism in [0,2]:
+                        output_loss[:,:,:,4:] = output_loss[:,:,:,4:] #* underground_mask
+                    else:
+                        output_loss = output_loss #* underground_mask
+                    
+                    loss = loss_fn(output_loss, target_loss)
+                    
+                    loss.backward()
+                    
+                    torch.nn.utils.clip_grad_norm_(mlp.parameters(), config_dict['training']['grad_clip'])
+                    if parallelism == 4:
+                        handles, flat_grad, gradients = utils.reduce_ddp_layernorms(parallelism, mlp, local_groups, global_groups, rank, node_rank)
+                        
+                    if parallelism == 1:
+                        loss = loss / world_size 
+                    
+                        optimizer.step()
+                            
+                    else:
+                        loss = loss / world_size
+                    
                     #torch.distributed.all_reduce(loss)    
 #                if rank == 0 and print_on:
 #

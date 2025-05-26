@@ -199,9 +199,7 @@ def training_loop(config_dict, device, localid, rank):
     epoch_times = np.zeros(11)
     torch.cuda.synchronize()
     
-
-    for epoch in range(11):
-        #if parallelism < 4 :
+    for epoch in range(1):
         train_dataloader.sampler.set_epoch(epoch)
 
 
@@ -233,7 +231,7 @@ def training_loop(config_dict, device, localid, rank):
         if rank == 0:
             epoch_times[epoch] = start.elapsed_time(end) / 1000 / 60 
             print(f"Epoch {epoch} time [min]: {(epoch_times[epoch])}")
-        
+
         scheduler.step(epoch)    
     if rank == 0:
         print(f'Average epoch time is {np.average(epoch_times)}')

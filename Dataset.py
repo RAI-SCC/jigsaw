@@ -5,9 +5,7 @@ import xarray as xr
 from torch.utils.data import Dataset, Subset, DataLoader, Sampler
 import os
 from multiprocessing import Value
-import threading
-import time
-import os, psutil
+import os
 class ERA5Dataset(Dataset):
     """Define 3D dataset."""
     def __init__(self, config, file_path, mode, patch_size, forecast_length=1, normalize=True, rank=None):
@@ -66,6 +64,7 @@ class ERA5Dataset(Dataset):
         self.patch_size = patch_size
         self.xlat = config['data']['xlat']
         self.rank = rank
+        
         if self.rank is not None:
             self.land_mask, self.soil_type, self.topography = load_constant_mask_2d(self.patch_size, xlat=self.xlat)
             self.land_mask = torch.unsqueeze(self.land_mask, 0)

@@ -36,13 +36,9 @@ def training_loop(config_dict, device, localid, rank):
     best_val_loss = 1e5
     
     xlat, xlon = config_dict['data']['xlat'], config_dict['data']['xlon']
-    #surface_weights  = torch.tensor([1.5, 0.77, 0.77, 3.0]) * 4
-    #pressure_weights = torch.tensor([3.00, 0.6, 1.5, 0.9, 0.9]).unsqueeze(1).expand(5, 13).flatten()
     surface_weights  = torch.tensor([1.5, 0.77, 0.77, 3.0]) * 4
     # [z, q, t, u, v]
     pressure_weights = torch.tensor([3.00, 0.6, 1.5, 0.9, 0.9]).unsqueeze(1).expand(5, 13).flatten()
-    #surface_weights = torch.tensor([0.6, 0.8, 0.8, 4]) * 4
-    #pressure_weights = torch.tensor([0.6, 0.2, 1.5, 0.8, 0.8]).unsqueeze(1).expand(5, 13).flatten()
     surface_upper_pressure_weights = torch.concat(
         [torch.tensor([1, 1, 1, 1]), # surface variables
         torch.tensor([1, 1, 1, 1, 1, 1, 0.9, 0.8, .7, .6, .5, .4, .3]).repeat(5)]
@@ -50,14 +46,7 @@ def training_loop(config_dict, device, localid, rank):
 
     variable_weights = ((torch.concat([surface_weights, pressure_weights]).view(1, 1, 1, 69))*surface_upper_pressure_weights).to(device)
     
-    # underground mask
-    #weights = torch.load('/hkfs/work/workspace/scratch/ke4365-kangu/kangu_finetuning/finetuning_weights/feature_weights.pt', map_location='cpu')
-    #underground_mask = weights['pressure_mask_lower'] # shape [5, 724, 1440]
-    #underground_mask = underground_mask.permute(1, 2, 0)[1:-2][:xlat].unsqueeze(-1).expand(-1, -1, -1, 13).reshape(1, xlat, xlon, 65).to(torch.float32) # shape is [1, xlat, xlon, 65]
-
-    area_weights = torch.tensor(eval.calc_weight(xlat)).view(1, xlat, 1, 1).to(device).to(torch.float32)
-
-    
+    area_weights = torch.tensor(eval.calc_weight(xlat)).view(1, xlat, 1, 1).to(device).to(torch.float32)    
     local_groups  = utils.get_local_groups_fourway(rank) # groups are [[0, 2], [1, 3], [4, 6], [5, 7]]
                                                          # group [0, 2]: index 0. group [1, 3]: index 1. group [4, 6]: index 3. 
                                                          # index = rank % 2 + node_rank * 2    
@@ -66,19 +55,8 @@ def training_loop(config_dict, device, localid, rank):
     node_rank     = rank // parallelism  
 
     # weights
-    mod = rank % parallelism
     variable_weights = torch.nn.functional.pad(variable_weights, (0,3))
     variable_weights = variable_weights[0,0,0,:36] if rank % parallelism in [0, 2] else variable_weights[0,0,0,36:]
-    #underground_mask = torch.nn.functional.pad(underground_mask, (0,3)) # [1, xlat, xlon, 68]
-    #if mod == 0:             
-    #    underground_mask = underground_mask[:,:,:720,:32].to(device)
-    #elif mod == 1:
-    #    underground_mask = underground_mask[:,:,:720,32:].to(device)
-    #elif mod == 2:
-    #    underground_mask = underground_mask[:,:,720:,:32].to(device)
-    #else:
-    #    underground_mask = underground_mask[:,:,720:,32:].to(device)
-        
 
     # Define model
     
@@ -90,11 +68,8 @@ def training_loop(config_dict, device, localid, rank):
         process_group=global_groups[rank % parallelism]
     )
 
-    
-        
     lr = config_dict['training']['lr']
     save_path = config_dict['training']['save_dir']
-    print_on = config_dict['training']['print']
     
     optimizer = optim.Adam([
             {'params': mlp.module.params.embedding.parameters(), 'lr': config_dict['training']['lr_embedding']},
@@ -105,7 +80,7 @@ def training_loop(config_dict, device, localid, rank):
             weight_decay=3e-6
     )
 
-    if parallelism > 1: # TODO set proper seeds for model parallelism
+    if parallelism > 1: 
         utils.set_all_seeds_local_rank(1, rank=rank, parallelism=parallelism) # Set all GPUs to the same seed so that they read the same data           
     else:
         utils.set_all_seeds(1, rank=rank)
@@ -129,21 +104,6 @@ def training_loop(config_dict, device, localid, rank):
             print("Initializing model from scratch")
         pass
     
-    try:
-        if rank == 0 and config_dict['training']['preload']:
-            print("loading pretrained convolutional weights")
-
-        if config_dict['training']['preload'] and epoch == 0:
-            if config_dict['training']['preload_embedding']:
-                mlp = utils.load_pretrained_embedding(mlp, config_dict)
-                
-            else: # Loading from pangu model
-                mlp = utils.load_pretrained_convolution(mlp, config_dict)
-            
-    except Exception as err:
-        if rank == 0:
-            print(f"Unable to load pretrained convolutional weights {err}")
-
     mlp = mlp.to(device)
 
     loss_fn = torch.nn.MSELoss()
@@ -169,8 +129,8 @@ def training_loop(config_dict, device, localid, rank):
     max_rollout = config_dict['model']['latent_rollout']
 
     handles = []
+
     for epoch in range(epoch, 200):
-        #if parallelism < 4 :
         train_dataloader.sampler.set_epoch(epoch)
         epoch_average_loss[0] = 0
 
@@ -178,10 +138,7 @@ def training_loop(config_dict, device, localid, rank):
             print(f"Epoch {epoch}, learning rate {scheduler._get_lr(epoch)}")
             
         mlp.train()
-        
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
+        start_time = time.perf_counter()
         
         for i, data in enumerate(train_dataloader):
             rollout = i % max_rollout
@@ -208,18 +165,8 @@ def training_loop(config_dict, device, localid, rank):
 
             target_loss = target_data * area_weights * variable_weights
                         
-            if rank % parallelism in [0,2]:
-                target_loss[:,:,:,4:] = target_loss[:,:,:,4:] #* underground_mask
-            else:
-                target_loss = target_loss #* underground_mask
-
             output = (output.reshape(output.shape[0], xlat, xlon//2, 36))             
             output_loss = output * area_weights * variable_weights
-                    
-            if rank % parallelism in [0,2]:
-                output_loss[:,:,:,4:] = output_loss[:,:,:,4:] #* underground_mask
-            else:
-                output_loss = output_loss #* underground_mask
                 
             loss = loss_fn(output_loss, target_loss)
             loss.backward()
@@ -229,18 +176,20 @@ def training_loop(config_dict, device, localid, rank):
             handles, flat_grad, gradients = utils.reduce_ddp_layernorms(parallelism, mlp, local_groups, global_groups, rank, node_rank)
 
             epoch_average_loss[0] = epoch_average_loss[0] + temp_loss
+
             if rank == 0:
                 print(f"{epoch}, after Step {i}/{len(train_dataloader)}. Rollout {rollout}. loss: {temp_loss}")
 
-        end.record()
+        end_time = time.perf_counter()
         torch.cuda.synchronize()
         mlp.eval()
+
         # average loss
         epoch_average_loss = epoch_average_loss / world_size
         torch.distributed.all_reduce(epoch_average_loss)
         if rank == 0:
             epoch_average_loss = epoch_average_loss / len(train_dataloader)
-            print(f"Epoch {epoch} time [min]: {(start.elapsed_time(end) / 1000 / 60 )}, average loss {epoch_average_loss[0]}")
+            print(f"Epoch {epoch} time [min]: {((end_time - start_time) / 60 )}, average loss {epoch_average_loss[0]}")
 
         torch.cuda.synchronize()
         
@@ -249,7 +198,7 @@ def training_loop(config_dict, device, localid, rank):
             best_val_loss = val_loss
             utils.save_model(mlp, optimizer, save_path,  rank, epoch)
         if rank == 0:
-            print(f"Epoch {epoch} time [min]: {val_loss}")
+            print(f"Epoch {epoch} val loss [min]: {val_loss}")
 
         torch.cuda.synchronize()
         
