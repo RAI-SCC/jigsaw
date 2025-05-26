@@ -1,34 +1,30 @@
 #from mpi4py import MPI
-import numpy as np
 import torch
 import torch.distributed as dist
-import time
-
 import torch.distributed
 
-
-def XW_fourway(Xij, Wij, rank,  device, model_group):
+def XW_fourway(Xij, Wij, rank,  device, model_group=None):
     
     """
-    Perform non-blocking send and receive operations for distributed matrix multiplication.
+    Batched matrix-matrix (XW) multiplication distributed across four processes.
     
     Parameters
     ----------
     Xij : torch.Tensor
-        The local part of matrix X.
+        Local input matrix.
     Wij : torch.Tensor
-        The local part of matrix W.
+        Local weight matrix.
     rank : int
-        The rank of the current process.
+        Global rank.
     device : torch.device
-        The device (CPU/GPU) for tensors.
-    model_group : torch.distributed.ProcessGroup
-        The process group for communication.
+        Device to perform computation on.
+    model_group : torch.distributed.ProcessGroup, optional
+        Process group for an individual model-parallel instance.
     
     Returns
     -------
     torch.Tensor
-        The result of the matrix multiplication.
+        Local result.
     """
 
     mod = rank % 4
@@ -36,7 +32,6 @@ def XW_fourway(Xij, Wij, rank,  device, model_group):
     bufferW = get_preallocated_buffer(Wij.shape, Wij.dtype, device, rank, 1)
     
     if mod == 0: 
-        # Rank 0 send A, B to 1 and 2. Receives A, B from 1 and 2.
         req1 = dist.isend(tensor=Xij, dst=rank+1, group=model_group)
         req2 = dist.irecv(tensor=bufferX, src=rank+1, group=model_group)
         req3 = dist.isend(tensor=Wij, dst=rank+2, group=model_group)
@@ -86,21 +81,21 @@ def XW_fourway(Xij, Wij, rank,  device, model_group):
     return Cij
 
 
-def matrix_transpose(X, rank, device):
+def matrix_transpose(X, rank, device, model_group=None):
     """
-    Transpose a matrix using distributed communication based on the rank of the process.
+    Batched transpose (XT) operation distributed across four processes.
     Parameters
     ----------
     X : torch.Tensor
-        The input matrix to be transposed.
+        Local input tensor to be transposed.
     rank : int
-        The rank of the current process in the distributed setup.
+        Global rank.
     device : torch.device
-        The device on which the tensor is located.
+        Device to perform computation on.
     Returns
     -------
-    torch.Tensor
-        The transposed matrix.
+    X : torch.Tensor
+        The transposed tensor.
     """
 
     mod = rank % 4
@@ -126,40 +121,34 @@ def matrix_transpose(X, rank, device):
     return X_T.mT
 
     
-def matrix_transpose_twoway(X, rank, device, model_group):
+def matrix_transpose_twoway(X, rank, device, model_group=None):
     """
-    Perform a two-way distributed matrix transpose.
-    
+    Batched transpose (XT) operation distributed across two processes.
     Parameters
     ----------
     X : torch.Tensor
-        Input tensor to transpose. Shape: [n_batch, a, b].
+        The input tensor.
     rank : int
-        Rank of the current process.
+        Global rank.
     device : torch.device
-        Device for tensor operations.
-    model_group : torch.distributed.ProcessGroup
-        Process group for communication.
+        Device to perform computation on.
+    model_group : torch.distributed.ProcessGroup, optional
+        Process group for an individual model-parallel instance.
     
     Returns
     -------
-    torch.Tensor
-        Transposed tensor.
+    XT: torch.Tensor
+        Local transposed tensor.
     """
 
     mod = rank % 2
 
     X0, X1 = torch.split(X, X.shape[-2]//2, dim=-2)
-    # X: [n_batch, a, b] Xt = []
-    #XT = torch.empty()
-
     bufferX = get_preallocated_buffer(X1.shape, torch.float32, device, rank) 
-        
-    if mod == 0: 
-        # Rank 0 send A, B to 1 and 2. Receives A, B from 1 and 2.
     
-        send_B_1 = torch.distributed.isend(X1, dst=rank+1, group=None)
-        recv_B_1 = torch.distributed.irecv(bufferX, src=rank+1, group=None)
+    if mod == 0: 
+        send_B_1 = torch.distributed.isend(X1, dst=rank+1, group=model_group)
+        recv_B_1 = torch.distributed.irecv(bufferX, src=rank+1, group=model_group)
         X0 = X0.mT    
         if len(X0.shape) == 3:
             XT = torch.empty(X0.shape[0], X0.shape[1]*2, X0.shape[2], device=device)
@@ -172,8 +161,8 @@ def matrix_transpose_twoway(X, rank, device, model_group):
         recv_B_1.wait()
         
     elif mod == 1:
-        recv_transpose = torch.distributed.irecv(bufferX, src=rank-1, group=None)
-        send_transpose = torch.distributed.isend(X0, dst=rank-1, group=None)
+        recv_transpose = torch.distributed.irecv(bufferX, src=rank-1, group=model_group)
+        send_transpose = torch.distributed.isend(X0, dst=rank-1, group=model_group)
         X1 = X1.mT
         if len(X0.shape) == 3:
             XT = torch.empty(X1.shape[0], X1.shape[1]*2, X1.shape[2], device=device)
@@ -200,26 +189,26 @@ def matrix_transpose_twoway(X, rank, device, model_group):
 
 
 
-def XWT_fourway(Xij, Wij, rank,  device, model_group):
+def XWT_fourway(Xij, Wij, rank,  device, model_group=None):
     
     """
-    Perform precomputation and asynchronous send/receive operations for distributed XWT matrix multiplication.
+    Batched matrix-matrix (XWT) multiplication distributed across four processes.
     Parameters
     ----------
     Xij : torch.Tensor
-        The input tensor X.
+        Local input matrix.
     Wij : torch.Tensor
-        The input tensor W.
+        Local weight matrix.
     rank : int
-        The rank of the current process in the distributed group.
+        Global rank.
     device : torch.device
-        The device (CPU/GPU) on which the tensors are allocated.
-    model_group : torch.distributed.ProcessGroup
-        The process group for collective communication.
+        Device to perform computation on.
+    model_group : torch.distributed.ProcessGroup, optional
+        Process group for an individual model-parallel instance.
     Returns
     -------
     Cij : torch.Tensor
-        The result of the matrix multiplication and communication operations.
+        Local result.
     """
     
     mod = rank % 4
@@ -309,7 +298,7 @@ _prealloc_buffers = {}
 
 def get_preallocated_buffer(shape, dtype, device, rank, index=0):
     """
-    Retrieve or create a preallocated buffer with the specified shape, dtype, and device.
+    Retrieve or create a preallocated buffer.
     Parameters
     ----------
     shape : tuple
@@ -317,15 +306,15 @@ def get_preallocated_buffer(shape, dtype, device, rank, index=0):
     dtype : torch.dtype
         The data type of the buffer.
     device : torch.device
-        The device on which the buffer will be allocated.
+        Device to perform computation on.
     rank : int
-        The rank of the process requesting the buffer.
+        Global rank.
     index : int, optional
         An additional index to differentiate buffers (default is 0).
     Returns
     -------
     torch.Tensor
-        A tensor with the specified shape, dtype, and device, either retrieved from the preallocated buffers or newly created.
+        Preallocated buffer.
     """
 
     key = (dtype, rank, index)
@@ -352,25 +341,25 @@ def get_preallocated_buffer(shape, dtype, device, rank, index=0):
         return out
 
 
-def XTW_fourway(Xij, Wij, rank, device, model_group):
+def XTW_fourway(Xij, Wij, rank, device, model_group=None):
     """
-    Precomputes the product of Xij and Wij with custom communication patterns using non-blocking sends and receives. Calculate ATB matrix--matrix multiplication.
+    Batched matrix-matrix (XTW) multiplication distributed across four processes.
     Parameters
     ----------
     Xij : torch.Tensor
-        The matrix Aij to be multiplied.
+        Local input matrix.
     Wij : torch.Tensor
-        The matrix Bij to be multiplied.
+        Local weight matrix.
     rank : int
-        The rank of the current process in the distributed group.
+        Global rank.
     device : torch.device
-        The device on which the tensors are allocated.
-    model_group : torch.distributed.ProcessGroup
-        The process group for collective communication.
+        Device to perform computation on.
+    model_group : torch.distributed.ProcessGroup, optional
+        Process group for an individual model-parallel instance.
     Returns
     -------
-    torch.Tensor
-        The resulting matrix Cij after the precomputation and communication.
+    Cij : torch.Tensor
+        Local result.
     """
 
     mod = rank % 4
@@ -384,9 +373,7 @@ def XTW_fourway(Xij, Wij, rank, device, model_group):
         req_1 = dist.isend(tensor=Xij, dst=rank+1, group=model_group)
         req_2 = dist.isend(tensor=Wij, dst=rank+2, group=model_group)
         req_3 = dist.irecv(tensor=bufferXW, src=rank+2, group=model_group)
-        
         Cij = torch.matmul(Xij.mT, Wij)
-
         req_1.wait()
         req_2.wait()
         req_3.wait()
@@ -409,9 +396,6 @@ def XTW_fourway(Xij, Wij, rank, device, model_group):
         Cij = torch.matmul(bufferX0.mT, Wij)
         req_2.wait()
         req_4.wait()
-        
-        
-        
     elif mod == 2:
         bufferX1 = get_preallocated_buffer(Xij.shape, Xij.dtype, device, rank, 0)
         bufferX3 = get_preallocated_buffer(Xij.shape, Xij.dtype, device, rank, 1)
@@ -457,23 +441,25 @@ def XTW_fourway(Xij, Wij, rank, device, model_group):
 
 def XW_twoway(Xij, Wij, device, rank, model_group=None):
     """
-    Perform a two-way matrix multiplication with communication between ranks.
+    Batched matrix-matrix (XW) multiplication distributed across two processes.
+
     Parameters
     ----------
     Xij : torch.Tensor
-        The input matrix A.
+        Local input matrix.
     Wij : torch.Tensor
-        The input matrix B.
+        Local weight matrix.
     device : torch.device
-        The device to perform computations on.
+        Device to perform computation on.
     rank : int
-        The rank of the current process.
+        Global rank.
     model_group : torch.distributed.ProcessGroup, optional
-        The process group for communication (default is None).
+        Process group for an individual model-parallel instance.
+        
     Returns
     -------
-    torch.Tensor
-        The resulting matrix after the two-way multiplication and communication.
+    Cij : torch.Tensor
+        Local result.
     """
     
     mod = rank % 2
@@ -505,27 +491,25 @@ def XW_twoway(Xij, Wij, device, rank, model_group=None):
 
 def XWT_twoway(Xij, Wij, device, rank, model_group=None):
     """
-    Perform a two-way asynchronous block transfer (XWT) matrix multiplication.
-    This function performs a two-way asynchronous block transfer matrix multiplication
-    using PyTorch's distributed communication primitives. It splits the input matrix `Bij`
-    into two parts, performs matrix multiplications, and exchanges the results between
-    neighboring ranks.
+    Batched matrix-matrix (XWT) multiplication distributed across two processes.
+
     Parameters
     ----------
     Xij : torch.Tensor
-        The input matrix X.
+        Local input matrix.
     Wij : torch.Tensor
-        The input matrix W.
+        Local weight matrix.
     device : torch.device
-        The device on which the tensors are allocated.
+        Device to perform computation on.
     rank : int
-        The rank of the current process in the distributed group.
+        Global rank.
     model_group : torch.distributed.ProcessGroup, optional
-        The process group for communication. Default is None.
+        Process group for an individual model-parallel instance.
+
     Returns
     -------
-    torch.Tensor
-        The resulting matrix after performing the  matrix multiplication.
+    Cij : torch.Tensor
+        Local result.
     """
 
     mod = rank % 2
@@ -564,26 +548,25 @@ def XWT_twoway(Xij, Wij, device, rank, model_group=None):
 
 def XTW_twoway(Xij, Wij, device, rank, model_group=None):
     """
-    Perform a two-way asynchronous tensor broadcast and matrix multiplication.
+    Batched matrix-matrix (XTW) multiplication distributed across two processes.
+
     Parameters
     ----------
     Xij : torch.Tensor
-        The input tensor X.
+        Local input matrix.
     Wij : torch.Tensor
-        The input tensor W.
+        Local weight matrix.
     device : torch.device
         The device on which to perform the operations.
     rank : int
-        The rank of the current process in the distributed group.
+        Global rank.
     model_group : torch.distributed.ProcessGroup, optional
-        The process group for communication (default is None).
+        Process group for an individual model-parallel instance.
     Returns
     -------
-    torch.Tensor
-        The resulting tensor after performing the matrix multiplications and concatenation.
-    """
-
-    
+    Cij : torch.Tensor
+        Local result.
+    """    
     mod = rank % 2
 
     bufferX = get_preallocated_buffer(Xij.shape, torch.float32, device, rank)
