@@ -1,5 +1,5 @@
 import torch
-import summa_gpu
+import distributed_matmul as dist_mm
 import numpy as np
 from torch.nn import GELU, Dropout
 
@@ -88,7 +88,7 @@ class XW_fourway(torch.autograd.Function):
         ctx.device = device
         ctx.rank = rank
         ctx.model_group = model_group
-        XW = summa_gpu.XW_fourway(x, W, rank,  device, model_group)
+        XW = dist_mm.XW_fourway(x, W, rank,  device, model_group)
         
         return XW.add(b)
         
@@ -119,8 +119,8 @@ class XW_fourway(torch.autograd.Function):
         rank = ctx.rank
         model_group = ctx.model_group
 
-        grad_input  = summa_gpu.XWT_fourway(grad_output, weight, rank=rank, device=device, model_group=model_group)
-        grad_weight = summa_gpu.XTW_fourway(input, grad_output, rank=rank, device=device, model_group=model_group)
+        grad_input  = dist_mm.XWT_fourway(grad_output, weight, rank=rank, device=device, model_group=model_group)
+        grad_weight = dist_mm.XTW_fourway(input, grad_output, rank=rank, device=device, model_group=model_group)
         grad_b      = grad_output
         
         return grad_input, grad_weight, grad_b, None, None, None
@@ -214,7 +214,7 @@ class XW_twoway(torch.autograd.Function):
         ctx.rank = rank
         ctx.model_group = model_group
         
-        return summa_gpu.XW_twoway(x, W, device, rank, model_group).add(b)
+        return dist_mm.XW_twoway(x, W, device, rank, model_group).add(b)
         
     @staticmethod
     def backward(ctx, grad_output):
@@ -242,8 +242,8 @@ class XW_twoway(torch.autograd.Function):
         device = ctx.device
         model_group = ctx.model_group
 
-        grad_input  = summa_gpu.XWT_twoway(grad_output, weight, rank=rank, device=device, model_group=model_group)
-        grad_weight = summa_gpu.XTW_twoway(input, grad_output, rank=rank, device=device, model_group=model_group)
+        grad_input  = dist_mm.XWT_twoway(grad_output, weight, rank=rank, device=device, model_group=model_group)
+        grad_weight = dist_mm.XTW_twoway(input, grad_output, rank=rank, device=device, model_group=model_group)
         grad_bias   = grad_output
 
         return grad_input, grad_weight, grad_bias, None, None, None
@@ -352,7 +352,7 @@ class XTW_fourway(torch.autograd.Function):
         ctx.rank = rank
         ctx.model_group = model_group
 
-        xw = summa_gpu.XTW_fourway(x, W, rank, device, model_group)
+        xw = dist_mm.XTW_fourway(x, W, rank, device, model_group)
         return xw.add(b)
     
     @staticmethod
@@ -382,8 +382,8 @@ class XTW_fourway(torch.autograd.Function):
         rank = ctx.rank
         model_group = ctx.model_group
 
-        grad_input = summa_gpu.XWT_fourway(weight, grad_output, rank=rank, device=device, model_group=model_group)
-        grad_weight = summa_gpu.XW_fourway(input, grad_output, rank=rank, device=device, model_group=model_group)
+        grad_input = dist_mm.XWT_fourway(weight, grad_output, rank=rank, device=device, model_group=model_group)
+        grad_weight = dist_mm.XW_fourway(input, grad_output, rank=rank, device=device, model_group=model_group)
         grad_b = grad_output
         
         return grad_input, grad_weight, grad_b, None, None, None
@@ -490,7 +490,7 @@ class XTW_twoway(torch.autograd.Function):
         ctx.rank = rank
         ctx.model_group = model_group
         
-        xtw = summa_gpu.XTW_twoway(x, W, device, rank, model_group)    
+        xtw = dist_mm.XTW_twoway(x, W, device, rank, model_group)    
 
         return xtw.add(b) 
     
@@ -519,8 +519,8 @@ class XTW_twoway(torch.autograd.Function):
         rank = ctx.rank 
         model_group = ctx.model_group 
 
-        grad_input = summa_gpu.XWT_twoway(weight, grad_output, device, rank, model_group)
-        grad_weight = summa_gpu.XW_twoway(input, grad_output, device, rank, model_group)
+        grad_input = dist_mm.XWT_twoway(weight, grad_output, device, rank, model_group)
+        grad_weight = dist_mm.XW_twoway(input, grad_output, device, rank, model_group)
         grad_b = grad_output
         return grad_input, grad_weight, grad_b, None, None, None
     
@@ -683,7 +683,7 @@ class XWT_fourway(torch.autograd.Function):
         ctx.device = device
         ctx.rank = rank
         ctx.model_group = model_group
-        xwt = summa_gpu.XWT_fourway(x, W, rank, device, model_group)
+        xwt = dist_mm.XWT_fourway(x, W, rank, device, model_group)
         
         return xwt.add(b)
         
@@ -714,8 +714,8 @@ class XWT_fourway(torch.autograd.Function):
         device=ctx.device        
         rank = ctx.rank
         model_group = ctx.model_group
-        grad_input = summa_gpu.XW_fourway(grad_output, weight, rank=rank,  device=device, model_group=model_group)
-        grad_weight = summa_gpu.XTW_fourway(grad_output, input, rank=rank, device=device, model_group=model_group)
+        grad_input = dist_mm.XW_fourway(grad_output, weight, rank=rank,  device=device, model_group=model_group)
+        grad_weight = dist_mm.XTW_fourway(grad_output, input, rank=rank, device=device, model_group=model_group)
         grad_b = grad_output
 
         return grad_input, grad_weight, grad_b, None, None, None
@@ -826,7 +826,7 @@ class XWT_twoway(torch.autograd.Function):
         ctx.device = device
         ctx.rank = rank
         
-        xw = summa_gpu.XWT_twoway(x, W, device, rank, model_group)
+        xw = dist_mm.XWT_twoway(x, W, device, rank, model_group)
         
         return xw.add(b)
         
@@ -856,8 +856,8 @@ class XWT_twoway(torch.autograd.Function):
         device = ctx.device
         rank = ctx.rank
         
-        grad_input  = summa_gpu.XW_twoway(grad_output, weight, device=device, rank=rank)
-        grad_weight = summa_gpu.XTW_twoway(grad_output, input, device=device, rank=rank)
+        grad_input  = dist_mm.XW_twoway(grad_output, weight, device=device, rank=rank)
+        grad_weight = dist_mm.XTW_twoway(grad_output, input, device=device, rank=rank)
         grad_b = grad_output
 
         return grad_input, grad_weight, grad_b, None, None, None
@@ -926,7 +926,7 @@ class DistributedXT(torch.autograd.Function):
 
         ctx.device = device
         ctx.rank = rank
-        x = summa_gpu.matrix_transpose(x, rank, device)
+        x = dist_mm.matrix_transpose(x, rank, device)
         return x
     
     @staticmethod
@@ -947,7 +947,7 @@ class DistributedXT(torch.autograd.Function):
 
         rank = ctx.rank
         device = ctx.device
-        grad_output = summa_gpu.matrix_transpose(grad_output, rank, device)
+        grad_output = dist_mm.matrix_transpose(grad_output, rank, device)
         return grad_output, None, None
 
 class DistributedTranspose_twoway(torch.nn.Module):
@@ -1018,7 +1018,7 @@ class DistributedXT_twoway(torch.autograd.Function):
         ctx.rank = rank
         ctx.model_group = model_group
 
-        x = summa_gpu.matrix_transpose_twoway(x, rank, device, model_group)
+        x = dist_mm.matrix_transpose_twoway(x, rank, device, model_group)
         return x
     
     @staticmethod
@@ -1042,7 +1042,7 @@ class DistributedXT_twoway(torch.autograd.Function):
         device = ctx.device
         model_group = ctx.model_group
 
-        grad_output = summa_gpu.matrix_transpose_twoway(grad_output, rank, device, model_group)
+        grad_output = dist_mm.matrix_transpose_twoway(grad_output, rank, device, model_group)
         return grad_output, None, None, None
 
 class DistributedMLP(torch.nn.Module):
