@@ -301,32 +301,14 @@ def getPositionEncoding(seq_len, d, n=10000):
     P = torch.tensor(P).to(torch.float32)
     return P
 
-def load_and_push_data(config_dict, data, parallelism, buffer, rank, device, local_groups, non_blocking=False):
+def load_and_push_data(data, device, non_blocking=False):
     """
-    Reads input data and pushes to device. 
+    Read input data and pushes to device. 
     
-    Returns [data, False] or [async_wait_handle, True, buffer]
+    Returns [data, False]
     """
-    # Case: 2-way split
-    # Need wait handle.
-    if parallelism == 2:
-        pushed_data = data.to(device, non_blocking=non_blocking) # Non-blocking is possible when pinned memory is used
-        return pushed_data, False
-
-    # Case: 4-way split
-    # Cases 1, 4 will automatically push data. Case 2 will wait.
-    elif parallelism == 4:
-        data_split = config_dict['model_parallel']['split'] # how many processes the data is sharded over
-        if data_split == 1:
-            buffer.zero_()
-            input_data = send_data_fourway(data, buffer, rank, device)
-            return input_data, False
-        elif data_split == 2: # default
-            input_data_handle = send_data_twoway(data, buffer, rank, device, local_groups)
-            return input_data_handle, True
-        elif data_split == 4:
-            input_data = data.to(device, non_blocking=non_blocking)
-            return input_data, False
+    pushed_data = data.to(device, non_blocking=non_blocking)
+    return pushed_data
 
         
 def reduce_ddp_layernorms(parallelism, mlp, local_groups, global_groups, rank, node_rank):

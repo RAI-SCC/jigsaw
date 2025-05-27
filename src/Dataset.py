@@ -10,22 +10,28 @@ class ERA5Dataset(Dataset):
     """Define 3D dataset."""
     def __init__(self, config, file_path, mode, patch_size, forecast_length=1, normalize=True, rank=None):
         """
-        initialize.
+        Initialize dataset.
 
+        Parameters
+        ----------
         params: Dict
-            configuration file
+            configuration yaml file.
         file_path: String
-            path to data directory
+            path to data directory.
         distributed: bool
-            flag for DDP
+            flag for DDP.
         mode: String
-            of value 'training', 'testing', 'validation'
+            of value 'training', 'testing', 'validation'.
         device: String
-            device that the code is running/offloaded on
+            Device to perform computation on.
         patch_size: Tuple(int, int, Optional[int])
             Number of pixels in ([vert], lat, lon) dimensions per patch
         forecast_length: int
-            For training, always 1. For validation, defines the number of autoregressive steps to roll out to.
+            Defines the number of future steps to return.
+        normalize: bool
+            Flag for normalization.
+        rank: int
+            Global rank, optional.
         """
         self.file_path = file_path
         self.mode = mode
@@ -84,15 +90,12 @@ class ERA5Dataset(Dataset):
             else:
                 train_years = times[(times.year<2017) & (times.year > 1979) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
             self.zarr_data = self.zarr_data.sel(time=train_years)
-        elif mode == 'validation':           # validation
+        elif mode == 'validation':
             validation_years = times[(times.year == 2018) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
             
             self.zarr_data = self.zarr_data.sel(time=validation_years)
-        elif mode == 'testing':           # validation
+        elif mode == 'testing':            
             validation_years = times[(times.year == 2020) | (times.year == 2021)] 
-            self.zarr_data = self.zarr_data.sel(time=validation_years)
-        elif mode == 'verify':
-            validation_years = times[(times.year == 2020) & (times.month == 1) & (times.day == 1) & (times.hour == 0)]
             self.zarr_data = self.zarr_data.sel(time=validation_years)
             
         self.n_samples_total = len(self.zarr_data['time'])
@@ -203,7 +206,6 @@ class ERA5DatasetDistributed(Dataset):
         self.file_path = file_path
         self.mode = mode
         self.dt = dt if dt is not None else config['data']['dt']
-        print(f'dt is {self.dt}')
         self.lite = config['data']['lite']
         self.rank = rank
         self.datapath = config['data']['train_data_path']     
@@ -216,7 +218,7 @@ class ERA5DatasetDistributed(Dataset):
             self.deltaTDivisor = 1
         else:
             if self.lite:
-                self.deltaTDivisor = 1 # TODO
+                self.deltaTDivisor = 1 
             else:
                 self.deltaTDivisor = 6
 
@@ -225,7 +227,7 @@ class ERA5DatasetDistributed(Dataset):
         
         self._get_files_stats(mode=self.mode)
         
-        # If data is downloaded from weatherbench, the 6-hourly subsampled data is stored in the reverse pressure level order.
+        # Current copies of subsampled WeatherBench2 data saves in reverse pressure-level order
         # Need to reverse so that the 0th presssure level is 1000 hPa, 1st is 925 hPa, etc.
         if config['data']['train_data_path'] == '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/1959-2023_01_10-wb13-6h-1440x721.zarr':
             self.level_ordering = range(13-1, -1, -1)
@@ -273,9 +275,9 @@ class ERA5DatasetDistributed(Dataset):
             if self.lite:
                 train_years = times[(times.year<2018) & (times.year > 2006) ]#& ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))] 
             elif self.datapath == '/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr' and not self.lite:
-                train_years = times[(times.year<2017) & (times.year > 1979)]
+                train_years = times[(times.year<2018) & (times.year > 1979)]
             else:
-                train_years = times[(times.year<2017) & (times.year > 1979) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
+                train_years = times[(times.year<2018) & (times.year > 1979) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
             self.zarr_data = self.zarr_data.sel(time=train_years)
         elif mode == 'validation':           # validation
             if self.lite:
