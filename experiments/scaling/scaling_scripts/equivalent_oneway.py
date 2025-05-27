@@ -5,19 +5,11 @@ import torch.distributed
 import torch.optim as optim
 from timm.scheduler.cosine_lr import CosineLRScheduler
 from timm.scheduler.step_lr import StepLRScheduler
-
-import sys
-sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-summa/')
-sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-summa/src')
 import utils, eval
 import Model
-import time
 from torch.nn.parallel import DistributedDataParallel as DDP
 import argparse
 import yaml
-import matplotlib.pyplot as plt
-import os, psutil
-from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
 def training_loop(config_dict, device, localid, rank):
 
@@ -109,21 +101,6 @@ def training_loop(config_dict, device, localid, rank):
             print("Initializing model from scratch")
         pass
     
-    try:
-        if rank == 0 and config_dict['training']['preload']:
-            print("loading pretrained convolutional weights")
-
-        if config_dict['training']['preload'] and epoch == 0:
-            if config_dict['training']['preload_embedding']:
-                mlp = utils.load_pretrained_embedding(mlp, config_dict)
-                
-            else: # Loading from pangu model
-                mlp = utils.load_pretrained_convolution(mlp, config_dict)
-            
-    except Exception as err:
-        if rank == 0:
-            print(f"Unable to load pretrained convolutional weights {err}")
-
     mlp = mlp.to(device)
 
     loss_fn = torch.nn.MSELoss()
@@ -197,7 +174,6 @@ def training_loop(config_dict, device, localid, rank):
             print(f"Epoch {epoch} time [min]: {(start.elapsed_time(end) / 1000 / 60 )}, average loss {epoch_average_loss}")
 
         torch.cuda.synchronize()
-        
                
         val_loss = eval.get_validation_mse(config_dict, mlp, valid_dataloader, device, rank, epoch, file_path=save_path, model_parallel=model_parallel, world_size=world_size, local_groups=local_groups, node_groups=node_groups, global_groups=global_groups)
         

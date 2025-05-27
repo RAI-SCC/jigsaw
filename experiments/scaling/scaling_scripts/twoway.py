@@ -3,20 +3,14 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.optim as optim
-import sys
-sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-summa/')
-sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-summa/src')
-import utils, eval
+import utils
 import Model
-import time
 from torch.nn.parallel import DistributedDataParallel as DDP
 import argparse
 import yaml
 import helper
 
-def training_loop(config_dict, device, localid, rank):
-
-    
+def training_loop(config_dict, device, localid, rank):   
     model_parallel = config_dict['model']['model_parallel']
     parallelism = config_dict['model_parallel']['parallelism'] if model_parallel else 1
     
@@ -31,11 +25,9 @@ def training_loop(config_dict, device, localid, rank):
         print(f'Training subset size {train_subset}')
         print(f'Data parameters {config_dict["data"]}')
     
-    best_val_loss = 1e5
     
     xlat, xlon = config_dict['data']['xlat'], config_dict['data']['xlon']
     
-    # underground mask
     local_group = utils.get_local_groups_twoway(rank)
     local_groups = None
     node_groups = local_group
@@ -61,10 +53,8 @@ def training_loop(config_dict, device, localid, rank):
             weight_decay=3e-6
     )
 
-    if parallelism > 1:
-        utils.set_all_seeds_local_rank(1, rank=rank, parallelism=parallelism) # Set all GPUs to the same seed so that they read the same data           
-    else:
-        utils.set_all_seeds(1, rank=rank)
+    
+    utils.set_all_seeds_local_rank(1, rank=rank, parallelism=parallelism) # Set all GPUs to the same seed so that they read the same data           
     
     train_dataloader = utils.get_dataloader(config_dict, config_dict['data']['train_data_path'], mode='train', distributed=(not model_parallel), batch_size=config_dict['training']['train_batch'], subset_size=train_subset, rank=rank)
     
@@ -101,15 +91,9 @@ def training_loop(config_dict, device, localid, rank):
 
     epoch_times = np.zeros(11)
 
-    if parallelism == 4:
-        buffer  = torch.zeros(config_dict['training']['train_batch'], xlat, xlon//2, 36, device=device)
-        buffer2 = torch.zeros(config_dict['training']['train_batch'], xlat, xlon//2, 36, device=device)
-    else:
-        buffer, buffer2 = None, None
-
     torch.cuda.synchronize()
 
-    for epoch in range(epoch, 11):
+    for epoch in range( 11):
         train_dataloader.sampler.set_epoch(epoch)
 
         mlp.train()
@@ -118,8 +102,8 @@ def training_loop(config_dict, device, localid, rank):
         start.record()
         for i, data in enumerate(train_dataloader):          
             # Loading data: Always with async ops and handles
-            input_data_or_handle,  _ = utils.load_and_push_data(config_dict, data[0], parallelism, buffer, rank, device, local_groups)
-            target_data_or_handle, _ = utils.load_and_push_data(config_dict, data[1][0], parallelism, buffer2, rank, device, local_groups)
+            input_data_or_handle  = utils.load_and_push_data(data[0], device)
+            target_data_or_handle = utils.load_and_push_data(data[1][0], device)
             
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)

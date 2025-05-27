@@ -5,20 +5,12 @@ import torch.distributed
 import torch.optim as optim
 from timm.scheduler.cosine_lr import CosineLRScheduler
 from timm.scheduler.step_lr import StepLRScheduler
-import torch.profiler
-
-import sys
-sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-summa/')
-sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-summa/src')
 import utils, eval
 import Model
 import time
 from torch.nn.parallel import DistributedDataParallel as DDP
 import argparse
 import yaml
-import matplotlib.pyplot as plt
-import os, psutil
-from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
 def training_loop(config_dict, device, localid, rank):
 
@@ -146,8 +138,8 @@ def training_loop(config_dict, device, localid, rank):
                     g['lr'] = i * (lr-start_lr) / len(train_dataloader) + start_lr
 
             # learning rate ramp-up in first iteration
-            input_data_or_handle,  _ = utils.load_and_push_data(config_dict, data[0], parallelism, buffer, rank, device, local_groups, non_blocking=True)
-            target_data_or_handle, _ = utils.load_and_push_data(config_dict, data[1][rollout], parallelism, buffer2, rank, device, local_groups, non_blocking=True)
+            input_data_or_handle  = utils.load_and_push_data(data[0], device, non_blocking=True)
+            target_data_or_handle = utils.load_and_push_data(data[1][rollout], device, non_blocking=True)
 
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)

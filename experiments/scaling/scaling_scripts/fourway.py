@@ -1,22 +1,14 @@
-
 import numpy as np
 import torch
 import torch.distributed
 import torch.optim as optim
-from timm.scheduler.cosine_lr import CosineLRScheduler
-from timm.scheduler.step_lr import StepLRScheduler
-
-import sys
-sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-summa/')
-sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-summa/src')
-import utils, eval
+import utils
 import Model
 import time
 from torch.nn.parallel import DistributedDataParallel as DDP
 import argparse
 import yaml
 import matplotlib.pyplot as plt
-import os, psutil
 from torch.nn.utils import vector_to_parameters
 import helper
 
@@ -74,34 +66,6 @@ def training_loop(config_dict, device, localid, rank):
         flop_forward, comm_forward = helper.calc_flops_comm(config_dict)
         print(f'Estimated forward TFLOPs and GB_COMM: {flop_forward}, {comm_forward}')
 
-    # load
-    try:
-        file_path = config_dict['training']['load_path']
-        mlp, optimizer, epoch = utils.load_model(mlp, optimizer=optimizer, file_path=file_path, rank=rank, model_parallel=model_parallel, parallelism=parallelism)
-        epoch = epoch + 1
-        
-    except Exception as err:
-        print(err)
-        epoch = 0
-        if rank == 0:
-            print("Initializing model from scratch")
-        pass
-    
-    try:
-        if rank == 0 and config_dict['training']['preload']:
-            print("loading pretrained convolutional weights")
-
-        if config_dict['training']['preload'] and epoch == 0:
-            if config_dict['training']['preload_embedding']:
-                mlp = utils.load_pretrained_embedding(mlp, config_dict)
-                
-            else: # Loading from pangu model
-                mlp = utils.load_pretrained_convolution(mlp, config_dict)
-            
-    except Exception as err:
-        if rank == 0:
-            print(f"Unable to load pretrained convolutional weights {err}")
-
     mlp = mlp.to(device)
 
     loss_fn = torch.nn.MSELoss()
@@ -112,15 +76,8 @@ def training_loop(config_dict, device, localid, rank):
     else:
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
-    epoch_times = np.zeros(11)
 
-    handles = []
-    
-    if parallelism == 4:
-        buffer  = torch.zeros(config_dict['training']['train_batch'], xlat, xlon//2, 36, device=device)
-        buffer2 = torch.zeros(config_dict['training']['train_batch'], xlat, xlon//2, 36, device=device)
-    else:
-        buffer, buffer2 = None, None
+    epoch_times = np.zeros(11)
     handles = []
 
     torch.cuda.synchronize()
@@ -134,33 +91,28 @@ def training_loop(config_dict, device, localid, rank):
         start.record()
 
         for i, data in enumerate(train_dataloader):
-            
             # Loading data: Always with async ops and handles
-            input_data_or_handle,  _ = utils.load_and_push_data(config_dict, data[0], parallelism, buffer, rank, device, local_groups)
-            target_data_or_handle, _ = utils.load_and_push_data(config_dict, data[1][0], parallelism, buffer2, rank, device, local_groups)
+            input_data_or_handle  = utils.load_and_push_data(data[0], device)
+            target_data_or_handle = utils.load_and_push_data(data[1][0], device)
             
             if i > 0:
                 handles.wait() # reduction of layer norm gradients
                 vector_to_parameters(flat_grad, gradients)
                 optimizer.step()
+
             optimizer.zero_grad(set_to_none=True)
-            
             input_data = input_data_or_handle
-            
-            output = mlp(input_data, rollout_=0+1) # output shape [n_batch, 720, 720, 36]
-                    
+            output = mlp(input_data, rollout_=0+1) # output shape [n_batch, 720, 720, 36]                    
             target_data = target_data_or_handle
-            
             # Reshape output
             output = (output.reshape(output.shape[0], xlat, xlon//2, 36))             
-            
             loss = loss_fn(output, target_data)
-            
             loss.backward()
             
             handles, flat_grad, gradients = utils.reduce_ddp_layernorms(parallelism, mlp, local_groups, global_groups, rank, node_rank)
         end.record()
         torch.cuda.synchronize()
+
         if rank == 0:
             epoch_times[epoch] = start.elapsed_time(end) / 1000 / 60 
             print(f"Epoch {epoch} time [min]: {(epoch_times[epoch])}")

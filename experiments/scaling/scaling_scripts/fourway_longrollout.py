@@ -5,20 +5,14 @@ import torch.distributed
 import torch.optim as optim
 from timm.scheduler.cosine_lr import CosineLRScheduler
 from timm.scheduler.step_lr import StepLRScheduler
-import torch.profiler
-
-import sys
-sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-summa/')
-sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-summa/src')
 import utils, eval
 import Model
 import time
 from torch.nn.parallel import DistributedDataParallel as DDP
 import argparse
 import yaml
-import matplotlib.pyplot as plt
 import hashlib
-from torch.nn.utils import parameters_to_vector, vector_to_parameters
+from torch.nn.utils import vector_to_parameters
 
 def deterministic_rand(i, n, seed="my_global_seed"):
     # Build a string combining seed & iteration

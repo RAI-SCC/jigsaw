@@ -5,20 +5,13 @@ import torch.distributed
 import torch.optim as optim
 from timm.scheduler.cosine_lr import CosineLRScheduler
 from timm.scheduler.step_lr import StepLRScheduler
-import torch.profiler
-
-import sys
-sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-summa/')
-sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-summa/src')
 import utils, eval
 import Model
 import time
 from torch.nn.parallel import DistributedDataParallel as DDP
 import argparse
 import yaml
-import matplotlib.pyplot as plt
-import os, psutil
-from torch.nn.utils import parameters_to_vector, vector_to_parameters
+from torch.nn.utils import vector_to_parameters
 
 def training_loop(config_dict, device, localid, rank):
 
@@ -98,7 +91,8 @@ def training_loop(config_dict, device, localid, rank):
         epoch = epoch + 1
         
     except Exception as err:
-        print(err)
+        if rank == 0:
+            print(err)
         epoch = 0
         if rank == 0:
             print("Initializing model from scratch")
@@ -141,14 +135,12 @@ def training_loop(config_dict, device, localid, rank):
         start_time = time.perf_counter()
         
         for i, data in enumerate(train_dataloader):
-            rollout = i % max_rollout
-
             if epoch == 0:
                 for g in optimizer.param_groups:
                     g['lr'] = i * (lr-start_lr) / len(train_dataloader) + start_lr
             # learning rate ramp-up in first iteration
-            input_data_or_handle,  _ = utils.load_and_push_data(config_dict, data[0], parallelism, buffer, rank, device, local_groups, non_blocking=True)
-            target_data_or_handle, _ = utils.load_and_push_data(config_dict, data[1][rollout], parallelism, buffer2, rank, device, local_groups, non_blocking=True)
+            input_data_or_handle = utils.load_and_push_data(data[0], device, non_blocking=True)
+            target_data_or_handle = utils.load_and_push_data(data[1][0], device, non_blocking=True)
             
             if i > 0:
                 handles.wait() # layer norm 
@@ -159,7 +151,7 @@ def training_loop(config_dict, device, localid, rank):
             
             input_data = input_data_or_handle
             
-            output = mlp(input_data, rollout_=rollout+1) # output shape [n_batch, 720, 720, 36]
+            output = mlp(input_data, rollout_=1) # output shape [n_batch, 720, 720, 36]
             
             target_data = target_data_or_handle
 
@@ -178,7 +170,7 @@ def training_loop(config_dict, device, localid, rank):
             epoch_average_loss[0] = epoch_average_loss[0] + temp_loss
 
             if rank == 0:
-                print(f"{epoch}, after Step {i}/{len(train_dataloader)}. Rollout {rollout}. loss: {temp_loss}")
+                print(f"{epoch}, after Step {i}/{len(train_dataloader)}. loss: {temp_loss}")
 
         end_time = time.perf_counter()
         torch.cuda.synchronize()
