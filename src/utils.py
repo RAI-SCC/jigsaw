@@ -119,8 +119,6 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
     dt = config_dict['data']['dt'] if dt is None else dt
     if parallelism == 1:
         dataset = ERA5Dataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), forecast_length=config_dict['model']['latent_rollout'], normalize=normalize)
-    elif parallelism == 4 and config_dict['model_parallel']['split'] == 1:
-        dataset = ERA5Dataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, rank=rank)    
     else:
         dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
     

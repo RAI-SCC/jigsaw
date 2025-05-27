@@ -2,9 +2,7 @@ import numpy as np
 import pandas as pd
 import torch
 import xarray as xr
-from torch.utils.data import Dataset, Subset, DataLoader, Sampler
-import os
-from multiprocessing import Value
+from torch.utils.data import Dataset
 import os
 class ERA5Dataset(Dataset):
     """Define 3D dataset."""
@@ -71,13 +69,6 @@ class ERA5Dataset(Dataset):
         self.xlat = config['data']['xlat']
         self.rank = rank
         
-        if self.rank is not None:
-            self.land_mask, self.soil_type, self.topography = load_constant_mask_2d(self.patch_size, xlat=self.xlat)
-            self.land_mask = torch.unsqueeze(self.land_mask, 0)
-            self.soil_type = torch.unsqueeze(self.soil_type, 0)
-            self.topography = torch.unsqueeze(self.topography, 0)
-        
-        
         
     def _get_files_stats(self, mode='train'):
         """Filter desired time points based on parameters and return file statistics."""
@@ -112,11 +103,6 @@ class ERA5Dataset(Dataset):
         global_idx: int
                 global index of item
         """
-        skipped_ranks = [1, 2, 3]    
-        if self.rank is not None:
-            if self.rank in skipped_ranks: # 0, 1 always senders
-                return [torch.zeros(1), torch.zeros(1)], [torch.zeros(1), torch.zeros(1)]
-        
         target_pressure = []
         target_surface  = []
         step = self.dt 
@@ -146,10 +132,8 @@ class ERA5Dataset(Dataset):
         input_pressure = input_pressure[:, :self.xlat]
         
         
-        if self.rank is None: # in serial case
-            input = np.concatenate([input_surface, input_pressure], axis=0)
-        else: # in parallel case
-            input = np.concatenate([input_surface, input_pressure, self.land_mask, self.soil_type, self.topography], axis=0)
+        
+        input = np.concatenate([input_surface, input_pressure], axis=0)
         
         target = []
         for i in range(self.forecast_length):
@@ -168,20 +152,8 @@ class ERA5Dataset(Dataset):
 
         input = torch.tensor(input)
         
-        if self.rank is None:
-            return input, target    
-        else:
-            input = input.permute(1,2,0)
-            input = [input[:, :720, :36], input[:, :720, 36:], input[:, 720:, :36], input[:, 720:, 36:]]
-
-            target_list = []
-            for i in range(self.forecast_length):
-                temp = torch.nn.functional.pad(target[i], (0, 0, 0, 0, 0, 3)).permute(1,2,0)
-            
-            target_list.append([temp[:, :720, :36], temp[:, :720, 36:], temp[:, 720:, :36], temp[:, 720:, 36:]])
-
-            
-            return input, target_list
+        return input, target    
+        
 class ERA5DatasetDistributed(Dataset):
     """Define 3D dataset."""
     def __init__(self, config, file_path, mode, patch_size, rank, forecast_length=1, normalize=True, dt=None):
@@ -247,17 +219,13 @@ class ERA5DatasetDistributed(Dataset):
         self.patch_size = patch_size
         self.xlat, self.xlon = config['data']['xlat'], config['data']['xlon']
         self.batch_size = config['training']['train_batch']
-        self.split = config['model_parallel']['split']
         self.parallelism = config['model_parallel']['parallelism']
 
         if self.parallelism == 4:
-            if self.split == 4:
-                if self.rank % 4 in [0, 1]:
-                    self.start, self.end = 0, self.xlon//2
-                else:
-                    self.start, self.end = self.xlon//2, self.xlon
-            else: 
-                self.start, self.end = 0, self.xlon
+            if self.rank % 4 in [0, 1]:
+                self.start, self.end = 0, self.xlon//2
+            else:
+                self.start, self.end = self.xlon//2, self.xlon
         else:
             self.start, self.end = 0, self.xlon
                
@@ -312,9 +280,6 @@ class ERA5DatasetDistributed(Dataset):
         global_idx: int
                 global index of item
         """
-        if self.parallelism == 4 and self.split == 2:
-            if self.rank % self.parallelism > 1:
-                return [torch.zeros(1)], [torch.zeros(1)]
         
         target_surface  = []
         step = self.dt
@@ -376,10 +341,7 @@ class ERA5DatasetDistributed(Dataset):
                 temp = temp.reshape(-1, self.xlat, self.end-self.start)
                 
                 temp = np.concatenate([target_surface[i], temp], axis=0)
-                if self.split == 2 and self.parallelism == 4:
-                    target.append([torch.tensor(temp[:,:,:720]).permute(1, 2, 0), torch.tensor(temp[:,:,720:]).permute(1, 2, 0)])
-                else:
-                    target.append(torch.tensor(temp).permute(1, 2, 0))
+                target.append(torch.tensor(temp).permute(1, 2, 0))
         else:
             temperature = input_pressure['temperature'][6:,:self.xlat,self.start:self.end].values
             u_velocity  = input_pressure['u_component_of_wind'][:,:self.xlat,self.start:self.end].values
@@ -403,16 +365,9 @@ class ERA5DatasetDistributed(Dataset):
                 
                 temp = temp.reshape(-1, self.xlat, self.end-self.start) 
                 
-                if self.split == 2 and self.parallelism == 4:
-                    target.append([torch.nn.functional.pad(torch.tensor(temp[:,:,:720]), (0, 0, 0, 0, 0, 3)).permute(1, 2, 0), 
-                                   torch.nn.functional.pad(torch.tensor(temp[:,:,720:]), (0, 0, 0, 0, 0, 3)).permute(1, 2, 0)])
-                else:
-                    target.append(torch.nn.functional.pad(torch.tensor(temp), (0, 0, 0, 0, 0, 3)).permute(1, 2, 0)) 
+                target.append(torch.nn.functional.pad(torch.tensor(temp), (0, 0, 0, 0, 0, 3)).permute(1, 2, 0)) 
                             
-        if self.split == 2 and  self.parallelism == 4:
-            input = [torch.tensor(input[:,:,:720]).permute(1,2,0), torch.tensor(input[:,:,720:]).permute(1,2,0)]
-        else:
-            input = torch.tensor(input).permute(1,2,0)
+        input = torch.tensor(input).permute(1,2,0)
         
         return input, target
 
