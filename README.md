@@ -17,9 +17,5 @@ Climatology values can be obtained via https://github.com/google-research/weathe
 ## Environment
 The correct Python environment can be obtained with
 ```
-pip install -r requirements.txt
-```
-Set the path to the source code as an environment variable.
-```
-SRC='path/to/src/Jigsaw'
+pip install -e .
 ```
