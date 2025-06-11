@@ -105,33 +105,51 @@ def XW_fourway(Xij, Wij, rank,  device, model_group=None):
     """
 
     mod = rank % 4
-    empty = torch.empty(0, device=device)
-    if mod == 0 or mod == 1:
-        x_send_list = [Xij, Xij, empty, empty]
-        x_recv_list = [torch.empty_like(Xij), torch.empty_like(Xij), empty, empty]
-    else:
-        x_send_list = [empty, empty, Xij, Xij]
-        x_recv_list = [empty, empty, torch.empty_like(Xij), torch.empty_like(Xij)]
-        
-    if mod == 0 or mod == 2:
-        w_send_list = [Wij, empty, Wij, empty]
-        w_recv_list = [torch.empty_like(Wij), empty, torch.empty_like(Wij), empty]
-    else:
-        w_send_list = [empty, Wij, empty, Wij]
-        w_recv_list = [empty,  torch.empty_like(Wij), empty, torch.empty_like(Wij)]
-
-    dist.all_to_all(x_recv_list, x_send_list, group=model_group)
-    dist.all_to_all(w_recv_list, w_send_list, group=model_group)
     
+    empty = torch.empty(0, device=device)
+
     if mod == 0:
-        Cij = torch.matmul(x_recv_list[0], w_recv_list[0]) + torch.matmul(x_recv_list[1], w_recv_list[2]) 
+        x_send_list = [empty, Xij, empty, empty]
+        x_recv_list = [empty, get_preallocated_buffer(Xij.shape, torch.float32, device, rank, 0), empty, empty]
+        w_send_list = [empty, empty, Wij, empty]       
+        w_recv_list = [empty, empty, get_preallocated_buffer(Wij.shape, torch.float32, device, rank, 1), empty]
     elif mod == 1:
-        Cij = torch.matmul(x_recv_list[0], w_recv_list[1]) + torch.matmul(x_recv_list[1], w_recv_list[3]) 
+        x_send_list = [Xij, empty, empty, empty]
+        x_recv_list = [get_preallocated_buffer(Xij.shape, torch.float32, device, rank, 0), empty, empty, empty]
+        w_send_list = [empty, empty, empty, Wij]
+        w_recv_list = [empty, empty, empty, get_preallocated_buffer(Wij.shape, torch.float32, device, rank, 1)]
     elif mod == 2:
-        Cij = torch.matmul(x_recv_list[2], w_recv_list[0]) + torch.matmul(x_recv_list[3], w_recv_list[2]) 
-    elif mod == 3:
-        Cij = torch.matmul(x_recv_list[2], w_recv_list[1]) + torch.matmul(x_recv_list[3], w_recv_list[3]) 
+        x_send_list = [empty, empty, empty, Xij]
+        x_recv_list = [empty, empty, empty, get_preallocated_buffer(Xij.shape, torch.float32, device, rank, 0)]
+        w_send_list = [Wij, empty, empty, empty]       
+        w_recv_list = [get_preallocated_buffer(Wij.shape, torch.float32, device, rank, 1), empty, empty, empty]
+    else:
+        x_send_list = [empty, empty, Xij, empty]
+        x_recv_list = [empty, empty, get_preallocated_buffer(Xij.shape, torch.float32, device, rank, 0), empty]
+        w_send_list = [empty, Wij, empty, empty]
+        w_recv_list = [empty,  get_preallocated_buffer(Wij.shape, torch.float32, device, rank, 1), empty, empty]
         
+    w_handle = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
+    x_handle = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
+    
+    w_handle.wait()
+    if mod == 0:
+        Cij = torch.matmul(Xij, Wij)
+    elif mod == 1:
+        Cij = torch.matmul(Xij, w_recv_list[3]) 
+    elif mod == 2:
+        Cij = torch.matmul(Xij, w_recv_list[0]) 
+    elif mod == 3:
+        Cij =  torch.matmul(Xij, Wij) 
+    x_handle.wait()
+    if mod == 0:
+        Cij = Cij + torch.matmul(x_recv_list[1], w_recv_list[2]) 
+    elif mod == 1:
+        Cij = Cij + torch.matmul(x_recv_list[0], Wij)
+    elif mod == 2:
+        Cij = Cij + torch.matmul(x_recv_list[3], Wij) 
+    else:
+        Cij = Cij + torch.matmul(x_recv_list[2], w_recv_list[1]) 
     return Cij
 
 #def matrix_transpose(X, rank, device, model_group=None):
@@ -172,7 +190,7 @@ def XW_fourway(Xij, Wij, rank,  device, model_group=None):
 #        X_T = X
 #
 #    return X_T.mT
-
+#
 def matrix_transpose(X, rank, device, model_group=None):
     """
     Batched transpose (XT) operation distributed across four processes.
@@ -195,13 +213,16 @@ def matrix_transpose(X, rank, device, model_group=None):
     if mod == 0 or mod == 3:
         x_send_list = [empty, empty, empty, empty]
         x_recv_list = [empty, empty, empty, empty]
-    else:
-        x_send_list = [empty,  X, X, empty]
-        x_recv_list = [empty, torch.empty_like(X), torch.empty_like(X), empty]
+    elif mod == 1:
+        x_send_list = [empty, empty, X, empty]
+        x_recv_list = [empty, empty, torch.empty_like(X), empty]
+    else: # mod == 2
+        x_send_list = [empty,  X, empty, empty]
+        x_recv_list = [empty, torch.empty_like(X), empty, empty]
 
     dist.all_to_all(x_recv_list, x_send_list, group=model_group)
     
-    if mod == 0 or 3:
+    if mod == 0 or mod == 3:
         return X.mT
     elif mod == 1:
         return x_recv_list[2].mT
@@ -297,39 +318,51 @@ def XWT_fourway(Xij, Wij, rank,  device, model_group=None):
     """
     
     mod = rank % 4
+    
     empty = torch.empty(0, device=device)
-    if mod == 0 or mod == 1:
-        x_send_list = [Xij, Xij, empty, empty]
-        x_recv_list = [get_preallocated_buffer(Xij.shape, torch.float32, device, rank, 0), 
-                       get_preallocated_buffer(Xij.shape, torch.float32, device, rank, 1), 
-                       empty, 
-                       empty
-                       ]
+
+    if mod == 0:
+        x_send_list = [empty, Xij, empty, empty]
+        x_recv_list = [empty, get_preallocated_buffer(Xij.shape, Xij.dtype, device, rank, 0), empty, empty]
+        w_send_list = [empty, empty, Wij, empty]       
+        w_recv_list = [empty, get_preallocated_buffer(Wij.shape, Xij.dtype, device, rank, 1), empty, empty]
+    elif mod == 1:
+        x_send_list = [Xij, empty, empty, empty]
+        x_recv_list = [get_preallocated_buffer(Xij.shape, Xij.dtype, device, rank, 0), empty, empty, empty]
         w_send_list = [Wij, empty, Wij, empty]       
-    else:
-        x_send_list = [empty, empty, Xij, Xij]
-        x_recv_list = [empty, 
-                       empty, 
-                       get_preallocated_buffer(Xij.shape, torch.float32, device, rank, 0), 
-                       get_preallocated_buffer(Xij.shape, torch.float32, device, rank, 1)]
+        w_recv_list = [empty, empty, get_preallocated_buffer(Wij.shape, Wij.dtype, device, rank, 1), get_preallocated_buffer(Wij.shape, Wij.dtype, device, rank, 2)]
+    elif mod == 2:
+        x_send_list = [empty, empty, empty, Xij]
+        x_recv_list = [empty, empty, empty, get_preallocated_buffer(Xij.shape, Xij.dtype, device, rank, 0)]
         w_send_list = [empty, Wij, empty, Wij]
-
-    if mod == 0 or mod == 2:
-        w_recv_list = [torch.empty_like(Wij), torch.empty_like(Wij), empty, empty]
+        w_recv_list = [get_preallocated_buffer(Wij.shape, Wij.dtype, device, rank, 1), get_preallocated_buffer(Wij.shape, Wij.dtype, device, rank, 2), empty, empty]
     else:
-        w_recv_list = [empty, empty, torch.empty_like(Wij), torch.empty_like(Wij)]
+        x_send_list = [empty, empty, Xij, empty]
+        x_recv_list = [empty, empty, get_preallocated_buffer(Xij.shape, Xij.dtype, device, rank, 0), empty]
+        w_send_list = [empty, Wij, empty, empty]
+        w_recv_list = [empty, empty, get_preallocated_buffer(Wij.shape, Xij.dtype, device, rank, 1), empty]
 
-    dist.all_to_all(x_recv_list, x_send_list, group=model_group)
-    dist.all_to_all(w_recv_list, w_send_list, group=model_group)
+    handle_1 = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
+    handle_2 = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
+    
+    handle_2.wait()
+    if mod == 0 or mod == 3:
+        Cij = torch.matmul(Xij, Wij.mT)
+    elif mod == 1:
+        Cij = torch.matmul(Xij, w_recv_list[3].mT) 
+    else:
+        Cij = torch.matmul(Xij, w_recv_list[0].mT) 
+    
+    handle_1.wait()
     
     if mod == 0:
-        Cij = torch.matmul(x_recv_list[0], w_recv_list[0].mT) + torch.matmul(x_recv_list[1], w_recv_list[1].mT) 
+        Cij = Cij + torch.matmul(x_recv_list[1], w_recv_list[1].mT) 
     elif mod == 1:
-        Cij = torch.matmul(x_recv_list[0], w_recv_list[2].mT) + torch.matmul(x_recv_list[1], w_recv_list[3].mT) 
+        Cij = Cij + torch.matmul(x_recv_list[0], w_recv_list[2].mT) 
     elif mod == 2:
-        Cij = torch.matmul(x_recv_list[2], w_recv_list[0].mT) + torch.matmul(x_recv_list[3], w_recv_list[1].mT) 
+        Cij = Cij + torch.matmul(x_recv_list[3], w_recv_list[1].mT) 
     elif mod == 3:
-        Cij = torch.matmul(x_recv_list[2], w_recv_list[2].mT) + torch.matmul(x_recv_list[3], w_recv_list[3].mT) 
+        Cij = Cij +  torch.matmul(x_recv_list[2], w_recv_list[2].mT) 
 
     return Cij
 
@@ -606,33 +639,53 @@ def XTW_fourway(Xij, Wij, rank, device, model_group=None):
 
     mod = rank % 4
     
-    if mod == 0 or mod == 1:
-        x_recv_list = [torch.empty_like(Xij), torch.empty(0, device=device), torch.empty_like(Xij), torch.empty(0, device=device)]
-    else:
-        x_recv_list = [torch.empty(0, device=device), torch.empty_like(Xij), torch.empty(0, device=device), torch.empty_like(Xij)]
-        
-        
-    if mod == 0 or mod == 2:
-        x_send_list = [Xij, Xij, torch.empty(0, device=device), torch.empty(0, device=device)]
-        w_send_list = [Wij, torch.empty(0, device=device), Wij, torch.empty(0, device=device)]       
-        w_recv_list = [torch.empty_like(Wij), torch.empty(0, device=device), torch.empty_like(Wij), torch.empty(0, device=device)]
-    else:
-        x_send_list = [torch.empty(0, device=device), torch.empty(0, device=device), Xij, Xij]
-        w_send_list = [torch.empty(0, device=device), Wij, torch.empty(0, device=device), Wij]
-        w_recv_list = [torch.empty(0, device=device),  torch.empty_like(Wij), torch.empty(0, device=device), torch.empty_like(Wij)]
+    empty = torch.empty(0, device=device)
 
-    dist.all_to_all(x_recv_list, x_send_list, group=model_group)
-    dist.all_to_all(w_recv_list, w_send_list, group=model_group)
+    if mod == 0:
+        x_send_list = [empty, Xij, empty, empty]
+        x_recv_list = [empty, empty, get_preallocated_buffer(Xij.shape, torch.float32, device, rank, 0), empty]
+        w_send_list = [empty, empty, Wij, empty]       
+        w_recv_list = [empty, empty, get_preallocated_buffer(Wij.shape, torch.float32, device, rank, 1), empty]
+    elif mod == 1:
+        x_send_list = [empty, empty, Xij, Xij]
+        x_recv_list = [get_preallocated_buffer(Xij.shape, torch.float32, device, rank, 0), empty, get_preallocated_buffer(Xij.shape, torch.float32, device, rank, 1), empty]
+        w_send_list = [empty, empty, empty, Wij]
+        w_recv_list = [empty,  empty, empty, get_preallocated_buffer(Wij.shape, torch.float32, device, rank, 2)]
+    elif mod == 2: 
+        x_send_list = [Xij, Xij, empty, empty]
+        x_recv_list = [empty, get_preallocated_buffer(Xij.shape, torch.float32, device, rank, 0), empty, get_preallocated_buffer(Xij.shape, torch.float32, device, rank, 1)]
+        w_send_list = [Wij, empty, empty, empty]       
+        w_recv_list = [get_preallocated_buffer(Wij.shape, torch.float32, device, rank, 2), empty, empty, empty]
+    else:
+        x_send_list = [empty, empty, Xij, empty]
+        x_recv_list = [empty, get_preallocated_buffer(Xij.shape, torch.float32, device, rank, 0), empty, empty]
+        w_send_list = [empty, Wij, empty, empty]
+        w_recv_list = [empty, get_preallocated_buffer(Wij.shape, torch.float32, device, rank, 1), empty, empty]
+        
+    x_handle = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
+    w_handle = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
+        
+    x_handle.wait()
     
     if mod == 0:
-        Cij = torch.matmul(x_recv_list[0].mT, w_recv_list[0]) + torch.matmul(x_recv_list[2].mT, w_recv_list[2]) 
+        Cij = torch.matmul(Xij.mT, Wij) 
     elif mod == 1:
-        Cij = torch.matmul(x_recv_list[0].mT, w_recv_list[1]) + torch.matmul(x_recv_list[2].mT, w_recv_list[3]) 
+        Cij = torch.matmul(x_recv_list[0].mT, Wij)
     elif mod == 2:
-        Cij = torch.matmul(x_recv_list[1].mT, w_recv_list[0]) + torch.matmul(x_recv_list[3].mT, w_recv_list[2]) 
+        Cij = torch.matmul(x_recv_list[3].mT, Wij) 
     elif mod == 3:
-        Cij = torch.matmul(x_recv_list[1].mT, w_recv_list[1]) + torch.matmul(x_recv_list[3].mT, w_recv_list[3]) 
-        
+        Cij = torch.matmul(Xij.mT, Wij) 
+    
+    w_handle.wait()
+
+    if mod == 0:
+        Cij = Cij + torch.matmul(x_recv_list[2].mT, w_recv_list[2]) 
+    elif mod == 1:
+        Cij = Cij + torch.matmul(x_recv_list[2].mT, w_recv_list[3]) 
+    elif mod == 2:
+        Cij = Cij + torch.matmul(x_recv_list[1].mT, w_recv_list[0])
+    elif mod == 3:
+        Cij = Cij + torch.matmul(x_recv_list[1].mT, w_recv_list[1])
     
     return Cij
 
