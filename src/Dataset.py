@@ -375,7 +375,7 @@ class ERA5DatasetDistributed(Dataset):
 
 def load_constant_mask_2d(
     patch_size,
-    folder_path="/hkfs/work/workspace/scratch/ke4365-summa/constant_masks/",
+    folder_path="/hkfs/work/workspace/scratch/ke4365-jigsaw/constant_masks/",
     xlat=721
 ):
     """

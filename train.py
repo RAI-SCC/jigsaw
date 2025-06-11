@@ -8,8 +8,8 @@ from timm.scheduler.step_lr import StepLRScheduler
 import torch.profiler
 
 import sys
-sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-summa/')
-sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-summa/src')
+sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-jigsaw/')
+sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-jigsaw/src')
 import utils, eval
 import Model
 import time

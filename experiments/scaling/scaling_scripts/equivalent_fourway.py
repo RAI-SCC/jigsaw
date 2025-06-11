@@ -197,8 +197,6 @@ def training_loop(config_dict, device, localid, rank):
         scheduler.step(epoch)    
         
 if __name__ == '__main__':
-    model_parallel = False
-    train_subset = None
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_file")
     args = parser.parse_args()
