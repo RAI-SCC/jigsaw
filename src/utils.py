@@ -1,6 +1,6 @@
 import numpy as np
 import torch.distributed
-from Dataset import ERA5Dataset, ERA5DatasetDistributed
+from Dataset import ERA5Dataset, ERA5DatasetDistributed, DummyHighResDataset, DistributedDummyHighResDataset, DistributedHighResDataset
 import torch
 from torch.utils.data import DataLoader, Subset
 import torch.distributed as dist
@@ -114,6 +114,52 @@ def send_data_fourway(data, buffer, rank, device):
     return input_data
 
 
+def get_highres_dataloader(config_dict, data_path, mode='train', subset_size=0, distributed=False, batch_size=1, normalize=True, rank=None, dt=None):
+    parallelism = config_dict['model_parallel']['parallelism']
+    dt = config_dict['data']['dt'] if dt is None else dt
+    if parallelism == 1:
+        dataset = DummyHighResDataset(config_dict)
+    else:
+        dataset = DistributedHighResDataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
+    
+    if subset_size != 0: 
+        subset_indices = torch.randperm(len(dataset))[:subset_size]
+        dataset = Subset(dataset, subset_indices)              
+    
+    if mode == 'validation' and parallelism > 1:
+        sampler    = DistributedSampler(dataset, 
+                                    shuffle=False,
+                                    num_replicas=(torch.distributed.get_world_size()//parallelism),
+                                    rank=rank//parallelism
+                                    ) 
+        dataloader = DataLoader(dataset, 
+                                batch_size=batch_size, 
+                                shuffle=False, 
+                                sampler=sampler, 
+                                drop_last=True, 
+                                pin_memory=torch.cuda.is_available(), 
+                                prefetch_factor=config_dict['data']['prefetch_factor'], 
+                                num_workers=config_dict['data']['num_workers']
+                                ) 
+        return dataloader
+    else:
+        sampler    = DistributedSampler(dataset, 
+                                    shuffle=True,
+                                    num_replicas=(torch.distributed.get_world_size()//parallelism),
+                                    rank=rank//parallelism
+                                    ) 
+        dataloader = DataLoader(dataset, 
+                                batch_size=batch_size, 
+                                shuffle=(sampler is None), 
+                                sampler=sampler, 
+                                drop_last=True, 
+                                pin_memory=torch.cuda.is_available(), 
+                                prefetch_factor=config_dict['data']['prefetch_factor'], 
+                                num_workers=config_dict['data']['num_workers']
+                                )
+
+    return dataloader
+
 def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distributed=False, batch_size=1, normalize=True, rank=None, dt=None):
     parallelism = config_dict['model_parallel']['parallelism']
     dt = config_dict['data']['dt'] if dt is None else dt
@@ -199,7 +245,7 @@ def count_parameters(model):
 
 def load_constant_mask_2d(
     patch_size,
-    folder_path="/hkfs/work/workspace/scratch/ke4365-summa/constant_masks/",
+    folder_path="/hkfs/work/workspace/scratch/ke4365-jigsaw/constant_masks/",
     xlat=721
 ):
     """

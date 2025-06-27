@@ -375,7 +375,7 @@ class ERA5DatasetDistributed(Dataset):
 
 def load_constant_mask_2d(
     patch_size,
-    folder_path="/hkfs/work/workspace/scratch/ke4365-summa/constant_masks/",
+    folder_path="/hkfs/work/workspace/scratch/ke4365-jigsaw/constant_masks/",
     xlat=721
 ):
     """
@@ -424,3 +424,50 @@ def load_constant_mask_2d(
 
     
     return land_mask, soil_type, topography
+
+class DummyHighResDataset(Dataset):
+    def __init__(self, config, nvars=72, nsamples=100):
+        self.x = config['data']['xlat']
+        self.y = config['data']['xlon']
+        self.nvars = nvars
+        self.seed = 1 # random seed for now
+        self.config = config
+        self.nsamples = nsamples
+    
+    def __len__(self):
+        if self.config['data']['train_subset'] == -1:
+            return self.nsamples
+        else:
+            return self.config['data']['train_subset']
+
+    def __getitem__(self, global_idx):
+        return torch.rand((self.x, self.y, self.nvars), dtype=torch.float32), torch.rand((self.x, self.y, self.nvars), dtype=torch.float32)
+    
+class DistributedDummyHighResDataset(DummyHighResDataset):
+    def __init__(self, config, nvars=72):
+        super().__init__(config)
+        self.parallelism = config['model_parallel']['parallelism']
+        self.y = -(-self.y//(self.parallelism//2))
+        self.nvars = -(-nvars//2) # ceiling function
+        self.seed = 1 # random seed for now
+        print(self.x, self.y, self.nvars)
+
+class DistributedHighResDataset(ERA5DatasetDistributed):
+    def __init__(self, config, file_path, mode, patch_size, rank, forecast_length=1, normalize=True, dt=None):
+        super().__init__(config, file_path, mode, patch_size, rank, forecast_length=1, normalize=True, dt=None)
+        
+    
+    def __getitem__(self, global_idx):
+        input, target = super().__getitem__(global_idx)
+        input = input.permute(2, 0, 1).unsqueeze(0)
+
+        input_up  = torch.nn.functional.interpolate(input, scale_factor=(2,2), mode='bilinear', align_corners=True)        
+
+        for i, t in enumerate(target):
+            t = t.permute(2, 0, 1).unsqueeze(0)
+            t = torch.nn.functional.interpolate(t, scale_factor=(2,2), mode='bilinear', align_corners=True)
+            target[i] = t.squeeze(0).permute(1,2,0)
+        input_up =  input_up.squeeze(0).permute(1,2,0)
+        return input_up, target
+    
+            
