@@ -221,13 +221,22 @@ class ERA5DatasetDistributed(Dataset):
         self.batch_size = config['training']['train_batch']
         self.parallelism = config['model_parallel']['parallelism']
 
-        if self.parallelism == 4:
-            if self.rank % 4 in [0, 1]:
+        if self.parallelism == 2:
+            self.start, self.end = 0, self.xlon
+        elif self.parallelism == 4:
+            if self.rank % 4 in [0, 1]: 
                 self.start, self.end = 0, self.xlon//2
             else:
                 self.start, self.end = self.xlon//2, self.xlon
-        else:
-            self.start, self.end = 0, self.xlon
+        elif self.parallelism == 8:
+            if self.rank % 4 in [0, 1]:
+                self.start, self.end = 0, self.xlon//4
+            elif self.rank % 4 in [2, 3]:
+                self.start, self.end = self.xlon//4, self.xlon//2
+            elif self.rank % 4 in [4, 5]:
+                self.start, self.end = self.xlon//2, self.xlon*3//4
+            elif self.rank % 4 in [6, 7]:
+                self.start, self.end = self.xlon*3//4, self.xlon
                
         self.land_mask, self.soil_type, self.topography = load_constant_mask_2d(self.patch_size, xlat=self.xlat)
         self.land_mask = torch.unsqueeze(self.land_mask[:,self.start:self.end], 0)
