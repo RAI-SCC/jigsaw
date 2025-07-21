@@ -580,6 +580,52 @@ class DistributedLN(torch.autograd.Function):
             Gradient of the loss with respect to the input of the layer.
         """
         return grad_output, None, None
+    
+class DistributedSoftMax(torch.nn.Module):
+    #TODO: check for correctness
+    def __init__(self, dim=-1, group=None):
+        super().__init__()
+        self.dim = dim
+        self.group = group if group is not None else torch.distributed.group.WORLD
+        self.func = _DistributedSoftmax.apply
+
+    def forward(self, x):
+        return self.func(x, self.dim, self.group)
+
+class _DistributedSoftmax(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, dim, group):
+        # store context
+        ctx.dim = dim
+        ctx.group = group
+
+        # local exponentials
+        y = torch.exp(x - x.amax(dim=dim, keepdim=True))
+        local_sum = y.sum(dim=dim, keepdim=True)
+        # global sum
+        global_sum = local_sum.clone()
+        torch.distributed.all_reduce(global_sum, op=torch.distributed.ReduceOp.SUM, group=group)
+        
+        # final softmax
+        out = y / global_sum
+        ctx.save_for_backward(out, global_sum)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        out, global_sum = ctx.saved_tensors
+        dim = ctx.dim
+        group = ctx.group
+
+        # local grad numerator
+        local_grad = grad_out * out
+        local_sum = local_grad.sum(dim=dim, keepdim=True)
+        # global sum for gradient
+        global_grad_sum = local_sum.clone()
+        torch.distributed.all_reduce(global_grad_sum, op=torch.distributed.ReduceOp.SUM, group=group)
+
+        grad_x = local_grad - out * global_grad_sum
+        return grad_x, None, None
 
     
 class DistributedXWT_fourway(torch.nn.Module):
@@ -861,7 +907,44 @@ class XWT_twoway(torch.autograd.Function):
         grad_b = grad_output
 
         return grad_input, grad_weight, grad_b, None, None, None
+    
+class DistributedXWT_attention_twoway(torch.nn.Module):
+    """
+    Batched matrix-matrix (XWT) multiplication distributed across two processes.
+    """
+    def __init__(self, device, rank, model_group):
+        """
+        Initialize the XWT Linear layer sharded over two processes.
+        """
+        self.device = device
+        self.rank = rank
+        self.model_group = model_group
 
+        super().__init__()
+        self.XWT = XWT_twoway().apply
+    
+    def forward(self, x, w, b, model_group):
+        """
+        Forward pass of linear layer (XWT) distributed across two processes.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input tensor of shape (B, x_in, in_dim).
+        model_group : torch.distributed.ProcessGroup, optional
+            Process group for an individual model-parallel instance.
+        Returns
+        -------
+        Cij: torch.Tensor
+            Local output tensor of shape (B, out_dim, in_dim).
+            B, out_dim are global values.
+            in_dim is local value.
+        """
+
+        Cij = self.XWT(x, w, b, self.device, self.rank, model_group)
+        
+        return Cij
+    
 class DistributedTranspose(torch.nn.Module):
     """
     Batched transpose (XT) operation distributed across four processes.
