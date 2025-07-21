@@ -77,7 +77,7 @@ def mixing_block(ntokens, patch_embedding_out, spatial_hidden_dim, channels_hidd
 
 
 def calc_flops_comm(config):
-    nlat, nlon=720, 1440
+    nlat, nlon=config['data']['xlat'], config['data']['xlon']
     nvars_in, nvars_out = 72, 72
     patch_size = config['model']['patch_size']
     patch_embedding_in = patch_size * nvars_in
@@ -101,7 +101,7 @@ def calc_flops_comm(config):
 
     tflop_per_block, gb_per_block = mixing_block(input_data[0], patch_embedding_out, spatial_hidden_dim, channels_hidden_dim)
 
-    flop_forward = tflop_per_block*3+ patch_embedding_flop + linlayer_flop + patch_recovery_flop
-    comm_forward = gb_per_block*3 + patch_embedding_comm + linlayer_comm + patch_recovery_comm
+    flop_forward = tflop_per_block*config['model']['mixing_blocks'] + patch_embedding_flop + linlayer_flop + patch_recovery_flop
+    comm_forward = gb_per_block*config['model']['mixing_blocks'] + patch_embedding_comm + linlayer_comm + patch_recovery_comm
 
     return flop_forward, comm_forward

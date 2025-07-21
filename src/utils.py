@@ -114,12 +114,17 @@ def send_data_fourway(data, buffer, rank, device):
     return input_data
 
 
-def get_highres_dataloader(config_dict, data_path, mode='train', subset_size=0, distributed=False, batch_size=1, normalize=True, rank=None, dt=None):
+def get_highres_dataloader(config_dict, data_path, mode='train', subset_size=0, distributed=False, batch_size=1, normalize=True, rank=None, dt=None, type='dummy'):
     parallelism = config_dict['model_parallel']['parallelism']
     dt = config_dict['data']['dt'] if dt is None else dt
     if parallelism == 1:
-        dataset = DummyHighResDataset(config_dict)
-    else:
+        if type == 'dummy':
+            dataset = DummyHighResDataset(config_dict, nvars=69)
+        else:
+            DistributedHighResDataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
+    elif type == 'dummy':
+        dataset = DistributedDummyHighResDataset(config_dict)
+    elif type == 'upsample':
         dataset = DistributedHighResDataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
     
     if subset_size != 0: 

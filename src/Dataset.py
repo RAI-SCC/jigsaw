@@ -439,9 +439,10 @@ class DummyHighResDataset(Dataset):
             return self.nsamples
         else:
             return self.config['data']['train_subset']
-
+    
     def __getitem__(self, global_idx):
-        return torch.rand((self.x, self.y, self.nvars), dtype=torch.float32), torch.rand((self.x, self.y, self.nvars), dtype=torch.float32)
+        return torch.rand((self.nvars, self.x, self.y), dtype=torch.float32), torch.rand((self.nvars, self.x, self.y), dtype=torch.float32)
+    
     
 class DistributedDummyHighResDataset(DummyHighResDataset):
     def __init__(self, config, nvars=72):
@@ -451,6 +452,9 @@ class DistributedDummyHighResDataset(DummyHighResDataset):
         self.nvars = -(-nvars//2) # ceiling function
         self.seed = 1 # random seed for now
         print(self.x, self.y, self.nvars)
+
+    def __getitem__(self, global_idx):
+        return torch.rand((self.x, self.y, self.nvars), dtype=torch.float32), torch.rand((self.x, self.y, self.nvars), dtype=torch.float32)
 
 class DistributedHighResDataset(ERA5DatasetDistributed):
     def __init__(self, config, file_path, mode, patch_size, rank, forecast_length=1, normalize=True, dt=None):
