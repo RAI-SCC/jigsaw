@@ -52,6 +52,7 @@ class DistributedAttention_twoway(torch.nn.Module):
 
     return values
 
+
 device, _, rank, _ = utils.init_CUDA()
 
 x_items, x_features, embed_dim = 10, 8, 4 # global values
