@@ -1015,42 +1015,60 @@ class XWT_twoway(torch.autograd.Function):
         grad_b = grad_output
 
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> cba30d5 (added xw multiplication for value computation)
         if b is None:
             return grad_input, grad_weight, None, None, None, None
         else:
             return grad_input, grad_weight, grad_b, None, None, None
+<<<<<<< HEAD
 =======
         return grad_input, grad_weight, grad_b, None, None, None
 >>>>>>> 6a6d4c2 (prelimiary attention implmenetation)
+=======
+>>>>>>> cba30d5 (added xw multiplication for value computation)
     
 class DistributedXWT_attention_twoway(torch.nn.Module):
     """
     Batched matrix-matrix (XWT) multiplication distributed across two processes.
     """
 <<<<<<< HEAD
+<<<<<<< HEAD
     def __init__(self, device, rank, model_group=None):
 =======
     def __init__(self, device, rank, model_group):
 >>>>>>> 6a6d4c2 (prelimiary attention implmenetation)
+=======
+    def __init__(self, device, rank, model_group=None):
+>>>>>>> cba30d5 (added xw multiplication for value computation)
         """
         Initialize the XWT Linear layer sharded over two processes.
         """
         self.device = device
         self.rank = rank
 <<<<<<< HEAD
+<<<<<<< HEAD
         self.model_group = model_group # TODO: no bias term
 =======
         self.model_group = model_group
 >>>>>>> 6a6d4c2 (prelimiary attention implmenetation)
+=======
+        self.model_group = model_group # TODO: no bias term
+>>>>>>> cba30d5 (added xw multiplication for value computation)
 
         super().__init__()
         self.XWT = XWT_twoway().apply
     
 <<<<<<< HEAD
+<<<<<<< HEAD
     def forward(self, x, w):
 =======
     def forward(self, x, w, b, model_group):
 >>>>>>> 6a6d4c2 (prelimiary attention implmenetation)
+=======
+    def forward(self, x, w):
+>>>>>>> cba30d5 (added xw multiplication for value computation)
         """
         Forward pass of linear layer (XWT) distributed across two processes.
 
@@ -1069,6 +1087,9 @@ class DistributedXWT_attention_twoway(torch.nn.Module):
         """
 
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> cba30d5 (added xw multiplication for value computation)
         Cij = self.XWT(x, w, None, self.device, self.rank, self.model_group)
         
         return Cij
@@ -1107,9 +1128,12 @@ class DistributedXW_attention_twoway(torch.nn.Module):
         """
 
         Cij = self.XW(x, w, None, self.device, self.rank, self.model_group)
+<<<<<<< HEAD
 =======
         Cij = self.XWT(x, w, b, self.device, self.rank, model_group)
 >>>>>>> 6a6d4c2 (prelimiary attention implmenetation)
+=======
+>>>>>>> cba30d5 (added xw multiplication for value computation)
         
         return Cij
     
