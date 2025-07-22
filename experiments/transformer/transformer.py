@@ -132,6 +132,7 @@ class DistributedAttention_twoway(torch.nn.Module):
     return values
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 
 device, _, rank, _ = utils.init_CUDA()
 
@@ -175,6 +176,9 @@ target = torch.rand((3, 4, 6)).to(device)
 print(result)
 loss = torch.nn.functional.mse_loss(result, target)
 =======
+=======
+
+>>>>>>> 23c9c63 (four-way transformer implementation; lacks proper softmax comms)
 device, _, rank, _ = utils.init_CUDA()
 
 x_items, x_features, embed_dim = 10, 8, 4 # global values
