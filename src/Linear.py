@@ -652,26 +652,12 @@ class _DistributedSoftmax(torch.autograd.Function):
         ctx.group = group
 
         # local exponentials
-<<<<<<< HEAD
-<<<<<<< HEAD
+
         y = torch.exp(x)#-x.amax(dim=dim, keepdim=True)) # softmax fails with norm if only 1 variable
         local_sum = y.sum(dim=dim, keepdim=True)
         # global sum
         global_sum = local_sum.clone()
-        
-=======
-        y = torch.exp(x - x.amax(dim=dim, keepdim=True))
-        local_sum = y.sum(dim=dim, keepdim=True)
-        # global sum
-        global_sum = local_sum.clone()
->>>>>>> 6a6d4c2 (prelimiary attention implmenetation)
-=======
-        y = torch.exp(x)#-x.amax(dim=dim, keepdim=True)) # softmax fails with norm if only 1 variable
-        local_sum = y.sum(dim=dim, keepdim=True)
-        # global sum
-        global_sum = local_sum.clone()
-        
->>>>>>> 2e4d3ee (include distributed operations required for attention)
+
         torch.distributed.all_reduce(global_sum, op=torch.distributed.ReduceOp.SUM, group=group)
         
         # final softmax
@@ -1021,62 +1007,27 @@ class XWT_twoway(torch.autograd.Function):
         grad_input  = dist_mm.XW_twoway(grad_output, weight, device=device, rank=rank)
         grad_weight = dist_mm.XTW_twoway(grad_output, input, device=device, rank=rank)
         grad_b = grad_output
-
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> cba30d5 (added xw multiplication for value computation)
         if b is None:
             return grad_input, grad_weight, None, None, None, None
         else:
             return grad_input, grad_weight, grad_b, None, None, None
-<<<<<<< HEAD
-=======
-        return grad_input, grad_weight, grad_b, None, None, None
->>>>>>> 6a6d4c2 (prelimiary attention implmenetation)
-=======
->>>>>>> cba30d5 (added xw multiplication for value computation)
     
 class DistributedXWT_attention_twoway(torch.nn.Module):
     """
     Batched matrix-matrix (XWT) multiplication distributed across two processes.
     """
-<<<<<<< HEAD
-<<<<<<< HEAD
-    def __init__(self, device, rank, model_group=None):
-=======
     def __init__(self, device, rank, model_group):
->>>>>>> 6a6d4c2 (prelimiary attention implmenetation)
-=======
-    def __init__(self, device, rank, model_group=None):
->>>>>>> cba30d5 (added xw multiplication for value computation)
         """
         Initialize the XWT Linear layer sharded over two processes.
         """
         self.device = device
         self.rank = rank
-<<<<<<< HEAD
-<<<<<<< HEAD
         self.model_group = model_group # TODO: no bias term
-=======
-        self.model_group = model_group
->>>>>>> 6a6d4c2 (prelimiary attention implmenetation)
-=======
-        self.model_group = model_group # TODO: no bias term
->>>>>>> cba30d5 (added xw multiplication for value computation)
 
         super().__init__()
         self.XWT = XWT_twoway().apply
-    
-<<<<<<< HEAD
-<<<<<<< HEAD
-    def forward(self, x, w):
-=======
+
     def forward(self, x, w, b, model_group):
->>>>>>> 6a6d4c2 (prelimiary attention implmenetation)
-=======
-    def forward(self, x, w):
->>>>>>> cba30d5 (added xw multiplication for value computation)
         """
         Forward pass of linear layer (XWT) distributed across two processes.
 
@@ -1094,10 +1045,6 @@ class DistributedXWT_attention_twoway(torch.nn.Module):
             in_dim is local value.
         """
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> cba30d5 (added xw multiplication for value computation)
         Cij = self.XWT(x, w, None, self.device, self.rank, self.model_group)
         
         return Cij
@@ -1136,12 +1083,6 @@ class DistributedXW_attention_twoway(torch.nn.Module):
         """
 
         Cij = self.XW(x, w, None, self.device, self.rank, self.model_group)
-<<<<<<< HEAD
-=======
-        Cij = self.XWT(x, w, b, self.device, self.rank, model_group)
->>>>>>> 6a6d4c2 (prelimiary attention implmenetation)
-=======
->>>>>>> cba30d5 (added xw multiplication for value computation)
         
         return Cij
     

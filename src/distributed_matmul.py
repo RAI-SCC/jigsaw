@@ -323,8 +323,6 @@ def XW_fourway(Xij, Wij, rank,  device, model_group=None):
         Cij = Cij + torch.matmul(x_recv_list[2], w_recv_list[1]) 
     return Cij
 
-<<<<<<< HEAD
-<<<<<<< HEAD
 def XW_twoway_(Xij, Wij, device, rank, model_group=None):
     """
     Batched matrix-matrix (XW) multiplication distributed across two processes.
@@ -335,18 +333,6 @@ def XW_twoway_(Xij, Wij, device, rank, model_group=None):
         Local input matrix.
     Wij : torch.Tensor
         Local weight matrix.
-=======
-    
-def matrix_transpose_twoway_(X, rank, device, model_group=None):
-    """
-    Batched transpose (XT) operation distributed across two processes.
-    Parameters
-    ----------
-    X : torch.Tensor
-        The input tensor.
-    rank : int
-        Global rank.
->>>>>>> cee3983 (merge from main)
     device : torch.device
         Device to perform computation on.
     rank : int
@@ -386,11 +372,7 @@ def matrix_transpose_twoway_(X, rank, device, model_group=None):
         Cij = Cij + torch.matmul(bufferX, W0)
     return Cij 
 
-<<<<<<< HEAD
 def XW_twoway(Xij, Wij, device, rank, model_group=None):
-=======
-def matrix_transpose_twoway(X, rank, device, model_group=None):
->>>>>>> cee3983 (merge from main)
     """
     Batched matrix-matrix (XW) multiplication distributed across two processes.
 
@@ -440,16 +422,7 @@ def matrix_transpose_twoway(X, rank, device, model_group=None):
     return Cij 
 
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
-=======
->>>>>>> 5931ddc (merge from main)
 def XWT_eightway(Xij, Wij, device, rank, model_group=None):
-=======
-def XWT_fourway(Xij, Wij, rank,  device, model_group=None):
-    
->>>>>>> cee3983 (merge from main)
     """
     Batched matrix-matrix (XWT) multiplication distributed across four processes.
     Parameters
@@ -592,8 +565,6 @@ def XWT_fourway(Xij, Wij, rank,  device, model_group=None):
     handle_2 = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
     
     handle_2.wait()
-<<<<<<< HEAD
-=======
 
     if mod == 0 or mod == 3:
         Cij = torch.matmul(Xij, Wij.mT)
@@ -706,8 +677,7 @@ def XTW_fourway(Xij, Wij, rank, device, model_group=None):
     
     return Cij
 
-=======
->>>>>>> 8d84a46 (add xwt implementation back)
+
 def XW_twoway_(Xij, Wij, device, rank, model_group=None):
     """
     Batched matrix-matrix (XW) multiplication distributed across two processes.
@@ -806,8 +776,6 @@ def XW_twoway(Xij, Wij, device, rank, model_group=None):
         Cij = Cij + torch.matmul(xw_recv_list[0], W0)
     return Cij 
 
-
-<<<<<<< HEAD
 def XWT_twoway_(Xij, Wij, device, rank, model_group=None):
     """
     Batched matrix-matrix (XWT) multiplication distributed across two processes.
@@ -905,7 +873,6 @@ def XWT_twoway(Xij, Wij, device, rank, model_group=None):
 
     xw_handle = dist.all_to_all(xw_recv_list, xw_send_list, group=model_group, async_op=True)
         
->>>>>>> cee3983 (merge from main)
     if mod == 0:
         Cij = torch.matmul(Xij, W0.mT)
         xw_handle.wait()
@@ -951,22 +918,6 @@ def XTW_twoway_(Xij, Wij, device, rank, model_group=None):
         send_B_1.wait()
         recv_B_1.wait()
         
-    elif mod == 1:
-        Cij = torch.matmul(Xij, w_recv_list[5].mT) + torch.matmul(Xij, w_recv_list[7].mT)
-    elif mod == 2:
-        Cij = torch.matmul(Xij, Wij.mT) + torch.matmul(Xij, w_recv_list[0].mT)
-    elif mod == 3:
-        Cij = torch.matmul(Xij, w_recv_list[5].mT) + torch.matmul(Xij, w_recv_list[7].mT)
-    elif mod == 4:
-        Cij = torch.matmul(Xij, w_recv_list[0].mT) + torch.matmul(Xij, w_recv_list[2].mT)
-    elif mod == 5:
-        Cij = torch.matmul(Xij, Wij.mT) + torch.matmul(Xij, w_recv_list[7].mT)
-    elif mod == 6:
-        Cij = torch.matmul(Xij, w_recv_list[0].mT) + torch.matmul(Xij, w_recv_list[2].mT)
-    elif mod == 7:
-        Cij = torch.matmul(Xij, w_recv_list[5].mT) + torch.matmul(Xij, Wij.mT)
-        
-    handle_1.wait()
     
     if mod == 0:
         Cij_bottom = torch.matmul(bufferX.mT, Wij)
@@ -976,9 +927,6 @@ def XTW_twoway_(Xij, Wij, device, rank, model_group=None):
     Cij = torch.concat([Cij_top, Cij_bottom], dim=-2)
     return Cij
 
->>>>>>> 2e4d3ee (include distributed operations required for attention)
-=======
->>>>>>> 8d84a46 (add xwt implementation back)
 def XTW_twoway(Xij, Wij, device, rank, model_group=None):
     """
     Batched matrix-matrix (XTW) multiplication distributed across two processes.
@@ -1079,8 +1027,4 @@ def XWT_twoway(Xij, Wij, device, rank, model_group=None):
         xw_handle.wait()
         Cij = Cij + xw_recv_list[0]
     
-<<<<<<< HEAD
     return Cij
-=======
-    return Cij
->>>>>>> 8d84a46 (add xwt implementation back)
