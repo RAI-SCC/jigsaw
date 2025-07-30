@@ -653,6 +653,7 @@ class _DistributedSoftmax(torch.autograd.Function):
 
         # local exponentials
 <<<<<<< HEAD
+<<<<<<< HEAD
         y = torch.exp(x)#-x.amax(dim=dim, keepdim=True)) # softmax fails with norm if only 1 variable
         local_sum = y.sum(dim=dim, keepdim=True)
         # global sum
@@ -664,6 +665,13 @@ class _DistributedSoftmax(torch.autograd.Function):
         # global sum
         global_sum = local_sum.clone()
 >>>>>>> 6a6d4c2 (prelimiary attention implmenetation)
+=======
+        y = torch.exp(x)#-x.amax(dim=dim, keepdim=True)) # softmax fails with norm if only 1 variable
+        local_sum = y.sum(dim=dim, keepdim=True)
+        # global sum
+        global_sum = local_sum.clone()
+        
+>>>>>>> 2e4d3ee (include distributed operations required for attention)
         torch.distributed.all_reduce(global_sum, op=torch.distributed.ReduceOp.SUM, group=group)
         
         # final softmax
