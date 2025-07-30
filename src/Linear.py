@@ -652,10 +652,11 @@ class _DistributedSoftmax(torch.autograd.Function):
         ctx.group = group
 
         # local exponentials
-        y = torch.exp(x - x.amax(dim=dim, keepdim=True))
+        y = torch.exp(x)#-x.amax(dim=dim, keepdim=True)) # softmax fails with norm if only 1 variable
         local_sum = y.sum(dim=dim, keepdim=True)
         # global sum
         global_sum = local_sum.clone()
+        
         torch.distributed.all_reduce(global_sum, op=torch.distributed.ReduceOp.SUM, group=group)
         
         # final softmax

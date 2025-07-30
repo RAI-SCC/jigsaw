@@ -142,10 +142,9 @@ def XWT_twoway(Xij, Wij, device, rank, model_group=None):
     mod = rank % 2
         
     W0, W1 = torch.split(Wij, Wij.shape[-2]//2, dim=-2)
-    bufferXW = get_preallocated_buffer((*Xij.shape[:-1], W0.shape[-2]), torch.float32, device, rank) 
+    bufferXW = get_preallocated_buffer((*Xij.shape[:-1], W0.shape[-2]), Xij.dtype, device, rank) 
 
-    empty = torch.empty(0, device=device)
-    
+    empty = torch.empty(0, device=device, dtype=Xij.dtype)
 
     if mod == 0:
         XW = torch.matmul(Xij, W1.mT)
@@ -196,7 +195,7 @@ def XW_twoway(Xij, Wij, device, rank, model_group=None):
     
     mod = rank % 2
     W0, W1 = torch.split(Wij, Wij.shape[-2]//2, dim=-2)
-    bufferX = get_preallocated_buffer(Xij.shape, torch.float32, device, rank) 
+    bufferX = get_preallocated_buffer(Xij.shape, Xij.dtype, device, rank) 
     if mod == 0: 
         # Rank 0 send A, B to 1 and 2. Receives A, B from 1 and 2.
         send_W_1 = torch.distributed.isend(Xij, dst=rank+1, group=None)
@@ -243,7 +242,7 @@ def XTW_twoway(Xij, Wij, device, rank, model_group=None):
     """    
     mod = rank % 2
 
-    bufferX = get_preallocated_buffer(Xij.shape, torch.float32, device, rank)
+    bufferX = get_preallocated_buffer(Xij.shape, Xij.dtype, device, rank)
     
     if mod == 0: 
         send_B_1 = torch.distributed.isend(Xij, dst=rank+1, group=None)
