@@ -198,7 +198,6 @@ class DistributedAttention_twoway(torch.nn.Module):
 >>>>>>> b72d58d (minimal working example of twoway-distributed multihead attention)
     
     attention = self.softmax(attention) # TODO: groups for softmax also need to be determined. probably same partners as layernorm
-    print(f'Rank {rank}: softmax {attention}')
     values = self.xw(attention, v)    
 <<<<<<< HEAD
     values = self.mlp(values, model_group=None)
