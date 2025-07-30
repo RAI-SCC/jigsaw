@@ -101,7 +101,6 @@ class DistributedAttention_twoway(torch.nn.Module):
     
     
     attention = self.softmax(attention) # TODO: groups for softmax also need to be determined. probably same partners as layernorm
-    print(f'Rank {rank}: softmax {attention}')
     values = self.xw(attention, v)    
     print(values)
     #values = self.mlp(values, model_group=None)
