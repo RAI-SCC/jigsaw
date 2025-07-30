@@ -324,6 +324,7 @@ def XW_fourway(Xij, Wij, rank,  device, model_group=None):
     return Cij
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 def XW_twoway_(Xij, Wij, device, rank, model_group=None):
     """
     Batched matrix-matrix (XW) multiplication distributed across two processes.
@@ -705,6 +706,8 @@ def XTW_fourway(Xij, Wij, rank, device, model_group=None):
     
     return Cij
 
+=======
+>>>>>>> 8d84a46 (add xwt implementation back)
 def XW_twoway_(Xij, Wij, device, rank, model_group=None):
     """
     Batched matrix-matrix (XW) multiplication distributed across two processes.
@@ -804,6 +807,7 @@ def XW_twoway(Xij, Wij, device, rank, model_group=None):
     return Cij 
 
 
+<<<<<<< HEAD
 def XWT_twoway_(Xij, Wij, device, rank, model_group=None):
     """
     Batched matrix-matrix (XWT) multiplication distributed across two processes.
@@ -973,6 +977,8 @@ def XTW_twoway_(Xij, Wij, device, rank, model_group=None):
     return Cij
 
 >>>>>>> 2e4d3ee (include distributed operations required for attention)
+=======
+>>>>>>> 8d84a46 (add xwt implementation back)
 def XTW_twoway(Xij, Wij, device, rank, model_group=None):
     """
     Batched matrix-matrix (XTW) multiplication distributed across two processes.
@@ -1073,4 +1079,8 @@ def XWT_twoway(Xij, Wij, device, rank, model_group=None):
         xw_handle.wait()
         Cij = Cij + xw_recv_list[0]
     
+<<<<<<< HEAD
     return Cij
+=======
+    return Cij
+>>>>>>> 8d84a46 (add xwt implementation back)
