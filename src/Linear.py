@@ -51,6 +51,43 @@ class DistributedXW_fourway(torch.nn.Module):
         
         return Cij
     
+class DistributedXW_attention_fourway(torch.nn.Module):
+    """
+    Batched matrix-matrix (XWT) multiplication distributed across two processes.
+    """
+    def __init__(self, device, rank, model_group=None):
+        """
+        Initialize the XWT Linear layer sharded over two processes.
+        """
+        self.device = device
+        self.rank = rank
+        self.model_group = model_group # TODO: no bias term
+
+        super().__init__()
+        self.XW = XW_fourway().apply
+    
+    def forward(self, x, w):
+        """
+        Forward pass of linear layer (XWT) distributed across two processes.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input tensor of shape (B, x_in, in_dim).
+        model_group : torch.distributed.ProcessGroup, optional
+            Process group for an individual model-parallel instance.
+        Returns
+        -------
+        Cij: torch.Tensor
+            Local output tensor of shape (B, out_dim, in_dim).
+            B, out_dim are global values.
+            in_dim is local value.
+        """
+
+        Cij = self.XW(x, w, None, self.device, self.rank, self.model_group)
+        
+        return Cij
+    
 class XW_fourway(torch.autograd.Function):
     """
     Autograd function for batched matrix-matrix (XW) multiplication distributed across four processes.
@@ -88,9 +125,14 @@ class XW_fourway(torch.autograd.Function):
         ctx.device = device
         ctx.rank = rank
         ctx.model_group = model_group
+        ctx.b = b
+
         XW = dist_mm.XW_fourway(x, W, rank,  device, model_group)
         
-        return XW.add(b)
+        if b is None:
+            return XW
+        else:
+            return XW.add(b)
         
     
     @staticmethod
@@ -122,8 +164,11 @@ class XW_fourway(torch.autograd.Function):
         grad_input  = dist_mm.XWT_fourway(grad_output, weight, rank=rank, device=device, model_group=model_group)
         grad_weight = dist_mm.XTW_fourway(input, grad_output, rank=rank, device=device, model_group=model_group)
         grad_b      = grad_output
-        
-        return grad_input, grad_weight, grad_b, None, None, None
+
+        if ctx.b is None:
+            return grad_input, grad_weight, None, None, None, None
+        else:
+            return grad_input, grad_weight, grad_b, None, None, None
     
 class DistributedXW_twoway(torch.nn.Module):
     """
@@ -213,8 +258,12 @@ class XW_twoway(torch.autograd.Function):
         ctx.device = device
         ctx.rank = rank
         ctx.model_group = model_group
+        ctx.b = b
         
-        return dist_mm.XW_twoway(x, W, device, rank, model_group).add(b)
+        if b is None:
+            return dist_mm.XW_twoway(x, W, device, rank, model_group)
+        else:
+            return dist_mm.XW_twoway(x, W, device, rank, model_group).add(b)
         
     @staticmethod
     def backward(ctx, grad_output):
@@ -246,7 +295,10 @@ class XW_twoway(torch.autograd.Function):
         grad_weight = dist_mm.XTW_twoway(input, grad_output, rank=rank, device=device, model_group=model_group)
         grad_bias   = grad_output
 
-        return grad_input, grad_weight, grad_bias, None, None, None
+        if ctx.b is None:
+            return grad_input, grad_weight, None, None, None, None
+        else:
+            return grad_input, grad_weight, grad_bias, None, None, None
          
 class DistributedXTW_fourway(torch.nn.Module):
     """
@@ -580,6 +632,54 @@ class DistributedLN(torch.autograd.Function):
             Gradient of the loss with respect to the input of the layer.
         """
         return grad_output, None, None
+    
+class DistributedSoftMax(torch.nn.Module):
+    #TODO: check for correctness
+    def __init__(self, dim=-1, group=None):
+        super().__init__()
+        self.dim = dim
+        self.group = group if group is not None else torch.distributed.group.WORLD
+        self.func = _DistributedSoftmax.apply
+
+    def forward(self, x):
+        return self.func(x, self.dim, self.group)
+
+class _DistributedSoftmax(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, dim, group):
+        # store context
+        ctx.dim = dim
+        ctx.group = group
+
+        # local exponentials
+
+        y = torch.exp(x)#-x.amax(dim=dim, keepdim=True)) # softmax fails with norm if only 1 variable
+        local_sum = y.sum(dim=dim, keepdim=True)
+        # global sum
+        global_sum = local_sum.clone()
+
+        torch.distributed.all_reduce(global_sum, op=torch.distributed.ReduceOp.SUM, group=group)
+        
+        # final softmax
+        out = y / global_sum
+        ctx.save_for_backward(out, global_sum)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        out, global_sum = ctx.saved_tensors
+        dim = ctx.dim
+        group = ctx.group
+
+        # local grad numerator
+        local_grad = grad_out * out
+        local_sum = local_grad.sum(dim=dim, keepdim=True)
+        # global sum for gradient
+        global_grad_sum = local_sum.clone()
+        torch.distributed.all_reduce(global_grad_sum, op=torch.distributed.ReduceOp.SUM, group=group)
+
+        grad_x = local_grad - out * global_grad_sum
+        return grad_x, None, None
 
     
 class DistributedXWT_fourway(torch.nn.Module):
@@ -647,6 +747,42 @@ class DistributedXWT_fourway(torch.nn.Module):
         
         return Cij
     
+class DistributedXWT_attention_fourway(torch.nn.Module):
+    """
+    Batched matrix-matrix (XWT) multiplication distributed across two processes.
+    """
+    def __init__(self, device, rank, model_group=None):
+        """
+        Initialize the XWT Linear layer sharded over two processes.
+        """
+        self.device = device
+        self.rank = rank
+        self.model_group = model_group # TODO: no bias term
+
+        super().__init__()
+        self.XWT = XWT_fourway().apply
+    
+    def forward(self, x, w):
+        """
+        Forward pass of linear layer (XWT) distributed across two processes.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input tensor of shape (B, x_in, in_dim).
+        model_group : torch.distributed.ProcessGroup, optional
+            Process group for an individual model-parallel instance.
+        Returns
+        -------
+        Cij: torch.Tensor
+            Local output tensor of shape (B, out_dim, in_dim).
+            B, out_dim are global values.
+            in_dim is local value.
+        """
+
+        Cij = self.XWT(x, w, None, self.device, self.rank, self.model_group)
+        
+        return Cij
 
 class XWT_fourway(torch.autograd.Function):
     """
@@ -684,8 +820,11 @@ class XWT_fourway(torch.autograd.Function):
         ctx.rank = rank
         ctx.model_group = model_group
         xwt = dist_mm.XWT_fourway(x, W, rank, device, model_group)
-        
-        return xwt.add(b)
+        ctx.b = b
+        if b is None:
+            return xwt
+        else:
+            return xwt.add(b)
         
     
     @staticmethod
@@ -718,7 +857,11 @@ class XWT_fourway(torch.autograd.Function):
         grad_weight = dist_mm.XTW_fourway(grad_output, input, rank=rank, device=device, model_group=model_group)
         grad_b = grad_output
 
-        return grad_input, grad_weight, grad_b, None, None, None
+        if ctx.b is None:
+            return grad_input, grad_weight, None, None, None, None
+        else:
+            return grad_input, grad_weight, grad_b, None, None, None
+        
 
 class DistributedXWT_twoway(torch.nn.Module):
     """
@@ -827,8 +970,12 @@ class XWT_twoway(torch.autograd.Function):
         ctx.rank = rank
         
         xw = dist_mm.XWT_twoway(x, W, device, rank, model_group)
-        
-        return xw.add(b)
+        ctx.b = b
+
+        if b is None:
+            return xw
+        else:
+            return xw.add(b)
         
     
     @staticmethod
@@ -855,13 +1002,90 @@ class XWT_twoway(torch.autograd.Function):
         input, weight = ctx.saved_tensors
         device = ctx.device
         rank = ctx.rank
+        b = ctx.b
         
         grad_input  = dist_mm.XW_twoway(grad_output, weight, device=device, rank=rank)
         grad_weight = dist_mm.XTW_twoway(grad_output, input, device=device, rank=rank)
         grad_b = grad_output
+        if b is None:
+            return grad_input, grad_weight, None, None, None, None
+        else:
+            return grad_input, grad_weight, grad_b, None, None, None
+    
+class DistributedXWT_attention_twoway(torch.nn.Module):
+    """
+    Batched matrix-matrix (XWT) multiplication distributed across two processes.
+    """
+    def __init__(self, device, rank, model_group):
+        """
+        Initialize the XWT Linear layer sharded over two processes.
+        """
+        self.device = device
+        self.rank = rank
+        self.model_group = model_group # TODO: no bias term
 
-        return grad_input, grad_weight, grad_b, None, None, None
+        super().__init__()
+        self.XWT = XWT_twoway().apply
 
+    def forward(self, x, w, b, model_group):
+        """
+        Forward pass of linear layer (XWT) distributed across two processes.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input tensor of shape (B, x_in, in_dim).
+        model_group : torch.distributed.ProcessGroup, optional
+            Process group for an individual model-parallel instance.
+        Returns
+        -------
+        Cij: torch.Tensor
+            Local output tensor of shape (B, out_dim, in_dim).
+            B, out_dim are global values.
+            in_dim is local value.
+        """
+
+        Cij = self.XWT(x, w, None, self.device, self.rank, self.model_group)
+        
+        return Cij
+    
+class DistributedXW_attention_twoway(torch.nn.Module):
+    """
+    Batched matrix-matrix (XWT) multiplication distributed across two processes.
+    """
+    def __init__(self, device, rank, model_group=None):
+        """
+        Initialize the XWT Linear layer sharded over two processes.
+        """
+        self.device = device
+        self.rank = rank
+        self.model_group = model_group # TODO: no bias term
+
+        super().__init__()
+        self.XW = XW_twoway().apply
+    
+    def forward(self, x, w):
+        """
+        Forward pass of linear layer (XW) distributed across two processes.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input tensor of shape (B, x_in, in_dim).
+        model_group : torch.distributed.ProcessGroup, optional
+            Process group for an individual model-parallel instance.
+        Returns
+        -------
+        Cij: torch.Tensor
+            Local output tensor of shape (B, out_dim, in_dim).
+            B, out_dim are global values.
+            in_dim is local value.
+        """
+
+        Cij = self.XW(x, w, None, self.device, self.rank, self.model_group)
+        
+        return Cij
+    
 class DistributedTranspose(torch.nn.Module):
     """
     Batched transpose (XT) operation distributed across four processes.

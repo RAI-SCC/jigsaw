@@ -1,6 +1,6 @@
 import torch
 from torch import permute, reshape
-from torch.nn import Conv2d, ConvTranspose2d
+from torch.nn import Conv2d, ConvTranspose2d, Softmax
 from utils import load_constant_mask_2d
 import Linear
 
@@ -792,3 +792,53 @@ class Distributed1DPatchRecovery_twoway(torch.nn.Module):
     output = output.view(output_shape[0], output_shape[1], output_shape[2]*output_shape[3], output_shape[4])
     # output shape: [n_batch, n_patch/2, n_var/2]
     return output
+  
+
+# Transformer-based patch embedding
+class DistributedAttention_twoway(torch.nn.Module):
+  def __init__(self, n_lat, n_lon, patch_size, var_in, embed_dim, device, rank, xlat=720, stride=None, model_group=None):
+    super().__init__()
+    self.model_group = model_group
+
+    self.n_lat, self.n_lon = n_lat, n_lon
+    self.patch_size = patch_size
+    self.var_in = var_in
+    self.embed_dim = embed_dim
+    if stride is None:
+      self.stride=patch_size
+    else:
+      self.stride=stride
+
+    self.q = Linear.DistributedXWT_twoway(patch_size*var_in//2, embed_dim,  device, rank, n_channels=var_in, init_method='linear')
+    self.k = Linear.DistributedXWT_twoway(patch_size*var_in//2, embed_dim,  device, rank, n_channels=var_in, init_method='linear')
+    self.v = Linear.DistributedXWT_twoway(patch_size*var_in//2, embed_dim,  device, rank, n_channels=var_in, init_method='linear')
+    
+    self.softmax = Linear.DistributedSoftMax(dim=-1, group=self.model_group)
+    self.xwt = Linear.DistributedXWT_attention_twoway(device, rank, model_group=self.model_group) # model group TODO 
+    
+    self.device = device
+    self.rank = rank
+    self.scale = embed_dim ** -0.5 # should be (embed_dim/heads)
+    self.Softmax = Softmax(dim=-1)
+
+  def forward(self, x, model_group):
+    """
+    x: (n_batch, vars, n_lat, n_lon)
+    """
+    # Load constant masks from the disc
+    
+    n_batch, n_x, n_y, n_var = x.shape
+    # x_local: [n_batch, n_lat, n_lon, variables]
+    x_patches_local = x.reshape(n_batch, n_x, n_y // self.patch_size, self.patch_size, n_var) # Shape of x_patches: [n_batches, num_patch_x, num_patch_y, size_patch, n_var]
+    x_patches_local = x_patches_local.flatten(start_dim=1, end_dim=2)
+    x_patches_local = x_patches_local.flatten(start_dim=2, end_dim=3)
+    
+    q = self.q(x_patches_local, model_group) # shape: [n_batches, spatial_tokens, channel_tokens]
+    k = self.k(x_patches_local, model_group)
+    v = self.v(x_patches_local, model_group)
+
+    q = self.scale * q
+    attention = self.xwt(q, k)
+    attention = self.softmax(attention) # TODO: groups for softmax also need to be determined. probably same partners as layernorm
+    values = self.xwt(attention, v)    
+    return values
