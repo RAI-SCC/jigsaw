@@ -80,5 +80,4 @@ for i in range(10000):
   loss.backward()
   optimizer.step()
   
-
 torch.distributed.destroy_process_group()

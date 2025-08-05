@@ -289,7 +289,6 @@ class ERA5DatasetDistributed(Dataset):
         global_idx: int
                 global index of item
         """
-        
         target_surface  = []
         step = self.dt
         # if forecast_length = 3, target_file_idx = global_idx + range(1, forecast_length+1)*step // 6
