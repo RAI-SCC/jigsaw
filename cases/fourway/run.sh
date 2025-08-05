@@ -10,7 +10,7 @@
 #SBATCH --constraint='LSDF'
 #SBATCH --exclusive
 
-home_directory='/hkfs/work/workspace/scratch/ke4365-summa'
+home_directory='/hkfs/work/workspace/scratch/ke4365-jigsaw'
 exp_directory=$PWD
 cp $home_directory/src/Linear.py $home_directory/train.py $home_directory/src/TestModel.py $exp_directory/src
 

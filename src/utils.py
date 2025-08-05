@@ -14,6 +14,7 @@ import random
 import time
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
+
 def get_local_groups_fourway(rank):
     # Rank 4, 6 should be in group together
     gpus_per_node = 4 # horeka- specific
