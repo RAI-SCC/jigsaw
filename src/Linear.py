@@ -1725,7 +1725,7 @@ class XWT_eightway(torch.autograd.Function):
         ctx.device = device
         ctx.rank = rank
         
-        xw = dist_mm.XWT_eightway(x, W,  rank, device, model_group)
+        xw = dist_mm.XWT_eightway(x, W, device, rank, model_group)
         
         return xw
         
