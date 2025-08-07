@@ -95,7 +95,7 @@ def training_loop(config_dict, device, localid, rank):
 
     # Define model
     if parallelism == 1:
-        mlp = Model.ModelSequential(config_dict, device, rank).to(device)
+        mlp = Model.ModelSequential(config_dict, rank, device).to(device)
 
         mlp = DDP(
             mlp,
@@ -103,7 +103,7 @@ def training_loop(config_dict, device, localid, rank):
             output_device=localid
         )
     elif parallelism == 2:
-        mlp = Model.Model_twoway(config_dict, device, rank, local_group).to(device)
+        mlp = Model.Model_twoway(config_dict, rank, device, local_group).to(device)
 
         mlp = DDP(
             mlp,
@@ -113,7 +113,7 @@ def training_loop(config_dict, device, localid, rank):
         )
 
     elif parallelism == 4:
-        mlp = Model.Model(config_dict, device, rank, node_groups).to(device)
+        mlp = Model.Model(config_dict, rank, device, node_groups).to(device)
         mlp = DDP(
             mlp,
             device_ids=[localid],
@@ -319,7 +319,7 @@ def training_loop(config_dict, device, localid, rank):
 
         torch.cuda.synchronize()
         val_loss = 1e7
-        val_loss = eval.get_validation_mse(config_dict, mlp, valid_dataloader, device, rank, epoch, file_path=save_path, model_parallel=model_parallel, world_size=world_size, local_groups=local_groups, node_groups=node_groups, global_groups=global_groups)
+        val_loss = eval.get_validation_mse(config_dict, mlp, valid_dataloader, rank, device, epoch, file_path=save_path, model_parallel=model_parallel, world_size=world_size, local_groups=local_groups, node_groups=node_groups, global_groups=global_groups)
     #
         if val_loss < best_val_loss:
             best_val_loss = val_loss

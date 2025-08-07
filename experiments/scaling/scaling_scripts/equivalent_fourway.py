@@ -53,7 +53,7 @@ def training_loop(config_dict, device, localid, rank):
 
     # Define model
     
-    mlp = Model.Model(config_dict, device, rank, node_groups).to(device)
+    mlp = Model.Model(config_dict, rank, device, node_groups).to(device)
     mlp = DDP(
         mlp,
         device_ids=[localid],

@@ -97,7 +97,7 @@ def gen_plots(config_dict, input_data, output, target_data, rank, file_path, epo
             utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=9)
         
 
-def get_validation_mse(config_dict, model, dataloader, device, rank, epoch, file_path, mse_file_path='rmse.csv', acc_file_path='acc.csv', model_parallel=True, world_size=4, local_groups=None, node_groups=None, global_groups=None):
+def get_validation_mse(config_dict, model, dataloader, rank, device, epoch, file_path, mse_file_path='rmse.csv', acc_file_path='acc.csv', model_parallel=True, world_size=4, local_groups=None, node_groups=None, global_groups=None):
     if config_dict['model']['model_parallel']:
         mse_file_path = f'rmse_{rank}.csv'
         acc_file_path = f'acc_{rank}.csv'

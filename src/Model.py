@@ -7,7 +7,7 @@ import numpy as np
 
 
 class Model(torch.nn.Module):
-    def __init__(self, config_dict, device, rank, model_group):
+    def __init__(self, config_dict, rank, device, model_group):
         super().__init__()
         self.rank = rank
         self.device = device
@@ -18,18 +18,18 @@ class Model(torch.nn.Module):
             self.patch_size = config_dict['model']['patch_size']
             self.stride = config_dict['model']['stride']
             self.n_lat, self.n_lon = self.xlat, self.xlon//self.patch_size
-            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension, device, rank, xlat=self.xlat, stride=self.stride)
+            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension, rank, device, xlat=self.xlat, stride=self.stride)
         else:
             self.patch_size = (config_dict['model']['patch_size'], config_dict['model']['patch_size'])
             self.n_lat, self.n_lon = self.xlat//self.patch_size[0], self.xlon//self.patch_size[1]
-            self.embedding = PatchEmbedding.DistributedPatchEmbedding(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension,  device, rank, xlat=self.xlat)
+            self.embedding = PatchEmbedding.DistributedPatchEmbedding(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension,  rank, device, xlat=self.xlat)
 
         self.n_blocks = config_dict['model']['mixing_blocks']
 
         if self.stride < self.patch_size:
-            self.blocks = torch.nn.ModuleList([MixerBlock(self.n_lat*self.n_lon, hidden_dimension//2, config_dict['model']['spatial_hidden_dim_fraction'], config_dict['model']['features_hidden_dim_fraction'], device, rank, parallelism=config_dict['model_parallel']['parallelism']) for i in range(self.n_blocks)])
+            self.blocks = torch.nn.ModuleList([MixerBlock(self.n_lat*self.n_lon, hidden_dimension//2, config_dict['model']['spatial_hidden_dim_fraction'], config_dict['model']['features_hidden_dim_fraction'], rank, device, parallelism=config_dict['model_parallel']['parallelism']) for i in range(self.n_blocks)])
         else:
-            self.blocks = torch.nn.ModuleList([MixerBlock(self.n_lat*self.n_lon//2, hidden_dimension//2, config_dict['model']['spatial_hidden_dim_fraction'], config_dict['model']['features_hidden_dim_fraction'], device, rank, parallelism=config_dict['model_parallel']['parallelism']) for i in range(self.n_blocks)])
+            self.blocks = torch.nn.ModuleList([MixerBlock(self.n_lat*self.n_lon//2, hidden_dimension//2, config_dict['model']['spatial_hidden_dim_fraction'], config_dict['model']['features_hidden_dim_fraction'], rank, device, parallelism=config_dict['model_parallel']['parallelism']) for i in range(self.n_blocks)])
         self.layer_norm = Linear.DistributedLayerNorm(hidden_dimension//2, self.rank, self.device)
         
         self.num_variables = 36 # TODO: generalize via config file
@@ -42,12 +42,12 @@ class Model(torch.nn.Module):
         self.add = config_dict['model']['add']
         if config_dict['model']['patch_embed'] == 1:
             if self.concat:
-                self.recovery = PatchEmbedding.Distributed1DPatchRecovery(self.patch_size, hidden_dimension, self.num_variables, device, rank, concat=True, stride=self.stride)
+                self.recovery = PatchEmbedding.Distributed1DPatchRecovery(self.patch_size, hidden_dimension, self.num_variables, rank, device, concat=True, stride=self.stride)
             else:
-                self.recovery = PatchEmbedding.Distributed1DPatchRecovery(self.patch_size, hidden_dimension, self.num_variables, device, rank, concat=False, stride=self.stride)
+                self.recovery = PatchEmbedding.Distributed1DPatchRecovery(self.patch_size, hidden_dimension, self.num_variables, rank, device, concat=False, stride=self.stride)
         else:
-            self.recovery = PatchEmbedding.DistributedPatchRecovery(self.patch_size, hidden_dimension, self.num_variables, device, rank)
-        self.linearlayer = Linear.DistributedXWT_fourway(self.num_variables*2, self.num_variables*1, device, rank)
+            self.recovery = PatchEmbedding.DistributedPatchRecovery(self.patch_size, hidden_dimension, self.num_variables, rank, device)
+        self.linearlayer = Linear.DistributedXWT_fourway(self.num_variables*2, self.num_variables*1, rank, device)
         
         self.activation = torch.nn.GELU()
         self.model_group = model_group
@@ -109,7 +109,7 @@ class Model(torch.nn.Module):
             return x
         
 class Model_twoway(torch.nn.Module):
-    def __init__(self, config_dict, device, rank, group):
+    def __init__(self, config_dict, rank, device, group):
         super().__init__()
         self.rank = rank
         self.device = device
@@ -121,12 +121,12 @@ class Model_twoway(torch.nn.Module):
             self.patch_size = config_dict['model']['patch_size']
             self.stride = config_dict['model']['stride']
             self.n_lat, self.n_lon = self.xlat, self.xlon//self.patch_size
-            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding_twoway(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension,  device, rank, xlat=self.xlat, stride=self.stride)
+            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding_twoway(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension,  rank, device, xlat=self.xlat, stride=self.stride)
         self.n_blocks = config_dict['model']['mixing_blocks']
         if self.stride < self.patch_size:
-            self.blocks = torch.nn.ModuleList([MixerBlock_twoway(self.n_lat*self.n_lon*2, hidden_dimension, config_dict['model']['spatial_hidden_dim_fraction'], config_dict['model']['features_hidden_dim_fraction'], device, rank) for i in range(self.n_blocks)])
+            self.blocks = torch.nn.ModuleList([MixerBlock_twoway(self.n_lat*self.n_lon*2, hidden_dimension, config_dict['model']['spatial_hidden_dim_fraction'], config_dict['model']['features_hidden_dim_fraction'], rank, device) for i in range(self.n_blocks)])
         else:
-            self.blocks = torch.nn.ModuleList([MixerBlock_twoway(self.n_lat*self.n_lon, hidden_dimension, config_dict['model']['spatial_hidden_dim_fraction'], config_dict['model']['features_hidden_dim_fraction'], device, rank) for i in range(self.n_blocks)])
+            self.blocks = torch.nn.ModuleList([MixerBlock_twoway(self.n_lat*self.n_lon, hidden_dimension, config_dict['model']['spatial_hidden_dim_fraction'], config_dict['model']['features_hidden_dim_fraction'], rank, device) for i in range(self.n_blocks)])
         self.layer_norm = Linear.torch.nn.LayerNorm(hidden_dimension//2)#, self.rank, self.device)
         
         self.num_variables = 72 # TODO: generalize via config file
@@ -141,11 +141,11 @@ class Model_twoway(torch.nn.Module):
         self.add = config_dict['model']['add']
         if config_dict['model']['patch_embed'] == 1:
             if self.concat:
-                self.recovery = PatchEmbedding.Distributed1DPatchRecovery_twoway(self.patch_size, hidden_dimension, self.num_variables, device, rank, concat=True, stride=self.stride)
+                self.recovery = PatchEmbedding.Distributed1DPatchRecovery_twoway(self.patch_size, hidden_dimension, self.num_variables, rank, device, concat=True, stride=self.stride)
             else:
-                self.recovery = PatchEmbedding.Distributed1DPatchRecovery_twoway(self.patch_size, hidden_dimension, self.num_variables,  device, rank, concat=False, stride=self.stride)
+                self.recovery = PatchEmbedding.Distributed1DPatchRecovery_twoway(self.patch_size, hidden_dimension, self.num_variables,  rank, device, concat=False, stride=self.stride)
         
-        self.linearlayer = Linear.DistributedXWT_twoway(self.num_variables, self.num_variables, device, rank)
+        self.linearlayer = Linear.DistributedXWT_twoway(self.num_variables, self.num_variables, rank, device)
         
         self.activation = torch.nn.GELU()
 
@@ -210,7 +210,7 @@ class Model_twoway(torch.nn.Module):
             return x
     
 class ModelSequential(torch.nn.Module):
-    def __init__(self, config_dict, device, rank):
+    def __init__(self, config_dict, rank, device):
         super().__init__()
         self.rank = rank
         hidden_dimension = config_dict['model']['hidden_dim']

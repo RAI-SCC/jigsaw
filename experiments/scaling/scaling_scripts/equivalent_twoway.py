@@ -49,7 +49,7 @@ def training_loop(config_dict, device, localid, rank):
     variable_weights = variable_weights[0,0,0,:36] if rank % parallelism == 0 else variable_weights[0,0,0,36:]
         
     # Define model    
-    mlp = Model.Model_twoway(config_dict, device, rank, local_group).to(device)
+    mlp = Model.Model_twoway(config_dict, rank, device, local_group).to(device)
 
     mlp = DDP(
         mlp,
@@ -115,6 +115,7 @@ def training_loop(config_dict, device, localid, rank):
     else:
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
+
     epoch_average_loss = torch.tensor([0]).to(device)
     buffer, buffer2 = None, None
     max_rollout = config_dict['model']['latent_rollout']
@@ -173,7 +174,7 @@ def training_loop(config_dict, device, localid, rank):
 
         torch.cuda.synchronize()
         
-        val_loss = eval.get_validation_mse(config_dict, mlp, valid_dataloader, device, rank, epoch, file_path=save_path, model_parallel=model_parallel, world_size=world_size, local_groups=local_groups, node_groups=node_groups, global_groups=global_groups)
+        val_loss = eval.get_validation_mse(config_dict, mlp, valid_dataloader, rank, device, epoch, file_path=save_path, model_parallel=model_parallel, world_size=world_size, local_groups=local_groups, node_groups=node_groups, global_groups=global_groups)
 
         if rank < parallelism and val_loss < best_val_loss:
             best_val_loss = val_loss
