@@ -50,7 +50,7 @@ def _get_preallocated_buffer(shape, dtype, rank, device, index=0):
         return out
     
 ## Two-way distributions
-def XWT_twoway(Xij, Wij, rank, device, model_group):
+def xw_transpose_twoway(Xij, Wij, rank, device, model_group):
     """
     Batched matrix-matrix (XWT) multiplication distributed across two processes.
 
@@ -103,7 +103,7 @@ def XWT_twoway(Xij, Wij, rank, device, model_group):
         
     return Cij
 
-def XW_twoway(Xij, Wij, rank, device, model_group):
+def xw_twoway(Xij, Wij, rank, device, model_group):
     """
     Batched matrix-matrix (XW) multiplication distributed across two processes.
 
@@ -154,7 +154,7 @@ def XW_twoway(Xij, Wij, rank, device, model_group):
     
     return Cij 
 
-def XTW_twoway(Xij, Wij, rank, device, model_group):
+def x_transpose_w_twoway(Xij, Wij, rank, device, model_group):
     """
     Batched matrix-matrix (XTW) multiplication distributed across two processes.
 
@@ -204,7 +204,7 @@ def XTW_twoway(Xij, Wij, rank, device, model_group):
     return Cij
 
 
-def XT_twoway(X, rank, device, model_group):
+def x_transpose_twoway(X, rank, device, model_group):
     """
     Batched transpose (XT) operation distributed across two processes.
     Parameters
@@ -268,7 +268,7 @@ def XT_twoway(X, rank, device, model_group):
     return XT
 
 
-def XWT_fourway(Xij, Wij, rank,  device, model_group):
+def xw_transpose_fourway(Xij, Wij, rank,  device, model_group):
     
     """
     Batched matrix-matrix (XWT) multiplication distributed across four processes.
@@ -339,7 +339,7 @@ def XWT_fourway(Xij, Wij, rank,  device, model_group):
 
     return Cij
     
-def XW_fourway(Xij, Wij, rank,  device, model_group):
+def xw_fourway(Xij, Wij, rank,  device, model_group):
     
     """
     Batched matrix-matrix (XW) multiplication distributed across four processes.
@@ -414,7 +414,7 @@ def XW_fourway(Xij, Wij, rank,  device, model_group):
         Cij = Cij + torch.matmul(x_recv_list[2], w_recv_list[1]) 
     return Cij
 
-def XTW_fourway(Xij, Wij, rank, device, model_group=None):
+def x_transpose_w_fourway(Xij, Wij, rank, device, model_group=None):
     """
     Batched matrix-matrix (XTW) multiplication distributed across four processes.
     Parameters
@@ -488,7 +488,7 @@ def XTW_fourway(Xij, Wij, rank, device, model_group=None):
     
     return Cij
 
-def XT_fourway(X, rank, device, model_group):
+def x_transpose_fourway(X, rank, device, model_group):
     """
     Batched transpose (XT) operation distributed across four processes.
     Parameters
@@ -526,7 +526,7 @@ def XT_fourway(X, rank, device, model_group):
     else:
         return x_recv_list[1].mT
     
-def XWT_eightway(Xij, Wij, rank, device, model_group):
+def xw_transpose_eightway(Xij, Wij, rank, device, model_group):
     """
     Batched matrix-matrix (XWT) multiplication distributed across four processes.
     Parameters
@@ -726,7 +726,7 @@ def XWT_eightway(Xij, Wij, rank, device, model_group):
 
     return Cij
 
-def XW_eightway(Xij, Wij, rank,  device, model_group):
+def xw_eightway(Xij, Wij, rank,  device, model_group):
     
     """
     Batched matrix-matrix (XW) multiplication distributed across eight processes.
@@ -905,7 +905,7 @@ def XW_eightway(Xij, Wij, rank,  device, model_group):
     
     return Cij
 
-def XTW_eightway(Xij, Wij, rank,  device, model_group):
+def x_transpose_w_eightway(Xij, Wij, rank,  device, model_group):
     
     """
     Batched matrix-matrix (XWT) multiplication distributed across four processes.
@@ -1162,7 +1162,7 @@ def XTW_eightway(Xij, Wij, rank,  device, model_group):
     
     return Cij
 
-def XT_eightway(Xij, rank, device, model_group):
+def x_transpose_eightway(Xij, rank, device, model_group):
     mod = rank % 8
     
     empty = torch.empty(0, device=device, dtype=Xij.dtype)

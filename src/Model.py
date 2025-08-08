@@ -47,7 +47,7 @@ class Model(torch.nn.Module):
                 self.recovery = PatchEmbedding.Distributed1DPatchRecovery(self.patch_size, hidden_dimension, self.num_variables, rank, device, concat=False, stride=self.stride)
         else:
             self.recovery = PatchEmbedding.DistributedPatchRecovery(self.patch_size, hidden_dimension, self.num_variables, rank, device)
-        self.linearlayer = Linear.DistributedXWT_fourway(self.num_variables*2, self.num_variables*1, rank, device)
+        self.linearlayer = Linear.DistributedXWT(4,self.num_variables*2, self.num_variables*1, rank, device)
         
         self.activation = torch.nn.GELU()
         self.model_group = model_group
@@ -145,7 +145,7 @@ class Model_twoway(torch.nn.Module):
             else:
                 self.recovery = PatchEmbedding.Distributed1DPatchRecovery_twoway(self.patch_size, hidden_dimension, self.num_variables,  rank, device, concat=False, stride=self.stride)
         
-        self.linearlayer = Linear.DistributedXWT_twoway(self.num_variables, self.num_variables, rank, device)
+        self.linearlayer = Linear.DistributedXWT(2, self.num_variables, self.num_variables, rank, device)
         
         self.activation = torch.nn.GELU()
 

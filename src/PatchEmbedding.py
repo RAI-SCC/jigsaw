@@ -521,7 +521,7 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
     else:
       self.stride = stride
     
-    self.patch_embed = Linear.DistributedXWT_fourway(patch_size*var_in//2, embed_dim//2, rank, device, n_channels=var_in, init_method='conv')
+    self.patch_embed = Linear.DistributedXWT(4, patch_size*var_in//2, embed_dim//2, rank, device, n_channels=var_in, init_method='conv')
     
     self.device = device    
     self.rank = rank
@@ -572,7 +572,7 @@ class DistributedPatchRecovery(torch.nn.Module):
     """
     super().__init__()
     # Here we use two transposed convolutions to recover data
-    self.conv = Linear.DistributedXWT(embed_dim//2, patch_size[0]*patch_size[1]*out_channels, comm, rank, device, n_channels=embed_dim, init_method='conv')
+    self.conv = Linear.DistributedXWT(4, embed_dim//2, patch_size[0]*patch_size[1]*out_channels, comm, rank, device, n_channels=embed_dim, init_method='conv')
     self.patch_size = patch_size
     self.out_channels = out_channels
 
@@ -640,14 +640,14 @@ class Distributed1DPatchRecovery(torch.nn.Module):
     
     if self.stride < patch_size:
       if self.concat:
-        self.conv = Linear.DistributedXWT_fourway(embed_dim, patch_size*out_channels//2, rank, device, n_channels=embed_dim, init_method='conv')
+        self.conv = Linear.DistributedXWT(4, embed_dim, patch_size*out_channels//2, rank, device, n_channels=embed_dim, init_method='conv')
       else:
-        self.conv = Linear.DistributedXWT_fourway(embed_dim//2, patch_size*out_channels//2, rank, device, n_channels=embed_dim, init_method='conv')
+        self.conv = Linear.DistributedXWT(4, embed_dim//2, patch_size*out_channels//2, rank, device, n_channels=embed_dim, init_method='conv')
     else:
       if self.concat:
-        self.conv = Linear.DistributedXWT_fourway(embed_dim, patch_size*out_channels, rank, device, n_channels=embed_dim, init_method='conv')
+        self.conv = Linear.DistributedXWT(4, embed_dim, patch_size*out_channels, rank, device, n_channels=embed_dim, init_method='conv')
       else:
-        self.conv = Linear.DistributedXWT_fourway(embed_dim//2, patch_size*out_channels, rank, device, n_channels=embed_dim, init_method='conv')
+        self.conv = Linear.DistributedXWT(4, embed_dim//2, patch_size*out_channels, rank, device, n_channels=embed_dim, init_method='conv')
     self.patch_size = patch_size
     self.out_channels = out_channels
 
@@ -694,7 +694,7 @@ class Distributed1DPatchEmbedding_twoway(torch.nn.Module):
     else:
       self.stride=stride
 
-    self.patch_embed = Linear.DistributedXWT_twoway(patch_size*var_in//2, embed_dim,  rank, device, n_channels=var_in, init_method='conv')
+    self.patch_embed = Linear.DistributedXWT(2, patch_size*var_in//2, embed_dim,  rank, device, n_channels=var_in, init_method='conv')
     
     self.device = device
     self.land_mask, self.soil_type, self.topography = load_constant_mask_2d(self.patch_size, xlat=720)
@@ -754,14 +754,14 @@ class Distributed1DPatchRecovery_twoway(torch.nn.Module):
       self.stride = stride
     if self.stride < patch_size:      
       if self.concat:
-        self.conv = Linear.DistributedXWT_twoway(embed_dim, patch_size*out_channels//2, rank, device, n_channels=embed_dim, init_method='conv')
+        self.conv = Linear.DistributedXWT(2, embed_dim, patch_size*out_channels//2, rank, device, n_channels=embed_dim, init_method='conv')
       else:
-        self.conv = Linear.DistributedXWT_twoway(embed_dim//2, patch_size*out_channels//2, rank, device, n_channels=embed_dim, init_method='conv')
+        self.conv = Linear.DistributedXWT(2, embed_dim//2, patch_size*out_channels//2, rank, device, n_channels=embed_dim, init_method='conv')
     else:
       if self.concat:
-        self.conv = Linear.DistributedXWT_twoway(embed_dim, patch_size*out_channels, rank, device, n_channels=embed_dim, init_method='conv')
+        self.conv = Linear.DistributedXWT(2, embed_dim, patch_size*out_channels, rank, device, n_channels=embed_dim, init_method='conv')
       else:
-        self.conv = Linear.DistributedXWT_twoway(embed_dim//2, patch_size*out_channels, rank, device, n_channels=embed_dim, init_method='conv')
+        self.conv = Linear.DistributedXWT(2, embed_dim//2, patch_size*out_channels, rank, device, n_channels=embed_dim, init_method='conv')
     self.patch_size = patch_size
     self.out_channels = out_channels // 2
 
