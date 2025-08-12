@@ -299,7 +299,6 @@ def xw_transpose_fourway(Xij, Wij, rank,  device, model_group):
     mod = rank % 4
     
     empty = torch.empty(0, device=device)
-
     if mod == 0:
         x_send_list = [empty, Xij, empty, empty]
         x_recv_list = [empty, _get_preallocated_buffer(Xij.shape, Xij.dtype, rank, device, 0), empty, empty]
