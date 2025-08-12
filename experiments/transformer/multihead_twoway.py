@@ -4,19 +4,10 @@ from torch.nn import Softmax
 import utils
 import distributed_matmul as dist_mm
 from einops import rearrange
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> 8063868 (initial example scripts for transformer)
 from sklearn.datasets import make_blobs
 from sklearn.preprocessing import normalize
 from typing import Tuple
 import numpy as np
-<<<<<<< HEAD
-=======
->>>>>>> b72d58d (minimal working example of twoway-distributed multihead attention)
-=======
->>>>>>> 8063868 (initial example scripts for transformer)
 
 class DistributedAttention_twoway(torch.nn.Module):
   def __init__(self, x_items, x_features, embed_dim, device, rank, output_dim, heads=1, model_group=None):
@@ -27,10 +18,8 @@ class DistributedAttention_twoway(torch.nn.Module):
     self.embed_dim = embed_dim
     self.x_features = x_features
     
-    self.qkv = Linear.DistributedXW_twoway(x_features, embed_dim//2*3, device, rank, n_channels=1, init_method='linear', bias=False)
-<<<<<<< HEAD
-<<<<<<< HEAD
-    self.concatenator = Linear.DistributedXW_twoway(embed_dim, output_dim//2, device, rank, n_channels=1, init_method='linear', bias=False)
+    self.qkv = Linear.DistributedXW(2, x_features, embed_dim//2*3, device, rank, n_channels=1, init_method='linear', bias=False)
+    self.concatenator = Linear.DistributedXW(2, embed_dim, output_dim//2, device, rank, n_channels=1, init_method='linear', bias=False)
     #with torch.no_grad():
     #  self.qkv.bias.copy_(torch.zeros(6).to(device))
     #  self.concatenator.bias.copy_(torch.zeros(3).to(device))
@@ -67,17 +56,11 @@ class DistributedAttention_twoway(torch.nn.Module):
           [ 0.1361, -0.2853,  0.0070],
           [-0.3919, -0.2184, -0.1945]]).to(device)
         )
-=======
-    
-=======
-    self.concatenator = Linear.DistributedXW_twoway(embed_dim, output_dim//2, device, rank, n_channels=1, init_method='linear', bias=False)
->>>>>>> 8063868 (initial example scripts for transformer)
+    self.concatenator = Linear.DistributedXW(2, embed_dim, output_dim//2, device, rank, n_channels=1, init_method='linear', bias=False)
     #with torch.no_grad():
     #  self.qkv.bias.copy_(torch.zeros(6).to(device))
     #  self.concatenator.bias.copy_(torch.zeros(3).to(device))
       
-#
-<<<<<<< HEAD
     #if rank == 0:
     #  with torch.no_grad():
     #    self.q.weights.copy_(
@@ -127,8 +110,6 @@ class DistributedAttention_twoway(torch.nn.Module):
     #        [0.6361, 0.1081]
     #      ]).to(device)
     #    )
->>>>>>> b72d58d (minimal working example of twoway-distributed multihead attention)
-=======
     if rank == 0:
       with torch.no_grad():
         self.qkv.weights.copy_(
@@ -160,27 +141,21 @@ class DistributedAttention_twoway(torch.nn.Module):
           [ 0.1361, -0.2853,  0.0070],
           [-0.3919, -0.2184, -0.1945]]).to(device)
         )
->>>>>>> 8063868 (initial example scripts for transformer)
-      
+
+    self.n_parallel = 2
     self.softmax = Linear.DistributedSoftMax(dim=-1, group=self.model_group)
-    self.xwt = Linear.DistributedXWT_attention_twoway(device, rank, model_group=self.model_group) # model group TODO 
-    self.xw = Linear.DistributedXW_attention_twoway(device, rank, model_group=self.model_group) # model group TODO 
+    self.xwt = Linear.DistributedMatMulXWTranspose(rank, device, self.n_parallel, model_group=self.model_group) # model group TODO 
+    self.xw = Linear.DistributedMatMulXW(rank, device, self.n_parallel, model_group=self.model_group) # model group TODO 
     
-<<<<<<< HEAD
-<<<<<<< HEAD
     
     #self.mlp = Linear.DistributedMLP(output_dim, output_dim, output_dim, device, rank, parallelism=2)
-=======
-    self.concatenator = Linear.DistributedXW_twoway(embed_dim, output_dim//2, device, rank, n_channels=1, init_method='linear', bias=False)
-    self.mlp = Linear.DistributedMLP(output_dim, output_dim, output_dim, device, rank, parallelism=2)
-    self.mlp2 = Linear.DistributedMLP(output_dim, output_dim, output_dim, device, rank, parallelism=2)
->>>>>>> b72d58d (minimal working example of twoway-distributed multihead attention)
-=======
+    self.concatenator = Linear.DistributedXW(embed_dim, output_dim//2, rank, device, self.n_parallel, n_channels=1, init_method='linear', bias=False)
+    self.mlp = Linear.DistributedMLP(output_dim, output_dim, output_dim, rank, device, self.n_parallel)
+    self.mlp2 = Linear.DistributedMLP(output_dim, output_dim, output_dim, rank, device, self.n_parallel)
     
     #self.mlp = Linear.DistributedMLP(output_dim, output_dim, output_dim, device, rank, parallelism=2)
->>>>>>> 8063868 (initial example scripts for transformer)
-    self.device = device
     self.rank = rank
+    self.device = device
     self.heads = heads
     self.scale = (embed_dim // self.heads) ** (-0.5) # should be (embed_dim/heads)
     
@@ -195,10 +170,8 @@ class DistributedAttention_twoway(torch.nn.Module):
     x_patches_local = x
 
     qkv = self.qkv(x_patches_local, model_group) # shape: [n_batches, spatial_tokens, channel_tokens]
-    #print(f'qkv {qkv}')
+    
     q, k, v = torch.tensor_split(qkv, 3, dim=2)
-<<<<<<< HEAD
-<<<<<<< HEAD
     
     q = rearrange(q, 'n i (h d) -> n h i d', h=self.heads)
     k = rearrange(k, 'n i (h d) -> n h i d', h=self.heads)
@@ -218,56 +191,16 @@ class DistributedAttention_twoway(torch.nn.Module):
     values = self.concatenator(values, model_group=None)
     print(values)
     #values = self.mlp(values, model_group=None)
-=======
-    #q, k, v = torch.tensor_split(q, self.heads, dim=2), torch.tensor_split(k, self.heads, dim=2), torch.tensor_split(v, self.heads, dim=2)
-=======
-    
->>>>>>> 8063868 (initial example scripts for transformer)
-    q = rearrange(q, 'n i (h d) -> n h i d', h=self.heads)
-    k = rearrange(k, 'n i (h d) -> n h i d', h=self.heads)
-    v = rearrange(v, 'n i (h d) -> n h i d', h=self.heads)
-    
-    q = self.scale * q
-    
-    attention = self.xwt(q, k)
-    
-    attention = self.softmax(attention) # TODO: groups for softmax also need to be determined. probably same partners as layernorm
-    
-
-    values = self.xw(attention, v)    
-    
-    values = rearrange(values, 'n h s d -> n s (h d)').contiguous()
-    
-    values = self.concatenator(values, model_group=None)
-<<<<<<< HEAD
-    values = self.mlp(values, model_group=None)
-    values = self.mlp2(values, model_group=None)
->>>>>>> b72d58d (minimal working example of twoway-distributed multihead attention)
-=======
-    print(values)
-    #values = self.mlp(values, model_group=None)
->>>>>>> 8063868 (initial example scripts for transformer)
     # Output: [n_batch, seq_length, output_dim]
     return values
 
 
 
 device, _, rank, _ = utils.init_CUDA()
-
-<<<<<<< HEAD
-<<<<<<< HEAD
 batch = 1
 x_items, x_features, embed_dim, heads = 4, 4, 4, 2 # x_features is global; embed_dim is global
 output_dim = 6
-=======
-batch = 1000
-x_items, x_features, embed_dim, heads = 4, 4, 64*4, 8 # x_features is global; embed_dim is global
->>>>>>> b72d58d (minimal working example of twoway-distributed multihead attention)
-=======
 batch = 1
-x_items, x_features, embed_dim, heads = 4, 4, 4, 2 # x_features is global; embed_dim is global
-output_dim = 6
->>>>>>> 8063868 (initial example scripts for transformer)
 torch.manual_seed(7)
 W = torch.randn(x_features, x_features//2).to(device)
 #b = torch.randn(x_features//2).to(device)
@@ -275,8 +208,6 @@ W = torch.randn(x_features, x_features//2).to(device)
 def sample_batch():
     x = torch.randn(batch, x_items, x_features//2).to(device)
     y = dist_mm.XW_twoway(x, W, device, rank)  # (batch, items, features)
-<<<<<<< HEAD
-<<<<<<< HEAD
     
     return x, y
 
@@ -322,82 +253,17 @@ def generate_spectral_clustering_data(
 
     return X, y
 
-torch.manual_seed(rank)
-=======
-=======
-    
->>>>>>> 8063868 (initial example scripts for transformer)
-    return x, y
-
-def generate_spectral_clustering_data(
-    n_samples: int = 12, 
-    n_clusters: int = 4, 
-    cluster_std: float = 0.60,
-    random_state: int = 42
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Generate dummy data for spectral clustering.
-
-    Args:
-        n_samples: Total number of samples.
-        n_clusters: Number of clusters.
-        cluster_std: Standard deviation of clusters.
-        random_state: Seed for reproducibility.
-
-<<<<<<< HEAD
->>>>>>> b72d58d (minimal working example of twoway-distributed multihead attention)
-=======
-    Returns:
-        X: (n_samples, 2) array of 2D data points.
-        y: (n_samples,) array of ground truth cluster labels.
-    """
-    torch.manual_seed(random_state)
-    X, y = make_blobs(n_samples=n_samples, centers=n_clusters, 
-                      cluster_std=cluster_std, random_state=random_state)
-    
-    X = normalize(X)  # Normalize for similarity-based methods
-    
-    X = torch.tensor(X).to(device)
-    y = np.eye(n_clusters)[y]
-    y = torch.tensor(y).to(device)
-    
-    if rank == 0:
-       X = X[:, 0]
-       y = y[:, :2]
-       
-    else:
-       X = X[:, 1]
-       y = y[:, 2:]
-           
-    X = X.reshape(1, n_samples, 1).to(torch.float32)
-    y = y.reshape(1, n_samples, 2).to(torch.float32)
-
-    return X, y
-
-torch.manual_seed(rank)
->>>>>>> 8063868 (initial example scripts for transformer)
 model = DistributedAttention_twoway(
   x_items, 
   x_features, 
   embed_dim, 
   device, 
   rank, 
-<<<<<<< HEAD
-<<<<<<< HEAD
   output_dim=output_dim, # global
-=======
-  output_dim=x_features, # global
->>>>>>> b72d58d (minimal working example of twoway-distributed multihead attention)
-=======
-  output_dim=output_dim, # global
->>>>>>> 8063868 (initial example scripts for transformer)
   heads=heads, 
   model_group=None
 ).to(torch.float32).to(device)
 
-
-<<<<<<< HEAD
-<<<<<<< HEAD
 #optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
 if rank == 0: 
@@ -430,88 +296,17 @@ for param in model.parameters():
       print(param.grad/2)
 #print(result)
   
-#for i in range(10):
-#  x, target = generate_spectral_clustering_data(random_state=i)    
-#  
-#  values = model(x)
-#  #if rank == 0:
-#  #  print(values, target)
-##  print(f'Values {values.shape}, target {target.shape}')
-#  loss = torch.nn.MSELoss()(values, target)
-#  
-#
-#  if rank == 0:
-#    print(loss)
-#    print(values, target)
-#  loss.backward()
-#  optimizer.step()
-#  optimizer.zero_grad()
-#  
-=======
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-x, target = sample_batch()  
+optimizer = torch.optim.Adam(model.parameters(),lr=1e-4)
+
+for i in range(10):
+  values = model(X)
+  loss = torch.nn.MSELoss()(values, values*0.1)
   
-for i in range(10000):
+  if rank == 0:
+    print(loss)
+  loss.backward()
+  optimizer.step()
+  optimizer.zero_grad()
   
-  values = model(x)
-=======
-#optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
->>>>>>> 8063868 (initial example scripts for transformer)
-
-if rank == 0: 
-   X = torch.tensor([[[0.7738, 0.2259],
-         [0.5921, 0.5352],
-         [0.9278, 0.0922],
-         [0.2943, 0.3762]]]).to(device)
-   y = torch.tensor([[[0.5278, 0.9356, 0.1470],
-         [0.0444, 0.1539, 0.1956],
-         [0.1278, 0.0125, 0.1721],
-         [0.8640, 0.3388, 0.2108]]]).to(device)
-else:
-   X = torch.tensor([[[0.3826, 0.9717],
-         [0.6686, 0.3781],
-         [0.3625, 0.4136],
-         [0.8099, 0.7743]]]).to(device)
-   y = torch.tensor([[[0.2019, 0.7259, 0.4731],
-         [0.8861, 0.7264, 0.8868],
-         [0.5535, 0.4012, 0.1849],
-         [0.7310, 0.3653, 0.8188]]]).to(device)
-y = y.reshape(1, 4, 3)
-   
-result = model(X)
-loss = torch.nn.MSELoss()(result, y)
-
-loss.backward()
-
-for param in model.parameters():
-   if param.grad is not None:
-      print(param.grad/2)
-#print(result)
-  
-<<<<<<< HEAD
->>>>>>> b72d58d (minimal working example of twoway-distributed multihead attention)
-=======
-#for i in range(10):
-#  x, target = generate_spectral_clustering_data(random_state=i)    
-#  
-#  values = model(x)
-#  #if rank == 0:
-#  #  print(values, target)
-##  print(f'Values {values.shape}, target {target.shape}')
-#  loss = torch.nn.MSELoss()(values, target)
-#  
-#
-#  if rank == 0:
-#    print(loss)
-#    print(values, target)
-#  loss.backward()
-#  optimizer.step()
-#  optimizer.zero_grad()
-#  
->>>>>>> 8063868 (initial example scripts for transformer)
-# Resulting global product should have shape 4, 12
-
-
-#result = model(x)
 
 torch.distributed.destroy_process_group()

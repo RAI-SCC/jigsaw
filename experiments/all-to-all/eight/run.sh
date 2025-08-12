@@ -28,7 +28,6 @@ export MASTER_ADDR=$master_addr
 echo "MASTER_ADDR="$MASTER_ADDR
 
 export CUDA_LAUNCH_BLOCKING=0
-export TORCH_NCCL_AVOID_RECORD_STREAMS=1 # https://discuss.pytorch.org/t/torch-distributed-all-reduce-causes-memory-trashing/215024
 export TORCH_NCCL_HIGH_PRIORITY=1
 
 srun python -u $home_directory/experiments/scaling/scaling_scripts/equivalent_fourway.py --config_file config.yaml

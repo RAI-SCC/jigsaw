@@ -44,7 +44,7 @@ def training_loop(config_dict, device, localid, rank):
                                                          # group [0, 2]: index 0. group [1, 3]: index 1. group [4, 6]: index 3. 
                                                          # index = rank % 2 + node_rank * 2    
     global_groups = utils.get_ddp_groups(parallelism)
-    node_groups   = utils.get_local_group_per_node(rank)
+    model_group   = utils.get_local_group_per_node(rank)
     node_rank     = rank // parallelism  
 
     # weights
@@ -53,7 +53,7 @@ def training_loop(config_dict, device, localid, rank):
 
     # Define model
     
-    mlp = Model.Model(config_dict, rank, device, node_groups).to(device)
+    mlp = Model.Model(config_dict, rank, device, parallelism, model_group).to(device)
     mlp = DDP(
         mlp,
         device_ids=[localid],

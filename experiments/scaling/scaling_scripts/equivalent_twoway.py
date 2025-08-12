@@ -47,9 +47,10 @@ def training_loop(config_dict, device, localid, rank):
     global_groups = utils.get_ddp_groups(parallelism)
     variable_weights = torch.nn.functional.pad(variable_weights, (0,3))
     variable_weights = variable_weights[0,0,0,:36] if rank % parallelism == 0 else variable_weights[0,0,0,36:]
-        
+    n_parallel = parallelism
+
     # Define model    
-    mlp = Model.Model_twoway(config_dict, rank, device, local_group).to(device)
+    mlp = Model.Model_twoway(config_dict, rank, device, n_parallel, local_group).to(device)
 
     mlp = DDP(
         mlp,
