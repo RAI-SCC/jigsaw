@@ -186,8 +186,6 @@ class Model_twoway(torch.nn.Module):
             x = self.layer_norm(x + x_res2)
         
         x = self.recovery(x, self.n_lat, self.n_lon) 
-        
-        
         x = x.reshape(x.shape[0], -1, x.shape[-1])
         
         if self.add:
@@ -198,8 +196,7 @@ class Model_twoway(torch.nn.Module):
 
             ### After recovery: [n_batch, n_lat, n_lon, n_var]
             x = self.layer_norm3(x)
-            x = x.reshape(x.shape[0], -1, x.shape[-1])
-            
+            x = x.flatten(start_dim=1, end_dim=2)
             x = self.linearlayer(x)
             
             return x  
@@ -284,7 +281,7 @@ class ModelSequential(torch.nn.Module):
             'recovery': torch.nn.ModuleList([self.recovery]),
             'common': torch.nn.ModuleList([self.blocks, self.layer_norm, self.layer_norm2, self.layer_norm3, self.linearlayer])
             }
-            )       
+            )
         else:
             self.params = torch.nn.ModuleDict({
             'embedding': torch.nn.ModuleList([self.embedding]),

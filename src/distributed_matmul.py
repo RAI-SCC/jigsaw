@@ -340,7 +340,7 @@ def xw_transpose_fourway(Xij, Wij, rank,  device, model_group):
     elif mod == 2:
         Cij = Cij + torch.matmul(x_recv_list[3], w_recv_list[1].mT) 
     elif mod == 3:
-        Cij = Cij +  torch.matmul(x_recv_list[2], w_recv_list[2].mT) 
+        Cij = Cij + torch.matmul(x_recv_list[2], w_recv_list[2].mT) 
 
     return Cij
     

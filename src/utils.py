@@ -66,6 +66,18 @@ def get_local_groups_twoway(rank):
     
     return local_groups[rank//2]
 
+def get_model_group(rank, n_parallel):
+    local_groups = []
+    for i in range(torch.distributed.get_world_size() // n_parallel):
+        local_start_rank = i * n_parallel
+        local_groups.append(
+                torch.distributed.new_group(
+                    ranks=list(range(local_start_rank, local_start_rank+n_parallel))
+                )
+        )
+    
+    return local_groups[rank//n_parallel]
+
 def get_local_group_per_node(rank):
     # [0, 1, 2, 3]
     # Rank 4, 6 should be in group together
