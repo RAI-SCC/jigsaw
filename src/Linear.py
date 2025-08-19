@@ -1,7 +1,7 @@
+from typing import Optional
+
 import numpy as np
 import torch
-from einops import rearrange
-from torch.nn import GELU, Dropout
 
 import distributed_matmul as dist_mm
 
@@ -50,9 +50,16 @@ class DistributedXWT(torch.nn.Module):
             in_dim: int, 
             out_dim: int, 
             rank: int, 
-            device, n_parallel, model_group, n_channels=1, bias=True, stdev=None, init_method='linear'):
+            device: torch.device, 
+            n_parallel: int, 
+            model_group: torch.distributed.ProcessGroup, 
+            n_channels: int = 1, 
+            bias: bool = True, 
+            stdev: float = None, 
+            init_method: str ='linear'
+        ) -> None:
         """
-        Initialize the XWT Linear layer sharded over two processes.
+        Initialize the XWT Linear layer sharded over n processes.
 
         Parameters
         ----------
@@ -80,7 +87,7 @@ class DistributedXWT(torch.nn.Module):
         self.out_dim = out_dim
 
         if init_method == 'linear':
-            stdev = 1. / np.sqrt(in_dim*2) # TODO: should this 2 be n_parallel?
+            stdev = 1. / np.sqrt(in_dim*2) # TODO: Dependent on the data sharding scheme
             self.weights = torch.nn.parameter.Parameter(torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev))
         elif init_method == 'conv':
             stdev = np.sqrt(6.0)/(8*8*n_channels) # TODO
@@ -93,7 +100,8 @@ class DistributedXWT(torch.nn.Module):
             self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim*2).uniform_(-stdev, stdev))
         else:
             self.bias = None
-        
+        if rank == 0:
+            print(f'XWT Std {stdev}')
         self.device = device
         self.rank = rank
         self.n_parallel = n_parallel
@@ -101,7 +109,7 @@ class DistributedXWT(torch.nn.Module):
 
         self.XWT = XWT().apply
     
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of linear layer (XWT) distributed across two processes.
 
@@ -125,8 +133,18 @@ class DistributedXWT(torch.nn.Module):
     
 class XWT(torch.autograd.Function):
     """Autograd function for batched matrix-matrix (XWT) multiplication distributed across n processes."""
+
     @staticmethod
-    def forward(ctx, x, W, b,  rank, device, n_parallel, model_group):
+    def forward(
+            ctx: torch.autograd.Function, 
+            x: torch.Tensor, 
+            w: torch.Tensor, 
+            b: torch.Tensor,
+            rank: int, 
+            device: torch.device, 
+            n_parallel: int, 
+            model_group: torch.distributed.ProcessGroup
+        ) -> torch.Tensor:
         """
         Forward pass of linear layer (XWT) distributed across two processes.
 
@@ -156,22 +174,20 @@ class XWT(torch.autograd.Function):
             B, out_dim are global values.
             in_dim is local value.
         """
-        ctx.save_for_backward(x, W)
+        ctx.save_for_backward(x, w)
         ctx.rank = rank
         ctx.device = device
         ctx.n_parallel = n_parallel
         ctx.model_group = model_group
-                
-        xwt = select_xw_transpose_kernel(n_parallel)(x, W, rank, device, model_group)
         ctx.b = b
 
-        if b is None:
-            return xwt
-        else:
-            return xwt.add(b)
+        xwt = select_xw_transpose_kernel(n_parallel)(x, w, rank, device, model_group)
+        
+        xwt = xwt if b is None else xwt.add(b)
+        return xwt
     
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx: torch.autograd.Function, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None]:
         """
         Backward pass of linear layer (XWT) distributed across two processes.
         
@@ -210,7 +226,19 @@ class XWT(torch.autograd.Function):
 class DistributedXW(torch.nn.Module):
     """Batched matrix-matrix (XW) multiplication distributed across two processes."""
 
-    def __init__(self, in_dim, out_dim, rank, device, n_parallel, model_group, n_channels=1, bias=True, stdev=None, init_method='linear'):
+    def __init__(
+            self, 
+            in_dim: int, 
+            out_dim: int, 
+            rank: int, 
+            device: torch.device, 
+            n_parallel: int, 
+            model_group: torch.distributed.ProcessGroup, 
+            n_channels: int=1, 
+            bias: bool=True, 
+            stdev: float=None, 
+            init_method: str='linear'
+        ) -> None:
         """
         Initialize distributed matrix-matrix multiplication module.
         
@@ -229,7 +257,9 @@ class DistributedXW(torch.nn.Module):
 
         self.in_dim = in_dim
         self.out_dim = out_dim
-        stdev = 1. / np.sqrt(in_dim*out_dim*n_parallel)
+        stdev = 1. / np.sqrt(in_dim*2)
+        if rank == 0:
+            print(f'XW Std {stdev}')
         
         self.weights = torch.nn.parameter.Parameter(torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev))
         self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev)) if bias else None
@@ -241,7 +271,7 @@ class DistributedXW(torch.nn.Module):
 
         self.XW = XW().apply
     
-    def forward(self, x):
+    def forward(self, x: torch.Tensor):
         """
         Forward pass of linear layer (XW) distributed across two processes.
 
@@ -257,15 +287,24 @@ class DistributedXW(torch.nn.Module):
             B, x_in are global values.
             out_dim is local value.
         """
-        Cij = self.XW(x, self.weights, self.bias, self.rank, self.device, self.n_parallel, self.model_group)
+        cij = self.XW(x, self.weights, self.bias, self.rank, self.device, self.n_parallel, self.model_group)
         
-        return Cij
+        return cij
     
 class XW(torch.autograd.Function):
     """Autograd function for batched matrix-matrix (XW) multiplication distributed across two processes."""
 
     @staticmethod
-    def forward(ctx, x, w, b, rank, device, n_parallel, model_group):
+    def forward(
+            ctx: torch.autograd.Function, 
+            x: torch.Tensor, 
+            w: torch.Tensor, 
+            b: Optional[torch.Tensor], 
+            rank: int, 
+            device: torch.device, 
+            n_parallel: int, 
+            model_group: torch.distributed.ProcessGroup
+        ) -> torch.Tensor:
         """
         Forward pass of linear layer (XW) distributed across two processes.
 
@@ -303,13 +342,12 @@ class XW(torch.autograd.Function):
         ctx.model_group = model_group
         
         xw = select_xw_kernel(n_parallel)(x, w, rank, device, model_group)
-        if b is None:
-            return xw
-        else:
-            return xw.add(b)
+        
+        xw = xw if b is None else xw.add(b)
+        return xw
         
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx: torch.autograd.Function, grad_output: torch.Tensor):
         """
         Backward pass of linear layer (XW) distributed across two processes.
 
@@ -349,7 +387,18 @@ class XW(torch.autograd.Function):
 class DistributedXTW(torch.nn.Module):
     """Batched matrix-matrix (XTW) linear layer distributed across n processes."""
 
-    def __init__(self, in_dim, out_dim, rank, device, n_parallel, model_group, n_channels=72, bias=True, init_method='linear'):
+    def __init__(
+            self, 
+            in_dim: int, 
+            out_dim: int, 
+            rank: int, 
+            device: torch.device, 
+            n_parallel: int, 
+            model_group: torch.distributed.ProcessGroup, 
+            n_channels: int=72, 
+            bias: bool=True, 
+            init_method: str='linear'
+        ) -> None:
         """
         n_parallel: int
             Number of processes to distribute over
@@ -372,7 +421,7 @@ class DistributedXTW(torch.nn.Module):
         self.in_dim = in_dim
         self.out_dim = out_dim
         if init_method == 'linear':
-            stdev = 1. / np.sqrt(in_dim*2) # TODO: 2 or n_parallel?
+            stdev = 1. / np.sqrt(in_dim*2) 
             self.weights = torch.nn.parameter.Parameter(torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev))
         elif init_method == 'conv':
             stdev = np.sqrt(6.0)/(60*n_channels) # TODO: 60?
@@ -381,7 +430,8 @@ class DistributedXTW(torch.nn.Module):
             self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev))
         else:
             self.bias = None
-
+        if rank == 0:
+            print(f'XTW Std {stdev}')
         self.rank = rank
         self.device = device
         self.n_parallel = n_parallel
@@ -389,7 +439,7 @@ class DistributedXTW(torch.nn.Module):
         
         self.XTW = XTW().apply
     
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of linear layer (XTW) distributed across two processes.
 
@@ -407,15 +457,24 @@ class DistributedXTW(torch.nn.Module):
             B, x_in are global values.
             out_dim is local value.
         """
-        Cij = self.XTW(x, self.weights, self.bias, self.rank, self.device, self.n_parallel, self.model_group)
+        cij = self.XTW(x, self.weights, self.bias, self.rank, self.device, self.n_parallel, self.model_group)
         
-        return Cij
+        return cij
     
 class XTW(torch.autograd.Function):
     """Autograd function for batched matrix-matrix (XTW) multiplication distributed across two processes."""
 
     @staticmethod
-    def forward(ctx, x, w, b, rank, device, n_parallel, model_group):
+    def forward(
+            ctx: torch.autograd.Function, 
+            x: torch.Tensor, 
+            w: torch.Tensor, 
+            b: torch.Tensor, 
+            rank: int, 
+            device: torch.device, 
+            n_parallel: int, 
+            model_group: torch.distributed.ProcessGroup
+        ) -> torch.Tensor:
         """
         Forward pass of linear layer (XTW) distributed across two processes.
 
@@ -452,10 +511,11 @@ class XTW(torch.autograd.Function):
         
         xtw = select_x_transpose_w_kernel(n_parallel)(x, w, rank, device, model_group)
 
-        return xtw.add(b) 
+        xtw = xtw if b is None else xtw.add(b)
+        return xtw
     
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx: torch.autograd.Function, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None, None]:
         """
         Backward pass of linear layer (XTW) distributed across two processes.
 
@@ -489,7 +549,13 @@ class XTW(torch.autograd.Function):
 class DistributedXTranpose(torch.nn.Module):
     """Batched transpose (XT) operation distributed across n processes."""
 
-    def __init__(self, rank, device, n_parallel, model_group):
+    def __init__(
+            self, 
+            rank: int, 
+            device: torch.device,
+            n_parallel: int, 
+            model_group: torch.distributed.ProcessGroup
+        ) -> None:
         """Initialize the Linear class."""
         super().__init__()
         self.rank = rank
@@ -498,9 +564,10 @@ class DistributedXTranpose(torch.nn.Module):
         self.model_group = model_group
         self.transpose = XT().apply
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of transpose (XT) distributed across two processes.
+
         Parameters.
         ----------
 
@@ -512,6 +579,7 @@ class DistributedXTranpose(torch.nn.Module):
             Device to perform computation on.
         model_group : torch.distributed.ProcessGroup, optional
             Process group for an individual model-parallel instance.
+
         Returns
         -------
         XT: torch.Tensor
@@ -521,13 +589,19 @@ class DistributedXTranpose(torch.nn.Module):
         return x_transpose
 
 class XT(torch.autograd.Function):
-    """
-    Autograd function for batched transpose (XT) operation distributed across two processes.
-    """
+    """Autograd function for batched transpose (XT) operation distributed across n processes."""
+
     @staticmethod
-    def forward(ctx, x, rank, device, n_parallel, model_group):
+    def forward(
+            ctx: torch.autograd.Function, 
+            x: torch.Tensor, 
+            rank: int, 
+            device: torch.device, 
+            n_parallel: int, 
+            model_group: torch.distributed.ProcessGroup
+        ) -> torch.Tensor:
         """
-        Forward pass of transpose (XT) distributed across two processes.
+        Forward pass of transpose (XT) distributed across n processes.
 
         Parameters
         ----------
@@ -541,12 +615,12 @@ class XT(torch.autograd.Function):
             The device on which the computation is performed.
         model_group : torch.distributed.ProcessGroup, optional
             Process group for an individual model-parallel instance.
+
         Returns
         -------
         XT: torch.Tensor
             Local transposed tensor.
         """
-
         ctx.device = device
         ctx.rank = rank
         ctx.n_parallel = n_parallel
@@ -556,7 +630,7 @@ class XT(torch.autograd.Function):
         return x
     
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx: torch.autograd.Function, grad_output: torch.Tensor) -> tuple[torch.Tensor, None, None, None]:
         """
         Backward pass of transpose (XT) distributed across two processes.
 
@@ -571,7 +645,6 @@ class XT(torch.autograd.Function):
         grad_output:
             Transposed gradient of the loss with respect to the input of the layer.
         """
-
         rank = ctx.rank
         device = ctx.device
         n_parallel = ctx.n_parallel
@@ -584,7 +657,13 @@ class XT(torch.autograd.Function):
 class DistributedMatMulXWTranspose(torch.nn.Module):
     """Batched matrix-matrix (XWT) multiplication distributed across n processes."""
 
-    def __init__(self, rank, device, n_parallel, model_group):
+    def __init__(
+            self,
+            rank: int, 
+            device: torch.device, 
+            n_parallel: int, 
+            model_group: torch.distributed.ProcessGroup
+        ) -> None:
         """Initialize the XWT Linear layer sharded over two processes."""
         self.rank = rank
         self.device = device
@@ -594,7 +673,12 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
         super().__init__()
         self.XWT = XWT().apply
 
-    def forward(self, x, w, b):
+    def forward(
+            self, 
+            x: torch.Tensor, 
+            w: torch.Tensor, 
+            b: torch.Tensor
+        ) -> torch.Tensor:
         """
         Forward pass of linear layer (XWT) distributed across two processes.
 
@@ -619,7 +703,13 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
 class DistributedMatMulXW(torch.nn.Module):
     """Batched matrix-matrix (XWT) multiplication distributed across two processes."""
 
-    def __init__(self, rank, device, n_parallel, model_group):
+    def __init__(
+            self, 
+            rank: int, 
+            device: torch.device, 
+            n_parallel: int, 
+            model_group: torch.distributed.ProcessGroup
+        ):
         """Initialize the XWT Linear layer sharded over n processes."""
         self.rank = rank
         self.device = device
@@ -647,6 +737,7 @@ class DistributedMatMulXW(torch.nn.Module):
             B, out_dim are global values.
             in_dim is local value.
         """
+
         Cij = self.XW(x, w, b, self.rank, self.device, self.n_parallel, self.model_group)
         
         return Cij

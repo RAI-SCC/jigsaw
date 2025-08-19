@@ -34,37 +34,21 @@ def get_local_groups_fourway(rank):
 
     return local_groups
 
-def get_ddp_groups(parallelism):
+def get_ddp_groups(rank, n_parallel):
     # Ranks 0, 4, ... should be in a group
     
-    n_nodes = torch.distributed.get_world_size() // parallelism
+    n_nodes = torch.distributed.get_world_size() // n_parallel
     # 
     global_group_list = []
     global_groups     = []
 
-    for node in np.arange(parallelism):
-        global_group_list.append(((np.arange(n_nodes)*parallelism+node)).tolist())
+    for node in np.arange(n_parallel):
+        global_group_list.append(((np.arange(n_nodes)*n_parallel+node)).tolist())
                
     for global_group in global_group_list:
         global_groups.append(torch.distributed.new_group(ranks=global_group))
     
-    return global_groups
-
-def get_local_groups_twoway(rank):
-    # [0,1] --> one group
-    # [2,3] --> another group
-    local_groups = []
-    
-
-    for i in range(torch.distributed.get_world_size() // 2):
-        # 8 --> [0, 4]
-        local_pair_start_rank = i * 2
-        local_groups.append(
-                torch.distributed.new_group(ranks=[local_pair_start_rank, local_pair_start_rank+1]
-                                            )
-            )
-    
-    return local_groups[rank//2]
+    return global_groups[rank//n_parallel]
 
 def get_model_group(rank, n_parallel):
     local_groups = []
@@ -78,19 +62,56 @@ def get_model_group(rank, n_parallel):
     
     return local_groups[rank//n_parallel]
 
-def get_local_group_per_node(rank):
-    # [0, 1, 2, 3]
-    # Rank 4, 6 should be in group together
+def get_model_group_rows(rank, n_parallel, n_rows):
+    """
+    Return mpi comm subgroups within model groups. 
+
+    rank: int
+        global rank of process
+    n_parallel: int
+        number of processes in model-parallel group
+    n_rows: int
+        number of rows that the model-parallel group is subdivided into.
+        default for 4: 2; default for 8: 4
+    """
     local_groups = []
-    for i in range(torch.distributed.get_world_size() // 4):
-        local_pair_start_rank = i * 4
+    n_cols = n_parallel // n_rows
+
+    for i in range(torch.distributed.get_world_size() // n_cols):
+        local_start_rank = i * n_cols
+        
         local_groups.append(
                 torch.distributed.new_group(
-                    ranks=[local_pair_start_rank, local_pair_start_rank+1, local_pair_start_rank+2, local_pair_start_rank+3]
+                    ranks=list(range(local_start_rank, local_start_rank + n_cols))
                 )
         )
     
-    return local_groups[rank//4]
+    return local_groups[rank//n_rows]
+
+def get_model_group_columns(rank, n_parallel, n_cols):
+    """
+    Return mpi comm subgroups within model groups. 
+
+    rank: int
+        global rank of process
+    n_parallel: int
+        number of processes in model-parallel group
+    n_cols: int
+        number of rows that the model-parallel group is subdivided into.
+        default for 4: 2; default for 8: 2
+    """
+    local_groups = []
+    n_rows = n_parallel // n_cols
+
+    for i in range(torch.distributed.get_world_size() // n_rows):
+        local_start_rank = i * n_rows
+        local_groups.append(
+                torch.distributed.new_group(
+                    ranks=list(range(local_start_rank, local_start_rank + n_parallel, n_rows))
+                )
+        )
+    
+    return local_groups[rank % n_cols + rank // n_parallel*n_cols]
 
 def set_all_seeds(seed, rank=None):
     if rank is None:
@@ -105,7 +126,6 @@ def set_all_seeds_local_rank(seed, rank=None, parallelism=4):
     os.environ["PL_GLOBAL_SEED"] = str(seed + rank//parallelism) # 0, 1, 2, 3 get same data. # 4, 5, 6, 7 get same data.
     torch.manual_seed(seed + rank//parallelism)
     torch.cuda.manual_seed_all(seed + rank//parallelism)
-
 
 
 def send_data_twoway(data, buffer, rank, device, groups):

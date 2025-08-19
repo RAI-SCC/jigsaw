@@ -1,19 +1,30 @@
-import numpy as np
 import torch
 from einops import rearrange
-from torch.nn import GELU, Dropout
+
 import Linear
-import DistributedNormFunctions as Norm
+import Normalization as Norm
+
 
 class DistributedAttention(torch.nn.Module):
-  def __init__(self, x_items, x_features, embed_dim, output_dim, heads, rank, device, n_parallel, model_group):
+  def __init__(
+        self, 
+        x_features: int, 
+        embed_dim: int, 
+        output_dim: int, 
+        heads: int, 
+        rank: int, 
+        device: torch.device, 
+        n_parallel: int, 
+        model_group: torch.distributed.ProcessGroup, 
+        softmax_group: torch.distributed.ProcessGroup
+    ):
     super().__init__()
     self.rank = rank
     self.device = device
     self.n_parallel = n_parallel
     self.model_group = model_group
+    self.softmax_group = softmax_group
     
-    self.x_items = x_items
     self.embed_dim = embed_dim
     self.x_features = x_features
     
@@ -21,21 +32,27 @@ class DistributedAttention(torch.nn.Module):
         self.qkv = Linear.DistributedXW(x_features, embed_dim//2*3, self.rank, self.device, self.n_parallel, self.model_group,  n_channels=1, init_method='linear', bias=False)
     elif n_parallel == 4:
         self.qkv = Linear.DistributedXW(x_features, embed_dim*3, self.rank, self.device, self.n_parallel, self.model_group,  n_channels=1, init_method='linear', bias=False)
-    self.softmax = Norm.DistributedSoftMax(dim=-1, group=self.model_group) # TODO: define softmax groups
+    elif n_parallel == 8:
+        self.qkv = Linear.DistributedXWT(x_features, embed_dim*3, self.rank, self.device, self.n_parallel, self.model_group,  n_channels=1, init_method='linear', bias=False)
+    self.softmax = Norm.DistributedSoftMax(dim=-1, group=self.softmax_group) # TODO: define softmax groups
     self.xwt = Linear.DistributedMatMulXWTranspose(self.rank, self.device, self.n_parallel, model_group=self.model_group) # model group TODO 
     self.xw = Linear.DistributedMatMulXW(rank, device, self.n_parallel, model_group=self.model_group) # model group TODO 
     
     if n_parallel == 2:
         self.concatenator = Linear.DistributedXW(embed_dim, output_dim//2, self.rank, self.device, self.n_parallel, self.model_group, n_channels=1, init_method='linear', bias=False)
-    else:
+    elif n_parallel == 4:
+        self.concatenator = Linear.DistributedXW(embed_dim, output_dim, self.rank, self.device, self.n_parallel, self.model_group, n_channels=1, init_method='linear', bias=False)
+    elif n_parallel == 8:
         self.concatenator = Linear.DistributedXW(embed_dim, output_dim, self.rank, self.device, self.n_parallel, self.model_group, n_channels=1, init_method='linear', bias=False)
     
     self.heads = heads
-    self.scale = (embed_dim // self.heads) ** (-0.5) # should be (embed_dim/heads)
+    self.scale = (embed_dim * 4 // self.heads) ** (-0.5) # should be (embed_dim/heads)
     
 
-  def forward(self, x):
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
     """
+    Forward pass for distributed multi-head attention.
+    
     x: (n_batch, vars, n_lat, n_lon)
     """
     # Load constant masks from the disc
@@ -57,6 +74,5 @@ class DistributedAttention(torch.nn.Module):
     values = rearrange(values, 'n h s d -> n s (h d)').contiguous()
     
     values = self.concatenator(values)
-    #values = self.mlp(values, model_group=None)
     # Output: [n_batch, seq_length, output_dim]
     return values

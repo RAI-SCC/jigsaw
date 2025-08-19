@@ -7,7 +7,18 @@ import Linear
 class DistributedMLP(torch.nn.Module):
     """Distributed MLP across n processes."""
 
-    def __init__(self, in_dim, hidden_dim, out_dim, rank, device, n_parallel, model_group, bias=True, dropout=1e-3):
+    def __init__(
+            self, 
+            in_dim: int, 
+            hidden_dim: int, 
+            out_dim: int, 
+            rank: int, 
+            device: torch.device, 
+            n_parallel: int, 
+            model_group: torch.distributed.ProcessGroup, 
+            bias: bool = True, 
+            dropout: float = 1e-3
+        ):
         """
         Initialize the MLP module for either two- or four-way model parallelism.
 
@@ -121,7 +132,7 @@ class DistributedXTWMLP(torch.nn.Module):
             self.linear2 = Linear.DistributedXW(hidden_dim, out_dim, rank, device, n_parallel, model_group, bias=bias)
         elif n_parallel == 8:
             self.linear1 = Linear.DistributedXTW(in_dim, hidden_dim, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
-            self.linear2 = Linear.DistributedXW(hidden_dim*2, out_dim, rank, device, n_parallel, model_group, bias=bias)
+            self.linear2 = Linear.DistributedXW(hidden_dim//2, out_dim, rank, device, n_parallel, model_group, bias=bias)
         
         self.activation = GELU()
         self.drop = Dropout(p=dropout)

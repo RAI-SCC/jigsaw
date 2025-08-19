@@ -1,20 +1,26 @@
+import os
+
 import torch
 import torch.distributed as dist
-import torch.distributed
-import os
 
 streams = [torch.cuda.Stream() for _ in range(2)]
 streamz = [torch.cuda.Stream() for _ in range(4)]
 
 _prealloc_buffers = {}   
-device=f'cuda:{int(os.getenv("SLURM_LOCALID"))}'
+device = f'cuda:{int(os.getenv("SLURM_LOCALID"))}'
 empty = torch.empty(0, device=device, dtype=torch.float32)
     
-
-def _get_preallocated_buffer(shape, dtype, rank, device, index=0):
+def _get_preallocated_buffer(
+        shape: torch.Size, 
+        dtype: torch.dtype, 
+        rank: int, 
+        device: torch.device, 
+        index: int = 0
+    ) -> torch.tensor:
     """
     Retrieve or create a preallocated buffer.
-    Parameters
+
+    Parameters.
     ----------
     shape : tuple
         The shape of the buffer to be created or retrieved.
@@ -26,12 +32,12 @@ def _get_preallocated_buffer(shape, dtype, rank, device, index=0):
         Global rank.
     index : int, optional
         An additional index to differentiate buffers (default is 0).
+
     Returns
     -------
     torch.Tensor
         Preallocated buffer.
     """
-
     key = (dtype, rank, index)
     if key not in _prealloc_buffers:
         _prealloc_buffers[key] = (None, 0)
@@ -56,7 +62,13 @@ def _get_preallocated_buffer(shape, dtype, rank, device, index=0):
         return out
     
 ## Two-way distributions
-def xw_transpose_twoway(Xij, Wij, rank, device, model_group):
+def xw_transpose_twoway(
+    Xij: torch.tensor, 
+    Wij: torch.tensor, 
+    rank: int,
+    device: torch.device, 
+    model_group: torch.distributed.ProcessGroup
+) -> torch.tensor:
     """
     Batched matrix-matrix (XWT) multiplication distributed across two processes.
 
@@ -78,7 +90,6 @@ def xw_transpose_twoway(Xij, Wij, rank, device, model_group):
     Cij : torch.Tensor
         Local result.
     """
-
     mod = rank % 2
         
     W0, W1 = torch.split(Wij, Wij.shape[-2]//2, dim=-2)
@@ -109,7 +120,13 @@ def xw_transpose_twoway(Xij, Wij, rank, device, model_group):
         
     return Cij
 
-def xw_twoway(Xij, Wij, rank, device, model_group):
+def xw_twoway(
+    Xij: torch.tensor, 
+    Wij: torch.tensor, 
+    rank: int, 
+    device: torch.device, 
+    model_group: torch.distributed.ProcessGroup
+) -> torch.tensor:
     """
     Batched matrix-matrix (XW) multiplication distributed across two processes.
 
@@ -160,7 +177,13 @@ def xw_twoway(Xij, Wij, rank, device, model_group):
     
     return Cij 
 
-def x_transpose_w_twoway(Xij, Wij, rank, device, model_group):
+def x_transpose_w_twoway(
+    Xij: torch.tensor, 
+    Wij: torch.tensor, 
+    rank: int, 
+    device: torch.device, 
+    model_group: torch.distributed.ProcessGroup
+) -> torch.tensor:
     """
     Batched matrix-matrix (XTW) multiplication distributed across two processes.
 
@@ -176,6 +199,7 @@ def x_transpose_w_twoway(Xij, Wij, rank, device, model_group):
         Global rank.
     model_group : torch.distributed.ProcessGroup, optional
         Process group for an individual model-parallel instance.
+
     Returns
     -------
     Cij : torch.Tensor
@@ -210,10 +234,16 @@ def x_transpose_w_twoway(Xij, Wij, rank, device, model_group):
     return Cij
 
 
-def x_transpose_twoway(X, rank, device, model_group):
+def x_transpose_twoway(
+    X: torch.tensor, 
+    rank: int, 
+    device: torch.device, 
+    model_group: torch.distributed.ProcessGroup
+) -> torch.tensor:
     """
     Batched transpose (XT) operation distributed across two processes.
-    Parameters
+
+    Parameters.
     ----------
     X : torch.Tensor
         The input tensor.
@@ -229,7 +259,6 @@ def x_transpose_twoway(X, rank, device, model_group):
     XT: torch.Tensor
         Local transposed tensor.
     """
-
     mod = rank % 2
 
     X0, X1 = torch.split(X, X.shape[-2]//2, dim=-2)
@@ -274,10 +303,16 @@ def x_transpose_twoway(X, rank, device, model_group):
     return XT
 
 
-def xw_transpose_fourway(Xij, Wij, rank,  device, model_group):
-    
+def xw_transpose_fourway(
+    Xij: torch.tensor, 
+    Wij: torch.tensor, 
+    rank: int, 
+    device: torch.device, 
+    model_group: torch.distributed.ProcessGroup
+) -> torch.tensor:
     """
     Batched matrix-matrix (XWT) multiplication distributed across four processes.
+    
     Parameters
     ----------
     Xij : torch.Tensor
@@ -290,12 +325,12 @@ def xw_transpose_fourway(Xij, Wij, rank,  device, model_group):
         Device to perform computation on.
     model_group : torch.distributed.ProcessGroup, optional
         Process group for an individual model-parallel instance.
+
     Returns
     -------
     Cij : torch.Tensor
         Local result.
     """
-    
     mod = rank % 4
     
     empty = torch.empty(0, device=device)
@@ -344,8 +379,13 @@ def xw_transpose_fourway(Xij, Wij, rank,  device, model_group):
 
     return Cij
     
-def xw_fourway(Xij, Wij, rank,  device, model_group):
-    
+def xw_fourway(
+    Xij: torch.tensor, 
+    Wij: torch.tensor, 
+    rank: int,
+    device: torch.device, 
+    model_group: torch.distributed.ProcessGroup
+) -> torch.tensor:
     """
     Batched matrix-matrix (XW) multiplication distributed across four processes.
     
@@ -367,7 +407,6 @@ def xw_fourway(Xij, Wij, rank,  device, model_group):
     torch.Tensor
         Local result.
     """
-
     mod = rank % 4
     
     empty = torch.empty(0, device=device)
@@ -419,9 +458,16 @@ def xw_fourway(Xij, Wij, rank,  device, model_group):
         Cij = Cij + torch.matmul(x_recv_list[2], w_recv_list[1]) 
     return Cij
 
-def x_transpose_w_fourway(Xij, Wij, rank, device, model_group=None):
+def x_transpose_w_fourway(
+    Xij: torch.tensor, 
+    Wij: torch.tensor, 
+    rank: int, 
+    device: torch.device, 
+    model_group: torch.distributed.ProcessGroup
+) -> torch.tensor:
     """
     Batched matrix-matrix (XTW) multiplication distributed across four processes.
+    
     Parameters
     ----------
     Xij : torch.Tensor
@@ -432,14 +478,14 @@ def x_transpose_w_fourway(Xij, Wij, rank, device, model_group=None):
         Global rank.
     device : torch.device
         Device to perform computation on.
-    model_group : torch.distributed.ProcessGroup, optional
+    model_group : torch.distributed.ProcessGroup
         Process group for an individual model-parallel instance.
+
     Returns
     -------
     Cij : torch.Tensor
         Local result.
     """
-
     mod = rank % 4
     
     empty = torch.empty(0, device=device)
@@ -493,10 +539,16 @@ def x_transpose_w_fourway(Xij, Wij, rank, device, model_group=None):
     
     return Cij
 
-def x_transpose_fourway(X, rank, device, model_group):
+def x_transpose_fourway(
+    X: torch.tensor, 
+    rank: int, 
+    device: torch.device, 
+    model_group: torch.distributed.ProcessGroup
+) -> torch.tensor:
     """
     Batched transpose (XT) operation distributed across four processes.
-    Parameters
+
+    Parameters.
     ----------
     X : torch.Tensor
         Local input tensor to be transposed.
@@ -504,12 +556,12 @@ def x_transpose_fourway(X, rank, device, model_group):
         Global rank.
     device : torch.device
         Device to perform computation on.
+
     Returns
     -------
     X : torch.Tensor
         The transposed tensor.
     """
-
     mod = rank % 4
     empty = torch.empty(0, device=device)
     if mod == 0 or mod == 3:
@@ -531,9 +583,16 @@ def x_transpose_fourway(X, rank, device, model_group):
     else:
         return x_recv_list[1].mT
     
-def xw_transpose_eightway_(Xij, Wij, rank, device, model_group):
+def xw_transpose_eightway_(
+    Xij: torch.tensor, 
+    Wij: torch.tensor, 
+    rank: int, 
+    device: torch.device, 
+    model_group: torch.distributed.ProcessGroup
+) -> torch.tensor:
     """
     Batched matrix-matrix (XWT) multiplication distributed across four processes.
+    
     Parameters
     ----------
     Xij : torch.Tensor
@@ -546,15 +605,13 @@ def xw_transpose_eightway_(Xij, Wij, rank, device, model_group):
         Device to perform computation on.
     model_group : torch.distributed.ProcessGroup, optional
         Process group for an individual model-parallel instance.
+
     Returns
     -------
     Cij : torch.Tensor
         Local result.
     """
-    
     mod = rank % 8
-    
-    #empty = torch.empty(0, device=device, dtype=Xij.dtype)
     
     if mod == 0:
         x_send_list = [empty, Xij, empty, empty, empty, empty, empty, empty]
@@ -733,10 +790,17 @@ def xw_transpose_eightway_(Xij, Wij, rank, device, model_group):
 
     return Cij
 
-def xw_transpose_eightway(Xij, Wij, rank, device, model_group):
+def xw_transpose_eightway(
+    Xij: torch.tensor, 
+    Wij: torch.tensor, 
+    rank: int, 
+    device: torch.device, 
+    model_group: torch.distributed.ProcessGroup
+) -> torch.tensor:
     """
     Batched matrix-matrix (XWT) multiplication distributed across four processes.
-    Parameters
+
+    Parameters.
     ----------
     Xij : torch.Tensor
         Local input matrix.
@@ -748,12 +812,12 @@ def xw_transpose_eightway(Xij, Wij, rank, device, model_group):
         Device to perform computation on.
     model_group : torch.distributed.ProcessGroup, optional
         Process group for an individual model-parallel instance.
+
     Returns
     -------
     Cij : torch.Tensor
         Local result.
     """
-    
     mod = rank % 8
     
     #empty = torch.empty(0, device=device, dtype=Xij.dtype)
@@ -978,10 +1042,16 @@ def xw_transpose_eightway(Xij, Wij, rank, device, model_group):
 
     return Cij
 
-def xw_eightway_(Xij, Wij, rank,  device, model_group):
-    
+def xw_eightway(
+    Xij: torch.tensor, 
+    Wij: torch.tensor, 
+    rank: int,  
+    device: torch.device, 
+    model_group: torch.distributed.ProcessGroup
+) -> torch.tensor:
     """
     Batched matrix-matrix (XW) multiplication distributed across eight processes.
+
     Parameters
     ----------
     Xij : torch.Tensor
@@ -994,121 +1064,108 @@ def xw_eightway_(Xij, Wij, rank,  device, model_group):
         Device to perform computation on.
     model_group : torch.distributed.ProcessGroup, optional
         Process group for an individual model-parallel instance.
+
     Returns
     -------
     Cij : torch.Tensor
         Local result.
     """
-    
     mod = rank % 8
-    
-    #empty = torch.empty(0, device=device, dtype=Xij.dtype)
-    W0 = _get_preallocated_buffer((*Wij.shape[:-2], Wij.shape[-2]*2, Wij.shape[-1]), dtype=Wij.dtype, rank=rank, device=device, index=1)
-    W1 = _get_preallocated_buffer((*Wij.shape[:-2], Wij.shape[-2]*2, Wij.shape[-1]), dtype=Wij.dtype, rank=rank, device=device, index=2)
-    W0_first_half, W0_second_half = torch.chunk(W0, chunks=2, dim=-2)
-    W1_first_half, W1_second_half = torch.chunk(W1, chunks=2, dim=-2)
     
     if mod == 0:
         x_send_list = [empty, Xij, empty, empty, empty, empty, empty, empty]
         x_recv_list = [empty, _get_preallocated_buffer(Xij.shape, Xij.dtype, rank, device, 0), empty, empty, empty, empty, empty, empty]
         w_send_list = [empty, empty, Wij, empty, Wij, empty, Wij, empty]
-        W0_first_half.copy_(Wij)
         w_recv_list = [
             empty,
             empty,
-            W0_second_half,
+            _get_preallocated_buffer(Wij.shape, Xij.dtype, rank, device, 1),
             empty, 
-            W0_first_half, 
+            _get_preallocated_buffer(Wij.shape, Xij.dtype, rank, device, 2), 
             empty,
-            W1_second_half, 
+            _get_preallocated_buffer(Wij.shape, Xij.dtype, rank, device, 3), 
             empty
         ]
     elif mod == 1:
         x_send_list = [Xij, empty, empty, empty, empty, empty, empty, empty]
         x_recv_list = [_get_preallocated_buffer(Xij.shape, Xij.dtype, rank, device, 0), empty, empty, empty, empty, empty, empty, empty]
         w_send_list = [empty, empty, empty, Wij, empty, Wij, empty, Wij]
-        W1_first_half = W1_first_half + Wij
         w_recv_list = [
             empty, 
             empty, 
             empty, 
-            W1_second_half,
+            _get_preallocated_buffer(Wij.shape, Wij.dtype, rank, device, 1),
             empty,
-            W0_first_half,
+            _get_preallocated_buffer(Wij.shape, Wij.dtype, rank, device, 2),
             empty,
-            W0_second_half
+            _get_preallocated_buffer(Wij.shape, Wij.dtype, rank, device, 3)
         ]
     elif mod == 2:
         x_send_list = [empty, empty, empty, Xij, empty, empty, empty, empty]
         x_recv_list = [empty, empty, empty, _get_preallocated_buffer(Xij.shape, Xij.dtype, rank, device, 0), empty, empty, empty, empty]
         w_send_list = [Wij, empty, empty, empty, Wij, empty, Wij, empty]
-        W0_second_half.copy_(Wij)
         w_recv_list = [
-            W0_first_half,
+            _get_preallocated_buffer(Wij.shape, Xij.dtype, rank, device, 1),
             empty,
             empty,
             empty, 
-            W1_first_half, 
+            _get_preallocated_buffer(Wij.shape, Xij.dtype, rank, device, 2), 
             empty,
-            W1_second_half, 
+            _get_preallocated_buffer(Wij.shape, Xij.dtype, rank, device, 3), 
             empty
         ]
     elif mod == 3:
         x_send_list = [empty, empty, Xij, empty, empty, empty, empty, empty]
         x_recv_list = [empty, empty, _get_preallocated_buffer(Xij.shape, Xij.dtype, rank, device, 0), empty, empty, empty, empty, empty]
         w_send_list = [empty, Wij, empty, empty, empty, Wij, empty, Wij]
-        W1_second_half.copy_(Wij)
         w_recv_list = [
             empty, 
-            W1_first_half,
+            _get_preallocated_buffer(Wij.shape, Wij.dtype, rank, device, 1),
             empty, 
             empty,
             empty,
-            W0_first_half,
+            _get_preallocated_buffer(Wij.shape, Wij.dtype, rank, device, 2),
             empty,
-            W0_second_half
+            _get_preallocated_buffer(Wij.shape, Wij.dtype, rank, device, 3)
         ]
     elif mod == 4:
         x_send_list = [empty, empty, empty, empty, empty, Xij, empty, empty]
         x_recv_list = [empty, empty, empty, empty, empty, _get_preallocated_buffer(Xij.shape, Xij.dtype, rank, device, 0), empty, empty]
         w_send_list = [Wij, empty, Wij, empty, empty, empty, Wij, empty]
-        W1_first_half = W1_first_half + Wij
         w_recv_list = [
-            W0_first_half,
+            _get_preallocated_buffer(Wij.shape, Xij.dtype, rank, device, 1),
             empty,
-            W0_second_half,
+            _get_preallocated_buffer(Wij.shape, Xij.dtype, rank, device, 2),
             empty, 
             empty, 
             empty,
-            W1_second_half, 
+            _get_preallocated_buffer(Wij.shape, Xij.dtype, rank, device, 3), 
             empty
         ]
     elif mod == 5:
         x_send_list = [empty, empty, empty, empty, Xij, empty, empty, empty]
         x_recv_list = [empty, empty, empty, empty, _get_preallocated_buffer(Xij.shape, Xij.dtype, rank, device, 0), empty, empty, empty]
         w_send_list = [empty, Wij, empty, Wij, empty, empty, empty, Wij]
-        W0_first_half.copy_(Wij)
         w_recv_list = [
             empty, 
-            W1_first_half,
+            _get_preallocated_buffer(Wij.shape, Wij.dtype, rank, device, 1),
             empty, 
-            W1_second_half,
+            _get_preallocated_buffer(Wij.shape, Wij.dtype, rank, device, 2),
             empty,
             empty,
             empty,
-            W0_second_half
+            _get_preallocated_buffer(Wij.shape, Wij.dtype, rank, device, 3)
         ]
     elif mod == 6:
         x_send_list = [empty, empty, empty, empty, empty, empty, empty, Xij]
         x_recv_list = [empty, empty, empty, empty, empty, empty, empty, _get_preallocated_buffer(Xij.shape, Xij.dtype, rank, device, 0)]
         w_send_list = [Wij, empty, Wij, empty, Wij, empty, empty, empty]
-        W1_second_half = W1_second_half + Wij
         w_recv_list = [
-            W0_first_half,
+            _get_preallocated_buffer(Wij.shape, Xij.dtype, rank, device, 1),
             empty,
-            W0_second_half,
+            _get_preallocated_buffer(Wij.shape, Xij.dtype, rank, device, 2),
             empty, 
-            W1_first_half, 
+            _get_preallocated_buffer(Wij.shape, Xij.dtype, rank, device, 3), 
             empty,
             empty,
             empty
@@ -1117,51 +1174,91 @@ def xw_eightway_(Xij, Wij, rank,  device, model_group):
         x_send_list = [empty, empty, empty, empty, empty, empty, Xij, empty]
         x_recv_list = [empty, empty, empty, empty, empty, empty, _get_preallocated_buffer(Xij.shape, Xij.dtype, rank, device, 0), empty]
         w_send_list = [empty, Wij, empty, Wij, empty, Wij, empty, empty]
-        W0_second_half.copy_(Wij)
         w_recv_list = [
             empty, 
-            W1_first_half,
+            _get_preallocated_buffer(Wij.shape, Wij.dtype, rank, device, 1),
             empty, 
-            W1_second_half,
+            _get_preallocated_buffer(Wij.shape, Wij.dtype, rank, device, 2),
             empty,
-            W0_first_half,
+            _get_preallocated_buffer(Wij.shape, Wij.dtype, rank, device, 3),
             empty,
             empty
         ]
 
     handle_w = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
     handle_x = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
-    
+
     handle_w.wait()
     
-    Cij = torch.matmul(Xij, W0)
+    if mod == 0:
+        ws_stacked = torch.concatenate([Wij, w_recv_list[2]], dim=0).contiguous() 
+        #Cij = torch.matmul(X0, Wij) + torch.matmul(X1, w_recv_list[2])
+    elif mod == 1:
+        ws_stacked = torch.concatenate([w_recv_list[5], w_recv_list[7]], dim=0).contiguous() 
+        #Cij = torch.matmul(X0, w_recv_list[5]) + torch.matmul(X1, w_recv_list[7])
+    elif mod == 2:
+        ws_stacked = torch.concatenate([w_recv_list[0], Wij], dim=0).contiguous() 
+        #Cij = torch.matmul(X0, w_recv_list[0]) + torch.matmul(X1, Wij)
+    elif mod == 3:
+        ws_stacked = torch.concatenate([w_recv_list[5], w_recv_list[7]], dim=0).contiguous() 
+        #Cij = torch.matmul(X0, w_recv_list[5]) + torch.matmul(X1, w_recv_list[7])
+    elif mod == 4:
+        ws_stacked = torch.concatenate([w_recv_list[0], w_recv_list[2]], dim=0).contiguous() 
+        #Cij = torch.matmul(X0, w_recv_list[0]) + torch.matmul(X1, w_recv_list[2])
+    elif mod == 5:
+        ws_stacked = torch.concatenate([Wij, w_recv_list[7]], dim=0).contiguous() 
+        #Cij = torch.matmul(X0, Wij) + torch.matmul(X1, w_recv_list[7])
+    elif mod == 6:
+        ws_stacked = torch.concatenate([w_recv_list[0], w_recv_list[2]], dim=0).contiguous() 
+        #Cij = torch.matmul(X0, w_recv_list[0]) + torch.matmul(X1, w_recv_list[2])
+    elif mod == 7:
+        ws_stacked = torch.concatenate([w_recv_list[5], Wij], dim=0).contiguous() 
+        #Cij = torch.matmul(X0, w_recv_list[5]) + torch.matmul(X1, Wij)  
+    
+    Cij = torch.matmul(Xij, ws_stacked)
+    if rank == 0:
+        print(f'Xij: {Xij.shape}, {Wij.shape}, {ws_stacked.shape}')
     
     handle_x.wait()
     
     if mod == 0:
-        Cij = Cij + torch.matmul(x_recv_list[1], W1)
+        X0, X1 = torch.split(x_recv_list[1], x_recv_list[1].shape[-1]//2, dim=-1) # split upon last dimension
+        Cij = Cij + torch.matmul(X0, w_recv_list[4]) + torch.matmul(X1, w_recv_list[6])
     elif mod == 1:
-        Cij = Cij + torch.matmul(x_recv_list[0], W1)
+        X0, X1 = torch.split(x_recv_list[0], x_recv_list[0].shape[-1]//2, dim=-1) # split upon last dimension
+        Cij = Cij + torch.matmul(X0, Wij) + torch.matmul(X1, w_recv_list[3])
     elif mod == 2:
-        Cij = Cij + torch.matmul(x_recv_list[3], W1)
+        X0, X1 = torch.split(x_recv_list[3], x_recv_list[3].shape[-1]//2, dim=-1) # split upon last dimension
+        Cij = Cij + torch.matmul(X0, w_recv_list[4]) + torch.matmul(X1, w_recv_list[6])
     elif mod == 3:
-        Cij = Cij + torch.matmul(x_recv_list[2], W1)
+        X0, X1 = torch.split(x_recv_list[2], x_recv_list[2].shape[-1]//2, dim=-1) # split upon last dimension
+        Cij = Cij + torch.matmul(X0, w_recv_list[1]) + torch.matmul(X1, Wij)
     elif mod == 4:
-        Cij = Cij + torch.matmul(x_recv_list[5], W1)
+        X0, X1 = torch.split(x_recv_list[5], x_recv_list[5].shape[-1]//2, dim=-1) # split upon last dimension
+        Cij = Cij + torch.matmul(X0, Wij) + torch.matmul(X1, w_recv_list[6])
     elif mod == 5:
-        Cij = Cij + torch.matmul(x_recv_list[4], W1)
+        X0, X1 = torch.split(x_recv_list[4], x_recv_list[4].shape[-1]//2, dim=-1) # split upon last dimension
+        Cij = Cij + torch.matmul(X0, w_recv_list[1]) + torch.matmul(X1, w_recv_list[3])
     elif mod == 6:
-        Cij = Cij + torch.matmul(x_recv_list[7], W1)
+        X0, X1 = torch.split(x_recv_list[7], x_recv_list[7].shape[-1]//2, dim=-1) # split upon last dimension
+        Cij = Cij + torch.matmul(X0, w_recv_list[4]) + torch.matmul(X1, Wij)
     elif mod == 7:
-        Cij = Cij + torch.matmul(x_recv_list[6], W1)
-    
+        X0, X1 = torch.split(x_recv_list[6], x_recv_list[6].shape[-1]//2, dim=-1) # split upon last dimension
+        Cij = Cij + torch.matmul(X0, w_recv_list[1]) + torch.matmul(X1, w_recv_list[3])
+
     return Cij
 
-def xw_eightway(Xij, Wij, rank,  device, model_group):
-    
+def xw_eightway(
+    Xij: torch.tensor, 
+    Wij: torch.tensor, 
+    rank: int, 
+    device: torch.device, 
+    model_group: torch.distributed.ProcessGroup
+) -> torch.tensor:
     """
     Batched matrix-matrix (XW) multiplication distributed across eight processes.
-    Parameters
+    
+    Parameters.
     ----------
     Xij : torch.Tensor
         Local input matrix.
@@ -1173,121 +1270,121 @@ def xw_eightway(Xij, Wij, rank,  device, model_group):
         Device to perform computation on.
     model_group : torch.distributed.ProcessGroup, optional
         Process group for an individual model-parallel instance.
+
     Returns
     -------
     Cij : torch.Tensor
         Local result.
     """
-    
     mod = rank % 8
     
     #empty = torch.empty(0, device=device, dtype=Xij.dtype)
     W0 = _get_preallocated_buffer((*Wij.shape[:-2], Wij.shape[-2]*2, Wij.shape[-1]), dtype=Wij.dtype, rank=rank, device=device, index=1)
     W1 = _get_preallocated_buffer((*Wij.shape[:-2], Wij.shape[-2]*2, Wij.shape[-1]), dtype=Wij.dtype, rank=rank, device=device, index=2)
-    W0_first_half, W0_second_half = torch.chunk(W0, chunks=2, dim=-2)
-    W1_first_half, W1_second_half = torch.chunk(W1, chunks=2, dim=-2)
     
+    W0_shape = W0.shape
+    split_size = W0_shape[-2]//2
     if mod == 0:
         x_send_list = [empty, Xij, empty, empty, empty, empty, empty, empty]
         x_recv_list = [empty, _get_preallocated_buffer(Xij.shape, Xij.dtype, rank, device, 0), empty, empty, empty, empty, empty, empty]
         w_send_list = [empty, empty, Wij, empty, Wij, empty, Wij, empty]
-        W0_first_half.copy_(Wij)
+        W0[..., :split_size, :].copy_(Wij)
         w_recv_list = [
             empty,
             empty,
-            W0_second_half,
+            W0[..., split_size:, :],
             empty, 
-            W0_first_half, 
+            W1[..., :split_size, :], 
             empty,
-            W1_second_half, 
+            W1[..., split_size:, ], 
             empty
         ]
     elif mod == 1:
         x_send_list = [Xij, empty, empty, empty, empty, empty, empty, empty]
         x_recv_list = [_get_preallocated_buffer(Xij.shape, Xij.dtype, rank, device, 0), empty, empty, empty, empty, empty, empty, empty]
         w_send_list = [empty, empty, empty, Wij, empty, Wij, empty, Wij]
-        W1_first_half.copy_(Wij)
+        W1[..., :split_size, :].copy_(Wij)
         w_recv_list = [
             empty, 
             empty, 
             empty, 
-            W1_second_half,
+            W1[..., split_size:, ],
             empty,
-            W0_first_half,
+            W0[..., :split_size, :],
             empty,
-            W0_second_half
+            W0[..., split_size:, ]
         ]
     elif mod == 2:
         x_send_list = [empty, empty, empty, Xij, empty, empty, empty, empty]
         x_recv_list = [empty, empty, empty, _get_preallocated_buffer(Xij.shape, Xij.dtype, rank, device, 0), empty, empty, empty, empty]
         w_send_list = [Wij, empty, empty, empty, Wij, empty, Wij, empty]
-        W0_second_half.copy_(Wij)
+        W0[..., split_size:, ].copy_(Wij)
         w_recv_list = [
-            W0_first_half,
+            W0[..., :split_size, :],
             empty,
             empty,
             empty, 
-            W1_first_half, 
+            W1[..., :split_size, :], 
             empty,
-            W1_second_half, 
+            W1[..., split_size:, ], 
             empty
         ]
     elif mod == 3:
         x_send_list = [empty, empty, Xij, empty, empty, empty, empty, empty]
         x_recv_list = [empty, empty, _get_preallocated_buffer(Xij.shape, Xij.dtype, rank, device, 0), empty, empty, empty, empty, empty]
         w_send_list = [empty, Wij, empty, empty, empty, Wij, empty, Wij]
-        W1_second_half.copy_(Wij)
+        W0[W0_shape[0]//2:].copy_(Wij)
         w_recv_list = [
             empty, 
-            W1_first_half,
+            W1[..., :split_size, :],
             empty, 
             empty,
             empty,
-            W0_first_half,
+            W0[..., :split_size, :],
             empty,
-            W0_second_half
+            W0[W0_shape[0]//2:]
         ]
     elif mod == 4:
         x_send_list = [empty, empty, empty, empty, empty, Xij, empty, empty]
         x_recv_list = [empty, empty, empty, empty, empty, _get_preallocated_buffer(Xij.shape, Xij.dtype, rank, device, 0), empty, empty]
         w_send_list = [Wij, empty, Wij, empty, empty, empty, Wij, empty]
-        W1_first_half.copy_(Wij)
+        W1[..., :split_size, :].copy_(Wij)
         w_recv_list = [
-            W0_first_half,
+            W0[..., :split_size, :],
             empty,
-            W0_second_half,
+            W0[W0_shape[0]//2:],
             empty, 
             empty, 
             empty,
-            W1_second_half, 
+            W1[W0_shape[0]//2:], 
             empty
         ]
     elif mod == 5:
         x_send_list = [empty, empty, empty, empty, Xij, empty, empty, empty]
         x_recv_list = [empty, empty, empty, empty, _get_preallocated_buffer(Xij.shape, Xij.dtype, rank, device, 0), empty, empty, empty]
         w_send_list = [empty, Wij, empty, Wij, empty, empty, empty, Wij]
-        W0_first_half.copy_(Wij)
+        W0[..., :split_size, :].copy_(Wij)
         w_recv_list = [
             empty, 
-            W1_first_half,
+            W1[..., :split_size, :],
             empty, 
-            W1_second_half,
+            W1[W0_shape[0]//2:],
             empty,
             empty,
             empty,
-            W0_second_half
+            W0[W0_shape[0]//2:]
         ]
     elif mod == 6:
         x_send_list = [empty, empty, empty, empty, empty, empty, empty, Xij]
         x_recv_list = [empty, empty, empty, empty, empty, empty, empty, _get_preallocated_buffer(Xij.shape, Xij.dtype, rank, device, 0)]
         w_send_list = [Wij, empty, Wij, empty, Wij, empty, empty, empty]
-        W1_second_half.copy_(Wij)
+        W1[W0_shape[0]//2:].copy_(Wij)
         w_recv_list = [
-            W0_first_half,
+            W0[..., :split_size, :],
             empty,
-            W0_second_half,
+            W0[W0_shape[0]//2:],
             empty, 
-            W1_first_half, 
+            W1[..., :split_size, :], 
             empty,
             empty,
             empty
@@ -1296,14 +1393,14 @@ def xw_eightway(Xij, Wij, rank,  device, model_group):
         x_send_list = [empty, empty, empty, empty, empty, empty, Xij, empty]
         x_recv_list = [empty, empty, empty, empty, empty, empty, _get_preallocated_buffer(Xij.shape, Xij.dtype, rank, device, 0), empty]
         w_send_list = [empty, Wij, empty, Wij, empty, Wij, empty, empty]
-        W0_second_half.copy_(Wij)
+        W0[W0_shape[0]//2:].copy_(Wij)
         w_recv_list = [
             empty, 
-            W1_first_half,
+            W1[..., :split_size, :],
             empty, 
-            W1_second_half,
+            W1[W0_shape[0]//2:],
             empty,
-            W0_first_half,
+            W0[..., :split_size, :],
             empty,
             empty
         ]
@@ -1315,10 +1412,10 @@ def xw_eightway(Xij, Wij, rank,  device, model_group):
         handle_w.wait()
         Cij0 = torch.matmul(Xij, W0)
     
-    with torch.cuda.stream(streams[1]):
+    with torch.cuda.stream(streams[0]):
         handle_w.wait()
         handle_x.wait()
-    
+        
         if mod == 0:
             Cij1 = torch.matmul(x_recv_list[1], W1)
         elif mod == 1:
@@ -1335,6 +1432,7 @@ def xw_eightway(Xij, Wij, rank,  device, model_group):
             Cij1 = torch.matmul(x_recv_list[7], W1)
         elif mod == 7:
             Cij1 = torch.matmul(x_recv_list[6], W1)
+
     
     for s in streams:
         s.synchronize()
@@ -1343,11 +1441,17 @@ def xw_eightway(Xij, Wij, rank,  device, model_group):
     
     return Cij
 
-def x_transpose_w_eightway_(Xij, Wij, rank,  device, model_group):
-    
+def x_transpose_w_eightway_(
+    Xij: torch.tensor, 
+    Wij: torch.tensor, 
+    rank: int, 
+    device: torch.device, 
+    model_group: torch.distributed.ProcessGroup
+) -> torch.tensor:
     """
     Batched matrix-matrix (XWT) multiplication distributed across four processes.
-    Parameters
+    
+    Parameters.
     ----------
     Xij : torch.Tensor
         Local input matrix.
@@ -1359,16 +1463,14 @@ def x_transpose_w_eightway_(Xij, Wij, rank,  device, model_group):
         Device to perform computation on.
     model_group : torch.distributed.ProcessGroup, optional
         Process group for an individual model-parallel instance.
+
     Returns
     -------
     Cij : torch.Tensor
         Local result.
     """
-    
     mod = rank % 8
     
-    #empty = torch.empty(0, device=device, dtype=Xij.dtype)
-
     X0, X1 = torch.split(Xij, Xij.shape[-1]//2, dim=-1) # split upon last dimension
     X0, X1 = X0.contiguous(), X1.contiguous()
     
@@ -1601,10 +1703,16 @@ def x_transpose_w_eightway_(Xij, Wij, rank,  device, model_group):
     return Cij
 
 
-def x_transpose_w_eightway(Xij, Wij, rank,  device, model_group):
-    
+def x_transpose_w_eightway(
+    Xij: torch.tensor, 
+    Wij: torch.tensor, 
+    rank: int, 
+    device: torch.device, 
+    model_group: torch.distributed.ProcessGroup
+) -> torch.tensor:
     """
-    Batched matrix-matrix (XWT) multiplication distributed across four processes.
+    Batched matrix-matrix (XTW) multiplication distributed across eight processes.
+
     Parameters
     ----------
     Xij : torch.Tensor
@@ -1617,15 +1725,13 @@ def x_transpose_w_eightway(Xij, Wij, rank,  device, model_group):
         Device to perform computation on.
     model_group : torch.distributed.ProcessGroup, optional
         Process group for an individual model-parallel instance.
+
     Returns
     -------
     Cij : torch.Tensor
         Local result.
     """
-    
     mod = rank % 8
-    
-    #empty = torch.empty(0, device=device, dtype=Xij.dtype)
     
     X0, X1 = torch.split(Xij.mT, Xij.shape[-1]//2, dim=-2)
     X0, X1 = X0.contiguous(), X1.contiguous()
@@ -1906,11 +2012,14 @@ def x_transpose_w_eightway(Xij, Wij, rank,  device, model_group):
     
     return Cij
 
-def x_transpose_eightway_(Xij, rank, device, model_group):
+def x_transpose_eightway_(
+    Xij: torch.tensor, 
+    rank: int, 
+    device: torch.device, 
+    model_group: torch.distributed.ProcessGroup
+) -> torch.tensor:
     mod = rank % 8
     
-    #empty = torch.empty(0, device=device, dtype=Xij.dtype)
-
     X0, X1 = torch.split(Xij, Xij.shape[-1]//2, dim=-1) # split upon last dimension
     X0, X1 = X0.contiguous(), X1.contiguous()
     Cij0 = _get_preallocated_buffer(X0.shape, Xij.dtype, rank, device, index=0)
