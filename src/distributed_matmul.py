@@ -1307,8 +1307,7 @@ def xw_eightway(
         case 0:
             x_send_list = [empty, xij, empty, empty, empty, empty, empty, empty]
             x_recv_list = [empty, _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0), empty, empty, empty, empty, empty, empty]
-            w_send_list = [empty, empty, wij, empty, wij, empty, wij, empty]
-            w0[..., :split_size, :].copy_(wij)
+            w_send_list = [empty, empty, wij, empty, wij, empty, wij, empty]            
             w_recv_list = [
                 empty,
                 empty,
@@ -1319,11 +1318,13 @@ def xw_eightway(
                 w1[..., split_size:, ], 
                 empty
             ]
+            handle_w = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
+            handle_x = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
+            w0[..., :split_size, :].copy_(wij)
         case 1:
             x_send_list = [xij, empty, empty, empty, empty, empty, empty, empty]
             x_recv_list = [_get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0), empty, empty, empty, empty, empty, empty, empty]
             w_send_list = [empty, empty, empty, wij, empty, wij, empty, wij]
-            w1[..., :split_size, :].copy_(wij)
             w_recv_list = [
                 empty, 
                 empty, 
@@ -1334,11 +1335,13 @@ def xw_eightway(
                 empty,
                 w0[..., split_size:, ]
             ]
+            handle_w = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
+            handle_x = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
+            w1[..., :split_size, :].copy_(wij)
         case 2:
             x_send_list = [empty, empty, empty, xij, empty, empty, empty, empty]
             x_recv_list = [empty, empty, empty, _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0), empty, empty, empty, empty]
             w_send_list = [wij, empty, empty, empty, wij, empty, wij, empty]
-            w0[..., split_size:, ].copy_(wij)
             w_recv_list = [
                 w0[..., :split_size, :],
                 empty,
@@ -1349,11 +1352,13 @@ def xw_eightway(
                 w1[..., split_size:, ], 
                 empty
             ]
+            handle_w = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
+            handle_x = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
+            w0[..., split_size:, ].copy_(wij)
         case 3:
             x_send_list = [empty, empty, xij, empty, empty, empty, empty, empty]
             x_recv_list = [empty, empty, _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0), empty, empty, empty, empty, empty]
             w_send_list = [empty, wij, empty, empty, empty, wij, empty, wij]
-            w0[w0_shape[0]//2:].copy_(wij)
             w_recv_list = [
                 empty, 
                 w1[..., :split_size, :],
@@ -1364,11 +1369,13 @@ def xw_eightway(
                 empty,
                 w0[w0_shape[0]//2:]
             ]
+            handle_w = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
+            handle_x = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
+            w0[w0_shape[0]//2:].copy_(wij)
         case 4:
             x_send_list = [empty, empty, empty, empty, empty, xij, empty, empty]
             x_recv_list = [empty, empty, empty, empty, empty, _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0), empty, empty]
             w_send_list = [wij, empty, wij, empty, empty, empty, wij, empty]
-            w1[..., :split_size, :].copy_(wij)
             w_recv_list = [
                 w0[..., :split_size, :],
                 empty,
@@ -1379,11 +1386,13 @@ def xw_eightway(
                 w1[w0_shape[0]//2:], 
                 empty
             ]
+            handle_w = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
+            handle_x = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
+            w1[..., :split_size, :].copy_(wij)
         case 5:
             x_send_list = [empty, empty, empty, empty, xij, empty, empty, empty]
             x_recv_list = [empty, empty, empty, empty, _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0), empty, empty, empty]
             w_send_list = [empty, wij, empty, wij, empty, empty, empty, wij]
-            w0[..., :split_size, :].copy_(wij)
             w_recv_list = [
                 empty, 
                 w1[..., :split_size, :],
@@ -1394,11 +1403,13 @@ def xw_eightway(
                 empty,
                 w0[w0_shape[0]//2:]
             ]
+            handle_w = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
+            handle_x = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
+            w0[..., :split_size, :].copy_(wij)
         case 6:
             x_send_list = [empty, empty, empty, empty, empty, empty, empty, xij]
             x_recv_list = [empty, empty, empty, empty, empty, empty, empty, _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0)]
             w_send_list = [wij, empty, wij, empty, wij, empty, empty, empty]
-            w1[w0_shape[0]//2:].copy_(wij)
             w_recv_list = [
                 w0[..., :split_size, :],
                 empty,
@@ -1409,11 +1420,13 @@ def xw_eightway(
                 empty,
                 empty
             ]
+            handle_w = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
+            handle_x = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
+            w1[w0_shape[0]//2:].copy_(wij)
         case 7:
             x_send_list = [empty, empty, empty, empty, empty, empty, xij, empty]
             x_recv_list = [empty, empty, empty, empty, empty, empty, _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0), empty]
             w_send_list = [empty, wij, empty, wij, empty, wij, empty, empty]
-            w0[w0_shape[0]//2:].copy_(wij)
             w_recv_list = [
                 empty, 
                 w1[..., :split_size, :],
@@ -1424,35 +1437,55 @@ def xw_eightway(
                 empty,
                 empty
             ]
-
-    handle_w = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
-    handle_x = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
-    
+            handle_w = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
+            handle_x = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
+            w0[w0_shape[0]//2:].copy_(wij)
+            
     with torch.cuda.stream(streams[0]):
         handle_w.wait()
         cij0 = torch.matmul(xij, w0)
     
-    with torch.cuda.stream(streams[1]):
-        handle_w.wait()
-        handle_x.wait()
-        
     match mod:
         case 0:
-            cij1 = torch.matmul(x_recv_list[1], w1)
+            with torch.cuda.stream(streams[1]):
+                handle_w.wait()
+                handle_x.wait()
+                cij1 = torch.matmul(x_recv_list[1], w1)
         case 1:
-            cij1 = torch.matmul(x_recv_list[0], w1)
+            with torch.cuda.stream(streams[1]):
+                handle_w.wait()
+                handle_x.wait()
+                cij1 = torch.matmul(x_recv_list[0], w1)
         case 2:
-            cij1 = torch.matmul(x_recv_list[3], w1)
+            with torch.cuda.stream(streams[1]):
+                handle_w.wait()
+                handle_x.wait()
+                cij1 = torch.matmul(x_recv_list[3], w1)
         case 3:
-            cij1 = torch.matmul(x_recv_list[2], w1)
+            with torch.cuda.stream(streams[1]):
+                handle_w.wait()
+                handle_x.wait()
+                cij1 = torch.matmul(x_recv_list[2], w1)
         case 4:
-            cij1 = torch.matmul(x_recv_list[5], w1)
+            with torch.cuda.stream(streams[1]):
+                handle_w.wait()
+                handle_x.wait()
+                cij1 = torch.matmul(x_recv_list[5], w1)
         case 5:
-            cij1 = torch.matmul(x_recv_list[4], w1)
+            with torch.cuda.stream(streams[1]):
+                handle_w.wait()
+                handle_x.wait()
+                cij1 = torch.matmul(x_recv_list[4], w1)
         case 6:
-            cij1 = torch.matmul(x_recv_list[7], w1)
+            with torch.cuda.stream(streams[1]):
+                handle_w.wait()
+                handle_x.wait()
+                cij1 = torch.matmul(x_recv_list[7], w1)
         case 7:
-            cij1 = torch.matmul(x_recv_list[6], w1)
+            with torch.cuda.stream(streams[1]):
+                handle_w.wait()
+                handle_x.wait()
+                cij1 = torch.matmul(x_recv_list[6], w1)
 
     for s in streams:
         s.synchronize()
@@ -1950,24 +1983,38 @@ def x_transpose_w_eightway(
     x_handle = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
     w_handle = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
     
-    with torch.cuda.stream(streamz[0]):
-        x_handle.wait()
-        match mod:
-            case 0:
+    match mod:
+        case 0:
+            with torch.cuda.stream(streamz[0]):
+                x_handle.wait()
                 cij0 = torch.matmul(x0, wij)
-            case 1:
+        case 1:
+            with torch.cuda.stream(streamz[0]):
+                x_handle.wait()
                 cij0 = torch.matmul(x_recv_list[0], wij)
-            case 2:
+        case 2:
+            with torch.cuda.stream(streamz[0]):
+                x_handle.wait()
                 cij0 = torch.matmul(x1, wij)
-            case 3:
+        case 3:
+            with torch.cuda.stream(streamz[0]):
+                x_handle.wait()
                 cij0 = torch.matmul(x_recv_list[2], wij)
-            case 4:
+        case 4:
+            with torch.cuda.stream(streamz[0]):
+                x_handle.wait()
                 cij0 = torch.matmul(x_recv_list[5], wij)
-            case 5:
+        case 5:
+            with torch.cuda.stream(streamz[0]):
+                x_handle.wait()
                 cij0 = torch.matmul(x0, wij)
-            case 6:
+        case 6:
+            with torch.cuda.stream(streamz[0]):
+                x_handle.wait()
                 cij0 = torch.matmul(x_recv_list[7], wij)
-            case 7:
+        case 7:
+            with torch.cuda.stream(streamz[0]):
+                x_handle.wait()
                 cij0 = torch.matmul(x1, wij)
     
     for stream in streamz[1:]:
