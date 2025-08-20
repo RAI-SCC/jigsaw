@@ -39,8 +39,8 @@ class MixerBlock(torch.nn.Module):
             self.layer_norm1 = torch.nn.LayerNorm(channels_mlp_dim//2) 
             self.layer_norm2 = torch.nn.LayerNorm(channels_mlp_dim//2) 
         elif n_parallel == 4: ## TODO; not used at the moment
-            self.layer_norm1 = Norm.DistributedLayerNorm(channels_mlp_dim, self.rank, self.device, self.model_group) 
-            self.layer_norm2 = Norm.DistributedLayerNorm(channels_mlp_dim, self.rank, self.device, self.model_group) 
+            self.layer_norm1 = Norm.DistributedLayerNorm(channels_mlp_dim//2, self.rank, self.device, self.model_group) 
+            self.layer_norm2 = Norm.DistributedLayerNorm(channels_mlp_dim//2, self.rank, self.device, self.model_group) 
  
     def forward(self, x):
         """

@@ -59,11 +59,11 @@ class DistributedMLP(torch.nn.Module):
             self.linear1 = Linear.DistributedXWT(in_dim//2, hidden_dim, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
             self.linear2 = Linear.DistributedXWT(hidden_dim//2, out_dim, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
         elif n_parallel == 4:
-            self.linear1 = Linear.DistributedXWT(in_dim, hidden_dim, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
-            self.linear2 = Linear.DistributedXWT(hidden_dim, out_dim, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
+            self.linear1 = Linear.DistributedXWT(in_dim//2, hidden_dim//2, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
+            self.linear2 = Linear.DistributedXWT(hidden_dim//2, out_dim//2, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
         elif n_parallel == 8:
-            self.linear1 = Linear.DistributedXWT(in_dim, hidden_dim, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
-            self.linear2 = Linear.DistributedXWT(hidden_dim*2, out_dim, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
+            self.linear1 = Linear.DistributedXWT(in_dim//2, hidden_dim//4, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
+            self.linear2 = Linear.DistributedXWT(hidden_dim//2, out_dim//4, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
         self.activation = GELU()
         self.drop = Dropout(p=dropout)
         self.drop2 = Dropout(p=dropout)
@@ -98,17 +98,11 @@ class DistributedXTWMLP(torch.nn.Module):
         Parameters
         ----------
         in_dim : int
-            Input dimension of MLP.
-            Two-way model: global value.
-            Four-way model: local value.
+            Global dimension of MLP.
         hidden_dim : int
-            Hidden dimension of MLP.
-            Two-way model: global value.
-            Four-way model: local value.
+            Global hidden dimension of MLP.
         out_dim : int
-            Output dimension of MLP.
-            Two-way model: global value.
-            Four-way model: local value.
+            Global output dimension of MLP.
         device : torch.device
             Device to perform computation on.
         rank : int
@@ -126,13 +120,13 @@ class DistributedXTWMLP(torch.nn.Module):
 
         if n_parallel == 2:
             self.linear1 = Linear.DistributedXTW(in_dim, hidden_dim//2, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
-            self.linear2 = Linear.DistributedXW(hidden_dim, out_dim//2, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
+            self.linear2 = Linear.DistributedXWT(hidden_dim//2, out_dim, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
         elif n_parallel == 4:
-            self.linear1 = Linear.DistributedXTW(in_dim, hidden_dim, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
-            self.linear2 = Linear.DistributedXW(hidden_dim, out_dim, rank, device, n_parallel, model_group, bias=bias)
+            self.linear1 = Linear.DistributedXTW(in_dim//2, hidden_dim//2, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
+            self.linear2 = Linear.DistributedXW(hidden_dim//2, out_dim//2, rank, device, n_parallel, model_group, bias=bias)
         elif n_parallel == 8:
-            self.linear1 = Linear.DistributedXTW(in_dim, hidden_dim, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
-            self.linear2 = Linear.DistributedXW(hidden_dim//2, out_dim, rank, device, n_parallel, model_group, bias=bias)
+            self.linear1 = Linear.DistributedXTW(in_dim//4, hidden_dim//2, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
+            self.linear2 = Linear.DistributedXWT(hidden_dim//2, out_dim//4, rank, device, n_parallel, model_group, bias=bias)
         
         self.activation = GELU()
         self.drop = Dropout(p=dropout)
@@ -141,7 +135,7 @@ class DistributedXTWMLP(torch.nn.Module):
 
     def forward(self, x):
         """
-        Forward pass of transposed MLP distributed across two or four processes.
+        Forward pass of transposed MLP distributed across n processes.
 
         Parameters
         ----------

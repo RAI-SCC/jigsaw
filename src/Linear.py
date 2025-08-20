@@ -100,8 +100,7 @@ class DistributedXWT(torch.nn.Module):
             self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim*2).uniform_(-stdev, stdev))
         else:
             self.bias = None
-        if rank == 0:
-            print(f'XWT Std {stdev}')
+        
         self.device = device
         self.rank = rank
         self.n_parallel = n_parallel
@@ -258,8 +257,6 @@ class DistributedXW(torch.nn.Module):
         self.in_dim = in_dim
         self.out_dim = out_dim
         stdev = 1. / np.sqrt(in_dim*2)
-        if rank == 0:
-            print(f'XW Std {stdev}')
         
         self.weights = torch.nn.parameter.Parameter(torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev))
         self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev)) if bias else None
@@ -430,8 +427,6 @@ class DistributedXTW(torch.nn.Module):
             self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev))
         else:
             self.bias = None
-        if rank == 0:
-            print(f'XTW Std {stdev}')
         self.rank = rank
         self.device = device
         self.n_parallel = n_parallel
@@ -737,7 +732,6 @@ class DistributedMatMulXW(torch.nn.Module):
             B, out_dim are global values.
             in_dim is local value.
         """
-
         Cij = self.XW(x, w, b, self.rank, self.device, self.n_parallel, self.model_group)
         
         return Cij

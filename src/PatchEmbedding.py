@@ -1,8 +1,10 @@
 import torch
 from torch import permute, reshape
 from torch.nn import Conv2d, ConvTranspose2d, Softmax
-from utils import load_constant_mask_2d
+
 import Linear
+from Dataset import load_constant_mask_2d
+
 
 class PatchEmbedding2D(torch.nn.Module):
   """2D Patch Embedding operation."""
@@ -470,11 +472,11 @@ class DistributedPatchEmbedding(torch.nn.Module):
     """
     # Load constant masks from the disc
     x_shape = x.shape
-    land_mask  = torch.broadcast_to(self.land_mask,   (x_shape[0], 1, x_shape[2], x_shape[3]))
-    soil_type  = torch.broadcast_to(self.soil_type,   (x_shape[0], 1, x_shape[2], x_shape[3]))
-    topography = torch.broadcast_to(self.topography,  (x_shape[0], 1, x_shape[2], x_shape[3]))  
-
-    x = torch.cat((x, land_mask, soil_type, topography), dim=1).permute(0, 2, 3, 1)
+    #land_mask  = torch.broadcast_to(self.land_mask,   (x_shape[0], 1, x_shape[2], x_shape[3]))
+    #soil_type  = torch.broadcast_to(self.soil_type,   (x_shape[0], 1, x_shape[2], x_shape[3]))
+    #topography = torch.broadcast_to(self.topography,  (x_shape[0], 1, x_shape[2], x_shape[3]))  
+    x = x.permute(0, 2, 3, 1)
+    #x = torch.cat((x, land_mask, soil_type, topography), dim=1).permute(0, 2, 3, 1)
     
     x_shape = x.shape
     
@@ -578,6 +580,8 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
       self.patch_embed = Linear.DistributedXWT(patch_size*var_in//2, embed_dim,  rank, device, n_parallel, model_group, n_channels=var_in, init_method='conv')
     elif n_parallel == 4:
       self.patch_embed = Linear.DistributedXWT(patch_size*var_in//2, embed_dim//2,  rank, device, n_parallel, model_group, n_channels=var_in, init_method='conv')
+    elif n_parallel == 8:
+      self.patch_embed = Linear.DistributedXWT(patch_size*var_in//4, embed_dim//2,  rank, device, n_parallel, model_group, n_channels=var_in, init_method='conv')
     
     self.rank = rank
     self.device = device

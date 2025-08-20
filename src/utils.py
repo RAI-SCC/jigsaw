@@ -1,44 +1,23 @@
-import numpy as np
-import torch.distributed
-from Dataset import ERA5Dataset, ERA5DatasetDistributed, DummyHighResDataset, DistributedDummyHighResDataset, DistributedHighResDataset
-import torch
-from torch.utils.data import DataLoader, Subset
-import torch.distributed as dist
 import os
-from torch.utils.data.distributed import DistributedSampler
-from torch.utils.data import Sampler
-import matplotlib.pyplot as plt
-import sys
-from multiprocessing import Value
-import random
 import time
-from torch.nn.utils import parameters_to_vector, vector_to_parameters
+from typing import Dict, Optional, Tuple
+
+import numpy as np
+import torch
+import torch.distributed
+import torch.distributed as dist
+import torch.optim as optim
+from timm.scheduler.cosine_lr import CosineLRScheduler
+from timm.scheduler.step_lr import StepLRScheduler
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+import Dataloaders
+import Model
 
 
-def get_local_groups_fourway(rank):
-    # Rank 4, 6 should be in group together
-    gpus_per_node = 4 # horeka- specific
-    node_rank     = rank // gpus_per_node # if rank between 0 and 3, node_rank = 0 
-                                          # if rank between 4 and 7, node_rank = 1
-    n_groups = torch.distributed.get_world_size() // gpus_per_node
-    local_groups = []
-
-    for node in range(n_groups):
-        base = node * gpus_per_node
-        local_groups.append(
-            torch.distributed.new_group(ranks=[base, base + 2])
-        )
-        local_groups.append(
-            torch.distributed.new_group(ranks=[base + 1, base + 3])
-        )
-
-    return local_groups
-
-def get_ddp_groups(rank, n_parallel):
-    # Ranks 0, 4, ... should be in a group
-    
+def get_ddp_groups(rank: int, n_parallel: int) -> dist.ProcessGroup:
+    """Return DDP groups."""
     n_nodes = torch.distributed.get_world_size() // n_parallel
-    # 
     global_group_list = []
     global_groups     = []
 
@@ -48,9 +27,10 @@ def get_ddp_groups(rank, n_parallel):
     for global_group in global_group_list:
         global_groups.append(torch.distributed.new_group(ranks=global_group))
     
-    return global_groups[rank//n_parallel]
+    return global_groups[rank%n_parallel]
 
 def get_model_group(rank, n_parallel):
+    """Return model groups."""
     local_groups = []
     for i in range(torch.distributed.get_world_size() // n_parallel):
         local_start_rank = i * n_parallel
@@ -74,19 +54,21 @@ def get_model_group_rows(rank, n_parallel, n_rows):
         number of rows that the model-parallel group is subdivided into.
         default for 4: 2; default for 8: 4
     """
-    local_groups = []
+    groups = []
     n_cols = n_parallel // n_rows
+    n_nodes = torch.distributed.get_world_size() // n_parallel
 
-    for i in range(torch.distributed.get_world_size() // n_cols):
-        local_start_rank = i * n_cols
-        
-        local_groups.append(
-                torch.distributed.new_group(
-                    ranks=list(range(local_start_rank, local_start_rank + n_cols))
-                )
-        )
-    
-    return local_groups[rank//n_rows]
+    for node in range(n_nodes):
+        base = node * n_parallel
+        for row in range(n_rows):
+            ranks = [base + row * n_cols + c for c in range(n_cols)]
+            groups.append(dist.new_group(ranks=ranks))
+
+    node = rank // n_parallel
+    local = rank % n_parallel
+    row = local // n_cols
+    idx = node * n_rows + row
+    return groups[idx]
 
 def get_model_group_columns(rank, n_parallel, n_cols):
     """
@@ -100,153 +82,43 @@ def get_model_group_columns(rank, n_parallel, n_cols):
         number of rows that the model-parallel group is subdivided into.
         default for 4: 2; default for 8: 2
     """
-    local_groups = []
+    groups = []
     n_rows = n_parallel // n_cols
+    n_nodes = torch.distributed.get_world_size() // n_parallel
 
-    for i in range(torch.distributed.get_world_size() // n_rows):
-        local_start_rank = i * n_rows
-        local_groups.append(
-                torch.distributed.new_group(
-                    ranks=list(range(local_start_rank, local_start_rank + n_parallel, n_rows))
-                )
+    for node in range(n_nodes): # [0, 2], [1, 3], [4, 6], [5, 7]
+        base = node * n_parallel
+        for col in range(n_cols):
+            ranks = [base + r * n_cols + col for r in range(n_rows)]
+            groups.append(torch.distributed.new_group(ranks=ranks)
         )
-    
-    return local_groups[rank % n_cols + rank // n_parallel*n_cols]
+            
+    node = rank // n_parallel
+    local = rank % n_parallel
+    col = local % n_cols
+    idx = node * n_cols + col
 
-def set_all_seeds(seed, rank=None):
+    return groups[idx]
+
+def set_all_seeds(seed: int = 0, rank: Optional[int] = None) -> None:
+    """Initialize all random seeds"""
     if rank is None:
         rank = 0
     os.environ["PL_GLOBAL_SEED"] = str(seed + rank)
     torch.manual_seed(seed + rank)
     torch.cuda.manual_seed_all(seed + rank)
 
-def set_all_seeds_local_rank(seed, rank=None, parallelism=4):
+def set_all_seeds_local_rank(seed: int = 0, rank: Optional[int] = None, n_parallel: int = None) -> None:
+    """Set all seeds on all model groups to the same value."""
     if rank is None:
         rank = 0
-    os.environ["PL_GLOBAL_SEED"] = str(seed + rank//parallelism) # 0, 1, 2, 3 get same data. # 4, 5, 6, 7 get same data.
-    torch.manual_seed(seed + rank//parallelism)
-    torch.cuda.manual_seed_all(seed + rank//parallelism)
+    set_all_seeds(seed + rank // n_parallel, rank=0)
 
 
-def send_data_twoway(data, buffer, rank, device, groups):
-    node_rank = rank // 4
-    sender = rank % 2 + node_rank * 4
-    data_list = [d.to(device, non_blocking=True) for d in data] if rank == sender else None
-    
-    handle = torch.distributed.scatter(buffer, data_list, src=sender, group=groups[rank % 2 + node_rank * 2], async_op=True)
-    
-    return handle 
-
-def send_data_fourway(data, buffer, rank, device):
-    sender = 0
-    input_data_list = [d.to(device) for d in data] if rank == sender else None
-    
-    torch.distributed.scatter(buffer, input_data_list, src=sender)
-    
-    input_data = buffer
-    return input_data
-
-
-def get_highres_dataloader(config_dict, data_path, mode='train', subset_size=0, distributed=False, batch_size=1, normalize=True, rank=None, dt=None, type='dummy'):
-    parallelism = config_dict['model_parallel']['parallelism']
-    dt = config_dict['data']['dt'] if dt is None else dt
-    if parallelism == 1:
-        if type == 'dummy':
-            dataset = DummyHighResDataset(config_dict, nvars=69)
-        else:
-            DistributedHighResDataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
-    elif type == 'dummy':
-        dataset = DistributedDummyHighResDataset(config_dict)
-    elif type == 'upsample':
-        dataset = DistributedHighResDataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
-    
-    if subset_size != 0: 
-        subset_indices = torch.randperm(len(dataset))[:subset_size]
-        dataset = Subset(dataset, subset_indices)              
-    
-    if mode == 'validation' and parallelism > 1:
-        sampler    = DistributedSampler(dataset, 
-                                    shuffle=False,
-                                    num_replicas=(torch.distributed.get_world_size()//parallelism),
-                                    rank=rank//parallelism
-                                    ) 
-        dataloader = DataLoader(dataset, 
-                                batch_size=batch_size, 
-                                shuffle=False, 
-                                sampler=sampler, 
-                                drop_last=True, 
-                                pin_memory=torch.cuda.is_available(), 
-                                prefetch_factor=config_dict['data']['prefetch_factor'], 
-                                num_workers=config_dict['data']['num_workers']
-                                ) 
-        return dataloader
-    else:
-        sampler    = DistributedSampler(dataset, 
-                                    shuffle=True,
-                                    num_replicas=(torch.distributed.get_world_size()//parallelism),
-                                    rank=rank//parallelism
-                                    ) 
-        dataloader = DataLoader(dataset, 
-                                batch_size=batch_size, 
-                                shuffle=(sampler is None), 
-                                sampler=sampler, 
-                                drop_last=True, 
-                                pin_memory=torch.cuda.is_available(), 
-                                prefetch_factor=config_dict['data']['prefetch_factor'], 
-                                num_workers=config_dict['data']['num_workers']
-                                )
-
-    return dataloader
-
-def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distributed=False, batch_size=1, normalize=True, rank=None, dt=None):
-    parallelism = config_dict['model_parallel']['parallelism']
-    dt = config_dict['data']['dt'] if dt is None else dt
-    if parallelism == 1:
-        dataset = ERA5Dataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), forecast_length=config_dict['model']['latent_rollout'], normalize=normalize)
-    else:
-        dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
-    
-    if subset_size != 0: 
-        subset_indices = torch.randperm(len(dataset))[:subset_size]
-        dataset = Subset(dataset, subset_indices)              
-    
-    if mode == 'validation' and parallelism > 1:
-        sampler    = DistributedSampler(dataset, 
-                                    shuffle=False,
-                                    num_replicas=(torch.distributed.get_world_size()//parallelism),
-                                    rank=rank//parallelism
-                                    ) 
-        dataloader = DataLoader(dataset, 
-                                batch_size=batch_size, 
-                                shuffle=False, 
-                                sampler=sampler, 
-                                drop_last=True, 
-                                pin_memory=torch.cuda.is_available(), 
-                                prefetch_factor=config_dict['data']['prefetch_factor'], 
-                                num_workers=config_dict['data']['num_workers']
-                                ) 
-        return dataloader
-    else:
-        sampler    = DistributedSampler(dataset, 
-                                    shuffle=True,
-                                    num_replicas=(torch.distributed.get_world_size()//parallelism),
-                                    rank=rank//parallelism
-                                    ) 
-        dataloader = DataLoader(dataset, 
-                                batch_size=batch_size, 
-                                shuffle=(sampler is None), 
-                                sampler=sampler, 
-                                drop_last=True, 
-                                pin_memory=torch.cuda.is_available(), 
-                                prefetch_factor=config_dict['data']['prefetch_factor'], 
-                                num_workers=config_dict['data']['num_workers']
-                                )
-
-    return dataloader
 
 def init_CUDA():
     """
-    Initialize DistributedDataParallel 
+    Initialize DistributedDataParallel. 
     
     Returns
     -------
@@ -275,80 +147,10 @@ def init_CUDA():
     else:
         print(f"Rank {rank} not initialized")
 
-    
     return device, slurm_localid, rank, world_size
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-def load_constant_mask_2d(
-    patch_size,
-    folder_path="/hkfs/work/workspace/scratch/ke4365-jigsaw/constant_masks/",
-    xlat=721
-):
-    """
-    Load the constant masks applied in the patch embedding layer.
-
-    patch_size: Tuple(int, int)
-        Number of pixels in (lat, lon) dimensions per patch
-    folder_path: String
-        Path to directory containing constant masks
-
-    Returns
-    -------
-    land_mask: Tensor
-        of shape (n_lat, n_lon) after padding
-    soil_type: Tensor
-        of shape (n_lat, n_lon) after padding
-    topography: Tensor
-        of shape (n_lat, n_lon) after padding
-    """
-    # Load data from numpy files
-    data_files = [f for f in os.listdir(folder_path) if f.endswith(".npy")]
-    data = {}
-    for file in data_files:
-        file_path = os.path.join(folder_path, file)
-        data[file] = np.load(file_path)
-
-    soil_type = data["soil_type.npy"]
-    topography = data["topography.npy"]
-
-    soil_type = (soil_type - np.mean(soil_type)) / np.std(soil_type)
-    topography = (topography - np.mean(topography)) / np.std(topography)
-    # Torch tensors
-    land_mask = torch.tensor(data["land_mask.npy"]).to(torch.float32)
-    soil_type = torch.tensor(soil_type).to(torch.float32)
-    topography = torch.tensor(topography).to(torch.float32)
-
-    # Check that the shapes of all the data are the same
-    assert (
-        land_mask.shape == soil_type.shape == topography.shape
-    ), "Shapes of the three constant masks are not equal."
-
-    land_mask = land_mask[:xlat]
-    soil_type = soil_type[:xlat]
-    topography = topography[:xlat]
-    
-    return land_mask, soil_type, topography
-
-def plot_fields(input, output, target, save_path, index=1):
-    input_print = input[index].detach().cpu()
-    output_print = output[index].detach().cpu()
-    target_print = target[index].detach().cpu()
-
-    vmin = target_print.min()
-    vmax = target_print.max()
-
-    fig, (ax0, ax1, ax2) = plt.subplots(1, 3, figsize=(15, 5))
-    c0 = ax0.pcolormesh(input_print)
-    fig.colorbar(c0, ax=ax0)
-    c1 = ax1.pcolormesh(output_print, vmin=vmin, vmax=vmax)
-    fig.colorbar(c1, ax=ax1)
-    c2 = ax2.pcolormesh(target_print, vmin=vmin, vmax=vmax)
-    fig.colorbar(c2, ax=ax2)
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close(fig)
 
 # save model
 def save_model(model, optimizer, file_path, rank, epoch, distributed=True):
@@ -360,17 +162,21 @@ def save_model(model, optimizer, file_path, rank, epoch, distributed=True):
     }
     torch.save(state, file_path)
 
-def load_model(model, optimizer, file_path, rank, model_parallel=False, parallelism=2):
+def load_model(model, optimizer, file_path, rank, model_parallel=False, n_parallel=4):
     if not model_parallel:
         rank = 0
     if model_parallel:
-        load_rank = rank % parallelism
+        load_rank = rank % n_parallel
         file_path = f'{file_path}/model_{load_rank}.pt'
-    state = torch.load(f"{file_path}", map_location='cpu')
-    model.load_state_dict(state['model_state'])
-    optimizer.load_state_dict(state['optimizer_state'])
+    try:
+        state = torch.load(f"{file_path}", map_location='cpu')
+        model.load_state_dict(state['model_state'])
+        optimizer.load_state_dict(state['optimizer_state'])
 
-    epoch = state['epoch']
+        epoch = state['epoch']
+    except Exception:
+        print(f'Could not load model from {file_path}. Initializing from scratch.')
+        epoch = 0
     return model, optimizer, epoch
 
 def getPositionEncoding(seq_len, d, n=10000):
@@ -383,27 +189,196 @@ def getPositionEncoding(seq_len, d, n=10000):
     P = torch.tensor(P).to(torch.float32)
     return P
 
-def load_and_push_data(data, device, non_blocking=False):
-    """
-    Read input data and pushes to device. 
-    
-    Returns [data, False]
-    """
-    pushed_data = data.to(device, non_blocking=non_blocking)
-    return pushed_data
+def setup_precision(tf32: bool) -> None:
+    """Configure matmul and cudnn TF32."""
+    torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
+    torch.backends.cudnn.allow_tf32 = bool(tf32)
 
-        
-def reduce_ddp_layernorms(parallelism, mlp, local_groups, global_groups, rank, node_rank):
-    # Now manually all-reduce each parameter's grad
-    handles = []
-    #gradients = [param.grad for name, param in mlp.named_parameters() if param.grad is not None]
-    gradients = [param.grad for name, param in mlp.named_parameters() if (param.grad is not None and 'layer_norm' in name)]
-    flat_grad = parameters_to_vector(gradients)
-    handles = torch.distributed.all_reduce(
-        flat_grad, 
-        op=torch.distributed.ReduceOp.AVG,
-        group=local_groups[rank % 2 + node_rank*2],
-        async_op=True
+def setup_groups(rank: int, n_parallel: int, nrows: int, ncols: int):
+    """Return communication groups."""
+    model_group = get_model_group(rank, n_parallel)
+    ddp_group = get_ddp_groups(rank, n_parallel)
+    model_subgroup_row = get_model_group_rows(rank, n_parallel, nrows)
+    model_subgroup_col = get_model_group_columns(rank, n_parallel, ncols)
+    return model_group, ddp_group, model_subgroup_row, model_subgroup_col
+
+def build_model(
+    config_dict: Dict,
+    device: torch.device,
+    localid: int,
+    rank: int,
+    n_parallel: int,
+    model_group,
+    ddp_group,
+) -> torch.nn.Module:
+    """Instantiate model and wrap with DDP."""
+    mlp = Model.Model_twoway(config_dict, rank, device, n_parallel, model_group).to(device)
+    mlp = DDP(mlp, device_ids=[localid], output_device=localid, process_group=ddp_group)
+    return mlp
+
+
+def build_optimizer(config_dict: Dict, mlp: torch.nn.Module) -> optim.Optimizer:
+    """Build Adam optimizer with per-block lrs."""
+    lr = config_dict["training"]["lr"]
+    opt = optim.Adam(
+        [
+            {"params": mlp.module.params.embedding.parameters(), "lr": config_dict["training"]["lr_embedding"]},
+            {"params": mlp.module.params.recovery.parameters(), "lr": config_dict["training"]["lr_recovery"]},
+            {"params": mlp.module.params.common.parameters()},
+        ],
+        lr=lr,
+        weight_decay=3e-6,
     )
-            
-    return handles, flat_grad, gradients
+    return opt
+
+def build_scheduler(config_dict: Dict, optimizer: optim.Optimizer, start_epoch: int = 0):
+    """Build LR scheduler and step it to start_epoch."""
+    if config_dict["training"]["lr_constant"]:
+        scheduler = StepLRScheduler(optimizer, decay_rate=1.0, decay_t=100)
+    else:
+        scheduler = CosineLRScheduler(
+            optimizer, t_initial=30, lr_min=5e-6, cycle_decay=1, cycle_mul=1, cycle_limit=10
+        )
+    scheduler.step(start_epoch)
+    return scheduler
+
+def build_dataloaders(
+    config_dict: Dict, model_parallel: bool, rank: int
+) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
+    """Build train and validation dataloaders."""
+    train_subset = config_dict["data"]["train_subset"]
+    valid_subset = config_dict["data"]["valid_subset"]
+    train_subset = None if train_subset < 0 else train_subset
+    valid_subset = None if valid_subset < 0 else valid_subset
+
+    train_dataloader = Dataloaders.get_dataloader(
+        config_dict,
+        config_dict["data"]["train_data_path"],
+        mode="train",
+        distributed=(not model_parallel),
+        batch_size=config_dict["training"]["train_batch"],
+        subset_size=train_subset,
+        rank=rank,
+    )
+    valid_dataloader = Dataloaders.get_dataloader(
+        config_dict,
+        config_dict["data"]["valid_data_path"],
+        mode="validation",
+        distributed=(not model_parallel),
+        batch_size=config_dict["training"]["valid_batch"],
+        subset_size=valid_subset,
+        rank=rank,
+    )
+    return train_dataloader, valid_dataloader
+
+@torch.no_grad()
+def validate(
+    config_dict: Dict,
+    mlp: torch.nn.Module,
+    valid_dataloader,
+    rank: int,
+    device: torch.device,
+    epoch: int,
+    save_path: str,
+    model_parallel: bool,
+    world_size: int,
+    model_subgroup_col,
+    model_group
+) -> float:
+    """
+    Run validation and return scalar loss.
+    """
+    val_loss = eval.get_validation_mse(
+        config_dict,
+        mlp,
+        valid_dataloader,
+        rank,
+        device,
+        epoch,
+        file_path=save_path,
+        model_parallel=model_parallel,
+        world_size=world_size,
+        model_subgroup_col=model_subgroup_col,
+        model_group=model_group
+    )
+    return float(val_loss)
+
+
+def train_one_epoch(
+    config_dict: Dict,
+    epoch: int,
+    model: torch.nn.Module,
+    train_dataloader,
+    optimizer: optim.Optimizer,
+    scheduler,
+    device: torch.device,
+    area_weights: torch.Tensor,       # [1, xlat, 1, 1]
+    variable_weights: torch.Tensor,   # [36]
+    xlat: int,
+    xlon: int,
+    max_rollout: int,
+    rank: int,
+    lr: float,
+    start_lr: float,
+) -> float:
+    """
+    Train for one epoch.
+
+    Tensor shapes:
+        input_data: [B, T, H, W, C] or as produced by Dataloaders
+        output:     [B, 720, 720, 36] -> reshaped to [B, xlat, xlon, 36]
+        target_data: list-like per rollout; target_data = data[1][rollout]
+    """
+    model.train()
+    epoch_loss = 0.0
+
+    if hasattr(train_dataloader, "sampler") and hasattr(train_dataloader.sampler, "set_epoch"):
+        train_dataloader.sampler.set_epoch(epoch)
+
+    start_time = time.perf_counter()
+
+    for i, data in enumerate(train_dataloader):
+        rollout = i % max_rollout
+
+        # warmup lr only in epoch 0
+        if epoch == 0:
+            warm = i * (lr - start_lr) / max(1, len(train_dataloader)) + start_lr
+            for g in optimizer.param_groups:
+                g["lr"] = warm
+
+        input_data = data[0].to(device, non_blocking=True)
+        target_data = data[1][rollout].to(device, non_blocking=True)
+
+        optimizer.zero_grad(set_to_none=True)
+
+        output = model(input_data, rollout_=rollout + 1)  # [B, 720, 720, 36]
+        output = output.reshape(output.shape[0], xlat, xlon, 36)
+
+        # broadcast weights
+        vw = variable_weights.view(1, 1, 1, 36)
+        ow = output * area_weights * vw
+        tw = target_data * area_weights * vw
+
+        loss = torch.nn.functional.mse_loss(ow, tw)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), config_dict["training"]["grad_clip"])
+        optimizer.step()
+
+        epoch_loss += float(loss.detach())
+        if rank == 0:
+            print(f"{epoch}, after Step {i}/{len(train_dataloader)}. Rollout {rollout}. loss: {float(loss.detach())}")
+
+    torch.cuda.synchronize()
+    end_time = time.perf_counter()
+
+    avg = epoch_loss / max(1, len(train_dataloader))
+    if rank == 0:
+        print(f"Epoch {epoch} time [min]: {(end_time - start_time) / 60.0}, average loss {avg}")
+
+    scheduler.step(epoch)
+
+    if rank == 0:
+        epoch_average_loss = epoch_average_loss / len(train_dataloader)
+        print(f"Epoch {epoch} time [min]: {((end_time - start_time) / 60 )}, average loss {epoch_average_loss[0]}")
+
+    return avg

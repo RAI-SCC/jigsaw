@@ -97,7 +97,21 @@ def gen_plots(config_dict, input_data, output, target_data, rank, file_path, epo
             utils.plot_fields(input_print, output_print-input_print, target_print-input_print, save_path=save_path, index=9)
         
 
-def get_validation_mse(config_dict, model, dataloader, rank, device, epoch, file_path, mse_file_path='rmse.csv', acc_file_path='acc.csv', model_parallel=True, world_size=4, local_groups=None, node_groups=None, global_groups=None):
+def get_validation_mse(
+    config_dict: dict, 
+    model: torch.nn.Module, 
+    dataloader: torch.utils.data.DataLoader, 
+    rank: int, 
+    device: torch.device, 
+    epoch: int, 
+    file_path: str, 
+    mse_file_path: str='rmse.csv', 
+    acc_file_path: str='acc.csv', 
+    model_parallel: bool=True, 
+    world_size: int=4, 
+    model_subgroup_col: torch.distributed.ProcessGroup=None, 
+    model_group: torch.distributed.ProcessGroup=None
+):
     if config_dict['model']['model_parallel']:
         mse_file_path = f'rmse_{rank}.csv'
         acc_file_path = f'acc_{rank}.csv'
@@ -201,8 +215,8 @@ def get_validation_mse(config_dict, model, dataloader, rank, device, epoch, file
                     target_data = data[1][step].to(device, non_blocking=True)
                 else:
                     if config_dict['model_parallel']['parallelism'] == 4:
-                        input_data_or_handle,  async_input = utils.load_and_push_data(config_dict, data[0], parallelism, buffer, rank, device, local_groups, non_blocking=False)
-                        target_data_or_handle, async_target = utils.load_and_push_data(config_dict, data[1][step], parallelism, buffer2, rank, device, local_groups, non_blocking=False)
+                        input_data_or_handle,  async_input = utils.load_and_push_data(config_dict, data[0], parallelism, buffer, rank, device, col_group, non_blocking=False)
+                        target_data_or_handle, async_target = utils.load_and_push_data(config_dict, data[1][step], parallelism, buffer2, rank, device, col_group, non_blocking=False)
                         if async_input:
                             input_data_or_handle.wait()
                             input_data = buffer
@@ -270,7 +284,7 @@ def get_validation_mse(config_dict, model, dataloader, rank, device, epoch, file
 
                     # Each process contains its half of the squarred error
                     rmse[rollout][indices + norm_offset +  index_offset] = rmse[rollout][indices + norm_offset + index_offset] + calc_mse_variable(target_data, output, device, area_weights, std=std, indices=indices, norm_offset=norm_offset).to(torch.float32)
-                    acc[rollout][indices + norm_offset + index_offset]   = acc[rollout][indices + norm_offset + index_offset]  + calc_acc_variable_parallel(target_data, output, device, area_weights, mean=mean, std=std, climatology=climatology, indices=indices, norm_offset=norm_offset, group=local_groups, rank=rank).to(torch.float32)
+                    acc[rollout][indices + norm_offset + index_offset]   = acc[rollout][indices + norm_offset + index_offset]  + calc_acc_variable_parallel(target_data, output, device, area_weights, mean=mean, std=std, climatology=climatology, indices=indices, norm_offset=norm_offset, group=col_group, rank=rank).to(torch.float32)
 
                     if batch == 0:
                         if  rank < 4 and parallelism == 4: # only needs to happen once
@@ -279,7 +293,7 @@ def get_validation_mse(config_dict, model, dataloader, rank, device, epoch, file
                             input_data, output, target_data = input_data[0].contiguous(), output[0].contiguous(), target_data[0].contiguous()
                             
                             input_tensor_gather = torch.zeros(4, *input_data.shape).to(device)
-                            torch.distributed.all_gather_into_tensor(input_tensor_gather, input_data, group=node_groups)
+                            torch.distributed.all_gather_into_tensor(input_tensor_gather, input_data, group=model_group)
                             
                             top_row = torch.cat([input_tensor_gather[0], input_tensor_gather[1]], dim=2)
                             bottom_row = torch.cat([input_tensor_gather[2], input_tensor_gather[3]], dim=2)
@@ -290,7 +304,7 @@ def get_validation_mse(config_dict, model, dataloader, rank, device, epoch, file
                             # gather first sample to rank 0
                             output_tensor_gather = torch.zeros(4, *output.shape).to(device)
                             
-                            torch.distributed.all_gather_into_tensor(output_tensor_gather, output, group=node_groups)
+                            torch.distributed.all_gather_into_tensor(output_tensor_gather, output, group=model_group)
                             
                             top_row2 = torch.cat([output_tensor_gather[0], output_tensor_gather[1]], dim=2)
                             bottom_row2 = torch.cat([output_tensor_gather[2], output_tensor_gather[3]], dim=2)
@@ -300,7 +314,7 @@ def get_validation_mse(config_dict, model, dataloader, rank, device, epoch, file
                             # Gather target data. Currently split between 4 devices as well.
                             target_tensor_gather = torch.zeros(4, *target_data.shape).to(device)
                             target_data = target_data.contiguous()
-                            torch.distributed.all_gather_into_tensor(target_tensor_gather, target_data, group=node_groups)
+                            torch.distributed.all_gather_into_tensor(target_tensor_gather, target_data, group=model_group)
                             
                             top_row = torch.cat([target_tensor_gather[0], target_tensor_gather[1]], dim=2)
                             bottom_row = torch.cat([target_tensor_gather[2], target_tensor_gather[3]], dim=2)

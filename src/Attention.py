@@ -18,6 +18,17 @@ class DistributedAttention(torch.nn.Module):
         model_group: torch.distributed.ProcessGroup, 
         softmax_group: torch.distributed.ProcessGroup
     ):
+    """
+    
+    Torch Module to perform distributed multi-headed attention.
+
+    x_features: int
+        global number of x features
+    embed_dim: int
+        global embedding dimension
+    output_dim: int
+        global 
+    """
     super().__init__()
     self.rank = rank
     self.device = device
@@ -29,24 +40,25 @@ class DistributedAttention(torch.nn.Module):
     self.x_features = x_features
     
     if n_parallel == 2:
-        self.qkv = Linear.DistributedXW(x_features, embed_dim//2*3, self.rank, self.device, self.n_parallel, self.model_group,  n_channels=1, init_method='linear', bias=False)
+        self.qkv = Linear.DistributedXWT(x_features//2, embed_dim*3, self.rank, self.device, self.n_parallel, self.model_group,  n_channels=1, init_method='linear', bias=False)
     elif n_parallel == 4:
-        self.qkv = Linear.DistributedXW(x_features, embed_dim*3, self.rank, self.device, self.n_parallel, self.model_group,  n_channels=1, init_method='linear', bias=False)
+        self.qkv = Linear.DistributedXWT(x_features//2, embed_dim//2*3, self.rank, self.device, self.n_parallel, self.model_group,  n_channels=1, init_method='linear', bias=False)
     elif n_parallel == 8:
-        self.qkv = Linear.DistributedXWT(x_features, embed_dim*3, self.rank, self.device, self.n_parallel, self.model_group,  n_channels=1, init_method='linear', bias=False)
+        self.qkv = Linear.DistributedXWT(x_features//4, embed_dim//2*3, self.rank, self.device, self.n_parallel, self.model_group,  n_channels=1, init_method='linear', bias=False)
+    
     self.softmax = Norm.DistributedSoftMax(dim=-1, group=self.softmax_group) # TODO: define softmax groups
     self.xwt = Linear.DistributedMatMulXWTranspose(self.rank, self.device, self.n_parallel, model_group=self.model_group) # model group TODO 
     self.xw = Linear.DistributedMatMulXW(rank, device, self.n_parallel, model_group=self.model_group) # model group TODO 
     
     if n_parallel == 2:
-        self.concatenator = Linear.DistributedXW(embed_dim, output_dim//2, self.rank, self.device, self.n_parallel, self.model_group, n_channels=1, init_method='linear', bias=False)
+        self.concatenator = Linear.DistributedXWT(embed_dim//2, output_dim, self.rank, self.device, self.n_parallel, self.model_group, n_channels=1, init_method='linear', bias=False)
     elif n_parallel == 4:
-        self.concatenator = Linear.DistributedXW(embed_dim, output_dim, self.rank, self.device, self.n_parallel, self.model_group, n_channels=1, init_method='linear', bias=False)
+        self.concatenator = Linear.DistributedXWT(embed_dim//2, output_dim//2, self.rank, self.device, self.n_parallel, self.model_group, n_channels=1, init_method='linear', bias=False)
     elif n_parallel == 8:
-        self.concatenator = Linear.DistributedXW(embed_dim, output_dim, self.rank, self.device, self.n_parallel, self.model_group, n_channels=1, init_method='linear', bias=False)
+        self.concatenator = Linear.DistributedXWT(embed_dim//2, output_dim//4, self.rank, self.device, self.n_parallel, self.model_group, n_channels=1, init_method='linear', bias=False)
     
     self.heads = heads
-    self.scale = (embed_dim * 4 // self.heads) ** (-0.5) # should be (embed_dim/heads)
+    self.scale = (embed_dim * 2 // self.heads) ** (-0.5) # should be (embed_dim/heads)
     
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -69,10 +81,11 @@ class DistributedAttention(torch.nn.Module):
     
     q = self.scale * q
     attention = self.xwt(q, k, None)
-    attention = self.softmax(attention) # TODO: groups for softmax also need to be determined. probably same partners as layernorm
+    attention = self.softmax(attention)
     values = self.xw(attention, v, None)    
     values = rearrange(values, 'n h s d -> n s (h d)').contiguous()
     
     values = self.concatenator(values)
+
     # Output: [n_batch, seq_length, output_dim]
     return values

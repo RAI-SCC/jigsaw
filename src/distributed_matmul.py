@@ -963,7 +963,7 @@ def xw_transpose_eightway(
         handle_w.wait()
     with torch.cuda.stream(streams[1]):
         handle_w.wait()  
-
+    print(f'!!! x shape {xij.shape}, wij shape {wij.shape}')
     match mod:
         case 0:
             with torch.cuda.stream(streams[0]):
@@ -1060,7 +1060,7 @@ def xw_transpose_eightway(
 
     return cij
 
-def xw_eightway(
+def xw_eightway_(
     xij: torch.tensor, 
     wij: torch.tensor, 
     rank: int,  
@@ -1211,30 +1211,32 @@ def xw_eightway(
     
     match mod:
         case 0:
-            ws_stacked = torch.concatenate([wij, w_recv_list[2]], dim=0).contiguous() 
+            ws_stacked = torch.concatenate([wij, w_recv_list[2]], dim=-2).contiguous() 
         #cij = torch.matmul(x0, wij) + torch.matmul(x1, w_recv_list[2])
         case 1:
-            ws_stacked = torch.concatenate([w_recv_list[5], w_recv_list[7]], dim=0).contiguous() 
+            ws_stacked = torch.concatenate([w_recv_list[5], w_recv_list[7]], dim=-2).contiguous() 
         #cij = torch.matmul(x0, w_recv_list[5]) + torch.matmul(x1, w_recv_list[7])
         case 2:
-            ws_stacked = torch.concatenate([w_recv_list[0], wij], dim=0).contiguous() 
+            ws_stacked = torch.concatenate([w_recv_list[0], wij], dim=-2).contiguous() 
         #cij = torch.matmul(x0, w_recv_list[0]) + torch.matmul(x1, wij)
         case 3:
-            ws_stacked = torch.concatenate([w_recv_list[5], w_recv_list[7]], dim=0).contiguous() 
+            ws_stacked = torch.concatenate([w_recv_list[5], w_recv_list[7]], dim=-2).contiguous() 
         #cij = torch.matmul(x0, w_recv_list[5]) + torch.matmul(x1, w_recv_list[7])
         case 4:
-            ws_stacked = torch.concatenate([w_recv_list[0], w_recv_list[2]], dim=0).contiguous() 
+            ws_stacked = torch.concatenate([w_recv_list[0], w_recv_list[2]], dim=-2).contiguous() 
         #cij = torch.matmul(x0, w_recv_list[0]) + torch.matmul(x1, w_recv_list[2])
         case 5:
-            ws_stacked = torch.concatenate([wij, w_recv_list[7]], dim=0).contiguous() 
+            ws_stacked = torch.concatenate([wij, w_recv_list[7]], dim=-2).contiguous() 
         #cij = torch.matmul(x0, wij) + torch.matmul(x1, w_recv_list[7])
         case 6:
-            ws_stacked = torch.concatenate([w_recv_list[0], w_recv_list[2]], dim=0).contiguous() 
+            ws_stacked = torch.concatenate([w_recv_list[0], w_recv_list[2]], dim=-2).contiguous() 
         #cij = torch.matmul(x0, w_recv_list[0]) + torch.matmul(x1, w_recv_list[2])
         case 7:
-            ws_stacked = torch.concatenate([w_recv_list[5], wij], dim=0).contiguous() 
+            ws_stacked = torch.concatenate([w_recv_list[5], wij], dim=-2).contiguous() 
         #cij = torch.matmul(x0, w_recv_list[5]) + torch.matmul(x1, wij)  
     
+    if rank == 0:
+        print(f'X shape: {xij.shape}, ws shape {ws_stacked.shape}, W shape {wij.shape}')
     cij = torch.matmul(xij, ws_stacked)
     
     handle_x.wait()
@@ -1311,11 +1313,11 @@ def xw_eightway(
             w_recv_list = [
                 empty,
                 empty,
-                w0[..., split_size:, :],
+                w0[..., split_size:, :].contiguous(),
                 empty, 
-                w1[..., :split_size, :], 
+                w1[..., :split_size, :].contiguous(), 
                 empty,
-                w1[..., split_size:, ], 
+                w1[..., split_size:, :].contiguous(), 
                 empty
             ]
             handle_w = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
@@ -1329,11 +1331,11 @@ def xw_eightway(
                 empty, 
                 empty, 
                 empty, 
-                w1[..., split_size:, ],
+                w1[..., split_size:, :].contiguous(),
                 empty,
-                w0[..., :split_size, :],
+                w0[..., :split_size, :].contiguous(),
                 empty,
-                w0[..., split_size:, ]
+                w0[..., split_size:, :].contiguous()
             ]
             handle_w = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
             handle_x = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
@@ -1343,18 +1345,18 @@ def xw_eightway(
             x_recv_list = [empty, empty, empty, _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0), empty, empty, empty, empty]
             w_send_list = [wij, empty, empty, empty, wij, empty, wij, empty]
             w_recv_list = [
-                w0[..., :split_size, :],
+                w0[..., :split_size, :].contiguous(),
                 empty,
                 empty,
                 empty, 
-                w1[..., :split_size, :], 
+                w1[..., :split_size, :].contiguous(), 
                 empty,
-                w1[..., split_size:, ], 
+                w1[..., split_size:, :].contiguous(), 
                 empty
             ]
             handle_w = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
             handle_x = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
-            w0[..., split_size:, ].copy_(wij)
+            w0[..., split_size:, :].copy_(wij)
         case 3:
             x_send_list = [empty, empty, xij, empty, empty, empty, empty, empty]
             x_recv_list = [empty, empty, _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0), empty, empty, empty, empty, empty]
@@ -1367,11 +1369,11 @@ def xw_eightway(
                 empty,
                 w0[..., :split_size, :],
                 empty,
-                w0[w0_shape[0]//2:]
+                w0[..., split_size:, :]
             ]
             handle_w = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
             handle_x = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
-            w0[w0_shape[0]//2:].copy_(wij)
+            w0[..., split_size:, :].copy_(wij)
         case 4:
             x_send_list = [empty, empty, empty, empty, empty, xij, empty, empty]
             x_recv_list = [empty, empty, empty, empty, empty, _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0), empty, empty]
@@ -1379,11 +1381,11 @@ def xw_eightway(
             w_recv_list = [
                 w0[..., :split_size, :],
                 empty,
-                w0[w0_shape[0]//2:],
+                w0[..., split_size:, :],
                 empty, 
                 empty, 
                 empty,
-                w1[w0_shape[0]//2:], 
+                w1[..., split_size:, :], 
                 empty
             ]
             handle_w = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
@@ -1397,11 +1399,11 @@ def xw_eightway(
                 empty, 
                 w1[..., :split_size, :],
                 empty, 
-                w1[w0_shape[0]//2:],
+                w1[..., split_size:, :],
                 empty,
                 empty,
                 empty,
-                w0[w0_shape[0]//2:]
+                w0[..., split_size:, :]
             ]
             handle_w = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
             handle_x = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
@@ -1413,7 +1415,7 @@ def xw_eightway(
             w_recv_list = [
                 w0[..., :split_size, :],
                 empty,
-                w0[w0_shape[0]//2:],
+                w0[..., split_size:, :],
                 empty, 
                 w1[..., :split_size, :], 
                 empty,
@@ -1422,7 +1424,7 @@ def xw_eightway(
             ]
             handle_w = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
             handle_x = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
-            w1[w0_shape[0]//2:].copy_(wij)
+            w1[..., split_size:, :].copy_(wij)
         case 7:
             x_send_list = [empty, empty, empty, empty, empty, empty, xij, empty]
             x_recv_list = [empty, empty, empty, empty, empty, empty, _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0), empty]
@@ -1431,7 +1433,7 @@ def xw_eightway(
                 empty, 
                 w1[..., :split_size, :],
                 empty, 
-                w1[w0_shape[0]//2:],
+                w1[..., split_size:, :],
                 empty,
                 w0[..., :split_size, :],
                 empty,
@@ -1439,7 +1441,7 @@ def xw_eightway(
             ]
             handle_w = dist.all_to_all(w_recv_list, w_send_list, group=model_group, async_op=True)
             handle_x = dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=True)
-            w0[w0_shape[0]//2:].copy_(wij)
+            w0[..., split_size:, :].copy_(wij)
             
     with torch.cuda.stream(streams[0]):
         handle_w.wait()

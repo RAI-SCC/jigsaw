@@ -3,7 +3,7 @@ import torch
 class DistributedLayerNorm(torch.nn.Module): 
     """Batched layer norm distributed across four processes."""
 
-    def __init__(self, dim, rank, device, model_group):
+    def __init__(self, dim, rank, device, norm_group):
         """
         Initialize layer normalization.
         
@@ -20,13 +20,13 @@ class DistributedLayerNorm(torch.nn.Module):
 
         self.rank = rank
         self.device = device
-        self.model_group = model_group
+        self.norm_group = norm_group
         self.layer_norm = torch.nn.LayerNorm(dim).to(device)
         self.layer_norm_apply = DistributedLN.apply
     
     def forward(self, x):
         """Forward pass of layer norm distributed across n processes."""
-        x = self.layer_norm_apply(x)
+        x = self.layer_norm_apply(x, self.norm_group)
         x = self.layer_norm(x)
 
         return x
@@ -35,13 +35,14 @@ class DistributedLN(torch.autograd.Function):
     """Autograd function for layer norm function distributed across four processes."""
 
     @staticmethod
-    def forward(ctx, x):
+    def forward(ctx, x, norm_group):
         """
         Forward pass of layer norm distributed across four processes.
 
         ctx : torch.autograd.Function
             Context object to save information for backward computation.
         """
+        ctx.norm_group = norm_group
         return x
     
     @staticmethod
@@ -56,6 +57,13 @@ class DistributedLN(torch.autograd.Function):
         grad_output: torch.torch.Tensor
             Gradient of the loss with respect to the input of the layer.
         """
+        torch.distributed.all_reduce(
+            grad_output, 
+            op=torch.distributed.ReduceOp.AVG,
+            group=ctx.norm_group,
+            async_op=False
+        )
+    
         return grad_output, None, None
     
 class DistributedSoftMax(torch.nn.Module):

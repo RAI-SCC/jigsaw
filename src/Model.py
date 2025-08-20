@@ -1,18 +1,21 @@
-import torch
-import PatchEmbedding
-from Linear import MixerBlock, MixerBlockSequential
-import Linear
-import utils
 import numpy as np
+import torch
+
+import Linear
+import PatchEmbedding
+import utils
+from Mixer import MixerBlock, MixerBlockSequential
+import Normalization as Norm
 
 
 class Model(torch.nn.Module):
-    def __init__(self, config_dict, rank, device, n_parallel, model_group):
+    def __init__(self, config_dict, rank, device, n_parallel, model_group, col_subgroup):
         super().__init__()
         self.rank = rank
         self.device = device
         self.n_parallel = n_parallel
         self.model_group = model_group
+        self.column_subgroup = col_subgroup
         
         hidden_dimension = config_dict['model']['hidden_dim']        
         self.xlat, self.xlon = config_dict['data']['xlat'], config_dict['data']['xlon']
@@ -29,13 +32,18 @@ class Model(torch.nn.Module):
 
         self.n_blocks = config_dict['model']['mixing_blocks']
 
-        self.blocks = torch.nn.ModuleList([MixerBlock(self.n_lat*self.n_lon//2, hidden_dimension//2, config_dict['model']['spatial_hidden_dim_fraction'], config_dict['model']['features_hidden_dim_fraction'], rank, device, n_parallel, model_group) for i in range(self.n_blocks)])
-        self.layer_norm = Linear.DistributedLayerNorm(hidden_dimension//2, self.rank, self.device, self.model_group)
+        self.blocks = torch.nn.ModuleList([MixerBlock(self.n_lat*self.n_lon, hidden_dimension, config_dict['model']['spatial_hidden_dim_fraction'], config_dict['model']['features_hidden_dim_fraction'], rank, device, n_parallel, model_group) for i in range(self.n_blocks)])
+        self.layer_norm = Norm.DistributedLayerNorm(
+            hidden_dimension//2, 
+            self.rank, 
+            self.device, 
+            self.column_subgroup
+        )
         
         self.num_variables = 36 # TODO: generalize via config file
             
-        self.layer_norm2 = Linear.DistributedLayerNorm(self.num_variables, self.rank, self.device, self.model_group)    
-        self.layer_norm3 = Linear.DistributedLayerNorm(self.num_variables*2, self.rank, self.device, self.model_group)    
+        self.layer_norm2 = Norm.DistributedLayerNorm(self.num_variables, self.rank, self.device, self.column_subgroup)
+        self.layer_norm3 = Norm.DistributedLayerNorm(self.num_variables*2, self.rank, self.device, self.column_subgroup)
         self.concat = config_dict['model']['concat']
         self.linear_residual = config_dict['model']['linear_residual']
         
@@ -196,7 +204,8 @@ class Model_twoway(torch.nn.Module):
 
             ### After recovery: [n_batch, n_lat, n_lon, n_var]
             x = self.layer_norm3(x)
-            x = x.flatten(start_dim=1, end_dim=2)
+            x = x.reshape(x.shape[0], -1, x.shape[-1])
+            #x = x.flatten(start_dim=1, end_dim=2)
             x = self.linearlayer(x)
             
             return x  
