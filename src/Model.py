@@ -247,10 +247,10 @@ class ModelSequential(torch.nn.Module):
             self.embedding = PatchEmbedding.PatchEmbeddingTest(self.patch_size, hidden_dimension, device=device,in_channels=72, padding=padding, stride=self.stride, xlat=self.xlat)
             self.n_blocks = config_dict['model']['mixing_blocks']
             self.blocks = torch.nn.ModuleList([MixerBlockSequential(720*1440//self.patch_size, hidden_dimension, hidden_dimension, self.dropout) for i in range(self.n_blocks)])
-        self.pos_encoding = config_dict['model']['positional_encoding']
-    
-        if self.pos_encoding:  
-            self.positional_encoding = utils.getPositionEncoding(self.n_lat*self.n_lon, hidden_dimension, n=10000).to(device)
+        #self.pos_encoding = config_dict['model']['positional_encoding']
+    #
+        #if self.pos_encoding:  
+        #    self.positional_encoding = utils.getPositionEncoding(self.n_lat*self.n_lon, hidden_dimension, n=10000).to(device)
         
         self.latent_rollout = config_dict['model']['latent_rollout']
 
@@ -309,8 +309,8 @@ class ModelSequential(torch.nn.Module):
         x = self.embedding(x) # x: latent_t
         
         # x: shape [1, n_patches, hidden_dim]
-        if self.pos_encoding:
-            x = x + self.positional_encoding 
+        #if self.pos_encoding:
+        #    x = x + self.positional_encoding 
             
         x_res2 = x.clone()
         

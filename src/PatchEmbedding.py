@@ -258,6 +258,7 @@ class PatchRecovery1D(torch.nn.Module):
     super().__init__()
     # Here we use two transposed convolutions to recover data
     self.patch_size = patch_size
+    self.stride = patch_size
 
     if concat:
       self.conv = torch.nn.ConvTranspose1d(in_channels=dim*2, out_channels=69, kernel_size=self.patch_size, stride=self.stride)

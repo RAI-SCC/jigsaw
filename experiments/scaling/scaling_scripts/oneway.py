@@ -4,6 +4,7 @@ import torch
 import torch.distributed
 import torch.optim as optim
 import utils
+import Dataloaders
 import Model
 from torch.nn.parallel import DistributedDataParallel as DDP
 import argparse
@@ -46,7 +47,7 @@ def training_loop(config_dict, device, localid, rank):
     )
 
     utils.set_all_seeds(1, rank=rank)
-    train_dataloader = utils.get_dataloader(config_dict, config_dict['data']['train_data_path'], mode='train', distributed=(not model_parallel), batch_size=config_dict['training']['train_batch'], subset_size=train_subset, rank=rank)
+    train_dataloader = Dataloaders.get_dataloader(config_dict, config_dict['data']['train_data_path'], mode='train', distributed=(not model_parallel), batch_size=config_dict['training']['train_batch'], subset_size=train_subset, rank=rank)
         
     if rank == 0:
         print(f"model has {utils.count_parameters(mlp)*parallelism/1e6} million parameters")

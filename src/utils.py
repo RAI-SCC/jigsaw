@@ -13,6 +13,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 import Dataloaders
 import Model
+import eval
 
 
 def get_ddp_groups(rank: int, n_parallel: int) -> dist.ProcessGroup:
@@ -208,13 +209,27 @@ def build_model(
     localid: int,
     rank: int,
     n_parallel: int,
-    model_group,
-    ddp_group,
+    model_group: torch.distributed.ProcessGroup,
+    ddp_group: torch.distributed.ProcessGroup,
+    col_group: torch.distributed.ProcessGroup = None
 ) -> torch.nn.Module:
     """Instantiate model and wrap with DDP."""
-    mlp = Model.Model_twoway(config_dict, rank, device, n_parallel, model_group).to(device)
-    mlp = DDP(mlp, device_ids=[localid], output_device=localid, process_group=ddp_group)
-    return mlp
+    match n_parallel:
+        case 2:
+            model = Model.Model_twoway(config_dict, rank, device, n_parallel, model_group).to(device)
+        case 4:
+            model = Model.Model(config_dict, rank, device, n_parallel, model_group, col_group).to(device)
+    
+    model = DDP(model, 
+                device_ids=[localid], 
+                output_device=localid, 
+                process_group=ddp_group
+                )
+
+    if rank == 0:
+        print(f"model has {count_parameters(model)*n_parallel/1e6} million parameters")
+
+    return model
 
 
 def build_optimizer(config_dict: Dict, mlp: torch.nn.Module) -> optim.Optimizer:
@@ -317,9 +332,7 @@ def train_one_epoch(
     xlat: int,
     xlon: int,
     max_rollout: int,
-    rank: int,
-    lr: float,
-    start_lr: float,
+    rank: int
 ) -> float:
     """
     Train for one epoch.
@@ -336,13 +349,14 @@ def train_one_epoch(
         train_dataloader.sampler.set_epoch(epoch)
 
     start_time = time.perf_counter()
-
+    if config_dict['model_parallel']['parallelism'] == 4:
+        xlon = xlon//2
     for i, data in enumerate(train_dataloader):
         rollout = i % max_rollout
 
         # warmup lr only in epoch 0
         if epoch == 0:
-            warm = i * (lr - start_lr) / max(1, len(train_dataloader)) + start_lr
+            warm = i * (config_dict['training']['lr'] - 1e-6) / max(1, len(train_dataloader)) + 1e-6
             for g in optimizer.param_groups:
                 g["lr"] = warm
 
@@ -352,7 +366,7 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         output = model(input_data, rollout_=rollout + 1)  # [B, 720, 720, 36]
-        output = output.reshape(output.shape[0], xlat, xlon, 36)
+        output = output.reshape(-1, xlat, xlon, 36)
 
         # broadcast weights
         vw = variable_weights.view(1, 1, 1, 36)
@@ -382,3 +396,32 @@ def train_one_epoch(
         print(f"Epoch {epoch} time [min]: {((end_time - start_time) / 60 )}, average loss {epoch_average_loss[0]}")
 
     return avg
+
+def get_weights(config_dict, device, n_parallel, rank):
+    xlat = config_dict['data']['xlat']
+    surface_weights  = torch.tensor(config_dict['training']['surface_weights'])
+    # [z, q, t, u, v]
+    pressure_weights = torch.tensor(config_dict['training']['pressure_weights']).unsqueeze(1).expand(5, 13).flatten()
+    surface_upper_pressure_weights = torch.concat(
+        [torch.tensor([1, 1, 1, 1]), # surface variables
+        torch.tensor([1, 1, 1, 1, 1, 1, 0.9, 0.8, .7, .6, .5, .4, .3]).repeat(5)]
+    ).view(1, 69)
+
+    variable_weights = ((torch.concat([surface_weights, pressure_weights]).view(1, 1, 1, 69))*surface_upper_pressure_weights).to(device)
+    
+    area_weights = torch.tensor(eval.calc_weight(xlat)).view(1, xlat, 1, 1).to(device).to(torch.float32)    
+
+    variable_weights = torch.nn.functional.pad(variable_weights, (0,3))
+    variable_weights = variable_weights[0,0,0,:36] if rank % n_parallel in [0, 2] else variable_weights[0,0,0,36:]
+
+    return variable_weights, area_weights 
+
+def define_subset_sizes(config_dict: dict, rank: int):
+    train_subset, valid_subset = config_dict['data']['train_subset'], config_dict['data']['valid_subset']
+    train_subset = None if train_subset < 0 else train_subset
+    valid_subset    = None if valid_subset < 0 else valid_subset
+
+    if rank == 0:
+        print(f'Training subset size {train_subset}')
+        print(f'Reading from {config_dict["data"]["train_data_path"]}')
+    return train_subset, valid_subset
