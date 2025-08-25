@@ -569,7 +569,7 @@ class DistributedPatchRecovery(torch.nn.Module):
     return output
 
 class Distributed1DPatchEmbedding(torch.nn.Module):
-  def __init__(self, n_lat, n_lon, patch_size, var_in, embed_dim, rank, device, n_parallel, model_group, xlat=720, stride=None):
+  def __init__(self, n_lat, n_lon, patch_size, var_in, embed_dim, rank, device, n_parallel, model_group):
     super().__init__()
 
     self.n_lat, self.n_lon = n_lat, n_lon
@@ -588,9 +588,7 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
     self.device = device
     
   def forward(self, x):
-    """
-    x: (n_batch, vars, n_lat, n_lon)
-    """
+    """x: (n_batch, vars, n_lat, n_lon)"""
     # Load constant masks from the disc
     
     n_batch, n_x, n_y, n_var = x.shape

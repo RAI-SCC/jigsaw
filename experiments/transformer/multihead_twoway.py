@@ -1,13 +1,16 @@
-import Linear
+from typing import Tuple
+
+import numpy as np
 import torch
-from torch.nn import Softmax
-import utils
-import distributed_matmul as dist_mm
 from einops import rearrange
 from sklearn.datasets import make_blobs
 from sklearn.preprocessing import normalize
-from typing import Tuple
-import numpy as np
+
+import Attention
+import distributed_matmul as dist_mm
+import Linear
+import utils
+
 
 class DistributedAttention_twoway(torch.nn.Module):
   def __init__(self, x_items, x_features, embed_dim, device, rank, output_dim, heads=1, model_group=None):
@@ -201,67 +204,22 @@ batch = 1
 x_items, x_features, embed_dim, heads = 4, 4, 4, 2 # x_features is global; embed_dim is global
 output_dim = 6
 batch = 1
+n_parallel=2
 torch.manual_seed(7)
 W = torch.randn(x_features, x_features//2).to(device)
-#b = torch.randn(x_features//2).to(device)
 
-def sample_batch():
-    x = torch.randn(batch, x_items, x_features//2).to(device)
-    y = dist_mm.XW_twoway(x, W, device, rank)  # (batch, items, features)
-    
-    return x, y
+model_group = utils.get_model_group(rank, n_parallel)
 
-def generate_spectral_clustering_data(
-    n_samples: int = 12, 
-    n_clusters: int = 4, 
-    cluster_std: float = 0.60,
-    random_state: int = 42
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Generate dummy data for spectral clustering.
-
-    Args:
-        n_samples: Total number of samples.
-        n_clusters: Number of clusters.
-        cluster_std: Standard deviation of clusters.
-        random_state: Seed for reproducibility.
-
-    Returns:
-        X: (n_samples, 2) array of 2D data points.
-        y: (n_samples,) array of ground truth cluster labels.
-    """
-    torch.manual_seed(random_state)
-    X, y = make_blobs(n_samples=n_samples, centers=n_clusters, 
-                      cluster_std=cluster_std, random_state=random_state)
-    
-    X = normalize(X)  # Normalize for similarity-based methods
-    
-    X = torch.tensor(X).to(device)
-    y = np.eye(n_clusters)[y]
-    y = torch.tensor(y).to(device)
-    
-    if rank == 0:
-       X = X[:, 0]
-       y = y[:, :2]
-       
-    else:
-       X = X[:, 1]
-       y = y[:, 2:]
-           
-    X = X.reshape(1, n_samples, 1).to(torch.float32)
-    y = y.reshape(1, n_samples, 2).to(torch.float32)
-
-    return X, y
-
-model = DistributedAttention_twoway(
-  x_items, 
-  x_features, 
-  embed_dim, 
-  device, 
+model = Attention.DistributedAttention(
+  x_features,
+  embed_dim,
+  output_dim, # global
+  heads,
   rank, 
-  output_dim=output_dim, # global
-  heads=heads, 
-  model_group=None
+  device,
+  n_parallel=n_parallel,  
+  model_group=model_group,
+  softmax_group=model_group
 ).to(torch.float32).to(device)
 
 #optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
@@ -290,15 +248,10 @@ result = model(X)
 loss = torch.nn.MSELoss()(result, y)
 
 loss.backward()
-
-for param in model.parameters():
-   if param.grad is not None:
-      print(param.grad/2)
-#print(result)
   
 optimizer = torch.optim.Adam(model.parameters(),lr=1e-4)
 
-for i in range(10):
+for i in range(10000):
   values = model(X)
   loss = torch.nn.MSELoss()(values, values*0.1)
   

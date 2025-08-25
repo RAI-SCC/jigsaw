@@ -3,6 +3,7 @@ import time
 from typing import Dict, Optional, Tuple
 
 import numpy as np
+import timm
 import torch
 import torch.distributed
 import torch.distributed as dist
@@ -12,8 +13,8 @@ from timm.scheduler.step_lr import StepLRScheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 import Dataloaders
-import Model
 import eval
+import Model
 
 
 def get_ddp_groups(rank: int, n_parallel: int) -> dist.ProcessGroup:
@@ -30,7 +31,7 @@ def get_ddp_groups(rank: int, n_parallel: int) -> dist.ProcessGroup:
     
     return global_groups[rank%n_parallel]
 
-def get_model_group(rank, n_parallel):
+def get_model_group(rank: int, n_parallel: int) -> dist.ProcessGroup:
     """Return model groups."""
     local_groups = []
     for i in range(torch.distributed.get_world_size() // n_parallel):
@@ -71,13 +72,13 @@ def get_model_group_rows(rank, n_parallel, n_rows):
     idx = node * n_rows + row
     return groups[idx]
 
-def get_model_group_columns(rank, n_parallel, n_cols):
+def get_model_group_columns(rank: int, n_parallel: int, n_cols: int) -> dist.ProcessGroup:
     """
     Return mpi comm subgroups within model groups. 
 
     rank: int
         global rank of process
-    n_parallel: int
+    n_parallel: intval_loss
         number of processes in model-parallel group
     n_cols: int
         number of rows that the model-parallel group is subdivided into.
@@ -101,23 +102,18 @@ def get_model_group_columns(rank, n_parallel, n_cols):
 
     return groups[idx]
 
-def set_all_seeds(seed: int = 0, rank: Optional[int] = None) -> None:
-    """Initialize all random seeds"""
-    if rank is None:
-        rank = 0
-    os.environ["PL_GLOBAL_SEED"] = str(seed + rank)
-    torch.manual_seed(seed + rank)
-    torch.cuda.manual_seed_all(seed + rank)
+def set_all_seeds(seed: int = 0) -> None:
+    """Initialize all random seeds."""
+    os.environ["PL_GLOBAL_SEED"] = str(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
-def set_all_seeds_local_rank(seed: int = 0, rank: Optional[int] = None, n_parallel: int = None) -> None:
+def set_all_seeds_model_group(seed: int = 0, rank: Optional[int] = None, n_parallel: int = None) -> None:
     """Set all seeds on all model groups to the same value."""
-    if rank is None:
-        rank = 0
-    set_all_seeds(seed + rank // n_parallel, rank=0)
+    set_all_seeds(seed + rank // n_parallel)
 
 
-
-def init_CUDA():
+def init_cuda() -> tuple[torch.device, int, int, int]:
     """
     Initialize DistributedDataParallel. 
     
@@ -150,12 +146,14 @@ def init_CUDA():
 
     return device, slurm_localid, rank, world_size
 
-def count_parameters(model):
+def count_parameters(model: torch.nn.Module):
+    """Return number of parameters in model."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 # save model
-def save_model(model, optimizer, file_path, rank, epoch, distributed=True):
-    file_path = f"{file_path}/model_{rank}.pt"
+def save_model(model: torch.nn.Module, optimizer: torch.optim, scheduler: timm.scheduler, file_path: str, rank: int, epoch: int, model_name: str='model'):  # noqa: D103
+    """Save model weights, optimizer state, epoch."""
+    file_path = f"{file_path}/{model_name}_{rank}.pt"
     state = {
         'model_state': model.state_dict(),
         'optimizer_state': optimizer.state_dict(),
@@ -163,9 +161,15 @@ def save_model(model, optimizer, file_path, rank, epoch, distributed=True):
     }
     torch.save(state, file_path)
 
-def load_model(model, optimizer, file_path, rank, model_parallel=False, n_parallel=4):
-    if not model_parallel:
-        rank = 0
+def load_model(
+        model: torch.nn.Module, 
+        optimizer: torch.optim, 
+        file_path: str, 
+        rank: int=0, 
+        model_parallel: bool=False, 
+        n_parallel: int=4
+    ):
+    """Load model from state dict."""
     if model_parallel:
         load_rank = rank % n_parallel
         file_path = f'{file_path}/model_{load_rank}.pt'
@@ -173,14 +177,15 @@ def load_model(model, optimizer, file_path, rank, model_parallel=False, n_parall
         state = torch.load(f"{file_path}", map_location='cpu')
         model.load_state_dict(state['model_state'])
         optimizer.load_state_dict(state['optimizer_state'])
-
         epoch = state['epoch']
     except Exception:
-        print(f'Could not load model from {file_path}. Initializing from scratch.')
+        if rank == 0:
+            print(f'Could not load model from {file_path}. Initializing from scratch.')
         epoch = 0
     return model, optimizer, epoch
 
-def getPositionEncoding(seq_len, d, n=10000):
+def get_position_encoding(seq_len: int, d: int, n: int=10000):
+    """Return fixed positional encoding for a given sequence length."""
     P = np.zeros((seq_len, d))
     for k in range(seq_len):
         for i in np.arange(int(d/2)):
@@ -201,6 +206,7 @@ def setup_groups(rank: int, n_parallel: int, nrows: int, ncols: int):
     ddp_group = get_ddp_groups(rank, n_parallel)
     model_subgroup_row = get_model_group_rows(rank, n_parallel, nrows)
     model_subgroup_col = get_model_group_columns(rank, n_parallel, ncols)
+    
     return model_group, ddp_group, model_subgroup_row, model_subgroup_col
 
 def build_model(
@@ -219,8 +225,10 @@ def build_model(
             model = Model.Model_twoway(config_dict, rank, device, n_parallel, model_group).to(device)
         case 4:
             model = Model.Model(config_dict, rank, device, n_parallel, model_group, col_group).to(device)
+        case 8:
+            model = Model.Model_eightway(config_dict, rank, device, n_parallel, model_group, col_group).to(device)
     
-    model = DDP(model, 
+    model = DDP(model,
                 device_ids=[localid], 
                 output_device=localid, 
                 process_group=ddp_group
@@ -246,7 +254,7 @@ def build_optimizer(config_dict: Dict, mlp: torch.nn.Module) -> optim.Optimizer:
     )
     return opt
 
-def build_scheduler(config_dict: Dict, optimizer: optim.Optimizer, start_epoch: int = 0):
+def build_scheduler(config_dict: Dict, optimizer: optim.Optimizer, start_epoch: int = 0) -> timm.scheduler:
     """Build LR scheduler and step it to start_epoch."""
     if config_dict["training"]["lr_constant"]:
         scheduler = StepLRScheduler(optimizer, decay_rate=1.0, decay_t=100)
@@ -286,38 +294,6 @@ def build_dataloaders(
     )
     return train_dataloader, valid_dataloader
 
-@torch.no_grad()
-def validate(
-    config_dict: Dict,
-    mlp: torch.nn.Module,
-    valid_dataloader,
-    rank: int,
-    device: torch.device,
-    epoch: int,
-    save_path: str,
-    model_parallel: bool,
-    world_size: int,
-    model_subgroup_col,
-    model_group
-) -> float:
-    """
-    Run validation and return scalar loss.
-    """
-    val_loss = eval.get_validation_mse(
-        config_dict,
-        mlp,
-        valid_dataloader,
-        rank,
-        device,
-        epoch,
-        file_path=save_path,
-        model_parallel=model_parallel,
-        world_size=world_size,
-        model_subgroup_col=model_subgroup_col,
-        model_group=model_group
-    )
-    return float(val_loss)
-
 
 def train_one_epoch(
     config_dict: Dict,
@@ -325,7 +301,8 @@ def train_one_epoch(
     model: torch.nn.Module,
     train_dataloader,
     optimizer: optim.Optimizer,
-    scheduler,
+    scheduler: timm.scheduler,
+    loss_fn: torch.nn.modules.loss,
     device: torch.device,
     area_weights: torch.Tensor,       # [1, xlat, 1, 1]
     variable_weights: torch.Tensor,   # [36]
@@ -373,41 +350,33 @@ def train_one_epoch(
         ow = output * area_weights * vw
         tw = target_data * area_weights * vw
 
-        loss = torch.nn.functional.mse_loss(ow, tw)
+        loss = loss_fn(ow, tw)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), config_dict["training"]["grad_clip"])
         optimizer.step()
-
-        epoch_loss += float(loss.detach())
+        torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG)
+        epoch_loss = epoch_loss + float(loss.detach())
         if rank == 0:
             print(f"{epoch}, after Step {i}/{len(train_dataloader)}. Rollout {rollout}. loss: {float(loss.detach())}")
 
     torch.cuda.synchronize()
     end_time = time.perf_counter()
 
-    avg = epoch_loss / max(1, len(train_dataloader))
+    epoch_average_loss = epoch_loss / max(1, len(train_dataloader))
     if rank == 0:
-        print(f"Epoch {epoch} time [min]: {(end_time - start_time) / 60.0}, average loss {avg}")
+        print(f"Epoch {epoch} time [min]: {(end_time - start_time) / 60.0}, average loss {epoch_average_loss}")
 
     scheduler.step(epoch)
 
-    if rank == 0:
-        epoch_average_loss = epoch_average_loss / len(train_dataloader)
-        print(f"Epoch {epoch} time [min]: {((end_time - start_time) / 60 )}, average loss {epoch_average_loss[0]}")
+    return epoch_average_loss
 
-    return avg
-
-def get_weights(config_dict, device, n_parallel, rank):
+def get_weights(config_dict: dict, device: torch.device, n_parallel: int, rank: int) -> tuple[torch.tensor, torch.tensor]:
+    """Return variable and latitude-weighted weights."""
     xlat = config_dict['data']['xlat']
     surface_weights  = torch.tensor(config_dict['training']['surface_weights'])
     # [z, q, t, u, v]
     pressure_weights = torch.tensor(config_dict['training']['pressure_weights']).unsqueeze(1).expand(5, 13).flatten()
-    surface_upper_pressure_weights = torch.concat(
-        [torch.tensor([1, 1, 1, 1]), # surface variables
-        torch.tensor([1, 1, 1, 1, 1, 1, 0.9, 0.8, .7, .6, .5, .4, .3]).repeat(5)]
-    ).view(1, 69)
-
-    variable_weights = ((torch.concat([surface_weights, pressure_weights]).view(1, 1, 1, 69))*surface_upper_pressure_weights).to(device)
+    variable_weights = ((torch.concat([surface_weights, pressure_weights]).view(1, 1, 1, 69))).to(device)
     
     area_weights = torch.tensor(eval.calc_weight(xlat)).view(1, xlat, 1, 1).to(device).to(torch.float32)    
 
@@ -416,12 +385,27 @@ def get_weights(config_dict, device, n_parallel, rank):
 
     return variable_weights, area_weights 
 
-def define_subset_sizes(config_dict: dict, rank: int):
+def define_subset_sizes(config_dict: dict, rank: int) -> tuple[int, int]:
+    """Return training and validation subset sizes."""
     train_subset, valid_subset = config_dict['data']['train_subset'], config_dict['data']['valid_subset']
     train_subset = None if train_subset < 0 else train_subset
-    valid_subset    = None if valid_subset < 0 else valid_subset
+    valid_subset = None if valid_subset < 0 else valid_subset
 
     if rank == 0:
         print(f'Training subset size {train_subset}')
         print(f'Reading from {config_dict["data"]["train_data_path"]}')
+
     return train_subset, valid_subset
+
+def build_loss_fn(config_dict):
+    """Return loss function."""
+    loss_type = config_dict['training']['loss']
+    match loss_type:
+        case 'L1':
+            loss_fn = torch.nn.L1Loss()
+        case 'L2':
+            loss_fn = torch.nn.MSELoss()
+        case _:
+            raise ValueError("Only L1 and L2 losses are supported.")
+    return loss_fn
+        

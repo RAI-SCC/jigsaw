@@ -74,7 +74,7 @@ def training_loop(config_dict, device, localid, rank):
     )
 
     if n_parallel > 1: 
-        utils.set_all_seeds_local_rank(1, rank=rank, n_parallel=n_parallel) # Set all GPUs to the same seed so that they read the same data           
+        utils.set_all_seeds_model_group(1, rank=rank, n_parallel=n_parallel) # Set all GPUs to the same seed so that they read the same data           
     else:
         utils.set_all_seeds(1, rank=rank)
     
@@ -192,7 +192,7 @@ if __name__ == '__main__':
     with open(args.config_file, 'r') as f:
         config_dict = yaml.load(f, Loader=yaml.SafeLoader)
 
-    device, localid, rank, world_size = utils.init_CUDA()
+    device, localid, rank, world_size = utils.init_cuda()
     
     training_loop(config_dict, device, localid, rank)
     torch.distributed.destroy_process_group()

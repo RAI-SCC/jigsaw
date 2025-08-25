@@ -24,11 +24,11 @@ class Model(torch.nn.Module):
             self.patch_size = config_dict['model']['patch_size']
             self.stride = config_dict['model']['stride']
             self.n_lat, self.n_lon = self.xlat, self.xlon//self.patch_size
-            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension, rank, device, n_parallel, model_group, xlat=self.xlat, stride=self.stride)
+            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension, rank, device, n_parallel, model_group)
         else:
             self.patch_size = (config_dict['model']['patch_size'], config_dict['model']['patch_size'])
             self.n_lat, self.n_lon = self.xlat//self.patch_size[0], self.xlon//self.patch_size[1]
-            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension,  rank, device, n_parallel, model_group, xlat=self.xlat)
+            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension,  rank, device, n_parallel, model_group)
 
         self.n_blocks = config_dict['model']['mixing_blocks']
 
@@ -124,12 +124,13 @@ class Model_twoway(torch.nn.Module):
         self.model_group = model_group # Local groups [0,1], [2,3]...
         hidden_dimension = config_dict['model']['hidden_dim']        
         self.xlat, self.xlon = config_dict['data']['xlat'], config_dict['data']['xlon']
-        
+        self.dropout = config_dict['model']['dropout']
+
         if config_dict['model']['patch_embed'] == 1:
             self.patch_size = config_dict['model']['patch_size']
             self.stride = config_dict['model']['stride']
             self.n_lat, self.n_lon = self.xlat, self.xlon//self.patch_size
-            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension, rank, device, n_parallel, model_group, xlat=self.xlat, stride=self.stride)
+            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding(self.xlat, self.xlon, self.patch_size, 72, hidden_dimension, rank, device, n_parallel, model_group)
         self.n_blocks = config_dict['model']['mixing_blocks']
 
         self.blocks = torch.nn.ModuleList([MixerBlock(self.n_lat*self.n_lon, hidden_dimension, config_dict['model']['spatial_hidden_dim_fraction'], config_dict['model']['features_hidden_dim_fraction'], rank, device, n_parallel, model_group) for i in range(self.n_blocks)])
