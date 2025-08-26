@@ -2,6 +2,7 @@ from typing import Optional
 
 import numpy as np
 import torch
+import torch.distributed as dist
 
 import distributed_matmul as dist_mm
 
@@ -52,7 +53,7 @@ class DistributedXWT(torch.nn.Module):
             rank: int, 
             device: torch.device, 
             n_parallel: int, 
-            model_group: torch.distributed.ProcessGroup, 
+            model_group: dist.ProcessGroup, 
             n_channels: int = 1, 
             bias: bool = True, 
             stdev: float = None, 
@@ -116,7 +117,7 @@ class DistributedXWT(torch.nn.Module):
         ----------
         x : torch.Tensor
             Local input tensor of shape (B, x_in, in_dim).
-        model_group : torch.distributed.ProcessGroup, optional
+        model_group : dist.ProcessGroup, optional
             Process group for an individual model-parallel instance.
 
         Returns
@@ -142,7 +143,7 @@ class XWT(torch.autograd.Function):
             rank: int, 
             device: torch.device, 
             n_parallel: int, 
-            model_group: torch.distributed.ProcessGroup
+            model_group: dist.ProcessGroup
         ) -> torch.Tensor:
         """
         Forward pass of linear layer (XWT) distributed across two processes.
@@ -163,7 +164,7 @@ class XWT(torch.autograd.Function):
             Global rank.
         n_parallel : int
             Number of processes to distribute operation across
-        model_group : torch.distributed.ProcessGroup, optional
+        model_group : dist.ProcessGroup, optional
             Process group for an individual model-parallel instance.
         
         Returns
@@ -232,7 +233,7 @@ class DistributedXW(torch.nn.Module):
             rank: int, 
             device: torch.device, 
             n_parallel: int, 
-            model_group: torch.distributed.ProcessGroup, 
+            model_group: dist.ProcessGroup, 
             n_channels: int=1, 
             bias: bool=True, 
             stdev: float=None, 
@@ -274,7 +275,7 @@ class DistributedXW(torch.nn.Module):
 
         x: torch.Tensor
             local input tensor of shape (B, x_in, x_out)
-        model_group : torch.distributed.ProcessGroup, optional
+        model_group : dist.ProcessGroup, optional
             Process group for an individual model-parallel instance.
 
         Returns
@@ -300,7 +301,7 @@ class XW(torch.autograd.Function):
             rank: int, 
             device: torch.device, 
             n_parallel: int, 
-            model_group: torch.distributed.ProcessGroup
+            model_group: dist.ProcessGroup
         ) -> torch.Tensor:
         """
         Forward pass of linear layer (XW) distributed across two processes.
@@ -321,7 +322,7 @@ class XW(torch.autograd.Function):
         device : Device to perform computation on.
         rank : int
             Global rank
-        model_group : torch.distributed.ProcessGroup, optional
+        model_group : dist.ProcessGroup, optional
             Process group for an individual model-parallel instance.
 
         Returns
@@ -391,7 +392,7 @@ class DistributedXTW(torch.nn.Module):
             rank: int, 
             device: torch.device, 
             n_parallel: int, 
-            model_group: torch.distributed.ProcessGroup, 
+            model_group: dist.ProcessGroup, 
             n_channels: int=72, 
             bias: bool=True, 
             init_method: str='linear'
@@ -442,7 +443,7 @@ class DistributedXTW(torch.nn.Module):
         ----------
         x : torch.Tensor
             Local input tensor of shape (B, x_in, in_dim).
-        model_group : torch.distributed.ProcessGroup, optional
+        model_group : dist.ProcessGroup, optional
             Process group for an individual model-parallel instance.
         
         Returns
@@ -468,7 +469,7 @@ class XTW(torch.autograd.Function):
             rank: int, 
             device: torch.device, 
             n_parallel: int, 
-            model_group: torch.distributed.ProcessGroup
+            model_group: dist.ProcessGroup
         ) -> torch.Tensor:
         """
         Forward pass of linear layer (XTW) distributed across two processes.
@@ -488,7 +489,7 @@ class XTW(torch.autograd.Function):
             Device to perform computation on.
         rank : int
             Global rank.
-        model_group : torch.distributed.ProcessGroup, optional
+        model_group : dist.ProcessGroup, optional
             Process group for an individual model-parallel instance.
 
         Returns
@@ -549,7 +550,7 @@ class DistributedXTranpose(torch.nn.Module):
             rank: int, 
             device: torch.device,
             n_parallel: int, 
-            model_group: torch.distributed.ProcessGroup
+            model_group: dist.ProcessGroup
         ) -> None:
         """Initialize the Linear class."""
         super().__init__()
@@ -572,7 +573,7 @@ class DistributedXTranpose(torch.nn.Module):
             Global rank.
         device : torch.device
             Device to perform computation on.
-        model_group : torch.distributed.ProcessGroup, optional
+        model_group : dist.ProcessGroup, optional
             Process group for an individual model-parallel instance.
 
         Returns
@@ -593,7 +594,7 @@ class XT(torch.autograd.Function):
             rank: int, 
             device: torch.device, 
             n_parallel: int, 
-            model_group: torch.distributed.ProcessGroup
+            model_group: dist.ProcessGroup
         ) -> torch.Tensor:
         """
         Forward pass of transpose (XT) distributed across n processes.
@@ -608,7 +609,7 @@ class XT(torch.autograd.Function):
             Global rank.
         device : torch.device
             The device on which the computation is performed.
-        model_group : torch.distributed.ProcessGroup, optional
+        model_group : dist.ProcessGroup, optional
             Process group for an individual model-parallel instance.
 
         Returns
@@ -657,7 +658,7 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
             rank: int, 
             device: torch.device, 
             n_parallel: int, 
-            model_group: torch.distributed.ProcessGroup
+            model_group: dist.ProcessGroup
         ) -> None:
         """Initialize the XWT Linear layer sharded over two processes."""
         self.rank = rank
@@ -681,7 +682,7 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
         ----------
         x : torch.Tensor
             Local input tensor of shape (B, x_in, in_dim).
-        model_group : torch.distributed.ProcessGroup, optional
+        model_group : dist.ProcessGroup, optional
             Process group for an individual model-parallel instance.
 
         Returns
@@ -703,7 +704,7 @@ class DistributedMatMulXW(torch.nn.Module):
             rank: int, 
             device: torch.device, 
             n_parallel: int, 
-            model_group: torch.distributed.ProcessGroup
+            model_group: dist.ProcessGroup
         ):
         """Initialize the XWT Linear layer sharded over n processes."""
         self.rank = rank
@@ -722,7 +723,7 @@ class DistributedMatMulXW(torch.nn.Module):
         ----------
         x : torch.Tensor
             Local input tensor of shape (B, x_in, in_dim).
-        model_group : torch.distributed.ProcessGroup, optional
+        model_group : dist.ProcessGroup, optional
             Process group for an individual model-parallel instance.
 
         Returns

@@ -5,7 +5,6 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import timm
 import torch
-import torch.distributed
 import torch.distributed as dist
 import torch.optim as optim
 from timm.scheduler.cosine_lr import CosineLRScheduler
@@ -19,7 +18,7 @@ import Model
 
 def get_ddp_groups(rank: int, n_parallel: int) -> dist.ProcessGroup:
     """Return DDP groups."""
-    n_nodes = torch.distributed.get_world_size() // n_parallel
+    n_nodes = dist.get_world_size() // n_parallel
     global_group_list = []
     global_groups     = []
 
@@ -27,24 +26,24 @@ def get_ddp_groups(rank: int, n_parallel: int) -> dist.ProcessGroup:
         global_group_list.append(((np.arange(n_nodes)*n_parallel+node)).tolist())
                
     for global_group in global_group_list:
-        global_groups.append(torch.distributed.new_group(ranks=global_group))
+        global_groups.append(dist.new_group(ranks=global_group))
     
     return global_groups[rank%n_parallel]
 
 def get_model_group(rank: int, n_parallel: int) -> dist.ProcessGroup:
     """Return model groups."""
     local_groups = []
-    for i in range(torch.distributed.get_world_size() // n_parallel):
+    for i in range(dist.get_world_size() // n_parallel):
         local_start_rank = i * n_parallel
         local_groups.append(
-                torch.distributed.new_group(
+                dist.new_group(
                     ranks=list(range(local_start_rank, local_start_rank+n_parallel))
                 )
         )
     
     return local_groups[rank//n_parallel]
 
-def get_model_group_rows(rank, n_parallel, n_rows):
+def get_model_group_rows(rank: int, n_parallel: int, n_rows: int) -> dist.ProcessGroup:
     """
     Return mpi comm subgroups within model groups. 
 
@@ -58,7 +57,7 @@ def get_model_group_rows(rank, n_parallel, n_rows):
     """
     groups = []
     n_cols = n_parallel // n_rows
-    n_nodes = torch.distributed.get_world_size() // n_parallel
+    n_nodes = dist.get_world_size() // n_parallel
 
     for node in range(n_nodes):
         base = node * n_parallel
@@ -86,13 +85,13 @@ def get_model_group_columns(rank: int, n_parallel: int, n_cols: int) -> dist.Pro
     """
     groups = []
     n_rows = n_parallel // n_cols
-    n_nodes = torch.distributed.get_world_size() // n_parallel
+    n_nodes = dist.get_world_size() // n_parallel
 
     for node in range(n_nodes): # [0, 2], [1, 3], [4, 6], [5, 7]
         base = node * n_parallel
         for col in range(n_cols):
             ranks = [base + r * n_cols + col for r in range(n_rows)]
-            groups.append(torch.distributed.new_group(ranks=ranks)
+            groups.append(dist.new_group(ranks=ranks)
         )
             
     node = rank // n_parallel
@@ -140,7 +139,7 @@ def init_cuda() -> tuple[torch.device, int, int, int]:
                             init_method="env://")
     
     if dist.is_initialized(): 
-        print(f"Rank {rank}/{world_size}: Process group initialized with torch rank {torch.distributed.get_rank()} and torch world size {torch.distributed.get_world_size()}.")
+        print(f"Rank {rank}/{world_size}: Process group initialized with torch rank {dist.get_rank()} and torch world size {dist.get_world_size()}.")
     else:
         print(f"Rank {rank} not initialized")
 
@@ -215,9 +214,9 @@ def build_model(
     localid: int,
     rank: int,
     n_parallel: int,
-    model_group: torch.distributed.ProcessGroup,
-    ddp_group: torch.distributed.ProcessGroup,
-    col_group: torch.distributed.ProcessGroup = None
+    model_group: dist.ProcessGroup,
+    ddp_group: dist.ProcessGroup,
+    col_group: dist.ProcessGroup = None
 ) -> torch.nn.Module:
     """Instantiate model and wrap with DDP."""
     match n_parallel:
@@ -354,7 +353,7 @@ def train_one_epoch(
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), config_dict["training"]["grad_clip"])
         optimizer.step()
-        torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG)
+        dist.all_reduce(loss, op=dist.ReduceOp.AVG)
         epoch_loss = epoch_loss + float(loss.detach())
         if rank == 0:
             print(f"{epoch}, after Step {i}/{len(train_dataloader)}. Rollout {rollout}. loss: {float(loss.detach())}")

@@ -3,8 +3,9 @@ import os
 import torch
 import torch.distributed as dist
 
-streams = [torch.cuda.Stream() for _ in range(2)]
-streamz = [torch.cuda.Stream() for _ in range(4)]
+if dist.is_initialized():
+    streams = [torch.cuda.Stream() for _ in range(2)]
+    streamz = [torch.cuda.Stream() for _ in range(4)]
 
 _prealloc_buffers = {}   
 device = f'cuda:{int(os.getenv("SLURM_LOCALID"))}'
@@ -66,7 +67,7 @@ def xw_transpose_twoway(
     wij: torch.tensor, 
     rank: int,
     device: torch.device, 
-    model_group: torch.distributed.ProcessGroup
+    model_group: dist.ProcessGroup
 ) -> torch.tensor:
     """
     Batched matrix-matrix (XWT) multiplication distributed across two processes.
@@ -81,7 +82,7 @@ def xw_transpose_twoway(
         Device to perform computation on.
     rank : int
         Global rank.
-    model_group : torch.distributed.ProcessGroup, optional
+    model_group : dist.ProcessGroup, optional
         Process group for an individual model-parallel instance.
 
     Returns
@@ -123,7 +124,7 @@ def xw_twoway(
     wij: torch.tensor, 
     rank: int, 
     device: torch.device, 
-    model_group: torch.distributed.ProcessGroup
+    model_group: dist.ProcessGroup
 ) -> torch.tensor:
     """
     Batched matrix-matrix (XW) multiplication distributed across two processes.
@@ -138,7 +139,7 @@ def xw_twoway(
         Device to perform computation on.
     rank : int
         Global rank.
-    model_group : torch.distributed.ProcessGroup, optional
+    model_group : dist.ProcessGroup, optional
         Process group for an individual model-parallel instance.
         
     Returns
@@ -179,7 +180,7 @@ def x_transpose_w_twoway(
     wij: torch.tensor, 
     rank: int, 
     device: torch.device, 
-    model_group: torch.distributed.ProcessGroup
+    model_group: dist.ProcessGroup
 ) -> torch.tensor:
     """
     Batched matrix-matrix (x_transposeW) multiplication distributed across two processes.
@@ -194,7 +195,7 @@ def x_transpose_w_twoway(
         The device on which to perform the operations.
     rank : int
         Global rank.
-    model_group : torch.distributed.ProcessGroup, optional
+    model_group : dist.ProcessGroup, optional
         Process group for an individual model-parallel instance.
 
     Returns
@@ -236,7 +237,7 @@ def x_transpose_twoway(
     x: torch.tensor, 
     rank: int, 
     device: torch.device, 
-    model_group: torch.distributed.ProcessGroup
+    model_group: dist.ProcessGroup
 ) -> torch.tensor:
     """
     Batched transpose (x_transpose) operation distributed across two processes.
@@ -249,7 +250,7 @@ def x_transpose_twoway(
         Global rank.
     device : torch.device
         Device to perform computation on.
-    model_group : torch.distributed.ProcessGroup, optional
+    model_group : dist.ProcessGroup, optional
         Process group for an individual model-parallel instance.
     
     Returns
@@ -307,7 +308,7 @@ def xw_transpose_fourway(
     wij: torch.tensor, 
     rank: int, 
     device: torch.device, 
-    model_group: torch.distributed.ProcessGroup
+    model_group: dist.ProcessGroup
 ) -> torch.tensor:
     """
     Batched matrix-matrix (XWT) multiplication distributed across four processes.
@@ -322,7 +323,7 @@ def xw_transpose_fourway(
         Global rank.
     device : torch.device
         Device to perform computation on.
-    model_group : torch.distributed.ProcessGroup, optional
+    model_group : dist.ProcessGroup, optional
         Process group for an individual model-parallel instance.
 
     Returns
@@ -388,7 +389,7 @@ def xw_fourway(
     wij: torch.tensor, 
     rank: int,
     device: torch.device, 
-    model_group: torch.distributed.ProcessGroup
+    model_group: dist.ProcessGroup
 ) -> torch.tensor:
     """
     Batched matrix-matrix (XW) multiplication distributed across four processes.
@@ -403,7 +404,7 @@ def xw_fourway(
         Global rank.
     device : torch.device
         Device to perform computation on.
-    model_group : torch.distributed.ProcessGroup, optional
+    model_group : dist.ProcessGroup, optional
         Process group for an individual model-parallel instance.
     
     Returns
@@ -471,7 +472,7 @@ def x_transpose_w_fourway(
     wij: torch.tensor, 
     rank: int, 
     device: torch.device, 
-    model_group: torch.distributed.ProcessGroup
+    model_group: dist.ProcessGroup
 ) -> torch.tensor:
     """
     Batched matrix-matrix (x_transposeW) multiplication distributed across four processes.
@@ -486,7 +487,7 @@ def x_transpose_w_fourway(
         Global rank.
     device : torch.device
         Device to perform computation on.
-    model_group : torch.distributed.ProcessGroup
+    model_group : dist.ProcessGroup
         Process group for an individual model-parallel instance.
 
     Returns
@@ -553,7 +554,7 @@ def x_transpose_fourway(
     x: torch.tensor, 
     rank: int, 
     device: torch.device, 
-    model_group: torch.distributed.ProcessGroup
+    model_group: dist.ProcessGroup
 ) -> torch.tensor:
     """
     Batched transpose (x_transpose) operation distributed across four processes.
@@ -605,7 +606,7 @@ def xw_transpose_eightway_(
     wij: torch.tensor, 
     rank: int, 
     device: torch.device, 
-    model_group: torch.distributed.ProcessGroup
+    model_group: dist.ProcessGroup
 ) -> torch.tensor:
     """
     Batched matrix-matrix (XWT) multiplication distributed across four processes.
@@ -620,7 +621,7 @@ def xw_transpose_eightway_(
         Global rank.
     device : torch.device
         Device to perform computation on.
-    model_group : torch.distributed.ProcessGroup, optional
+    model_group : dist.ProcessGroup, optional
         Process group for an individual model-parallel instance.
 
     Returns
@@ -814,7 +815,7 @@ def xw_transpose_eightway(
     wij: torch.tensor, 
     rank: int, 
     device: torch.device, 
-    model_group: torch.distributed.ProcessGroup
+    model_group: dist.ProcessGroup
 ) -> torch.tensor:
     """
     Batched matrix-matrix (XWT) multiplication distributed across four processes.
@@ -829,7 +830,7 @@ def xw_transpose_eightway(
         Global rank.
     device : torch.device
         Device to perform computation on.
-    model_group : torch.distributed.ProcessGroup, optional
+    model_group : dist.ProcessGroup, optional
         Process group for an individual model-parallel instance.
 
     Returns
@@ -1065,7 +1066,7 @@ def xw_eightway_(
     wij: torch.tensor, 
     rank: int,  
     device: torch.device, 
-    model_group: torch.distributed.ProcessGroup
+    model_group: dist.ProcessGroup
 ) -> torch.tensor:
     """
     Batched matrix-matrix (XW) multiplication distributed across eight processes.
@@ -1080,7 +1081,7 @@ def xw_eightway_(
         Global rank.
     device : torch.device
         Device to perform computation on.
-    model_group : torch.distributed.ProcessGroup, optional
+    model_group : dist.ProcessGroup, optional
         Process group for an individual model-parallel instance.
 
     Returns
@@ -1274,7 +1275,7 @@ def xw_eightway(
     wij: torch.tensor, 
     rank: int, 
     device: torch.device, 
-    model_group: torch.distributed.ProcessGroup
+    model_group: dist.ProcessGroup
 ) -> torch.tensor:
     """
     Batched matrix-matrix (XW) multiplication distributed across eight processes.
@@ -1289,7 +1290,7 @@ def xw_eightway(
         Global rank.
     device : torch.device
         Device to perform computation on.
-    model_group : torch.distributed.ProcessGroup, optional
+    model_group : dist.ProcessGroup, optional
         Process group for an individual model-parallel instance.
 
     Returns
@@ -1501,7 +1502,7 @@ def x_transpose_w_eightway_(
     wij: torch.tensor, 
     rank: int, 
     device: torch.device, 
-    model_group: torch.distributed.ProcessGroup
+    model_group: dist.ProcessGroup
 ) -> torch.tensor:
     """
     Batched matrix-matrix (XWT) multiplication distributed across four processes.
@@ -1516,7 +1517,7 @@ def x_transpose_w_eightway_(
         Global rank.
     device : torch.device
         Device to perform computation on.
-    model_group : torch.distributed.ProcessGroup, optional
+    model_group : dist.ProcessGroup, optional
         Process group for an individual model-parallel instance.
 
     Returns
@@ -1766,7 +1767,7 @@ def x_transpose_w_eightway(
     wij: torch.tensor, 
     rank: int, 
     device: torch.device, 
-    model_group: torch.distributed.ProcessGroup
+    model_group: dist.ProcessGroup
 ) -> torch.tensor:
     """
     Batched matrix-matrix (x_transposeW) multiplication distributed across eight processes.
@@ -1781,7 +1782,7 @@ def x_transpose_w_eightway(
         Global rank.
     device : torch.device
         Device to perform computation on.
-    model_group : torch.distributed.ProcessGroup, optional
+    model_group : dist.ProcessGroup, optional
         Process group for an individual model-parallel instance.
 
     Returns
@@ -2092,7 +2093,7 @@ def x_transpose_eightway(
     xij: torch.tensor, 
     rank: int, 
     device: torch.device, 
-    model_group: torch.distributed.ProcessGroup
+    model_group: dist.ProcessGroup
 ) -> torch.tensor:
     """
     Batched transpose (x_transpose) operation distributed across four processes.
