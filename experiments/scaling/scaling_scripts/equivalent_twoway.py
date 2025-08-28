@@ -24,10 +24,15 @@ def training_loop(config_dict: dict, device: torch.device, localid: int, rank: i
 
     # Set up model  groups
     match n_parallel:
+        case 1:
+            model_group, ddp_group, _, model_subgroup_col = utils.setup_groups(rank, n_parallel, 1, 1)
+            n_vars_local = 69
         case 2:
             model_group, ddp_group, _, model_subgroup_col = utils.setup_groups(rank, n_parallel, 1, 2)
+            n_vars_local = 36
         case 4:
             model_group, ddp_group, _, model_subgroup_col = utils.setup_groups(rank, n_parallel, 2, 2)
+            n_vars_local = 36
     
     # Define model and load model 
     model = utils.build_model(config_dict, device, localid, rank, n_parallel, model_group, ddp_group, model_subgroup_col)
@@ -58,6 +63,7 @@ def training_loop(config_dict: dict, device: torch.device, localid: int, rank: i
             variable_weights=variable_weights,
             xlat=xlat,
             xlon=xlon,
+            n_vars_local=n_vars_local,
             max_rollout=max_rollout,
             rank=rank
         )

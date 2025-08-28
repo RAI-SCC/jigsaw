@@ -220,6 +220,8 @@ def build_model(
 ) -> torch.nn.Module:
     """Instantiate model and wrap with DDP."""
     match n_parallel:
+        case 1: 
+            model = Model.ModelSequential(config_dict, device, rank).to(device)
         case 2:
             model = Model.Model_twoway(config_dict, rank, device, n_parallel, model_group).to(device)
         case 4:
@@ -307,6 +309,7 @@ def train_one_epoch(
     variable_weights: torch.Tensor,   # [36]
     xlat: int,
     xlon: int,
+    n_vars_local: int,
     max_rollout: int,
     rank: int
 ) -> float:
@@ -342,7 +345,7 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         output = model(input_data, rollout_=rollout + 1)  # [B, 720, 720, 36]
-        output = output.reshape(-1, xlat, xlon, 36)
+        output = output.reshape(-1, xlat, xlon, n_vars_local)
 
         # broadcast weights
         vw = variable_weights.view(1, 1, 1, 36)
