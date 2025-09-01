@@ -211,10 +211,10 @@ class ERA5DatasetDistributed(Dataset):
             self.level_ordering = range(13-1, -1, -1)
 
         # normalization for pressure levels and standard deviation
-        self.p_mean = np.load('/leonardo_work/EUHPC_B27_052/data/constant_masks/pressure_zarr.npy', allow_pickle=True)[0].reshape(65, 1, 1)
-        self.p_std  = np.load('/leonardo_work/EUHPC_B27_052/data/constant_masks/pressure_zarr.npy', allow_pickle=True)[1].reshape(65, 1, 1)
-        self.s_mean = np.load('/leonardo_work/EUHPC_B27_052/data/constant_masks/surface_zarr.npy', allow_pickle=True)[0].reshape(4, 1, 1)
-        self.s_std  = np.load('/leonardo_work/EUHPC_B27_052/data/constant_masks/surface_zarr.npy', allow_pickle=True)[1].reshape(4, 1, 1)
+        self.p_mean = np.load('/hkfs/work/workspace/scratch/ke4365-jigsaw/Jigsaw/constant_masks/pressure_zarr.npy', allow_pickle=True)[0].reshape(65, 1, 1)
+        self.p_std  = np.load('/hkfs/work/workspace/scratch/ke4365-jigsaw/Jigsaw/constant_masks/pressure_zarr.npy', allow_pickle=True)[1].reshape(65, 1, 1)
+        self.s_mean = np.load('/hkfs/work/workspace/scratch/ke4365-jigsaw/Jigsaw/constant_masks/surface_zarr.npy', allow_pickle=True)[0].reshape(4, 1, 1)
+        self.s_std  = np.load('/hkfs/work/workspace/scratch/ke4365-jigsaw/Jigsaw/constant_masks/surface_zarr.npy', allow_pickle=True)[1].reshape(4, 1, 1)
         
         self.patch_size = patch_size
         self.xlat, self.xlon = config['data']['xlat'], config['data']['xlon']
@@ -437,10 +437,10 @@ class ERA5Preprocessed(Dataset):
             self.level_ordering = range(13-1, -1, -1)
 
         # normalization for pressure levels and standard deviation
-        self.p_mean = np.load('/leonardo_work/EUHPC_B27_052/data/constant_masks/pressure_zarr.npy', allow_pickle=True)[0].reshape(65, 1, 1)
-        self.p_std  = np.load('/leonardo_work/EUHPC_B27_052/data/constant_masks/pressure_zarr.npy', allow_pickle=True)[1].reshape(65, 1, 1)
-        self.s_mean = np.load('/leonardo_work/EUHPC_B27_052/data/constant_masks/surface_zarr.npy', allow_pickle=True)[0].reshape(4, 1, 1)
-        self.s_std  = np.load('/leonardo_work/EUHPC_B27_052/data/constant_masks/surface_zarr.npy', allow_pickle=True)[1].reshape(4, 1, 1)
+        self.p_mean = np.load('/hkfs/work/workspace/scratch/ke4365-jigsaw/Jigsaw/constant_masks/pressure_zarr.npy', allow_pickle=True)[0].reshape(65, 1, 1)
+        self.p_std  = np.load('/hkfs/work/workspace/scratch/ke4365-jigsaw/Jigsaw/constant_masks/pressure_zarr.npy', allow_pickle=True)[1].reshape(65, 1, 1)
+        self.s_mean = np.load('/hkfs/work/workspace/scratch/ke4365-jigsaw/Jigsaw/constant_masks/surface_zarr.npy', allow_pickle=True)[0].reshape(4, 1, 1)
+        self.s_std  = np.load('/hkfs/work/workspace/scratch/ke4365-jigsaw/Jigsaw/constant_masks/surface_zarr.npy', allow_pickle=True)[1].reshape(4, 1, 1)
         
         self.patch_size = patch_size
         self.xlat, self.xlon = config['data']['xlat'], config['data']['xlon']
@@ -530,43 +530,46 @@ class ERA5Preprocessed(Dataset):
         targets = self.zarr_data.isel(time=target_file_idxs)
             
         target_list = []
+        
         if self.rank % 2 == 0: # first half of data
             # Input data
             # Stack and convert to numpy array
-            variables = input['fields'].values
-            variables = variables[:36]
+            variables = input['fields']
+            variables = variables[:36, :self.xlat]
             # normalize
             variables[:4] = (variables[:4] - self.s_mean) / self.s_std
             variables[4:] = (variables[4:] - self.p_mean[:32]) / self.p_std[:32]
-                        
+            print(f' I am rank {self.rank}! with var shape {variables.shape} !!!!!!!!!!')
             # Output data
             for i in range(self.forecast_length):
                 target = targets.isel(time=i)['fields'].values
-                target = target[:36]
+                target = target[:36, :self.xlat]
                 # normalize
                 target[:4] = (target[:4] - self.s_mean) / self.s_std
                 target[4:] = (target[4:] - self.p_mean[:32]) / self.p_std[:32]
                 
                 target_list.append(torch.tensor(target).permute(1, 2, 0))
+            variables = torch.tensor(variables).permute(1,2,0)
         else:
             # Input data
             # Stack and convert to numpy array
             variables = input['fields'].values
-            variables = variables[36:]
+            variables = variables[36:, :self.xlat]
             # normalize
             variables = (variables - self.p_mean[32:]) / self.p_std[32:]
+            variables = np.concatenate([variables, self.land_mask, self.soil_type, self.topography], axis=0)
             
             for i in range(self.forecast_length):
                 target = targets.isel(time=i)['fields'].values
-                target = target[36:]
+                target = target[36:, :self.xlat]
                 # normalize
                 target = (target - self.p_mean[32:]) / self.p_std[32:]
                 target = torch.tensor(target)
                 target = torch.nn.functional.pad(target, (0,0,0,0,0,3)).permute(1, 2, 0)
                 target_list.append(target)
                             
-        variables = torch.tensor(variables).permute(1,2,0)
-        
+            variables = torch.tensor(variables).permute(1,2,0)
+            
         return variables, target
     
 def load_constant_mask_2d(
