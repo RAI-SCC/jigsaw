@@ -198,6 +198,7 @@ def setup_precision(tf32: bool) -> None:
     """Configure matmul and cudnn TF32."""
     torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
     torch.backends.cudnn.allow_tf32 = bool(tf32)
+    return
 
 def setup_groups(rank: int, n_parallel: int, nrows: int, ncols: int):
     """Return communication groups."""
