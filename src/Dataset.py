@@ -571,7 +571,7 @@ class ERA5Preprocessed(Dataset):
     
 def load_constant_mask_2d(
     patch_size,
-    folder_path="/leonardo_work/EUHPC_B27_052/data/constant_masks/",
+    folder_path="/hkfs/work/workspace/scratch/ke4365-jigsaw/Jigsaw/constant_masks/",
     xlat=721
 ):
     """
