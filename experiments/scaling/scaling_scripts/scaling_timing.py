@@ -71,16 +71,18 @@ def train_one_epoch(
         xlon: int
     ):
         """Time and train one epoch."""
+        print(f'len train dataloader {len(train_dataloader)}')
         for data in train_dataloader:
             # Loading data: Always with async ops and handles
             input_data = data[0].to(device, non_blocking=True)
             target_data = data[1][0].to(device, non_blocking=True)
+            target_data.unsqueeze(dim=0)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             output = model(input_data, rollout_=0+1) # output shape [n_batch, 720, 720, 36]
                     
             # Reshape output
-            output = (output.reshape(output.shape[0], xlat, xlon, 36))             
+            output = (output.reshape(output.shape[0], xlat, xlon, 36))       
             loss = loss_fn(output, target_data)
             loss.backward()
 
@@ -94,6 +96,5 @@ if __name__ == '__main__':
 
     device, localid, rank, world_size = utils.init_cuda()
 
-    
     training_loop(config_dict, device, localid, rank)
     torch.distributed.destroy_process_group()
