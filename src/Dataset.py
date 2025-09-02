@@ -211,10 +211,10 @@ class ERA5DatasetDistributed(Dataset):
             self.level_ordering = range(13-1, -1, -1)
 
         # normalization for pressure levels and standard deviation
-        self.p_mean = np.load('/hkfs/work/workspace/scratch/ke4365-jigsaw/Jigsaw/constant_masks/pressure_zarr.npy', allow_pickle=True)[0].reshape(65, 1, 1)
-        self.p_std  = np.load('/hkfs/work/workspace/scratch/ke4365-jigsaw/Jigsaw/constant_masks/pressure_zarr.npy', allow_pickle=True)[1].reshape(65, 1, 1)
-        self.s_mean = np.load('/hkfs/work/workspace/scratch/ke4365-jigsaw/Jigsaw/constant_masks/surface_zarr.npy', allow_pickle=True)[0].reshape(4, 1, 1)
-        self.s_std  = np.load('/hkfs/work/workspace/scratch/ke4365-jigsaw/Jigsaw/constant_masks/surface_zarr.npy', allow_pickle=True)[1].reshape(4, 1, 1)
+        self.p_mean = np.load(f'{config["data"]["constant_masks_path"]}/pressure_zarr.npy', allow_pickle=True)[0].reshape(65, 1, 1)
+        self.p_std  = np.load(f'{config["data"]["constant_masks_path"]}/pressure_zarr.npy', allow_pickle=True)[1].reshape(65, 1, 1)
+        self.s_mean = np.load(f'{config["data"]["constant_masks_path"]}/surface_zarr.npy', allow_pickle=True)[0].reshape(4, 1, 1)
+        self.s_std  = np.load(f'{config["data"]["constant_masks_path"]}/surface_zarr.npy', allow_pickle=True)[1].reshape(4, 1, 1)
         
         self.patch_size = patch_size
         self.xlat, self.xlon = config['data']['xlat'], config['data']['xlon']
@@ -534,13 +534,13 @@ class ERA5Preprocessed(Dataset):
         if self.rank % 2 == 0: # first half of data
             # Input data
             # Stack and convert to numpy array
-            variables = input['fields'][:36, :self.xlat].values
+            variables = input['fields'][:36, :self.xlat, self.start:self.end].values
             # normalize
             variables[:4] = (variables[:4] - self.s_mean) / self.s_std
             variables[4:] = (variables[4:] - self.p_mean[:32]) / self.p_std[:32]
             # Output data
             for i in range(self.forecast_length):
-                target = targets.isel(time=i)['fields'][:36, :self.xlat].values
+                target = targets.isel(time=i)['fields'][:36, :self.xlat, self.start:self.end].values
                 # normalize
                 target[:4] = (target[:4] - self.s_mean) / self.s_std
                 target[4:] = (target[4:] - self.p_mean[:32]) / self.p_std[:32]
@@ -550,13 +550,13 @@ class ERA5Preprocessed(Dataset):
         else:
             # Input data
             # Stack and convert to numpy array
-            variables = input['fields'][36:, :self.xlat].values
+            variables = input['fields'][36:, :self.xlat, self.start:self.end].values
             # normalize
             variables = (variables - self.p_mean[32:]) / self.p_std[32:]
             variables = np.concatenate([variables, self.land_mask, self.soil_type, self.topography], axis=0)
             
             for i in range(self.forecast_length):
-                target = targets.isel(time=i)['fields'][36:, :self.xlat].values
+                target = targets.isel(time=i)['fields'][36:, :self.xlat, self.start:self.end].values
                 # normalize
                 target = (target - self.p_mean[32:]) / self.p_std[32:]
                 target = torch.tensor(target)
