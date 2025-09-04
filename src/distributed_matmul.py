@@ -290,23 +290,25 @@ def x_transpose_twoway(
                 )
                 x_transpose[:, : x0.shape[1]] = x0
             else:
-                x_transpose = torch.empty(x0.shape[0] * 2, x0.shape[1], device=device)
+                x_transpose = torch.empty(
+                    x0.shape[0] * 2, x0.shape[1], device=device)
                 x_transpose[: x0.shape[1]] = x0
             xt_handle.wait()
             if len(x0.shape) == 3:
-                x_transpose[:, x0.shape[1] :, :] = buffer_x.mT
+                x_transpose[:, x0.shape[1]:, :] = buffer_x.mT
             else:
-                x_transpose[x0.shape[1] :, :] = buffer_x.mT
+                x_transpose[x0.shape[1]:, :] = buffer_x.mT
         case 1:
             x1 = x1.mT
             if len(x0.shape) == 3:
                 x_transpose = torch.empty(
                     x1.shape[0], x1.shape[1] * 2, x1.shape[2], device=device
                 )
-                x_transpose[:, x1.shape[1] :] = x1
+                x_transpose[:, x1.shape[1]:] = x1
             else:
-                x_transpose = torch.empty(x1.shape[1] * 2, x1.shape[2], device=device)
-                x_transpose[x1.shape[1] :] = x1
+                x_transpose = torch.empty(
+                    x1.shape[1] * 2, x1.shape[2], device=device)
+                x_transpose[x1.shape[1]:] = x1
             xt_handle.wait()
             if len(x1.shape) == 3:
                 x_transpose[:, : x1.shape[1], :] = buffer_x.mT
@@ -350,21 +352,24 @@ def xw_transpose_fourway(
             x_send_list = [empty, xij, empty, empty]
             x_recv_list = [
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
             ]
             w_send_list = [empty, empty, wij, empty]
             w_recv_list = [
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 1),
                 empty,
                 empty,
             ]
         case 1:
             x_send_list = [xij, empty, empty, empty]
             x_recv_list = [
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -373,8 +378,10 @@ def xw_transpose_fourway(
             w_recv_list = [
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 1),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 2),
             ]
         case 2:
             x_send_list = [empty, empty, empty, xij]
@@ -382,12 +389,15 @@ def xw_transpose_fourway(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
             ]
             w_send_list = [empty, wij, empty, wij]
             w_recv_list = [
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 1),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 2),
                 empty,
                 empty,
             ]
@@ -396,14 +406,16 @@ def xw_transpose_fourway(
             x_recv_list = [
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
             ]
             w_send_list = [empty, wij, empty, empty]
             w_recv_list = [
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 1),
                 empty,
             ]
 
@@ -788,10 +800,12 @@ def xw_transpose_eightway_(
 
     match mod:
         case 0:
-            x_send_list = [empty, xij, empty, empty, empty, empty, empty, empty]
+            x_send_list = [empty, xij, empty,
+                           empty, empty, empty, empty, empty]
             x_recv_list = [
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -802,18 +816,23 @@ def xw_transpose_eightway_(
             w_send_list = [empty, empty, wij, empty, wij, empty, wij, empty]
             w_recv_list = [
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 1),
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 2),
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 3),
                 empty,
                 empty,
                 empty,
                 empty,
             ]
         case 1:
-            x_send_list = [xij, empty, empty, empty, empty, empty, empty, empty]
+            x_send_list = [xij, empty, empty,
+                           empty, empty, empty, empty, empty]
             x_recv_list = [
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -828,18 +847,24 @@ def xw_transpose_eightway_(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 1),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 2),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 3),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 4),
             ]
         case 2:
-            x_send_list = [empty, empty, empty, xij, empty, empty, empty, empty]
+            x_send_list = [empty, empty, empty,
+                           xij, empty, empty, empty, empty]
             x_recv_list = [
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -847,21 +872,26 @@ def xw_transpose_eightway_(
             ]
             w_send_list = [wij, empty, empty, empty, wij, empty, wij, empty]
             w_recv_list = [
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 1),
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 2),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 3),
                 empty,
                 empty,
                 empty,
                 empty,
             ]
         case 3:
-            x_send_list = [empty, empty, xij, empty, empty, empty, empty, empty]
+            x_send_list = [empty, empty, xij,
+                           empty, empty, empty, empty, empty]
             x_recv_list = [
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -874,42 +904,54 @@ def xw_transpose_eightway_(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 1),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 2),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 3),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 4),
             ]
         case 4:
-            x_send_list = [empty, empty, empty, empty, empty, xij, empty, empty]
+            x_send_list = [empty, empty, empty,
+                           empty, empty, xij, empty, empty]
             x_recv_list = [
                 empty,
                 empty,
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
             ]
             w_send_list = [empty, wij, empty, wij, empty, wij, empty, wij]
             w_recv_list = [
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 1),
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 2),
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 3),
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 4),
                 empty,
                 empty,
                 empty,
                 empty,
             ]
         case 5:
-            x_send_list = [empty, empty, empty, empty, xij, empty, empty, empty]
+            x_send_list = [empty, empty, empty,
+                           empty, xij, empty, empty, empty]
             x_recv_list = [
                 empty,
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -920,13 +962,17 @@ def xw_transpose_eightway_(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 1),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 2),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 3),
             ]
         case 6:
-            x_send_list = [empty, empty, empty, empty, empty, empty, empty, xij]
+            x_send_list = [empty, empty, empty,
+                           empty, empty, empty, empty, xij]
             x_recv_list = [
                 empty,
                 empty,
@@ -935,21 +981,27 @@ def xw_transpose_eightway_(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
             ]
             w_send_list = [empty, wij, empty, wij, empty, wij, empty, wij]
             w_recv_list = [
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 1),
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 2),
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 3),
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 4),
                 empty,
                 empty,
                 empty,
                 empty,
             ]
         case 7:
-            x_send_list = [empty, empty, empty, empty, empty, empty, xij, empty]
+            x_send_list = [empty, empty, empty,
+                           empty, empty, empty, xij, empty]
             x_recv_list = [
                 empty,
                 empty,
@@ -957,7 +1009,8 @@ def xw_transpose_eightway_(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
             ]
             w_send_list = [empty, wij, empty, wij, empty, wij, empty, empty]
@@ -966,9 +1019,12 @@ def xw_transpose_eightway_(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 1),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 2),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 3),
                 empty,
             ]
 
@@ -1112,10 +1168,12 @@ def xw_transpose_eightway(
 
     match mod:
         case 0:
-            x_send_list = [empty, xij, empty, empty, empty, empty, empty, empty]
+            x_send_list = [empty, xij, empty,
+                           empty, empty, empty, empty, empty]
             x_recv_list = [
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -1126,18 +1184,23 @@ def xw_transpose_eightway(
             w_send_list = [empty, empty, wij, empty, wij, empty, wij, empty]
             w_recv_list = [
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 1),
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 2),
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 3),
                 empty,
                 empty,
                 empty,
                 empty,
             ]
         case 1:
-            x_send_list = [xij, empty, empty, empty, empty, empty, empty, empty]
+            x_send_list = [xij, empty, empty,
+                           empty, empty, empty, empty, empty]
             x_recv_list = [
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -1152,18 +1215,24 @@ def xw_transpose_eightway(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 1),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 2),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 3),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 4),
             ]
         case 2:
-            x_send_list = [empty, empty, empty, xij, empty, empty, empty, empty]
+            x_send_list = [empty, empty, empty,
+                           xij, empty, empty, empty, empty]
             x_recv_list = [
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -1171,21 +1240,26 @@ def xw_transpose_eightway(
             ]
             w_send_list = [wij, empty, empty, empty, wij, empty, wij, empty]
             w_recv_list = [
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 1),
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 2),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 3),
                 empty,
                 empty,
                 empty,
                 empty,
             ]
         case 3:
-            x_send_list = [empty, empty, xij, empty, empty, empty, empty, empty]
+            x_send_list = [empty, empty, xij,
+                           empty, empty, empty, empty, empty]
             x_recv_list = [
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -1198,42 +1272,54 @@ def xw_transpose_eightway(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 1),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 2),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 3),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 4),
             ]
         case 4:
-            x_send_list = [empty, empty, empty, empty, empty, xij, empty, empty]
+            x_send_list = [empty, empty, empty,
+                           empty, empty, xij, empty, empty]
             x_recv_list = [
                 empty,
                 empty,
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
             ]
             w_send_list = [empty, wij, empty, wij, empty, wij, empty, wij]
             w_recv_list = [
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 1),
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 2),
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 3),
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 4),
                 empty,
                 empty,
                 empty,
                 empty,
             ]
         case 5:
-            x_send_list = [empty, empty, empty, empty, xij, empty, empty, empty]
+            x_send_list = [empty, empty, empty,
+                           empty, xij, empty, empty, empty]
             x_recv_list = [
                 empty,
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -1244,13 +1330,17 @@ def xw_transpose_eightway(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 1),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 2),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 3),
             ]
         case 6:
-            x_send_list = [empty, empty, empty, empty, empty, empty, empty, xij]
+            x_send_list = [empty, empty, empty,
+                           empty, empty, empty, empty, xij]
             x_recv_list = [
                 empty,
                 empty,
@@ -1259,21 +1349,27 @@ def xw_transpose_eightway(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
             ]
             w_send_list = [empty, wij, empty, wij, empty, wij, empty, wij]
             w_recv_list = [
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 1),
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 2),
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 3),
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 4),
                 empty,
                 empty,
                 empty,
                 empty,
             ]
         case 7:
-            x_send_list = [empty, empty, empty, empty, empty, empty, xij, empty]
+            x_send_list = [empty, empty, empty,
+                           empty, empty, empty, xij, empty]
             x_recv_list = [
                 empty,
                 empty,
@@ -1281,7 +1377,8 @@ def xw_transpose_eightway(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
             ]
             w_send_list = [empty, wij, empty, wij, empty, wij, empty, empty]
@@ -1290,9 +1387,12 @@ def xw_transpose_eightway(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 1),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 2),
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 3),
                 empty,
             ]
 
@@ -1452,10 +1552,12 @@ def xw_eightway_(
 
     match mod:
         case 0:
-            x_send_list = [empty, xij, empty, empty, empty, empty, empty, empty]
+            x_send_list = [empty, xij, empty,
+                           empty, empty, empty, empty, empty]
             x_recv_list = [
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -1467,17 +1569,22 @@ def xw_eightway_(
             w_recv_list = [
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 1),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 2),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 3),
                 empty,
             ]
         case 1:
-            x_send_list = [xij, empty, empty, empty, empty, empty, empty, empty]
+            x_send_list = [xij, empty, empty,
+                           empty, empty, empty, empty, empty]
             x_recv_list = [
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -1491,19 +1598,24 @@ def xw_eightway_(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 1),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 2),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 3),
             ]
         case 2:
-            x_send_list = [empty, empty, empty, xij, empty, empty, empty, empty]
+            x_send_list = [empty, empty, empty,
+                           xij, empty, empty, empty, empty]
             x_recv_list = [
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -1511,21 +1623,26 @@ def xw_eightway_(
             ]
             w_send_list = [wij, empty, empty, empty, wij, empty, wij, empty]
             w_recv_list = [
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 1),
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 2),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 3),
                 empty,
             ]
         case 3:
-            x_send_list = [empty, empty, xij, empty, empty, empty, empty, empty]
+            x_send_list = [empty, empty, xij,
+                           empty, empty, empty, empty, empty]
             x_recv_list = [
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -1535,45 +1652,55 @@ def xw_eightway_(
             w_send_list = [empty, wij, empty, empty, empty, wij, empty, wij]
             w_recv_list = [
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 1),
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 2),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 3),
             ]
         case 4:
-            x_send_list = [empty, empty, empty, empty, empty, xij, empty, empty]
+            x_send_list = [empty, empty, empty,
+                           empty, empty, xij, empty, empty]
             x_recv_list = [
                 empty,
                 empty,
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
             ]
             w_send_list = [wij, empty, wij, empty, empty, empty, wij, empty]
             w_recv_list = [
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 1),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 2),
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 3),
                 empty,
             ]
         case 5:
-            x_send_list = [empty, empty, empty, empty, xij, empty, empty, empty]
+            x_send_list = [empty, empty, empty,
+                           empty, xij, empty, empty, empty]
             x_recv_list = [
                 empty,
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -1581,16 +1708,20 @@ def xw_eightway_(
             w_send_list = [empty, wij, empty, wij, empty, empty, empty, wij]
             w_recv_list = [
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 1),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 2),
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 3),
             ]
         case 6:
-            x_send_list = [empty, empty, empty, empty, empty, empty, empty, xij]
+            x_send_list = [empty, empty, empty,
+                           empty, empty, empty, empty, xij]
             x_recv_list = [
                 empty,
                 empty,
@@ -1599,21 +1730,26 @@ def xw_eightway_(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
             ]
             w_send_list = [wij, empty, wij, empty, wij, empty, empty, empty]
             w_recv_list = [
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 1),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 2),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 3),
                 empty,
                 empty,
                 empty,
             ]
         case 7:
-            x_send_list = [empty, empty, empty, empty, empty, empty, xij, empty]
+            x_send_list = [empty, empty, empty,
+                           empty, empty, empty, xij, empty]
             x_recv_list = [
                 empty,
                 empty,
@@ -1621,17 +1757,21 @@ def xw_eightway_(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
             ]
             w_send_list = [empty, wij, empty, wij, empty, wij, empty, empty]
             w_recv_list = [
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 1),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 2),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 3),
                 empty,
                 empty,
             ]
@@ -1647,7 +1787,8 @@ def xw_eightway_(
 
     match mod:
         case 0:
-            ws_stacked = torch.concatenate([wij, w_recv_list[2]], dim=-2).contiguous()
+            ws_stacked = torch.concatenate(
+                [wij, w_recv_list[2]], dim=-2).contiguous()
         # cij = torch.matmul(x0, wij) + torch.matmul(x1, w_recv_list[2])
         case 1:
             ws_stacked = torch.concatenate(
@@ -1655,7 +1796,8 @@ def xw_eightway_(
             ).contiguous()
         # cij = torch.matmul(x0, w_recv_list[5]) + torch.matmul(x1, w_recv_list[7])
         case 2:
-            ws_stacked = torch.concatenate([w_recv_list[0], wij], dim=-2).contiguous()
+            ws_stacked = torch.concatenate(
+                [w_recv_list[0], wij], dim=-2).contiguous()
         # cij = torch.matmul(x0, w_recv_list[0]) + torch.matmul(x1, wij)
         case 3:
             ws_stacked = torch.concatenate(
@@ -1668,7 +1810,8 @@ def xw_eightway_(
             ).contiguous()
         # cij = torch.matmul(x0, w_recv_list[0]) + torch.matmul(x1, w_recv_list[2])
         case 5:
-            ws_stacked = torch.concatenate([wij, w_recv_list[7]], dim=-2).contiguous()
+            ws_stacked = torch.concatenate(
+                [wij, w_recv_list[7]], dim=-2).contiguous()
         # cij = torch.matmul(x0, wij) + torch.matmul(x1, w_recv_list[7])
         case 6:
             ws_stacked = torch.concatenate(
@@ -1676,11 +1819,13 @@ def xw_eightway_(
             ).contiguous()
         # cij = torch.matmul(x0, w_recv_list[0]) + torch.matmul(x1, w_recv_list[2])
         case 7:
-            ws_stacked = torch.concatenate([w_recv_list[5], wij], dim=-2).contiguous()
+            ws_stacked = torch.concatenate(
+                [w_recv_list[5], wij], dim=-2).contiguous()
         # cij = torch.matmul(x0, w_recv_list[5]) + torch.matmul(x1, wij)
 
     if rank == 0:
-        print(f"X shape: {xij.shape}, ws shape {ws_stacked.shape}, W shape {wij.shape}")
+        print(
+            f"X shape: {xij.shape}, ws shape {ws_stacked.shape}, W shape {wij.shape}")
     cij = torch.matmul(xij, ws_stacked)
 
     handle_x.wait()
@@ -1699,7 +1844,8 @@ def xw_eightway_(
             x0, x1 = torch.split(
                 x_recv_list[0], x_recv_list[0].shape[-1] // 2, dim=-1
             )  # split upon last dimension
-            cij = cij + torch.matmul(x0, wij) + torch.matmul(x1, w_recv_list[3])
+            cij = cij + torch.matmul(x0, wij) + \
+                torch.matmul(x1, w_recv_list[3])
         case 2:
             x0, x1 = torch.split(
                 x_recv_list[3], x_recv_list[3].shape[-1] // 2, dim=-1
@@ -1713,12 +1859,14 @@ def xw_eightway_(
             x0, x1 = torch.split(
                 x_recv_list[2], x_recv_list[2].shape[-1] // 2, dim=-1
             )  # split upon last dimension
-            cij = cij + torch.matmul(x0, w_recv_list[1]) + torch.matmul(x1, wij)
+            cij = cij + \
+                torch.matmul(x0, w_recv_list[1]) + torch.matmul(x1, wij)
         case 4:
             x0, x1 = torch.split(
                 x_recv_list[5], x_recv_list[5].shape[-1] // 2, dim=-1
             )  # split upon last dimension
-            cij = cij + torch.matmul(x0, wij) + torch.matmul(x1, w_recv_list[6])
+            cij = cij + torch.matmul(x0, wij) + \
+                torch.matmul(x1, w_recv_list[6])
         case 5:
             x0, x1 = torch.split(
                 x_recv_list[4], x_recv_list[4].shape[-1] // 2, dim=-1
@@ -1732,7 +1880,8 @@ def xw_eightway_(
             x0, x1 = torch.split(
                 x_recv_list[7], x_recv_list[7].shape[-1] // 2, dim=-1
             )  # split upon last dimension
-            cij = cij + torch.matmul(x0, w_recv_list[4]) + torch.matmul(x1, wij)
+            cij = cij + \
+                torch.matmul(x0, w_recv_list[4]) + torch.matmul(x1, wij)
         case 7:
             x0, x1 = torch.split(
                 x_recv_list[6], x_recv_list[6].shape[-1] // 2, dim=-1
@@ -1796,10 +1945,12 @@ def xw_eightway(
 
     match mod:
         case 0:
-            x_send_list = [empty, xij, empty, empty, empty, empty, empty, empty]
+            x_send_list = [empty, xij, empty,
+                           empty, empty, empty, empty, empty]
             x_recv_list = [
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -1826,9 +1977,11 @@ def xw_eightway(
             )
             w0[..., :split_size, :].copy_(wij)
         case 1:
-            x_send_list = [xij, empty, empty, empty, empty, empty, empty, empty]
+            x_send_list = [xij, empty, empty,
+                           empty, empty, empty, empty, empty]
             x_recv_list = [
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -1856,12 +2009,14 @@ def xw_eightway(
             )
             w1[..., :split_size, :].copy_(wij)
         case 2:
-            x_send_list = [empty, empty, empty, xij, empty, empty, empty, empty]
+            x_send_list = [empty, empty, empty,
+                           xij, empty, empty, empty, empty]
             x_recv_list = [
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -1886,11 +2041,13 @@ def xw_eightway(
             )
             w0[..., split_size:, :].copy_(wij)
         case 3:
-            x_send_list = [empty, empty, xij, empty, empty, empty, empty, empty]
+            x_send_list = [empty, empty, xij,
+                           empty, empty, empty, empty, empty]
             x_recv_list = [
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -1916,14 +2073,16 @@ def xw_eightway(
             )
             w0[..., split_size:, :].copy_(wij)
         case 4:
-            x_send_list = [empty, empty, empty, empty, empty, xij, empty, empty]
+            x_send_list = [empty, empty, empty,
+                           empty, empty, xij, empty, empty]
             x_recv_list = [
                 empty,
                 empty,
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
             ]
@@ -1946,13 +2105,15 @@ def xw_eightway(
             )
             w1[..., :split_size, :].copy_(wij)
         case 5:
-            x_send_list = [empty, empty, empty, empty, xij, empty, empty, empty]
+            x_send_list = [empty, empty, empty,
+                           empty, xij, empty, empty, empty]
             x_recv_list = [
                 empty,
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
@@ -1976,7 +2137,8 @@ def xw_eightway(
             )
             w0[..., :split_size, :].copy_(wij)
         case 6:
-            x_send_list = [empty, empty, empty, empty, empty, empty, empty, xij]
+            x_send_list = [empty, empty, empty,
+                           empty, empty, empty, empty, xij]
             x_recv_list = [
                 empty,
                 empty,
@@ -1985,7 +2147,8 @@ def xw_eightway(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
             ]
             w_send_list = [wij, empty, wij, empty, wij, empty, empty, empty]
             w_recv_list = [
@@ -2006,7 +2169,8 @@ def xw_eightway(
             )
             w1[..., split_size:, :].copy_(wij)
         case 7:
-            x_send_list = [empty, empty, empty, empty, empty, empty, xij, empty]
+            x_send_list = [empty, empty, empty,
+                           empty, empty, empty, xij, empty]
             x_recv_list = [
                 empty,
                 empty,
@@ -2014,7 +2178,8 @@ def xw_eightway(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(xij.shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    xij.shape, xij.dtype, rank, device, 0),
                 empty,
             ]
             w_send_list = [empty, wij, empty, wij, empty, wij, empty, empty]
@@ -2120,7 +2285,8 @@ def x_transpose_w_eightway_(
     """
     mod = rank % 8
 
-    x0, x1 = torch.split(xij, xij.shape[-1] // 2, dim=-1)  # split upon last dimension
+    # split upon last dimension
+    x0, x1 = torch.split(xij, xij.shape[-1] // 2, dim=-1)
     x0, x1 = x0.contiguous(), x1.contiguous()
 
     match mod:
@@ -2140,11 +2306,14 @@ def x_transpose_w_eightway_(
             w_recv_list = [
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 3),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 4),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 5),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 5),
                 empty,
             ]
         case 1:
@@ -2164,11 +2333,14 @@ def x_transpose_w_eightway_(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 4),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 5),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 5),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 6),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 6),
             ]
         case 2:
             x_send_list = [x0, x0, empty, x1, empty, empty, empty, empty]
@@ -2184,13 +2356,16 @@ def x_transpose_w_eightway_(
             ]
             w_send_list = [wij, empty, empty, empty, wij, empty, wij, empty]
             w_recv_list = [
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 3),
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 4),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 5),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 5),
                 empty,
             ]
         case 3:
@@ -2208,13 +2383,16 @@ def x_transpose_w_eightway_(
             w_send_list = [empty, wij, empty, empty, empty, wij, empty, wij]
             w_recv_list = [
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 4),
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 5),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 5),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 6),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 6),
             ]
         case 4:
             x_send_list = [x0, x0, x1, x1, empty, empty, empty, empty]
@@ -2230,13 +2408,16 @@ def x_transpose_w_eightway_(
             ]
             w_send_list = [wij, empty, wij, empty, empty, empty, wij, empty]
             w_recv_list = [
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 4),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 5),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 5),
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 6),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 6),
                 empty,
             ]
         case 5:
@@ -2254,13 +2435,16 @@ def x_transpose_w_eightway_(
             w_send_list = [empty, wij, empty, wij, empty, empty, empty, wij]
             w_recv_list = [
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 3),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 4),
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 5),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 5),
             ]
         case 6:
             x_send_list = [x0, x0, x1, x1, empty, empty, empty, empty]
@@ -2276,11 +2460,14 @@ def x_transpose_w_eightway_(
             ]
             w_send_list = [wij, empty, wij, empty, wij, empty, empty, empty]
             w_recv_list = [
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 4),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 5),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 5),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 6),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 6),
                 empty,
                 empty,
                 empty,
@@ -2300,11 +2487,14 @@ def x_transpose_w_eightway_(
             w_send_list = [empty, wij, empty, wij, empty, wij, empty, empty]
             w_recv_list = [
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 3),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 4),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 5),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 5),
                 empty,
                 empty,
             ]
@@ -2440,34 +2630,44 @@ def x_transpose_w_eightway(
             x_recv_list = [
                 empty,
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 0),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 1),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 2),
                 empty,
             ]
             w_send_list = [empty, empty, wij, empty, wij, empty, wij, empty]
             w_recv_list = [
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 3),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 4),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 5),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 5),
                 empty,
             ]
         case 1:
             x_send_list = [empty, empty, empty, empty, x0, x0, x1, x1]
             x_recv_list = [
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 0),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 1),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 2),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 3),
                 empty,
             ]
             w_send_list = [empty, empty, empty, wij, empty, wij, empty, wij]
@@ -2475,123 +2675,159 @@ def x_transpose_w_eightway(
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 4),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 5),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 5),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 6),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 6),
             ]
         case 2:
             x_send_list = [x0, x0, empty, x1, empty, empty, empty, empty]
             x_recv_list = [
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 0),
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 1),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 2),
                 empty,
             ]
             w_send_list = [wij, empty, empty, empty, wij, empty, wij, empty]
             w_recv_list = [
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 3),
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 4),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 5),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 5),
                 empty,
             ]
         case 3:
             x_send_list = [empty, empty, empty, empty, x0, x0, x1, x1]
             x_recv_list = [
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 0),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 1),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 2),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 3),
                 empty,
             ]
             w_send_list = [empty, wij, empty, empty, empty, wij, empty, wij]
             w_recv_list = [
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 4),
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 5),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 5),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 6),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 6),
             ]
         case 4:
             x_send_list = [x0, x0, x1, x1, empty, empty, empty, empty]
             x_recv_list = [
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 0),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 1),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 2),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 3),
             ]
             w_send_list = [wij, empty, wij, empty, empty, empty, wij, empty]
             w_recv_list = [
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 4),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 5),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 5),
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 6),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 6),
                 empty,
             ]
         case 5:
             x_send_list = [empty, empty, empty, empty, x0, empty, x1, x1]
             x_recv_list = [
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 0),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 1),
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 2),
             ]
             w_send_list = [empty, wij, empty, wij, empty, empty, empty, wij]
             w_recv_list = [
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 3),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 4),
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 5),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 5),
             ]
         case 6:
             x_send_list = [x0, x0, x1, x1, empty, empty, empty, empty]
             x_recv_list = [
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 0),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 1),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 2),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 3),
             ]
             w_send_list = [wij, empty, wij, empty, wij, empty, empty, empty]
             w_recv_list = [
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 4),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 5),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 5),
                 empty,
-                _get_preallocated_buffer(wij.shape, xij.dtype, rank, device, 6),
+                _get_preallocated_buffer(
+                    wij.shape, xij.dtype, rank, device, 6),
                 empty,
                 empty,
                 empty,
@@ -2600,22 +2836,28 @@ def x_transpose_w_eightway(
             x_send_list = [empty, empty, empty, empty, x0, x0, x1, empty]
             x_recv_list = [
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 0),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 0),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 1),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 1),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, rank, device, 2),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, rank, device, 2),
                 empty,
                 empty,
             ]
             w_send_list = [empty, wij, empty, wij, empty, wij, empty, empty]
             w_recv_list = [
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 3),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 3),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 4),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 4),
                 empty,
-                _get_preallocated_buffer(wij.shape, wij.dtype, rank, device, 5),
+                _get_preallocated_buffer(
+                    wij.shape, wij.dtype, rank, device, 5),
                 empty,
                 empty,
             ]
@@ -2753,7 +2995,8 @@ def x_transpose_eightway(
     """
     mod = rank % 8
 
-    x0, x1 = torch.split(xij, xij.shape[-1] // 2, dim=-1)  # split upon last dimension
+    # split upon last dimension
+    x0, x1 = torch.split(xij, xij.shape[-1] // 2, dim=-1)
     x0, x1 = x0.contiguous(), x1.contiguous()
     cij0 = _get_preallocated_buffer(x0.shape, xij.dtype, rank, device, index=0)
     cij1 = _get_preallocated_buffer(x1.shape, xij.dtype, rank, device, index=0)
@@ -2762,17 +3005,21 @@ def x_transpose_eightway(
         case 0:
             x_send_list = [empty, x1, empty, empty, empty, empty, empty, empty]
             cij0.copy_(x0)
-            x_recv_list = [empty, empty, cij1, empty, empty, empty, empty, empty]
+            x_recv_list = [empty, empty, cij1,
+                           empty, empty, empty, empty, empty]
         case 1:
             x_send_list = [empty, empty, empty, empty, x0, empty, x1, empty]
-            x_recv_list = [empty, empty, empty, empty, cij0, empty, cij1, empty]
+            x_recv_list = [empty, empty, empty,
+                           empty, cij0, empty, cij1, empty]
         case 2:
             cij1.copy_(x1)
             x_send_list = [x0, empty, empty, empty, empty, empty, empty, empty]
-            x_recv_list = [cij0, empty, empty, empty, empty, empty, empty, empty]
+            x_recv_list = [cij0, empty, empty,
+                           empty, empty, empty, empty, empty]
         case 3:
             x_send_list = [empty, empty, empty, empty, x0, empty, x1, empty]
-            x_recv_list = [empty, empty, empty, empty, cij0, empty, cij1, empty]
+            x_recv_list = [empty, empty, empty,
+                           empty, cij0, empty, cij1, empty]
         case 4:
             x_send_list = [empty, x0, empty, x1, empty, empty, empty, empty]
             x_recv_list = [
@@ -2813,8 +3060,10 @@ def x_transpose_eightway(
         case 7:
             x_send_list = [empty, empty, empty, empty, empty, x0, empty, empty]
             cij1.copy_(x1)
-            x_recv_list = [empty, empty, empty, empty, empty, cij0, empty, empty]
+            x_recv_list = [empty, empty, empty,
+                           empty, empty, cij0, empty, empty]
 
-    dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=False)
+    dist.all_to_all(x_recv_list, x_send_list,
+                    group=model_group, async_op=False)
     cij = torch.concat([cij0, cij1], dim=-1).mT
     return cij

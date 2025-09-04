@@ -1,12 +1,14 @@
 import torch
+import torch.distributed as dist
 
-class DistributedLayerNorm(torch.nn.Module): 
+
+class DistributedLayerNorm(torch.nn.Module):
     """Batched layer norm distributed across four processes."""
 
     def __init__(self, dim, rank, device, norm_group):
         """
         Initialize layer normalization.
-        
+
         Parameters.
         ----------
         dim : int
@@ -23,14 +25,15 @@ class DistributedLayerNorm(torch.nn.Module):
         self.norm_group = norm_group
         self.layer_norm = torch.nn.LayerNorm(dim).to(device)
         self.layer_norm_apply = DistributedLN.apply
-    
+
     def forward(self, x):
         """Forward pass of layer norm distributed across n processes."""
         x = self.layer_norm_apply(x, self.norm_group)
         x = self.layer_norm(x)
 
         return x
-    
+
+
 class DistributedLN(torch.autograd.Function):
     """Autograd function for layer norm function distributed across four processes."""
 
@@ -44,7 +47,7 @@ class DistributedLN(torch.autograd.Function):
         """
         ctx.norm_group = norm_group
         return x
-    
+
     @staticmethod
     def backward(ctx, grad_output):
         """
@@ -57,27 +60,29 @@ class DistributedLN(torch.autograd.Function):
         grad_output: torch.torch.Tensor
             Gradient of the loss with respect to the input of the layer.
         """
-        torch.distributed.all_reduce(
-            grad_output, 
-            op=torch.distributed.ReduceOp.AVG,
+        dist..all_reduce(
+            grad_output,
+            op=dist..ReduceOp.AVG,
             group=ctx.norm_group,
             async_op=False
         )
-    
+
         return grad_output, None, None
-    
+
+
 class DistributedSoftMax(torch.nn.Module):
     """Distributed Softmax operation."""
 
-    #TODO: check for correctness
+    # TODO: check for correctness
     def __init__(self, dim=-1, group=None):
         super().__init__()
         self.dim = dim
-        self.group = group if group is not None else torch.distributed.group.WORLD
+        self.group = group if group is not None else dist..group.WORLD
         self.func = _DistributedSoftmax.apply
 
     def forward(self, x):
         return self.func(x, self.dim, self.group)
+
 
 class _DistributedSoftmax(torch.autograd.Function):
     @staticmethod
@@ -89,13 +94,15 @@ class _DistributedSoftmax(torch.autograd.Function):
 
         # local exponentials
 
-        y = torch.exp(x)#-x.amax(dim=dim, keepdim=True)) # softmax fails with norm if only 1 variable
+        # -x.amax(dim=dim, keepdim=True)) # softmax fails with norm if only 1 variable
+        y = torch.exp(x)
         local_sum = y.sum(dim=dim, keepdim=True)
         # global sum
         global_sum = local_sum.clone()
 
-        torch.distributed.all_reduce(global_sum, op=torch.distributed.ReduceOp.SUM, group=group)
-        
+        dist..all_reduce(
+            global_sum, op=dist..ReduceOp.SUM, group=group)
+
         # final softmax
         out = y / global_sum
         ctx.save_for_backward(out, global_sum)
@@ -112,7 +119,8 @@ class _DistributedSoftmax(torch.autograd.Function):
         local_sum = local_grad.sum(dim=dim, keepdim=True)
         # global sum for gradient
         global_grad_sum = local_sum.clone()
-        torch.distributed.all_reduce(global_grad_sum, op=torch.distributed.ReduceOp.SUM, group=group)
+        dist..all_reduce(
+            global_grad_sum, op=dist..ReduceOp.SUM, group=group)
 
         grad_x = local_grad - out * global_grad_sum
         return grad_x, None, None

@@ -1,14 +1,12 @@
-import numpy as np
 import torch
-from einops import rearrange
-from torch.nn import GELU, Dropout
 import Linear
 import Normalization as Norm
-import MLP 
+import MLP
+
 
 class MixerBlock(torch.nn.Module):
-    """Mixing block that performs token and channel mixing using two-way distributed MLPs and layer normalization."""
-    
+    """Mixing block that performs token and channel mixing using four-way distributed MLPs and layer normalization."""
+
     def __init__(self, tokens_mlp_dim, channels_mlp_dim, spatial_hidden_dim_fraction, channels_hidden_dim_fraction, rank, device, n_parallel, model_group):
         """
         Parameters
@@ -27,21 +25,26 @@ class MixerBlock(torch.nn.Module):
             Global rank.
         """  # noqa: D205
         super(MixerBlock, self).__init__()
-        self.token_mixing = MLP.DistributedXTWMLP(tokens_mlp_dim, int(tokens_mlp_dim * spatial_hidden_dim_fraction), tokens_mlp_dim, rank, device, n_parallel=n_parallel, model_group=model_group)
-        self.channel_mixing = MLP.DistributedMLP(channels_mlp_dim, int(channels_mlp_dim * channels_hidden_dim_fraction), channels_mlp_dim, rank, device, n_parallel=n_parallel, model_group=model_group)
-        self.transpose = Linear.DistributedXTranpose(rank, device, n_parallel, model_group)
+        self.token_mixing = MLP.DistributedXTWMLP(tokens_mlp_dim, int(
+            tokens_mlp_dim * spatial_hidden_dim_fraction), tokens_mlp_dim, rank, device, n_parallel=n_parallel, model_group=model_group)
+        self.channel_mixing = MLP.DistributedMLP(channels_mlp_dim, int(
+            channels_mlp_dim * channels_hidden_dim_fraction), channels_mlp_dim, rank, device, n_parallel=n_parallel, model_group=model_group)
+        self.transpose = Linear.DistributedXTranpose(
+            rank, device, n_parallel, model_group)
         self.rank = rank
         self.device = device
         self.n_parallel = n_parallel
         self.model_group = model_group
-        
+
         if n_parallel == 2:
-            self.layer_norm1 = torch.nn.LayerNorm(channels_mlp_dim//2) 
-            self.layer_norm2 = torch.nn.LayerNorm(channels_mlp_dim//2) 
-        elif n_parallel == 4: ## TODO; not used at the moment
-            self.layer_norm1 = Norm.DistributedLayerNorm(channels_mlp_dim//2, self.rank, self.device, self.model_group) 
-            self.layer_norm2 = Norm.DistributedLayerNorm(channels_mlp_dim//2, self.rank, self.device, self.model_group) 
- 
+            self.layer_norm1 = torch.nn.LayerNorm(channels_mlp_dim//2)
+            self.layer_norm2 = torch.nn.LayerNorm(channels_mlp_dim//2)
+        elif n_parallel == 4:  # TODO; not used at the moment
+            self.layer_norm1 = Norm.DistributedLayerNorm(
+                channels_mlp_dim//2, self.rank, self.device, self.model_group)
+            self.layer_norm2 = Norm.DistributedLayerNorm(
+                channels_mlp_dim//2, self.rank, self.device, self.model_group)
+
     def forward(self, x):
         """
         Forward pass of MixerBlock distributed across two processes.
@@ -61,22 +64,20 @@ class MixerBlock(torch.nn.Module):
             transposition, and channel mixing.
         """
         x_res = x
-        y = self.layer_norm1(x)         
+        y = self.layer_norm1(x)
         y = self.token_mixing(y)
         y = self.transpose(y)
         x = x_res + y
-        y = self.layer_norm2(x) 
-        x = x + self.channel_mixing(y) 
-        
-        return x
-    
+        y = self.layer_norm2(x)
+        x = x + self.channel_mixing(y)
 
+        return x
 
 
 class MixerBlockSequential(torch.nn.Module):
     """
     A sequential Mixer block for token and channel mixing.
-    
+
     Parameters.
     ----------
     tokens_mlp_dim : int
@@ -90,15 +91,17 @@ class MixerBlockSequential(torch.nn.Module):
     dropout : float, optional
         Dropout probability, by default 1e-3.
     """
-    
+
     def __init__(self, tokens_mlp_dim, channels_mlp_dim, spatial_hidden_dim_fraction, channels_hidden_dim_fraction, dropout=1e-3):
         super(MixerBlockSequential, self).__init__()
-        
-        self.token_mixing = MLP.SequentialMLP(tokens_mlp_dim, int(tokens_mlp_dim * spatial_hidden_dim_fraction), tokens_mlp_dim, dropout=dropout)
-        self.channel_mixing = MLP.SequentialMLP(channels_mlp_dim, int(channels_mlp_dim * channels_hidden_dim_fraction), channels_mlp_dim, dropout=dropout)
+
+        self.token_mixing = MLP.SequentialMLP(tokens_mlp_dim, int(
+            tokens_mlp_dim * spatial_hidden_dim_fraction), tokens_mlp_dim, dropout=dropout)
+        self.channel_mixing = MLP.SequentialMLP(channels_mlp_dim, int(
+            channels_mlp_dim * channels_hidden_dim_fraction), channels_mlp_dim, dropout=dropout)
         self.layer_norm1 = torch.nn.LayerNorm(channels_mlp_dim)
         self.layer_norm2 = torch.nn.LayerNorm(channels_mlp_dim)
-        
+
     def forward(self, x):
         """
         Forward pass of MixerBlock.
@@ -122,6 +125,5 @@ class MixerBlockSequential(torch.nn.Module):
         x = x_res + y
         y = self.layer_norm2(x)
         x = x + self.channel_mixing(y)
-        
+
         return x
-    

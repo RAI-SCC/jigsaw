@@ -1,24 +1,23 @@
-import numpy as np
 import torch
-from einops import rearrange
 from torch.nn import GELU, Dropout
 import Linear
+
 
 class DistributedMLP(torch.nn.Module):
     """Distributed MLP across n processes."""
 
     def __init__(
-            self, 
-            in_dim: int, 
-            hidden_dim: int, 
-            out_dim: int, 
-            rank: int, 
-            device: torch.device, 
-            n_parallel: int, 
-            model_group: torch.distributed.ProcessGroup, 
-            bias: bool = True, 
-            dropout: float = 1e-3
-        ):
+        self,
+        in_dim: int,
+        hidden_dim: int,
+        out_dim: int,
+        rank: int,
+        device: torch.device,
+        n_parallel: int,
+        model_group: torch.distributed.ProcessGroup,
+        bias: bool = True,
+        dropout: float = 1e-3
+    ):
         """
         Initialize the MLP module for either two- or four-way model parallelism.
 
@@ -56,19 +55,25 @@ class DistributedMLP(torch.nn.Module):
         if n_parallel == 2:
             # in, hidden, out dim are global sizes for two-way model parallelism
             # required to maintain partitioning across final dimension
-            self.linear1 = Linear.DistributedXWT(in_dim//2, hidden_dim, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
-            self.linear2 = Linear.DistributedXWT(hidden_dim//2, out_dim, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
+            self.linear1 = Linear.DistributedXWT(
+                in_dim//2, hidden_dim, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
+            self.linear2 = Linear.DistributedXWT(
+                hidden_dim//2, out_dim, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
         elif n_parallel == 4:
-            self.linear1 = Linear.DistributedXWT(in_dim//2, hidden_dim//2, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
-            self.linear2 = Linear.DistributedXWT(hidden_dim//2, out_dim//2, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
+            self.linear1 = Linear.DistributedXWT(
+                in_dim//2, hidden_dim//2, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
+            self.linear2 = Linear.DistributedXWT(
+                hidden_dim//2, out_dim//2, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
         elif n_parallel == 8:
-            self.linear1 = Linear.DistributedXWT(in_dim//2, hidden_dim//4, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
-            self.linear2 = Linear.DistributedXWT(hidden_dim//2, out_dim//4, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
+            self.linear1 = Linear.DistributedXWT(
+                in_dim//2, hidden_dim//4, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
+            self.linear2 = Linear.DistributedXWT(
+                hidden_dim//2, out_dim//4, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
         self.activation = GELU()
         self.drop = Dropout(p=dropout)
         self.drop2 = Dropout(p=dropout)
         self.rank = rank
-        
+
     def forward(self, x):
         """
         Forward pass of MLP distributed across two or four processes.
@@ -85,8 +90,9 @@ class DistributedMLP(torch.nn.Module):
         x = self.drop(x)
         x = self.linear2(x)
         x = self.drop2(x)
-        
+
         return x
+
 
 class DistributedXTWMLP(torch.nn.Module):
     """Distributed MLP layer where inputs are transposed."""
@@ -119,15 +125,21 @@ class DistributedXTWMLP(torch.nn.Module):
         self.model_group = model_group
 
         if n_parallel == 2:
-            self.linear1 = Linear.DistributedXTW(in_dim, hidden_dim//2, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
-            self.linear2 = Linear.DistributedXWT(hidden_dim//2, out_dim, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
+            self.linear1 = Linear.DistributedXTW(
+                in_dim, hidden_dim//2, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
+            self.linear2 = Linear.DistributedXWT(
+                hidden_dim//2, out_dim, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
         elif n_parallel == 4:
-            self.linear1 = Linear.DistributedXTW(in_dim//2, hidden_dim//2, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
-            self.linear2 = Linear.DistributedXW(hidden_dim//2, out_dim//2, rank, device, n_parallel, model_group, bias=bias)
+            self.linear1 = Linear.DistributedXTW(
+                in_dim//2, hidden_dim//2, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
+            self.linear2 = Linear.DistributedXW(
+                hidden_dim//2, out_dim//2, rank, device, n_parallel, model_group, bias=bias)
         elif n_parallel == 8:
-            self.linear1 = Linear.DistributedXTW(in_dim//4, hidden_dim//2, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
-            self.linear2 = Linear.DistributedXWT(hidden_dim//2, out_dim//4, rank, device, n_parallel, model_group, bias=bias)
-        
+            self.linear1 = Linear.DistributedXTW(
+                in_dim//4, hidden_dim//2, rank, device, n_parallel, model_group, bias=bias, init_method='linear')
+            self.linear2 = Linear.DistributedXWT(
+                hidden_dim//2, out_dim//4, rank, device, n_parallel, model_group, bias=bias)
+
         self.activation = GELU()
         self.drop = Dropout(p=dropout)
         self.drop2 = Dropout(p=dropout)
@@ -150,6 +162,7 @@ class DistributedXTWMLP(torch.nn.Module):
         x = self.linear2(x)
         x = self.drop2(x)
         return x
+
 
 class SequentialMLP(torch.nn.Module):
     """Multi-Layer Perceptron (MLP) with one hidden layer."""
@@ -182,5 +195,5 @@ class SequentialMLP(torch.nn.Module):
         x = self.drop(x)
         x = self.linear2(x)
         x = self.drop2(x)
-        
+
         return x
