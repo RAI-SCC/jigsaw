@@ -2,13 +2,7 @@
 import numpy as np
 import torch
 import torch.distributed
-import torch.optim as optim
-from timm.scheduler.cosine_lr import CosineLRScheduler
-from timm.scheduler.step_lr import StepLRScheduler
 import utils
-import eval
-import Model
-import time
 from torch.nn.parallel import DistributedDataParallel as DDP
 import argparse
 import yaml
