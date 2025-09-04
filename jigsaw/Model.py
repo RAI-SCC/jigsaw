@@ -1,11 +1,11 @@
 import numpy as np
 import torch
 
-import Linear
-import PatchEmbedding
-import utils
-from Mixer import MixerBlock, MixerBlockSequential
-import Normalization as Norm
+from . import Linear
+from . import PatchEmbedding
+from . import utils
+from .Mixer import MixerBlock, MixerBlockSequential
+from . import Normalization as Norm
 
 
 class Model(torch.nn.Module):

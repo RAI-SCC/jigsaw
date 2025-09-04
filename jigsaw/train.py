@@ -8,10 +8,10 @@ from timm.scheduler.step_lr import StepLRScheduler
 import torch.profiler
 
 import sys
-sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-jigsaw/')
-sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-jigsaw/src')
-import utils, eval
-import Model
+#sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-jigsaw/')
+#sys.path.insert(1, '/hkfs/work/workspace/scratch/ke4365-jigsaw/src')
+from . import utils, eval
+from . import Model
 import time
 from torch.nn.parallel import DistributedDataParallel as DDP
 import argparse

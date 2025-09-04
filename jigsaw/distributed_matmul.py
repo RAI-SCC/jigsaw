@@ -8,7 +8,12 @@ if dist.is_initialized():
     streamz = [torch.cuda.Stream() for _ in range(4)]
 
 _prealloc_buffers = {}
-device = f"cuda:{int(os.getenv('SLURM_LOCALID'))}"
+
+if torch.cuda.is_available():
+    device = f"cuda:{int(os.getenv('SLURM_LOCALID','0'))}"
+else:
+    device = torch.device('cpu')
+
 empty = torch.empty(0, device=device, dtype=torch.float32)
 
 

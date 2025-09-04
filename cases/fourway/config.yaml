@@ -1,7 +1,7 @@
 data:
   dt: 6
-  train_data_path: '/hkfs/work/workspace/scratch/ke4365-era5_data/era5_subset.zarr'
-  valid_data_path: '/hkfs/work/workspace/scratch/ke4365-era5_data/era5_subset.zarr'
+  train_data_path: '/data/era5.zarr'
+  valid_data_path: '/data/era5.zarr'
   train_subset: -1
   valid_subset: -1
   prefetch_factor: 2 

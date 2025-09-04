@@ -1,8 +1,8 @@
 import torch
 from einops import rearrange
 
-import Linear
-import Normalization as Norm
+from . import Linear
+from . import Normalization as Norm
 
 
 class DistributedAttention(torch.nn.Module):

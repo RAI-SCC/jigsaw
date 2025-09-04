@@ -11,9 +11,9 @@ from timm.scheduler.cosine_lr import CosineLRScheduler
 from timm.scheduler.step_lr import StepLRScheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-import Dataloaders
-import eval
-import Model
+from . import Dataloaders
+from . import eval
+from . import Model
 
 
 def get_ddp_groups(rank: int, n_parallel: int) -> dist.ProcessGroup:

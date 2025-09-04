@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from einops import rearrange
 from torch.nn import GELU, Dropout
-import Linear
+from . import Linear
 
 class DistributedMLP(torch.nn.Module):
     """Distributed MLP across n processes."""

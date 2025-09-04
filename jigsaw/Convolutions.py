@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 
 class DistributedConv1D(torch.nn.Module):

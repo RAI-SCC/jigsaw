@@ -2,9 +2,9 @@ import numpy as np
 import torch
 from einops import rearrange
 from torch.nn import GELU, Dropout
-import Linear
-import Normalization as Norm
-import MLP 
+from . import Linear
+from . import Normalization as Norm
+from . import MLP 
 
 class MixerBlock(torch.nn.Module):
     """Mixing block that performs token and channel mixing using two-way distributed MLPs and layer normalization."""
