@@ -190,14 +190,14 @@ def validate(
     
     # Load climatology
     if parallelism < 4:
-        climatology = get_climatology()[:n_lat]
+        climatology = get_climatology(config_dict)[:n_lat]
     elif parallelism == 4:
         n_lon = n_lon//2
         mod = rank % 4
         if mod in [0, 1]:
-            climatology = get_climatology()[:n_lat, :n_lon]
+            climatology = get_climatology(config_dict)[:n_lat, :n_lon]
         else:
-            climatology = get_climatology()[:n_lat, n_lon:]
+            climatology = get_climatology(config_dict)[:n_lat, n_lon:]
 
     if parallelism == 1:
         variable_weights = variable_weights.to(device)
@@ -212,7 +212,7 @@ def validate(
     xlat, xlon = config_dict['data']['xlat'], config_dict['data']['xlon']
 
     index_offset = 2 if 'rollout_time' in var_names else 1
-    mean, std = load_averages()
+    mean, std = load_averages(config_dict)
     
     loss_fn = torch.nn.MSELoss()
     parallelism = config_dict['model_parallel']['parallelism']
@@ -355,9 +355,9 @@ def validate(
 
     return loss.item()
 
-def load_averages():
-    static_slevel = np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/surface_zarr.npy')
-    static_plevel = np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/pressure_zarr.npy')
+def load_averages(config):
+    static_slevel = np.load(f'{config["data"]["constant_masks_path"]}/surface_zarr.npy')
+    static_plevel = np.load(f'{config["data"]["constant_masks_path"]}/pressure_zarr.npy')
     mean_slevel   = torch.tensor(static_slevel[0].reshape(4))
     std_slevel    = torch.tensor(static_slevel[1].reshape(4))
     mean_plevel   = torch.tensor(static_plevel[0].reshape(65))
@@ -367,9 +367,9 @@ def load_averages():
     std  = torch.concatenate([std_slevel, std_plevel], axis=0)
     return mean, std
     
-def get_climatology():
-    climatology_plevel = torch.tensor(np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/pressure_climatology.npy')).reshape(65, 721, 1440)
-    climatology_slevel = torch.tensor(np.load('/hkfs/work/workspace/scratch/ke4365-kangu/constant_masks/surface_climatology.npy'))
+def get_climatology(config):
+    climatology_plevel = torch.tensor(np.load(f'{config["data"]["constant_masks_path"]}/pressure_climatology.npy')).reshape(65, 721, 1440)
+    climatology_slevel = torch.tensor(np.load(f'{config["data"]["constant_masks_path"]}/surface_climatology.npy'))
 
     climatology = torch.concatenate([climatology_slevel, climatology_plevel], axis=0).permute(1, 2, 0)
     # climatology [721, 1440, variables]
