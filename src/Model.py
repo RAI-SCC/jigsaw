@@ -86,8 +86,7 @@ class Model(torch.nn.Module):
         x_res2 = x
         for j in range(rollout_): # Rolling out in "latent space"
             for i in range(self.n_blocks):
-                x_res3 = x
-                x = self.blocks[i](x) + x_res3
+                x = self.blocks[i](x)
         
         # After MLP-mixing blocks: [n_batch, n_patch_lat * n_patch_lon/2, embed_dim/2]
         # After recovery: [n_batch, n_lat*n_lon//2, n_var//2]
@@ -184,8 +183,7 @@ class Model_twoway(torch.nn.Module):
         
         for rollout in torch.arange(rollout_):
             for i in range(self.n_blocks):
-                x_res3 = x
-                x = self.blocks[i](x) + x_res3
+                x = self.blocks[i](x) 
         
         # After MLP-mixing blocks: [n_batch, n_patch_lat * n_patch_lon/2, embed_dim/2]
         # After recovery: [n_batch, n_lat*n_lon//2, n_var//2]
