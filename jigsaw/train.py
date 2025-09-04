@@ -26,7 +26,7 @@ def training_loop(config_dict, device, localid, rank):
     model_parallel = config_dict['model']['model_parallel']
     parallelism = config_dict['model_parallel']['parallelism'] if model_parallel else 1
     
-    utils.set_all_seeds(1, rank=(rank%parallelism)) if parallelism > 1 else utils.set_all_seeds(1, rank=None) # ensure ranks 0, 4, ...8... have the same initial parameters
+    utils.set_all_seeds_model_group(1, rank=(rank%parallelism)) if parallelism > 1 else utils.set_all_seeds(1) # ensure ranks 0, 4, ...8... have the same initial parameters
     
     train_subset, valid_subset = config_dict['data']['train_subset'], config_dict['data']['valid_subset']
     train_subset = None if train_subset < 0 else train_subset
@@ -342,7 +342,7 @@ if __name__ == '__main__':
     with open(args.config_file, 'r') as f:
         config_dict = yaml.load(f, Loader=yaml.SafeLoader)
 
-    device, localid, rank, world_size = utils.init_CUDA()
+    device, localid, rank, world_size = utils.init_cuda()
 
     
     training_loop(config_dict, device, localid, rank)

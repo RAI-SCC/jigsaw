@@ -107,7 +107,7 @@ def set_all_seeds(seed: int = 0) -> None:
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-def set_all_seeds_model_group(seed: int = 0, rank: Optional[int] = None, n_parallel: int = None) -> None:
+def set_all_seeds_model_group(seed: int = 0, rank: Optional[int] = 0, n_parallel: int = 1) -> None:
     """Set all seeds on all model groups to the same value."""
     set_all_seeds(seed + rank // n_parallel)
 
