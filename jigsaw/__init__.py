@@ -1,10 +1,10 @@
 """Jigsaw model parallelization package."""
 
 # Import main modules to make them available at package level
+# Note: Script modules like 'train' are not imported here to avoid conflicts when run with python -m
 from . import eval
 from . import utils
 from . import Model
-from . import train
 from . import Dataloaders
 from . import Dataset
 from . import Linear
@@ -19,7 +19,6 @@ __all__ = [
     "eval",
     "utils", 
     "Model",
-    "train",
     "Dataloaders",
     "Dataset",
     "Linear",
