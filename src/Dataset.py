@@ -379,8 +379,7 @@ class ERA5DatasetDistributed(Dataset):
         input = torch.tensor(input).permute(1,2,0)
         
         return input, target
-
-
+    
 class ERA5Preprocessed(Dataset):
     """Define 3D dataset."""
     def __init__(self, config, file_path, mode, patch_size, rank, forecast_length=1, normalize=True, dt=None):
@@ -426,16 +425,152 @@ class ERA5Preprocessed(Dataset):
         
         self._get_files_stats(mode=self.mode)
         
-        # Current copies of subsampled WeatherBench2 data saves in reverse pressure-level order
-        # Need to reverse so that the 0th presssure level is 1000 hPa, 1st is 925 hPa, etc.
-        if config['data']['train_data_path'] == '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/1959-2023_01_10-wb13-6h-1440x721.zarr':
-            self.level_ordering = range(13-1, -1, -1)
-        elif config['data']['train_data_path'] == '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/era5.zarr':
-            self.level_ordering = range(0, 13)
-        elif config['data']['train_data_path'] == '/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr':
-            self.level_ordering = range(0, 13)
-        else: # baseline assuption is subsampled WB2 data
-            self.level_ordering = range(13-1, -1, -1)
+        # normalization for pressure levels and standard deviation
+        self.p_mean = np.load(f'{config["data"]["constant_masks_path"]}/pressure_zarr.npy', allow_pickle=True)[0].reshape(65, 1, 1)
+        self.p_std  = np.load(f'{config["data"]["constant_masks_path"]}/pressure_zarr.npy', allow_pickle=True)[1].reshape(65, 1, 1)
+        self.s_mean = np.load(f'{config["data"]["constant_masks_path"]}/surface_zarr.npy', allow_pickle=True)[0].reshape(4, 1, 1)
+        self.s_std  = np.load(f'{config["data"]["constant_masks_path"]}/surface_zarr.npy', allow_pickle=True)[1].reshape(4, 1, 1)
+        
+        self.patch_size = patch_size
+        self.xlat, self.xlon = config['data']['xlat'], config['data']['xlon']
+        self.batch_size = config['training']['train_batch']
+        self.parallelism = config['model_parallel']['parallelism']
+
+        self.land_mask, self.soil_type, self.topography = load_constant_mask_2d(config['data']['constant_masks_path'], xlat=self.xlat)
+        self.land_mask = torch.unsqueeze(self.land_mask, 0)
+        self.soil_type = torch.unsqueeze(self.soil_type, 0)
+        self.topography = torch.unsqueeze(self.topography, 0)
+
+    def _get_files_stats(self, mode='train'):
+        """Filter desired time points based on parameters and return file statistics."""
+
+        self.zarr_data = xr.open_dataset(self.file_path, engine='zarr')
+        times = pd.to_datetime(self.zarr_data['time'].values)
+        if mode == 'train': # training case, lite
+            if self.lite:
+                train_years = times[(times.year<2018) & (times.year > 2006) ]#& ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))] 
+            elif self.datapath == '/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr' and not self.lite:
+                train_years = times[(times.year<2018) & (times.year > 1979)]
+            else:
+                train_years = times[(times.year<2018) & (times.year > 1979) & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
+            self.zarr_data = self.zarr_data.sel(time=train_years)
+        elif mode == 'validation':           # validation
+            if self.lite:
+                validation_years = times[(times.year == 2018)]# & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
+            elif (not self.lite) and self.datapath == '/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr':
+                validation_years = times[(times.year == 2018)]
+            else:
+                validation_years = times[(times.year < 2018)& ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
+            self.zarr_data = self.zarr_data.sel(time=validation_years)
+        elif mode == 'testing':           # validation
+            validation_years = times[(times.year == 2020) | (times.year == 2021)] 
+            self.zarr_data = self.zarr_data.sel(time=validation_years)
+        elif mode == 'verify':
+            validation_years = times[(times.year == 2020) & (times.month == 1) & (times.day == 1) & (times.hour == 0)]
+            self.zarr_data = self.zarr_data.sel(time=validation_years)
+            
+        self.n_samples_total = len(self.zarr_data['time'])
+        
+        # N channels
+        self.n_in_channels   = len(self.zarr_data.data_vars)
+        
+        
+    def __len__(self):
+        """Return total number of samples."""
+        return self.n_samples_total - self.forecast_length * self.dt // self.deltaTDivisor  
+    
+        
+    def __getitem__(self, global_idx):
+        """
+        Return single input, target.
+
+        global_idx: int
+                global index of item
+        """
+        target_surface  = []
+        step = self.dt
+        # if forecast_length = 3, target_file_idx = global_idx + range(1, forecast_length+1)*step // 6
+        target_file_idxs = global_idx + torch.div(torch.arange(1, self.forecast_length+1)*step, self.deltaTDivisor , rounding_mode='trunc')
+        for target_idx in target_file_idxs:
+            if target_idx >= self.__len__(): 
+                target_idx = self.__len__() - 1
+            
+        # Isolate data from time point and convert to numpy array
+        # WeatherBench data stores from low --> high pressure levels
+        # We convert to high --> low
+        input = self.zarr_data.isel(time=global_idx)
+        targets = self.zarr_data.isel(time=target_file_idxs)
+            
+        target_list = []
+        
+        
+        # Input data
+        # Stack and convert to numpy array
+        variables = input['fields'][:, :self.xlat].values
+        # normalize
+        variables[:4] = (variables[:4] - self.s_mean) / self.s_std
+        variables[4:] = (variables[4:] - self.p_mean) / self.p_std
+        variables = np.concatenate([variables, self.land_mask, self.soil_type, self.topography], axis=0)
+        # Output data
+        for i in range(self.forecast_length):
+            target = targets.isel(time=i)['fields'][:, :self.xlat].values
+            # normalize
+            target[:4] = (target[:4] - self.s_mean) / self.s_std
+            target[4:] = (target[4:] - self.p_mean) / self.p_std
+            
+            target_list.append(torch.tensor(target).permute(1, 2, 0))
+            
+        
+        variables = torch.tensor(variables)
+            
+        return variables, target_list
+
+
+class ERA5PreprocessedDistributed(Dataset):
+    """Define 3D dataset."""
+    def __init__(self, config, file_path, mode, patch_size, rank, forecast_length=1, normalize=True, dt=None):
+        """
+        initialize.
+
+        params: Dict
+            configuration file
+        file_path: String
+            path to data directory
+        distributed: bool
+            flag for DDP
+        mode: String
+            of value 'training', 'testing', 'validation'
+        device: String
+            device that the code is running/offloaded on
+        patch_size: Tuple(int, int, Optional[int])
+            Number of pixels in ([vert], lat, lon) dimensions per patch
+        forecast_length: int
+            For training, always 1. For validation, defines the number of autoregressive steps to roll out to.
+        """
+        self.file_path = file_path
+        self.mode = mode
+        self.dt = dt if dt is not None else config['data']['dt']
+        self.lite = config['data']['lite']
+        self.rank = rank
+        self.datapath = config['data']['train_data_path']     
+
+        if config['data']['train_data_path'] == '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/1959-2023_01_10-wb13-6h-1440x721.zarr':        
+            self.deltaTDivisor = 6
+        elif config['data']['train_data_path'] == '/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr' and not self.lite:
+            self.deltaTDivisor = 1
+        elif config['data']['train_data_path'] == '/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/era5.zarr' and not self.lite:
+            self.deltaTDivisor = 1
+        else:
+            if self.lite:
+                self.deltaTDivisor = 1 
+            else:
+                self.deltaTDivisor = 6
+
+        self.forecast_length = forecast_length
+        self.normalize = normalize
+        
+        self._get_files_stats(mode=self.mode)
+        
 
         # normalization for pressure levels and standard deviation
         self.p_mean = np.load(f'{config["data"]["constant_masks_path"]}/pressure_zarr.npy', allow_pickle=True)[0].reshape(65, 1, 1)
@@ -650,7 +785,7 @@ class DistributedDummyHighResDataset(DummyHighResDataset):
     def __getitem__(self, global_idx):
         return torch.rand((self.x, self.y, self.nvars), dtype=torch.float32), torch.rand((self.x, self.y, self.nvars), dtype=torch.float32)
 
-class DistributedHighResDataset(ERA5DatasetDistributed):
+class DistributedHighResDataset(ERA5PreprocessedDistributed):
     def __init__(self, config, file_path, mode, patch_size, rank, forecast_length=1, normalize=True, dt=None):
         super().__init__(config, file_path, mode, patch_size, rank, forecast_length=1, normalize=True, dt=None)
         
@@ -668,4 +803,21 @@ class DistributedHighResDataset(ERA5DatasetDistributed):
         input_up =  input_up.squeeze(0).permute(1,2,0)
         return input_up, target
     
+    
+
+class HighResDataset(ERA5Preprocessed):
+    def __init__(self, config, file_path, mode, patch_size, rank, forecast_length=1, normalize=True, dt=None):
+        super().__init__(config, file_path, mode, patch_size, rank, forecast_length=1, normalize=True, dt=None)
             
+    def __getitem__(self, global_idx):
+        input, target = super().__getitem__(global_idx)
+        input = input.permute(2, 0, 1).unsqueeze(0)
+
+        input_up  = torch.nn.functional.interpolate(input, scale_factor=(2,2), mode='bilinear', align_corners=True)        
+
+        for i, t in enumerate(target):
+            t = t.permute(2, 0, 1).unsqueeze(0)
+            t = torch.nn.functional.interpolate(t, scale_factor=(2,2), mode='bilinear', align_corners=True)
+            target[i] = t.squeeze(0).permute(1,2,0)
+        input_up =  input_up.squeeze(0).permute(1,2,0)
+        return input_up, target

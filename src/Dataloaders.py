@@ -5,10 +5,12 @@ from torch.utils.data.distributed import DistributedSampler
 from Dataset import (
     DistributedDummyHighResDataset,
     DistributedHighResDataset,
+    HighResDataset,
     DummyHighResDataset,
     ERA5Dataset,
     ERA5DatasetDistributed,
-    ERA5Preprocessed
+    ERA5Preprocessed,
+    ERA5PreprocessedDistributed
 )
 
 
@@ -67,10 +69,19 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
     parallelism = config_dict['model_parallel']['parallelism']
     dt = config_dict['data']['dt'] if dt is None else dt
     if parallelism == 1:
-        dataset = ERA5Dataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), forecast_length=config_dict['model']['latent_rollout'], normalize=normalize)
+        if config_dict['data']['preprocessed']:
+            if config_dict['data']['resolution'] == 0.25:
+                dataset = ERA5Preprocessed(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
+            else:
+                dataset = HighResDataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
+        else:
+            dataset = ERA5Dataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), forecast_length=config_dict['model']['latent_rollout'], normalize=normalize)
     else:
         if config_dict['data']['preprocessed']:
-            dataset = ERA5Preprocessed(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
+            if config_dict['data']['resolution'] == 0.25:
+                dataset = ERA5PreprocessedDistributed(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
+            elif config_dict['data']['resolution'] == 0.125:
+                dataset = DistributedHighResDataset(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
         else:
             dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(2,4,4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
     
