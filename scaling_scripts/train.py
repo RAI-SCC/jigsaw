@@ -3,6 +3,8 @@ import time
 
 import torch
 import torch.distributed as dist
+import torch.optim as optim
+import timm
 import yaml
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -110,7 +112,7 @@ def training_loop(config_dict: dict, device: torch.device, localid: int, rank: i
 
 
 def train_one_epoch(
-    config_dict: Dict,
+    config_dict: dict,
     epoch: int,
     model: torch.nn.Module,
     train_dataloader,
@@ -144,16 +146,20 @@ def train_one_epoch(
     start_time = time.perf_counter()
     if config_dict['model_parallel']['parallelism'] == 4:
         xlon = xlon//2
+    
+    if rank == 0:
+        print(f"Epoch {epoch}, learning rate {scheduler._get_lr(epoch)}")
+        
     for i, data in enumerate(train_dataloader):
         rollout = i % max_rollout
 
         # warmup lr only in epoch 0
         if epoch == 0:
-            warm = i * (config_dict['training']['lr'] - start_lr) / \
+            max_values = scheduler._get_lr(epoch)
+            for index, g in enumerate(optimizer.param_groups):
+                warm = i * (max_values[index] - start_lr) / \
                 max(1, len(train_dataloader)) + start_lr
-            for g in optimizer.param_groups:
                 g["lr"] = warm
-
         input_data = data[0].to(device, non_blocking=True)
         target_data = data[1][rollout].to(device, non_blocking=True)
 
@@ -163,7 +169,7 @@ def train_one_epoch(
         output = output.reshape(-1, xlat, xlon, n_vars_local)
 
         # broadcast weights
-        vw = variable_weights.view(1, 1, 1, 36)
+        vw = variable_weights.view(1, 1, 1, n_vars_local)
         ow = output * area_weights * vw
         tw = target_data * area_weights * vw
         loss = loss_fn(ow, tw)
