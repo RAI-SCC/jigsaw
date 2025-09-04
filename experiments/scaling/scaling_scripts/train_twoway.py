@@ -361,6 +361,6 @@ if __name__ == "__main__":
     args = parse_args()
     config_dict = load_config(args.config_file)
 
-    device, localid, rank, world_size = utils.init_CUDA()
+    device, localid, rank, world_size = utils.init_cuda()
     training_loop(config_dict, device, localid, rank, world_size)
     torch.distributed.destroy_process_group()

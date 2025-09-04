@@ -65,7 +65,8 @@ def training_loop(config_dict: dict, device: torch.device, localid: int, rank: i
             xlon=xlon,
             n_vars_local=n_vars_local,
             max_rollout=max_rollout,
-            rank=rank
+            rank=rank,
+            start_lr=1e-6
         )
 
         torch.cuda.synchronize()
@@ -88,9 +89,9 @@ def training_loop(config_dict: dict, device: torch.device, localid: int, rank: i
             model_group=model_group
         )
 
-        if rank < n_parallel and val_loss < best_val_loss:
-            best_val_loss = val_loss
-            utils.save_model(model, optimizer, scheduler, config_dict['training']['save_dir'],  rank, epoch)
+        #                                                                                                                      if rank < n_parallel and val_loss < best_val_loss:
+        #                                                                                                                          best_val_loss = val_loss
+        #                                                                                                                          utils.save_model(model, optimizer, scheduler, config_dict['training']['save_dir'],  rank, epoch)
         if rank == 0:
             print(f"Epoch {epoch}. Average training loss {avg_loss}. Average validation loss: {val_loss}")
 

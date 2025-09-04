@@ -21,11 +21,16 @@ def training_loop(config_dict: dict, device: torch.device, localid: int, rank: i
     
     # Set up model  groups
     match n_parallel:
+        case 1:
+            model_group, ddp_group, _, model_subgroup_col = utils.setup_groups(rank, n_parallel, 1, 1)
+            n_vars_out = 69
         case 2:
             model_group, ddp_group, _, model_subgroup_col = utils.setup_groups(rank, n_parallel, 1, 2)
+            n_vars_out = 36
         case 4:
             model_group, ddp_group, _, model_subgroup_col = utils.setup_groups(rank, n_parallel, 2, 2)
             xlon = xlon//2
+            n_vars_out = 36
 
     # Set up model, optimizer, loss function
     model = utils.build_model(config_dict, device, localid, rank, n_parallel, model_group, ddp_group, model_subgroup_col)
@@ -50,7 +55,7 @@ def training_loop(config_dict: dict, device: torch.device, localid: int, rank: i
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        train_one_epoch(model, train_dataloader, optimizer, loss_fn, xlat, xlon)
+        train_one_epoch(model, train_dataloader, optimizer, loss_fn, xlat, xlon, n_vars_out)
         end.record()
         torch.cuda.synchronize()
 
@@ -68,7 +73,8 @@ def train_one_epoch(
         optimizer: torch.optim, 
         loss_fn: torch.nn.modules.loss, 
         xlat: int, 
-        xlon: int
+        xlon: int,
+        n_vars_out: int
     ):
         """Time and train one epoch."""
         data = next(iter(train_dataloader)) 
@@ -82,7 +88,7 @@ def train_one_epoch(
             output = model(input_data, rollout_=0+1) # output shape [n_batch, 720, 720, 36]
                     
             # Reshape output
-            output = (output.reshape(output.shape[0], xlat, xlon, 36))             
+            output = (output.reshape(output.shape[0], xlat, xlon, n_vars_out))
             loss = loss_fn(output, target_data)
             loss.backward()
 
