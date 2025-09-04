@@ -204,7 +204,7 @@ def validate(
     elif parallelism == 2:
         variable_weights = torch.nn.functional.pad(variable_weights, (0,3))
         variable_weights = variable_weights[0,0,0,:36] if rank % parallelism == 0 else variable_weights[0,0,0,36:]
-    else:
+    elif parallelism == 4:
         mod = rank % parallelism
         variable_weights = torch.nn.functional.pad(variable_weights, (0,3))
         variable_weights = variable_weights[0,0,0,:36] if rank % parallelism in [0, 2] else variable_weights[0,0,0,36:]
@@ -290,13 +290,12 @@ def validate(
                     
                     if batch == 0 and rank < 4 and parallelism == 4: # only needs to happen once:
                         input_data_gathered, output_data_gathered, target_data_gathered = prepare_plot_data(input_data, output, target_data, device, model_group)
-                    if rank == 0:
-                        gen_plots(config_dict, input_data_gathered, output_data_gathered, target_data_gathered, rank, file_path, epoch, model_parallel=model_parallel)    
+                        if rank == 0:
+                            gen_plots(config_dict, input_data_gathered, output_data_gathered, target_data_gathered, rank, file_path, epoch, model_parallel=model_parallel)    
                     
                     # Each process contains its half of the squarred error
                     rmse[rollout][indices + norm_offset + index_offset] = rmse[rollout][indices + norm_offset + index_offset] + calc_mse_variable(target_data, output, device, area_weights, std=std, indices=indices, norm_offset=norm_offset).to(torch.float32)
-                    acc[rollout][indices + norm_offset + index_offset]  = acc[rollout][indices + norm_offset + index_offset] + calc_acc_variable_parallel(target_data, output, device, area_weights, mean=mean, std=std, climatology=climatology, indices=indices, group=model_subgroup_col, rank=rank, norm_offset=norm_offset).to(torch.float32)
-                
+                    acc[rollout][indices + norm_offset + index_offset]  = acc[rollout][indices + norm_offset + index_offset]  + calc_acc_variable_parallel(target_data, output, device, area_weights, mean=mean, std=std, climatology=climatology, indices=indices, group=model_subgroup_col, rank=rank, norm_offset=norm_offset).to(torch.float32)
             
             output_loss = output * area_weights * variable_weights
             target_loss = target_data * area_weights * variable_weights
@@ -314,7 +313,7 @@ def validate(
         total_samples = [len(dataloader.dataset)]
         loss = loss / world_size / total_samples[0] 
         
-        torch.distributed.all_reduce(loss)    
+        torch.distributed.all_reduce(loss)
     
     for rollout in rollout_time:
         if parallelism == 1:

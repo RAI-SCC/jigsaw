@@ -222,7 +222,7 @@ def build_model(
     """Instantiate model and wrap with DDP."""
     match n_parallel:
         case 1: 
-            model = Model.ModelSequential(config_dict, device, rank).to(device)
+            model = Model.ModelSequential(config_dict, rank, device).to(device)
         case 2:
             model = Model.Model_twoway(config_dict, rank, device, n_parallel, model_group).to(device)
         case 4:
@@ -312,7 +312,8 @@ def train_one_epoch(
     xlon: int,
     n_vars_local: int,
     max_rollout: int,
-    rank: int
+    rank: int,
+    start_lr: float
 ) -> float:
     """
     Train for one epoch.
@@ -336,7 +337,7 @@ def train_one_epoch(
 
         # warmup lr only in epoch 0
         if epoch == 0:
-            warm = i * (config_dict['training']['lr'] - 1e-6) / max(1, len(train_dataloader)) + 1e-6
+            warm = i * (config_dict['training']['lr'] - start_lr) / max(1, len(train_dataloader)) + start_lr
             for g in optimizer.param_groups:
                 g["lr"] = warm
 
@@ -352,7 +353,6 @@ def train_one_epoch(
         vw = variable_weights.view(1, 1, 1, 36)
         ow = output * area_weights * vw
         tw = target_data * area_weights * vw
-
         loss = loss_fn(ow, tw)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), config_dict["training"]["grad_clip"])
@@ -381,7 +381,7 @@ def get_weights(config_dict: dict, device: torch.device, n_parallel: int, rank: 
     pressure_weights = torch.tensor(config_dict['training']['pressure_weights']).unsqueeze(1).expand(5, 13).flatten()
     variable_weights = ((torch.concat([surface_weights, pressure_weights]).view(1, 1, 1, 69))).to(device)
     
-    area_weights = torch.tensor(eval.calc_weight(xlat)).view(1, xlat, 1, 1).to(device).to(torch.float32)    
+    area_weights = eval.calc_weight(xlat).view(1, xlat, 1, 1).to(device).to(torch.float32)    
 
     variable_weights = torch.nn.functional.pad(variable_weights, (0,3))
     variable_weights = variable_weights[0,0,0,:36] if rank % n_parallel in [0, 2] else variable_weights[0,0,0,36:]

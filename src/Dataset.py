@@ -60,15 +60,18 @@ class ERA5Dataset(Dataset):
         else: # baseline assuption is subsampled WB2 data
             self.level_ordering = range(13-1, -1, -1)
 
-        self.p_mean = np.load('/leonardo_work/EUHPC_B27_052/data/constant_masks/pressure_zarr.npy', allow_pickle=True)[0].reshape(5, 13, 1, 1)
-        self.p_std  = np.load('/leonardo_work/EUHPC_B27_052/data/constant_masks/pressure_zarr.npy', allow_pickle=True)[1].reshape(5, 13, 1, 1)
-        self.s_mean = np.load('/leonardo_work/EUHPC_B27_052/data/constant_masks/surface_zarr.npy', allow_pickle=True)[0].reshape(4, 1, 1)
-        self.s_std  = np.load('/leonardo_work/EUHPC_B27_052/data/constant_masks/surface_zarr.npy', allow_pickle=True)[1].reshape(4, 1, 1)
+        self.p_mean = np.load(f'{config["data"]["constant_masks_path"]}/pressure_zarr.npy', allow_pickle=True)[0].reshape(5, 13, 1, 1)
+        self.p_std  = np.load(f'{config["data"]["constant_masks_path"]}/pressure_zarr.npy', allow_pickle=True)[1].reshape(5, 13, 1, 1)
+        self.s_mean = np.load(f'{config["data"]["constant_masks_path"]}/surface_zarr.npy', allow_pickle=True)[0].reshape(4, 1, 1)
+        self.s_std  = np.load(f'{config["data"]["constant_masks_path"]}/surface_zarr.npy', allow_pickle=True)[1].reshape(4, 1, 1)
         
         self.patch_size = patch_size
         self.xlat = config['data']['xlat']
         self.rank = rank
-        
+        self.land_mask, self.soil_type, self.topography = load_constant_mask_2d(config['data']['constant_masks_path'], xlat=self.xlat)
+        self.land_mask = torch.unsqueeze(self.land_mask, 0)
+        self.soil_type = torch.unsqueeze(self.soil_type, 0)
+        self.topography = torch.unsqueeze(self.topography, 0)
         
     def _get_files_stats(self, mode='train'):
         """Filter desired time points based on parameters and return file statistics."""
@@ -130,10 +133,8 @@ class ERA5Dataset(Dataset):
         input_pressure = np.reshape(input_pressure, (-1, 721, 1440))
         input_surface  = input_surface[:, :self.xlat]
         input_pressure = input_pressure[:, :self.xlat]
-        
-        
-        
-        input = np.concatenate([input_surface, input_pressure], axis=0)
+                
+        input = np.concatenate([input_surface, input_pressure, self.land_mask, self.soil_type, self.topography], axis=0)
         
         target = []
         for i in range(self.forecast_length):
@@ -148,7 +149,7 @@ class ERA5Dataset(Dataset):
             target_pressure[i] = target_pressure[i].reshape(-1, 721, 1440)
             target_pressure[i] = target_pressure[i][:, :self.xlat]
             target_surface[i] = target_surface[i][:, :self.xlat]
-            target.append(torch.concat([target_surface[i], target_pressure[i]], axis=0))
+            target.append(torch.concat([target_surface[i], target_pressure[i]], axis=0).permute(1, 2, 0))
 
         input = torch.tensor(input)
         
@@ -158,7 +159,7 @@ class ERA5DatasetDistributed(Dataset):
     """Define 3D dataset."""
     def __init__(self, config, file_path, mode, patch_size, rank, forecast_length=1, normalize=True, dt=None):
         """
-        initialize.
+        Initialize.
 
         params: Dict
             configuration file

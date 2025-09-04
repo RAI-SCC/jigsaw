@@ -154,7 +154,7 @@ class PatchRecovery2D(torch.nn.Module):
 class PatchEmbedding1D(torch.nn.Module):
   """2D Patch Embedding operation."""
 
-  def __init__(self, patch_size, dim, device,  in_channels=72, padding=(0,0), stride=(8,8), xlat=721):
+  def __init__(self, config, patch_size, dim, device,  in_channels=72, padding=(0,0), stride=(8,8), xlat=721):
     """
     Initialize patch embedding operation.
     
@@ -179,14 +179,7 @@ class PatchEmbedding1D(torch.nn.Module):
     #  padding = (0,0)
     self.stride = stride
 
-    self.conv_surface = torch.nn.Conv1d(in_channels, out_channels=self.dim, kernel_size=self.patch_size, stride=self.stride)
-    
-    # Load constant masks from the disc
-    
-    self.land_mask, self.soil_type, self.topography = load_constant_mask_2d(self.patch_size, xlat=xlat)
-    self.land_mask = self.land_mask.to(device)
-    self.soil_type = self.soil_type.to(device)
-    self.topography = self.topography.to(device)
+    self.conv = torch.nn.Conv1d(in_channels, out_channels=self.dim, kernel_size=self.patch_size, stride=self.stride)
       
   def forward(self, input):
     """
@@ -213,26 +206,17 @@ class PatchEmbedding1D(torch.nn.Module):
     """
     # Input should be padded already, according to the patch size
     input_shape = input.shape
-    # Add three constant fields to the surface fields
-    # Need to broadcast in this case because we are copying the data over more than 1 dimension
-    # Broadcast to 4D data
-    land_mask  = torch.broadcast_to(self.land_mask,   (input_shape[0], 1, input_shape[2], input_shape[3]))
-    soil_type  = torch.broadcast_to(self.soil_type,   (input_shape[0], 1, input_shape[2], input_shape[3]))
-    topography = torch.broadcast_to(self.topography,  (input_shape[0], 1, input_shape[2], input_shape[3]))
-      
-    input_surface = torch.cat((input, land_mask, soil_type, topography), dim=1)
+    
 
     # Apply a linear projection for patch_size[1]*patch_size[2] patches
     # shape: (nData, fields, latitude, longitude)
-    input_surface = input_surface.reshape(input_shape[0], input_shape[1]+3, -1)
+    input = input.reshape(input_shape[0], input_shape[1], -1)
     
-    input_surface = self.conv_surface(input_surface)
+    input = self.conv(input)
     
     # Reshape x for calculation of linear projections
     # Dimensions: (nData, latitude, longitude, fields)
-    x = permute(input_surface, (0, 2, 1))
-    ## Dimensions: (nData,  latitude, longitude, fields)
-    #x = reshape(x, shape=(x.shape[0], x.shape[1]*x.shape[2], x.shape[-1]))
+    x = permute(input, (0, 2, 1))
         
     return x
   
