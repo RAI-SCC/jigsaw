@@ -1,7 +1,6 @@
 
 import argparse
 
-import helper
 import numpy as np
 import torch
 import torch.distributed
@@ -47,9 +46,6 @@ def training_loop(config_dict: dict, device: torch.device, localid: int, rank: i
         config_dict, model_parallel, rank)
 
     if rank == 0:
-        flop_forward, comm_forward = helper.calc_flops_comm(config_dict)
-        print(
-            f'Estimated forward TFLOPs and GB_COMM: {flop_forward}, {comm_forward}')
         print(f'len train dataloader {len(train_dataloader)}')
 
     utils.setup_precision(config_dict['training']['tf32'])

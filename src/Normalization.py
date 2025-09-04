@@ -60,9 +60,9 @@ class DistributedLN(torch.autograd.Function):
         grad_output: torch.torch.Tensor
             Gradient of the loss with respect to the input of the layer.
         """
-        dist..all_reduce(
+        dist.all_reduce(
             grad_output,
-            op=dist..ReduceOp.AVG,
+            op=dist.ReduceOp.AVG,
             group=ctx.norm_group,
             async_op=False
         )
@@ -77,7 +77,7 @@ class DistributedSoftMax(torch.nn.Module):
     def __init__(self, dim=-1, group=None):
         super().__init__()
         self.dim = dim
-        self.group = group if group is not None else dist..group.WORLD
+        self.group = group if group is not None else dist.group.WORLD
         self.func = _DistributedSoftmax.apply
 
     def forward(self, x):
@@ -100,8 +100,8 @@ class _DistributedSoftmax(torch.autograd.Function):
         # global sum
         global_sum = local_sum.clone()
 
-        dist..all_reduce(
-            global_sum, op=dist..ReduceOp.SUM, group=group)
+        dist.all_reduce(
+            global_sum, op=dist.ReduceOp.SUM, group=group)
 
         # final softmax
         out = y / global_sum
@@ -119,8 +119,8 @@ class _DistributedSoftmax(torch.autograd.Function):
         local_sum = local_grad.sum(dim=dim, keepdim=True)
         # global sum for gradient
         global_grad_sum = local_sum.clone()
-        dist..all_reduce(
-            global_grad_sum, op=dist..ReduceOp.SUM, group=group)
+        dist.all_reduce(
+            global_grad_sum, op=dist.ReduceOp.SUM, group=group)
 
         grad_x = local_grad - out * global_grad_sum
         return grad_x, None, None
