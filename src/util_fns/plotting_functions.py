@@ -1,10 +1,11 @@
 import matplotlib.pyplot as plt
-
+import numpy as np
 
 def plot_fields(input, output, target, save_path, index=1):
-    input_print = input[index].detach().cpu()
-    output_print = output[index].detach().cpu()
-    target_print = target[index].detach().cpu()
+    
+    input_print = np.flipud(input[index].detach().cpu().numpy())
+    output_print = np.flipud(output[index].detach().cpu().numpy())
+    target_print = np.flipud(target[index].detach().cpu().numpy())
 
     vmin = target_print.min()
     vmax = target_print.max()

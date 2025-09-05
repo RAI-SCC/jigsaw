@@ -23,8 +23,7 @@ def get_ddp_groups(rank: int, n_parallel: int) -> dist.ProcessGroup:
     global_groups = []
 
     for node in np.arange(n_parallel):
-        global_group_list.append(
-            ((np.arange(n_nodes)*n_parallel+node)).tolist())
+        global_group_list.append((np.arange(n_nodes) * n_parallel + node).tolist())
 
     for global_group in global_group_list:
         global_groups.append(dist.new_group(ranks=global_group))
@@ -39,17 +38,16 @@ def get_model_group(rank: int, n_parallel: int) -> dist.ProcessGroup:
         local_start_rank = i * n_parallel
         local_groups.append(
             dist.new_group(
-                ranks=list(
-                    range(local_start_rank, local_start_rank+n_parallel))
+                ranks=list(range(local_start_rank, local_start_rank + n_parallel))
             )
         )
 
-    return local_groups[rank//n_parallel]
+    return local_groups[rank // n_parallel]
 
 
 def get_model_group_rows(rank: int, n_parallel: int, n_rows: int) -> dist.ProcessGroup:
     """
-    Return mpi comm subgroups within model groups. 
+    Return mpi comm subgroups within model groups.
 
     rank: int
         global rank of process
@@ -76,9 +74,11 @@ def get_model_group_rows(rank: int, n_parallel: int, n_rows: int) -> dist.Proces
     return groups[idx]
 
 
-def get_model_group_columns(rank: int, n_parallel: int, n_cols: int) -> dist.ProcessGroup:
+def get_model_group_columns(
+    rank: int, n_parallel: int, n_cols: int
+) -> dist.ProcessGroup:
     """
-    Return mpi comm subgroups within model groups. 
+    Return mpi comm subgroups within model groups.
 
     rank: int
         global rank of process
@@ -96,8 +96,7 @@ def get_model_group_columns(rank: int, n_parallel: int, n_cols: int) -> dist.Pro
         base = node * n_parallel
         for col in range(n_cols):
             ranks = [base + r * n_cols + col for r in range(n_rows)]
-            groups.append(dist.new_group(ranks=ranks)
-                          )
+            groups.append(dist.new_group(ranks=ranks))
 
     node = rank // n_parallel
     local = rank % n_parallel
@@ -114,14 +113,16 @@ def set_all_seeds(seed: int = 0) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def set_all_seeds_model_group(seed: int = 0, rank: Optional[int] = None, n_parallel: int = None) -> None:
+def set_all_seeds_model_group(
+    seed: int = 0, rank: Optional[int] = None, n_parallel: int = None
+) -> None:
     """Set all seeds on all model groups to the same value."""
     set_all_seeds(seed + rank // n_parallel)
 
 
 def init_cuda() -> tuple[torch.device, int, int, int]:
     """
-    Initialize DistributedDataParallel. 
+    Initialize DistributedDataParallel.
 
     Returns
     -------
@@ -130,7 +131,7 @@ def init_cuda() -> tuple[torch.device, int, int, int]:
     rank: int
     world_size: int
     """
-    rank = int(os.getenv("SLURM_PROCID"))       # Get individual process ID.
+    rank = int(os.getenv("SLURM_PROCID"))  # Get individual process ID.
     # Get overall number of processes.
     world_size = int(os.getenv("SLURM_NTASKS"))
     slurm_localid = int(os.getenv("SLURM_LOCALID"))
@@ -141,13 +142,14 @@ def init_cuda() -> tuple[torch.device, int, int, int]:
     torch.cuda.set_device(slurm_localid)
 
     # Initialize DistributedDataParallel.
-    dist.init_process_group(backend="nccl",
-                            rank=rank,
-                            world_size=world_size,
-                            init_method="env://")
+    dist.init_process_group(
+        backend="nccl", rank=rank, world_size=world_size, init_method="env://"
+    )
 
     if dist.is_initialized():
-        print(f"Rank {rank}/{world_size}: Process group initialized with torch rank {dist.get_rank()} and torch world size {dist.get_world_size()}.")
+        print(
+            f"Rank {rank}/{world_size}: Process group initialized with torch rank {dist.get_rank()} and torch world size {dist.get_world_size()}."
+        )
     else:
         print(f"Rank {rank} not initialized")
 
@@ -158,16 +160,25 @@ def count_parameters(model: torch.nn.Module):
     """Return number of parameters in model."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
+
 # save model
 
 
-def save_model(model: torch.nn.Module, optimizer: torch.optim, scheduler: timm.scheduler, file_path: str, rank: int, epoch: int, model_name: str = 'model'):  # noqa: D103
+def save_model(
+    model: torch.nn.Module,
+    optimizer: torch.optim,
+    scheduler: timm.scheduler,
+    file_path: str,
+    rank: int,
+    epoch: int,
+    model_name: str = "model",
+):  # noqa: D103
     """Save model weights, optimizer state, epoch."""
     file_path = f"{file_path}/{model_name}_{rank}.pt"
     state = {
-        'model_state': model.state_dict(),
-        'optimizer_state': optimizer.state_dict(),
-        'epoch': epoch
+        "model_state": model.state_dict(),
+        "optimizer_state": optimizer.state_dict(),
+        "epoch": epoch,
     }
     torch.save(state, file_path)
 
@@ -178,21 +189,20 @@ def load_model(
     file_path: str,
     rank: int = 0,
     model_parallel: bool = False,
-    n_parallel: int = 4
+    n_parallel: int = 4,
 ):
     """Load model from state dict."""
     if model_parallel:
         load_rank = rank % n_parallel
-        file_path = f'{file_path}/model_{load_rank}.pt'
+        file_path = f"{file_path}/model_{load_rank}.pt"
     try:
-        state = torch.load(f"{file_path}", map_location='cpu')
-        model.load_state_dict(state['model_state'])
-        optimizer.load_state_dict(state['optimizer_state'])
-        epoch = state['epoch']
+        state = torch.load(f"{file_path}", map_location="cpu")
+        model.load_state_dict(state["model_state"])
+        optimizer.load_state_dict(state["optimizer_state"])
+        epoch = state["epoch"]
     except Exception:
         if rank == 0:
-            print(
-                f'Could not load model from {file_path}. Initializing from scratch.')
+            print(f"Could not load model from {file_path}. Initializing from scratch.")
         epoch = 0
     return model, optimizer, epoch
 
@@ -201,10 +211,10 @@ def get_position_encoding(seq_len: int, d: int, n: int = 10000):
     """Return fixed positional encoding for a given sequence length."""
     P = np.zeros((seq_len, d))
     for k in range(seq_len):
-        for i in np.arange(int(d/2)):
-            denominator = np.power(n, 2*i/d)
-            P[k, 2*i] = np.sin(k/denominator)
-            P[k, 2*i+1] = np.cos(k/denominator)
+        for i in np.arange(int(d / 2)):
+            denominator = np.power(n, 2 * i / d)
+            P[k, 2 * i] = np.sin(k / denominator)
+            P[k, 2 * i + 1] = np.cos(k / denominator)
     P = torch.tensor(P).to(torch.float32)
     return P
 
@@ -234,7 +244,7 @@ def build_model(
     n_parallel: int,
     model_group: dist.ProcessGroup,
     ddp_group: dist.ProcessGroup,
-    col_group: dist.ProcessGroup = None
+    col_group: dist.ProcessGroup = None,
 ) -> torch.nn.Module:
     """Instantiate model and wrap with DDP."""
     match n_parallel:
@@ -242,23 +252,25 @@ def build_model(
             model = Model.ModelSequential(config_dict, rank, device).to(device)
         case 2:
             model = Model.Model_twoway(
-                config_dict, rank, device, n_parallel, model_group).to(device)
+                config_dict, rank, device, n_parallel, model_group
+            ).to(device)
         case 4:
-            model = Model.Model(config_dict, rank, device,
-                                n_parallel, model_group, col_group).to(device)
+            model = Model.Model(
+                config_dict, rank, device, n_parallel, model_group, col_group
+            ).to(device)
         case 8:
             model = Model.Model_eightway(
-                config_dict, rank, device, n_parallel, model_group, col_group).to(device)
+                config_dict, rank, device, n_parallel, model_group, col_group
+            ).to(device)
 
-    model = DDP(model,
-                device_ids=[localid],
-                output_device=localid,
-                process_group=ddp_group
-                )
+    model = DDP(
+        model, device_ids=[localid], output_device=localid, process_group=ddp_group
+    )
 
     if rank == 0:
         print(
-            f"model has {count_parameters(model)*n_parallel/1e6} million parameters")
+            f"model has {count_parameters(model) * n_parallel / 1e6} million parameters"
+        )
         print(f"estimated forward FLOPS: {calc_flops_comm(config_dict)}")
     return model
 
@@ -268,10 +280,14 @@ def build_optimizer(config_dict: Dict, mlp: torch.nn.Module) -> optim.Optimizer:
     lr = config_dict["training"]["lr"]
     opt = optim.Adam(
         [
-            {"params": mlp.module.params.embedding.parameters(
-            ), "lr": config_dict["training"]["lr_embedding"]},
-            {"params": mlp.module.params.recovery.parameters(
-            ), "lr": config_dict["training"]["lr_recovery"]},
+            {
+                "params": mlp.module.params.embedding.parameters(),
+                "lr": config_dict["training"]["lr_embedding"],
+            },
+            {
+                "params": mlp.module.params.recovery.parameters(),
+                "lr": config_dict["training"]["lr_recovery"],
+            },
             {"params": mlp.module.params.common.parameters()},
         ],
         lr=lr,
@@ -280,13 +296,24 @@ def build_optimizer(config_dict: Dict, mlp: torch.nn.Module) -> optim.Optimizer:
     return opt
 
 
-def build_scheduler(config_dict: Dict, optimizer: optim.Optimizer, start_epoch: int = 0) -> timm.scheduler:
+def build_scheduler(
+    config_dict: Dict,
+    optimizer: optim.Optimizer,
+    start_epoch: int = 0,
+    n_epochs: int = 50,
+    lr_min: float = 1e-5
+) -> timm.scheduler:
     """Build LR scheduler and step it to start_epoch."""
     if config_dict["training"]["lr_constant"]:
         scheduler = StepLRScheduler(optimizer, decay_rate=1.0, decay_t=100)
     else:
         scheduler = CosineLRScheduler(
-            optimizer, t_initial=30, lr_min=5e-6, cycle_decay=1, cycle_mul=1, cycle_limit=10
+            optimizer,
+            t_initial=n_epochs,
+            lr_min=lr_min,
+            cycle_decay=1,
+            cycle_mul=1,
+            cycle_limit=10,
         )
     scheduler.step(start_epoch)
     return scheduler
@@ -322,86 +349,109 @@ def build_dataloaders(
     return train_dataloader, valid_dataloader
 
 
-def get_weights(config_dict: dict, device: torch.device, n_parallel: int, rank: int) -> tuple[torch.tensor, torch.tensor]:
+def get_weights(
+    config_dict: dict, device: torch.device, n_parallel: int, rank: int
+) -> tuple[torch.tensor, torch.tensor]:
     """Return variable and latitude-weighted weights."""
-    xlat = config_dict['data']['xlat']
-    surface_weights = torch.tensor(config_dict['training']['surface_weights'])
+    xlat = config_dict["data"]["xlat"]
+    surface_weights = torch.tensor(config_dict["training"]["surface_weights"])
     # [z, q, t, u, v]
-    pressure_weights = torch.tensor(
-        config_dict['training']['pressure_weights']).unsqueeze(1).expand(5, 13).flatten()
+    pressure_weights = (
+        torch.tensor(config_dict["training"]["pressure_weights"])
+        .unsqueeze(1)
+        .expand(5, 13)
+        .flatten()
+    )
     variable_weights = (
-        (torch.concat([surface_weights, pressure_weights]).view(1, 1, 1, 69))).to(device)
+        torch.concat([surface_weights, pressure_weights]).view(1, 1, 1, 69)
+    ).to(device)
 
-    area_weights = eval.calc_weight(xlat).view(
-        1, xlat, 1, 1).to(device).to(torch.float32)
+    area_weights = (
+        eval.calc_weight(xlat).view(1, xlat, 1, 1).to(device).to(torch.float32)
+    )
 
     variable_weights = torch.nn.functional.pad(variable_weights, (0, 3))
-    variable_weights = variable_weights[0, 0, 0, :36] if rank % n_parallel in [
-        0, 2] else variable_weights[0, 0, 0, 36:]
+    variable_weights = (
+        variable_weights[0, 0, 0, :36]
+        if rank % n_parallel in [0, 2]
+        else variable_weights[0, 0, 0, 36:]
+    )
 
     return variable_weights, area_weights
 
 
 def define_subset_sizes(config_dict: dict, rank: int) -> tuple[int, int]:
     """Return training and validation subset sizes."""
-    train_subset, valid_subset = config_dict['data']['train_subset'], config_dict['data']['valid_subset']
+    train_subset, valid_subset = (
+        config_dict["data"]["train_subset"],
+        config_dict["data"]["valid_subset"],
+    )
     train_subset = None if train_subset < 0 else train_subset
     valid_subset = None if valid_subset < 0 else valid_subset
 
     if rank == 0:
-        print(f'Training subset size {train_subset}')
-        print(f'Reading from {config_dict["data"]["train_data_path"]}')
+        print(f"Training subset size {train_subset}")
+        print(f"Reading from {config_dict['data']['train_data_path']}")
 
     return train_subset, valid_subset
 
 
 def build_loss_fn(config_dict):
     """Return loss function."""
-    loss_type = config_dict['training']['loss']
+    loss_type = config_dict["training"]["loss"]
     match loss_type:
-        case 'L1':
+        case "L1":
             loss_fn = torch.nn.L1Loss()
-        case 'L2':
+        case "L2":
             loss_fn = torch.nn.MSELoss()
         case _:
             raise ValueError("Only L1 and L2 losses are supported.")
     return loss_fn
+
 
 # For an AB multiplication,
 # define based on global in/hid/out dimensions
 
 
 def AB_flop_global(in_dim, hidden_dim, out_dim):
-    return in_dim*out_dim*(2*hidden_dim-1)
+    return in_dim * out_dim * (2 * hidden_dim - 1)
 
 
 def AB_flop_local(in_dim, hidden_dim, out_dim):
-    in_local, hidden_local, out_local = in_dim/2, hidden_dim/2, out_dim/2
+    in_local, hidden_local, out_local = in_dim / 2, hidden_dim / 2, out_dim / 2
     flop = 0
     for proc in range(4):
         if proc == 0:
-            flop = flop + 2 * \
-                AB_flop_global(in_local, hidden_local,
-                               out_local) + in_local*out_local
+            flop = (
+                flop
+                + 2 * AB_flop_global(in_local, hidden_local, out_local)
+                + in_local * out_local
+            )
         elif proc == 1:
-            flop = flop + 2 * \
-                AB_flop_global(in_local, hidden_local,
-                               out_local) + in_local*out_local
+            flop = (
+                flop
+                + 2 * AB_flop_global(in_local, hidden_local, out_local)
+                + in_local * out_local
+            )
         elif proc == 2:
-            flop = flop + 2 * \
-                AB_flop_global(in_local, hidden_local,
-                               out_local) + in_local*out_local
+            flop = (
+                flop
+                + 2 * AB_flop_global(in_local, hidden_local, out_local)
+                + in_local * out_local
+            )
         elif proc == 3:
-            flop = flop + 2 * \
-                AB_flop_global(in_local, hidden_local,
-                               out_local) + in_local*out_local
-    return flop/1e12
+            flop = (
+                flop
+                + 2 * AB_flop_global(in_local, hidden_local, out_local)
+                + in_local * out_local
+            )
+    return flop / 1e12
 
 
-def AB_communication(in_dim, hidden_dim, out_dim, dtype='float32'):
+def AB_communication(in_dim, hidden_dim, out_dim, dtype="float32"):
     # four processes
     # return parameters only
-    in_local, hidden_local, out_local = in_dim/2, hidden_dim/2, out_dim/2
+    in_local, hidden_local, out_local = in_dim / 2, hidden_dim / 2, out_dim / 2
     comm = 0
     for proc in range(4):
         if proc == 0:
@@ -413,12 +463,12 @@ def AB_communication(in_dim, hidden_dim, out_dim, dtype='float32'):
         elif proc == 3:
             comm = comm + in_local * hidden_local + hidden_local * out_local
 
-    return comm/(2**30)
+    return comm / (2**30)
 
 
 def transpose_communication(in_dim, out_dim):
-    in_local, out_local = in_dim/2, out_dim/2
-    return in_local*out_local*2/(2**30)
+    in_local, out_local = in_dim / 2, out_dim / 2
+    return in_local * out_local * 2 / (2**30)
 
 
 def mixing_block(ntokens, patch_embedding_out, spatial_hidden_dim, channels_hidden_dim):
@@ -429,81 +479,105 @@ def mixing_block(ntokens, patch_embedding_out, spatial_hidden_dim, channels_hidd
     # Transpose
     comm = comm + transpose_communication(*input_shape)
     # Token mixing
-    flop = flop + AB_flop_local(patch_embedding_out, ntokens,
-                                spatial_hidden_dim) + spatial_hidden_dim/1e12
-    comm = comm + AB_communication(patch_embedding_out,
-                                   ntokens, spatial_hidden_dim)
+    flop = (
+        flop
+        + AB_flop_local(patch_embedding_out, ntokens, spatial_hidden_dim)
+        + spatial_hidden_dim / 1e12
+    )
+    comm = comm + AB_communication(patch_embedding_out, ntokens, spatial_hidden_dim)
     # activation
-    flop = flop + patch_embedding_out*spatial_hidden_dim/1e12
+    flop = flop + patch_embedding_out * spatial_hidden_dim / 1e12
     # token mixing 2
-    flop = flop + AB_flop_local(patch_embedding_out,
-                                spatial_hidden_dim, ntokens) + ntokens/1e12
-    comm = comm + AB_communication(patch_embedding_out,
-                                   spatial_hidden_dim, ntokens)
+    flop = (
+        flop
+        + AB_flop_local(patch_embedding_out, spatial_hidden_dim, ntokens)
+        + ntokens / 1e12
+    )
+    comm = comm + AB_communication(patch_embedding_out, spatial_hidden_dim, ntokens)
 
     # transpose
     comm = comm + transpose_communication(patch_embedding_out, ntokens)
 
     # Residual connection addition
-    flop = flop + ntokens*patch_embedding_out/1e12
+    flop = flop + ntokens * patch_embedding_out / 1e12
 
     # channel mixing
-    flop = flop + AB_flop_local(ntokens, patch_embedding_out,
-                                channels_hidden_dim) + channels_hidden_dim/1e12
-    comm = comm + AB_communication(ntokens,
-                                   patch_embedding_out, channels_hidden_dim)
+    flop = (
+        flop
+        + AB_flop_local(ntokens, patch_embedding_out, channels_hidden_dim)
+        + channels_hidden_dim / 1e12
+    )
+    comm = comm + AB_communication(ntokens, patch_embedding_out, channels_hidden_dim)
     # activation
-    flop = flop + ntokens*channels_hidden_dim/1e12
+    flop = flop + ntokens * channels_hidden_dim / 1e12
     # channel mixing 2
-    flop = flop + AB_flop_local(ntokens, channels_hidden_dim,
-                                patch_embedding_out) + patch_embedding_out/1e12
-    comm = comm + AB_communication(ntokens,
-                                   channels_hidden_dim, patch_embedding_out)
+    flop = (
+        flop
+        + AB_flop_local(ntokens, channels_hidden_dim, patch_embedding_out)
+        + patch_embedding_out / 1e12
+    )
+    comm = comm + AB_communication(ntokens, channels_hidden_dim, patch_embedding_out)
 
     # residual addition
-    flop = flop + ntokens*patch_embedding_out/1e12
+    flop = flop + ntokens * patch_embedding_out / 1e12
 
     return flop, comm  # FLOP: GigaFLOP, Comm: GBs
 
 
 def calc_flops_comm(config):
-    nlat, nlon = config['data']['xlat'], config['data']['xlon']
+    nlat, nlon = config["data"]["xlat"], config["data"]["xlon"]
     nvars_in, nvars_out = 72, 72
-    patch_size = config['model']['patch_size']
+    patch_size = config["model"]["patch_size"]
     patch_embedding_in = patch_size * nvars_in
-    patch_embedding_out = config['model']['hidden_dim']
+    patch_embedding_out = config["model"]["hidden_dim"]
     # where ntokens = nlat*nlon/patch_size
-    input_data = (nlat*nlon/patch_size, patch_size*nvars_in)
-    ntokens = nlat*nlon/patch_size
-    spatial_hidden_dim = int(
-        config['model']['spatial_hidden_dim_fraction'] * ntokens)
+    input_data = (nlat * nlon / patch_size, patch_size * nvars_in)
+    ntokens = nlat * nlon / patch_size
+    spatial_hidden_dim = int(config["model"]["spatial_hidden_dim_fraction"] * ntokens)
     channels_hidden_dim = int(
-        config['model']['features_hidden_dim_fraction'] * patch_embedding_out)
+        config["model"]["features_hidden_dim_fraction"] * patch_embedding_out
+    )
 
     patch_embedding_comm = AB_communication(
-        ntokens, patch_size*nvars_in, patch_embedding_out)  # GBs of data communicated
-    patch_embedding_flop = AB_flop_local(
-        ntokens, patch_size*nvars_in, patch_embedding_out) + patch_embedding_out/1e12
+        ntokens, patch_size * nvars_in, patch_embedding_out
+    )  # GBs of data communicated
+    patch_embedding_flop = (
+        AB_flop_local(ntokens, patch_size * nvars_in, patch_embedding_out)
+        + patch_embedding_out / 1e12
+    )
 
     # including concat
     # (ntokens, patch_embedding_out)
     patch_recovery_comm = AB_communication(
-        ntokens, patch_embedding_out*2, patch_embedding_in)  # GBs of data communicated
-    patch_recovery_flop = AB_flop_local(
-        ntokens, patch_embedding_out*2, patch_embedding_in) + patch_embedding_in/1e12
+        ntokens, patch_embedding_out * 2, patch_embedding_in
+    )  # GBs of data communicated
+    patch_recovery_flop = (
+        AB_flop_local(ntokens, patch_embedding_out * 2, patch_embedding_in)
+        + patch_embedding_in / 1e12
+    )
 
     linlayer_comm = AB_communication(
-        nlat*nlon, nvars_out*2, nvars_out)  # GBs of data communicated
-    linlayer_flop = AB_flop_local(
-        nlat*nlon, nvars_out*2, nvars_out) + nvars_out/1e12
+        nlat * nlon, nvars_out * 2, nvars_out
+    )  # GBs of data communicated
+    linlayer_flop = (
+        AB_flop_local(nlat * nlon, nvars_out * 2, nvars_out) + nvars_out / 1e12
+    )
 
     tflop_per_block, gb_per_block = mixing_block(
-        input_data[0], patch_embedding_out, spatial_hidden_dim, channels_hidden_dim)
+        input_data[0], patch_embedding_out, spatial_hidden_dim, channels_hidden_dim
+    )
 
-    flop_forward = tflop_per_block * \
-        config['model']['mixing_blocks'] + patch_embedding_flop + \
-        linlayer_flop + patch_recovery_flop
-    comm_forward = gb_per_block*config['model']['mixing_blocks'] + \
-        patch_embedding_comm + linlayer_comm + patch_recovery_comm
+    flop_forward = (
+        tflop_per_block * config["model"]["mixing_blocks"]
+        + patch_embedding_flop
+        + linlayer_flop
+        + patch_recovery_flop
+    )
+    comm_forward = (
+        gb_per_block * config["model"]["mixing_blocks"]
+        + patch_embedding_comm
+        + linlayer_comm
+        + patch_recovery_comm
+    )
 
     return flop_forward, comm_forward

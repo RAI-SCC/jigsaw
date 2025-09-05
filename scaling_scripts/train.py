@@ -46,7 +46,7 @@ def training_loop(config_dict: dict, device: torch.device, localid: int, rank: i
     optimizer = utils.build_optimizer(config_dict, model)
     model, optimizer, epoch = utils.load_model(
         model, optimizer=optimizer, file_path=config_dict['training']['load_path'], rank=rank, model_parallel=model_parallel, n_parallel=n_parallel)
-    scheduler = utils.build_scheduler(config_dict, optimizer, epoch)
+    scheduler = utils.build_scheduler(config_dict, optimizer, epoch, n_epochs=config_dict['training']['n_epochs'], lr_min=config_dict['training']['lr_min'])
     loss_fn = utils.build_loss_fn(config_dict)
 
     # Set random seed and ensure the same model groups same seeds
@@ -154,11 +154,11 @@ def train_one_epoch(
         rollout = i % max_rollout
 
         # warmup lr only in epoch 0
-        if epoch == 0:
+        if epoch == 0 and i < 5000:
             max_values = scheduler._get_lr(epoch)
             for index, g in enumerate(optimizer.param_groups):
                 warm = i * (max_values[index] - start_lr) / \
-                max(1, len(train_dataloader)) + start_lr
+                5000 + start_lr
                 g["lr"] = warm
         input_data = data[0].to(device, non_blocking=True)
         target_data = data[1][rollout].to(device, non_blocking=True)
