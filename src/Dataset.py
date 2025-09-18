@@ -1331,17 +1331,15 @@ class HighResDataset(ERA5Preprocessed):
 
     def __getitem__(self, global_idx):
         input, target = super().__getitem__(global_idx)
-        input = input.permute(2, 0, 1).unsqueeze(0)
-
+        input = input.unsqueeze(0)
         input_up = torch.nn.functional.interpolate(
             input, scale_factor=(2, 2), mode="bilinear", align_corners=True
         )
-
         for i, t in enumerate(target):
             t = t.permute(2, 0, 1).unsqueeze(0)
             t = torch.nn.functional.interpolate(
                 t, scale_factor=(2, 2), mode="bilinear", align_corners=True
             )
             target[i] = t.squeeze(0).permute(1, 2, 0)
-        input_up = input_up.squeeze(0).permute(1, 2, 0)
+        input_up = input_up.squeeze(0)
         return input_up, target
