@@ -10,6 +10,7 @@ import torch.optim as optim
 from timm.scheduler.cosine_lr import CosineLRScheduler
 from timm.scheduler.step_lr import StepLRScheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.nn.utils import parameters_to_vector
 
 import Dataloaders
 import eval
@@ -199,7 +200,7 @@ def load_model(
         state = torch.load(f"{file_path}", map_location="cpu")
         model.load_state_dict(state["model_state"])
         optimizer.load_state_dict(state["optimizer_state"])
-        epoch = state["epoch"]
+        epoch = state["epoch"] + 1
     except Exception:
         if rank == 0:
             print(f"Could not load model from {file_path}. Initializing from scratch.")
@@ -258,6 +259,7 @@ def build_model(
             model = Model.Model(
                 config_dict, rank, device, n_parallel, model_group, col_group
             ).to(device)
+            ddp_average_layer_norm_weights(model, col_group)
         case 8:
             model = Model.Model_eightway(
                 config_dict, rank, device, n_parallel, model_group, col_group
@@ -274,6 +276,28 @@ def build_model(
         print(f"estimated forward FLOPS: {calc_flops_comm(config_dict)}")
     return model
 
+def iter_layer_norm_params(model: torch.nn.Module):
+    """
+    Yield (name, parameter) pairs for LayerNorm weights and biases.
+    """
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.LayerNorm):
+            for suffix, p in (("weight", module.weight), ("bias", module.bias)):
+                if p is not None:
+                    yield f"{name}.{suffix}", p
+
+@torch.no_grad()
+def ddp_average_layer_norm_weights(model: torch.nn.Module, col_group: dist.ProcessGroup) -> None:
+    """
+    All-reduce and in-place average LayerNorm weights/biases across processes.
+    Shapes: each param is [hidden_dim].
+    """
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        # Single process: nothing to do.
+        return
+    for _, p in iter_layer_norm_params(model): 
+        torch.distributed.all_reduce(p.data, op=torch.distributed.ReduceOp.SUM, group=col_group)
+        p.data.div_(2)
 
 def build_optimizer(config_dict: Dict, mlp: torch.nn.Module) -> optim.Optimizer:
     """Build Adam optimizer with per-block lrs."""
@@ -301,7 +325,7 @@ def build_scheduler(
     optimizer: optim.Optimizer,
     start_epoch: int = 0,
     n_epochs: int = 50,
-    lr_min: float = 1e-5
+    lr_min: float = 1e-5,
 ) -> timm.scheduler:
     """Build LR scheduler and step it to start_epoch."""
     if config_dict["training"]["lr_constant"]:
@@ -581,3 +605,29 @@ def calc_flops_comm(config):
     )
 
     return flop_forward, comm_forward
+
+
+def reduce_ddp_layernorms(
+    model, col_groups
+):
+    """
+    Reduce gradients across local groups for 4-way parallel.
+
+    For processes that predict the same variables.
+    """
+    # Now manually all-reduce each parameter's grad
+    handles = []
+    gradients = [
+        param.grad
+        for name, param in model.named_parameters()
+        if (param.grad is not None and "layer_norm" in name)
+    ]
+    flat_grad = parameters_to_vector(gradients)
+    handles = torch.distributed.all_reduce(
+        flat_grad,
+        op=torch.distributed.ReduceOp.AVG,
+        group=col_groups,
+        async_op=True,
+    )
+
+    return handles, flat_grad, gradients

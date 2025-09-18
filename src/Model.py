@@ -4,6 +4,7 @@ import torch
 import Linear
 import PatchEmbedding
 import utils
+import Dataset
 from Mixer import MixerBlock, MixerBlockSequential
 import Normalization as Norm
 
@@ -85,43 +86,63 @@ class Model(torch.nn.Module):
                 'common': torch.nn.ModuleList([self.blocks, self.layer_norm])
             }
             )
+        self.land_mask, self.soil_type, self.topography = Dataset.load_constant_mask_2d(
+            config_dict["data"]["constant_masks_path"], xlat=self.xlat
+        )
+        if self.rank % 4 in [0, 1]:
+            self.start, self.end = 0, self.xlon // 2
+        else:
+            self.start, self.end = self.xlon // 2, self.xlon
+        self.land_mask = torch.unsqueeze(self.land_mask[:, self.start : self.end], 0)
+        self.soil_type = torch.unsqueeze(self.soil_type[:, self.start : self.end], 0)
+        self.topography = torch.unsqueeze(self.topography[:, self.start : self.end], 0)
 
     def forward(self, x, rollout_=0):
-        x_res = x
-        x_res = x_res.flatten(start_dim=1, end_dim=2)
-        # x_shape [n_batch, n_var, 720, 1440]
-        x = self.embedding(x)
-        # After embedding: x_shape [n_batch, n_patch_lat * n_patch_lon, embed_dim]
-        x_res2 = x
-        for j in range(rollout_):  # Rolling out in "latent space"
+        
+        for i in range(rollout_):
+            x_res = x
+            if len(x_res.shape) > 3:
+                x_res = x_res.flatten(start_dim=1, end_dim=2)
+            else:
+                x = x.reshape(x.shape[0], self.n_lat, self.n_lat, x.shape[-1])
+                
+                if self.rank % 2 == 1:
+                    # change last 3 dims to constant mask
+                    x[...,-3] = self.land_mask
+                    x[...,-2] = self.soil_type
+                    x[...,-1] = self.topography
+                    x_res = x.flatten(start_dim=1, end_dim=2)    
+
+            # x_shape [n_batch, n_var, 720, 1440]
+            x = self.embedding(x)
+            # After embedding: x_shape [n_batch, n_patch_lat * n_patch_lon, embed_dim]
+            x_res2 = x
             for i in range(self.n_blocks):
                 x = self.blocks[i](x)
 
-        # After MLP-mixing blocks: [n_batch, n_patch_lat * n_patch_lon/2, embed_dim/2]
-        # After recovery: [n_batch, n_lat*n_lon//2, n_var//2]
-        if self.concat:
-            x = self.layer_norm(x)
-            x = torch.concat((x, x_res2), dim=2)
-        else:
-            x = self.layer_norm(x + x_res2)
-        x = self.recovery(x, self.n_lat, self.n_lon//2)
+            # After MLP-mixing blocks: [n_batch, n_patch_lat * n_patch_lon/2, embed_dim/2]
+            # After recovery: [n_batch, n_lat*n_lon//2, n_var//2]
+            if self.concat:
+                x = self.layer_norm(x)
+                x = torch.concat((x, x_res2), dim=2)
+            else:
+                x = self.layer_norm(x + x_res2)
+            x = self.recovery(x, self.n_lat, self.n_lon//2)
 
-        x = x.reshape(x.shape[0], -1, x.shape[-1])
-
-        if self.add:
-            return x + x_res
-
-        if self.linear_residual:
-            x = self.layer_norm2(x)
-            x = torch.concat((x, x_res), dim=2)
-
-            # After recovery: [n_batch, n_lat, n_lon, n_var]
-            x = self.layer_norm3(x)
             x = x.reshape(x.shape[0], -1, x.shape[-1])
-            x = self.linearlayer(x)
-            return x
-        else:
-            return x
+
+            if self.add:
+                return x + x_res
+
+            if self.linear_residual:
+                x = self.layer_norm2(x)
+                x = torch.concat((x, x_res), dim=2)
+
+                # After recovery: [n_batch, n_lat, n_lon, n_var]
+                x = self.layer_norm3(x)
+                x = x.reshape(x.shape[0], -1, x.shape[-1])
+                x = self.linearlayer(x)
+        return x
 
 
 class Model_twoway(torch.nn.Module):

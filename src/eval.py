@@ -4,6 +4,7 @@ import utils
 import time
 from pathlib import Path
 import pandas as pd
+import Dataset
 from util_fns import plotting_functions as plot_fns
 
 
@@ -270,8 +271,8 @@ def validate(
     device: torch.device,
     epoch: int,
     file_path: str,
-    mse_file_path: str = "rmse.csv",
-    acc_file_path: str = "acc.csv",
+    mse_file_path: str = "rmse",
+    acc_file_path: str = "acc",
     model_parallel: bool = True,
     world_size: int = 4,
     model_subgroup_col: torch.distributed.ProcessGroup = None,
@@ -279,8 +280,8 @@ def validate(
     model_group: torch.distributed.ProcessGroup = None,
 ):
     if config_dict["model"]["model_parallel"]:
-        mse_file_path = f"rmse_{rank}.csv"
-        acc_file_path = f"acc_{rank}.csv"
+        mse_file_path = f"{mse_file_path}_{rank}.csv"
+        acc_file_path = f"{acc_file_path}_{rank}.csv"
     loss = torch.zeros(1).to(device)
     parallelism = config_dict["model_parallel"]["parallelism"]
     rollout_time = config_dict["model"]["latent_rollout"]
@@ -352,6 +353,16 @@ def validate(
         )
 
     xlat, xlon = config_dict["data"]["xlat"], config_dict["data"]["xlon"]
+    land_mask, soil_type, topography = Dataset.load_constant_mask_2d(
+        config_dict["data"]["constant_masks_path"], xlat=xlat
+    )
+    if rank % 4 in [0, 1]:
+        start, end = 0, xlon // 2
+    else:
+        start, end = xlon // 2, xlon
+    land_mask = torch.unsqueeze(land_mask[:, start : end], 0)
+    soil_type = torch.unsqueeze(soil_type[:, start : end], 0)
+    topography = torch.unsqueeze(topography[:, start : end], 0)
 
     index_offset = 2 if "rollout_time" in var_names else 1
     mean, std = load_averages(config_dict)
@@ -369,6 +380,8 @@ def validate(
     for batch, data in enumerate(dataloader):
         if rank == 0:
             print(f"{batch}/{len(dataloader)}")
+        
+        input_data = data[0].to(device, non_blocking=True)
         for step, rollout in enumerate(rollout_time):
             # Write epoch
             rmse[rollout][0] = epoch
@@ -377,19 +390,23 @@ def validate(
             acc[rollout][1] = step
 
             # Input and target data loading
-            if parallelism == 1:
-                input_data = data[0].to(device, non_blocking=True)
-                target_data = data[1][step].to(device, non_blocking=True)
+            target_data = data[1][step].to(device, non_blocking=True)       
+            
+            if step == 0:        
+                model_input = input_data.detach()                
             else:
-                if config_dict["model_parallel"]["parallelism"] == 4:
-                    input_data = data[0].to(device, non_blocking=True)
-                    target_data = data[1][step].to(device, non_blocking=True)
-                else:
-                    input_data = data[0].to(device, non_blocking=True)
-
-            output = model(input_data, rollout_=step + 1)
-            output = output.detach()
-
+                model_input = model_output.reshape(2, 720, 720, 36)
+                
+                if rank % 2 == 1:
+                    # change last 3 dims to constant mask
+                    model_input[...,-3] = land_mask
+                    model_input[...,-2] = soil_type
+                    model_input[...,-1] = topography
+                    
+            model_output = model(model_input, rollout_=1)
+                
+            output = model_output.detach()
+            
             match parallelism:
                 case 1:
                     # Permute input data for mse calculation
