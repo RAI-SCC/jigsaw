@@ -1,5 +1,9 @@
 import torch
 import torch.distributed as dist
+from distributed_convolutions import conv1d_twoway, conv2d_twoway
+import torch.nn.functional as F
+from torch.nn.grad import conv1d_input, conv1d_weight, conv2d_input, conv2d_weight
+from typing import Optional, Tuple
 
 
 class DistributedConv1D(torch.nn.Module):
@@ -11,9 +15,9 @@ class DistributedConv1D(torch.nn.Module):
         stride,
         padding,
         dilation,
+        rank,
         groups,
-        bias,
-        random_seed
+        device
     ):
         """
         Distributed 1D Convolution.
@@ -23,19 +27,21 @@ class DistributedConv1D(torch.nn.Module):
         input shape of forward pass: (N, Cin, Lin) or (Cin, Lin)
         output shape of forward pass: (N, Cout, Lout)
         """
-
+        super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_size = kernel_size
         self.stride = stride
         self.padding = padding
         self.dilation = dilation
-        self.groups = groups
-        self.bias = bias
-        self.random_seed = random_seed
-
-        self.conv1d = torch.conv1d(
-            self.in_channels, self.out_channels, self.kernel_size)
+        self.rank = rank
+        self.model_group = groups
+        self.device = device
+        self.n_parallel = 2
+        
+        self.conv1d = torch.nn.Conv1d(
+            self.in_channels, self.out_channels, kernel_size=self.kernel_size, stride=self.stride
+        )
 
         self.conv1d_apply = Conv1d().apply
 
@@ -57,8 +63,9 @@ class DistributedConv1D(torch.nn.Module):
             B, out_dim are global values.
             in_dim is local value.
         """
-        Cij = self.conv1d_apply(x, self.weights, self.bias, self.rank,
-                                self.device, self.n_parallel, self.model_group)
+        Cij = self.conv1d_apply(
+            x, self.conv1d.weight, self.conv1d.bias, self.kernel_size, self.stride, self.padding, self.dilation, self.rank, self.device, self.n_parallel, self.model_group
+        )
 
         return Cij
 
@@ -70,57 +77,54 @@ class Conv1d(torch.autograd.Function):
     def forward(
         ctx: torch.autograd.Function,
         x: torch.Tensor,
-        w: torch.Tensor,
-        b: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
+        kernel_size: int,
+        stride: int,
+        padding: int,
+        dilation: int,
         rank: int,
         device: torch.device,
         n_parallel: int,
-        model_group: dist.ProcessGroup
+        model_group: dist.ProcessGroup,
     ) -> torch.Tensor:
-        """
-        Forward pass of linear layer (XWT) distributed across two processes.
-
-        Parameters
-        ----------
-        ctx : torch.autograd.Function
-            Context object to save information for backward computation.
-        x : torch.Tensor
-            Local input tensor of shape (B, x_in, in_dim).
-        W : torch.Tensor
-            Local weight tensor of shape (in_dim, out_dim).
-        b : torch.Tensor
-            Local bias tensor of shape (out_dim).
-        device : torch.device
-            Device to perform computation on.
-        rank : int
-            Global rank.
-        n_parallel : int
-            Number of processes to distribute operation across
-        model_group : dist.ProcessGroup, optional
-            Process group for an individual model-parallel instance.
-
-        Returns
-        -------
-        Cij: torch.Tensor
-            Local output tensor of shape (B, out_dim, in_dim).
-            B, out_dim are global values.
-            in_dim is local value.
-        """
-        ctx.save_for_backward(x, w)
         ctx.rank = rank
         ctx.device = device
         ctx.n_parallel = n_parallel
         ctx.model_group = model_group
-        ctx.b = b
-
-        xwt = select_xw_transpose_kernel(n_parallel)(
-            x, w, rank, device, model_group)
-
-        xwt = xwt if b is None else xwt.add(b)
-        return xwt
+        ctx.b = bias
+        
+        x_aug, L_local = conv1d_twoway(
+            x,
+            kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            rank=rank,
+            model_group=model_group,
+        )
+        y = F.conv1d(
+            x_aug,
+            weight,
+            bias,
+            stride=stride,
+            padding=padding
+        )
+        ctx.save_for_backward(x_aug, weight, torch.tensor([L_local], device=x.device))
+        ctx.stride, ctx.padding, ctx.dilation, ctx.groups = (
+            stride,
+            padding,
+            dilation,
+            model_group,
+        )
+        ctx.rank, ctx.group = rank, model_group
+        ctx.has_bias = bias is not None
+        return y
 
     @staticmethod
-    def backward(ctx: torch.autograd.Function, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None]:
+    def backward(
+        ctx: torch.autograd.Function, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None]:
         """
         Backward pass of linear layer (XWT) distributed across two processes.
 
@@ -140,20 +144,225 @@ class Conv1d(torch.autograd.Function):
         grad_bias: torch.Tensor
             Gradient with respect to the bias.
         """
-        input, weight = ctx.saved_tensors
-        b = ctx.b
-        rank = ctx.rank
-        device = ctx.device
-        n_parallel = ctx.n_parallel
-        model_group = ctx.model_group
+        x_aug, weight, L_local_t = ctx.saved_tensors
+        stride, padding, dilation, groups = (
+            ctx.stride,
+            ctx.padding,
+            ctx.dilation,
+            ctx.groups,
+        )
+        rank, group = ctx.rank, ctx.group
+        L_local = int(L_local_t.item())
 
-        grad_input = select_xw_kernel(n_parallel)(
-            grad_output, weight, rank=rank, device=device, model_group=model_group)
-        grad_weight = select_x_transpose_w_kernel(n_parallel)(
-            grad_output, input, rank=rank, device=device, model_group=model_group)
-        grad_b = grad_output
+        # parameter grads from native conv1d gradient helpers
+        g_w = conv1d_weight(
+            x_aug,
+            weight.shape,
+            grad_output,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=1,
+        )
+        g_b = grad_output.sum(dim=(0, 2)) if ctx.has_bias else None
 
-        if b is None:
-            return grad_input, grad_weight, None, None, None, None, None
-        else:
-            return grad_input, grad_weight, grad_b, None, None, None, None
+        # make grads identical on all ranks
+        dist.all_reduce(g_w, op=dist.ReduceOp.AVG, group=group)
+        if g_b is not None:
+            dist.all_reduce(g_b, op=dist.ReduceOp.AVG, group=group)
+        
+        # input grad then crop back to local slice
+        g_x_aug = conv1d_input(
+            x_aug.shape,
+            weight,
+            grad_output,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=1,
+        )
+        g_x = g_x_aug[..., :L_local] if (rank % 2 == 0) else g_x_aug[..., -L_local:]
+
+        return g_x, g_w, g_b, None, None, None, None, None, None, None, None
+
+
+class DistributedConv2D(torch.nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride,
+        padding,
+        dilation,
+        rank,
+        groups,
+        device
+    ):
+        """
+        Distributed 1D Convolution.
+
+        random seed is required because of initialization/synchronization between "partner processes"
+
+        input shape of forward pass: (N, Cin, Lin) or (Cin, Lin)
+        output shape of forward pass: (N, Cout, Lout)
+        """
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+        self.rank = rank
+        self.model_group = groups
+        self.device = device
+        self.n_parallel = 2
+        
+        self.conv2d = torch.nn.Conv2d(
+            self.in_channels, self.out_channels, kernel_size=self.kernel_size, stride=self.stride
+        )
+
+        self.conv2d_apply = Conv2d().apply
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of linear layer (XWT) distributed across two processes.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input tensor of shape (B, x_in, in_dim).
+        model_group : dist.ProcessGroup, optional
+            Process group for an individual model-parallel instance.
+
+        Returns
+        -------
+        Cij: torch.Tensor
+            Local output tensor of shape (B, out_dim, in_dim).
+            B, out_dim are global values.
+            in_dim is local value.
+        """
+        Cij = self.conv2d_apply(
+            x, self.conv2d.weight, self.conv2d.bias, self.kernel_size, self.stride, self.padding, self.dilation, self.rank, self.device, self.n_parallel, self.model_group
+        )
+
+        return Cij
+
+
+class Conv2d(torch.autograd.Function):
+    """Autograd function for batched matrix-matrix (XWT) multiplication distributed across n processes."""
+
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.Function,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
+        kernel_size: Union[int,],
+        stride: int,
+        padding: int,
+        dilation: int,
+        rank: int,
+        device: torch.device,
+        n_parallel: int,
+        model_group: dist.ProcessGroup,
+    ) -> torch.Tensor:
+        ctx.rank = rank
+        ctx.device = device
+        ctx.n_parallel = n_parallel
+        ctx.model_group = model_group
+        ctx.b = bias
+        
+        x_aug, W_local = conv2d_twoway(
+            x,
+            kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            rank=rank,
+            model_group=model_group,
+        )
+        y = F.conv2d(
+            x_aug,
+            weight,
+            bias,
+            stride=stride,
+            padding=padding
+        )
+        ctx.save_for_backward(x_aug, weight, torch.tensor([W_local], device=x.device))
+        ctx.stride, ctx.padding, ctx.dilation, ctx.groups = (
+            stride,
+            padding,
+            dilation,
+            model_group,
+        )
+        ctx.rank, ctx.group = rank, model_group
+        ctx.has_bias = bias is not None
+        return y
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.Function, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None]:
+        """
+        Backward pass of linear layer (XWT) distributed across two processes.
+
+        Parameters
+        ----------
+        ctx : torch.autograd.Function
+            Context object to save information for backward computation.
+        grad_output : tensor
+            The gradient of the loss with respect to the output of the layer.
+
+        Returns
+        -------
+        grad_input: torch.Tensor
+            Gradient with respect to the input.
+        grad_weight: torch.Tensor
+            Gradient with respect to the weights.
+        grad_bias: torch.Tensor
+            Gradient with respect to the bias.
+        """
+        x_aug, weight, L_local_t = ctx.saved_tensors
+        stride, padding, dilation, groups = (
+            ctx.stride,
+            ctx.padding,
+            ctx.dilation,
+            ctx.groups,
+        )
+        rank, group = ctx.rank, ctx.group
+        L_local = int(L_local_t.item())
+
+        # parameter grads from native conv1d gradient helpers
+        g_w = conv2d_weight(
+            x_aug,
+            weight.shape,
+            grad_output,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=1,
+        )
+        
+        g_b = grad_output.sum(dim=(0, 2, 3)) if ctx.has_bias else None
+
+        # make grads identical on all ranks
+        
+        dist.all_reduce(g_w, op=dist.ReduceOp.AVG, group=group)
+        if g_b is not None:
+            dist.all_reduce(g_b, op=dist.ReduceOp.AVG, group=group)
+        #print(f'I am rank {rank} with shape {g_b.shape}, L_local {L_local}')
+        # input grad then crop back to local slice
+        g_x_aug = conv2d_input(
+            x_aug.shape,
+            weight,
+            grad_output,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=1,
+        )
+        g_x = g_x_aug[..., :L_local] if (rank % 2 == 0) else g_x_aug[..., -L_local:]
+
+        return g_x, g_w, g_b, None, None, None, None, None, None, None, None
