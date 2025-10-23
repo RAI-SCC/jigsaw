@@ -3,6 +3,7 @@ import os
 import torch
 import torch.distributed as dist
 
+
 def conv1d_twoway(
     x: torch.tensor,
     kernel_size: int,
@@ -10,53 +11,61 @@ def conv1d_twoway(
     padding: int,
     dilation: int,
     rank: int,
-    model_group: dist.ProcessGroup    
+    model_group: dist.ProcessGroup,
 ) -> torch.tensor:
     """Distributed 1d convolution"""
     # x shape
-    
+
     overlap = max(kernel_size + (kernel_size - 1) * (dilation - 1) - stride, 0)
     mod = rank % 2
-    
+
     # global indices where you want to apply the convolutions:
-    global_size = int(x.shape[-1]*2)
-    global_steps = torch.arange(0, global_size-kernel_size, step=stride)
-    len_global_size = global_steps.shape[-1] 
-    
-    # uh
-    mid_index = len_global_size//2 - 1 if len_global_size % 2 == 0 else len_global_size//2 
-    
-    #print(global_steps[mid_index], x.shape[-1])
-#    local_steps = global_steps[0:mid_index] # i.e., [0, 3, 6]
-    #print(f'Mid index: {mid_index}, global steps {global_steps}')
-    # lets say x has shape [c, 10], with stride 3 and kernel size 10
-    # final size would be [1, 10, 4]
-    # on rank 0: you need [0--10], [3--13]
-    # on rank 1: [6 -- 16] --> append indices 6, 7, 8, 9
-    
-    right = (global_steps[mid_index]+kernel_size)-x.shape[-1] # left is how m uch you get from rank 1 --> 0
-    #right = kernel_size - (global_steps[mid_index+1])
+    global_size = int(x.shape[-1] * 2)
+    global_steps = torch.arange(0, global_size - kernel_size, step=stride)
+    len_global_size = global_steps.shape[-1]
+
+    # midpoint calculation
+    mid_index = (
+        len_global_size // 2 - 1 if len_global_size % 2 == 0 else len_global_size // 2
+    )
+
+    right = (global_steps[mid_index] + kernel_size) - x.shape[
+        -1
+    ]  # left is how m uch you get from rank 1 --> 0
+    # right = kernel_size - (global_steps[mid_index+1])
     left = overlap - right
-    #print(f"from right perspective: {right}, {global_steps[mid_index+1]}")
-    #print(f'Rank {rank}, Right {right}, left {left}, total overlap {overlap}')
+
     B, C, L = x.shape
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
 
     match mod:
         case 0:
             send = x[..., -right:] if right > 0 else empty
-            recv = torch.zeros((B, C, right), device=x.device, dtype=x.dtype) if right > 0 else empty
+            recv = (
+                torch.zeros((B, C, right), device=x.device, dtype=x.dtype)
+                if right > 0
+                else empty
+            )
             send = send.contiguous()
-            dist.all_to_all([recv, empty], [empty, send], group=model_group, async_op=False)
+            dist.all_to_all(
+                [empty, recv], [empty, send], group=model_group, async_op=False
+            )
             x_augment = torch.cat((x, recv if right > 0 else empty), dim=-1)
         case 1:
             send = x[..., :left] if left > 0 else empty
-            recv = torch.zeros((B, C, left), device=x.device, dtype=x.dtype) if left > 0 else empty
+            recv = (
+                torch.zeros((B, C, left), device=x.device, dtype=x.dtype)
+                if left > 0
+                else empty
+            )
             send = send.contiguous()
-            dist.all_to_all([empty, recv], [send, empty], group=model_group, async_op=False)
+            dist.all_to_all(
+                [recv, empty], [send, empty], group=model_group, async_op=False
+            )
             x_augment = torch.cat((recv if left > 0 else empty, x), dim=-1)
-    
+
     return x_augment, L
+
 
 def conv2d_twoway(
     x: torch.tensor,
@@ -65,55 +74,95 @@ def conv2d_twoway(
     padding: int,
     dilation: int,
     rank: int,
-    model_group: dist.ProcessGroup    
+    model_group: dist.ProcessGroup,
 ) -> torch.tensor:
     """Distributed 1d convolution"""
     # x shape
-    
-    overlap = max(kernel_size[1] + (kernel_size[1] - 1) * (dilation[1] - 1) - stride[1], 0)
+
+    overlap = max(
+        kernel_size[1] + (kernel_size[1] - 1) * (dilation[1] - 1) - stride[1], 0
+    )
     mod = rank % 2
-    
+
     # global indices where you want to apply the convolutions:
-    global_size = int(x.shape[-1]*2)
-    global_steps = torch.arange(0, global_size-kernel_size[1], step=stride[1])
-    len_global_size = global_steps.shape[-1] 
-    
+    global_size = int(x.shape[-1] * 2)
+    global_steps = torch.arange(0, global_size - kernel_size[1], step=stride[1])
+    len_global_size = global_steps.shape[-1]
+
     # uh
-    mid_index = len_global_size//2 - 1 if len_global_size % 2 == 0 else len_global_size//2 
-    
-    #print(global_steps[mid_index], x.shape[-1])
-#    local_steps = global_steps[0:mid_index] # i.e., [0, 3, 6]
-    #print(f'Mid index: {mid_index}, global steps {global_steps}')
+    mid_index = (
+        len_global_size // 2 - 1 if len_global_size % 2 == 0 else len_global_size // 2
+    )
+
+    # print(global_steps[mid_index], x.shape[-1])
+    #    local_steps = global_steps[0:mid_index] # i.e., [0, 3, 6]
+    # print(f'Mid index: {mid_index}, global steps {global_steps}')
     # lets say x has shape [c, 10], with stride 3 and kernel size 10
     # final size would be [1, 10, 4]
     # on rank 0: you need [0--10], [3--13]
     # on rank 1: [6 -- 16] --> append indices 6, 7, 8, 9
-    
-    right_to_left = (global_steps[mid_index]+kernel_size[1])-x.shape[-1] # right is how much you get from rank 1 gets
-    #right = kernel_size - (global_steps[mid_index+1])
+
+    right_to_left = (global_steps[mid_index] + kernel_size[1]) - x.shape[
+        -1
+    ]  # right is how much you get from rank 1 gets
+    # right = kernel_size - (global_steps[mid_index+1])
     left_to_right = overlap - right_to_left
-    #print(f"from right perspective: {right}, {global_steps[mid_index+1]}")
-    #print(f'Rank {rank}, Right {right}, left {left}, total overlap {overlap}')
+    # print(f"from right perspective: {right}, {global_steps[mid_index+1]}")
+    # print(f'Rank {rank}, Right {right}, left {left}, total overlap {overlap}')
     B, C, H, W = x.shape
-    
+
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
 
     match mod:
         case 0:
             send = x[..., -left_to_right:] if left_to_right > 0 else empty
-            recv = torch.zeros((B, C, H, right_to_left), device=x.device, dtype=x.dtype) if right_to_left > 0 else empty
+            recv = (
+                torch.zeros((B, C, H, right_to_left), device=x.device, dtype=x.dtype)
+                if right_to_left > 0
+                else empty
+            )
             send = send.contiguous()
-            #print(f'Rank {rank} recv shape {recv.shape}, send shape {send.shape}, left {left_to_right}, right {right_to_left}')
-            dist.all_to_all([recv, empty], [empty, send], group=model_group, async_op=False)
+            # print(f'Rank {rank} recv shape {recv.shape}, send shape {send.shape}, left {left_to_right}, right {right_to_left}')
+            dist.all_to_all(
+                [empty, recv], [empty, send], group=model_group, async_op=False
+            )
             x_augment = torch.cat((x, recv if right_to_left > 0 else empty), dim=-1)
         case 1:
             send = x[..., :right_to_left] if right_to_left > 0 else empty
-            recv = torch.zeros((B, C, H, left_to_right), device=x.device, dtype=x.dtype) if left_to_right > 0 else empty
+            recv = (
+                torch.zeros((B, C, H, left_to_right), device=x.device, dtype=x.dtype)
+                if left_to_right > 0
+                else empty
+            )
             send = send.contiguous()
-            dist.all_to_all([empty, recv], [send, empty], group=model_group, async_op=False)
+            dist.all_to_all(
+                [recv, empty], [send, empty], group=model_group, async_op=False
+            )
             x_augment = torch.cat((recv if left_to_right > 0 else empty, x), dim=-1)
-            #print(f'Rank {rank} recv shape {recv.shape}, send shape {send.shape}')
-    return x_augment, W
+            # print(f'Rank {rank} recv shape {recv.shape}, send shape {send.shape}')
+    return x_augment, H, W
+
+
+def global_to_local_mapping(
+    h_size: int,
+    w_size: int,
+    rank: int,
+    world_size: int,
+    global_index_h: int,
+    global_index_w: int,
+):
+    if rank in [2, 3]:
+        global_mapping_y = global_index_h - h_size
+    else:
+        global_mapping_y = global_index_h
+    if rank in [1, 3]:
+        global_mapping_x = global_index_w - w_size
+    else:
+        global_mapping_x = global_index_w
+    global_mapping_x = 0 if global_mapping_x < 0 else global_mapping_x
+    global_mapping_y = 0 if global_mapping_y < 0 else global_mapping_y
+    return global_mapping_y, global_mapping_x
+
 
 def conv2d_fourway(
     x: torch.tensor,
@@ -122,62 +171,312 @@ def conv2d_fourway(
     padding: int,
     dilation: int,
     rank: int,
-    model_group: dist.ProcessGroup    
+    model_group: dist.ProcessGroup,
 ) -> torch.tensor:
     """Distributed 2d convolution"""
     # x shape
-    
-    x_overlap = max(kernel_size[0] + (kernel_size[0] - 1) * (dilation[0] - 1) - stride[0], 0)
-    y_overlap = max(kernel_size[1] + (kernel_size[1] - 1) * (dilation[1] - 1) - stride[1], 0)
-    
+
+    h_size, w_size = x.shape[-2], x.shape[-1]
     mod = rank % 4
-    
+
     # global indices where you want to apply the convolutions:
-    global_size_x = int(x.shape[-2]*2)
-    global_size_y = int(x.shape[-1]*2)
-    global_steps_x = torch.arange(0, global_size_x-kernel_size[0], step=stride[0])
-    global_steps_y = torch.arange(0, global_size_y-kernel_size[1], step=stride[1])
-    len_global_size_x = global_steps_x.shape[-1] 
-    len_global_size_y = global_steps_y.shape[-1] 
-    
-    # uh
-    mid_index_x = len_global_size_x//2 - 1 if len_global_size_x % 2 == 0 else len_global_size_x//2 
-    mid_index_y = len_global_size_y//2 - 1 if len_global_size_y % 2 == 0 else len_global_size_y//2 
-    
-    #print(global_steps[mid_index], x.shape[-1])
-#    local_steps = global_steps[0:mid_index] # i.e., [0, 3, 6]
-    #print(f'Mid index: {mid_index}, global steps {global_steps}')
-    # lets say x has shape [c, 10], with stride 3 and kernel size 10
-    # final size would be [1, 10, 4]
-    # on rank 0: you need [0--10], [3--13]
-    # on rank 1: [6 -- 16] --> append indices 6, 7, 8, 9
-    
-    x_right_to_left = (global_steps_x[mid_index_x]+kernel_size[0])-x.shape[-2] # right is how much you get from rank 1 gets
-    #right = kernel_size - (global_steps[mid_index+1])
-    x_left_to_right = x_overlap - x_right_to_left
-    
-    y_right_to_left = (global_steps_x[mid_index_x]+kernel_size[1])-x.shape[-1]
-    y_left_to_right = y_overlap - y_right_to_left
-    
-    #print(f"from right perspective: {right}, {global_steps[mid_index+1]}")
-    #print(f'Rank {rank}, Right {right}, left {left}, total overlap {overlap}')
+    global_size_h = int(x.shape[-2] * 2)
+    global_size_w = int(x.shape[-1] * 2)
+    global_steps_h = torch.arange(0, global_size_h - kernel_size[0] + 1, step=stride[0])
+    global_steps_w = torch.arange(0, global_size_w - kernel_size[1] + 1, step=stride[1])
+
+    len_global_size_y = global_steps_h.shape[-1]
+    len_global_size_x = global_steps_w.shape[-1]
+    # midpoint calculation
+    mid_index_h = (
+        len_global_size_y // 2 - 1
+        if len_global_size_y % 2 == 0
+        else len_global_size_y // 2
+    )
+    mid_index_w = (
+        len_global_size_x // 2 - 1
+        if len_global_size_x % 2 == 0
+        else len_global_size_x // 2
+    )
+
+    h_bottom_to_top = (global_steps_h[mid_index_h] + kernel_size[0]) - x.shape[-2]
+    if h_bottom_to_top < 0:
+        h_bottom_to_top = 0
+    h_top_to_bottom = x.shape[-2] - global_steps_h[mid_index_h + 1]
+    if h_top_to_bottom < 0:
+        h_top_to_bottom = 0
+
+    w_right_to_left = (global_steps_w[mid_index_w] + kernel_size[1]) - x.shape[-1]
+    if w_right_to_left < 0:
+        w_right_to_left = 0
+    # w_local_max = global_steps_w[mid_index_w] + kernel_size[1]
+    # w_local_max = x.shape[-1] if w_local_max > x.shape[-1] else w_local_max
+    # print(f'wlocal max {w_local_max}')
+    w_left_to_right = (x.shape[-1]) - global_steps_w[mid_index_w + 1]
+    if w_left_to_right < 0:
+        w_left_to_right = 0
+
+    # print(
+    #     f"Left to right {w_left_to_right}, Right to left {w_right_to_left}",
+    #     f"y top to bottom {h_top_to_bottom}, y bottom to top {h_bottom_to_top}",
+    # )
+
     B, C, H, W = x.shape
-    
+
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
 
     match mod:
         case 0:
-            send = x[..., -x_left_to_right, -y_left_to_right:] if y_left_to_right > 0 else empty
-            recv = torch.zeros((B, C, x_right_to_left, y_right_to_left), device=x.device, dtype=x.dtype) if y_right_to_left > 0 else empty
-            send = send.contiguous()
-            #print(f'Rank {rank} recv shape {recv.shape}, send shape {send.shape}, left {left_to_right}, right {right_to_left}')
-            dist.all_to_all([recv, empty], [empty, send], group=model_group, async_op=False)
-            x_augment = torch.cat((x, recv if x_right_to_left > 0 else empty), dim=-1) # TODO: how to append multiple dimensions?
+            send_1 = x[..., -w_left_to_right:] if w_left_to_right > 0 else empty
+            send_2 = (
+                x[..., -h_top_to_bottom:, :]
+                if h_top_to_bottom > 0
+                else empty
+            )
+            send_3 = (
+                x[..., -h_top_to_bottom:, -w_left_to_right:]
+                if (w_left_to_right > 0 and h_top_to_bottom > 0)
+                else empty
+            )
+            recv_1 = (
+                torch.zeros(
+                    (B, C, H, w_right_to_left),
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                if w_right_to_left > 0
+                else empty
+            )
+            recv_2 = (
+                torch.zeros(
+                    (B, C, h_bottom_to_top, W),
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                if h_bottom_to_top > 0
+                else empty
+            )
+            recv_3 = (
+                torch.zeros(
+                    (
+                        B,
+                        C,
+                        h_bottom_to_top,
+                        w_right_to_left,
+                    ),
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                if (h_bottom_to_top > 0 and w_right_to_left > 0)
+                else empty
+            )
+            send_1, send_2, send_3 = (
+                send_1.contiguous(),
+                send_2.contiguous(),
+                send_3.contiguous(),
+            )
+
+            dist.all_to_all(
+                [empty, recv_1, recv_2, recv_3],
+                [empty, send_1, send_2, send_3],
+                group=model_group,
+                async_op=False,
+            )
+            x_augment_1 = torch.cat(
+                (x, recv_1 if w_right_to_left > 0 else empty), dim=-1
+            )
+            x_augment_2 = torch.cat((recv_2, recv_3), dim=-1)
+            x_augment = torch.cat((x_augment_1, x_augment_2), dim=-2).contiguous()
         case 1:
-            send = x[..., :right_to_left] if right_to_left > 0 else empty
-            recv = torch.zeros((B, C, H, left_to_right), device=x.device, dtype=x.dtype) if left_to_right > 0 else empty
-            send = send.contiguous()
-            dist.all_to_all([empty, recv], [send, empty], group=model_group, async_op=False)
-            x_augment = torch.cat((recv if left_to_right > 0 else empty, x), dim=-1)
-            #print(f'Rank {rank} recv shape {recv.shape}, send shape {send.shape}')
-    return x_augment, W
+            send_0 = x[..., :w_right_to_left] if w_right_to_left > 0 else empty
+            send_2 = (
+                x[..., -h_top_to_bottom:, :w_right_to_left]
+                if (h_top_to_bottom > 0 and w_right_to_left > 0)
+                else empty
+            )
+            send_3 = x[..., -h_top_to_bottom:, :] if h_top_to_bottom > 0 else empty
+            recv_0 = (
+                torch.zeros(
+                    (B, C, H, w_left_to_right),
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                if w_left_to_right > 0
+                else empty
+            )
+            recv_2 = (
+                torch.zeros(
+                    (
+                        B,
+                        C,
+                        h_bottom_to_top,
+                        w_left_to_right,
+                    ),
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                if (h_bottom_to_top > 0 and w_left_to_right > 0)
+                else empty
+            )
+            recv_3 = (
+                torch.zeros(
+                    (B, C, h_bottom_to_top, W),
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                if h_bottom_to_top > 0
+                else empty
+            )
+            send_0, send_2, send_3 = (
+                send_0.contiguous(),
+                send_2.contiguous(),
+                send_3.contiguous(),
+            )
+
+            dist.all_to_all(
+                [recv_0, empty, recv_2, recv_3],
+                [send_0, empty, send_2, send_3],
+                group=model_group,
+                async_op=False,
+            )
+            x_augment_1 = torch.cat((recv_0, x), dim=-1)
+            x_augment_2 = torch.cat((recv_2, recv_3), dim=-1)
+            x_augment = torch.cat((x_augment_1, x_augment_2), dim=-2).contiguous()
+            h_coord, w_coord = global_to_local_mapping(
+                h_size,
+                w_size,
+                rank,
+                4,
+                global_steps_h[mid_index_h],
+                global_steps_w[mid_index_w + 1],
+            )
+            x_augment = x_augment[..., w_coord:]
+            # print(f'Rank 1 X augment {x_augment}')
+            # print(f'Rank 1 recv from 2 {recv_2}')
+        case 2:
+            send_0 = (
+                x[..., :h_bottom_to_top, :] if h_bottom_to_top > 0 else empty
+            )
+            send_1 = (
+                x[..., :h_bottom_to_top, -w_left_to_right:]
+                if (h_bottom_to_top > 0 and w_left_to_right > 0)
+                else empty
+            )
+            # print(f'Rank 2-->1 shape {send_1.shape}, bottom to top: {h_bottom_to_top}, left to right:')
+            send_3 = x[..., -w_left_to_right:] if w_left_to_right > 0 else empty
+            recv_0 = (
+                torch.zeros(
+                    (B, C, h_top_to_bottom, W),
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                if h_top_to_bottom > 0
+                else empty
+            )
+            recv_1 = (
+                torch.zeros(
+                    (B, C, h_top_to_bottom, w_right_to_left),
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                if h_top_to_bottom > 0 and w_right_to_left > 0
+                else empty
+            )
+            recv_3 = (
+                torch.zeros(
+                    (B, C, H, w_right_to_left),
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                if w_right_to_left > 0
+                else empty
+            )
+            send_0, send_1, send_3 = (
+                send_0.contiguous(),
+                send_1.contiguous(),
+                send_3.contiguous(),
+            )
+
+            dist.all_to_all(
+                [recv_0, recv_1, empty, recv_3],
+                [send_0, send_1, empty, send_3],
+                group=model_group,
+                async_op=False,
+            )
+            x_augment_1 = torch.cat((recv_0, recv_1), dim=-1)
+            x_augment_2 = torch.cat((x, recv_3), dim=-1)
+            x_augment = torch.cat((x_augment_1, x_augment_2), dim=-2).contiguous()
+            h_coord, w_coord = global_to_local_mapping(
+                h_size,
+                w_size,
+                rank,
+                4,
+                global_steps_h[mid_index_h + 1],
+                global_steps_w[mid_index_w],
+            )
+            x_augment = x_augment[..., h_coord:, :]
+        case 3:
+            send_0 = (
+                x[..., :h_bottom_to_top, :w_right_to_left]
+                if (h_bottom_to_top > 0 and w_right_to_left > 0)
+                else empty
+            )
+            send_1 = x[..., :h_bottom_to_top, :] if h_bottom_to_top > 0 else empty
+            send_2 = x[..., :w_right_to_left] if w_right_to_left > 0 else empty
+            recv_0 = (
+                torch.zeros(
+                    (B, C, h_top_to_bottom, w_left_to_right),
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                if (h_top_to_bottom > 0 and w_left_to_right > 0)
+                else empty
+            )
+            recv_1 = (
+                torch.zeros(
+                    (B, C, h_top_to_bottom, W),
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                if h_top_to_bottom > 0
+                else empty
+            )
+            recv_2 = (
+                torch.zeros(
+                    (B, C, H, w_left_to_right),
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                if w_left_to_right > 0
+                else empty
+            )
+            send_0, send_1, send_2 = (
+                send_0.contiguous(),
+                send_1.contiguous(),
+                send_2.contiguous(),
+            )
+
+            dist.all_to_all(
+                [recv_0, recv_1, recv_2, empty],
+                [send_0, send_1, send_2, empty],
+                group=model_group,
+                async_op=False,
+            )
+
+            x_augment_1 = torch.cat((recv_0, recv_1), dim=-1)
+            x_augment_2 = torch.cat((recv_2, x), dim=-1)
+            x_augment = torch.cat((x_augment_1, x_augment_2), dim=-2).contiguous()
+            h_coord, w_coord = global_to_local_mapping(
+                h_size,
+                w_size,
+                rank,
+                4,
+                global_steps_h[mid_index_h + 1],
+                global_steps_w[mid_index_w + 1],
+            )
+
+            x_augment = x_augment[..., h_coord:, w_coord:]
+
+    # print(f"I am rank {rank} and x_augment has shape {x_augment.shape}")
+
+    return x_augment, H, W

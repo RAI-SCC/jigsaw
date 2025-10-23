@@ -593,7 +593,7 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
                 patch_size*var_in//2, embed_dim//2,  rank, device, n_parallel, model_group, n_channels=var_in, init_method='conv')
         elif n_parallel == 8:
             self.patch_embed = Linear.DistributedXWT(
-                patch_size*var_in//4, embed_dim//2,  rank, device, n_parallel, model_group, n_channels=var_in, init_method='conv')
+                patch_size*var_in//2, embed_dim//4,  rank, device, n_parallel, model_group, n_channels=var_in, init_method='conv')
 
         self.rank = rank
         self.device = device
@@ -640,8 +640,12 @@ class Distributed1DPatchRecovery(torch.nn.Module):
         self.concat = concat
 
         if self.concat:
-            self.conv = Linear.DistributedXWT(embed_dim, patch_size*out_channels, self.rank, self.device,
-                                              self.n_parallel, self.model_group, n_channels=embed_dim, init_method='conv')
+            if self.n_parallel == 8: # why
+              self.conv = Linear.DistributedXWT(embed_dim, patch_size*out_channels//2, self.rank, self.device,
+                                                self.n_parallel, self.model_group, n_channels=embed_dim, init_method='conv')
+            else:
+              self.conv = Linear.DistributedXWT(embed_dim, patch_size*out_channels, self.rank, self.device,
+                                                self.n_parallel, self.model_group, n_channels=embed_dim, init_method='conv')
         else:
             self.conv = Linear.DistributedXWT(embed_dim//2, patch_size*out_channels, self.rank,
                                               self.device, self.n_parallel, self.model_group, n_channels=embed_dim, init_method='conv')

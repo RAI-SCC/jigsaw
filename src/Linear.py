@@ -139,7 +139,6 @@ class DistributedXWT(torch.nn.Module):
         """
         Cij = self.XWT(x, self.weights, self.bias, self.rank,
                        self.device, self.n_parallel, self.model_group)
-
         return Cij
 
 
@@ -305,7 +304,6 @@ class DistributedXW(torch.nn.Module):
         """
         cij = self.XW(x, self.weights, self.bias, self.rank,
                       self.device, self.n_parallel, self.model_group)
-
         return cij
 
 

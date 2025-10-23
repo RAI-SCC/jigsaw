@@ -24,7 +24,7 @@ class DistributedLayerNorm(torch.nn.Module):
         self.device = device
         self.norm_group = norm_group
         self.layer_norm = torch.nn.LayerNorm(dim).to(device)
-        self.layer_norm_apply = DistributedLN.apply
+        #self.layer_norm_apply = DistributedLN.apply
 
     def forward(self, x):
         """Forward pass of layer norm distributed across n processes."""

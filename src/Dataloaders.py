@@ -88,14 +88,12 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
         else:
             dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(
                 2, 4, 4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
-
-    if subset_size != 0:
+    if subset_size > 0:
         subset_indices = torch.randperm(len(dataset))[:subset_size]
         dataset = Subset(dataset, subset_indices)
     if subset_size > len(dataset):
         subset_indices = torch.randperm(800).repeat(config_dict['data']['train_subset'] // 800)
         dataset = Subset(dataset, subset_indices)
-
     if mode == 'validation' and parallelism > 1:
         sampler = DistributedSampler(dataset,
                                      shuffle=False,
@@ -129,5 +127,4 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
                                 prefetch_factor=config_dict['data']['prefetch_factor'],
                                 num_workers=config_dict['data']['num_workers']
                                 )
-
     return dataloader

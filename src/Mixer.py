@@ -23,7 +23,7 @@ class MixerBlock(torch.nn.Module):
             Device to run the computations on.
         rank : int
             Global rank.
-        """  # noqa: D205
+        """  
         super(MixerBlock, self).__init__()
         self.token_mixing = MLP.DistributedXTWMLP(tokens_mlp_dim, int(
             tokens_mlp_dim * spatial_hidden_dim_fraction), tokens_mlp_dim, rank, device, n_parallel=n_parallel, model_group=model_group)
@@ -39,7 +39,7 @@ class MixerBlock(torch.nn.Module):
         if n_parallel == 2:
             self.layer_norm1 = torch.nn.LayerNorm(channels_mlp_dim//2)
             self.layer_norm2 = torch.nn.LayerNorm(channels_mlp_dim//2)
-        elif n_parallel == 4:  # TODO; not used at the moment
+        elif n_parallel == 4 or n_parallel == 8: 
             self.layer_norm1 = Norm.DistributedLayerNorm(
                 channels_mlp_dim//2, self.rank, self.device, self.model_group)
             self.layer_norm2 = Norm.DistributedLayerNorm(
@@ -70,7 +70,6 @@ class MixerBlock(torch.nn.Module):
         x = x_res + y
         y = self.layer_norm2(x)
         x = x + self.channel_mixing(y)
-
         return x
 
 

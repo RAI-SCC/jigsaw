@@ -42,7 +42,6 @@ def get_model_group(rank: int, n_parallel: int) -> dist.ProcessGroup:
                 ranks=list(range(local_start_rank, local_start_rank + n_parallel))
             )
         )
-
     return local_groups[rank // n_parallel]
 
 
@@ -201,6 +200,7 @@ def load_model(
         model.load_state_dict(state["model_state"])
         optimizer.load_state_dict(state["optimizer_state"])
         epoch = state["epoch"] + 1
+        #epoch = 0
     except Exception:
         if rank == 0:
             print(f"Could not load model from {file_path}. Initializing from scratch.")
@@ -259,7 +259,7 @@ def build_model(
             model = Model.Model(
                 config_dict, rank, device, n_parallel, model_group, col_group
             ).to(device)
-            ddp_average_layer_norm_weights(model, col_group)
+            #ddp_average_layer_norm_weights(model, col_group)
         case 8:
             model = Model.Model_eightway(
                 config_dict, rank, device, n_parallel, model_group, col_group
@@ -349,8 +349,8 @@ def build_dataloaders(
     """Build train and validation dataloaders."""
     train_subset = config_dict["data"]["train_subset"]
     valid_subset = config_dict["data"]["valid_subset"]
-    train_subset = None if train_subset < 0 else train_subset
-    valid_subset = None if valid_subset < 0 else valid_subset
+    train_subset = -1 if train_subset < 0 else train_subset
+    valid_subset = -1 if valid_subset < 0 else valid_subset
 
     train_dataloader = Dataloaders.get_dataloader(
         config_dict,
