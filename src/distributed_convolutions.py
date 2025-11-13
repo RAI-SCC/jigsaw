@@ -2,7 +2,7 @@ import os
 
 import torch
 import torch.distributed as dist
-
+import torch.nn.functional as F
 
 def conv1d_twoway(
     x: torch.tensor,
@@ -65,6 +65,36 @@ def conv1d_twoway(
             x_augment = torch.cat((recv if left > 0 else empty, x), dim=-1)
 
     return x_augment, L
+
+def conv1d_twoway_channel(
+    x: torch.tensor,
+    w: torch.tensor,
+    in_channels: int,
+    rank: int,
+    model_group: dist.ProcessGroup,
+) -> torch.tensor:
+    """Distributed 1d convolution across channels"""
+    # x shape
+    mod = rank % 2
+    # communicate x1, x0
+    empty = torch.empty(0, device=x.device, dtype=x.dtype)
+    x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
+    
+    match mod:
+        case 0:
+            y = F.conv1d(x, w[:,:in_channels//2])
+            dist.all_to_all(
+                [empty, x_buffer], [empty, x], group=model_group, async_op=False
+            )
+            y += F.conv1d(x_buffer, w[:,in_channels//2:])
+            return y, x, x_buffer
+        case 1:
+            y = F.conv1d(x, w[:,in_channels//2:])
+            dist.all_to_all(
+                [x_buffer, empty], [x, empty], group=model_group, async_op=False
+            )
+            y += F.conv1d(x_buffer, w[:, :in_channels//2])
+            return y, x_buffer, x
 
 
 def conv2d_twoway(
