@@ -4,6 +4,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
+
 def conv1d_twoway(
     x: torch.tensor,
     kernel_size: int,
@@ -66,6 +67,7 @@ def conv1d_twoway(
 
     return x_augment, L
 
+
 def conv1d_twoway_channel(
     x: torch.tensor,
     w: torch.tensor,
@@ -79,21 +81,141 @@ def conv1d_twoway_channel(
     # communicate x1, x0
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
     x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
-    
+
     match mod:
         case 0:
-            y = F.conv1d(x, w[:,:in_channels//2])
+            y = F.conv1d(x, w[:, : in_channels // 2])
             dist.all_to_all(
                 [empty, x_buffer], [empty, x], group=model_group, async_op=False
             )
-            y += F.conv1d(x_buffer, w[:,in_channels//2:])
+            y += F.conv1d(x_buffer, w[:, in_channels // 2 :])
             return y, x, x_buffer
         case 1:
-            y = F.conv1d(x, w[:,in_channels//2:])
+            y = F.conv1d(x, w[:, in_channels // 2 :])
             dist.all_to_all(
                 [x_buffer, empty], [x, empty], group=model_group, async_op=False
             )
-            y += F.conv1d(x_buffer, w[:, :in_channels//2])
+            y += F.conv1d(x_buffer, w[:, : in_channels // 2])
+            return y, x_buffer, x
+        
+def conv1d_fourway_complete(
+    x: torch.tensor,
+    w: torch.tensor,
+    kernel_size: int,
+    stride: int,
+    padding: int,
+    dilation: int,
+    in_channels: int,
+    rank: int,
+    spatial_group: dist.ProcessGroup,
+    channel_group: dist.ProcessGroup
+) -> torch.tensor:
+    """Distributed 1d convolution"""
+    # Setup
+    mod = rank % 4
+
+    # communicate x1, x0
+    empty = torch.empty(0, device=x.device, dtype=x.dtype)
+    x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
+
+    # Calculate overlap between two adjacent spatial domains
+    overlap = max(kernel_size + (kernel_size - 1) * (dilation - 1) - stride, 0)
+    # global indices where you want to apply the convolutions:
+    global_size = int(x.shape[-1] * 2)
+    global_steps = torch.arange(0, global_size - kernel_size, step=stride)
+    len_global_size = global_steps.shape[-1]
+
+    # midpoint calculation
+    mid_index = (
+        len_global_size // 2 - 1 if len_global_size % 2 == 0 else len_global_size // 2
+    )
+
+    right_to_left = (global_steps[mid_index] + kernel_size) - x.shape[
+        -1
+    ]  # right is how much you get from rank 1 
+
+    left_to_right = overlap - right_to_left
+
+    B, C, L = x.shape
+    empty = torch.empty(0, device=x.device, dtype=x.dtype)
+    match mod:
+        case 0 | 1:
+            send = x[..., -left_to_right:] if left_to_right > 0 else empty
+            recv = (
+                torch.zeros((B, C, right_to_left), device=x.device, dtype=x.dtype)
+                if right_to_left > 0
+                else empty
+            )
+            send = send.contiguous()
+            dist.all_to_all(
+                [empty, recv], [empty, send], group=spatial_group, async_op=False
+            )
+            x_augment = torch.cat((x, recv if right_to_left > 0 else empty), dim=-1)
+        case 2 | 3:
+            send = x[..., :right_to_left] if right_to_left > 0 else empty
+            recv = (
+                torch.zeros((B, C, left_to_right), device=x.device, dtype=x.dtype)
+                if left_to_right > 0
+                else empty
+            )
+            send = send.contiguous()
+            dist.all_to_all(
+                [recv, empty], [send, empty], group=spatial_group, async_op=False
+            )
+            x_augment = torch.cat((recv if left_to_right > 0 else empty, x), dim=-1)
+    print(f'Rank {rank}, x shape {x_augment.shape}, x buffer shape {x_buffer.shape}')
+    match mod:
+        case 0 | 2:
+            y = F.conv1d(x_augment, w[:, : in_channels // 2], stride=stride, padding=padding, dilation=dilation)
+            dist.all_to_all(
+                [empty, x_buffer], [empty, x_augment], group=channel_group, async_op=False
+            )
+            y += F.conv1d(x_buffer, w[:, in_channels // 2 :], stride=stride, padding=padding, dilation=dilation)
+            return y, x_augment, x_buffer, L
+        case 1 | 3:
+            y = F.conv1d(x, w[:, in_channels // 2 :], stride=stride, padding=padding, dilation=dilation)
+            
+            dist.all_to_all(
+                [x_buffer, empty], [x_augment, empty], group=channel_group, async_op=False
+            )
+            y += F.conv1d(x_buffer, w[:, : in_channels // 2], stride=stride, padding=padding, dilation=dilation)
+            
+            return y, x_buffer, x_augment, L
+
+
+def conv2d_twoway_channel(
+    x: torch.tensor,
+    w: torch.tensor,
+    in_channels: int,
+    stride: int = 1,
+    padding: int = 0,
+    dilation: int = 1,
+    groups: int = 1,
+    rank: int = 0,
+    model_group: dist.ProcessGroup = None,
+) -> torch.tensor:
+    """Distributed 2d convolution across channels (two-way split)"""
+    ## TODO : include bias as well
+    # x shape
+    mod = rank % 2
+    # communicate x1, x0
+    empty = torch.empty(0, device=x.device, dtype=x.dtype)
+    x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
+
+    match mod:
+        case 0:
+            y = F.conv2d(x, w[:, : in_channels // 2], stride=stride, padding=padding, dilation=dilation)
+            dist.all_to_all(
+                [empty, x_buffer], [empty, x], group=model_group, async_op=False
+            )
+            y += F.conv2d(x_buffer, w[:, in_channels // 2 :], stride=stride, padding=padding, dilation=dilation)
+            return y, x, x_buffer
+        case 1:
+            y = F.conv2d(x, w[:, in_channels // 2 :], stride=stride, padding=padding, dilation=dilation)
+            dist.all_to_all(
+                [x_buffer, empty], [x, empty], group=model_group, async_op=False
+            )
+            y += F.conv2d(x_buffer, w[:, : in_channels // 2], stride=stride, padding=padding, dilation=dilation)
             return y, x_buffer, x
 
 
@@ -119,23 +241,14 @@ def conv2d_twoway(
     global_steps = torch.arange(0, global_size - kernel_size[1], step=stride[1])
     len_global_size = global_steps.shape[-1]
 
-    # uh
     mid_index = (
         len_global_size // 2 - 1 if len_global_size % 2 == 0 else len_global_size // 2
     )
 
-    # print(global_steps[mid_index], x.shape[-1])
-    #    local_steps = global_steps[0:mid_index] # i.e., [0, 3, 6]
-    # print(f'Mid index: {mid_index}, global steps {global_steps}')
-    # lets say x has shape [c, 10], with stride 3 and kernel size 10
-    # final size would be [1, 10, 4]
-    # on rank 0: you need [0--10], [3--13]
-    # on rank 1: [6 -- 16] --> append indices 6, 7, 8, 9
-
     right_to_left = (global_steps[mid_index] + kernel_size[1]) - x.shape[
         -1
     ]  # right is how much you get from rank 1 gets
-    # right = kernel_size - (global_steps[mid_index+1])
+
     left_to_right = overlap - right_to_left
     # print(f"from right perspective: {right}, {global_steps[mid_index+1]}")
     # print(f'Rank {rank}, Right {right}, left {left}, total overlap {overlap}')
@@ -258,11 +371,7 @@ def conv2d_fourway(
     match mod:
         case 0:
             send_1 = x[..., -w_left_to_right:] if w_left_to_right > 0 else empty
-            send_2 = (
-                x[..., -h_top_to_bottom:, :]
-                if h_top_to_bottom > 0
-                else empty
-            )
+            send_2 = x[..., -h_top_to_bottom:, :] if h_top_to_bottom > 0 else empty
             send_3 = (
                 x[..., -h_top_to_bottom:, -w_left_to_right:]
                 if (w_left_to_right > 0 and h_top_to_bottom > 0)
@@ -384,9 +493,7 @@ def conv2d_fourway(
             # print(f'Rank 1 X augment {x_augment}')
             # print(f'Rank 1 recv from 2 {recv_2}')
         case 2:
-            send_0 = (
-                x[..., :h_bottom_to_top, :] if h_bottom_to_top > 0 else empty
-            )
+            send_0 = x[..., :h_bottom_to_top, :] if h_bottom_to_top > 0 else empty
             send_1 = (
                 x[..., :h_bottom_to_top, -w_left_to_right:]
                 if (h_bottom_to_top > 0 and w_left_to_right > 0)
