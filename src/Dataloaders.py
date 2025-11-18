@@ -79,15 +79,22 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
                 2, 4, 4), forecast_length=config_dict['model']['latent_rollout'], normalize=normalize)
     else:
         if config_dict['data']['preprocessed']:
-            if config_dict['data']['resolution'] == 0.25:
+            if config_dict['model_parallel']['type'] == 'megatron':
+                dataset = ERA5Preprocessed(config_dict, data_path, mode=mode, patch_size=(
+                    2, 4, 4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
+            elif config_dict['data']['resolution'] == 0.25:
                 dataset = ERA5PreprocessedDistributed(config_dict, data_path, mode=mode, patch_size=(
                     2, 4, 4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
             elif config_dict['data']['resolution'] == 0.125:
                 dataset = DistributedHighResDataset(config_dict, data_path, mode=mode, patch_size=(
                     2, 4, 4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
         else:
-            dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(
-                2, 4, 4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
+            if config_dict['model_parallel']['type'] == 'megatron':
+                dataset = ERA5Dataset(config_dict, data_path, mode=mode, patch_size=(
+                    2, 4, 4), forecast_length=config_dict['model']['latent_rollout'], normalize=normalize)
+            else:
+                dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(
+                    2, 4, 4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
     if subset_size > 0:
         subset_indices = torch.randperm(len(dataset))[:subset_size]
         dataset = Subset(dataset, subset_indices)

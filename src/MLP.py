@@ -1,6 +1,6 @@
 import torch
 from torch.nn import GELU, Dropout
-import Linear
+import Linear, Linear_Megatron
 
 
 class DistributedMLP(torch.nn.Module):
@@ -196,4 +196,86 @@ class SequentialMLP(torch.nn.Module):
         x = self.linear2(x)
         x = self.drop2(x)
 
+        return x
+
+class DistributedMLP_Megatron(torch.nn.Module):
+    """Distributed MLP across n processes."""
+
+    def __init__(
+        self,
+        in_dim: int,
+        hidden_dim: int,
+        out_dim: int,
+        rank: int,
+        device: torch.device,
+        n_parallel: int,
+        model_group: torch.distributed.ProcessGroup,
+        bias: bool = True,
+        dropout: float = 1e-3
+    ):
+        """
+        Initialize the MLP module for either two- or four-way model parallelism.
+
+        Parameters
+        ----------
+        in_dim : int
+            Input dimension of MLP.
+            Two-way model: global value.
+            Four-way model: local value.
+        hidden_dim : int
+            Hidden dimension of MLP.
+            Two-way model: global value.
+            Four-way model: local value.
+        out_dim : int
+            Output dimension of MLP.
+            Two-way model: global value.
+            Four-way model: local value.
+        device : torch.device
+            Device to perform computation on.
+        rank : int
+            Global rank.
+        parallelism : int, optional
+            Degree of parallelism (default is 4).
+        bias : bool, optional
+            If True, adds a learnable bias to the output (default is True).
+        dropout : int, optional
+            dropout rate. Default value is 1e-3.
+        """
+        super().__init__()
+        self.rank = rank
+        self.device = device
+        self.n_parallel = n_parallel
+        self.model_group = model_group
+
+        self.linear1 = torch.nn.Linear(in_dim, hidden_dim//n_parallel, bias=bias, device=None)
+        self.linear2 = torch.nn.Linear(hidden_dim//n_parallel, out_dim, bias=bias, device=None)
+        self.forward_all_reduce = Linear_Megatron.ForwardAllReduce(self.model_group)
+        self.backward_all_reduce = Linear_Megatron.BackwardAllReduce(self.model_group)
+        self.activation = GELU()
+        self.drop = Dropout(p=dropout)
+        self.drop2 = Dropout(p=dropout)
+        self.rank = rank
+
+    def forward(self, x):
+        """
+        Forward pass of MLP distributed across two or four processes.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input tensor of shape (B, x_in, in_dim).
+        model_group : torch.distributed.ProcessGroup, optional
+            Process group for an individual model-parallel instance.
+        """
+        x = self.backward_all_reduce(x)
+        x = self.linear1(x)
+        
+        x = self.activation(x)
+        x = self.drop(x)
+        x = self.linear2(x)
+        x = self.drop2(x)
+        x = x.contiguous()
+        # forward all reduce
+        self.forward_all_reduce(x)
+        
         return x

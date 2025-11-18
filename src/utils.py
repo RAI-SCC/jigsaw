@@ -236,6 +236,34 @@ def setup_groups(rank: int, n_parallel: int, nrows: int, ncols: int):
 
     return model_group, ddp_group, model_subgroup_row, model_subgroup_col
 
+def build_megatron_model(
+    config_dict: Dict,
+    device: torch.device,
+    localid: int,
+    rank: int,
+    n_parallel: int,
+    model_group: dist.ProcessGroup,
+    ddp_group: dist.ProcessGroup,
+    col_group: dist.ProcessGroup = None
+):
+    match n_parallel:
+        case 1:
+            model = Model.ModelSequential(config_dict, rank, device).to(device)
+        case _:
+            model = Model.ModelMegatron(
+                config_dict, rank, device, n_parallel, model_group
+            ).to(device)
+        
+    model = DDP(
+        model, device_ids=[localid], output_device=localid, process_group=ddp_group
+    )
+
+    if rank == 0:
+        print(
+            f"model has {count_parameters(model) * n_parallel / 1e6} million parameters"
+        )
+        print(f"estimated forward FLOPS: {calc_flops_comm(config_dict)}")
+    return model
 
 def build_model(
     config_dict: Dict,
@@ -299,20 +327,20 @@ def ddp_average_layer_norm_weights(model: torch.nn.Module, col_group: dist.Proce
         torch.distributed.all_reduce(p.data, op=torch.distributed.ReduceOp.SUM, group=col_group)
         p.data.div_(2)
 
-def build_optimizer(config_dict: Dict, mlp: torch.nn.Module) -> optim.Optimizer:
+def build_optimizer(config_dict: Dict, model: torch.nn.Module) -> optim.Optimizer:
     """Build Adam optimizer with per-block lrs."""
     lr = config_dict["training"]["lr"]
     opt = optim.Adam(
         [
             {
-                "params": mlp.module.params.embedding.parameters(),
+                "params": model.module.params.embedding.parameters(),
                 "lr": config_dict["training"]["lr_embedding"],
             },
             {
-                "params": mlp.module.params.recovery.parameters(),
+                "params": model.module.params.recovery.parameters(),
                 "lr": config_dict["training"]["lr_recovery"],
             },
-            {"params": mlp.module.params.common.parameters()},
+            {"params": model.module.params.common.parameters()},
         ],
         lr=lr,
         weight_decay=3e-6,
@@ -393,13 +421,13 @@ def get_weights(
     area_weights = (
         eval.calc_weight(xlat).view(1, xlat, 1, 1).to(device).to(torch.float32)
     )
-
-    variable_weights = torch.nn.functional.pad(variable_weights, (0, 3))
-    variable_weights = (
-        variable_weights[0, 0, 0, :36]
-        if rank % n_parallel in [0, 2]
-        else variable_weights[0, 0, 0, 36:]
-    )
+    if config_dict['model_parallel']['type'] != 'megatron':
+        variable_weights = torch.nn.functional.pad(variable_weights, (0, 3))
+        variable_weights = (
+            variable_weights[0, 0, 0, :36]
+            if rank % n_parallel in [0, 2]
+            else variable_weights[0, 0, 0, 36:]
+        )
 
     return variable_weights, area_weights
 
