@@ -388,6 +388,7 @@ class Model(torch.nn.Module):
             self.start, self.end = 0, self.xlon // 2
         else:
             self.start, self.end = self.xlon // 2, self.xlon
+            
         self.land_mask = torch.unsqueeze(self.land_mask[:, self.start : self.end], 0)
         self.soil_type = torch.unsqueeze(self.soil_type[:, self.start : self.end], 0)
         self.topography = torch.unsqueeze(self.topography[:, self.start : self.end], 0)

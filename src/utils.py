@@ -12,6 +12,7 @@ from timm.scheduler.step_lr import StepLRScheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import parameters_to_vector
 
+import TransformerModels
 import Dataloaders
 import eval
 import Model
@@ -200,7 +201,7 @@ def load_model(
         model.load_state_dict(state["model_state"])
         optimizer.load_state_dict(state["optimizer_state"])
         epoch = state["epoch"] + 1
-        #epoch = 0
+        # epoch = 0
     except Exception:
         if rank == 0:
             print(f"Could not load model from {file_path}. Initializing from scratch.")
@@ -236,6 +237,7 @@ def setup_groups(rank: int, n_parallel: int, nrows: int, ncols: int):
 
     return model_group, ddp_group, model_subgroup_row, model_subgroup_col
 
+
 def build_megatron_model(
     config_dict: Dict,
     device: torch.device,
@@ -244,7 +246,7 @@ def build_megatron_model(
     n_parallel: int,
     model_group: dist.ProcessGroup,
     ddp_group: dist.ProcessGroup,
-    col_group: dist.ProcessGroup = None
+    col_group: dist.ProcessGroup = None,
 ):
     match n_parallel:
         case 1:
@@ -253,7 +255,7 @@ def build_megatron_model(
             model = Model.ModelMegatron(
                 config_dict, rank, device, n_parallel, model_group
             ).to(device)
-        
+
     model = DDP(
         model, device_ids=[localid], output_device=localid, process_group=ddp_group
     )
@@ -264,6 +266,7 @@ def build_megatron_model(
         )
         print(f"estimated forward FLOPS: {calc_flops_comm(config_dict)}")
     return model
+
 
 def build_model(
     config_dict: Dict,
@@ -287,7 +290,7 @@ def build_model(
             model = Model.Model(
                 config_dict, rank, device, n_parallel, model_group, col_group
             ).to(device)
-            #ddp_average_layer_norm_weights(model, col_group)
+            # ddp_average_layer_norm_weights(model, col_group)
         case 8:
             model = Model.Model_eightway(
                 config_dict, rank, device, n_parallel, model_group, col_group
@@ -304,6 +307,54 @@ def build_model(
         print(f"estimated forward FLOPS: {calc_flops_comm(config_dict)}")
     return model
 
+
+def build_transformer_model(
+    config_dict: dict,
+    device: torch.device,
+    localid: int,
+    rank: int,
+    n_parallel: int,
+    model_group: dist.ProcessGroup,
+    ddp_group: dist.ProcessGroup,
+    row_group: dist.ProcessGroup = None,
+    col_group: dist.ProcessGroup = None,
+):
+    if config_dict["model_parallel"]["type"] == 'megatron':
+        match n_parallel:
+            case 1:
+                model = TransformerModels.Transformer_Sequential(
+                    config_dict, rank, device, n_parallel, model_group, row_group, col_group
+                ).to(device)
+            case _:
+                model = TransformerModels.Megatron_Transformer(
+                    config_dict, rank, device, n_parallel, model_group, row_group, col_group
+                ).to(device)
+    else:    
+        match n_parallel:
+            case 1:
+                model = TransformerModels.Transformer_Sequential(
+                    config_dict, rank, device, n_parallel, model_group, row_group, col_group
+                ).to(device)
+            case 2:
+                model = TransformerModels.Transformer_Twoway(
+                    config_dict, rank, device, n_parallel, model_group, row_group, col_group
+                ).to(device)
+            case 4:
+                model = TransformerModels.Transformer_Fourway(
+                    config_dict, rank, device, n_parallel, model_group, row_group, col_group
+                ).to(device)
+
+    model = DDP(
+        model, device_ids=[localid], output_device=localid, process_group=ddp_group
+    )
+    if rank == 0:
+        print(
+            f"model has {count_parameters(model) * n_parallel / 1e6} million parameters"
+        )
+        print(f"estimated forward FLOPS: {calc_flops_transformer(config_dict)}")
+    return model
+
+
 def iter_layer_norm_params(model: torch.nn.Module):
     """
     Yield (name, parameter) pairs for LayerNorm weights and biases.
@@ -314,8 +365,11 @@ def iter_layer_norm_params(model: torch.nn.Module):
                 if p is not None:
                     yield f"{name}.{suffix}", p
 
+
 @torch.no_grad()
-def ddp_average_layer_norm_weights(model: torch.nn.Module, col_group: dist.ProcessGroup) -> None:
+def ddp_average_layer_norm_weights(
+    model: torch.nn.Module, col_group: dist.ProcessGroup
+) -> None:
     """
     All-reduce and in-place average LayerNorm weights/biases across processes.
     Shapes: each param is [hidden_dim].
@@ -323,9 +377,12 @@ def ddp_average_layer_norm_weights(model: torch.nn.Module, col_group: dist.Proce
     if not torch.distributed.is_available() or not torch.distributed.is_initialized():
         # Single process: nothing to do.
         return
-    for _, p in iter_layer_norm_params(model): 
-        torch.distributed.all_reduce(p.data, op=torch.distributed.ReduceOp.SUM, group=col_group)
+    for _, p in iter_layer_norm_params(model):
+        torch.distributed.all_reduce(
+            p.data, op=torch.distributed.ReduceOp.SUM, group=col_group
+        )
         p.data.div_(2)
+
 
 def build_optimizer(config_dict: Dict, model: torch.nn.Module) -> optim.Optimizer:
     """Build Adam optimizer with per-block lrs."""
@@ -421,7 +478,7 @@ def get_weights(
     area_weights = (
         eval.calc_weight(xlat).view(1, xlat, 1, 1).to(device).to(torch.float32)
     )
-    if config_dict['model_parallel']['type'] != 'megatron':
+    if config_dict["model_parallel"]["type"] != "megatron":
         variable_weights = torch.nn.functional.pad(variable_weights, (0, 3))
         variable_weights = (
             variable_weights[0, 0, 0, :36]
@@ -576,6 +633,31 @@ def mixing_block(ntokens, patch_embedding_out, spatial_hidden_dim, channels_hidd
     return flop, comm  # FLOP: GigaFLOP, Comm: GBs
 
 
+def transformer_block(ntokens, hidden_dim, transformer_dim, out_dim, heads):
+    # input shape = output of patch embedding shape
+    input_shape = (ntokens, hidden_dim)
+    flop = 0
+    comm = 0
+
+    # qkv calculation
+    # X: (n_tokens, hidden_dim) @ (hidden_dim, 3 * transformer_dimension)
+    flop = flop + AB_flop_local(ntokens, hidden_dim, 3 * transformer_dim)
+    comm = comm + AB_communication(ntokens, hidden_dim, 3 * transformer_dim)
+
+    # Q @ K.mT
+    # Q: (n_tokens, transformer_dim) K.mT : (transformer_dim, n_tokens)
+    flop = flop + heads * AB_flop_local(ntokens, transformer_dim // heads, ntokens)
+    # TODO: currently ignore softmax 
+    # (Q@K.mT) @ V
+    # (Q@K.mT): (n_tokens, n_tokens) @ (n_tokens, transformer_dim)
+    flop = flop + heads * AB_flop_local(ntokens, ntokens, transformer_dim // heads)
+    
+    # concatenator
+    flop = flop + AB_flop_local(ntokens, transformer_dim, out_dim)
+    
+    return flop, comm  # FLOP: GigaFLOP, Comm: GBs
+
+
 def calc_flops_comm(config):
     nlat, nlon = config["data"]["xlat"], config["data"]["xlon"]
     nvars_in, nvars_out = 72, 72
@@ -635,9 +717,62 @@ def calc_flops_comm(config):
     return flop_forward, comm_forward
 
 
-def reduce_ddp_layernorms(
-    model, col_groups
-):
+def calc_flops_transformer(config):
+    nlat, nlon = config["data"]["xlat"], config["data"]["xlon"]
+    nvars_in, nvars_out = 72, 72
+    patch_size = config["model"]["patch_size"]
+    patch_embedding_in = patch_size * nvars_in
+    patch_embedding_out = config["model"]["hidden_dim"]
+    transformer_dim = config["model"]["transformer_dim"]
+    # where ntokens = nlat*nlon/patch_size
+    input_data = (nlat * nlon / patch_size, patch_size * nvars_in)
+    ntokens = nlat * nlon / patch_size
+    patch_embedding_comm = AB_communication(
+        ntokens, patch_size * nvars_in, patch_embedding_out
+    )  # GBs of data communicated
+    patch_embedding_flop = (
+        AB_flop_local(ntokens, patch_size * nvars_in, patch_embedding_out)
+        + patch_embedding_out / 1e12
+    )
+
+    # including concat
+    # (ntokens, patch_embedding_out)
+    patch_recovery_comm = AB_communication(
+        ntokens, patch_embedding_out * 2, patch_embedding_in
+    )  # GBs of data communicated
+    patch_recovery_flop = (
+        AB_flop_local(ntokens, patch_embedding_out * 2, patch_embedding_in)
+        + patch_embedding_in / 1e12
+    )
+
+    linlayer_comm = AB_communication(
+        nlat * nlon, nvars_out * 2, nvars_out
+    )  # GBs of data communicated
+    linlayer_flop = (
+        AB_flop_local(nlat * nlon, nvars_out * 2, nvars_out) + nvars_out / 1e12
+    )
+
+    tflop_per_block, gb_per_block = transformer_block(
+        input_data[0], patch_embedding_out, transformer_dim, patch_embedding_out, config["model"]["heads"]
+    )
+
+    flop_forward = (
+        tflop_per_block * config["model"]["mixing_blocks"]
+        + patch_embedding_flop
+        + linlayer_flop
+        + patch_recovery_flop
+    )
+    comm_forward = (
+        gb_per_block * config["model"]["mixing_blocks"]
+        + patch_embedding_comm
+        + linlayer_comm
+        + patch_recovery_comm
+    )
+
+    return flop_forward, comm_forward
+
+
+def reduce_ddp_layernorms(model, col_groups):
     """
     Reduce gradients across local groups for 4-way parallel.
 
