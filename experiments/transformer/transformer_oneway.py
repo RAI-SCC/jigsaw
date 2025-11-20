@@ -47,8 +47,7 @@ class DistributedAttention_oneway(torch.nn.Module):
     attended = torch.matmul(attention_weights, v)  # (1, x_items, embed_dim)
 
     out = self.linear(attended)  # (1, x_items, x_features)
-    #print("Mean off-diagonal attention weight:",
-    #  (attention_weights[0] - torch.eye(x_items, device=device)).abs().mean().item())
+
     return out
   
 class MiniTransformer(torch.nn.Module):
