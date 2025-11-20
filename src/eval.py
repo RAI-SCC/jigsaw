@@ -427,7 +427,6 @@ def validate(
                             epoch,
                             model_parallel=model_parallel,
                         )
-                    # print(f'Shape target and result: {input_data.shape}, {target_data.shape}, {output.shape}')
                     # Calculate RMSE and ACC
                     rmse[rollout][indices_key] = rmse[rollout][
                         indices_key

@@ -345,6 +345,7 @@ class Model(torch.nn.Module):
                 n_parallel,
                 model_group,
             )
+            
         self.linearlayer = Linear.DistributedXWT(
             self.num_variables * 2,
             self.num_variables,
@@ -388,7 +389,7 @@ class Model(torch.nn.Module):
             self.start, self.end = 0, self.xlon // 2
         else:
             self.start, self.end = self.xlon // 2, self.xlon
-            
+
         self.land_mask = torch.unsqueeze(self.land_mask[:, self.start : self.end], 0)
         self.soil_type = torch.unsqueeze(self.soil_type[:, self.start : self.end], 0)
         self.topography = torch.unsqueeze(self.topography[:, self.start : self.end], 0)
@@ -871,113 +872,44 @@ class ModelMegatron(torch.nn.Module):
 
         self.patch_embed = config_dict["model"]["patch_embed"]
         self.num_variables = 69
-        
-        if self.patch_embed == 1:
-            self.patch_size = config_dict["model"]["patch_size"]
-            self.stride = config_dict["model"]["stride"]
-            self.n_patches = (
-                self.xlat * self.xlon - 1 * (self.patch_size - 1) - 1
-            ) // self.stride + 1
 
-            self.dropout = config_dict["model"]["dropout"]
-            self.embedding = PatchEmbedding.PatchEmbedding1D(
-                config_dict,
-                self.patch_size,
-                hidden_dimension,
-                device=device,
-                in_channels=72,
-                padding=padding,
-                stride=self.stride,
-                xlat=self.xlat,
-            )
-            self.n_blocks = config_dict["model"]["mixing_blocks"]
-            self.blocks = torch.nn.ModuleList(
-                [
-                    MixerBlockMegatron(
-                        self.n_patches,
-                        hidden_dimension,
-                        config_dict["model"]["spatial_hidden_dim_fraction"],
-                        config_dict["model"]["features_hidden_dim_fraction"],
-                        rank,
-                        device,
-                        n_parallel,
-                        model_group,
-                        self.dropout,
-                        bias=True
-                    )
-                    for i in range(self.n_blocks)
-                ]
-            )
-        elif self.patch_embed == 2:
-            self.patch_size = (
-                config_dict["model"]["patch_size"],
-                config_dict["model"]["patch_size"],
-            )
-            self.embedding = PatchEmbedding.PatchEmbedding2D(
-                self.patch_size,
-                hidden_dimension,
-                device=device,
-                in_channels=72,
-                padding=padding,
-                stride=self.stride,
-                xlat=self.xlat,
-            )
-            self.n_blocks = config_dict["model"]["mixing_blocks"]
-            self.n_lat = (
-                self.xlat + 2 * padding[0] - 1 * (self.patch_size[0] - 1) - 1
-            ) // self.stride + 1
-            self.n_lon = (
-                self.xlon + 2 * padding[1] - 1 * (self.patch_size[1] - 1) - 1
-            ) // self.stride + 1
-            self.blocks = torch.nn.ModuleList(
-                [
-                    MixerBlockMegatron(
-                        self.n_lat * self.n_lon,
-                        hidden_dimension,
-                        hidden_dimension,
-                        rank,
-                        device,
-                        n_parallel,
-                        model_group,
-                        self.dropout,
-                        bias=True
-                    )
-                    for i in range(self.n_blocks)
-                ]
-            )
-        else:
-            self.patch_size = config_dict["model"]["patch_size"]
-            # (self.xlat+2*padding[0]-1*(self.patch_size[0]-1)-1)//self.stride+1
-            self.n_lat = 720 // 1
-            # (self.xlon+2*padding[1]-1*(self.patch_size[1]-1)-1)//self.stride+1
-            self.n_lon = 1440 // self.patch_size
-            self.dropout = config_dict["model"]["dropout"]
-            self.embedding = PatchEmbedding.PatchEmbeddingTest(
-                self.patch_size,
-                hidden_dimension,
-                device=device,
-                in_channels=72,
-                padding=padding,
-                stride=self.stride,
-                xlat=self.xlat,
-            )
-            self.n_blocks = config_dict["model"]["mixing_blocks"]
-            self.blocks = torch.nn.ModuleList(
-                [
-                    MixerBlockMegatron(
-                        720 * 1440 // self.patch_size,
-                        hidden_dimension,
-                        hidden_dimension,
-                        rank,
-                        device,
-                        n_parallel,
-                        model_group,
-                        self.dropout,
-                        bias=True
-                    )
-                    for i in range(self.n_blocks)
-                ]
-            )
+        self.patch_size = config_dict["model"]["patch_size"]
+        self.stride = config_dict["model"]["stride"]
+        self.n_patches = (
+            self.xlat * self.xlon - 1 * (self.patch_size - 1) - 1
+        ) // self.stride + 1
+        #
+        self.n_lat, self.n_lon = self.xlat, self.xlon // self.patch_size
+        
+        self.dropout = config_dict["model"]["dropout"]
+        self.embedding = PatchEmbedding.PatchEmbedding1D(
+            config_dict,
+            self.patch_size,
+            hidden_dimension,
+            device=device,
+            in_channels=72,
+            padding=padding,
+            stride=self.stride,
+            xlat=self.xlat,
+        )
+        self.n_blocks = config_dict["model"]["mixing_blocks"]
+        self.blocks = torch.nn.ModuleList(
+            [
+                MixerBlockMegatron(
+                    self.n_lat * self.n_lon,
+                    hidden_dimension,
+                    config_dict["model"]["spatial_hidden_dim_fraction"],
+                    config_dict["model"]["features_hidden_dim_fraction"],
+                    rank,
+                    device,
+                    n_parallel,
+                    model_group,
+                    self.dropout,
+                    bias=True,
+                )
+                for i in range(self.n_blocks)
+            ]
+        )
 
         self.latent_rollout = config_dict["model"]["latent_rollout"]
 
@@ -986,63 +918,35 @@ class ModelMegatron(torch.nn.Module):
         self.add = config_dict["model"]["add"]
         self.concat = config_dict["model"]["concat"]
         self.linear_residual = config_dict["model"]["linear_residual"]
+
         if self.linear_residual:
             self.layer_norm2 = torch.nn.LayerNorm(self.num_variables)
-            self.layer_norm3 = torch.nn.LayerNorm(69 * 2)
+            self.layer_norm3 = torch.nn.LayerNorm(self.num_variables * 2)
             self.linearlayer = torch.nn.Linear(
                 self.num_variables * 2, self.num_variables
             )
 
-        if self.patch_embed == 1:
-            if self.concat:
-                self.recovery = PatchEmbedding.PatchRecovery1D(
-                    self.patch_size,
-                    hidden_dimension,
-                    padding=padding,
-                    stride=self.stride,
-                    out_channels=69,
-                    concat=True,
-                    xlat=self.xlat,
-                    xlon=self.xlon,
-                )
-            else:
-                self.recovery = PatchEmbedding.PatchRecovery1D(
-                    self.patch_size,
-                    hidden_dimension,
-                    padding=padding,
-                    stride=self.stride,
-                    out_channels=69,
-                    concat=False,
-                    xlat=self.xlat,
-                    xlon=self.xlon,
-                )
-        elif self.patch_embed == 2:
-            if self.concat:
-                self.recovery = PatchEmbedding.PatchRecovery2D(
-                    self.patch_size,
-                    hidden_dimension,
-                    padding=padding,
-                    stride=self.stride,
-                    out_channels=69,
-                    concat=True,
-                )
-            else:
-                self.recovery = PatchEmbedding.PatchRecovery2D(
-                    self.patch_size,
-                    hidden_dimension,
-                    padding=padding,
-                    stride=self.stride,
-                    out_channels=69,
-                    concat=False,
-                )
+        if self.concat:
+            self.recovery = PatchEmbedding.PatchRecovery1D(
+                self.patch_size,
+                hidden_dimension,
+                padding=padding,
+                stride=self.stride,
+                out_channels=69,
+                concat=True,
+                xlat=self.xlat,
+                xlon=self.xlon,
+            )
         else:
-            self.recovery = PatchEmbedding.PatchRecoveryTest(
+            self.recovery = PatchEmbedding.PatchRecovery1D(
                 self.patch_size,
                 hidden_dimension,
                 padding=padding,
                 stride=self.stride,
                 out_channels=69,
                 concat=False,
+                xlat=self.xlat,
+                xlon=self.xlon,
             )
 
         self.activation = torch.nn.GELU()
@@ -1076,10 +980,14 @@ class ModelMegatron(torch.nn.Module):
         x_shape = x.shape
         x_res = x.clone()
         x_res = x_res.permute(0, 2, 3, 1)
-
+        
         # x shape: [1, 69, 720, 1440]
         x = self.embedding(x)  # x: latent_t
-
+        #print(f'Rank {self.rank} and x initial values {x[0,0,:5]}')
+        #for name, param in self.embedding.named_parameters():
+        #    if len(param.shape) == 3:
+        #        print(f'Rank {self.rank}, param {param[0,0,:4]}')
+                
         x_res2 = x.clone()
 
         # x shape: [1, 1152, 2000]
@@ -1093,24 +1001,11 @@ class ModelMegatron(torch.nn.Module):
         else:
             x = self.layer_norm(x + x_res2)
 
-        if self.patch_embed == 2:  # Case: Decoder is 2D embedding
-            x = self.recovery(
-                x,
-                self.n_lat,
-                self.n_lon,
-                output_size=(
-                    x_res.shape[0],
-                    x_res.shape[3],
-                    x_res.shape[1],
-                    x_res.shape[2],
-                ),
-            )
-        else:  # Case: Decoder is 1D convolution
-            x = self.recovery(x)
+        x = self.recovery(x)
 
         if self.add:  # Recovery
             x = x.reshape(x_shape[0], self.xlat, self.xlon, self.num_variables)
-            return x + x_res[...,:-3]
+            return x + x_res[..., :-3]
 
         if self.linear_residual:
             x = self.layer_norm2(x)  # layer norm must go before concat

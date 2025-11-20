@@ -88,6 +88,7 @@ def training_loop(
     max_rollout = config_dict["model"]["latent_rollout"]
     epoch_end = epoch + 11 
     epoch_end = config_dict['training']['n_epochs'] if epoch_end > config_dict['training']['n_epochs'] else epoch_end
+    
     for epoch in range(epoch, epoch_end):
         avg_loss = train_one_epoch(
             config_dict,
@@ -223,7 +224,7 @@ def train_one_epoch(
             vector_to_parameters(flat_grad, gradients)
             
         optimizer.step()
-        dist.all_reduce(loss, op=dist.ReduceOp.AVG)
+        # dist.all_reduce(loss, op=dist.ReduceOp.AVG)
         epoch_loss = epoch_loss + float(loss.detach())
         if rank == 0:
             print(

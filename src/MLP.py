@@ -276,6 +276,6 @@ class DistributedMLP_Megatron(torch.nn.Module):
         x = self.drop2(x)
         x = x.contiguous()
         # forward all reduce
-        self.forward_all_reduce(x)
+        x = self.forward_all_reduce(x)
         
         return x

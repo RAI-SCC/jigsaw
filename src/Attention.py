@@ -5,6 +5,7 @@ from einops import rearrange
 import Linear
 import Linear_Megatron
 import Normalization as Norm
+import MLP
 
 
 class DistributedTransformer(torch.nn.Module):
@@ -168,12 +169,61 @@ class DistributedTransformer(torch.nn.Module):
             attention = q @ k.mT
             attention = self.softmax(attention)
             values = attention @ v
+            
         values = rearrange(values, "n h s d -> n s (h d)").contiguous()
 
         values = self.concatenator(values)
 
         # Output: [n_batch, seq_length, output_dim]
         return values
+
+class TransformerLayer(torch.nn.Module):
+    def __init__(
+        self,
+        x_features: int,
+        embed_dim: int,
+        output_dim: int,
+        heads: int,
+        rank: int,
+        device: torch.device,
+        n_parallel: int,
+        model_group: dist.ProcessGroup,
+        softmax_group: dist.ProcessGroup,
+        column_subgroup: dist.ProcessGroup
+    ):
+        super().__init__()
+        self.attention_block = DistributedTransformer(
+            x_features,
+            embed_dim,
+            output_dim,
+            heads,
+            rank,
+            device,
+            n_parallel,
+            model_group,
+            softmax_group
+        )
+        self.layer_norm = Norm.DistributedLayerNorm(
+            output_dim // 2,
+            rank,
+            device,
+            column_subgroup
+        )
+        self.MLP = MLP.DistributedMLP(
+            output_dim,
+            output_dim // 2,
+            output_dim,
+            rank,
+            device,
+            n_parallel,
+            model_group
+        )
+        
+    def forward(self, x: torch.tensor):
+        x = self.attention_block(x)
+        x = self.layer_norm(x)
+        x = self.MLP(x)
+        return x
     
 class MegatronTransformer(torch.nn.Module):
     def __init__(
@@ -257,3 +307,48 @@ class MegatronTransformer(torch.nn.Module):
         self.forward_all_reduce(values)
         # Output: [n_batch, seq_length, output_dim]
         return values
+    
+class MegatronTransformerLayer(torch.nn.Module):
+    def __init__(
+        self,
+        x_features: int,
+        embed_dim: int,
+        output_dim: int,
+        heads: int,
+        rank: int,
+        device: torch.device,
+        n_parallel: int,
+        model_group: dist.ProcessGroup,
+        softmax_group: dist.ProcessGroup,
+        column_subgroup: dist.ProcessGroup
+    ):
+        super().__init__()
+        self.attention_block = MegatronTransformer(
+            x_features,
+            embed_dim,
+            output_dim,
+            heads,
+            rank,
+            device,
+            n_parallel,
+            model_group,
+            softmax_group
+        )
+        self.layer_norm = torch.nn.LayerNorm(
+            output_dim
+        )
+        self.MLP = MLP.DistributedMLP_Megatron(
+            output_dim,
+            output_dim // 2,
+            output_dim,
+            rank,
+            device,
+            n_parallel,
+            model_group
+        )
+        
+    def forward(self, x: torch.tensor):
+        x = self.attention_block(x)
+        x = self.layer_norm(x)
+        x = self.MLP(x)
+        return x

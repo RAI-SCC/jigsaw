@@ -4,7 +4,7 @@ import torch
 import Linear
 import PatchEmbedding
 import Attention
-import utils
+import MLP
 import Dataset
 import Normalization as Norm
 
@@ -368,7 +368,7 @@ class Transformer_Fourway(torch.nn.Module):
         self.n_blocks = config_dict["model"]["mixing_blocks"]
         self.blocks = torch.nn.ModuleList(
             [
-                Attention.DistributedTransformer(
+                Attention.TransformerLayer( # Transformer layer including MLP block
                     hidden_dimension,
                     transformer_dimension,
                     hidden_dimension,
@@ -378,6 +378,7 @@ class Transformer_Fourway(torch.nn.Module):
                     self.n_parallel,
                     self.model_group,
                     self.softmax_subgroup,
+                    self.column_subgroup
                 )
                 for i in range(self.n_blocks)
             ]
@@ -557,7 +558,7 @@ class Megatron_Transformer(torch.nn.Module):
         self.n_blocks = config_dict["model"]["mixing_blocks"]
         self.blocks = torch.nn.ModuleList(
             [
-                Attention.MegatronTransformer(
+                Attention.MegatronTransformerLayer(
                     hidden_dimension,
                     transformer_dimension,
                     hidden_dimension,
@@ -567,6 +568,7 @@ class Megatron_Transformer(torch.nn.Module):
                     self.n_parallel,
                     self.model_group,
                     self.softmax_subgroup,
+                    self.column_subgroup
                 )
                 for i in range(self.n_blocks)
             ]
@@ -636,7 +638,7 @@ class Megatron_Transformer(torch.nn.Module):
 
     def forward(self, x, rollout_=1):
         x_shape = x.shape
-        x_res = x
+        x_res = x.clone()
         x_res = x_res.permute(0, 2, 3, 1)
 
         # x shape: [1, 69, 720, 1440]

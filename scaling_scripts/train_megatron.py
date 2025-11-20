@@ -20,7 +20,7 @@ def training_loop(
     n_parallel = config_dict["model_parallel"]["parallelism"]
     model_parallel = n_parallel > 1
     # Set all seeds in the same model group to be different
-    utils.set_all_seeds(1) # TODO: for now, set all random seeds to be same 
+    utils.set_all_seeds(1 + rank % n_parallel) # TODO: for now, set all random seeds to be same 
                            # for data loading and model weight initialization 
                            # purposes
 
@@ -32,30 +32,46 @@ def training_loop(
     # Set up model  groups
     match n_parallel:
         case 1:
-            model_group, ddp_group, _, model_subgroup_col = utils.setup_groups(
+            model_group, ddp_group, model_subgroup_row, model_subgroup_col = utils.setup_groups(
                 rank, n_parallel, 1, 1
             )
         case 2:
-            model_group, ddp_group, _, model_subgroup_col = utils.setup_groups(
+            model_group, ddp_group, model_subgroup_row, model_subgroup_col = utils.setup_groups(
                 rank, n_parallel, 1, 2
             )
         case 4:
-            model_group, ddp_group, _, model_subgroup_col = utils.setup_groups(
+            model_group, ddp_group, model_subgroup_row, model_subgroup_col = utils.setup_groups(
                 rank, n_parallel, 2, 2
             )
     n_vars_local = 69
 
     # Define model and load model
-    model = utils.build_megatron_model(
-        config_dict,
-        device,
-        localid,
-        rank,
-        n_parallel,
-        model_group,
-        ddp_group,
-        model_subgroup_col,
-    )
+    match config_dict["model"]["type"]:
+        case "ViT":
+            model = utils.build_transformer_model(
+                config_dict,
+                device,
+                localid,
+                rank,
+                n_parallel,
+                model_group,
+                ddp_group,
+                model_subgroup_row,
+                model_subgroup_col,
+            )
+        case "Mixer":
+            model = utils.build_megatron_model(
+                config_dict,
+                device,
+                localid,
+                rank,
+                n_parallel,
+                model_group,
+                ddp_group,
+                model_subgroup_col,
+            )
+        case model_type : 
+            print(f"Model type {model_type} does not exist.")
     
     optimizer = utils.build_optimizer(config_dict, model)
     model, optimizer, epoch = utils.load_model(
@@ -194,16 +210,17 @@ def train_one_epoch(
         rollout = i % max_rollout
         
         # warmup lr only in epoch 0
-        # if epoch == 0 and i < 5000:
-        #     max_values = scheduler._get_lr(epoch)
-        #     for index, g in enumerate(optimizer.param_groups):
-        #         warm = i * (max_values[index] - start_lr) / 5000 + start_lr
-        #         g["lr"] = warm
+        if epoch == 0 and i < 5000:
+            max_values = scheduler._get_lr(epoch)
+            for index, g in enumerate(optimizer.param_groups):
+                warm = i * (max_values[index] - start_lr) / 5000 + start_lr
+                g["lr"] = warm
         
         input_data = data[0].to(device, non_blocking=True)
         target_data = data[1][rollout].to(device, non_blocking=True)
-        # print(f'x input {input_data[0,0,0,:10]}')
+
         optimizer.zero_grad(set_to_none=True)
+        
         output = model(input_data, rollout_=rollout + 1)  # [B, 720, 720, 36]
         output = output.reshape(-1, xlat, xlon, n_vars_local)
 
@@ -217,11 +234,6 @@ def train_one_epoch(
         torch.nn.utils.clip_grad_norm_(
             model.parameters(), config_dict["training"]["grad_clip"]
         )
-        
-        # if config_dict['model_parallel']['parallelism'] == 4:
-        #     handles, flat_grad, gradients = utils.reduce_ddp_layernorms(model, col_group)
-        #     handles.wait()
-        #     vector_to_parameters(flat_grad, gradients)
             
         optimizer.step()
         # dist.all_reduce(loss, op=dist.ReduceOp.AVG)

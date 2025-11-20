@@ -257,9 +257,9 @@ def build_megatron_model(
             ).to(device)
     # need to match parameters for non-transformer, non-mlp layers
     for name, param in model.named_parameters():
-        if ('blocks' not in name) or 'layer_norm' in name:
-            dist.all_reduce(param.data)
-    
+        if ("blocks" not in name) or "layer_norm" in name:
+            dist.all_reduce(param.data, op=dist.ReduceOp.AVG)
+
     model = DDP(
         model, device_ids=[localid], output_device=localid, process_group=ddp_group
     )
@@ -268,7 +268,7 @@ def build_megatron_model(
         print(
             f"model has {count_parameters(model) * n_parallel / 1e6} million parameters"
         )
-        print(f"estimated forward FLOPS: {calc_flops_transformer(config_dict)}")
+        print(f"estimated forward FLOPS: {calc_flops_comm(config_dict)}")
     return model
 
 
@@ -323,29 +323,62 @@ def build_transformer_model(
     row_group: dist.ProcessGroup = None,
     col_group: dist.ProcessGroup = None,
 ):
-    if config_dict["model_parallel"]["type"] == 'megatron':
+    if config_dict["model_parallel"]["type"] == "megatron":
         match n_parallel:
             case 1:
                 model = TransformerModels.Transformer_Sequential(
-                    config_dict, rank, device, n_parallel, model_group, row_group, col_group
+                    config_dict,
+                    rank,
+                    device,
+                    n_parallel,
+                    model_group,
+                    row_group,
+                    col_group,
                 ).to(device)
             case _:
                 model = TransformerModels.Megatron_Transformer(
-                    config_dict, rank, device, n_parallel, model_group, row_group, col_group
+                    config_dict,
+                    rank,
+                    device,
+                    n_parallel,
+                    model_group,
+                    row_group,
+                    col_group,
                 ).to(device)
-    else:    
+        for name, param in model.named_parameters():
+            if ("blocks" not in name) or "layer_norm" in name:
+                dist.all_reduce(param.data, op=dist.ReduceOp.AVG)
+    else:
         match n_parallel:
             case 1:
                 model = TransformerModels.Transformer_Sequential(
-                    config_dict, rank, device, n_parallel, model_group, row_group, col_group
+                    config_dict,
+                    rank,
+                    device,
+                    n_parallel,
+                    model_group,
+                    row_group,
+                    col_group,
                 ).to(device)
             case 2:
                 model = TransformerModels.Transformer_Twoway(
-                    config_dict, rank, device, n_parallel, model_group, row_group, col_group
+                    config_dict,
+                    rank,
+                    device,
+                    n_parallel,
+                    model_group,
+                    row_group,
+                    col_group,
                 ).to(device)
             case 4:
                 model = TransformerModels.Transformer_Fourway(
-                    config_dict, rank, device, n_parallel, model_group, row_group, col_group
+                    config_dict,
+                    rank,
+                    device,
+                    n_parallel,
+                    model_group,
+                    row_group,
+                    col_group,
                 ).to(device)
 
     model = DDP(
@@ -651,14 +684,14 @@ def transformer_block(ntokens, hidden_dim, transformer_dim, out_dim, heads):
     # Q @ K.mT
     # Q: (n_tokens, transformer_dim) K.mT : (transformer_dim, n_tokens)
     flop = flop + heads * AB_flop_local(ntokens, transformer_dim // heads, ntokens)
-    # TODO: currently ignore softmax 
+    # TODO: currently ignore softmax
     # (Q@K.mT) @ V
     # (Q@K.mT): (n_tokens, n_tokens) @ (n_tokens, transformer_dim)
     flop = flop + heads * AB_flop_local(ntokens, ntokens, transformer_dim // heads)
-    
+
     # concatenator
     flop = flop + AB_flop_local(ntokens, transformer_dim, out_dim)
-    
+
     return flop, comm  # FLOP: GigaFLOP, Comm: GBs
 
 
@@ -757,7 +790,11 @@ def calc_flops_transformer(config):
     )
 
     tflop_per_block, gb_per_block = transformer_block(
-        input_data[0], patch_embedding_out, transformer_dim, patch_embedding_out, config["model"]["heads"]
+        input_data[0],
+        patch_embedding_out,
+        transformer_dim,
+        patch_embedding_out,
+        config["model"]["heads"],
     )
 
     flop_forward = (

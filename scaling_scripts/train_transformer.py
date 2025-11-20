@@ -48,17 +48,33 @@ def training_loop(
             n_vars_local = 36 if config_dict["model_parallel"]["type"] == 'jigsaw' else 69
 
     # Define model and load model
-    model = utils.build_transformer_model(
-        config_dict,
-        device,
-        localid,
-        rank,
-        n_parallel,
-        model_group,
-        ddp_group,
-        model_subgroup_row,
-        model_subgroup_col,
-    )
+    match config_dict["model"]["type"]:
+        case "ViT":
+            model = utils.build_transformer_model(
+                config_dict,
+                device,
+                localid,
+                rank,
+                n_parallel,
+                model_group,
+                ddp_group,
+                model_subgroup_row,
+                model_subgroup_col,
+            )
+        case "Mixer":
+            model = utils.build_megatron_model(
+                config_dict,
+                device,
+                localid,
+                rank,
+                n_parallel,
+                model_group,
+                ddp_group,
+                model_subgroup_col,
+            )
+        case model_type : 
+            print(f"Model type {model_type} does not exist.")
+            
     optimizer = utils.build_optimizer(config_dict, model)
     model, optimizer, epoch = utils.load_model(
         model,
@@ -118,6 +134,9 @@ def training_loop(
 
         model.eval()
         
+        if config_dict["model_parallel"]["type"] == 'megatron':
+            config_dict['model_parallel']['parallelism'] = 1
+            
         val_loss = eval.validate(
             config_dict,
             model,
@@ -217,13 +236,13 @@ def train_one_epoch(
         vw = variable_weights.view(1, 1, 1, n_vars_local)
         ow = output * area_weights * vw
         tw = target_data * area_weights * vw
-        loss = loss_fn(ow, tw)
+        loss = loss_fn(ow, tw) 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
             model.parameters(), config_dict["training"]["grad_clip"]
         )
 
-        if config_dict["model_parallel"]["parallelism"] == 4:
+        if config_dict["model_parallel"]["parallelism"] == 4 and config_dict["model_parallel"]["type"] == 'jigsaw':
             handles, flat_grad, gradients = utils.reduce_ddp_layernorms(
                 model, col_group
             )

@@ -57,6 +57,7 @@ class MegatronForwardAllReduce(torch.autograd.Function):
         ctx.model_group = model_group
         x = x.contiguous()
         torch.distributed.all_reduce(x, op=dist.ReduceOp.SUM, group=ctx.model_group)
+        x /= 4
         return x
 
     @staticmethod
@@ -94,7 +95,7 @@ class BackwardAllReduce(torch.nn.Module):
         super().__init__()
         
         self.model_group = model_group
-        self.all_reduce = MegatronForwardAllReduce().apply
+        self.all_reduce = MegatronBackwardAllReduce().apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -157,5 +158,6 @@ class MegatronBackwardAllReduce(torch.autograd.Function):
         """
         grad_output = grad_output.contiguous()
         dist.all_reduce(grad_output, op=dist.ReduceOp.SUM, group=ctx.model_group)
+        grad_output /= 4
         
         return grad_output, None
