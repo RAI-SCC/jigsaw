@@ -112,6 +112,9 @@ def training_loop(
         torch.cuda.synchronize()
 
         model.eval()
+        if config_dict["model_parallel"]["type"] == 'megatron':
+            config_dict['model_parallel']['parallelism'] = 1
+            
         val_loss = eval.validate(
             config_dict,
             model,

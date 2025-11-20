@@ -126,7 +126,7 @@ def gen_plots(
         target_print = target_data[0].reshape(xlat, xlon, 69).permute(2, 0, 1)
 
         save_path = f"{file_path}/u10_{epoch}.png"
-        utils.plot_fields(
+        plot_fns.plot_fields(
             input_print,
             output_print - input_print,
             target_print - input_print,
@@ -134,7 +134,7 @@ def gen_plots(
             index=1,
         )
         save_path = f"{file_path}/T2M_{epoch}.png"
-        utils.plot_fields(
+        plot_fns.plot_fields(
             input_print,
             output_print - input_print,
             target_print - input_print,
@@ -142,7 +142,7 @@ def gen_plots(
             index=3,
         )
         save_path = f"{file_path}/T850_{epoch}.png"
-        utils.plot_fields(
+        plot_fns.plot_fields(
             input_print,
             output_print - input_print,
             target_print - input_print,
@@ -150,7 +150,7 @@ def gen_plots(
             index=32,
         )
         save_path = f"{file_path}/U850_{epoch}.png"
-        utils.plot_fields(
+        plot_fns.plot_fields(
             input_print,
             output_print - input_print,
             target_print - input_print,
@@ -158,7 +158,7 @@ def gen_plots(
             index=45,
         )
         save_path = f"{file_path}/Z500_{epoch}.png"
-        utils.plot_fields(
+        plot_fns.plot_fields(
             input_print,
             output_print - input_print,
             target_print - input_print,
@@ -411,7 +411,10 @@ def validate(
                 case 1:
                     # Permute input data for mse calculation
                     input_data = input_data.permute(0, 2, 3, 1)
-                    target_data = target_data.permute(0, 2, 3, 1)
+                    if config_dict["model_parallel"]["type"] == 'jigsaw':
+                        target_data = target_data.permute(0, 2, 3, 1)
+                    else:
+                        input_data = input_data[:,:,:,:69]
                     norm_offset, index_offset = 0, 0
                     if batch == 0 and rank == 0:  # PLOT BEFORE MODIFYING
                         gen_plots(
@@ -424,7 +427,7 @@ def validate(
                             epoch,
                             model_parallel=model_parallel,
                         )
-
+                    # print(f'Shape target and result: {input_data.shape}, {target_data.shape}, {output.shape}')
                     # Calculate RMSE and ACC
                     rmse[rollout][indices_key] = rmse[rollout][
                         indices_key

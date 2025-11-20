@@ -117,6 +117,7 @@ def training_loop(
         torch.cuda.synchronize()
 
         model.eval()
+        
         val_loss = eval.validate(
             config_dict,
             model,

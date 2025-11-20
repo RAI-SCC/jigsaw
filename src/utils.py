@@ -255,7 +255,11 @@ def build_megatron_model(
             model = Model.ModelMegatron(
                 config_dict, rank, device, n_parallel, model_group
             ).to(device)
-
+    # need to match parameters for non-transformer, non-mlp layers
+    for name, param in model.named_parameters():
+        if ('blocks' not in name) or 'layer_norm' in name:
+            dist.all_reduce(param.data)
+    
     model = DDP(
         model, device_ids=[localid], output_device=localid, process_group=ddp_group
     )
@@ -264,7 +268,7 @@ def build_megatron_model(
         print(
             f"model has {count_parameters(model) * n_parallel / 1e6} million parameters"
         )
-        print(f"estimated forward FLOPS: {calc_flops_comm(config_dict)}")
+        print(f"estimated forward FLOPS: {calc_flops_transformer(config_dict)}")
     return model
 
 

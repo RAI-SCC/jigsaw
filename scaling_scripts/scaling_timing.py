@@ -3,7 +3,7 @@ import argparse
 
 import numpy as np
 import torch
-import torch.distributed
+import torch.distributed as dist
 import yaml
 
 import utils
@@ -110,4 +110,4 @@ if __name__ == '__main__':
     device, localid, rank, world_size = utils.init_cuda()
 
     training_loop(config_dict, device, localid, rank)
-    torch.distributed.destroy_process_group()
+    dist.destroy_process_group()
