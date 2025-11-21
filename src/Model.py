@@ -423,6 +423,7 @@ class Model(torch.nn.Module):
                 x = torch.concat((x, x_res2), dim=2)
             else:
                 x = self.layer_norm(x + x_res2)
+                
             x = self.recovery(x, self.n_lat, self.n_lon // 2)
 
             x = x.reshape(x.shape[0], -1, x.shape[-1])
@@ -983,10 +984,6 @@ class ModelMegatron(torch.nn.Module):
         
         # x shape: [1, 69, 720, 1440]
         x = self.embedding(x)  # x: latent_t
-        #print(f'Rank {self.rank} and x initial values {x[0,0,:5]}')
-        #for name, param in self.embedding.named_parameters():
-        #    if len(param.shape) == 3:
-        #        print(f'Rank {self.rank}, param {param[0,0,:4]}')
                 
         x_res2 = x.clone()
 
@@ -1009,7 +1006,7 @@ class ModelMegatron(torch.nn.Module):
 
         if self.linear_residual:
             x = self.layer_norm2(x)  # layer norm must go before concat
-            x = torch.concat((x[:, :, :, : self.num_variables], x_res[..., :69]), dim=3)
+            x = torch.concat((x[:, :, :, : self.num_variables], x_res[..., :self.num_variables]), dim=3)
             x = self.layer_norm3(x)
             x = x.reshape(x_shape[0], self.xlat * self.xlon, self.num_variables * 2)
             x = self.linearlayer(x)

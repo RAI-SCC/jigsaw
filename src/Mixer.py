@@ -90,13 +90,14 @@ class MixerBlock(torch.nn.Module):
             Output tensor after applying layer normalization, token mixing,
             transposition, and channel mixing.
         """
-        x_res = x
+        x_res = x.clone()
         y = self.layer_norm1(x)
         y = self.token_mixing(y)
         y = self.transpose(y)
         x = x_res + y
         y = self.layer_norm2(x)
         x = x + self.channel_mixing(y)
+        
         return x
 
 
@@ -246,7 +247,6 @@ class MixerBlockMegatron(torch.nn.Module):
         y = self.layer_norm1(x)
         y = y.mT
         y = self.token_mixing(y)
-        # print(f'x y shape {x_res.shape}, y {y.shape}')
         y = y.mT
         x = x_res + y
         y = self.layer_norm2(x)

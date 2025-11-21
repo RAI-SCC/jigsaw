@@ -360,9 +360,9 @@ def validate(
         start, end = 0, xlon // 2
     else:
         start, end = xlon // 2, xlon
-    land_mask = torch.unsqueeze(land_mask[:, start : end], 0)
-    soil_type = torch.unsqueeze(soil_type[:, start : end], 0)
-    topography = torch.unsqueeze(topography[:, start : end], 0)
+    land_mask = torch.unsqueeze(land_mask[:, start:end], 0)
+    soil_type = torch.unsqueeze(soil_type[:, start:end], 0)
+    topography = torch.unsqueeze(topography[:, start:end], 0)
 
     index_offset = 2 if "rollout_time" in var_names else 1
     mean, std = load_averages(config_dict)
@@ -380,7 +380,7 @@ def validate(
     for batch, data in enumerate(dataloader):
         if rank == 0:
             print(f"{batch}/{len(dataloader)}")
-        
+
         input_data = data[0].to(device, non_blocking=True)
         for step, rollout in enumerate(rollout_time):
             # Write epoch
@@ -390,31 +390,31 @@ def validate(
             acc[rollout][1] = step
 
             # Input and target data loading
-            target_data = data[1][step].to(device, non_blocking=True)       
-            
-            if step == 0:        
-                model_input = input_data.detach()                
+            target_data = data[1][step].to(device, non_blocking=True)
+
+            if step == 0:
+                model_input = input_data.detach()
             else:
                 model_input = model_output.reshape(2, 720, 720, 36)
-                
+
                 if rank % 2 == 1:
                     # change last 3 dims to constant mask
-                    model_input[...,-3] = land_mask
-                    model_input[...,-2] = soil_type
-                    model_input[...,-1] = topography
-                    
+                    model_input[..., -3] = land_mask
+                    model_input[..., -2] = soil_type
+                    model_input[..., -1] = topography
+
             model_output = model(model_input, rollout_=1)
-                
+
             output = model_output.detach()
-            
+
             match parallelism:
                 case 1:
                     # Permute input data for mse calculation
                     input_data = input_data.permute(0, 2, 3, 1)
-                    if config_dict["model_parallel"]["type"] == 'jigsaw':
+                    if config_dict["model_parallel"]["type"] == "jigsaw":
                         target_data = target_data.permute(0, 2, 3, 1)
                     else:
-                        input_data = input_data[:,:,:,:69]
+                        input_data = input_data[:, :, :, :69]
                     norm_offset, index_offset = 0, 0
                     if batch == 0 and rank == 0:  # PLOT BEFORE MODIFYING
                         gen_plots(
@@ -570,6 +570,7 @@ def validate(
         total_samples = total_samples + input_data.shape[0]
 
     if parallelism == 1:
+        print(f"I am rank {rank} and loss values are {loss} over {total_samples}")
         torch.distributed.all_reduce(total_samples)
         torch.distributed.all_reduce(loss)
         loss /= total_samples
@@ -669,7 +670,6 @@ def calc_mse_variable(
 
     std_multiplier = std[indices + norm_offset].view(1, 1, 1, len(indices)).to(device)
     area_weights = area_weights.view(1, n_lat, 1, 1)
-
     mean_squared_error = (
         (target[:, :, :, indices] - result[:, :, :, indices])
         * std_multiplier.flatten()

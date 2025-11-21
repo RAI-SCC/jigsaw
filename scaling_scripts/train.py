@@ -222,9 +222,9 @@ def train_one_epoch(
             handles, flat_grad, gradients = utils.reduce_ddp_layernorms(model, col_group)
             handles.wait()
             vector_to_parameters(flat_grad, gradients)
-            
+        
         optimizer.step()
-        # dist.all_reduce(loss, op=dist.ReduceOp.AVG)
+        dist.all_reduce(loss, op=dist.ReduceOp.AVG)
         epoch_loss = epoch_loss + float(loss.detach())
         if rank == 0:
             print(
