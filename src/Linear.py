@@ -58,11 +58,11 @@ class DistributedXWT(torch.nn.Module):
         device: torch.device,
         n_parallel: int,
         model_group: dist.ProcessGroup,
-        spatial_group: dist.ProcessGroup,
         n_channels: int = 1,
         bias: bool = True,
         stdev: float = None,
         init_method: str = "linear",
+        patch_size = None
     ) -> None:
         """
         Initialize the XWT Linear layer sharded over n processes.
@@ -93,13 +93,17 @@ class DistributedXWT(torch.nn.Module):
         self.out_dim = out_dim
 
         if init_method == "linear":
-            # TODO: Dependent on the data sharding scheme
-            stdev = 1.0 / np.sqrt(in_dim * 2)
+            stdev = 1.0 / np.sqrt(in_dim * 2) if n_parallel == 4 else 1.0 / np.sqrt(in_dim) # TODO: multiply by 2 for parallelism = 4, I think
             self.weights = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
             )
         elif init_method == "conv":
-            stdev = np.sqrt(6.0) / (8 * 8 * n_channels)  # TODO
+            stdev = np.sqrt(1.0 / (69 * patch_size))  # TODO generalize to input script
+            self.weights = torch.nn.parameter.Parameter(
+                torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
+            )
+        elif init_method == "convTranspose":
+            stdev = np.sqrt(1.0 / (69 * patch_size * 2))  # TODO generalize to input script
             self.weights = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
             )
@@ -111,12 +115,10 @@ class DistributedXWT(torch.nn.Module):
             self.bias = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim).uniform_(-stdev, stdev)
             )
-            dist.all_reduce(self.bias, group=spatial_group, op=dist.ReduceOp.AVG)
         elif bias and n_parallel == 8:
             self.bias = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim * 2).uniform_(-stdev, stdev)
             )
-            dist.all_reduce(self.bias, group=spatial_group, op=dist.ReduceOp.AVG)
         else:
             self.bias = None
 
@@ -248,7 +250,8 @@ class XWT(torch.autograd.Function):
         grad_weight = select_x_transpose_w_kernel(n_parallel)(
             grad_output, input, rank=rank, device=device, model_group=model_group
         )
-        grad_b = grad_output
+
+        grad_b = grad_output.sum(dim=(0, 1))
 
         if b is None:
             return grad_input, grad_weight, None, None, None, None, None
@@ -268,7 +271,7 @@ class DistributedXW(torch.nn.Module):
         n_parallel: int,
         model_group: dist.ProcessGroup,
         n_channels: int = 1,
-        bias: bool = True,
+        bias: bool = False,
         stdev: float = None,
         init_method: str = "linear",
     ) -> None:
@@ -290,7 +293,7 @@ class DistributedXW(torch.nn.Module):
 
         self.in_dim = in_dim
         self.out_dim = out_dim
-        stdev = 1.0 / np.sqrt(in_dim * 2)
+        stdev = 1.0 / np.sqrt(in_dim * 2) if n_parallel == 4 else 1.0 / np.sqrt(in_dim)
 
         self.weights = torch.nn.parameter.Parameter(
             torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev)
@@ -426,7 +429,7 @@ class XW(torch.autograd.Function):
         grad_weight = select_x_transpose_w_kernel(n_parallel)(
             input, grad_output, rank=rank, device=device, model_group=model_group
         )
-        grad_bias = grad_output
+        grad_bias = grad_output.sum(dim=(0, 1))
 
         if ctx.b is None:
             return grad_input, grad_weight, None, None, None, None, None
@@ -446,7 +449,7 @@ class DistributedXTW(torch.nn.Module):
         n_parallel: int,
         model_group: dist.ProcessGroup,
         n_channels: int = 72,
-        bias: bool = True,
+        bias: bool = False,
         init_method: str = "linear",
     ) -> None:
         """
@@ -471,7 +474,7 @@ class DistributedXTW(torch.nn.Module):
         self.in_dim = in_dim
         self.out_dim = out_dim
         if init_method == "linear":
-            stdev = 1.0 / np.sqrt(in_dim * 2)
+            stdev = 1.0 / np.sqrt(in_dim * 2) if n_parallel == 2 else 1.0 / np.sqrt(in_dim)
             self.weights = torch.nn.parameter.Parameter(
                 torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev)
             )
@@ -571,6 +574,7 @@ class XTW(torch.autograd.Function):
         ctx.device = device
         ctx.n_parallel = n_parallel
         ctx.model_group = model_group
+        ctx.has_bias = False if b is None else True
 
         xtw = select_x_transpose_w_kernel(n_parallel)(x, w, rank, device, model_group)
 
@@ -614,7 +618,8 @@ class XTW(torch.autograd.Function):
         grad_weight = select_xw_kernel(n_parallel)(
             input, grad_output, rank, device, model_group
         )
-        grad_b = grad_output
+
+        grad_b = grad_output.sum(dim=(0, 1)) if ctx.has_bias else None
         return grad_input, grad_weight, grad_b, None, None, None, None
 
 
