@@ -208,6 +208,7 @@ class PatchEmbedding1D(torch.nn.Module):
         stride=(8, 8),
         xlat=721,
         bias=True
+        bias=True
     ):
         """
         Initialize patch embedding operation.
@@ -751,10 +752,7 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
                 model_group,
                 n_channels=var_in,
                 init_method="conv",
-<<<<<<< HEAD
                 bias=bias,
-=======
->>>>>>> a54fdf6 (add ViT models)
                 patch_size=patch_size
             )
         elif n_parallel == 4:
@@ -767,10 +765,7 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
                 model_group,
                 n_channels=var_in,
                 init_method="conv",
-<<<<<<< HEAD
                 bias=bias,
-=======
->>>>>>> a54fdf6 (add ViT models)
                 patch_size=patch_size
             )
         elif n_parallel == 8:
@@ -783,10 +778,7 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
                 model_group,
                 n_channels=var_in,
                 init_method="conv",
-<<<<<<< HEAD
                 bias=bias,
-=======
->>>>>>> a54fdf6 (add ViT models)
                 patch_size=patch_size
             )
 
@@ -858,14 +850,9 @@ class Distributed1DPatchRecovery(torch.nn.Module):
                     self.n_parallel,
                     self.model_group,
                     n_channels=embed_dim,
-<<<<<<< HEAD
                     init_method="convTranspose",
                     bias=bias,
-                patch_size=patch_size
-=======
-                    init_method="conv",
                     patch_size=patch_size
->>>>>>> a54fdf6 (add ViT models)
                 )
             else:
                 self.conv = Linear.DistributedXWT(
@@ -876,12 +863,8 @@ class Distributed1DPatchRecovery(torch.nn.Module):
                     self.n_parallel,
                     self.model_group,
                     n_channels=embed_dim,
-<<<<<<< HEAD
                     init_method="convTranspose",
                     bias=bias,
-=======
-                    init_method="conv",
->>>>>>> a54fdf6 (add ViT models)
                     patch_size=patch_size
                 )
         else:
@@ -893,12 +876,8 @@ class Distributed1DPatchRecovery(torch.nn.Module):
                 self.n_parallel,
                 self.model_group,
                 n_channels=embed_dim,
-<<<<<<< HEAD
                 init_method="convTranspose",
                 bias=bias,
-=======
-                init_method="conv",
->>>>>>> a54fdf6 (add ViT models)
                 patch_size=patch_size
             )
         self.patch_size = patch_size

@@ -129,6 +129,7 @@ class Model_eightway(torch.nn.Module):
                 model_group,
             )
             
+            
         self.linearlayer = Linear.DistributedXWT(
             self.num_variables * 2,
             self.num_variables // 2,
@@ -255,7 +256,7 @@ class Model(torch.nn.Module):
                 self.device,
                 n_parallel,
                 model_group,
-                bias=False
+                bias=True
             )
         else:
             self.patch_size = (
@@ -276,7 +277,7 @@ class Model(torch.nn.Module):
                 self.device,
                 n_parallel,
                 model_group,
-                bias=False
+                bias=True
             )
 
         self.n_blocks = config_dict["model"]["mixing_blocks"]
@@ -353,7 +354,7 @@ class Model(torch.nn.Module):
                 self.device,
                 n_parallel,
                 model_group,
-                bias=False
+                bias=True
             )            
             self.layer_norm2 = Norm.DistributedLayerNorm(
                 self.num_variables, self.rank, self.device, self.column_subgroup

@@ -43,7 +43,7 @@ class MixerBlock(torch.nn.Module):
             device,
             n_parallel=n_parallel,
             model_group=model_group,
-            bias=False
+            bias=True
         )
         self.channel_mixing = MLP.DistributedMLP(
             channels_mlp_dim,
@@ -53,7 +53,7 @@ class MixerBlock(torch.nn.Module):
             device,
             n_parallel=n_parallel,
             model_group=model_group,
-            bias=False
+            bias=True
         )
         self.transpose = Linear.DistributedXTranpose(
             rank, device, n_parallel, model_group
