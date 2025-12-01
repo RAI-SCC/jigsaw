@@ -88,14 +88,14 @@ def conv1d_twoway_channel(
             dist.all_to_all(
                 [empty, x_buffer], [empty, x], group=model_group, async_op=False
             )
-            y += F.conv1d(x_buffer, w[:, in_channels // 2 :])
+            y = y + F.conv1d(x_buffer, w[:, in_channels // 2 :])
             return y, x, x_buffer
         case 1:
             y = F.conv1d(x, w[:, in_channels // 2 :])
             dist.all_to_all(
                 [x_buffer, empty], [x, empty], group=model_group, async_op=False
             )
-            y += F.conv1d(x_buffer, w[:, : in_channels // 2])
+            y = y + F.conv1d(x_buffer, w[:, : in_channels // 2])
             return y, x_buffer, x
         
 def conv1d_fourway_complete(
@@ -170,7 +170,7 @@ def conv1d_fourway_complete(
             dist.all_to_all(
                 [empty, x_buffer], [empty, x_augment], group=channel_group, async_op=False
             )
-            y += F.conv1d(x_buffer, w[:, in_channels // 2 :], stride=stride, padding=padding, dilation=dilation)
+            y = y + F.conv1d(x_buffer, w[:, in_channels // 2 :], stride=stride, padding=padding, dilation=dilation)
             return y, x_augment, x_buffer, L
         case 1 | 3:
             y = F.conv1d(x, w[:, in_channels // 2 :], stride=stride, padding=padding, dilation=dilation)
@@ -178,7 +178,7 @@ def conv1d_fourway_complete(
             dist.all_to_all(
                 [x_buffer, empty], [x_augment, empty], group=channel_group, async_op=False
             )
-            y += F.conv1d(x_buffer, w[:, : in_channels // 2], stride=stride, padding=padding, dilation=dilation)
+            y = y + F.conv1d(x_buffer, w[:, : in_channels // 2], stride=stride, padding=padding, dilation=dilation)
             
             return y, x_buffer, x_augment, L
 
@@ -208,14 +208,14 @@ def conv2d_twoway_channel(
             dist.all_to_all(
                 [empty, x_buffer], [empty, x], group=model_group, async_op=False
             )
-            y += F.conv2d(x_buffer, w[:, in_channels // 2 :], stride=stride, padding=padding, dilation=dilation)
+            y = y + F.conv2d(x_buffer, w[:, in_channels // 2 :], stride=stride, padding=padding, dilation=dilation)
             return y, x, x_buffer
         case 1:
             y = F.conv2d(x, w[:, in_channels // 2 :], stride=stride, padding=padding, dilation=dilation)
             dist.all_to_all(
                 [x_buffer, empty], [x, empty], group=model_group, async_op=False
             )
-            y += F.conv2d(x_buffer, w[:, : in_channels // 2], stride=stride, padding=padding, dilation=dilation)
+            y = y + F.conv2d(x_buffer, w[:, : in_channels // 2], stride=stride, padding=padding, dilation=dilation)
             return y, x_buffer, x
 
 
