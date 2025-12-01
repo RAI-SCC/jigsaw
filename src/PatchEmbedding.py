@@ -207,6 +207,7 @@ class PatchEmbedding1D(torch.nn.Module):
         padding=(0, 0),
         stride=(8, 8),
         xlat=721,
+        bias=True
     ):
         """
         Initialize patch embedding operation.
@@ -236,7 +237,8 @@ class PatchEmbedding1D(torch.nn.Module):
             in_channels,
             out_channels=self.dim,
             kernel_size=self.patch_size,
-            stride=self.stride
+            stride=self.stride,
+            bias=bias
         )
 
     def forward(self, input):
@@ -291,6 +293,7 @@ class PatchRecovery1D(torch.nn.Module):
         concat=False,
         xlat=721,
         xlon=1440,
+        bias=True
     ):
         """
         2D Patch recovery.
@@ -317,6 +320,7 @@ class PatchRecovery1D(torch.nn.Module):
                 out_channels=69,
                 kernel_size=self.patch_size,
                 stride=self.stride,
+                bias=bias
             )
         else:
             self.conv = torch.nn.ConvTranspose1d(
@@ -324,6 +328,7 @@ class PatchRecovery1D(torch.nn.Module):
                 out_channels=69,
                 kernel_size=self.patch_size,
                 stride=self.stride,
+                bias=bias
             )
         self.out_channels = out_channels
         self.patch_size = patch_size
@@ -728,6 +733,7 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
         device,
         n_parallel,
         model_group,
+        bias=True
     ):
         super().__init__()
 
@@ -746,6 +752,7 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
                 model_group,
                 n_channels=var_in,
                 init_method="conv",
+                bias=bias,
                 patch_size=patch_size
             )
         elif n_parallel == 4:
@@ -758,6 +765,7 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
                 model_group,
                 n_channels=var_in,
                 init_method="conv",
+                bias=bias,
                 patch_size=patch_size
             )
         elif n_parallel == 8:
@@ -770,6 +778,7 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
                 model_group,
                 n_channels=var_in,
                 init_method="conv",
+                bias=bias,
                 patch_size=patch_size
             )
 
@@ -795,7 +804,7 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
 
 
 class Distributed1DPatchRecovery(torch.nn.Module):
-    """2D Patch recovery option."""
+    """1D Patch recovery option."""
 
     def __init__(
         self,
@@ -809,6 +818,7 @@ class Distributed1DPatchRecovery(torch.nn.Module):
         concat=False,
         group=None,
         stride=None,
+        bias=False
     ):
         """
         1D Patch recovery.
@@ -840,8 +850,9 @@ class Distributed1DPatchRecovery(torch.nn.Module):
                     self.n_parallel,
                     self.model_group,
                     n_channels=embed_dim,
-                    init_method="conv",
-                    patch_size=patch_size
+                    init_method="convTranspose",
+                    bias=bias,
+                patch_size=patch_size
                 )
             else:
                 self.conv = Linear.DistributedXWT(
@@ -852,7 +863,8 @@ class Distributed1DPatchRecovery(torch.nn.Module):
                     self.n_parallel,
                     self.model_group,
                     n_channels=embed_dim,
-                    init_method="conv",
+                    init_method="convTranspose",
+                    bias=bias,
                     patch_size=patch_size
                 )
         else:
@@ -864,7 +876,8 @@ class Distributed1DPatchRecovery(torch.nn.Module):
                 self.n_parallel,
                 self.model_group,
                 n_channels=embed_dim,
-                init_method="conv",
+                init_method="convTranspose",
+                bias=bias,
                 patch_size=patch_size
             )
         self.patch_size = patch_size

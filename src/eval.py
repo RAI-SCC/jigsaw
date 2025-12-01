@@ -415,6 +415,7 @@ def validate(
                         target_data = target_data.permute(0, 2, 3, 1)
                     else:
                         input_data = input_data[:, :, :, :69]
+
                     norm_offset, index_offset = 0, 0
                     if batch == 0 and rank == 0:  # PLOT BEFORE MODIFYING
                         gen_plots(
@@ -561,22 +562,44 @@ def validate(
                         norm_offset=norm_offset,
                     ).to(torch.float32)
 
-            output_loss = output * area_weights * variable_weights
-            target_loss = target_data * area_weights * variable_weights
+            if parallelism > 1 and rank in [1, 3]:
+                output_loss = (
+                    output[..., :33] * area_weights * variable_weights[..., :33]
+                )
+                target_loss = (
+                    target_data[..., :33] * area_weights * variable_weights[..., :33]
+                )
+
+            else:
+                output_loss = output * area_weights * variable_weights
+                target_loss = target_data * area_weights * variable_weights
 
             iter_loss = loss_fn(output_loss, target_loss)
+
+            if parallelism == 4 and rank in [0, 2]:
+                iter_loss = iter_loss * (36 / 69) * 0.5
+            elif parallelism == 4 and rank in [1, 3]:
+                iter_loss = iter_loss * (33 / 69) * 0.5
+
             loss = loss + iter_loss.detach()
 
         total_samples = total_samples + input_data.shape[0]
 
     if parallelism == 1:
-        print(f"I am rank {rank} and loss values are {loss} over {total_samples}")
         torch.distributed.all_reduce(total_samples)
         torch.distributed.all_reduce(loss)
+
         loss /= total_samples
+
+        # print(f"I am rank {rank} and loss values are {loss} over {total_samples}")
     else:
         total_samples = [len(dataloader.dataset)]
         loss = loss / world_size / total_samples[0]
+
+        if parallelism == 4:
+            loss = (
+                loss * world_size
+            )  # do not divide by world size, since this is handled
 
         torch.distributed.all_reduce(loss)
 
@@ -671,14 +694,12 @@ def calc_mse_variable(
     std_multiplier = std[indices + norm_offset].view(1, 1, 1, len(indices)).to(device)
     area_weights = area_weights.view(1, n_lat, 1, 1)
     mean_squared_error = (
-        (target[:, :, :, indices] - result[:, :, :, indices])
+        (target[..., indices] - result[..., indices])
         * std_multiplier.flatten()
         / divisor
     ) ** 2 * area_weights
-
     # MSE will have shape [n_batch, n_vars, ]
     mean_squared_error = mean_squared_error.sum(dim=(0, 1, 2))
-
     return mean_squared_error
 
 
