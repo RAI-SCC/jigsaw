@@ -129,7 +129,6 @@ class Model_eightway(torch.nn.Module):
                 model_group,
             )
             
-            
         self.linearlayer = Linear.DistributedXWT(
             self.num_variables * 2,
             self.num_variables // 2,
