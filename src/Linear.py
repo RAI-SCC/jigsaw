@@ -316,8 +316,11 @@ class XWT(torch.autograd.Function):
             model_group_bdim,
         ) = in_dims
 
-        # We only support vmapping 
-        git 
+        # We only support vmapping over tensor arguments; non-tensors must not be batched.
+        assert rank_bdim is None
+        assert device_bdim is None
+        assert n_parallel_bdim is None
+        assert model_group_bdim is None
         # assert w_bdim is None
 #        assert b_bdim is None
 
@@ -584,11 +587,11 @@ class XW(torch.autograd.Function):
         assert n_parallel_bdim is None
         assert model_group_bdim is None
         # assert w_bdim is None
-        # assert b_bdim is None
+        assert b_bdim is None
 
         # Case 1: no vmapping at all → just call original op.
         if x_bdim is None:
-            out = XW.apply(x, w, b, rank, device, n_parallel, model_group)
+            out = XWT.apply(x, w, b, rank, device, n_parallel, model_group)
             return out, None
 
         # Only support vmap over dim 0 of x.
@@ -862,11 +865,11 @@ class XTW(torch.autograd.Function):
         assert n_parallel_bdim is None
         assert model_group_bdim is None
         # assert w_bdim is None
-        #assert b_bdim is None
+        assert b_bdim is None
 
         # Case 1: no vmapping at all → just call original op.
         if x_bdim is None:
-            out = XTW.apply(x, w, b, rank, device, n_parallel, model_group)
+            out = XWT.apply(x, w, b, rank, device, n_parallel, model_group)
             return out, None
 
         # Only support vmap over dim 0 of x.
@@ -936,7 +939,7 @@ class DistributedXTranpose(torch.nn.Module):
 class XT(torch.autograd.Function):
     """Autograd function for batched transpose (XT) operation distributed across n processes."""
 
-    # generate_vmap_rule = True
+    generate_vmap_rule = True
 
     @staticmethod
     def forward(
@@ -979,7 +982,6 @@ class XT(torch.autograd.Function):
         output: xwt
         """
         
-        x, rank, device, n_parallel, model_group = inputs
         ctx.device = device
         ctx.rank = rank
         ctx.n_parallel = n_parallel
@@ -1012,24 +1014,6 @@ class XT(torch.autograd.Function):
             grad_output, rank, device, model_group
         )
         return grad_output, None, None, None, None
-
-    @staticmethod
-    def vmap(
-        info,
-        in_dims: tuple[Optional[int], ...],
-        x: torch.Tensor,
-        rank: int,
-        device: torch.device,
-        n_parallel: int,
-        model_group: dist.ProcessGroup,
-    ) -> tuple[torch.Tensor, Optional[int]]:
-       
-        x = x.contiguous()
-        # x under vmap has shape (V, B, x_in, in_dim).
-        out = XT.apply(x, rank, device, n_parallel, model_group)
-
-        # out has vmapped dimension at dim 0
-        return out, 0
 
 
 class DistributedMatMulXWTranspose(torch.nn.Module):
