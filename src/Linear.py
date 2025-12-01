@@ -62,7 +62,7 @@ class DistributedXWT(torch.nn.Module):
         bias: bool = True,
         stdev: float = None,
         init_method: str = "linear",
-        patch_size = None
+        patch_size=None,
     ) -> None:
         """
         Initialize the XWT Linear layer sharded over n processes.
@@ -93,7 +93,9 @@ class DistributedXWT(torch.nn.Module):
         self.out_dim = out_dim
 
         if init_method == "linear":
-            stdev = 1.0 / np.sqrt(in_dim * 2) if n_parallel == 4 else 1.0 / np.sqrt(in_dim) # TODO: multiply by 2 for parallelism = 4, I think
+            stdev = (
+                1.0 / np.sqrt(in_dim * 2) if n_parallel == 4 else 1.0 / np.sqrt(in_dim)
+            )  # TODO: multiply by 2 for parallelism = 4, I think
             self.weights = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
             )
@@ -103,7 +105,9 @@ class DistributedXWT(torch.nn.Module):
                 torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
             )
         elif init_method == "convTranspose":
-            stdev = np.sqrt(1.0 / (69 * patch_size * 2))  # TODO generalize to input script
+            stdev = np.sqrt(
+                1.0 / (69 * patch_size * 2)
+            )  # TODO generalize to input script
             self.weights = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
             )
@@ -126,7 +130,6 @@ class DistributedXWT(torch.nn.Module):
         self.rank = rank
         self.n_parallel = n_parallel
         self.model_group = model_group
-
         self.XWT = XWT().apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -164,7 +167,6 @@ class XWT(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx: torch.autograd.Function,
         x: torch.Tensor,
         w: torch.Tensor,
         b: torch.Tensor,
@@ -202,17 +204,28 @@ class XWT(torch.autograd.Function):
             B, out_dim are global values.
             in_dim is local value.
         """
-        ctx.save_for_backward(x, w)
+        xwt = select_xw_transpose_kernel(n_parallel)(x, w, rank, device, model_group)
+        
+        # Handle bias term here?
+        if (b is not None) and (len(b.shape) > 1):
+            b = b.reshape(b.shape[0], 1, 1, -1)
+        
+        xwt = xwt if b is None else xwt.add(b)
+        return xwt
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        """
+        ctx: FunctionCtx
+        inputs: tuple(x, w, b, rank, device, n_parallel, model_group)
+        output: xwt
+        """
+        x, w, b, rank, device, n_parallel, model_group = inputs
+        ctx.save_for_backward(x, w, b)
         ctx.rank = rank
         ctx.device = device
         ctx.n_parallel = n_parallel
         ctx.model_group = model_group
-        ctx.b = b
-
-        xwt = select_xw_transpose_kernel(n_parallel)(x, w, rank, device, model_group)
-
-        xwt = xwt if b is None else xwt.add(b)
-        return xwt
 
     @staticmethod
     def backward(
@@ -237,8 +250,7 @@ class XWT(torch.autograd.Function):
         grad_bias: torch.Tensor
             Gradient with respect to the bias.
         """
-        input, weight = ctx.saved_tensors
-        b = ctx.b
+        input, weight, bias  = ctx.saved_tensors
         rank = ctx.rank
         device = ctx.device
         n_parallel = ctx.n_parallel
@@ -251,12 +263,89 @@ class XWT(torch.autograd.Function):
             grad_output, input, rank=rank, device=device, model_group=model_group
         )
 
-        grad_b = grad_output.sum(dim=(0, 1))
-
-        if b is None:
-            return grad_input, grad_weight, None, None, None, None, None
+        if len(grad_output.shape) == 4:
+            grad_b = None if bias is None else grad_output.sum(dim=(1, 2))
         else:
-            return grad_input, grad_weight, grad_b, None, None, None, None
+            grad_b = None if bias is None else grad_output.sum(dim=(0, 1))
+
+        return grad_input, grad_weight, grad_b, None, None, None, None
+
+    @staticmethod
+    def vmap(
+        info,
+        in_dims: tuple[Optional[int], ...],
+        x: torch.Tensor,
+        w: torch.Tensor,
+        b: Optional[torch.Tensor],
+        rank: int,
+        device: torch.device,
+        n_parallel: int,
+        model_group: dist.ProcessGroup,
+    ) -> tuple[torch.Tensor, Optional[int]]:
+        """
+        Define XWT behavior under torch.vmap.
+
+        Parameters
+        ----------
+        info :
+            Metadata object with info.batch_size (size of vmapped dimension).
+        in_dims :
+            Tuple of Optional[int] describing which dimension of each input
+            is vmapped over. Structure matches (x, w, b, rank, device, n_parallel, model_group).
+        x : Tensor
+            Possibly batched input.
+        w : Tensor
+            Possibly shared or batched weights.
+        b : Tensor or None
+            Possibly shared or batched bias.
+
+        Returns
+        -------
+        output : Tensor
+            Batched output with vmapped dimension in front.
+        out_dim : Optional[int]
+            Index of vmapped dimension in output (0 if batched, None if not).
+        """
+        (
+            x_bdim,
+            w_bdim,
+            b_bdim,
+            rank_bdim,
+            device_bdim,
+            n_parallel_bdim,
+            model_group_bdim,
+        ) = in_dims
+
+        # We only support vmapping over tensor arguments; non-tensors must not be batched.
+        assert rank_bdim is None
+        assert device_bdim is None
+        assert n_parallel_bdim is None
+        assert model_group_bdim is None
+        # assert w_bdim is None
+#        assert b_bdim is None
+
+        # Case 1: no vmapping at all → just call original op.
+        if x_bdim is None:
+            out = XWT.apply(x, w, b, rank, device, n_parallel, model_group)
+            return out, None
+
+        # Only support vmap over dim 0 of x.
+        if x_bdim != 0:
+            raise NotImplementedError(
+                f"XWT.vmap only supports vmapping over x in dim 0, got x_bdim={x_bdim}"
+            )
+
+        # x under vmap has shape (V, B, x_in, in_dim).
+        x = x.contiguous()
+        V = x.shape[0]
+        B = x.shape[1]
+        rest = w.shape[1:]  # (in_dim, out_dim)
+
+        w = w.reshape(V, 1, *rest)
+        out = XWT.apply(x, w, b, rank, device, n_parallel, model_group)
+
+        # out has vmapped dimension at dim 0
+        return out, 0
 
 
 class DistributedXW(torch.nn.Module):
@@ -344,7 +433,6 @@ class XW(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx: torch.autograd.Function,
         x: torch.Tensor,
         w: torch.Tensor,
         b: Optional[torch.Tensor],
@@ -382,17 +470,27 @@ class XW(torch.autograd.Function):
             B, x_in are global values.
             out_dim is local value.
         """
-        ctx.save_for_backward(x, w)
-        ctx.b = b
+        xw = select_xw_kernel(n_parallel)(x, w, rank, device, model_group)
+
+        if (b is not None) and (len(b.shape) > 1):
+            b = b.reshape(b.shape[0], 1, 1, -1)
+        xw = xw if b is None else xw.add(b)
+        return xw
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        """
+        ctx: FunctionCtx
+        inputs: tuple(x, w, b, rank, device, n_parallel, model_group)
+        output: xwt
+        """
+        x, w, b, rank, device, n_parallel, model_group = inputs
+        ctx.save_for_backward(x, w, b)
         ctx.rank = rank
         ctx.device = device
         ctx.n_parallel = n_parallel
         ctx.model_group = model_group
-
-        xw = select_xw_kernel(n_parallel)(x, w, rank, device, model_group)
-
-        xw = xw if b is None else xw.add(b)
-        return xw
+        ctx.b = b
 
     @staticmethod
     def backward(ctx: torch.autograd.Function, grad_output: torch.Tensor):
@@ -415,13 +513,13 @@ class XW(torch.autograd.Function):
         grad_bias: torch.Tensor
             Gradient with respect to the bias.
         """
-        input, weight = ctx.saved_tensors
+        input, weight, bias = ctx.saved_tensors
         rank = ctx.rank
         device = ctx.device
         n_parallel = ctx.n_parallel
         model_group = ctx.model_group
 
-        # TODO: needed add after introduction of multi-head attention valueconcat
+        # TODO: needed add after introduction of multi-head attention value concat
         grad_output = grad_output.contiguous()
         grad_input = select_xw_transpose_kernel(n_parallel)(
             grad_output, weight, rank=rank, device=device, model_group=model_group
@@ -429,12 +527,90 @@ class XW(torch.autograd.Function):
         grad_weight = select_x_transpose_w_kernel(n_parallel)(
             input, grad_output, rank=rank, device=device, model_group=model_group
         )
-        grad_bias = grad_output.sum(dim=(0, 1))
 
-        if ctx.b is None:
-            return grad_input, grad_weight, None, None, None, None, None
+        if len(grad_output.shape) == 4:
+            grad_b = None if bias is None else grad_output.sum(dim=(1, 2))
         else:
-            return grad_input, grad_weight, grad_bias, None, None, None, None
+            grad_b = None if bias is None else grad_output.sum(dim=(0, 1))
+
+        return grad_input, grad_weight, grad_b, None, None, None, None
+        
+    @staticmethod
+    def vmap(
+        info,
+        in_dims: tuple[Optional[int], ...],
+        x: torch.Tensor,
+        w: torch.Tensor,
+        b: Optional[torch.Tensor],
+        rank: int,
+        device: torch.device,
+        n_parallel: int,
+        model_group: dist.ProcessGroup,
+    ) -> tuple[torch.Tensor, Optional[int]]:
+        """
+        Define XWT behavior under torch.vmap.
+
+        Parameters
+        ----------
+        info :
+            Metadata object with info.batch_size (size of vmapped dimension).
+        in_dims :
+            Tuple of Optional[int] describing which dimension of each input
+            is vmapped over. Structure matches (x, w, b, rank, device, n_parallel, model_group).
+        x : Tensor
+            Possibly batched input.
+        w : Tensor
+            Possibly shared or batched weights.
+        b : Tensor or None
+            Possibly shared or batched bias.
+
+        Returns
+        -------
+        output : Tensor
+            Batched output with vmapped dimension in front.
+        out_dim : Optional[int]
+            Index of vmapped dimension in output (0 if batched, None if not).
+        """
+        (
+            x_bdim,
+            w_bdim,
+            b_bdim,
+            rank_bdim,
+            device_bdim,
+            n_parallel_bdim,
+            model_group_bdim,
+        ) = in_dims
+
+        # We only support vmapping over tensor arguments; non-tensors must not be batched.
+        assert rank_bdim is None
+        assert device_bdim is None
+        assert n_parallel_bdim is None
+        assert model_group_bdim is None
+        # assert w_bdim is None
+        assert b_bdim is None
+
+        # Case 1: no vmapping at all → just call original op.
+        if x_bdim is None:
+            out = XWT.apply(x, w, b, rank, device, n_parallel, model_group)
+            return out, None
+
+        # Only support vmap over dim 0 of x.
+        if x_bdim != 0:
+            raise NotImplementedError(
+                f"XWT.vmap only supports vmapping over x in dim 0, got x_bdim={x_bdim}"
+            )
+
+        # x under vmap has shape (V, B, x_in, in_dim).
+        x = x.contiguous()
+        V = x.shape[0]
+        B = x.shape[1]
+        rest = w.shape[1:]  # (in_dim, out_dim)
+        # print(f'x shape {x.shape}, w shape {w.shape}')
+        w = w.reshape(V, 1, *rest)
+        out = XW.apply(x, w, b, rank, device, n_parallel, model_group)
+
+        # out has vmapped dimension at dim 0
+        return out, 0
 
 
 class DistributedXTW(torch.nn.Module):
@@ -474,7 +650,9 @@ class DistributedXTW(torch.nn.Module):
         self.in_dim = in_dim
         self.out_dim = out_dim
         if init_method == "linear":
-            stdev = 1.0 / np.sqrt(in_dim * 2) if n_parallel == 2 else 1.0 / np.sqrt(in_dim)
+            stdev = (
+                1.0 / np.sqrt(in_dim * 2) if n_parallel == 2 else 1.0 / np.sqrt(in_dim)
+            )
             self.weights = torch.nn.parameter.Parameter(
                 torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev)
             )
@@ -532,7 +710,6 @@ class XTW(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx: torch.autograd.Function,
         x: torch.Tensor,
         w: torch.Tensor,
         b: torch.Tensor,
@@ -569,17 +746,27 @@ class XTW(torch.autograd.Function):
             B, x_in are global values.
             out_dim is local value.
         """
-        ctx.save_for_backward(x, w)
+        xtw = select_x_transpose_w_kernel(n_parallel)(x, w, rank, device, model_group)
+        if (b is not None) and (len(b.shape) > 1):
+            b = b.reshape(b.shape[0], 1, 1, -1)
+        xtw = xtw if b is None else xtw.add(b)
+        return xtw
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        """
+        ctx: FunctionCtx
+        inputs: tuple(x, w, b, rank, device, n_parallel, model_group)
+        output: xwt
+        """
+
+        x, w, b, rank, device, n_parallel, model_group = inputs
+        ctx.save_for_backward(x, w, b)
         ctx.rank = rank
         ctx.device = device
         ctx.n_parallel = n_parallel
         ctx.model_group = model_group
-        ctx.has_bias = False if b is None else True
-
-        xtw = select_x_transpose_w_kernel(n_parallel)(x, w, rank, device, model_group)
-
-        xtw = xtw if b is None else xtw.add(b)
-        return xtw
+        ctx.b = b
 
     @staticmethod
     def backward(
@@ -606,7 +793,7 @@ class XTW(torch.autograd.Function):
         grad_bias: torch.Tensor
             Gradient with respect to the bias.
         """
-        input, weight = ctx.saved_tensors
+        input, weight, bias = ctx.saved_tensors
         rank = ctx.rank
         device = ctx.device
         n_parallel = ctx.n_parallel
@@ -619,8 +806,89 @@ class XTW(torch.autograd.Function):
             input, grad_output, rank, device, model_group
         )
 
-        grad_b = grad_output.sum(dim=(0, 1)) if ctx.has_bias else None
+        if len(grad_output.shape) == 4:
+            grad_b = None if bias is None else grad_output.sum(dim=(1, 2))
+        else:
+            grad_b = None if bias is None else grad_output.sum(dim=(0, 1))
+        
         return grad_input, grad_weight, grad_b, None, None, None, None
+
+    @staticmethod
+    def vmap(
+        info,
+        in_dims: tuple[Optional[int], ...],
+        x: torch.Tensor,
+        w: torch.Tensor,
+        b: Optional[torch.Tensor],
+        rank: int,
+        device: torch.device,
+        n_parallel: int,
+        model_group: dist.ProcessGroup,
+    ) -> tuple[torch.Tensor, Optional[int]]:
+        """
+        Define XWT behavior under torch.vmap.
+
+        Parameters
+        ----------
+        info :
+            Metadata object with info.batch_size (size of vmapped dimension).
+        in_dims :
+            Tuple of Optional[int] describing which dimension of each input
+            is vmapped over. Structure matches (x, w, b, rank, device, n_parallel, model_group).
+        x : Tensor
+            Possibly batched input.
+        w : Tensor
+            Possibly shared or batched weights.
+        b : Tensor or None
+            Possibly shared or batched bias.
+
+        Returns
+        -------
+        output : Tensor
+            Batched output with vmapped dimension in front.
+        out_dim : Optional[int]
+            Index of vmapped dimension in output (0 if batched, None if not).
+        """
+        (
+            x_bdim,
+            w_bdim,
+            b_bdim,
+            rank_bdim,
+            device_bdim,
+            n_parallel_bdim,
+            model_group_bdim,
+        ) = in_dims
+
+        # We only support vmapping over tensor arguments; non-tensors must not be batched.
+        assert rank_bdim is None
+        assert device_bdim is None
+        assert n_parallel_bdim is None
+        assert model_group_bdim is None
+        # assert w_bdim is None
+        assert b_bdim is None
+
+        # Case 1: no vmapping at all → just call original op.
+        if x_bdim is None:
+            out = XWT.apply(x, w, b, rank, device, n_parallel, model_group)
+            return out, None
+
+        # Only support vmap over dim 0 of x.
+        if x_bdim != 0:
+            raise NotImplementedError(
+                f"XWT.vmap only supports vmapping over x in dim 0, got x_bdim={x_bdim}"
+            )
+
+        # x under vmap has shape (V, B, x_in, in_dim).
+        x = x.contiguous()
+        V = x.shape[0]
+        B = x.shape[1]
+        rest = w.shape[1:]  # (in_dim, out_dim)
+        # print(f'x shape {x.shape}, w shape {w.shape}')
+        w = w.reshape(V, 1, *rest)
+        out = XTW.apply(x, w, b, rank, device, n_parallel, model_group)
+
+        # out has vmapped dimension at dim 0
+        return out, 0
 
 
 class DistributedXTranpose(torch.nn.Module):
@@ -671,9 +939,10 @@ class DistributedXTranpose(torch.nn.Module):
 class XT(torch.autograd.Function):
     """Autograd function for batched transpose (XT) operation distributed across n processes."""
 
+    generate_vmap_rule = True
+
     @staticmethod
     def forward(
-        ctx: torch.autograd.Function,
         x: torch.Tensor,
         rank: int,
         device: torch.device,
@@ -701,13 +970,22 @@ class XT(torch.autograd.Function):
         XT: torch.Tensor
             Local transposed tensor.
         """
+        
+        x = select_x_transpose_kernel(n_parallel)(x, rank, device, model_group)
+        return x
+    
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        """
+        ctx: FunctionCtx
+        inputs: tuple(x, w, b, rank, device, n_parallel, model_group)
+        output: xwt
+        """
+        
         ctx.device = device
         ctx.rank = rank
         ctx.n_parallel = n_parallel
         ctx.model_group = model_group
-
-        x = select_x_transpose_kernel(n_parallel)(x, rank, device, model_group)
-        return x
 
     @staticmethod
     def backward(

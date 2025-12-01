@@ -127,16 +127,7 @@ class ERA5Dataset(Dataset):
             ]
             self.zarr_data = self.zarr_data.sel(time=train_years)
         elif mode == "validation":
-            validation_years = times[
-                (times.year == 2017)
-                & (
-                    (times.hour == 0)
-                    | (times.hour == 6)
-                    | (times.hour == 12)
-                    | (times.hour == 18)
-                )
-            ]
-
+            validation_years = times[(times.year == 2018)]
             self.zarr_data = self.zarr_data.sel(time=validation_years)
         elif mode == "testing":
             validation_years = times[(times.year == 2020) | (times.year == 2021)]
@@ -453,34 +444,12 @@ class ERA5DatasetDistributed(Dataset):
                 ]
             self.zarr_data = self.zarr_data.sel(time=train_years)
         elif mode == "validation":  # validation
-            if (
-                self.datapath
-                == "/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr"
-            ):
-                validation_years = times[(times.year == 2018)]
-            else:
-                validation_years = times[
-                    (times.year < 2018)
-                    & (
-                        (times.hour == 0)
-                        | (times.hour == 6)
-                        | (times.hour == 12)
-                        | (times.hour == 18)
-                    )
-                ]
+            validation_years = times[(times.year == 2018)]
             self.zarr_data = self.zarr_data.sel(time=validation_years)
         elif mode == "testing":  # validation
             validation_years = times[(times.year == 2020) | (times.year == 2021)]
             self.zarr_data = self.zarr_data.sel(time=validation_years)
-        elif mode == "verify":
-            validation_years = times[
-                (times.year == 2020)
-                & (times.month == 1)
-                & (times.day == 1)
-                & (times.hour == 0)
-            ]
-            self.zarr_data = self.zarr_data.sel(time=validation_years)
-
+        
         self.n_samples_total = len(self.zarr_data["time"])
 
         # N channels
