@@ -260,6 +260,7 @@ def build_megatron_model(
         if ("blocks" not in name) or "layer_norm" in name:
             dist.all_reduce(param.data, op=dist.ReduceOp.AVG)
 
+    
     model = DDP(
         model, device_ids=[localid], output_device=localid, process_group=ddp_group
     )
@@ -299,6 +300,11 @@ def build_model(
             model = Model.Model_eightway(
                 config_dict, rank, device, n_parallel, model_group, col_group
             ).to(device)
+
+    for name, param in model.named_parameters():
+        if param is not None:
+            if "bias" in name:
+                dist.all_reduce(param.data, op=dist.ReduceOp.AVG, group=col_group)
 
     model = DDP(
         model, device_ids=[localid], output_device=localid, process_group=ddp_group
@@ -824,14 +830,14 @@ def reduce_ddp_layernorms(model, col_groups):
     gradients = [
         param.grad
         for name, param in model.named_parameters()
-        if (param.grad is not None and "layer_norm" in name)
+        if (param.grad is not None and ("layer_norm" in name or "bias" in name))
     ]
     flat_grad = parameters_to_vector(gradients)
     handles = torch.distributed.all_reduce(
         flat_grad,
         op=torch.distributed.ReduceOp.AVG,
         group=col_groups,
-        async_op=True,
+        async_op=False,
     )
 
     return handles, flat_grad, gradients
