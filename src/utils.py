@@ -295,16 +295,18 @@ def build_model(
             model = Model.Model(
                 config_dict, rank, device, n_parallel, model_group, col_group
             ).to(device)
-            # ddp_average_layer_norm_weights(model, col_group)
+            for name, param in model.named_parameters():
+                if param is not None:
+                    if "bias" in name:
+                        dist.all_reduce(param.data, op=dist.ReduceOp.AVG, group=col_group)
         case 8:
             model = Model.Model_eightway(
                 config_dict, rank, device, n_parallel, model_group, col_group
             ).to(device)
-
-    for name, param in model.named_parameters():
-        if param is not None:
-            if "bias" in name:
-                dist.all_reduce(param.data, op=dist.ReduceOp.AVG, group=col_group)
+            for name, param in model.named_parameters():
+                if param is not None:
+                    if "bias" in name:
+                        dist.all_reduce(param.data, op=dist.ReduceOp.AVG, group=col_group)
 
     model = DDP(
         model, device_ids=[localid], output_device=localid, process_group=ddp_group
@@ -837,7 +839,7 @@ def reduce_ddp_layernorms(model, col_groups):
         flat_grad,
         op=torch.distributed.ReduceOp.AVG,
         group=col_groups,
-        async_op=False,
+        async_op=True,
     )
 
     return handles, flat_grad, gradients

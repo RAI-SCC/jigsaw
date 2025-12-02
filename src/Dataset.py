@@ -46,7 +46,6 @@ class ERA5Dataset(Dataset):
         self.file_path = file_path
         self.mode = mode
         self.dt = config["data"]["dt"]
-        self.lite = config["data"]["lite"]
         if (
             config["data"]["train_data_path"]
             == "/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/1959-2023_01_10-wb13-6h-1440x721.zarr"
@@ -58,10 +57,7 @@ class ERA5Dataset(Dataset):
         ):
             self.deltaTDivisor = 6
         else:
-            if self.lite:
-                self.deltaTDivisor = 6
-            else:
-                self.deltaTDivisor = 6
+            self.deltaTDivisor = 6
         self.forecast_length = forecast_length
         self.normalize = normalize
 
@@ -119,28 +115,16 @@ class ERA5Dataset(Dataset):
         self.zarr_data = xr.open_dataset(self.file_path, engine="zarr")
         times = pd.to_datetime(self.zarr_data["time"].values)
         if mode == "train":  # training case, lite
-            if self.lite:
-                train_years = times[
-                    (times.year < 2017)
-                    & (times.year > 2006)
-                    & (
-                        (times.hour == 0)
-                        | (times.hour == 6)
-                        | (times.hour == 12)
-                        | (times.hour == 18)
-                    )
-                ]
-            else:
-                train_years = times[
-                    (times.year < 2017)
-                    & (times.year > 1979)
-                    & (
-                        (times.hour == 0)
-                        | (times.hour == 6)
-                        | (times.hour == 12)
-                        | (times.hour == 18)
-                    )
-                ]
+            train_years = times[
+                (times.year < 2017)
+                & (times.year > 1979)
+                & (
+                    (times.hour == 0)
+                    | (times.hour == 6)
+                    | (times.hour == 12)
+                    | (times.hour == 18)
+                )
+            ]
             self.zarr_data = self.zarr_data.sel(time=train_years)
         elif mode == "validation":
             validation_years = times[
@@ -352,7 +336,6 @@ class ERA5DatasetDistributed(Dataset):
         self.file_path = file_path
         self.mode = mode
         self.dt = dt if dt is not None else config["data"]["dt"]
-        self.lite = config["data"]["lite"]
         self.rank = rank
         self.datapath = config["data"]["train_data_path"]
 
@@ -363,21 +346,16 @@ class ERA5DatasetDistributed(Dataset):
             self.deltaTDivisor = 6
         elif (
             config["data"]["train_data_path"]
-            == "/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr"
-            and not self.lite
+            == "/hkfs/work/workspace/scratch/ke4365-era5_dataset/era5.zarr"
         ):
             self.deltaTDivisor = 1
         elif (
             config["data"]["train_data_path"]
             == "/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/era5.zarr"
-            and not self.lite
         ):
             self.deltaTDivisor = 1
         else:
-            if self.lite:
-                self.deltaTDivisor = 1
-            else:
-                self.deltaTDivisor = 6
+            self.deltaTDivisor = 6
 
         self.forecast_length = forecast_length
         self.normalize = normalize
@@ -457,13 +435,9 @@ class ERA5DatasetDistributed(Dataset):
         self.zarr_data = xr.open_dataset(self.file_path, engine="zarr")
         times = pd.to_datetime(self.zarr_data["time"].values)
         if mode == "train":  # training case, lite
-            if self.lite:
-                # & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
-                train_years = times[(times.year < 2018) & (times.year > 2006)]
-            elif (
+            if (
                 self.datapath
-                == "/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr"
-                and not self.lite
+                == "/hkfs/work/workspace/scratch/ke4365-era5_dataset/era5.zarr"
             ):
                 train_years = times[(times.year < 2018) & (times.year > 1979)]
             else:
@@ -479,12 +453,8 @@ class ERA5DatasetDistributed(Dataset):
                 ]
             self.zarr_data = self.zarr_data.sel(time=train_years)
         elif mode == "validation":  # validation
-            if self.lite:
-                # & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
-                validation_years = times[(times.year == 2018)]
-            elif (
-                (not self.lite)
-                and self.datapath
+            if (
+                self.datapath
                 == "/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr"
             ):
                 validation_years = times[(times.year == 2018)]
@@ -744,7 +714,6 @@ class ERA5Preprocessed(Dataset):
         self.file_path = file_path
         self.mode = mode
         self.dt = dt if dt is not None else config["data"]["dt"]
-        self.lite = config["data"]["lite"]
         self.rank = rank
         self.datapath = config["data"]["train_data_path"]
 
@@ -756,20 +725,15 @@ class ERA5Preprocessed(Dataset):
         elif (
             config["data"]["train_data_path"]
             == "/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr"
-            and not self.lite
         ):
             self.deltaTDivisor = 1
         elif (
             config["data"]["train_data_path"]
             == "/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/era5.zarr"
-            and not self.lite
         ):
             self.deltaTDivisor = 1
         else:
-            if self.lite:
-                self.deltaTDivisor = 1
-            else:
-                self.deltaTDivisor = 6
+            self.deltaTDivisor = 6
 
         self.forecast_length = forecast_length
         self.normalize = normalize
@@ -812,13 +776,9 @@ class ERA5Preprocessed(Dataset):
         self.zarr_data = xr.open_dataset(self.file_path, engine="zarr")
         times = pd.to_datetime(self.zarr_data["time"].values)
         if mode == "train":  # training case, lite
-            if self.lite:
-                # & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
-                train_years = times[(times.year < 2018) & (times.year > 2006)]
-            elif (
+            if (
                 self.datapath
                 == "/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr"
-                and not self.lite
             ):
                 train_years = times[(times.year < 2018) & (times.year > 1979)]
             else:
@@ -834,12 +794,8 @@ class ERA5Preprocessed(Dataset):
                 ]
             self.zarr_data = self.zarr_data.sel(time=train_years)
         elif mode == "validation":  # validation
-            if self.lite:
-                # & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
-                validation_years = times[(times.year == 2018)]
-            elif (
-                (not self.lite)
-                and self.datapath
+            if (
+                self.datapath
                 == "/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr"
             ):
                 validation_years = times[(times.year == 2018)]
@@ -962,7 +918,6 @@ class ERA5PreprocessedDistributed(Dataset):
         self.file_path = file_path
         self.mode = mode
         self.dt = dt if dt is not None else config["data"]["dt"]
-        self.lite = config["data"]["lite"]
         self.rank = rank
         self.datapath = config["data"]["train_data_path"]
 
@@ -973,21 +928,18 @@ class ERA5PreprocessedDistributed(Dataset):
             self.deltaTDivisor = 6
         elif (
             config["data"]["train_data_path"]
-            == "/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr"
-            and not self.lite
+            == "/hkfs/work/workspace/scratch/ke4365-era5_dataset/era5.zarr"
+            
         ):
             self.deltaTDivisor = 1
         elif (
             config["data"]["train_data_path"]
             == "/lsdf/kit/imk-tro/projects/Gruppe_Quinting/ec.era5/era5.zarr"
-            and not self.lite
+            
         ):
             self.deltaTDivisor = 1
         else:
-            if self.lite:
-                self.deltaTDivisor = 1
-            else:
-                self.deltaTDivisor = 6
+            self.deltaTDivisor = 6
 
         self.forecast_length = forecast_length
         self.normalize = normalize
@@ -1047,13 +999,9 @@ class ERA5PreprocessedDistributed(Dataset):
         self.zarr_data = xr.open_dataset(self.file_path, engine="zarr")
         times = pd.to_datetime(self.zarr_data["time"].values)
         if mode == "train":  # training case, lite
-            if self.lite:
-                # & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
-                train_years = times[(times.year < 2018) & (times.year > 2006)]
-            elif (
+            if (
                 self.datapath
                 == "/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr"
-                and not self.lite
             ):
                 train_years = times[(times.year < 2018) & (times.year > 1979)]
             else:
@@ -1069,13 +1017,9 @@ class ERA5PreprocessedDistributed(Dataset):
                 ]
             self.zarr_data = self.zarr_data.sel(time=train_years)
         elif mode == "validation":  # validation
-            if self.lite:
-                # & ((times.hour == 0) | (times.hour == 6) | (times.hour == 12) | (times.hour == 18))]
-                validation_years = times[(times.year == 2018)]
-            elif (
-                (not self.lite)
-                and self.datapath
-                == "/hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr"
+            if (
+                self.datapath
+                == "/hkfs/work/workspace/scratch/ke4365-era5_dataset/era5.zarr"
             ):
                 validation_years = times[(times.year == 2018)]
             else:
@@ -1257,7 +1201,6 @@ class DistributedDummyHighResDataset(DummyHighResDataset):
         self.y = -(-self.y // (self.parallelism // 2))
         self.nvars = -(-nvars // 2)  # ceiling function
         self.seed = 1  # random seed for now
-        print(self.x, self.y, self.nvars)
 
     def __getitem__(self, global_idx):
         return torch.rand(
