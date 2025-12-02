@@ -746,6 +746,7 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
                 model_group,
                 n_channels=var_in,
                 init_method="conv",
+                patch_size=patch_size
             )
         elif n_parallel == 4:
             self.patch_embed = Linear.DistributedXWT(
@@ -757,6 +758,7 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
                 model_group,
                 n_channels=var_in,
                 init_method="conv",
+                patch_size=patch_size
             )
         elif n_parallel == 8:
             self.patch_embed = Linear.DistributedXWT(
@@ -768,6 +770,7 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
                 model_group,
                 n_channels=var_in,
                 init_method="conv",
+                patch_size=patch_size
             )
 
         self.rank = rank
@@ -838,6 +841,7 @@ class Distributed1DPatchRecovery(torch.nn.Module):
                     self.model_group,
                     n_channels=embed_dim,
                     init_method="conv",
+                    patch_size=patch_size
                 )
             else:
                 self.conv = Linear.DistributedXWT(
@@ -849,6 +853,7 @@ class Distributed1DPatchRecovery(torch.nn.Module):
                     self.model_group,
                     n_channels=embed_dim,
                     init_method="conv",
+                    patch_size=patch_size
                 )
         else:
             self.conv = Linear.DistributedXWT(
@@ -860,6 +865,7 @@ class Distributed1DPatchRecovery(torch.nn.Module):
                 self.model_group,
                 n_channels=embed_dim,
                 init_method="conv",
+                patch_size=patch_size
             )
         self.patch_size = patch_size
 

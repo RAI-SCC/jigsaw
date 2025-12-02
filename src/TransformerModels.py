@@ -201,6 +201,7 @@ class Transformer_Twoway(torch.nn.Module):
             device,
             n_parallel,
             model_group,
+            bias=False
         )
         self.n_blocks = config_dict["model"]["mixing_blocks"]
         self.blocks = torch.nn.ModuleList(
@@ -235,6 +236,7 @@ class Transformer_Twoway(torch.nn.Module):
                 device,
                 n_parallel=n_parallel,
                 model_group=model_group,
+                bias=False
             )
 
         if self.concat:
@@ -248,6 +250,7 @@ class Transformer_Twoway(torch.nn.Module):
                 model_group,
                 concat=True,
                 stride=self.stride,
+                bias=False
             )
         else:
             self.recovery = PatchEmbedding.Distributed1DPatchRecovery(
@@ -260,6 +263,7 @@ class Transformer_Twoway(torch.nn.Module):
                 model_group,
                 concat=False,
                 stride=self.stride,
+                bias=False
             )
         self.activation = torch.nn.GELU()
 
