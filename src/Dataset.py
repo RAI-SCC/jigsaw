@@ -346,7 +346,7 @@ class ERA5DatasetDistributed(Dataset):
         ):
             self.deltaTDivisor = 1
         else:
-            self.deltaTDivisor = 6
+            self.deltaTDivisor = 1
 
         self.forecast_length = forecast_length
         self.normalize = normalize
