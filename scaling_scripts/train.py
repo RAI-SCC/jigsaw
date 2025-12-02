@@ -219,25 +219,29 @@ def train_one_epoch(
         ow = output * area_weights * vw
         tw = target_data * area_weights * vw
         
-        if rank in [1,3]:
-            loss = loss_fn(ow[...,:33], tw[...,:33])
-            loss = loss * 33 / 69 * 0.5 * 4
-        else:
-            loss = loss_fn(ow, tw)
-            loss = loss * 39 / 69 * 0.5 * 4
-            
+        match config_dict["model_parallel"]["parallelism"]:
+            case 4:
+                if rank in [1,3]:
+                    loss = loss_fn(ow[...,:33], tw[...,:33])
+                    loss = loss * 33 / 69 * 0.5 * 4
+                else:
+                    loss = loss_fn(ow, tw)
+                    loss = loss * 39 / 69 * 0.5 * 4
+            case _:
+                loss = loss_fn(ow, tw)
             
         loss.backward()
         
         dist.all_reduce(loss)
-        loss /= 4
+        
+        loss = loss / config_dict["model_parallel"]["parallelism"]
         torch.nn.utils.clip_grad_norm_(
             model.parameters(), config_dict["training"]["grad_clip"]
         )
         
         if config_dict['model_parallel']['parallelism'] == 4:
             handles, flat_grad, gradients = utils.reduce_ddp_layernorms(model, col_group)
-            #handles.wait()
+            handles.wait()
             vector_to_parameters(flat_grad, gradients)
         
         optimizer.step()
