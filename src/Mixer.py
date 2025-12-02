@@ -43,7 +43,7 @@ class MixerBlock(torch.nn.Module):
             device,
             n_parallel=n_parallel,
             model_group=model_group,
-            bias=True
+            bias=False
         )
         self.channel_mixing = MLP.DistributedMLP(
             channels_mlp_dim,
@@ -53,7 +53,7 @@ class MixerBlock(torch.nn.Module):
             device,
             n_parallel=n_parallel,
             model_group=model_group,
-            bias=True
+            bias=False
         )
         self.transpose = Linear.DistributedXTranpose(
             rank, device, n_parallel, model_group
@@ -92,7 +92,7 @@ class MixerBlock(torch.nn.Module):
             Output tensor after applying layer normalization, token mixing,
             transposition, and channel mixing.
         """
-        x_res = x.clone()
+        x_res = x
         y = self.layer_norm1(x)
         y = self.token_mixing(y)
         y = self.transpose(y)

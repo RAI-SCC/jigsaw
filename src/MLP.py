@@ -17,7 +17,7 @@ class DistributedMLP(torch.nn.Module):
         device: torch.device,
         n_parallel: int,
         model_group: torch.distributed.ProcessGroup,
-        bias: bool = True,
+        bias: bool = False,
         dropout: float = 1e-3,
     ):
         """

@@ -255,7 +255,7 @@ class Model(torch.nn.Module):
                 self.device,
                 n_parallel,
                 model_group,
-                bias=True
+                bias=False
             )
         else:
             self.patch_size = (
@@ -276,7 +276,7 @@ class Model(torch.nn.Module):
                 self.device,
                 n_parallel,
                 model_group,
-                bias=True
+                bias=False
             )
 
         self.n_blocks = config_dict["model"]["mixing_blocks"]
@@ -353,7 +353,7 @@ class Model(torch.nn.Module):
                 self.device,
                 n_parallel,
                 model_group,
-                bias=True
+                bias=False
             )            
             self.layer_norm2 = Norm.DistributedLayerNorm(
                 self.num_variables, self.rank, self.device, self.column_subgroup
