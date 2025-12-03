@@ -13,7 +13,7 @@ device = f"cuda:{int(os.getenv('SLURM_LOCALID'))}"
 empty = torch.empty(0, device=device, dtype=torch.float32)
 
 def xw_transpose_columnwise_twoway(
-    : torch.tensor,
+    xij: torch.tensor,
     wij: torch.tensor,
     rank: int,
     device: torch.device,

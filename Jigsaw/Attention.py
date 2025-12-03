@@ -2,8 +2,8 @@ import torch
 import torch.distributed as dist
 from einops import rearrange
 
-import Jigsaw.Normalization as Norm
-from Jigsaw import MLP, Linear, Linear_Megatron
+from . import Normalization as Norm
+from . import MLP, Linear, Linear_Megatron
 
 
 class DistributedAttention(torch.nn.Module):

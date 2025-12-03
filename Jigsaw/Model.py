@@ -1,10 +1,9 @@
 import numpy as np
 import torch
 
-from Jigsaw import Dataset, Linear, PatchEmbedding
-from Jigsaw import Normalization as Norm
-from Jigsaw.Mixer import MixerBlock, MixerBlockMegatron, MixerBlockSequential
-from Jigsaw.util_fns import flop_comm_estimation
+from . import Dataset, Linear, PatchEmbedding
+from . import Normalization as Norm
+from .Mixer import MixerBlock, MixerBlockMegatron, MixerBlockSequential
 
 
 class WeatherMixer(torch.nn.Module):

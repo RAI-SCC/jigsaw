@@ -12,8 +12,11 @@ from timm.scheduler.step_lr import StepLRScheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import parameters_to_vector
 
-from Jigsaw import Dataloaders, Model, TransformerModels, eval
-
+#from Jigsaw import Dataloaders, Model, TransformerModels, eval
+from .Dataloaders import get_dataloader
+from . import Model
+from . import TransformerModels
+from . import eval
 
 def get_ddp_groups(rank: int, parallelism: int) -> dist.ProcessGroup:
     """Return DDP groups."""
@@ -493,7 +496,7 @@ def build_dataloaders(
     train_subset = -1 if train_subset < 0 else train_subset
     valid_subset = -1 if valid_subset < 0 else valid_subset
 
-    train_dataloader, dataset_train_info = Dataloaders.get_dataloader(
+    train_dataloader = get_dataloader(
         config_dict,
         config_dict["data"]["train_data_path"],
         mode="train",
@@ -502,7 +505,8 @@ def build_dataloaders(
         subset_size=train_subset,
         rank=rank,
     )
-    valid_dataloader, dataset_valid_info = Dataloaders.get_dataloader(
+    #valid_dataloader, dataset_valid_info = Dataloaders.get_dataloader(
+    valid_dataloader = get_dataloader(
         config_dict,
         config_dict["data"]["valid_data_path"],
         mode="validation",
@@ -512,7 +516,7 @@ def build_dataloaders(
         rank=rank,
     )
 
-    return train_dataloader, dataset_train_info, valid_dataloader, dataset_valid_info
+    return train_dataloader, valid_dataloader
 
 
 def get_weights(

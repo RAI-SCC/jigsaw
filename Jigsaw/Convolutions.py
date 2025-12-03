@@ -3,9 +3,8 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from Jigsaw.distributed_convolutions import (
-    conv1d_fourway,
-    convTranspose1d_fourway,
+from .distributed_convolutions import (
+    conv1d_fourway_complete,
     conv1d_twoway,
     conv1d_twoway_channel,
     conv2d_fourway,

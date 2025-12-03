@@ -5,7 +5,7 @@ import torch.nn.init as init
 from torch.nn import GELU, Dropout
 import torch.distributed as dist
 
-from Jigsaw import Linear, Linear_Megatron
+from . import Linear, Linear_Megatron
 
 
 class DistributedMLP(torch.nn.Module):

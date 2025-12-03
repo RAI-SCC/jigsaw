@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.init as init
 
-import Jigsaw.distributed_matmul as dist_mm
+from . import distributed_matmul as dist_mm
 
 
 class FirstLinearLayer(torch.nn.Module):
