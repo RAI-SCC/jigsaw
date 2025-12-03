@@ -1,5 +1,6 @@
 import torch
-from Jigsaw import Linear, MLP
+
+from Jigsaw import MLP, Linear
 from Jigsaw import Normalization as Norm
 
 

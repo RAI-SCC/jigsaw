@@ -1,16 +1,17 @@
+from typing import Optional, Tuple, Union
+
 import torch
 import torch.distributed as dist
-from distributed_convolutions import (
-    conv1d_twoway,
-    conv2d_twoway,
-    conv2d_fourway,
-    conv1d_twoway_channel,
-    conv2d_twoway_channel,
-    conv1d_fourway_complete,
-)
 import torch.nn.functional as F
+from distributed_convolutions import (
+    conv1d_fourway_complete,
+    conv1d_twoway,
+    conv1d_twoway_channel,
+    conv2d_fourway,
+    conv2d_twoway,
+    conv2d_twoway_channel,
+)
 from torch.nn.grad import conv1d_input, conv1d_weight, conv2d_input, conv2d_weight
-from typing import Optional, Tuple, Union
 
 
 class DistributedConv1D(torch.nn.Module):

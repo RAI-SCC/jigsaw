@@ -1,8 +1,10 @@
-import torch
-import numpy as np
 import time
 from pathlib import Path
+
+import numpy as np
 import pandas as pd
+import torch
+
 from Jigsaw import Dataset
 from Jigsaw.util_fns import plotting_functions as plot_fns
 

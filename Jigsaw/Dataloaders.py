@@ -4,11 +4,11 @@ from torch.utils.data.distributed import DistributedSampler
 
 from Jigsaw.Dataset import (
     DistributedHighResDataset,
-    HighResDataset,
     ERA5Dataset,
     ERA5DatasetDistributed,
     ERA5Preprocessed,
-    ERA5PreprocessedDistributed
+    ERA5PreprocessedDistributed,
+    HighResDataset,
 )
 
 

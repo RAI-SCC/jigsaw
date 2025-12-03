@@ -2,8 +2,8 @@ import torch
 import torch.distributed as dist
 from einops import rearrange
 
-from Jigsaw import Linear, Linear_Megatron, MLP
 import Jigsaw.Normalization as Norm
+from Jigsaw import MLP, Linear, Linear_Megatron
 
 
 class DistributedTransformer(torch.nn.Module):

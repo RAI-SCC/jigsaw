@@ -1,7 +1,9 @@
 import math
+
 import torch
-from torch.nn import GELU, Dropout
 import torch.nn.init as init
+from torch.nn import GELU, Dropout
+
 from Jigsaw import Linear, Linear_Megatron
 
 

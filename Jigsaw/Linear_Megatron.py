@@ -1,12 +1,13 @@
+import math
 from typing import Optional
 
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.init as init
-import math
 
 import Jigsaw.distributed_matmul as dist_mm
+
 
 class FirstLinearLayer(torch.nn.Module):
     """Batched matrix-matrix (XWT) multiplication distributed across n processes."""
