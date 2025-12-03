@@ -3,7 +3,7 @@ import os
 import torch
 import torch.distributed as dist
 
-import distributed_matmul as dist_mm
+from . import distributed_matmul as dist_mm
 
 streams = [torch.cuda.Stream() for _ in range(2)]
 streamz = [torch.cuda.Stream() for _ in range(4)]
