@@ -939,8 +939,6 @@ class DistributedXTranpose(torch.nn.Module):
 class XT(torch.autograd.Function):
     """Autograd function for batched transpose (XT) operation distributed across n processes."""
 
-    generate_vmap_rule = True
-
     @staticmethod
     def forward(
         x: torch.Tensor,
