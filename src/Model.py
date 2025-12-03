@@ -500,9 +500,6 @@ class Model_twoway(torch.nn.Module):
 
         self.num_variables = 72  # TODO: generalize via config file
 
-        self.layer_norm2 = torch.nn.LayerNorm(self.num_variables // 2)
-        self.layer_norm3 = torch.nn.LayerNorm(self.num_variables)
-
         self.concat = config_dict["model"]["concat"]
         self.linear_residual = config_dict["model"]["linear_residual"]
 
@@ -535,16 +532,20 @@ class Model_twoway(torch.nn.Module):
                     stride=self.stride,
                     bias=False
                 )
-
-        self.linearlayer = Linear.DistributedXWT(
-            self.num_variables,
-            self.num_variables,
-            rank,
-            device,
-            n_parallel=n_parallel,
-            model_group=model_group,
-            bias=True
-        )
+                
+        if config_dict["model"]["linear_residual"]:
+            self.linearlayer = Linear.DistributedXWT(
+                self.num_variables,
+                self.num_variables,
+                rank,
+                device,
+                n_parallel=n_parallel,
+                model_group=model_group,
+                bias=True
+            )
+            self.layer_norm2 = torch.nn.LayerNorm(self.num_variables // 2)
+            self.layer_norm3 = torch.nn.LayerNorm(self.num_variables)
+            
 
         self.activation = torch.nn.GELU()
 
@@ -583,9 +584,10 @@ class Model_twoway(torch.nn.Module):
         # After embedding: x_shape [n_batch, n_patch_lat * n_patch_lon, embed_dim]
         x_res2 = x
 
-        for rollout in torch.arange(rollout_):
-            for i in range(self.n_blocks):
-                x = self.blocks[i](x)
+        # for rollout in torch.arange(rollout_):
+        # print(f'this is not even accessed!')
+        for i in range(self.n_blocks):
+            x = self.blocks[i](x)
 
         # After MLP-mixing blocks: [n_batch, n_patch_lat * n_patch_lon/2, embed_dim/2]
         # After recovery: [n_batch, n_lat*n_lon//2, n_var//2]

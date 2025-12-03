@@ -741,7 +741,6 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
         self.patch_size = patch_size
         self.var_in = var_in
         self.embed_dim = embed_dim
-
         if n_parallel == 2:
             self.patch_embed = Linear.DistributedXWT(
                 patch_size * var_in // 2,

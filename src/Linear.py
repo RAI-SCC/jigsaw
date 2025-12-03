@@ -316,11 +316,8 @@ class XWT(torch.autograd.Function):
             model_group_bdim,
         ) = in_dims
 
-        # We only support vmapping over tensor arguments; non-tensors must not be batched.
-        assert rank_bdim is None
-        assert device_bdim is None
-        assert n_parallel_bdim is None
-        assert model_group_bdim is None
+        # We only support vmapping 
+        git 
         # assert w_bdim is None
 #        assert b_bdim is None
 

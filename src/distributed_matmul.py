@@ -266,6 +266,7 @@ def x_transpose_twoway(
     mod = rank % 2
 
     x0, x1 = torch.split(x, x.shape[-2] // 2, dim=-2)
+    x0, x1 = x0.contiguous(), x1.contiguous()
     buffer_x = _get_preallocated_buffer(x1.shape, x1.dtype, rank, device)
 
     match mod:
@@ -279,36 +280,42 @@ def x_transpose_twoway(
     xt_handle = dist.all_to_all(
         x_recv_list, x_send_list, group=model_group, async_op=True
     )
-
+    
+    
     match mod:
         case 0:
             x0 = x0.mT
-            if len(x0.shape) == 3:
+            
+            x_shape = x0.shape
+            if len(x_shape) >= 3:
                 x_transpose = torch.empty(
-                    x0.shape[0], x0.shape[1] * 2, x0.shape[2], device=device
+                    *x_shape[:-2], x0.shape[-2] * 2, x0.shape[-1], device=device
                 )
-                x_transpose[:, : x0.shape[1]] = x0
+                # print(f'current x0 shape: {x0.shape} and x_transpose shape {x_transpose.shape}')
+                x_transpose[..., : x0.shape[-2], :] = x0
             else:
                 x_transpose = torch.empty(x0.shape[0] * 2, x0.shape[1], device=device)
                 x_transpose[: x0.shape[1]] = x0
             xt_handle.wait()
-            if len(x0.shape) == 3:
-                x_transpose[:, x0.shape[1] :, :] = buffer_x.mT
+            if len(x_shape) >= 3:
+                x_transpose[..., x0.shape[-2] :, :] = buffer_x.mT
             else:
                 x_transpose[x0.shape[1] :, :] = buffer_x.mT
         case 1:
             x1 = x1.mT
-            if len(x0.shape) == 3:
+            x_shape = x1.shape
+            if len(x_shape) >= 3:
                 x_transpose = torch.empty(
-                    x1.shape[0], x1.shape[1] * 2, x1.shape[2], device=device
+                    *x_shape[:-2], x1.shape[-2] * 2, x1.shape[-1], device=device
                 )
-                x_transpose[:, x1.shape[1] :] = x1
+                # print(f'x transpose shape: {x_transpose.shape}, x1 {x1.shape}')
+                x_transpose[..., x1.shape[-2] :, :] = x1
             else:
                 x_transpose = torch.empty(x1.shape[1] * 2, x1.shape[2], device=device)
                 x_transpose[x1.shape[1] :] = x1
             xt_handle.wait()
-            if len(x1.shape) == 3:
-                x_transpose[:, : x1.shape[1], :] = buffer_x.mT
+            if len(x_shape) >= 3:
+                x_transpose[..., : x1.shape[-2], :] = buffer_x.mT
             else:
                 x_transpose[: x1.shape[1], :] = buffer_x.mT
     return x_transpose
@@ -471,7 +478,7 @@ def xw_fourway(
     mod = rank % 4
 
     xdtype, wdtype = xij.dtype, wij.dtype
-
+    xij = xij.contiguous()
     match mod:
         case 0:
             x_send_list = [empty, xij, empty, empty]
@@ -600,6 +607,7 @@ def x_transpose_w_fourway(
 
     xdtype, wdtype = xij.dtype, wij.dtype
 
+    xij = xij.contiguous()
     match mod:
         case 0:
             x_send_list = [empty, xij, empty, empty]
