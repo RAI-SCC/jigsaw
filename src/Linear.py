@@ -591,7 +591,7 @@ class XW(torch.autograd.Function):
 
         # Case 1: no vmapping at all → just call original op.
         if x_bdim is None:
-            out = XWT.apply(x, w, b, rank, device, n_parallel, model_group)
+            out = XW.apply(x, w, b, rank, device, n_parallel, model_group)
             return out, None
 
         # Only support vmap over dim 0 of x.
@@ -869,7 +869,7 @@ class XTW(torch.autograd.Function):
 
         # Case 1: no vmapping at all → just call original op.
         if x_bdim is None:
-            out = XWT.apply(x, w, b, rank, device, n_parallel, model_group)
+            out = XTW.apply(x, w, b, rank, device, n_parallel, model_group)
             return out, None
 
         # Only support vmap over dim 0 of x.
@@ -1027,6 +1027,7 @@ class XT(torch.autograd.Function):
         model_group: dist.ProcessGroup,
     ) -> tuple[torch.Tensor, Optional[int]]:
        
+        x = x.contiguous()
         # x under vmap has shape (V, B, x_in, in_dim).
         out = XT.apply(x, rank, device, n_parallel, model_group)
 
