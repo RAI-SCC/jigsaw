@@ -238,7 +238,7 @@ class DistributedXTWMLP(torch.nn.Module):
                 bias=bias,
                 init_method="linear",
             )
-            self.linear2 = Linear.DistributedXW(
+            self.linear2 = Linear.DistributedXWT(
                 hidden_dim // 2,
                 out_dim // 2,
                 rank,
@@ -246,6 +246,7 @@ class DistributedXTWMLP(torch.nn.Module):
                 n_parallel,
                 model_group,
                 bias=bias,
+                init_method='linear'
             )
         elif n_parallel == 8:
             self.linear1 = Linear.DistributedXTW(
