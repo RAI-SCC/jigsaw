@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 
-from Jigsaw.Dataset import (
+from .Dataset import (
     DistributedHighResDataset,
     ERA5Dataset,
     ERA5DatasetDistributed,

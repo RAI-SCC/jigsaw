@@ -5,8 +5,8 @@ import numpy as np
 import pandas as pd
 import torch
 
-from Jigsaw import Dataset
-from Jigsaw.util_fns import plotting_functions as plot_fns
+from . import Dataset
+from .util_fns import plotting_functions as plot_fns
 
 
 def calc_weight(n_lat: int, cossum: float = 458.36551167) -> torch.Tensor:
