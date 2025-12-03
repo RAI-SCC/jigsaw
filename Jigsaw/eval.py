@@ -1,11 +1,10 @@
 import torch
 import numpy as np
-import utils
 import time
 from pathlib import Path
 import pandas as pd
-import Dataset
-from util_fns import plotting_functions as plot_fns
+from Jigsaw import Dataset
+from Jigsaw.util_fns import plotting_functions as plot_fns
 
 
 def calc_weight(n_lat: int, cossum: float = 458.36551167) -> torch.Tensor:

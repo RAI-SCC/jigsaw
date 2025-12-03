@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-import distributed_matmul as dist_mm
+from Jigsaw import distributed_matmul as dist_mm
 
 
 def select_xw_transpose_kernel(n_parallel: int):

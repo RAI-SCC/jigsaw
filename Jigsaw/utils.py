@@ -12,10 +12,7 @@ from timm.scheduler.step_lr import StepLRScheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import parameters_to_vector
 
-import TransformerModels
-import Dataloaders
-import eval
-import Model
+from Jigsaw import TransformerModels, Dataloaders, eval, Model
 
 
 def get_ddp_groups(rank: int, n_parallel: int) -> dist.ProcessGroup:

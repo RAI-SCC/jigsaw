@@ -1,7 +1,6 @@
 import torch
-import Linear
-import Normalization as Norm
-import MLP
+from Jigsaw import Linear, MLP
+from Jigsaw import Normalization as Norm
 
 
 class MixerBlock(torch.nn.Module):

@@ -2,8 +2,8 @@ import torch
 from torch import permute, reshape
 from torch.nn import Conv2d, ConvTranspose2d, Softmax
 
-import Linear
-from Dataset import load_constant_mask_2d
+from Jigsaw import Linear
+from Jigsaw.Dataset import load_constant_mask_2d
 
 
 class PatchEmbedding2D(torch.nn.Module):

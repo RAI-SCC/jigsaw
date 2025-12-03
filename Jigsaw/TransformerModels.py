@@ -1,12 +1,8 @@
 import numpy as np
 import torch
 
-import Linear
-import PatchEmbedding
-import Attention
-import MLP
-import Dataset
-import Normalization as Norm
+from Jigsaw import Linear, PatchEmbedding, Attention, Dataset
+import Jigsaw.Normalization as Norm
 
 
 class Transformer_Sequential(torch.nn.Module):

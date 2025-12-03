@@ -1,12 +1,9 @@
 import numpy as np
 import torch
 
-import Linear
-import PatchEmbedding
-import utils
-import Dataset
-from Mixer import MixerBlock, MixerBlockSequential, MixerBlockMegatron
-import Normalization as Norm
+from Jigsaw import Linear, PatchEmbedding, Dataset
+from Jigsaw.Mixer import MixerBlock, MixerBlockSequential, MixerBlockMegatron
+from Jigsaw import Normalization as Norm
 
 
 class Model_eightway(torch.nn.Module):
