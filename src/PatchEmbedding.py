@@ -208,7 +208,6 @@ class PatchEmbedding1D(torch.nn.Module):
         stride=(8, 8),
         xlat=721,
         bias=True
-        bias=True
     ):
         """
         Initialize patch embedding operation.
