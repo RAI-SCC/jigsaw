@@ -6,7 +6,7 @@ import pandas as pd
 import torch
 
 from . import Dataset
-from .util_fns import plotting_functions as plot_fns
+from .util_fns.plotting_functions import *
 
 
 def calc_weight(n_lat: int, cossum: float = 458.36551167) -> torch.Tensor:
@@ -127,7 +127,7 @@ def gen_plots(
         target_print = target_data[0].reshape(xlat, xlon, 69).permute(2, 0, 1)
 
         save_path = f"{file_path}/u10_{epoch}.png"
-        plot_fns.plot_fields(
+        plot_fields(
             input_print,
             output_print - input_print,
             target_print - input_print,
@@ -135,7 +135,7 @@ def gen_plots(
             index=1,
         )
         save_path = f"{file_path}/T2M_{epoch}.png"
-        plot_fns.plot_fields(
+        plot_fields(
             input_print,
             output_print - input_print,
             target_print - input_print,
@@ -143,7 +143,7 @@ def gen_plots(
             index=3,
         )
         save_path = f"{file_path}/T850_{epoch}.png"
-        plot_fns.plot_fields(
+        plot_fields(
             input_print,
             output_print - input_print,
             target_print - input_print,
@@ -151,7 +151,7 @@ def gen_plots(
             index=32,
         )
         save_path = f"{file_path}/U850_{epoch}.png"
-        plot_fns.plot_fields(
+        plot_fields(
             input_print,
             output_print - input_print,
             target_print - input_print,
@@ -159,7 +159,7 @@ def gen_plots(
             index=45,
         )
         save_path = f"{file_path}/Z500_{epoch}.png"
-        plot_fns.plot_fields(
+        plot_fields(
             input_print,
             output_print - input_print,
             target_print - input_print,
@@ -174,7 +174,7 @@ def gen_plots(
 
         if rank == 0:
             save_path = f"{file_path}/u10_{epoch}.png"
-            plot_fns.plot_fields(
+            plot_fields(
                 input_print,
                 output_print - input_print,
                 target_print - input_print,
@@ -182,7 +182,7 @@ def gen_plots(
                 index=1,
             )
             save_path = f"{file_path}/T2M_{epoch}.png"
-            plot_fns.plot_fields(
+            plot_fields(
                 input_print,
                 output_print - input_print,
                 target_print - input_print,
@@ -190,7 +190,7 @@ def gen_plots(
                 index=3,
             )
             save_path = f"{file_path}/T850_{epoch}.png"
-            plot_fns.plot_fields(
+            plot_fields(
                 input_print,
                 output_print - input_print,
                 target_print - input_print,
@@ -198,7 +198,7 @@ def gen_plots(
                 index=32,
             )
             save_path = f"{file_path}/Z500_{epoch}.png"
-            plot_fns.plot_fields(
+            plot_fields(
                 input_print,
                 output_print - input_print,
                 target_print - input_print,
@@ -207,7 +207,7 @@ def gen_plots(
             )
         elif rank == 1:
             save_path = f"{file_path}/U850_{epoch}.png"
-            plot_fns.plot_fields(
+            plot_fields(
                 input_print,
                 output_print - input_print,
                 target_print - input_print,
@@ -222,7 +222,7 @@ def gen_plots(
         target_print = target_print.reshape(xlat, xlon, 69).permute(2, 0, 1)
         if rank == 0:
             save_path = f"{file_path}/u10_{epoch}.png"
-            plot_fns.plot_fields(
+            plot_fields(
                 input_print,
                 output_print - input_print,
                 target_print - input_print,
@@ -230,7 +230,7 @@ def gen_plots(
                 index=1,
             )
             save_path = f"{file_path}/T2M_{epoch}.png"
-            plot_fns.plot_fields(
+            plot_fields(
                 input_print,
                 output_print - input_print,
                 target_print - input_print,
@@ -238,7 +238,7 @@ def gen_plots(
                 index=3,
             )
             save_path = f"{file_path}/T850_{epoch}.png"
-            plot_fns.plot_fields(
+            plot_fields(
                 input_print,
                 output_print - input_print,
                 target_print - input_print,
@@ -246,7 +246,7 @@ def gen_plots(
                 index=32,
             )
             save_path = f"{file_path}/U850_{epoch}.png"
-            plot_fns.plot_fields(
+            plot_fields(
                 input_print,
                 output_print - input_print,
                 target_print - input_print,
@@ -254,7 +254,7 @@ def gen_plots(
                 index=45,
             )
             save_path = f"{file_path}/Z500_{epoch}.png"
-            plot_fns.plot_fields(
+            plot_fields(
                 input_print,
                 output_print - input_print,
                 target_print - input_print,
