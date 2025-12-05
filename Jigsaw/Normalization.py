@@ -174,7 +174,12 @@ class DistributedSoftMax(torch.nn.Module):
     def __init__(self, dim=-1, group=None):
         super().__init__()
         self.dim = dim
+<<<<<<< HEAD
         self.group = group  # is not None else dist.group.WORLD
+=======
+        print(group)
+        self.group = group # is not None else dist.group.WORLD
+>>>>>>> b692ace (implement vmap for softmax)
         self.func = _DistributedSoftmax.apply
 
     def forward(self, x):
@@ -187,10 +192,14 @@ class _DistributedSoftmax(torch.autograd.Function):
         """Overloaded Autograd function for distributed SoftMax."""
         # local exponentials
         # -x.amax(dim=dim, keepdim=True)) # softmax fails with norm if only 1 variable
+<<<<<<< HEAD
         local_max = x.amax(dim=-1, keepdim=True)
         dist.all_reduce(local_max, op=dist.ReduceOp.MAX, group=group)
 
         y = torch.exp(x - local_max)
+=======
+        y = torch.exp(x)
+>>>>>>> b692ace (implement vmap for softmax)
 
         local_sum = y.sum(dim=dim, keepdim=True)
         # global sum
@@ -200,7 +209,10 @@ class _DistributedSoftmax(torch.autograd.Function):
 
         # final softmax
         out = y / global_sum
+<<<<<<< HEAD
         # print(f'My device {x.device}, out {out}')
+=======
+>>>>>>> b692ace (implement vmap for softmax)
         return out
 
     @staticmethod
