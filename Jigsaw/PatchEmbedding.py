@@ -625,7 +625,7 @@ class DistributedPatchEmbedding(torch.nn.Module):
         x_patches_local = x_patches_local.contiguous().to(self.device)
 
         x = self.patch_embed(x_patches_local, model_group)
-
+        
         # x shape: (n_batch, n_lat/p0, n_lon/01, embed_dim)
         return x
 

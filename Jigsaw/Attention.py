@@ -152,11 +152,11 @@ class DistributedTransformer(torch.nn.Module):
 
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.qkv(x_patches_local)
-        q, k, v = torch.tensor_split(qkv, 3, dim=2)
+        q, k, v = torch.tensor_split(qkv, 3, dim=-1)
 
-        q = rearrange(q, "n i (h d) -> n h i d", h=self.heads).contiguous()
-        k = rearrange(k, "n i (h d) -> n h i d", h=self.heads).contiguous()
-        v = rearrange(v, "n i (h d) -> n h i d", h=self.heads).contiguous()
+        q = rearrange(q, "... n i (h d) -> ... n h i d", h=self.heads).contiguous()
+        k = rearrange(k, "... n i (h d) -> ... n h i d", h=self.heads).contiguous()
+        v = rearrange(v, "... n i (h d) -> ... n h i d", h=self.heads).contiguous()
 
         q = self.scale * q
         if self.n_parallel > 1:
@@ -168,7 +168,7 @@ class DistributedTransformer(torch.nn.Module):
             attention = self.softmax(attention)
             values = attention @ v
             
-        values = rearrange(values, "n h s d -> n s (h d)").contiguous()
+        values = rearrange(values, "... n h s d -> ... n s (h d)").contiguous()
 
         values = self.concatenator(values)
 

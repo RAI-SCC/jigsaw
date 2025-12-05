@@ -205,11 +205,11 @@ class XWT(torch.autograd.Function):
             in_dim is local value.
         """
         xwt = select_xw_transpose_kernel(n_parallel)(x, w, rank, device, model_group)
-        
+
         # Handle bias term here?
         if (b is not None) and (len(b.shape) > 1):
             b = b.reshape(b.shape[0], 1, 1, -1)
-        
+
         xwt = xwt if b is None else xwt.add(b)
         return xwt
 
@@ -250,7 +250,7 @@ class XWT(torch.autograd.Function):
         grad_bias: torch.Tensor
             Gradient with respect to the bias.
         """
-        input, weight, bias  = ctx.saved_tensors
+        input, weight, bias = ctx.saved_tensors
         rank = ctx.rank
         device = ctx.device
         n_parallel = ctx.n_parallel
@@ -265,6 +265,8 @@ class XWT(torch.autograd.Function):
 
         if len(grad_output.shape) == 4:
             grad_b = None if bias is None else grad_output.sum(dim=(1, 2))
+        elif len(grad_output.shape) == 5:
+            grad_b = None if bias is None else grad_output.sum(dim=(1, 2, 3))
         else:
             grad_b = None if bias is None else grad_output.sum(dim=(0, 1))
 
@@ -322,7 +324,7 @@ class XWT(torch.autograd.Function):
         assert n_parallel_bdim is None
         assert model_group_bdim is None
         # assert w_bdim is None
-#        assert b_bdim is None
+        #        assert b_bdim is None
 
         # Case 1: no vmapping at all → just call original op.
         if x_bdim is None:
@@ -341,7 +343,9 @@ class XWT(torch.autograd.Function):
         B = x.shape[1]
         rest = w.shape[1:]  # (in_dim, out_dim)
 
-        w = w.reshape(V, 1, *rest)
+        if len(x.shape) > len(w.shape):
+            w = w.reshape(V, 1, *rest)
+
         out = XWT.apply(x, w, b, rank, device, n_parallel, model_group)
 
         # out has vmapped dimension at dim 0
@@ -534,7 +538,7 @@ class XW(torch.autograd.Function):
             grad_b = None if bias is None else grad_output.sum(dim=(0, 1))
 
         return grad_input, grad_weight, grad_b, None, None, None, None
-        
+
     @staticmethod
     def vmap(
         info,
@@ -810,7 +814,7 @@ class XTW(torch.autograd.Function):
             grad_b = None if bias is None else grad_output.sum(dim=(1, 2))
         else:
             grad_b = None if bias is None else grad_output.sum(dim=(0, 1))
-        
+
         return grad_input, grad_weight, grad_b, None, None, None, None
 
     @staticmethod
@@ -968,10 +972,10 @@ class XT(torch.autograd.Function):
         XT: torch.Tensor
             Local transposed tensor.
         """
-        
+
         x = select_x_transpose_kernel(n_parallel)(x, rank, device, model_group)
         return x
-    
+
     @staticmethod
     def setup_context(ctx, inputs, output):
         """
@@ -979,7 +983,7 @@ class XT(torch.autograd.Function):
         inputs: tuple(x, w, b, rank, device, n_parallel, model_group)
         output: xwt
         """
-        
+
         x, rank, device, n_parallel, model_group = inputs
         ctx.device = device
         ctx.rank = rank
@@ -1013,7 +1017,7 @@ class XT(torch.autograd.Function):
             grad_output, rank, device, model_group
         )
         return grad_output, None, None, None, None
-    
+
     @staticmethod
     def vmap(
         info,
@@ -1024,7 +1028,6 @@ class XT(torch.autograd.Function):
         n_parallel: int,
         model_group: dist.ProcessGroup,
     ) -> tuple[torch.Tensor, Optional[int]]:
-       
         x = x.contiguous()
         # x under vmap has shape (V, B, x_in, in_dim).
         out = XT.apply(x, rank, device, n_parallel, model_group)
