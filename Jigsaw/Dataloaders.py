@@ -17,7 +17,7 @@ def get_highres_dataloader(config_dict, data_path, mode='train', subset_size=0, 
     n_parallel = config_dict['model_parallel']['parallelism']
     dt = config_dict['data']['dt'] if dt is None else dt
     if n_parallel == 1:
-        DistributedHighResDataset(config_dict, data_path, mode=mode, patch_size=(
+        dataset = HighResDataset(config_dict, data_path, mode=mode, patch_size=(
             2, 4, 4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
     elif type == 'upsample':
         dataset = DistributedHighResDataset(config_dict, data_path, mode=mode, patch_size=(
