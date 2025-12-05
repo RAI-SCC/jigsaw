@@ -1,5 +1,5 @@
 import torch
-from distributed_matmul import _get_preallocated_buffer
+from .distributed_matmul import _get_preallocated_buffer
 
 def XTW_twoway_(Xij, Wij, rank, device, model_group):
     """
