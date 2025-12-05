@@ -95,6 +95,7 @@ class DistributedAttention(torch.nn.Module):
         else:
             self.softmax = torch.nn.Softmax(dim=-1)
             self.xwt = torch.nn.Identity()  # Placeholder for non-parallel case
+            self.xwt = torch.nn.Identity()  # Placeholder for non-parallel case
             self.xw = torch.nn.Identity()
 
         match self.n_parallel:
