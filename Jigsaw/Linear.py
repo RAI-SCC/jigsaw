@@ -609,8 +609,8 @@ class XW(torch.autograd.Function):
         V = x.shape[0]
         B = x.shape[1]
         rest = w.shape[1:]  # (in_dim, out_dim)
-        # print(f'x shape {x.shape}, w shape {w.shape}')
-        w = w.reshape(V, 1, *rest)
+        if len(x.shape) > len(w.shape):
+            w = w.reshape(V, 1, *rest)
         out = XW.apply(x, w, b, rank, device, n_parallel, model_group)
 
         # out has vmapped dimension at dim 0
@@ -887,8 +887,9 @@ class XTW(torch.autograd.Function):
         V = x.shape[0]
         B = x.shape[1]
         rest = w.shape[1:]  # (in_dim, out_dim)
-        # print(f'x shape {x.shape}, w shape {w.shape}')
-        w = w.reshape(V, 1, *rest)
+        
+        if len(x.shape) > len(w.shape):
+            w = w.reshape(V, 1, *rest)
         out = XTW.apply(x, w, b, rank, device, n_parallel, model_group)
 
         # out has vmapped dimension at dim 0

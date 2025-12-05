@@ -403,11 +403,13 @@ def validate(
                     model_input[..., -3] = land_mask
                     model_input[..., -2] = soil_type
                     model_input[..., -1] = topography
-
-            model_output = model(model_input, rollout_=1)
-
+            
+            model_output = model(model_input, samples=config_dict["training"]["n_samples"])
+            
+            if len(model_output.shape) > 3:
+                model_output = model_output.mean(dim=0)
             output = model_output.detach()
-
+            
             match parallelism:
                 case 1:
                     # Permute input data for mse calculation
@@ -575,6 +577,7 @@ def validate(
                 output_loss = output * area_weights * variable_weights
                 target_loss = target_data * area_weights * variable_weights
 
+            print(f'output shape: {output.shape}, target shape {target_data.shape}')
             iter_loss = loss_fn(output_loss, target_loss)
 
             if parallelism == 4 and rank in [0, 2]:

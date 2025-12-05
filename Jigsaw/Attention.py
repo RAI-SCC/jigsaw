@@ -92,7 +92,7 @@ class DistributedTransformer(torch.nn.Module):
             )  # model group TODO
         else:
             self.softmax = torch.nn.Softmax(dim=-1)
-            self.xwt = torch.nn.Identity() # Placeholder for non-parallel case
+            self.xwt = torch.nn.Identity()  # Placeholder for non-parallel case
             self.xw = torch.nn.Identity()
 
         match self.n_parallel:
@@ -149,9 +149,9 @@ class DistributedTransformer(torch.nn.Module):
 
         # x_local: [n_batch, n_lat, n_lon, variables]
         x_patches_local = x
-
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.qkv(x_patches_local)
+
         q, k, v = torch.tensor_split(qkv, 3, dim=-1)
 
         q = rearrange(q, "... n i (h d) -> ... n h i d", h=self.heads).contiguous()
@@ -167,13 +167,12 @@ class DistributedTransformer(torch.nn.Module):
             attention = q @ k.mT
             attention = self.softmax(attention)
             values = attention @ v
-            
         values = rearrange(values, "... n h s d -> ... n s (h d)").contiguous()
-
         values = self.concatenator(values)
 
         # Output: [n_batch, seq_length, output_dim]
         return values
+
 
 class TransformerLayer(torch.nn.Module):
     def __init__(
@@ -187,7 +186,7 @@ class TransformerLayer(torch.nn.Module):
         n_parallel: int,
         model_group: dist.ProcessGroup,
         softmax_group: dist.ProcessGroup,
-        column_subgroup: dist.ProcessGroup
+        column_subgroup: dist.ProcessGroup,
     ):
         super().__init__()
         self.attention_block = DistributedTransformer(
@@ -199,13 +198,10 @@ class TransformerLayer(torch.nn.Module):
             device,
             n_parallel,
             model_group,
-            softmax_group
+            softmax_group,
         )
         self.layer_norm = Norm.DistributedLayerNorm(
-            output_dim // 2,
-            rank,
-            device,
-            column_subgroup
+            output_dim // 2, rank, device, column_subgroup
         )
         self.MLP = MLP.DistributedMLP(
             output_dim,
@@ -214,15 +210,16 @@ class TransformerLayer(torch.nn.Module):
             rank,
             device,
             n_parallel,
-            model_group
+            model_group,
         )
-        
+
     def forward(self, x: torch.tensor):
         x = self.attention_block(x)
         x = self.layer_norm(x)
         x = self.MLP(x)
         return x
-    
+
+
 class MegatronTransformer(torch.nn.Module):
     def __init__(
         self,
@@ -258,8 +255,12 @@ class MegatronTransformer(torch.nn.Module):
         self.embed_dim = embed_dim
         self.x_features = x_features
 
-        self.qkv = torch.nn.Linear(x_features, embed_dim * 3, bias=self.bias, device=None)
-        self.concatenator = torch.nn.Linear(embed_dim, output_dim, bias=self.bias, device=None)
+        self.qkv = torch.nn.Linear(
+            x_features, embed_dim * 3, bias=self.bias, device=None
+        )
+        self.concatenator = torch.nn.Linear(
+            embed_dim, output_dim, bias=self.bias, device=None
+        )
         self.forward_all_reduce = Linear_Megatron.ForwardAllReduce(self.model_group)
         self.backward_all_reduce = Linear_Megatron.BackwardAllReduce(self.model_group)
 
@@ -279,11 +280,11 @@ class MegatronTransformer(torch.nn.Module):
 
         # x_local: [n_batch, n_lat, n_lon, variables]
         x_patches_local = x
-        
+
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.backward_all_reduce(x_patches_local)
         qkv = self.qkv(qkv)
-        
+
         q, k, v = torch.tensor_split(qkv, 3, dim=2)
 
         q = rearrange(q, "n i (h d) -> n h i d", h=self.heads).contiguous()
@@ -305,7 +306,8 @@ class MegatronTransformer(torch.nn.Module):
         self.forward_all_reduce(values)
         # Output: [n_batch, seq_length, output_dim]
         return values
-    
+
+
 class MegatronTransformerLayer(torch.nn.Module):
     def __init__(
         self,
@@ -318,7 +320,7 @@ class MegatronTransformerLayer(torch.nn.Module):
         n_parallel: int,
         model_group: dist.ProcessGroup,
         softmax_group: dist.ProcessGroup,
-        column_subgroup: dist.ProcessGroup
+        column_subgroup: dist.ProcessGroup,
     ):
         super().__init__()
         self.attention_block = MegatronTransformer(
@@ -330,11 +332,9 @@ class MegatronTransformerLayer(torch.nn.Module):
             device,
             n_parallel,
             model_group,
-            softmax_group
+            softmax_group,
         )
-        self.layer_norm = torch.nn.LayerNorm(
-            output_dim
-        )
+        self.layer_norm = torch.nn.LayerNorm(output_dim)
         self.MLP = MLP.DistributedMLP_Megatron(
             output_dim,
             output_dim // 2,
@@ -342,9 +342,9 @@ class MegatronTransformerLayer(torch.nn.Module):
             rank,
             device,
             n_parallel,
-            model_group
+            model_group,
         )
-        
+
     def forward(self, x: torch.tensor):
         x = self.attention_block(x)
         x = self.layer_norm(x)
