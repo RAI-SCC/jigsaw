@@ -87,7 +87,7 @@ class DistributedSoftMax(torch.nn.Module):
 class _DistributedSoftmax(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, dim, group):
-        """Overloaded Autograd function for distirbuted SoftMax."""
+        """Overloaded Autograd function for distributed SoftMax."""
         # store context
         ctx.dim = dim
         ctx.group = group
@@ -101,7 +101,8 @@ class _DistributedSoftmax(torch.autograd.Function):
         global_sum = local_sum.clone()
 
         dist.all_reduce(
-            global_sum, op=dist.ReduceOp.SUM, group=group)
+            global_sum, op=dist.ReduceOp.SUM, group=group
+        )
 
         # final softmax
         out = y / global_sum
@@ -124,3 +125,8 @@ class _DistributedSoftmax(torch.autograd.Function):
 
         grad_x = local_grad - out * global_grad_sum
         return grad_x, None, None
+
+    @staticmethod
+    def vmap(info, in_dims: tuple[Optional[int], ...], x, dim, group):
+        print(f'shape x {x.shape}')
+

@@ -423,7 +423,6 @@ class ERA5DatasetDistributed(Dataset):
 
     def _get_files_stats(self, mode="train"):
         """Filter desired time points based on parameters and return file statistics."""
-
         self.zarr_data = xr.open_dataset(self.file_path, engine="zarr")
         times = pd.to_datetime(self.zarr_data["time"].values)
         if mode == "train":  # training case, lite
@@ -645,7 +644,6 @@ class ERA5DatasetDistributed(Dataset):
                 )
 
         input = torch.tensor(input).permute(1, 2, 0)
-
         return input, target
 
 
