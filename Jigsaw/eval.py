@@ -559,7 +559,6 @@ def validate(
                 output_loss = output #* area_weights * variable_weights
                 target_loss = target_data# * area_weights * variable_weights
 
-            print(f'output shape: {output.shape}, target shape {target_data.shape}')
             iter_loss = loss_fn(output_loss, target_loss)
 
             if parallelism == 4 and rank in [0, 2]:
