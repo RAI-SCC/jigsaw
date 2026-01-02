@@ -174,3 +174,7 @@ pangu_evaluation/*
 lineartest.py
 pytest.sh 
 possibly_corrupt_files_in_this_workspace.txt
+src/data_processed/
+data_processed/
+
+

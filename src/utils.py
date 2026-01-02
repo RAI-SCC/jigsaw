@@ -16,6 +16,7 @@ import TransformerModels
 import Dataloaders
 import eval
 import Model
+from dice import TopKDiceLoss
 
 
 def get_ddp_groups(rank: int, n_parallel: int) -> dist.ProcessGroup:
@@ -432,20 +433,26 @@ def ddp_average_layer_norm_weights(
 def build_optimizer(config_dict: Dict, model: torch.nn.Module) -> optim.Optimizer:
     """Build Adam optimizer with per-block lrs."""
     lr = config_dict["training"]["lr"]
-    opt = optim.Adam(
-        [
-            {
-                "params": model.module.params.embedding.parameters(),
-                "lr": config_dict["training"]["lr_embedding"],
-            },
-            {
-                "params": model.module.params.recovery.parameters(),
-                "lr": config_dict["training"]["lr_recovery"],
-            },
-            {"params": model.module.params.common.parameters()},
-        ],
-        lr=lr,
-        weight_decay=3e-6,
+    # opt = optim.Adam(
+    #     [
+    #         {
+    #             "params": model.module.params.embedding.parameters(),
+    #             "lr": config_dict["training"]["lr_embedding"],
+    #         },
+    #         {
+    #             "params": model.module.params.recovery.parameters(),
+    #             "lr": config_dict["training"]["lr_recovery"],
+    #         },
+    #         {"params": model.module.params.common.parameters()},
+    #     ],
+    #     lr=lr,
+    #     weight_decay=3e-6,
+    # )
+    opt = optim.AdamW(
+        model.parameters(),
+        lr=config_dict["training"]["lr"],
+        weight_decay=1e-4, 
+        betas = (0.9, 0.999)
     )
     return opt
 
@@ -503,35 +510,35 @@ def build_dataloaders(
     return train_dataloader, valid_dataloader
 
 
-def get_weights(
-    config_dict: dict, device: torch.device, n_parallel: int, rank: int
-) -> tuple[torch.tensor, torch.tensor]:
-    """Return variable and latitude-weighted weights."""
-    xlat = config_dict["data"]["xlat"]
-    surface_weights = torch.tensor(config_dict["training"]["surface_weights"])
-    # [z, q, t, u, v]
-    pressure_weights = (
-        torch.tensor(config_dict["training"]["pressure_weights"])
-        .unsqueeze(1)
-        .expand(5, 13)
-        .flatten()
-    )
-    variable_weights = (
-        torch.concat([surface_weights, pressure_weights]).view(1, 1, 1, 69)
-    ).to(device)
+# def get_weights(
+#     config_dict: dict, device: torch.device, n_parallel: int, rank: int
+# ) -> tuple[torch.tensor, torch.tensor]:
+#     """Return variable and latitude-weighted weights."""
+#     xlat = config_dict["data"]["xlat"]
+#     surface_weights = torch.tensor(config_dict["training"]["surface_weights"])
+#     # [z, q, t, u, v]
+#     pressure_weights = (
+#         torch.tensor(config_dict["training"]["pressure_weights"])
+#         .unsqueeze(1)
+#         .expand(5, 13)
+#         .flatten()
+#     )
+#     variable_weights = (
+#         torch.concat([surface_weights, pressure_weights]).view(1, 1, 1, 69)
+#     ).to(device)
 
-    area_weights = (
-        eval.calc_weight(xlat).view(1, xlat, 1, 1).to(device).to(torch.float32)
-    )
-    if config_dict["model_parallel"]["type"] != "megatron":
-        variable_weights = torch.nn.functional.pad(variable_weights, (0, 3))
-        variable_weights = (
-            variable_weights[0, 0, 0, :36]
-            if rank % n_parallel in [0, 2]
-            else variable_weights[0, 0, 0, 36:]
-        )
+#     area_weights = (
+#         eval.calc_weight(xlat).view(1, xlat, 1, 1).to(device).to(torch.float32)
+#     )
+#     if config_dict["model_parallel"]["type"] != "megatron":
+#         variable_weights = torch.nn.functional.pad(variable_weights, (0, 3))
+#         variable_weights = (
+#             variable_weights[0, 0, 0, :36]
+#             if rank % n_parallel in [0, 2]
+#             else variable_weights[0, 0, 0, 36:]
+#         )
 
-    return variable_weights, area_weights
+#     return variable_weights, area_weights
 
 
 def define_subset_sizes(config_dict: dict, rank: int) -> tuple[int, int]:
@@ -549,17 +556,20 @@ def define_subset_sizes(config_dict: dict, rank: int) -> tuple[int, int]:
 
     return train_subset, valid_subset
 
-
+#TODO: change loss function for segmentation   
+# added new loss function: TopKDiceLoss
 def build_loss_fn(config_dict):
     """Return loss function."""
     loss_type = config_dict["training"]["loss"]
     match loss_type:
+        case "TopK_Dice":
+            loss_fn = TopKDiceLoss(k=10)
         case "L1":
             loss_fn = torch.nn.L1Loss()
         case "L2":
             loss_fn = torch.nn.MSELoss()
         case _:
-            raise ValueError("Only L1 and L2 losses are supported.")
+            raise ValueError(f"Loss type '{loss_type}' is not supported.")
     return loss_fn
 
 

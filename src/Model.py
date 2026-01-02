@@ -1,16 +1,19 @@
 import numpy as np
 import torch
+import torch.nn as nn
 
 import Linear
 import PatchEmbedding
 import utils
 import Dataset
 from Mixer import MixerBlock, MixerBlockSequential, MixerBlockMegatron
+from util_fns.SwinMLP import SwinEncoderBlock, SwinDecoderBlock
 import Normalization as Norm
 
 
-class Model_eightway(torch.nn.Module):
-    def __init__(
+
+#class Model_eightway(torch.nn.Module):
+""" def __init__(
         self, config_dict, rank, device, n_parallel, model_group, col_subgroup
     ):
         super().__init__()
@@ -224,9 +227,9 @@ class Model_eightway(torch.nn.Module):
                 x = x.reshape(x.shape[0], -1, x.shape[-1])
                 x = self.linearlayer(x)
         return x
+ """
 
-
-class Model(torch.nn.Module):
+""" #class Model(torch.nn.Module):
     def __init__(
         self, config_dict, rank, device, n_parallel, model_group, col_subgroup
     ):
@@ -439,10 +442,10 @@ class Model(torch.nn.Module):
                 x = self.layer_norm3(x)
                 x = x.reshape(x.shape[0], -1, x.shape[-1])
                 x = self.linearlayer(x)
-        return x
+        return x """
 
 
-class Model_twoway(torch.nn.Module):
+""" #class Model_twoway(torch.nn.Module):
     def __init__(self, config_dict, rank, device, n_parallel, model_group):
         super().__init__()
         self.rank = rank
@@ -601,19 +604,30 @@ class Model_twoway(torch.nn.Module):
             return x
         else:
             return x
+ """
 
 
-class ModelSequential(torch.nn.Module):
+# TODO: modify for image segmentation, remove rollout, latent rollout
+# Turned into ModelSequential for image segmentation on one GPU
+class ModelSwinMLP(torch.nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+""" class ModelSequential(torch.nn.Module):
     def __init__(self, config_dict, rank, device):
         super().__init__()
-        self.rank = rank
-        hidden_dimension = config_dict["model"]["hidden_dim"]
+        # 1. Dimensionen laden
+        hidden_dimension = config_dict["model"]["hidden_dim"] # Wie groß ist der Vektor pro Patch?
+        self.stride = config_dict["model"]["stride"] # Wie weit springt das Fenster?
 
+        # 2. Patch-Embedding definieren?????
         self.stride = config_dict["model"]["stride"]
         self.xlat, self.xlon = config_dict["data"]["xlat"], config_dict["data"]["xlon"]
         padding = (0, 0)
 
         self.patch_embed = config_dict["model"]["patch_embed"]
+
+        # 3. Mixer-Blöcke definieren
         if self.patch_embed == 1:
             self.patch_size = config_dict["model"]["patch_size"]
             self.stride = config_dict["model"]["stride"]
@@ -627,17 +641,18 @@ class ModelSequential(torch.nn.Module):
                 self.patch_size,
                 hidden_dimension,
                 device=device,
-                in_channels=72,
+                in_channels=72, #TODO: Anzahl Input-Variablen -> 
                 padding=padding,
                 stride=self.stride,
                 xlat=self.xlat,
             )
+            # Anzahl der Mixer-Blöcke, Hier wird eine Liste von Blöcken erstellt. Das ist das eigentliche "Gehirn"
             self.n_blocks = config_dict["model"]["mixing_blocks"]
             self.blocks = torch.nn.ModuleList(
                 [
                     MixerBlockSequential(
-                        self.n_patches,
-                        hidden_dimension,
+                        self.n_patches,       # Wie viele Patches (Token) gibt es?
+                        hidden_dimension,     # Wie tief ist ein Token?
                         config_dict["model"]["spatial_hidden_dim_fraction"],
                         config_dict["model"]["features_hidden_dim_fraction"],
                         self.dropout,
@@ -713,11 +728,14 @@ class ModelSequential(torch.nn.Module):
         self.latent_rollout = config_dict["model"]["latent_rollout"]
 
         self.layer_norm = torch.nn.LayerNorm(hidden_dimension)
+
+        #TODO: 69 = number of output variables, needs to be changed for image segmentation!
         if self.rank == 3:
             self.num_variables = 69
         else:
             self.num_variables = 69
 
+        # Recovery, Modell macht aus Hidden Dimension wieder die 69 Variablen
         self.add = config_dict["model"]["add"]
         self.concat = config_dict["model"]["concat"]
         self.linear_residual = config_dict["model"]["linear_residual"]
@@ -735,8 +753,9 @@ class ModelSequential(torch.nn.Module):
                     hidden_dimension,
                     padding=padding,
                     stride=self.stride,
-                    out_channels=69,
+                    out_channels=69, #TODO: number of output variables, needs to be changed for image segmentation!
                     concat=True,
+                    #TODO: turn into height and width for image segmentation
                     xlat=self.xlat,
                     xlon=self.xlon,
                 )
@@ -807,10 +826,18 @@ class ModelSequential(torch.nn.Module):
                 }
             )
 
+    #TODO: modify for image segmentation, remove rollout, latent rollout
     def forward(self, x, rollout_=1):
+        # x Input Shape beim Wetter: [Batch, 72, 720, 1440] (Variablen, Lat, Lon)
+        
+        # RESIDUAL CONNECTION: Das Modell merkt sich den Input (x_res),
+        # um später nur die ÄNDERUNG (Delta) vorherzusagen.
         x_shape = x.shape
         x_res = x.clone()
         x_res = x_res.permute(0, 2, 3, 1)
+
+        # 1. Patch-Embedding, Macht aus den Pixeln abstrakte "Token".
+        # x wird zu: [Batch, Anzahl_Patches, Hidden_Dim]
 
         # x shape: [1, 69, 720, 1440]
         x = self.embedding(x)  # x: latent_t
@@ -821,11 +848,14 @@ class ModelSequential(torch.nn.Module):
 
         x_res2 = x.clone()
 
+        # 2. Der Loop (Mixer Blöcke)
+        # rollout_ ist für Zeitreihen. Bei dir ist rollout_=1.
         # x shape: [1, 1152, 2000]
         for rollout in torch.arange(rollout_):
             for i in range(self.n_blocks):
                 x = self.blocks[i](x)  # x: latent_tplus1
 
+        # 3. Skip Connection verarbeiten
         if self.concat:
             x = self.layer_norm(x)
             x = torch.concat((x, x_res2), dim=2)
@@ -847,6 +877,10 @@ class ModelSequential(torch.nn.Module):
         else:  # Case: Decoder is 1D convolution
             x = self.recovery(x)
 
+        # WETTER-ALARM: Addiert den Input wieder drauf.
+            # Das macht man bei Regression (Vorhersage der Änderung).
+            # Bei Segmentierung (Maske erstellen) ist das FALSCH! 
+            # Du willst nicht Bild + Maske rechnen.
         if self.add:  # Recovery
             x = x.reshape(x_shape[0], self.xlat, self.xlon, self.num_variables)
             return x + x_res
@@ -859,10 +893,10 @@ class ModelSequential(torch.nn.Module):
             x = self.linearlayer(x)
             x = x.reshape(x_shape[0], self.xlat, self.xlon, self.num_variables)
         return x
+ """
 
-
-class ModelMegatron(torch.nn.Module):
-    def __init__(self, config_dict, rank, device, n_parallel, model_group):
+#class ModelMegatron(torch.nn.Module):
+""" def __init__(self, config_dict, rank, device, n_parallel, model_group):
         super().__init__()
         self.rank = rank
         hidden_dimension = config_dict["model"]["hidden_dim"]
@@ -1012,3 +1046,30 @@ class ModelMegatron(torch.nn.Module):
             x = self.linearlayer(x)
             x = x.reshape(x_shape[0], self.xlat, self.xlon, self.num_variables)
         return x
+ """
+
+# TODO: Input_resolution anpassen - mit slices hablieren oder nicht?
+class ModelSwinMLP(torch.nn.Module):
+    def __init__(self, channels_in, input_resolution = (4,512,512), classes=2, window_size =4):
+        super().__init__()
+
+        self.input_resolution = input_resolution
+        self.window_size = window_size
+        self.channels_in = channels_in
+        self.classes = classes
+
+        self.conv = nn.Conv3d(in_channels=channels_in,
+                              out_channels=32,
+                              kernel_size=1,
+                              padding=0,
+                              stride=2,
+                              bias=False)
+        
+        self.norm = nn.InstanceNorm3d(32)
+        self.act = nn.GELU()
+
+        self.down1 = SwinEncoderBlock(32, 64, input_resolution, window_size = 4)
+        self.down2 = SwinEncoderBlock(channels_in, input_resolution, window_size)
+        self.down3 = SwinEncoderBlock(channels_in, input_resolution, window_size)
+        self.down4 = SwinEncoderBlock(channels_in, input_resolution, window_size)
+
