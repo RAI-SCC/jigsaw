@@ -15,89 +15,89 @@ from torch.nn.utils import parameters_to_vector
 from Jigsaw import Dataloaders, Model, TransformerModels, eval
 
 
-def get_ddp_groups(rank: int, n_parallel: int) -> dist.ProcessGroup:
+def get_ddp_groups(rank: int, parallelism: int) -> dist.ProcessGroup:
     """Return DDP groups."""
-    n_nodes = dist.get_world_size() // n_parallel
+    n_nodes = dist.get_world_size() // parallelism
     global_group_list = []
     global_groups = []
 
-    for node in np.arange(n_parallel):
-        global_group_list.append((np.arange(n_nodes) * n_parallel + node).tolist())
+    for node in np.arange(parallelism):
+        global_group_list.append((np.arange(n_nodes) * parallelism + node).tolist())
 
     for global_group in global_group_list:
         global_groups.append(dist.new_group(ranks=global_group))
 
-    return global_groups[rank % n_parallel]
+    return global_groups[rank % parallelism]
 
 
-def get_model_group(rank: int, n_parallel: int) -> dist.ProcessGroup:
+def get_model_group(rank: int, parallelism: int) -> dist.ProcessGroup:
     """Return model groups."""
     local_groups = []
-    for i in range(dist.get_world_size() // n_parallel):
-        local_start_rank = i * n_parallel
+    for i in range(dist.get_world_size() // parallelism):
+        local_start_rank = i * parallelism
         local_groups.append(
             dist.new_group(
-                ranks=list(range(local_start_rank, local_start_rank + n_parallel))
+                ranks=list(range(local_start_rank, local_start_rank + parallelism))
             )
         )
-    return local_groups[rank // n_parallel]
+    return local_groups[rank // parallelism]
 
 
-def get_model_group_rows(rank: int, n_parallel: int, n_rows: int) -> dist.ProcessGroup:
+def get_model_group_rows(rank: int, parallelism: int, n_rows: int) -> dist.ProcessGroup:
     """
     Return mpi comm subgroups within model groups.
 
     rank: int
         global rank of process
-    n_parallel: int
+    parallelism: int
         number of processes in model-parallel group
     n_rows: int
         number of rows that the model-parallel group is subdivided into.
         default for 4: 2; default for 8: 4
     """
     groups = []
-    n_cols = n_parallel // n_rows
-    n_nodes = dist.get_world_size() // n_parallel
+    n_cols = parallelism // n_rows
+    n_nodes = dist.get_world_size() // parallelism
 
     for node in range(n_nodes):
-        base = node * n_parallel
+        base = node * parallelism
         for row in range(n_rows):
             ranks = [base + row * n_cols + c for c in range(n_cols)]
             groups.append(dist.new_group(ranks=ranks))
 
-    node = rank // n_parallel
-    local = rank % n_parallel
+    node = rank // parallelism
+    local = rank % parallelism
     row = local // n_cols
     idx = node * n_rows + row
     return groups[idx]
 
 
 def get_model_group_columns(
-    rank: int, n_parallel: int, n_cols: int
+    rank: int, parallelism: int, n_cols: int
 ) -> dist.ProcessGroup:
     """
     Return mpi comm subgroups within model groups.
 
     rank: int
         global rank of process
-    n_parallel: intval_loss
+    parallelism: intval_loss
         number of processes in model-parallel group
     n_cols: int
         number of rows that the model-parallel group is subdivided into.
         default for 4: 2; default for 8: 2
     """
     groups = []
-    n_rows = n_parallel // n_cols
-    n_nodes = dist.get_world_size() // n_parallel
+    n_rows = parallelism // n_cols
+    n_nodes = dist.get_world_size() // parallelism
 
     for node in range(n_nodes):  # [0, 2], [1, 3], [4, 6], [5, 7]
-        base = node * n_parallel
+        base = node * parallelism
         for col in range(n_cols):
             ranks = [base + r * n_cols + col for r in range(n_rows)]
             groups.append(dist.new_group(ranks=ranks))
 
-    node = rank // n_parallel
-    local = rank % n_parallel
+    node = rank // parallelism
+    local = rank % parallelism
     col = local % n_cols
     idx = node * n_cols + col
 
@@ -112,10 +112,10 @@ def set_all_seeds(seed: int = 0) -> None:
 
 
 def set_all_seeds_model_group(
-    seed: int = 0, rank: Optional[int] = None, n_parallel: int = None
+    seed: int = 0, rank: Optional[int] = None, parallelism: int = None
 ) -> None:
     """Set all seeds on all model groups to the same value."""
-    set_all_seeds(seed + rank // n_parallel)
+    set_all_seeds(seed + rank // parallelism)
 
 
 def init_cuda() -> tuple[torch.device, int, int, int]:
@@ -187,11 +187,11 @@ def load_model(
     file_path: str,
     rank: int = 0,
     model_parallel: bool = False,
-    n_parallel: int = 4,
+    parallelism: int = 4,
 ):
     """Load model from state dict."""
     if model_parallel:
-        load_rank = rank % n_parallel
+        load_rank = rank % parallelism
         file_path = f"{file_path}/model_{load_rank}.pt"
     try:
         state = torch.load(f"{file_path}", map_location="cpu")
@@ -225,12 +225,12 @@ def setup_precision(tf32: bool) -> None:
     return
 
 
-def setup_groups(rank: int, n_parallel: int, nrows: int, ncols: int):
+def setup_groups(rank: int, parallelism: int, nrows: int, ncols: int):
     """Return communication groups."""
-    model_group = get_model_group(rank, n_parallel)
-    ddp_group = get_ddp_groups(rank, n_parallel)
-    model_subgroup_row = get_model_group_rows(rank, n_parallel, nrows)
-    model_subgroup_col = get_model_group_columns(rank, n_parallel, ncols)
+    model_group = get_model_group(rank, parallelism)
+    ddp_group = get_ddp_groups(rank, parallelism)
+    model_subgroup_row = get_model_group_rows(rank, parallelism, nrows)
+    model_subgroup_col = get_model_group_columns(rank, parallelism, ncols)
 
     return model_group, ddp_group, model_subgroup_row, model_subgroup_col
 
@@ -240,17 +240,17 @@ def build_megatron_model(
     device: torch.device,
     localid: int,
     rank: int,
-    n_parallel: int,
+    parallelism: int,
     model_group: dist.ProcessGroup,
     ddp_group: dist.ProcessGroup,
     col_group: dist.ProcessGroup = None,
 ):
-    match n_parallel:
+    match parallelism:
         case 1:
             model = Model.ModelSequential(config_dict, rank, device).to(device)
         case _:
             model = Model.ModelMegatron(
-                config_dict, rank, device, n_parallel, model_group
+                config_dict, rank, device, parallelism, model_group
             ).to(device)
     # need to match parameters for non-transformer, non-mlp layers
     for name, param in model.named_parameters():
@@ -264,7 +264,7 @@ def build_megatron_model(
 
     if rank == 0:
         print(
-            f"model has {count_parameters(model) * n_parallel / 1e6} million parameters"
+            f"model has {count_parameters(model) * parallelism / 1e6} million parameters"
         )
         print(f"estimated forward FLOPS: {calc_flops_comm(config_dict)}")
     return model
@@ -275,22 +275,22 @@ def build_model(
     device: torch.device,
     localid: int,
     rank: int,
-    n_parallel: int,
+    parallelism: int,
     model_group: dist.ProcessGroup,
     ddp_group: dist.ProcessGroup,
     col_group: dist.ProcessGroup = None,
 ) -> torch.nn.Module:
     """Instantiate model and wrap with DDP."""
-    match n_parallel:
+    match parallelism:
         case 1:
             model = Model.ModelSequential(config_dict, rank, device).to(device)
         case 2:
             model = Model.Model_twoway(
-                config_dict, rank, device, n_parallel, model_group
+                config_dict, rank, device, parallelism, model_group
             ).to(device)
         case 4:
             model = Model.Model(
-                config_dict, rank, device, n_parallel, model_group, col_group
+                config_dict, rank, device, parallelism, model_group, col_group
             ).to(device)
             for name, param in model.named_parameters():
                 if param is not None:
@@ -298,7 +298,7 @@ def build_model(
                         dist.all_reduce(param.data, op=dist.ReduceOp.AVG, group=col_group)
         case 8:
             model = Model.Model_eightway(
-                config_dict, rank, device, n_parallel, model_group, col_group
+                config_dict, rank, device, parallelism, model_group, col_group
             ).to(device)
             for name, param in model.named_parameters():
                 if param is not None:
@@ -311,7 +311,7 @@ def build_model(
 
     if rank == 0:
         print(
-            f"model has {count_parameters(model) * n_parallel / 1e6} million parameters"
+            f"model has {count_parameters(model) * parallelism / 1e6} million parameters"
         )
         print(f"estimated forward FLOPS: {calc_flops_comm(config_dict)}")
     return model
@@ -322,20 +322,20 @@ def build_transformer_model(
     device: torch.device,
     localid: int,
     rank: int,
-    n_parallel: int,
+    parallelism: int,
     model_group: dist.ProcessGroup,
     ddp_group: dist.ProcessGroup,
     row_group: dist.ProcessGroup = None,
     col_group: dist.ProcessGroup = None,
 ):
     if config_dict["model_parallel"]["type"] == "megatron":
-        match n_parallel:
+        match parallelism:
             case 1:
                 model = TransformerModels.Transformer_Sequential(
                     config_dict,
                     rank,
                     device,
-                    n_parallel,
+                    parallelism,
                     model_group,
                     row_group,
                     col_group,
@@ -345,7 +345,7 @@ def build_transformer_model(
                     config_dict,
                     rank,
                     device,
-                    n_parallel,
+                    parallelism,
                     model_group,
                     row_group,
                     col_group,
@@ -354,13 +354,13 @@ def build_transformer_model(
             if ("blocks" not in name) or "layer_norm" in name:
                 dist.all_reduce(param.data, op=dist.ReduceOp.AVG)
     else:
-        match n_parallel:
+        match parallelism:
             case 1:
                 model = TransformerModels.Transformer_Sequential(
                     config_dict,
                     rank,
                     device,
-                    n_parallel,
+                    parallelism,
                     model_group,
                     row_group,
                     col_group,
@@ -370,7 +370,7 @@ def build_transformer_model(
                     config_dict,
                     rank,
                     device,
-                    n_parallel,
+                    parallelism,
                     model_group,
                     row_group,
                     col_group,
@@ -380,7 +380,7 @@ def build_transformer_model(
                     config_dict,
                     rank,
                     device,
-                    n_parallel,
+                    parallelism,
                     model_group,
                     row_group,
                     col_group,
@@ -391,7 +391,7 @@ def build_transformer_model(
     )
     if rank == 0:
         print(
-            f"model has {count_parameters(model) * n_parallel / 1e6} million parameters"
+            f"model has {count_parameters(model) * parallelism / 1e6} million parameters"
         )
         print(f"estimated forward FLOPS: {calc_flops_transformer(config_dict)}")
     return model
@@ -501,7 +501,7 @@ def build_dataloaders(
 
 
 def get_weights(
-    config_dict: dict, device: torch.device, n_parallel: int, rank: int
+    config_dict: dict, device: torch.device, parallelism: int, rank: int
 ) -> tuple[torch.tensor, torch.tensor]:
     """Return variable and latitude-weighted weights."""
     xlat = config_dict["data"]["xlat"]
@@ -524,7 +524,7 @@ def get_weights(
         variable_weights = torch.nn.functional.pad(variable_weights, (0, 3))
         variable_weights = (
             variable_weights[0, 0, 0, :36]
-            if rank % n_parallel in [0, 2]
+            if rank % parallelism in [0, 2]
             else variable_weights[0, 0, 0, 36:]
         )
 

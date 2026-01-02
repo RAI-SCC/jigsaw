@@ -7,43 +7,43 @@ import torch.distributed as dist
 from Jigsaw import distributed_matmul as dist_mm
 
 
-def select_xw_transpose_kernel(n_parallel: int):
+def select_xw_transpose_kernel(parallelism: int):
     """Return correct xw_t kernel."""
-    if n_parallel == 2:
+    if parallelism == 2:
         return dist_mm.xw_transpose_twoway
-    elif n_parallel == 4:
+    elif parallelism == 4:
         return dist_mm.xw_transpose_fourway
-    elif n_parallel == 8:
+    elif parallelism == 8:
         return dist_mm.xw_transpose_eightway
 
 
-def select_xw_kernel(n_parallel: int):
+def select_xw_kernel(parallelism: int):
     """Return xw kernel."""
-    if n_parallel == 2:
+    if parallelism == 2:
         return dist_mm.xw_twoway
-    elif n_parallel == 4:
+    elif parallelism == 4:
         return dist_mm.xw_fourway
-    elif n_parallel == 8:
+    elif parallelism == 8:
         return dist_mm.xw_eightway
 
 
-def select_x_transpose_w_kernel(n_parallel: int):
+def select_x_transpose_w_kernel(parallelism: int):
     """Return x_tw kernel."""
-    if n_parallel == 2:
+    if parallelism == 2:
         return dist_mm.x_transpose_w_twoway
-    elif n_parallel == 4:
+    elif parallelism == 4:
         return dist_mm.x_transpose_w_fourway
-    elif n_parallel == 8:
+    elif parallelism == 8:
         return dist_mm.x_transpose_w_eightway
 
 
-def select_x_transpose_kernel(n_parallel: int):
+def select_x_transpose_kernel(parallelism: int):
     """Return x_tw kernel."""
-    if n_parallel == 2:
+    if parallelism == 2:
         return dist_mm.x_transpose_twoway
-    elif n_parallel == 4:
+    elif parallelism == 4:
         return dist_mm.x_transpose_fourway
-    elif n_parallel == 8:
+    elif parallelism == 8:
         return dist_mm.x_transpose_eightway
 
 
@@ -56,7 +56,7 @@ class DistributedXWT(torch.nn.Module):
         out_dim: int,
         rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
         n_channels: int = 1,
         bias: bool = True,
@@ -69,7 +69,7 @@ class DistributedXWT(torch.nn.Module):
 
         Parameters
         ----------
-        n_parallel: int
+        parallelism: int
             number of processes it is distributed over
         in_dim : int
             input dimension of local weight matrix.
@@ -94,7 +94,7 @@ class DistributedXWT(torch.nn.Module):
 
         if init_method == "linear":
             stdev = (
-                1.0 / np.sqrt(in_dim * 2) if n_parallel == 4 else 1.0 / np.sqrt(in_dim)
+                1.0 / np.sqrt(in_dim * 2) if parallelism == 4 else 1.0 / np.sqrt(in_dim)
             )  # TODO: multiply by 2 for parallelism = 4, I think
             self.weights = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
@@ -111,15 +111,15 @@ class DistributedXWT(torch.nn.Module):
             self.weights = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
             )
-        if bias and n_parallel == 2:
+        if bias and parallelism == 2:
             self.bias = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim // 2).uniform_(-stdev, stdev)
             )
-        elif bias and n_parallel == 4:
+        elif bias and parallelism == 4:
             self.bias = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim).uniform_(-stdev, stdev)
             )
-        elif bias and n_parallel == 8:
+        elif bias and parallelism == 8:
             self.bias = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim * 2).uniform_(-stdev, stdev)
             )
@@ -128,7 +128,7 @@ class DistributedXWT(torch.nn.Module):
 
         self.device = device
         self.rank = rank
-        self.n_parallel = n_parallel
+        self.parallelism = parallelism
         self.model_group = model_group
         self.XWT = XWT().apply
 
@@ -156,7 +156,7 @@ class DistributedXWT(torch.nn.Module):
             self.bias,
             self.rank,
             self.device,
-            self.n_parallel,
+            self.parallelism,
             self.model_group,
         )
         return Cij
@@ -172,7 +172,7 @@ class XWT(torch.autograd.Function):
         b: torch.Tensor,
         rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
     ) -> torch.Tensor:
         """
@@ -192,7 +192,7 @@ class XWT(torch.autograd.Function):
             Device to perform computation on.
         rank : int
             Global rank.
-        n_parallel : int
+        parallelism : int
             Number of processes to distribute operation across
         model_group : dist.ProcessGroup, optional
             Process group for an individual model-parallel instance.
@@ -204,7 +204,7 @@ class XWT(torch.autograd.Function):
             B, out_dim are global values.
             in_dim is local value.
         """
-        xwt = select_xw_transpose_kernel(n_parallel)(x, w, rank, device, model_group)
+        xwt = select_xw_transpose_kernel(parallelism)(x, w, rank, device, model_group)
 
         # Handle bias term here?
         if (b is not None) and (len(b.shape) > 1):
@@ -217,14 +217,14 @@ class XWT(torch.autograd.Function):
     def setup_context(ctx, inputs, output):
         """
         ctx: FunctionCtx
-        inputs: tuple(x, w, b, rank, device, n_parallel, model_group)
+        inputs: tuple(x, w, b, rank, device, parallelism, model_group)
         output: xwt
         """
-        x, w, b, rank, device, n_parallel, model_group = inputs
+        x, w, b, rank, device, parallelism, model_group = inputs
         ctx.save_for_backward(x, w, b)
         ctx.rank = rank
         ctx.device = device
-        ctx.n_parallel = n_parallel
+        ctx.parallelism = parallelism
         ctx.model_group = model_group
 
     @staticmethod
@@ -253,13 +253,13 @@ class XWT(torch.autograd.Function):
         input, weight, bias = ctx.saved_tensors
         rank = ctx.rank
         device = ctx.device
-        n_parallel = ctx.n_parallel
+        parallelism = ctx.parallelism
         model_group = ctx.model_group
 
-        grad_input = select_xw_kernel(n_parallel)(
+        grad_input = select_xw_kernel(parallelism)(
             grad_output, weight, rank=rank, device=device, model_group=model_group
         )
-        grad_weight = select_x_transpose_w_kernel(n_parallel)(
+        grad_weight = select_x_transpose_w_kernel(parallelism)(
             grad_output, input, rank=rank, device=device, model_group=model_group
         )
 
@@ -281,7 +281,7 @@ class XWT(torch.autograd.Function):
         b: Optional[torch.Tensor],
         rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
     ) -> tuple[torch.Tensor, Optional[int]]:
         """
@@ -293,7 +293,7 @@ class XWT(torch.autograd.Function):
             Metadata object with info.batch_size (size of vmapped dimension).
         in_dims :
             Tuple of Optional[int] describing which dimension of each input
-            is vmapped over. Structure matches (x, w, b, rank, device, n_parallel, model_group).
+            is vmapped over. Structure matches (x, w, b, rank, device, parallelism, model_group).
         x : Tensor
             Possibly batched input.
         w : Tensor
@@ -314,21 +314,21 @@ class XWT(torch.autograd.Function):
             b_bdim,
             rank_bdim,
             device_bdim,
-            n_parallel_bdim,
+            parallelism_bdim,
             model_group_bdim,
         ) = in_dims
 
         # We only support vmapping over tensor arguments; non-tensors must not be batched.
         assert rank_bdim is None
         assert device_bdim is None
-        assert n_parallel_bdim is None
+        assert parallelism_bdim is None
         assert model_group_bdim is None
         # assert w_bdim is None
         #        assert b_bdim is None
 
         # Case 1: no vmapping at all → just call original op.
         if x_bdim is None:
-            out = XWT.apply(x, w, b, rank, device, n_parallel, model_group)
+            out = XWT.apply(x, w, b, rank, device, parallelism, model_group)
             return out, None
 
         # Only support vmap over dim 0 of x.
@@ -346,7 +346,7 @@ class XWT(torch.autograd.Function):
         if len(x.shape) > len(w.shape):
             w = w.reshape(V, 1, *rest)
 
-        out = XWT.apply(x, w, b, rank, device, n_parallel, model_group)
+        out = XWT.apply(x, w, b, rank, device, parallelism, model_group)
 
         # out has vmapped dimension at dim 0
         return out, 0
@@ -361,7 +361,7 @@ class DistributedXW(torch.nn.Module):
         out_dim: int,
         rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
         n_channels: int = 1,
         bias: bool = False,
@@ -371,7 +371,7 @@ class DistributedXW(torch.nn.Module):
         """
         Initialize distributed matrix-matrix multiplication module.
 
-        n_parallel: int
+        parallelism: int
             Number of processes the operation is distributed over
         in_dim: int
             Global input dimension of local weight matrix.
@@ -386,7 +386,7 @@ class DistributedXW(torch.nn.Module):
 
         self.in_dim = in_dim
         self.out_dim = out_dim
-        stdev = 1.0 / np.sqrt(in_dim * 2) if n_parallel == 4 else 1.0 / np.sqrt(in_dim)
+        stdev = 1.0 / np.sqrt(in_dim * 2) if parallelism == 4 else 1.0 / np.sqrt(in_dim)
 
         self.weights = torch.nn.parameter.Parameter(
             torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev)
@@ -399,7 +399,7 @@ class DistributedXW(torch.nn.Module):
 
         self.rank = rank
         self.device = device
-        self.n_parallel = n_parallel
+        self.parallelism = parallelism
         self.model_group = model_group
 
         self.XW = XW().apply
@@ -426,7 +426,7 @@ class DistributedXW(torch.nn.Module):
             self.bias,
             self.rank,
             self.device,
-            self.n_parallel,
+            self.parallelism,
             self.model_group,
         )
         return cij
@@ -442,7 +442,7 @@ class XW(torch.autograd.Function):
         b: Optional[torch.Tensor],
         rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
     ) -> torch.Tensor:
         """
@@ -474,7 +474,7 @@ class XW(torch.autograd.Function):
             B, x_in are global values.
             out_dim is local value.
         """
-        xw = select_xw_kernel(n_parallel)(x, w, rank, device, model_group)
+        xw = select_xw_kernel(parallelism)(x, w, rank, device, model_group)
 
         if (b is not None) and (len(b.shape) > 1):
             b = b.reshape(b.shape[0], 1, 1, -1)
@@ -485,14 +485,14 @@ class XW(torch.autograd.Function):
     def setup_context(ctx, inputs, output):
         """
         ctx: FunctionCtx
-        inputs: tuple(x, w, b, rank, device, n_parallel, model_group)
+        inputs: tuple(x, w, b, rank, device, parallelism, model_group)
         output: xwt
         """
-        x, w, b, rank, device, n_parallel, model_group = inputs
+        x, w, b, rank, device, parallelism, model_group = inputs
         ctx.save_for_backward(x, w, b)
         ctx.rank = rank
         ctx.device = device
-        ctx.n_parallel = n_parallel
+        ctx.parallelism = parallelism
         ctx.model_group = model_group
         ctx.b = b
 
@@ -520,15 +520,15 @@ class XW(torch.autograd.Function):
         input, weight, bias = ctx.saved_tensors
         rank = ctx.rank
         device = ctx.device
-        n_parallel = ctx.n_parallel
+        parallelism = ctx.parallelism
         model_group = ctx.model_group
 
         # TODO: needed add after introduction of multi-head attention value concat
         grad_output = grad_output.contiguous()
-        grad_input = select_xw_transpose_kernel(n_parallel)(
+        grad_input = select_xw_transpose_kernel(parallelism)(
             grad_output, weight, rank=rank, device=device, model_group=model_group
         )
-        grad_weight = select_x_transpose_w_kernel(n_parallel)(
+        grad_weight = select_x_transpose_w_kernel(parallelism)(
             input, grad_output, rank=rank, device=device, model_group=model_group
         )
 
@@ -548,7 +548,7 @@ class XW(torch.autograd.Function):
         b: Optional[torch.Tensor],
         rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
     ) -> tuple[torch.Tensor, Optional[int]]:
         """
@@ -560,7 +560,7 @@ class XW(torch.autograd.Function):
             Metadata object with info.batch_size (size of vmapped dimension).
         in_dims :
             Tuple of Optional[int] describing which dimension of each input
-            is vmapped over. Structure matches (x, w, b, rank, device, n_parallel, model_group).
+            is vmapped over. Structure matches (x, w, b, rank, device, parallelism, model_group).
         x : Tensor
             Possibly batched input.
         w : Tensor
@@ -581,21 +581,21 @@ class XW(torch.autograd.Function):
             b_bdim,
             rank_bdim,
             device_bdim,
-            n_parallel_bdim,
+            parallelism_bdim,
             model_group_bdim,
         ) = in_dims
 
         # We only support vmapping over tensor arguments; non-tensors must not be batched.
         assert rank_bdim is None
         assert device_bdim is None
-        assert n_parallel_bdim is None
+        assert parallelism_bdim is None
         assert model_group_bdim is None
         # assert w_bdim is None
         assert b_bdim is None
 
         # Case 1: no vmapping at all → just call original op.
         if x_bdim is None:
-            out = XWT.apply(x, w, b, rank, device, n_parallel, model_group)
+            out = XWT.apply(x, w, b, rank, device, parallelism, model_group)
             return out, None
 
         # Only support vmap over dim 0 of x.
@@ -611,7 +611,7 @@ class XW(torch.autograd.Function):
         rest = w.shape[1:]  # (in_dim, out_dim)
         if len(x.shape) > len(w.shape):
             w = w.reshape(V, 1, *rest)
-        out = XW.apply(x, w, b, rank, device, n_parallel, model_group)
+        out = XW.apply(x, w, b, rank, device, parallelism, model_group)
 
         # out has vmapped dimension at dim 0
         return out, 0
@@ -626,14 +626,14 @@ class DistributedXTW(torch.nn.Module):
         out_dim: int,
         rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
         n_channels: int = 72,
         bias: bool = False,
         init_method: str = "linear",
     ) -> None:
         """
-        n_parallel: int
+        parallelism: int
             Number of processes to distribute over
         in_dim : int
             input dimension of local weight matrix.
@@ -655,7 +655,7 @@ class DistributedXTW(torch.nn.Module):
         self.out_dim = out_dim
         if init_method == "linear":
             stdev = (
-                1.0 / np.sqrt(in_dim * 2) if n_parallel == 2 else 1.0 / np.sqrt(in_dim)
+                1.0 / np.sqrt(in_dim * 2) if parallelism == 2 else 1.0 / np.sqrt(in_dim)
             )
             self.weights = torch.nn.parameter.Parameter(
                 torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev)
@@ -673,7 +673,7 @@ class DistributedXTW(torch.nn.Module):
             self.bias = None
         self.rank = rank
         self.device = device
-        self.n_parallel = n_parallel
+        self.parallelism = parallelism
         self.model_group = model_group
 
         self.XTW = XTW().apply
@@ -702,7 +702,7 @@ class DistributedXTW(torch.nn.Module):
             self.bias,
             self.rank,
             self.device,
-            self.n_parallel,
+            self.parallelism,
             self.model_group,
         )
 
@@ -719,7 +719,7 @@ class XTW(torch.autograd.Function):
         b: torch.Tensor,
         rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
     ) -> torch.Tensor:
         """
@@ -750,7 +750,7 @@ class XTW(torch.autograd.Function):
             B, x_in are global values.
             out_dim is local value.
         """
-        xtw = select_x_transpose_w_kernel(n_parallel)(x, w, rank, device, model_group)
+        xtw = select_x_transpose_w_kernel(parallelism)(x, w, rank, device, model_group)
         if (b is not None) and (len(b.shape) > 1):
             b = b.reshape(b.shape[0], 1, 1, -1)
         xtw = xtw if b is None else xtw.add(b)
@@ -760,15 +760,15 @@ class XTW(torch.autograd.Function):
     def setup_context(ctx, inputs, output):
         """
         ctx: FunctionCtx
-        inputs: tuple(x, w, b, rank, device, n_parallel, model_group)
+        inputs: tuple(x, w, b, rank, device, parallelism, model_group)
         output: xwt
         """
 
-        x, w, b, rank, device, n_parallel, model_group = inputs
+        x, w, b, rank, device, parallelism, model_group = inputs
         ctx.save_for_backward(x, w, b)
         ctx.rank = rank
         ctx.device = device
-        ctx.n_parallel = n_parallel
+        ctx.parallelism = parallelism
         ctx.model_group = model_group
         ctx.b = b
 
@@ -800,13 +800,13 @@ class XTW(torch.autograd.Function):
         input, weight, bias = ctx.saved_tensors
         rank = ctx.rank
         device = ctx.device
-        n_parallel = ctx.n_parallel
+        parallelism = ctx.parallelism
         model_group = ctx.model_group
 
-        grad_input = select_xw_transpose_kernel(n_parallel)(
+        grad_input = select_xw_transpose_kernel(parallelism)(
             weight, grad_output, rank, device, model_group
         )
-        grad_weight = select_xw_kernel(n_parallel)(
+        grad_weight = select_xw_kernel(parallelism)(
             input, grad_output, rank, device, model_group
         )
 
@@ -826,7 +826,7 @@ class XTW(torch.autograd.Function):
         b: Optional[torch.Tensor],
         rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
     ) -> tuple[torch.Tensor, Optional[int]]:
         """
@@ -838,7 +838,7 @@ class XTW(torch.autograd.Function):
             Metadata object with info.batch_size (size of vmapped dimension).
         in_dims :
             Tuple of Optional[int] describing which dimension of each input
-            is vmapped over. Structure matches (x, w, b, rank, device, n_parallel, model_group).
+            is vmapped over. Structure matches (x, w, b, rank, device, parallelism, model_group).
         x : Tensor
             Possibly batched input.
         w : Tensor
@@ -859,21 +859,21 @@ class XTW(torch.autograd.Function):
             b_bdim,
             rank_bdim,
             device_bdim,
-            n_parallel_bdim,
+            parallelism_bdim,
             model_group_bdim,
         ) = in_dims
 
         # We only support vmapping over tensor arguments; non-tensors must not be batched.
         assert rank_bdim is None
         assert device_bdim is None
-        assert n_parallel_bdim is None
+        assert parallelism_bdim is None
         assert model_group_bdim is None
         # assert w_bdim is None
         # assert b_bdim is None
 
         # Case 1: no vmapping at all → just call original op.
         if x_bdim is None:
-            out = XWT.apply(x, w, b, rank, device, n_parallel, model_group)
+            out = XWT.apply(x, w, b, rank, device, parallelism, model_group)
             return out, None
 
         # Only support vmap over dim 0 of x.
@@ -890,7 +890,7 @@ class XTW(torch.autograd.Function):
         
         if len(x.shape) > len(w.shape):
             w = w.reshape(V, 1, *rest)
-        out = XTW.apply(x, w, b, rank, device, n_parallel, model_group)
+        out = XTW.apply(x, w, b, rank, device, parallelism, model_group)
 
         # out has vmapped dimension at dim 0
         return out, 0
@@ -903,14 +903,14 @@ class DistributedXTranpose(torch.nn.Module):
         self,
         rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
     ) -> None:
         """Initialize the Linear class."""
         super().__init__()
         self.rank = rank
         self.device = device
-        self.n_parallel = n_parallel
+        self.parallelism = parallelism
         self.model_group = model_group
         self.transpose = XT().apply
 
@@ -936,7 +936,7 @@ class DistributedXTranpose(torch.nn.Module):
             Local transposed tensor.
         """
         x_transpose = self.transpose(
-            x, self.rank, self.device, self.n_parallel, self.model_group
+            x, self.rank, self.device, self.parallelism, self.model_group
         )
         return x_transpose
 
@@ -949,7 +949,7 @@ class XT(torch.autograd.Function):
         x: torch.Tensor,
         rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
     ) -> torch.Tensor:
         """
@@ -974,21 +974,21 @@ class XT(torch.autograd.Function):
             Local transposed tensor.
         """
 
-        x = select_x_transpose_kernel(n_parallel)(x, rank, device, model_group)
+        x = select_x_transpose_kernel(parallelism)(x, rank, device, model_group)
         return x
 
     @staticmethod
     def setup_context(ctx, inputs, output):
         """
         ctx: FunctionCtx
-        inputs: tuple(x, w, b, rank, device, n_parallel, model_group)
+        inputs: tuple(x, w, b, rank, device, parallelism, model_group)
         output: xwt
         """
 
-        x, rank, device, n_parallel, model_group = inputs
+        x, rank, device, parallelism, model_group = inputs
         ctx.device = device
         ctx.rank = rank
-        ctx.n_parallel = n_parallel
+        ctx.parallelism = parallelism
         ctx.model_group = model_group
 
     @staticmethod
@@ -1011,10 +1011,10 @@ class XT(torch.autograd.Function):
         """
         rank = ctx.rank
         device = ctx.device
-        n_parallel = ctx.n_parallel
+        parallelism = ctx.parallelism
         model_group = ctx.model_group
 
-        grad_output = select_x_transpose_kernel(n_parallel)(
+        grad_output = select_x_transpose_kernel(parallelism)(
             grad_output, rank, device, model_group
         )
         return grad_output, None, None, None, None
@@ -1026,12 +1026,12 @@ class XT(torch.autograd.Function):
         x: torch.Tensor,
         rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
     ) -> tuple[torch.Tensor, Optional[int]]:
         x = x.contiguous()
         # x under vmap has shape (V, B, x_in, in_dim).
-        out = XT.apply(x, rank, device, n_parallel, model_group)
+        out = XT.apply(x, rank, device, parallelism, model_group)
 
         # out has vmapped dimension at dim 0
         return out, 0
@@ -1044,13 +1044,13 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
         self,
         rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
     ) -> None:
         """Initialize the XWT Linear layer sharded over two processes."""
         self.rank = rank
         self.device = device
-        self.n_parallel = n_parallel
+        self.parallelism = parallelism
         self.model_group = model_group
 
         super().__init__()
@@ -1077,7 +1077,7 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
             in_dim is local value.
         """
         Cij = self.XWT(
-            x, w, b, self.rank, self.device, self.n_parallel, self.model_group
+            x, w, b, self.rank, self.device, self.parallelism, self.model_group
         )
 
         return Cij
@@ -1090,13 +1090,13 @@ class DistributedMatMulXW(torch.nn.Module):
         self,
         rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
     ):
         """Initialize the XWT Linear layer sharded over n processes."""
         self.rank = rank
         self.device = device
-        self.n_parallel = n_parallel  # TODO: no bias term
+        self.parallelism = parallelism  # TODO: no bias term
         self.model_group = model_group
 
         super().__init__()
@@ -1121,7 +1121,7 @@ class DistributedMatMulXW(torch.nn.Module):
             in_dim is local value.
         """
         Cij = self.XW(
-            x, w, b, self.rank, self.device, self.n_parallel, self.model_group
+            x, w, b, self.rank, self.device, self.parallelism, self.model_group
         )
 
         return Cij

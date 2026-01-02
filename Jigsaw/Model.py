@@ -4,16 +4,17 @@ import torch
 from Jigsaw import Dataset, Linear, PatchEmbedding
 from Jigsaw import Normalization as Norm
 from Jigsaw.Mixer import MixerBlock, MixerBlockMegatron, MixerBlockSequential
+from Jigsaw.util_fns import flop_comm_estimation
 
 
 class Model_eightway(torch.nn.Module):
     def __init__(
-        self, config_dict, rank, device, n_parallel, model_group, col_subgroup
+        self, config_dict, rank, device, parallelism, model_group, col_subgroup
     ):
         super().__init__()
         self.rank = rank
         self.device = device
-        self.n_parallel = n_parallel
+        self.parallelism = parallelism
         self.model_group = model_group
         self.column_subgroup = col_subgroup
 
@@ -32,7 +33,7 @@ class Model_eightway(torch.nn.Module):
                 hidden_dimension,
                 self.rank,
                 self.device,
-                n_parallel,
+                parallelism,
                 model_group,
             )
         else:
@@ -52,7 +53,7 @@ class Model_eightway(torch.nn.Module):
                 hidden_dimension,
                 self.rank,
                 self.device,
-                n_parallel,
+                parallelism,
                 model_group,
             )
 
@@ -67,7 +68,7 @@ class Model_eightway(torch.nn.Module):
                     config_dict["model"]["features_hidden_dim_fraction"],
                     rank,
                     self.device,
-                    n_parallel,
+                    parallelism,
                     model_group,
                 )
                 for i in range(self.n_blocks)
@@ -98,7 +99,7 @@ class Model_eightway(torch.nn.Module):
                     self.num_variables,
                     rank,
                     self.device,
-                    n_parallel,
+                    parallelism,
                     model_group,
                     concat=True,
                     stride=self.stride,
@@ -110,7 +111,7 @@ class Model_eightway(torch.nn.Module):
                     self.num_variables,
                     rank,
                     self.device,
-                    n_parallel,
+                    parallelism,
                     model_group,
                     concat=False,
                     stride=self.stride,
@@ -122,7 +123,7 @@ class Model_eightway(torch.nn.Module):
                 self.num_variables,
                 rank,
                 self.device,
-                n_parallel,
+                parallelism,
                 model_group,
             )
 
@@ -131,7 +132,7 @@ class Model_eightway(torch.nn.Module):
             self.num_variables // 2,
             rank,
             self.device,
-            n_parallel,
+            parallelism,
             model_group,
         )
 
@@ -226,12 +227,12 @@ class Model_eightway(torch.nn.Module):
 
 class Model(torch.nn.Module):
     def __init__(
-        self, config_dict, rank, device, n_parallel, model_group, col_subgroup
+        self, config_dict, rank, device, parallelism, model_group, col_subgroup
     ):
         super().__init__()
         self.rank = rank
         self.device = device
-        self.n_parallel = n_parallel
+        self.parallelism = parallelism
         self.model_group = model_group
         self.column_subgroup = col_subgroup
 
@@ -250,7 +251,7 @@ class Model(torch.nn.Module):
                 hidden_dimension,
                 self.rank,
                 self.device,
-                n_parallel,
+                parallelism,
                 model_group,
                 bias=True,
             )
@@ -271,7 +272,7 @@ class Model(torch.nn.Module):
                 hidden_dimension,
                 self.rank,
                 self.device,
-                n_parallel,
+                parallelism,
                 model_group,
                 bias=True,
             )
@@ -287,7 +288,7 @@ class Model(torch.nn.Module):
                     config_dict["model"]["features_hidden_dim_fraction"],
                     rank,
                     self.device,
-                    n_parallel,
+                    parallelism,
                     model_group,
                 )
                 for i in range(self.n_blocks)
@@ -313,7 +314,7 @@ class Model(torch.nn.Module):
                     self.num_variables,
                     rank,
                     self.device,
-                    n_parallel,
+                    parallelism,
                     model_group,
                     concat=True,
                     stride=self.stride,
@@ -326,7 +327,7 @@ class Model(torch.nn.Module):
                     self.num_variables,
                     rank,
                     self.device,
-                    n_parallel,
+                    parallelism,
                     model_group,
                     concat=False,
                     stride=self.stride,
@@ -338,7 +339,7 @@ class Model(torch.nn.Module):
                 self.num_variables,
                 rank,
                 self.device,
-                n_parallel,
+                parallelism,
                 model_group,
             )
 
@@ -348,7 +349,7 @@ class Model(torch.nn.Module):
                 self.num_variables,
                 rank,
                 self.device,
-                n_parallel,
+                parallelism,
                 model_group,
                 bias=True,
             )
@@ -397,6 +398,66 @@ class Model(torch.nn.Module):
         self.land_mask = torch.unsqueeze(self.land_mask[:, self.start : self.end], 0)
         self.soil_type = torch.unsqueeze(self.soil_type[:, self.start : self.end], 0)
         self.topography = torch.unsqueeze(self.topography[:, self.start : self.end], 0)
+        self.flop_comm = self._calc_flop_comm(config_dict)
+
+    def _calc_flop_comm(self, config_dict):
+        nlat, nlon = config_dict["data"]["xlat"], config_dict["data"]["xlon"]
+        nvars_in, nvars_out = 72, 72
+        patch_size = config_dict["model"]["patch_size"]
+        patch_embedding_in = patch_size * nvars_in
+        patch_embedding_out = config_dict["model"]["hidden_dim"]
+        # where ntokens = nlat*nlon/patch_size
+        input_data = (nlat * nlon / patch_size, patch_size * nvars_in)
+        ntokens = nlat * nlon / patch_size
+        spatial_hidden_dim = int(
+            config_dict["model"]["spatial_hidden_dim_fraction"] * ntokens
+        )
+        channels_hidden_dim = int(
+            config_dict["model"]["features_hidden_dim_fraction"] * patch_embedding_out
+        )
+
+        patch_embedding_comm = flop_comm_estimation.AB_communication(
+            ntokens, patch_size * nvars_in, patch_embedding_out
+        )  # GBs of data communicated
+        patch_embedding_flop = (
+            flop_comm_estimation.AB_flop_local(ntokens, patch_size * nvars_in, patch_embedding_out)
+            + patch_embedding_out / 1e12
+        )
+
+        # including concat
+        # (ntokens, patch_embedding_out)
+        patch_recovery_comm = flop_comm_estimation.AB_communication(
+            ntokens, patch_embedding_out * 2, patch_embedding_in
+        )  # GBs of data communicated
+        patch_recovery_flop = (
+            flop_comm_estimation.AB_flop_local(ntokens, patch_embedding_out * 2, patch_embedding_in)
+            + patch_embedding_in / 1e12
+        )
+
+        linlayer_comm = flop_comm_estimation.AB_communication(
+            nlat * nlon, nvars_out * 2, nvars_out
+        )  # GBs of data communicated
+        linlayer_flop = (
+            flop_comm_estimation.AB_flop_local(nlat * nlon, nvars_out * 2, nvars_out) + nvars_out / 1e12
+        )
+
+        tflop_per_block, gb_per_block = flop_comm_estimation.mixing_block(
+            input_data[0], patch_embedding_out, spatial_hidden_dim, channels_hidden_dim
+        )
+
+        flop_forward = (
+            tflop_per_block * config_dict["model"]["mixing_blocks"]
+            + patch_embedding_flop
+            + linlayer_flop
+            + patch_recovery_flop
+        )
+        comm_forward = (
+            gb_per_block * config_dict["model"]["mixing_blocks"]
+            + patch_embedding_comm
+            + linlayer_comm
+            + patch_recovery_comm
+        )
+        return flop_forward, comm_forward
 
     def forward(self, x, rollout_=0):
         x_res = x
@@ -447,11 +508,11 @@ class Model(torch.nn.Module):
 
 
 class Model_twoway(torch.nn.Module):
-    def __init__(self, config_dict, rank, device, n_parallel, model_group):
+    def __init__(self, config_dict, rank, device, parallelism, model_group):
         super().__init__()
         self.rank = rank
         self.device = device
-        self.n_parallel = n_parallel
+        self.parallelism = parallelism
         self.model_group = model_group  # Local groups [0,1], [2,3]...
         hidden_dimension = config_dict["model"]["hidden_dim"]
         self.xlat, self.xlon = config_dict["data"]["xlat"], config_dict["data"]["xlon"]
@@ -469,7 +530,7 @@ class Model_twoway(torch.nn.Module):
                 hidden_dimension,
                 rank,
                 device,
-                n_parallel,
+                parallelism,
                 model_group,
                 bias=True,
             )
@@ -484,7 +545,7 @@ class Model_twoway(torch.nn.Module):
                     config_dict["model"]["features_hidden_dim_fraction"],
                     rank,
                     device,
-                    n_parallel,
+                    parallelism,
                     model_group,
                 )
                 for i in range(self.n_blocks)
@@ -509,7 +570,7 @@ class Model_twoway(torch.nn.Module):
                     self.num_variables,
                     rank,
                     device,
-                    n_parallel,
+                    parallelism,
                     model_group,
                     concat=True,
                     stride=self.stride,
@@ -522,7 +583,7 @@ class Model_twoway(torch.nn.Module):
                     self.num_variables,
                     rank,
                     device,
-                    n_parallel,
+                    parallelism,
                     model_group,
                     concat=False,
                     stride=self.stride,
@@ -535,7 +596,7 @@ class Model_twoway(torch.nn.Module):
                 self.num_variables,
                 rank,
                 device,
-                n_parallel=n_parallel,
+                parallelism=parallelism,
                 model_group=model_group,
                 bias=True,
             )
@@ -862,7 +923,7 @@ class ModelSequential(torch.nn.Module):
 
 
 class ModelMegatron(torch.nn.Module):
-    def __init__(self, config_dict, rank, device, n_parallel, model_group):
+    def __init__(self, config_dict, rank, device, parallelism, model_group):
         super().__init__()
         self.rank = rank
         hidden_dimension = config_dict["model"]["hidden_dim"]
@@ -904,7 +965,7 @@ class ModelMegatron(torch.nn.Module):
                     config_dict["model"]["features_hidden_dim_fraction"],
                     rank,
                     device,
-                    n_parallel,
+                    parallelism,
                     model_group,
                     self.dropout,
                     bias=False,
