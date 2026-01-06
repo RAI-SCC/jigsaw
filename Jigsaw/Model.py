@@ -21,7 +21,9 @@ class WeatherMixer(torch.nn.Module):
         hidden_dimension = config_dict["model"]["hidden_dim"]
         self.xlat, self.xlon = config_dict["data"]["xlat"], config_dict["data"]["xlon"]
 
-        if config_dict["model"]["patch_embed"] == 1:
+        if (
+            config_dict["model"]["patch_embed"] == 1
+        ):  # 2-dimensional convolutional patch embedding
             self.patch_size = config_dict["model"]["patch_size"]
             self.stride = config_dict["model"]["stride"]
             self.n_lat, self.n_lon = self.xlat, self.xlon // self.patch_size
@@ -36,7 +38,7 @@ class WeatherMixer(torch.nn.Module):
                 parallelism,
                 model_group,
             )
-        else:
+        else:  # 2-dimensional convolutional patch embedding
             self.patch_size = (
                 config_dict["model"]["patch_size"],
                 config_dict["model"]["patch_size"],
@@ -75,11 +77,17 @@ class WeatherMixer(torch.nn.Module):
                 for i in range(self.n_blocks)
             ]
         )
-        self.layer_norm = Norm.DistributedLayerNorm(
-            hidden_dimension // 2, self.rank, self.device, self.column_subgroup
-        )
 
-        self.num_variables = 36  # TODO: generalize via config file
+        # Define layer norms
+        match parallelism:
+            case 2:
+                self.layer_norm = Linear.torch.nn.LayerNorm(hidden_dimension // 2)
+                self.num_variables = 72
+            case 4 | 8:
+                self.layer_norm = Norm.DistributedLayerNorm(
+                    hidden_dimension // 2, self.rank, self.device, self.column_subgroup
+                )
+                self.num_variables = 36  # TODO: generalize via config file
 
         self.concat = config_dict["model"]["concat"]
         self.linear_residual = config_dict["model"]["linear_residual"]
@@ -87,32 +95,19 @@ class WeatherMixer(torch.nn.Module):
         self.add = config_dict["model"]["add"]
 
         if config_dict["model"]["patch_embed"] == 1:
-            if self.concat:
-                self.recovery = PatchEmbedding.Distributed1DPatchRecovery(
-                    self.patch_size,
-                    hidden_dimension,
-                    self.num_variables,
-                    rank,
-                    self.device,
-                    parallelism,
-                    model_group,
-                    concat=True,
-                    stride=self.stride,
-                    bias=False,
-                )
-            else:
-                self.recovery = PatchEmbedding.Distributed1DPatchRecovery(
-                    self.patch_size,
-                    hidden_dimension,
-                    self.num_variables,
-                    rank,
-                    self.device,
-                    parallelism,
-                    model_group,
-                    concat=False,
-                    stride=self.stride,
-                )
-        else:
+            self.recovery = PatchEmbedding.Distributed1DPatchRecovery(
+                self.patch_size,
+                hidden_dimension,
+                self.num_variables,
+                rank,
+                self.device,
+                parallelism,
+                model_group,
+                concat=self.concat,
+                stride=self.stride,
+                bias=False,
+            )
+        else:  # 2-dimensional convolutional patch recovery
             self.recovery = PatchEmbedding.Distributed1DPatchRecovery(
                 self.patch_size,
                 hidden_dimension,
@@ -125,20 +120,23 @@ class WeatherMixer(torch.nn.Module):
 
         if config_dict["model"]["linear_residual"]:
             self.linearlayer = Linear.DistributedXWT(
-                self.num_variables * 2,
-                self.num_variables // 2,
+                self.num_variables * 2 if parallelism > 2 else self.num_variables,
+                self.num_variables // 2 if parallelism == 8 else self.num_variables,
                 rank,
                 self.device,
                 parallelism,
                 model_group,
             )
-
-            self.layer_norm2 = Norm.DistributedLayerNorm(
-                self.num_variables, self.rank, self.device, self.column_subgroup
-            )
-            self.layer_norm3 = Norm.DistributedLayerNorm(
-                self.num_variables * 2, self.rank, self.device, self.column_subgroup
-            )
+            if parallelism == 2:
+                self.layer_norm2 = torch.nn.LayerNorm(self.num_variables // 2)
+                self.layer_norm3 = torch.nn.LayerNorm(self.num_variables)
+            else:
+                self.layer_norm2 = Norm.DistributedLayerNorm(
+                    self.num_variables, self.rank, self.device, self.column_subgroup
+                )
+                self.layer_norm3 = Norm.DistributedLayerNorm(
+                    self.num_variables * 2, self.rank, self.device, self.column_subgroup
+                )
 
         self.activation = torch.nn.GELU()
         self.model_group = model_group
@@ -167,7 +165,10 @@ class WeatherMixer(torch.nn.Module):
                     "common": torch.nn.ModuleList([self.blocks, self.layer_norm]),
                 }
             )
+
+        # Estimate the number of FLOPs/forward pass and intra-node communication
         self._load_constant_masks(config_dict, parallelism)
+        self._calc_flop_comm(config_dict)
 
     def _load_constant_masks(self, config_dict, parallelism):
         match parallelism:
@@ -188,8 +189,8 @@ class WeatherMixer(torch.nn.Module):
                     case 4 | 5:
                         self.start, self.end = self.xlon // 2, self.xlon * 3 // 4
                     case 6 | 7:
-                       self.start, self.end = self.xlon * 3 // 4, self.xlon
-                       
+                        self.start, self.end = self.xlon * 3 // 4, self.xlon
+
         self.land_mask, self.soil_type, self.topography = Dataset.load_constant_mask_2d(
             config_dict["data"]["constant_masks_path"], xlat=self.xlat
         )
@@ -198,15 +199,14 @@ class WeatherMixer(torch.nn.Module):
         self.topography = torch.unsqueeze(self.topography[:, self.start : self.end], 0)
 
     def _calc_flop_comm(self, config_dict):
-        nlat, nlon = config_dict["data"]["xlat"], config_dict["data"]["xlon"]
-        parallelism = 4
+        nlat, nlon = self.xlat, self.xlon
+        parallelism = self.parallelism
         nvars_in, nvars_out = 72, 72
         patch_size = config_dict["model"]["patch_size"]
         patch_embedding_in = patch_size * nvars_in
         patch_embedding_out = config_dict["model"]["hidden_dim"]
         # where ntokens = nlat*nlon/patch_size
-        input_data = (nlat * nlon / patch_size, patch_size * nvars_in)
-        ntokens = nlat * nlon / patch_size
+        ntokens = self.xlat * self.xlon / patch_size
         spatial_hidden_dim = int(
             config_dict["model"]["spatial_hidden_dim_fraction"] * ntokens
         )
@@ -214,9 +214,10 @@ class WeatherMixer(torch.nn.Module):
             config_dict["model"]["features_hidden_dim_fraction"] * patch_embedding_out
         )
 
+        # patch embedding
         patch_embedding_comm = flop_comm_estimation.AB_communication(
             parallelism, ntokens, patch_size * nvars_in, patch_embedding_out
-        )  # GBs of data communicated
+        )
         patch_embedding_flop = (
             flop_comm_estimation.AB_flop_local(
                 ntokens, patch_size * nvars_in, patch_embedding_out
@@ -224,28 +225,34 @@ class WeatherMixer(torch.nn.Module):
             + patch_embedding_out / 1e12
         )
 
-        # including concat
-        # (ntokens, patch_embedding_out)
+        # self.concat + 1 (multiplier = 1 if no concatenation, = 2 if concat)
         patch_recovery_comm = flop_comm_estimation.AB_communication(
-            ntokens, patch_embedding_out * 2, patch_embedding_in
-        )  # GBs of data communicated
+            parallelism,
+            ntokens,
+            patch_embedding_out * (self.concat + 1),
+            patch_embedding_in,
+        )
         patch_recovery_flop = (
             flop_comm_estimation.AB_flop_local(
-                ntokens, patch_embedding_out * 2, patch_embedding_in
+                ntokens, patch_embedding_out * (self.concat + 1), patch_embedding_in
             )
             + patch_embedding_in / 1e12
         )
 
         linlayer_comm = flop_comm_estimation.AB_communication(
-            nlat * nlon, nvars_out * 2, nvars_out
-        )  # GBs of data communicated
+            parallelism, nlat * nlon, nvars_out * 2, nvars_out
+        )
         linlayer_flop = (
             flop_comm_estimation.AB_flop_local(nlat * nlon, nvars_out * 2, nvars_out)
             + nvars_out / 1e12
         )
 
         tflop_per_block, gb_per_block = flop_comm_estimation.mixing_block(
-            input_data[0], patch_embedding_out, spatial_hidden_dim, channels_hidden_dim
+            parallelism,
+            ntokens,
+            patch_embedding_out,
+            spatial_hidden_dim,
+            channels_hidden_dim,
         )
 
         flop_forward = (
@@ -260,11 +267,16 @@ class WeatherMixer(torch.nn.Module):
             + linlayer_comm
             + patch_recovery_comm
         )
+        if self.rank == 0:
+            print(f"Forward TFLOPS: {flop_forward} and comm (GB) {comm_forward}.")
+
         return flop_forward, comm_forward
-    
+
     def forward(self, x, rollout_=0):
+        print(f'hello')
         for i in range(rollout_):
             x_res = x
+            
             if len(x_res.shape) > 3:
                 x_res = x_res.flatten(start_dim=1, end_dim=2)
             else:
@@ -277,13 +289,12 @@ class WeatherMixer(torch.nn.Module):
                     x[..., -1] = self.topography
                     x_res = x.flatten(start_dim=1, end_dim=2)
             # x_shape [n_batch, n_var, 720, 1440]
+            x_res = x.flatten(start_dim=1, end_dim=2)
             x = self.embedding(x)
-            # After embedding: x_shape [n_batch, n_patch_lat * n_patch_lon, embed_dim]
             x_res2 = x
 
             for i in range(self.n_blocks):
                 x = self.blocks[i](x)
-                torch.cuda.synchronize()
 
             # After MLP-mixing blocks: [n_batch, n_patch_lat * n_patch_lon/2, embed_dim/2]
             # After recovery: [n_batch, n_lat*n_lon//2, n_var//2]
@@ -292,7 +303,8 @@ class WeatherMixer(torch.nn.Module):
                 x = torch.concat((x, x_res2), dim=2)
             else:
                 x = self.layer_norm(x + x_res2)
-            x = self.recovery(x, self.n_lat, self.n_lon // 4)
+
+            x = self.recovery(x, self.n_lat, self.n_lon // (self.parallelism // 2))
             x = x.reshape(x.shape[0], -1, x.shape[-1])
 
             if self.add:
@@ -306,6 +318,7 @@ class WeatherMixer(torch.nn.Module):
                 x = self.layer_norm3(x)
                 x = x.reshape(x.shape[0], -1, x.shape[-1])
                 x = self.linearlayer(x)
+            print(x)
         return x
 
 
@@ -724,7 +737,7 @@ class Model(torch.nn.Module):
         )  # GBs of data communicated
         patch_embedding_flop = (
             flop_comm_estimation.AB_flop_local(
-                ntokens, patch_size * nvars_in, patch_embedding_out
+                parallelism, ntokens, patch_size * nvars_in, patch_embedding_out
             )
             + patch_embedding_out / 1e12
         )
@@ -732,7 +745,7 @@ class Model(torch.nn.Module):
         # including concat
         # (ntokens, patch_embedding_out)
         patch_recovery_comm = flop_comm_estimation.AB_communication(
-            ntokens, patch_embedding_out * 2, patch_embedding_in
+            parallelism, ntokens, patch_embedding_out * 2, patch_embedding_in
         )  # GBs of data communicated
         patch_recovery_flop = (
             flop_comm_estimation.AB_flop_local(
@@ -742,15 +755,21 @@ class Model(torch.nn.Module):
         )
 
         linlayer_comm = flop_comm_estimation.AB_communication(
-            nlat * nlon, nvars_out * 2, nvars_out
+            parallelism, nlat * nlon, nvars_out * 2, nvars_out
         )  # GBs of data communicated
         linlayer_flop = (
-            flop_comm_estimation.AB_flop_local(nlat * nlon, nvars_out * 2, nvars_out)
+            flop_comm_estimation.AB_flop_local(
+                parallelism, nlat * nlon, nvars_out * 2, nvars_out
+            )
             + nvars_out / 1e12
         )
 
         tflop_per_block, gb_per_block = flop_comm_estimation.mixing_block(
-            input_data[0], patch_embedding_out, spatial_hidden_dim, channels_hidden_dim
+            parallelism,
+            input_data[0],
+            patch_embedding_out,
+            spatial_hidden_dim,
+            channels_hidden_dim,
         )
 
         flop_forward = (
@@ -836,8 +855,8 @@ class Model_twoway(torch.nn.Module):
                 self.patch_size,
                 72,
                 hidden_dimension,
-                rank,
-                device,
+                self.rank,
+                self.device,
                 parallelism,
                 model_group,
                 bias=True,
@@ -859,9 +878,7 @@ class Model_twoway(torch.nn.Module):
                 for i in range(self.n_blocks)
             ]
         )
-        self.layer_norm = Linear.torch.nn.LayerNorm(
-            hidden_dimension // 2
-        )  # , self.rank, self.device)
+        self.layer_norm = Linear.torch.nn.LayerNorm(hidden_dimension // 2)
 
         self.num_variables = 72  # TODO: generalize via config file
 
@@ -948,13 +965,10 @@ class Model_twoway(torch.nn.Module):
         # After embedding: x_shape [n_batch, n_patch_lat * n_patch_lon, embed_dim]
         x_res2 = x
 
-        # for rollout in torch.arange(rollout_):
-        # print(f'this is not even accessed!')
         for i in range(self.n_blocks):
             x = self.blocks[i](x)
 
-        # After MLP-mixing blocks: [n_batch, n_patch_lat * n_patch_lon/2, embed_dim/2]
-        # After recovery: [n_batch, n_lat*n_lon//2, n_var//2]
+        # After MLP-mixing blocks: [n_batch, n_patch_lat * n_patch_lon/2, embed_dim/2
         if self.concat:
             x = self.layer_norm(x)
             x = torch.concat((x, x_res2), dim=2)
@@ -966,6 +980,7 @@ class Model_twoway(torch.nn.Module):
 
         if self.add:
             return x + x_res
+
         if self.linear_residual:
             x = self.layer_norm2(x)
             x = torch.concat((x, x_res), dim=2)
@@ -973,12 +988,8 @@ class Model_twoway(torch.nn.Module):
             # After recovery: [n_batch, n_lat, n_lon, n_var]
             x = self.layer_norm3(x)
             x = x.reshape(x.shape[0], -1, x.shape[-1])
-            # x = x.flatten(start_dim=1, end_dim=2)
             x = self.linearlayer(x)
-
-            return x
-        else:
-            return x
+        return x
 
 
 class ModelSequential(torch.nn.Module):

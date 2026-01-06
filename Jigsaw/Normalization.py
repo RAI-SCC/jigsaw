@@ -74,7 +74,6 @@ class DistributedSoftMax(torch.nn.Module):
     def __init__(self, dim=-1, group=None):
         super().__init__()
         self.dim = dim
-        print(group)
         self.group = group # is not None else dist.group.WORLD
         self.func = _DistributedSoftmax.apply
 

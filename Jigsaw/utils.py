@@ -225,6 +225,16 @@ def setup_precision(tf32: bool) -> None:
     return
 
 
+def setup_comm_groups(rank: int, parallelism: int):
+    match parallelism:
+        case 1:
+            groups = setup_groups(rank, parallelism, 1, 1)
+        case 2:
+            groups = setup_groups(rank, parallelism, 1, 2)
+        case 4:
+            groups = setup_groups(rank, parallelism, 2, 2)
+    return groups
+    
 def setup_groups(rank: int, parallelism: int, nrows: int, ncols: int):
     """Return communication groups."""
     model_group = get_model_group(rank, parallelism)

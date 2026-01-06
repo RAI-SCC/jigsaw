@@ -21,7 +21,7 @@ def AB_communication(parallelism, in_dim, hidden_dim, out_dim, dtype="float32"):
         case 1:
             return 0
         case 2:
-            return 2 * in_dim * hidden_local
+            comm = 2 * in_dim * hidden_local
         case 4:
             comm = 4 * (in_local * hidden_local + hidden_local * out_local)
         case 8:

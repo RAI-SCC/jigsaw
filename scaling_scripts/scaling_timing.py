@@ -6,42 +6,42 @@ import torch
 import torch.distributed as dist
 import yaml
 
-import utils
+from Jigsaw import utils
 
 
 def training_loop(config_dict: dict, device: torch.device, localid: int, rank: int) -> None:
     """Training loop for scaling experiments."""
     model_parallel = config_dict['model']['model_parallel']
-    n_parallel = config_dict['model_parallel']['parallelism'] if model_parallel else 1
+    parallelism = config_dict['model_parallel']['parallelism'] if model_parallel else 1
 
-    utils.set_all_seeds(1 + rank % n_parallel)
+    utils.set_all_seeds(1 + rank % parallelism)
 
     xlat, xlon = config_dict['data']['xlat'], config_dict['data']['xlon']
 
     # Set up model  groups
-    match n_parallel:
+    match parallelism:
         case 1:
             model_group, ddp_group, _, model_subgroup_col = utils.setup_groups(
-                rank, n_parallel, 1, 1)
+                rank, parallelism, 1, 1)
             n_vars_out = 69
         case 2:
             model_group, ddp_group, _, model_subgroup_col = utils.setup_groups(
-                rank, n_parallel, 1, 2)
+                rank, parallelism, 1, 2)
             n_vars_out = 36
         case 4:
             model_group, ddp_group, _, model_subgroup_col = utils.setup_groups(
-                rank, n_parallel, 2, 2)
+                rank, parallelism, 2, 2)
             xlon = xlon//2
             n_vars_out = 36
 
     # Set up model, optimizer, loss function
     model = utils.build_model(config_dict, device, localid, rank,
-                              n_parallel, model_group, ddp_group, model_subgroup_col)
+                              parallelism, model_group, ddp_group, model_subgroup_col)
     optimizer = utils.build_optimizer(config_dict, model)
     loss_fn = utils.build_loss_fn(config_dict)
 
     # Set all GPUs to the same seed so that they read the same data
-    utils.set_all_seeds_model_group(1, rank=rank, n_parallel=n_parallel)
+    utils.set_all_seeds_model_group(1, rank=rank, parallelism=parallelism)
     train_dataloader, _ = utils.build_dataloaders(
         config_dict, model_parallel, rank)
 
