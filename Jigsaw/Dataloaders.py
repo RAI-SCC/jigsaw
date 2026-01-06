@@ -9,6 +9,7 @@ from Jigsaw.Dataset import (
     ERA5Preprocessed,
     ERA5PreprocessedDistributed,
     HighResDataset,
+    ERAJigsaw
 )
 
 
@@ -95,6 +96,9 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
             else:
                 dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(
                     2, 4, 4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
+    
+    dataset = ERAJigsaw(config_dict, data_path, mode=mode, patch_size=(
+                    2, 4, 4), rank=rank, forecast_length=config_dict['model']['latent_rollout'])
             
     if subset_size > 0:
         subset_indices = torch.randperm(len(dataset))[:subset_size]
