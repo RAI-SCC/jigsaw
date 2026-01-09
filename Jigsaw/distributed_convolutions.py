@@ -16,7 +16,7 @@ def conv1d_twoway(
 ) -> torch.tensor:
     """Distributed 1d convolution"""
     # x shape
-
+    
     overlap = max(kernel_size + (kernel_size - 1) * (dilation - 1) - stride, 0)
     mod = rank % 2
 
@@ -30,40 +30,40 @@ def conv1d_twoway(
         len_global_size // 2 - 1 if len_global_size % 2 == 0 else len_global_size // 2
     )
 
-    right = (global_steps[mid_index] + kernel_size) - x.shape[
+    right_to_left = (global_steps[mid_index] + kernel_size) - x.shape[
         -1
     ]  # left is how m uch you get from rank 1 --> 0
     # right = kernel_size - (global_steps[mid_index+1])
-    left = overlap - right
+    left_to_right = overlap - right_to_left
 
     B, C, L = x.shape
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
 
     match mod:
         case 0:
-            send = x[..., -right:] if right > 0 else empty
+            send = x[..., -left_to_right:] if left_to_right > 0 else empty
             recv = (
-                torch.zeros((B, C, right), device=x.device, dtype=x.dtype)
-                if right > 0
+                torch.zeros((B, C, right_to_left), device=x.device, dtype=x.dtype)
+                if right_to_left > 0
                 else empty
             )
             send = send.contiguous()
             dist.all_to_all(
                 [empty, recv], [empty, send], group=model_group, async_op=False
             )
-            x_augment = torch.cat((x, recv if right > 0 else empty), dim=-1)
+            x_augment = torch.cat((x, recv if right_to_left > 0 else empty), dim=-1)
         case 1:
-            send = x[..., :left] if left > 0 else empty
+            send = x[..., :right_to_left] if right_to_left > 0 else empty
             recv = (
-                torch.zeros((B, C, left), device=x.device, dtype=x.dtype)
-                if left > 0
+                torch.zeros((B, C, left_to_right), device=x.device, dtype=x.dtype)
+                if left_to_right > 0
                 else empty
             )
             send = send.contiguous()
             dist.all_to_all(
                 [recv, empty], [send, empty], group=model_group, async_op=False
             )
-            x_augment = torch.cat((recv if left > 0 else empty, x), dim=-1)
+            x_augment = torch.cat((recv if left_to_right > 0 else empty, x), dim=-1)
 
     return x_augment, L
 
@@ -116,7 +116,7 @@ def conv1d_fourway_complete(
 
     # communicate x1, x0
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
-    x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
+    
 
     # Calculate overlap between two adjacent spatial domains
     overlap = max(kernel_size + (kernel_size - 1) * (dilation - 1) - stride, 0)
@@ -138,6 +138,7 @@ def conv1d_fourway_complete(
 
     B, C, L = x.shape
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
+    # Spatial split
     match mod:
         case 0 | 1:
             send = x[..., -left_to_right:] if left_to_right > 0 else empty
@@ -163,23 +164,31 @@ def conv1d_fourway_complete(
                 [recv, empty], [send, empty], group=spatial_group, async_op=False
             )
             x_augment = torch.cat((recv if left_to_right > 0 else empty, x), dim=-1)
-    print(f'Rank {rank}, x shape {x_augment.shape}, x buffer shape {x_buffer.shape}')
+    x_buffer = torch.zeros(x_augment.shape, device=x.device, dtype=x.dtype)
+    
+    # print(f'I am rank {rank} and the shape of x_augment is {x_augment.shape}. xbuffer is {x_buffer.shape}')
+    # print(f'Rank {rank}, x shape {x_augment.shape}, x buffer shape {x_buffer.shape}')
+    
+    # Channel-parallelism
     match mod:
         case 0 | 2:
             y = F.conv1d(x_augment, w[:, : in_channels // 2], stride=stride, padding=padding, dilation=dilation)
             dist.all_to_all(
                 [empty, x_buffer], [empty, x_augment], group=channel_group, async_op=False
             )
+            # print(f'Rank {mod} before: x_augment: {x_augment.shape} y shape here {y.shape}, w shape {w[:, :in_channels//2].shape}, stride {stride}, padding{ padding}, dilation {dilation}')
             y = y + F.conv1d(x_buffer, w[:, in_channels // 2 :], stride=stride, padding=padding, dilation=dilation)
+            # print(f'Rank {mod}, x augment {x_augment.shape}, x buffer {x_buffer.shape}, y shape {y.shape}')
             return y, x_augment, x_buffer, L
         case 1 | 3:
-            y = F.conv1d(x, w[:, in_channels // 2 :], stride=stride, padding=padding, dilation=dilation)
+            y = F.conv1d(x_augment, w[:, in_channels // 2 :], stride=stride, padding=padding, dilation=dilation)
             
             dist.all_to_all(
                 [x_buffer, empty], [x_augment, empty], group=channel_group, async_op=False
             )
+            # print(f'Rank {mod} before: y shape here {y.shape}')
             y = y + F.conv1d(x_buffer, w[:, : in_channels // 2], stride=stride, padding=padding, dilation=dilation)
-            
+            # print(f'Rank: {mod} x buffer: {x_buffer.shape}, x augment {x_augment.shape}, y shape {y.shape}')
             return y, x_buffer, x_augment, L
 
 
