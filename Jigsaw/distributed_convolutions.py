@@ -432,6 +432,8 @@ def conv1d_twoway(
 ) -> torch.tensor:
     """Distributed 1d convolution"""
     # x shape
+    
+    overlap = max(kernel_size + (kernel_size - 1) * (dilation - 1) - stride, 0)
     mod = rank % 2
 
     # global indices where you want to apply the convolutions:
