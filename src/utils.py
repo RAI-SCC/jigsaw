@@ -11,7 +11,7 @@ from timm.scheduler.cosine_lr import CosineLRScheduler
 from timm.scheduler.step_lr import StepLRScheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import parameters_to_vector
-
+from perun import monitor
 import TransformerModels
 import Dataloaders
 import eval
@@ -498,6 +498,7 @@ def build_dataloaders(
         subset_size=train_subset,
         rank=rank,
     )
+
     valid_dataloader = Dataloaders.get_dataloader(
         config_dict,
         config_dict["data"]["valid_data_path"],
@@ -556,7 +557,6 @@ def define_subset_sizes(config_dict: dict, rank: int) -> tuple[int, int]:
 
     return train_subset, valid_subset
 
-#TODO: change loss function for segmentation   
 # added new loss function: TopKDiceLoss
 def build_loss_fn(config_dict):
     """Return loss function."""
@@ -853,3 +853,183 @@ def reduce_ddp_layernorms(model, col_groups):
     )
 
     return handles, flat_grad, gradients
+
+from dice import dice_coeff
+from torchvision.utils import make_grid
+import torchvision.utils as vutils
+
+
+@monitor()
+@torch.no_grad()
+def check_accuracy(loader, model, device="cpu", rank=0): 
+    if rank != 0:
+        return 0.0
+
+    num_correct = 0
+    num_pixels = 0
+    dice_score = 0
+    model.eval()
+
+    print(f"=> Rank {rank}: Checking accuracy.")
+
+    for batch in loader:
+        
+        image = batch[0].to(device)
+        true_mask = batch[1].to(device)
+
+        preds = model(image)
+        
+        # Used for accuracy, get prediceted class mask, for each pixel
+        #For example, if preds for a pixel is [0.2, 0.8], argmax gives class 1
+        pred_mask = torch.argmax(preds, dim=1) 
+        
+        # Accuracy Calculation
+        num_correct += (pred_mask == true_mask).sum().item()
+        num_pixels += torch.numel(pred_mask)
+        
+        # Dice Score Calculation
+        # Turn logits into probabilities for class 1
+        pred_class1 = torch.softmax(preds, dim=1)[:, 1, :, :]
+        # Binarize predictions at 0.5 threshold
+        pred_binary = (pred_class1 > 0.5).float()
+        
+        # Expand true_mask to have channel dimension if needed
+        if true_mask.dim() == 3:
+            true_mask_expanded = true_mask.unsqueeze(1)
+        else:
+            true_mask_expanded = true_mask
+            
+        dice_score += dice_coeff(pred_binary.unsqueeze(1), true_mask_expanded, reduce_batch_first=False)
+
+    acc = num_correct/num_pixels*100
+    avg_dice = dice_score/len(loader)
+    
+    print(f"Rank {rank} | Accuracy: {acc:.2f}%")
+    print(f"Rank {rank} | Dice Score: {avg_dice:.4f}")
+    
+    model.train()
+    return avg_dice
+
+@torch.no_grad()
+def save_predictions_as_imgs(
+    loader, model, folder="saved_images/", device="cpu", num_examples=8, epoch=0, rank=0
+):
+    if rank != 0:
+        return
+
+    model.eval()
+    os.makedirs(folder, exist_ok=True)
+    images_to_save = []
+    
+    # Get a single batch from the loader
+    iterator = iter(loader)
+    batch = next(iterator)
+    images = batch[0].to(device)
+    true_masks = batch[1].to(device)
+
+    logits = model(images) # [Batch, 2, H, W]
+    
+    # Create predictions, first as probabilities then as class indices
+    probs = torch.softmax(logits, dim=1)
+    preds = torch.argmax(probs, dim=1)
+
+    for i in range(min(num_examples, images.shape[0])):
+        
+        img_single = images[i]     
+        true_single = true_masks[i] 
+        pred_single = preds[i]      
+        
+        # Convert to RGB for better visualization
+        img_rgb = img_single.repeat(3, 1, 1).float() if img_single.shape[0] == 1 else img_single.float()
+        true_rgb = true_single.repeat(3, 1, 1).float()
+        pred_rgb = pred_single.repeat(3, 1, 1).float()
+
+        # Overlay erstellen 
+        overlay = img_rgb.clone() * 0.6
+        
+        tp = (pred_single == 1) & (true_single == 1)
+        fp = (pred_single == 1) & (true_single == 0)
+        fn = (pred_single == 0) & (true_single == 1)
+
+        overlay[1, :, :] += tp.squeeze().float() * 0.4  # Green
+        overlay[0, :, :] += fp.squeeze().float() * 0.8  # Red
+        overlay[2, :, :] += fn.squeeze().float() * 0.8  # Blue
+        overlay = torch.clamp(overlay, 0, 1)
+
+        # Original | Ground Truth | Prediction | Overlay
+        combined = torch.cat((img_rgb, true_rgb, pred_rgb, overlay), dim=2)
+        images_to_save.append(combined)
+
+    grid = make_grid(images_to_save, nrow=1, padding=5, pad_value=1.0)
+    vutils.save_image(grid, f"{folder}/prediction_epoch_{epoch}.png")
+    
+    print(f"Visualization saved to {folder}/prediction_epoch_{epoch}.png")
+    model.train()
+
+from Model import ModelSwinMLP
+
+def build_swin_model(
+    config_dict: Dict,
+    device: torch.device,
+    localid: int, # local GPU id
+    rank: int,    # global rank, means the ID of the GPU of all nodes
+    ddp_group: dist.ProcessGroup
+) -> torch.nn.Module:
+    
+    data_cfg = config_dict["data"]
+    swin_cfg = config_dict["SWIN_MLP"]
+    
+    resolution = (data_cfg["image_height"], data_cfg["image_width"])
+    
+    if rank == 0:
+        print(f"Building SwinMLP with Resolution: {resolution}, Window: {swin_cfg['window_size']}")
+
+    model = ModelSwinMLP(
+        channels_in=data_cfg["in_channels"],
+        input_resolution=resolution,
+        classes=data_cfg["num_classes"],
+        window_size=swin_cfg["window_size"]
+    ).to(device)
+
+    model = DDP(
+        model, 
+        device_ids=[localid], 
+        output_device=localid, 
+        process_group=ddp_group,
+    )
+
+    return model
+
+
+def build_swin_dataloaders(
+        config_dict: dict, model_parallel: bool, rank: int
+    ) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
+    
+    train_path = config_dict["data"]["train_data_path"]
+    valid_path = config_dict["data"]["valid_data_path"]
+    train_batch = config_dict["training"]["train_batch"]
+    valid_batch = config_dict["training"]["valid_batch"]
+
+    is_distributed = (not model_parallel)
+
+    train_loader = Dataloaders.get_dataloader(
+        config_dict=config_dict,
+        data_path=train_path,
+        mode="train",
+        distributed=is_distributed, 
+        batch_size=train_batch,
+        subset_size=config_dict["data"]["train_subset"],
+        rank=rank
+    )
+
+    valid_loader = Dataloaders.get_dataloader(
+        config_dict=config_dict,
+        data_path=valid_path,
+        mode="validation",
+        distributed=is_distributed, 
+        batch_size=valid_batch,
+        subset_size=config_dict["data"]["valid_subset"],
+        rank=rank
+    )
+
+    return train_loader, valid_loader

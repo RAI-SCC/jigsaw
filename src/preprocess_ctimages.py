@@ -3,12 +3,17 @@ import glob
 import random
 import cv2
 import numpy as np
+import torchvision.transforms as T
+import yaml
+
 
 IMAGE_DIR = '/Users/davidsteimel/Downloads/archive/images/images/' 
 MASK_DIR = '/Users/davidsteimel/Downloads/archive/masks/masks/'
-
 OUTPUT_DIR = 'data_processed' 
-TARGET_SIZE = (512, 512)
+CONFIG_FILE = "data_config.yaml"
+
+data_cfg = yaml.safe_load(open(CONFIG_FILE))["data"]
+TARGET_SIZE = (data_cfg["image_width"], data_cfg["image_height"])
 
 all_image_files = glob.glob(os.path.join(IMAGE_DIR, '*.jpg'))
 all_mask_files = glob.glob(os.path.join(MASK_DIR, '*.jpg'))
@@ -36,10 +41,11 @@ print(f'Total: {num_total} | Train: {len(train_ids)} | Val: {len(val_ids)} | Tes
 
 splits = ['train', 'val', 'test']
 types = ['image', 'mask']
+size = str(TARGET_SIZE[0]) 
 
 for split in splits:
     for type_ in types:
-        path = os.path.join('data_processed', split, type_)
+        path = os.path.join('data_processed', size, split, type_)
         os.makedirs(path, exist_ok=True)
         print(f"Ordner erstellt/geprüft: {path}")
 
@@ -79,11 +85,10 @@ for image_path in all_image_files:
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None: continue
 
-    if img.shape[:2] == TARGET_SIZE:
+    if img.shape[:2] == (TARGET_SIZE[1], TARGET_SIZE[0]):
         img_resized = img
     else:
         img_resized = cv2.resize(img, TARGET_SIZE, interpolation=cv2.INTER_CUBIC)
-        # img_resized = cv2.resize(img, TARGET_SIZE, interpolation=cv2.INTER_AREA)
 
     multiclass_mask_color = cv2.imread(mask_path, cv2.IMREAD_COLOR) 
     
@@ -98,7 +103,7 @@ for image_path in all_image_files:
     else:
         mask_resized = cv2.resize(binary_mask, TARGET_SIZE, interpolation=cv2.INTER_NEAREST)
 
-    cv2.imwrite(os.path.join(OUTPUT_DIR, split_dir, 'image', base_name), img_resized)
-    cv2.imwrite(os.path.join(OUTPUT_DIR, split_dir, 'mask', base_name), mask_resized)
+    cv2.imwrite(os.path.join(OUTPUT_DIR, size, split_dir, 'image', base_name), img_resized)
+    cv2.imwrite(os.path.join(OUTPUT_DIR, size, split_dir, 'mask', base_name), mask_resized)
 
 print("Processing completed!")

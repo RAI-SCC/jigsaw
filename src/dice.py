@@ -26,15 +26,22 @@ class TopKDiceLoss(nn.Module):
         super(TopKDiceLoss, self).__init__()
         self.k = k
         self.smooth = smooth
-
+        
+    # logits: (Batch, 2, H, W) -> From Modell
+    # target: (Batch, 1, H, W) -> From DataLoader    
     def forward(self, logits: Tensor, target: Tensor):
         # Calculate probabilities
         probs = torch.softmax(logits, dim=1)
+
         probs = probs[:, 1, ...]  # Assuming class 1 is the foreground class
         
         # Ensure the dimensions match
-        if target.dim() == 3:
-            target = target.unsqueeze(1)
+        if target.dim() == 4 and target.shape[1] == 1:
+            target = target.squeeze(1)
+        elif target.dim() == 3:
+            pass
+
+        assert probs.shape == target.shape, f"Shapes dont match: {probs.shape} vs {target.shape}"
             
         # Flatten everything to work on a pixel-wise basis
         probs_flat = probs.contiguous().view(probs.shape[0], -1)

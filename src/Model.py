@@ -1,13 +1,13 @@
 import numpy as np
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 import Linear
 import PatchEmbedding
 import utils
 import Dataset
 from Mixer import MixerBlock, MixerBlockSequential, MixerBlockMegatron
-from util_fns.SwinMLP import SwinEncoderBlock, SwinDecoderBlock
+from util_fns.SwinMLP import SwinMLPEncoderLayer, SwinMLPDecoderLayer
 import Normalization as Norm
 
 
@@ -607,12 +607,6 @@ import Normalization as Norm
  """
 
 
-# TODO: modify for image segmentation, remove rollout, latent rollout
-# Turned into ModelSequential for image segmentation on one GPU
-class ModelSwinMLP(torch.nn.Module):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
 """ class ModelSequential(torch.nn.Module):
     def __init__(self, config_dict, rank, device):
         super().__init__()
@@ -1048,9 +1042,8 @@ class ModelSwinMLP(torch.nn.Module):
         return x
  """
 
-# TODO: Input_resolution anpassen - mit slices hablieren oder nicht?
 class ModelSwinMLP(torch.nn.Module):
-    def __init__(self, channels_in, input_resolution = (4,512,512), classes=2, window_size =4):
+    def __init__(self, channels_in, input_resolution = (512,512), classes=2, window_size =4):
         super().__init__()
 
         self.input_resolution = input_resolution
@@ -1058,18 +1051,85 @@ class ModelSwinMLP(torch.nn.Module):
         self.channels_in = channels_in
         self.classes = classes
 
-        self.conv = nn.Conv3d(in_channels=channels_in,
+        self.conv = nn.Conv2d(in_channels=channels_in,
                               out_channels=32,
                               kernel_size=1,
                               padding=0,
                               stride=2,
                               bias=False)
         
-        self.norm = nn.InstanceNorm3d(32)
+        self.norm = nn.InstanceNorm2d(32)
         self.act = nn.GELU()
 
-        self.down1 = SwinEncoderBlock(32, 64, input_resolution, window_size = 4)
-        self.down2 = SwinEncoderBlock(channels_in, input_resolution, window_size)
-        self.down3 = SwinEncoderBlock(channels_in, input_resolution, window_size)
-        self.down4 = SwinEncoderBlock(channels_in, input_resolution, window_size)
+        current_res = [input_resolution[0] // 2, input_resolution[1] // 2]
 
+        self.down1 = SwinMLPEncoderLayer(in_channels=32, out_channels=64, 
+                                         input_resolution=current_res, 
+                                         window_size=window_size)
+        
+        current_res = [current_res[0] // 2, current_res[1] // 2]
+
+        self.down2 = SwinMLPEncoderLayer(in_channels=64, out_channels=128, 
+                                         input_resolution=current_res, 
+                                         window_size=2 * window_size)
+        
+        current_res = [current_res[0] // 2, current_res[1] // 2] 
+
+        self.down3 = SwinMLPEncoderLayer(in_channels=128, out_channels=256, 
+                                         input_resolution=current_res, 
+                                         window_size=window_size)
+        
+        current_res = [current_res[0] // 2, current_res[1] // 2]
+       
+        self.down4 = SwinMLPEncoderLayer(in_channels=256, out_channels=512, 
+                                         input_resolution=current_res, 
+                                         window_size=window_size)
+        
+        bottleneck_res = [current_res[0] // 2, current_res[1] // 2]
+
+        self.up1 = SwinMLPDecoderLayer(in_channels=512, out_channels=256, 
+                                       input_resolution=bottleneck_res, 
+                                       window_size=window_size)
+        current_res = [current_res[0] * 2, current_res[1] * 2]
+
+        self.up2 = SwinMLPDecoderLayer(in_channels=256, out_channels=128, 
+                                       input_resolution=bottleneck_res, 
+                                       window_size=window_size)
+        current_res = [current_res[0] * 2, current_res[1] * 2]
+
+        self.up3 = SwinMLPDecoderLayer(in_channels=128, out_channels=64, 
+                                       input_resolution=bottleneck_res, 
+                                       window_size=window_size)
+        current_res = [current_res[0] * 2, current_res[1] * 2]
+
+        self.up4 = SwinMLPDecoderLayer(in_channels=64, out_channels=32, 
+                                       input_resolution=bottleneck_res, 
+                                       window_size=window_size)
+        current_res = [current_res[0] * 2, current_res[1] * 2]
+
+        self.final_upsample = nn.ConvTranspose2d(
+            in_channels=32,
+            out_channels=classes,
+            kernel_size=4, 
+            stride=2, 
+            padding=1,
+            bias=False
+            )           
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.norm(x)
+        x0 = self.act(x) 
+        x1 = self.down1(x0)
+        x2 = self.down2(x1)
+        x3 = self.down3(x2)
+        x_bottleneck = self.down4(x3)
+
+        x = self.up1(x_bottleneck, x_skip=x3) 
+        x = self.up2(x, x_skip=x2)
+        x = self.up3(x, x_skip=x1)
+        x = self.up4(x, x_skip=x0)
+
+        logits = self.final_upsample(x)
+
+        return logits
