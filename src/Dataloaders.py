@@ -121,7 +121,7 @@ def get_dataloader(config_dict, data_path, mode, distributed, batch_size, subset
             num_replicas=torch.distributed.get_world_size(),
             rank=rank,
             shuffle=(mode == "train"), 
-            drop_last=True
+            drop_last= (mode == "train")
         )
 
     return DataLoader(

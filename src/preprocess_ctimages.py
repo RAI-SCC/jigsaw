@@ -6,14 +6,15 @@ import numpy as np
 import torchvision.transforms as T
 import yaml
 
-
-IMAGE_DIR = '/Users/davidsteimel/Downloads/archive/images/images/' 
-MASK_DIR = '/Users/davidsteimel/Downloads/archive/masks/masks/'
+IMAGE_DIR = 'data/images/images/' 
+MASK_DIR = 'data/masks/masks/'
 OUTPUT_DIR = 'data_processed' 
 CONFIG_FILE = "data_config.yaml"
 
 data_cfg = yaml.safe_load(open(CONFIG_FILE))["data"]
-TARGET_SIZE = (data_cfg["image_width"], data_cfg["image_height"])
+H = data_cfg["image_height"]
+W = data_cfg["image_width"]
+TARGET_SIZE = (W, H) 
 
 all_image_files = glob.glob(os.path.join(IMAGE_DIR, '*.jpg'))
 all_mask_files = glob.glob(os.path.join(MASK_DIR, '*.jpg'))
@@ -41,7 +42,7 @@ print(f'Total: {num_total} | Train: {len(train_ids)} | Val: {len(val_ids)} | Tes
 
 splits = ['train', 'val', 'test']
 types = ['image', 'mask']
-size = str(TARGET_SIZE[0]) 
+size = str(H) 
 
 for split in splits:
     for type_ in types:
