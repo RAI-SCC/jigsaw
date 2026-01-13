@@ -911,6 +911,7 @@ def check_accuracy(loader, model, device="cpu", rank=0):
     return avg_dice
 
 @torch.no_grad()
+@torch.no_grad()
 def save_predictions_as_imgs(
     loader, model, folder="saved_images/", device="cpu", num_examples=8, epoch=0, rank=0
 ):
@@ -920,50 +921,53 @@ def save_predictions_as_imgs(
     model.eval()
     os.makedirs(folder, exist_ok=True)
     images_to_save = []
-    
-    # Get a single batch from the loader
+
     iterator = iter(loader)
     batch = next(iterator)
-    images = batch[0].to(device)
+    
+    images = batch[0].to(device)      
     true_masks = batch[1].to(device)
 
-    logits = model(images) # [Batch, 2, H, W]
-    
-    # Create predictions, first as probabilities then as class indices
+    logits = model(images)            
     probs = torch.softmax(logits, dim=1)
-    preds = torch.argmax(probs, dim=1)
+    preds = torch.argmax(probs, dim=1) 
 
     for i in range(min(num_examples, images.shape[0])):
+        img_single = images[i]  
         
-        img_single = images[i]     
-        true_single = true_masks[i] 
-        pred_single = preds[i]      
-        
-        # Convert to RGB for better visualization
-        img_rgb = img_single.repeat(3, 1, 1).float() if img_single.shape[0] == 1 else img_single.float()
-        true_rgb = true_single.repeat(3, 1, 1).float()
-        pred_rgb = pred_single.repeat(3, 1, 1).float()
+        img_disp = img_single * 0.5 + 0.5  
+        img_disp = torch.clamp(img_disp, 0, 1)
 
-        # Overlay erstellen 
-        overlay = img_rgb.clone() * 0.6
+        if img_disp.shape[0] == 1:
+            img_rgb = img_disp.repeat(3, 1, 1)
+        else:
+            img_rgb = img_disp
+
+        true_single = true_masks[i].squeeze(0) if true_masks[i].dim() == 3 else true_masks[i]
+        pred_single = preds[i]
+
+        overlay = img_rgb.clone() * 0.6 
         
-        tp = (pred_single == 1) & (true_single == 1)
+        tp = (pred_single == 1) & (true_single == 1) 
         fp = (pred_single == 1) & (true_single == 0)
         fn = (pred_single == 0) & (true_single == 1)
 
-        overlay[1, :, :] += tp.squeeze().float() * 0.4  # Green
-        overlay[0, :, :] += fp.squeeze().float() * 0.8  # Red
-        overlay[2, :, :] += fn.squeeze().float() * 0.8  # Blue
+        overlay[1, :, :] += tp.float() * 0.4
+        overlay[0, :, :] += fp.float() * 0.8
+        overlay[2, :, :] += fn.float() * 0.8
+        
         overlay = torch.clamp(overlay, 0, 1)
 
-        # Original | Ground Truth | Prediction | Overlay
+        true_rgb = torch.stack([true_single.float()]*3, dim=0)
+        pred_rgb = torch.stack([pred_single.float()]*3, dim=0)
+
         combined = torch.cat((img_rgb, true_rgb, pred_rgb, overlay), dim=2)
         images_to_save.append(combined)
 
-    grid = make_grid(images_to_save, nrow=1, padding=5, pad_value=1.0)
-    vutils.save_image(grid, f"{folder}/prediction_epoch_{epoch}.png")
-    
-    print(f"Visualization saved to {folder}/prediction_epoch_{epoch}.png")
+    grid = make_grid(images_to_save, nrow=4, padding=10, pad_value=1.0)
+    save_path = f"{folder}/prediction_epoch_{epoch}.png"
+    vutils.save_image(grid, save_path)
+    print(f"Visualization saved to {save_path}")
     model.train()
 
 from Model import ModelSwinMLP

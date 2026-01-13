@@ -50,6 +50,7 @@ def train_one_epoch(
 
     return epoch_loss / len(loader)
 
+@monitor()
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_file", required=True, help="Path to config.yaml")
