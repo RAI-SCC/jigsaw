@@ -95,8 +95,8 @@ for image_path in all_image_files:
     
     if multiclass_mask_color is None: continue
 
-    lower_blue = np.array([200, 0, 0])
-    upper_blue = np.array([255, 50, 50])
+    lower_blue = np.array([200, 0, 0], dtype=np.uint8)
+    upper_blue = np.array([255, 50, 50], dtype=np.uint8)
     binary_mask = cv2.inRange(multiclass_mask_color, lower_blue, upper_blue)
 
     if binary_mask.shape[:2] == TARGET_SIZE:
