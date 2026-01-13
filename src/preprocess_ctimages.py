@@ -9,7 +9,7 @@ import yaml
 IMAGE_DIR = 'data/images/images/' 
 MASK_DIR = 'data/masks/masks/'
 OUTPUT_DIR = 'data_processed' 
-CONFIG_FILE = "config.yaml"
+CONFIG_FILE = "experiments/sample_run/one/config.yaml"
 
 data_cfg = yaml.safe_load(open(CONFIG_FILE))["data"]
 H = data_cfg["image_height"]
