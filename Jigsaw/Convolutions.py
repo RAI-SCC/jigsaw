@@ -11,6 +11,7 @@ from Jigsaw.distributed_convolutions import (
     conv2d_twoway,
     conv2d_twoway_channel,
 )
+import Jigsaw.distributed_convolutions as dist_conv
 from torch.nn.grad import conv1d_input, conv1d_weight, conv2d_input, conv2d_weight
 
 
@@ -592,6 +593,7 @@ class Conv1d_complete(torch.autograd.Function):
         ctx.n_parallel = n_parallel
         ctx.spatial_group = spatial_group
         ctx.channel_group = channel_group
+        ctx.in_channels_global = in_channels
         ctx.b = bias
         
         y, x0, x1, right_to_left, left_to_right = conv1d_fourway_complete(
@@ -608,8 +610,6 @@ class Conv1d_complete(torch.autograd.Function):
         )
 
         ctx.right_to_left, ctx.left_to_right = right_to_left, left_to_right
-
-        print(f"I am rank {rank} and data has shape {x0.shape}, {x1.shape}, LOCAL x shape {x.shape}")
 
         x_aug = torch.cat([x0, x1], dim=1)
 
@@ -655,33 +655,11 @@ class Conv1d_complete(torch.autograd.Function):
             ctx.spatial_group,
             ctx.channel_group,
         )
-        # parameter grads from native conv1d gradient helpers        
-        # x_aug should have the local shape
-        g_w = conv1d_weight(
-            x_aug,
-            weight.shape,
-            grad_output,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-            groups=1,
-        )
-        g_b = grad_output.sum(dim=(0, 2)) if ctx.has_bias else None
-
-        # make grads identical on all ranks
-        dist.all_reduce(g_w, op=dist.ReduceOp.SUM, group=spatial_group)
-        if g_b is not None:
-            dist.all_reduce(g_b, op=dist.ReduceOp.AVG, group=spatial_group)
-
         right_to_left, left_to_right = ctx.right_to_left, ctx.left_to_right
         x_shape_padded, x_shape = ctx.x_shape_padded, ctx.x_shape
         
-        # should be only half the channels? Then the boundaries are communicated across the
-        # spatial domains, and then averaged across the channel groups
-
-        print(
-            f"Rank {rank}, ctx x shape {x_shape}, x shape padded {x_shape_padded}, weight shape {weight.shape}, l2r r2l {left_to_right, right_to_left}, grad out shape {grad_output.shape}"
-        )
+        empty = torch.empty(0, device=grad_output.device, dtype=grad_output.dtype)
+       
         # print(f'rank:{rank} {conv_shape}')
         g_x_aug = conv1d_input(
             x_shape_padded,
@@ -699,61 +677,72 @@ class Conv1d_complete(torch.autograd.Function):
         )  # SWAP?
 
 
-        empty = torch.empty(0, device=grad_output.device, dtype=grad_output.dtype)
-        device = ctx.device
-        dtype = grad_output.dtype
+       
+       
         
-        match rank % 4:
-            case 0 | 1:
-                send = g_x_aug[..., -left_to_right:] if left_to_right > 0 else empty
-                recv = (
-                    torch.zeros(
-                        (*g_x_aug.shape[:-1], right_to_left), device=device, dtype=dtype
-                    )
-                    if right_to_left > 0
-                    else empty
-                )
-                send = send.contiguous()
-                dist.all_to_all(
-                    [empty, recv],
-                    [empty, send],
-                    group=ctx.spatial_group,
-                    async_op=False,
-                )
-                recv = recv if right_to_left > 0 else empty
-            case 2 | 3:
-                send = g_x_aug[..., :right_to_left] if right_to_left > 0 else empty
-                recv = (
-                    torch.zeros(
-                        (*g_x_aug.shape[:-1], left_to_right), device=device, dtype=dtype
-                    )
-                    if left_to_right > 0
-                    else empty
-                )
-                send = send.contiguous()
-                dist.all_to_all(
-                    [recv, empty],
-                    [send, empty],
-                    group=ctx.spatial_group,
-                    async_op=False,
-                )
-                recv = recv if left_to_right > 0 else empty
+        # should be only half the channels? Then the boundaries are communicated across the
+        # spatial domains, and then averaged across the channel groups
 
+        # print(
+        #     f"Rank {rank}, ctx x shape {x_shape}, x shape padded {x_shape_padded}, weight shape {weight.shape}, l2r r2l {left_to_right, right_to_left}, grad out shape {grad_output.shape}"
+        # )
+        
+        # g_x calculation
+        halo, wait_handle = dist_conv.communicate_halos(
+            g_x_aug,
+            right_to_left, 
+            left_to_right,
+            rank % 4,
+            4,
+            empty,
+            spatial_group,
+            async_op=True
+        )
+        
+        wait_handle.wait()
+        
         if rank % 4 in [0, 1]:
             g_x = g_x_aug[..., : x_shape[-1]]
             if right_to_left > 0:
-                g_x[..., -right_to_left:] = g_x[..., -right_to_left:] + recv
+                g_x[..., -right_to_left:] = g_x[..., -right_to_left:] + halo
         else: # right half
             g_x = g_x_aug[..., -x_shape[-1] :]
             # print(f'rank {rank}. gx shape {g_x.shape}, ctx shape {ctx.x_shape}')
             if left_to_right > 0:
-                g_x[..., :left_to_right] = g_x[..., :left_to_right] + recv
+                g_x[..., :left_to_right] = g_x[..., :left_to_right] + halo
+                
+                
         g_x = g_x.contiguous()
-        dist.all_reduce(g_x, op=dist.ReduceOp.SUM, group=channel_group)
         
-        n_channels_local = g_x.shape[1] // 2 # TODO save from input ctx?
-        g_x = g_x[:,:n_channels_local] if rank % 2 == 0 else g_x[:, n_channels_local:]
-        print(f"I am rank {rank} and gx {g_x}")        
+        # async here because we assume the size of the input data will be much larger than the convolution weights,
+        # i.e., advantageous to perform the g_x communication before calculating conv1d_weight
+        
+        g_x_handle = dist.all_reduce(g_x, op=dist.ReduceOp.SUM, group=channel_group, async_op=True) # TODO we can do this with a P2P op of an all reduce to only send half of the information
+                
+        # parameter grads from native conv1d gradient helpers        
+        # x_aug should have the local shape
+        g_w = conv1d_weight(
+            x_aug,
+            weight.shape,
+            grad_output,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=1,
+        )
+        g_b = grad_output.sum(dim=(0, 2)) if ctx.has_bias else None
+
+        # make grads identical on all ranks
+        g_w_handle = dist.all_reduce(g_w, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True)
+        if g_b is not None:
+            dist.all_reduce(g_b, op=dist.ReduceOp.AVG, group=spatial_group)
+            
+        
+        g_w_handle.wait()
+        g_x_handle.wait()
+        g_x = g_x[:,:ctx.in_channels_global // 2 ] if rank % 2 == 0 else g_x[:, ctx.in_channels_global // 2 :]
+        
+        
         return g_x, g_w, g_b, None, None, None, None, None, None, None, None, None, None
 
 

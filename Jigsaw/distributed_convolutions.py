@@ -4,7 +4,165 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-    
+
+def calc_halo_sizes(
+    x_shape: torch.tensor,
+    kernel_size: int,
+    stride: int,
+):
+    # global indices where you want to apply the convolutions:
+    global_size = int(x_shape[-1] * 2)
+    global_steps = torch.arange(0, global_size - kernel_size + 1, step=stride)
+    len_global_size = global_steps.shape[-1]
+    mid_index = len_global_size // 2 - 1
+
+    right_to_left = max((global_steps[mid_index] + kernel_size) - x_shape[-1], 0)
+
+    left_to_right = (
+        global_steps[mid_index + 1] - x_shape[-1]
+        if global_steps[mid_index + 1] < x_shape[-1]
+        else 0
+    )
+    left_to_right = left_to_right * -1
+
+    return right_to_left, left_to_right
+
+
+def get_left_right_local_ranks(parallelism: int):
+    if parallelism == 2:
+        return [[0], [1]]
+    elif parallelism == 4:
+        return [[0, 1], [2, 3]]
+
+
+def communicate_halos(
+    x: torch.tensor,
+    right_to_left: int,
+    left_to_right: int,
+    local_rank: int,
+    parallelism: int,
+    empty: torch.tensor,
+    spatial_group: dist.ProcessGroup,
+    async_op: bool
+):
+    left_right_local_ranks = get_left_right_local_ranks(parallelism)
+    if local_rank in left_right_local_ranks[0]:
+        send = x[..., -left_to_right:] if left_to_right > 0 else empty
+        recv = (
+            torch.zeros((*x.shape[:-1], right_to_left), device=x.device, dtype=x.dtype)
+            if right_to_left > 0
+            else empty
+        )
+        send = send.contiguous()
+        if async_op: 
+            wait_handle = dist.all_to_all(
+                [empty, recv], [empty, send], group=spatial_group, async_op=async_op
+            )
+            return recv, wait_handle
+        else:
+            dist.all_to_all(
+                [empty, recv], [empty, send], group=spatial_group, async_op=async_op
+            )
+            return recv, None
+    elif local_rank in left_right_local_ranks[1]:
+        send = x[..., :right_to_left] if right_to_left > 0 else empty
+        recv = (
+            torch.zeros((*x.shape[:-1], left_to_right), device=x.device, dtype=x.dtype)
+            if left_to_right > 0
+            else empty
+        )
+        send = send.contiguous()
+        if async_op:
+            wait_handle = dist.all_to_all(
+                [recv, empty], [send, empty], group=spatial_group, async_op=async_op
+            )
+            return recv, wait_handle
+        else:
+            dist.all_to_all(
+                [recv, empty], [send, empty], group=spatial_group, async_op=async_op
+            )
+            return recv, None
+
+
+def append_halos(
+    x: torch.tensor,
+    halo: torch.tensor,
+    right_to_left: int,
+    left_to_right: int,
+    local_rank: int,
+    parallelism: int,
+    empty: torch.tensor,
+):
+    left_right_local_ranks = get_left_right_local_ranks(parallelism)
+
+    if local_rank in left_right_local_ranks[0]:
+        x_with_halos = torch.cat((x, halo if right_to_left > 0 else empty), dim=-1)
+    elif local_rank in left_right_local_ranks[1]:
+        x_with_halos = torch.cat((halo if left_to_right > 0 else empty, x), dim=-1)
+    return x_with_halos
+
+
+def distributed_conv1d_over_channels(
+    x: torch.tensor,
+    w: torch.tensor,
+    local_rank: int,
+    in_channels_global: int,
+    stride: int,
+    padding: int,
+    dilation: int,
+    empty: torch.tensor,
+    channel_group: dist.ProcessGroup,
+):
+    x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
+
+    # TODO: will need adjustment after including BNN
+    match local_rank:
+        case 0 | 2:
+            x_handle = dist.all_to_all(
+                [empty, x_buffer],
+                [empty, x],
+                group=channel_group,
+                async_op=True,
+            )
+            y = F.conv1d(
+                x,
+                w[:, : in_channels_global // 2],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
+            x_handle.wait()
+            y = y + F.conv1d(
+                x_buffer,
+                w[:, in_channels_global // 2 :],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
+            return y, x, x_buffer
+        case 1 | 3:
+            x_handle = dist.all_to_all(
+                [x_buffer, empty],
+                [x, empty],
+                group=channel_group,
+                async_op=True,
+            )
+            y = F.conv1d(
+                x,
+                w[:, in_channels_global // 2 :],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
+            x_handle.wait()
+            y = y + F.conv1d(
+                x_buffer,
+                w[:, : in_channels_global // 2],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
+            return y, x_buffer, x
 
 
 def conv1d_twoway(
@@ -155,110 +313,46 @@ def conv1d_fourway_complete(
 ) -> torch.tensor:
     """Distributed 1d convolution"""
     # Setup
-    mod = rank % 4
+    local_model_rank = rank % 4
 
     # communicate x1, x0
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
 
-    # global indices where you want to apply the convolutions:
-    global_size = int(x.shape[-1] * 2)
-    global_steps = torch.arange(0, global_size - kernel_size + 1, step=stride)
-    len_global_size = global_steps.shape[-1]
+    right_to_left, left_to_right = calc_halo_sizes(x.shape, kernel_size, stride)
 
-    # midpoint calculation
-    mid_index = len_global_size // 2 - 1
-
-    right_to_left = max((global_steps[mid_index] + kernel_size) - x.shape[-1], 0)
-
-    left_to_right = (
-        global_steps[mid_index + 1] - x.shape[-1]
-        if global_steps[mid_index + 1] < x.shape[-1]
-        else 0
-    )
-    left_to_right = left_to_right * -1
-
-    B, C, L = x.shape
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
+
     # Spatial split
-    match mod:
-        case 0 | 1:
-            send = x[..., -left_to_right:] if left_to_right > 0 else empty
-            recv = (
-                torch.zeros((B, C, right_to_left), device=x.device, dtype=x.dtype)
-                if right_to_left > 0
-                else empty
-            )
-            send = send.contiguous()
-            dist.all_to_all(
-                [empty, recv], [empty, send], group=spatial_group, async_op=False
-            )
-            x_augment = torch.cat((x, recv if right_to_left > 0 else empty), dim=-1)
-        case 2 | 3:
-            send = x[..., :right_to_left] if right_to_left > 0 else empty
-            recv = (
-                torch.zeros((B, C, left_to_right), device=x.device, dtype=x.dtype)
-                if left_to_right > 0
-                else empty
-            )
-            send = send.contiguous()
-            dist.all_to_all(
-                [recv, empty], [send, empty], group=spatial_group, async_op=False
-            )
-            x_augment = torch.cat((recv if left_to_right > 0 else empty, x), dim=-1)
+    halo, _ = communicate_halos(
+        x,
+        right_to_left,
+        left_to_right,
+        local_model_rank,
+        4,
+        empty,
+        spatial_group,
+        async_op=False
+    )
+    x_with_halos = append_halos(
+        x, halo, right_to_left, left_to_right, local_model_rank, 4, empty
+    )
 
-    x_buffer = torch.zeros(x_augment.shape, device=x.device, dtype=x.dtype)
-
-    # Channel-parallelism
-    match mod:
-        case 0 | 2:
-            y = F.conv1d(
-                x_augment,
-                w[:, : in_channels // 2],
-                stride=stride,
-                padding=padding,
-                dilation=dilation,
-            )
-            dist.all_to_all(
-                [empty, x_buffer],
-                [empty, x_augment],
-                group=channel_group,
-                async_op=False,
-            )
-            # print(f'Rank {mod} before: x_augment: {x_augment.shape} y shape here {y.shape}, w shape {w[:, :in_channels//2].shape}, stride {stride}, padding{ padding}, dilation {dilation}')
-            y = y + F.conv1d(
-                x_buffer,
-                w[:, in_channels // 2 :],
-                stride=stride,
-                padding=padding,
-                dilation=dilation,
-            )
-            # print(f'Rank {mod}, x augment {x_augment.shape}, x buffer {x_buffer.shape}, y shape {y.shape}')
-            return y, x_augment, x_buffer, right_to_left, left_to_right
-        case 1 | 3:
-            y = F.conv1d(
-                x_augment,
-                w[:, in_channels // 2 :],
-                stride=stride,
-                padding=padding,
-                dilation=dilation,
-            )
-
-            dist.all_to_all(
-                [x_buffer, empty],
-                [x_augment, empty],
-                group=channel_group,
-                async_op=False,
-            )
-            # print(f'Rank {mod} before: y shape here {y.shape}')
-            y = y + F.conv1d(
-                x_buffer,
-                w[:, : in_channels // 2],
-                stride=stride,
-                padding=padding,
-                dilation=dilation,
-            )
-            # print(f'Rank: {mod} x buffer: {x_buffer.shape}, x augment {x_augment.shape}, y shape {y.shape}')
-            return y, x_buffer, x_augment, right_to_left, left_to_right
+    (
+        y,
+        x_left,
+        x_right,
+    ) = distributed_conv1d_over_channels(
+        x_with_halos,
+        w,
+        local_model_rank,
+        in_channels,
+        stride,
+        padding,
+        dilation,
+        empty,
+        channel_group,
+    )
+    return y, x_left, x_right, right_to_left, left_to_right
 
 
 def conv2d_twoway_channel(
