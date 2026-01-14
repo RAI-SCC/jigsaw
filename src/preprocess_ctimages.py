@@ -6,8 +6,8 @@ import numpy as np
 import torchvision.transforms as T
 import yaml
 
-IMAGE_DIR = '/Users/davidsteimel/Desktop/data/images/images/' 
-MASK_DIR = '/Users/davidsteimel/Desktop/data/masks/masks/'
+IMAGE_DIR = 'data/images/images/' 
+MASK_DIR = 'data/masks/masks/'
 OUTPUT_DIR = 'data_processed' 
 CONFIG_FILE = "experiments/sample_run/one/config.yaml"
 
