@@ -16,25 +16,38 @@ def conv1d_twoway(
 ) -> torch.tensor:
     """Distributed 1d convolution"""
     # x shape
-    
+
     overlap = max(kernel_size + (kernel_size - 1) * (dilation - 1) - stride, 0)
     mod = rank % 2
 
     # global indices where you want to apply the convolutions:
     global_size = int(x.shape[-1] * 2)
-    global_steps = torch.arange(0, global_size - kernel_size, step=stride)
+    global_steps = torch.arange(0, global_size - kernel_size + 1, step=stride)
     len_global_size = global_steps.shape[-1]
 
     # midpoint calculation
     mid_index = (
-        len_global_size // 2 - 1 if len_global_size % 2 == 0 else len_global_size // 2
+        len_global_size // 2
+        - 1  # if len_global_size % 2 == 0 else len_global_size // 2
     )
 
-    right_to_left = (global_steps[mid_index] + kernel_size) - x.shape[
-        -1
-    ]  # left is how m uch you get from rank 1 --> 0
+    right_to_left = max((global_steps[mid_index] + kernel_size) - x.shape[-1], 0)
+    print(
+        f"global steps: {global_steps}, mid index {mid_index}, kernel size {kernel_size}, x shape {x.shape}"
+    )
+
+    # left is how much you get from rank 1 --> 0
     # right = kernel_size - (global_steps[mid_index+1])
-    left_to_right = overlap - right_to_left
+    # left_to_right = overlap - right_to_left
+    left_to_right = (
+        global_steps[mid_index + 1] - x.shape[-1]
+        if global_steps[mid_index + 1] < x.shape[-1]
+        else 0
+    )
+    left_to_right = left_to_right * -1
+    print(
+        f"right to left: {right_to_left}, left to right {left_to_right}, overlap {global_steps[mid_index + 1]}"
+    )
 
     B, C, L = x.shape
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
@@ -65,13 +78,16 @@ def conv1d_twoway(
             )
             x_augment = torch.cat((recv if left_to_right > 0 else empty, x), dim=-1)
 
-    return x_augment, L
+    return x_augment, L, right_to_left, left_to_right
 
 
 def conv1d_twoway_channel(
     x: torch.tensor,
     w: torch.tensor,
     in_channels: int,
+    stride: int,
+    padding: int,
+    dilation: int,
     rank: int,
     model_group: dist.ProcessGroup,
 ) -> torch.tensor:
@@ -84,20 +100,45 @@ def conv1d_twoway_channel(
 
     match mod:
         case 0:
-            y = F.conv1d(x, w[:, : in_channels // 2])
+            y = F.conv1d(
+                x,
+                w[:, : in_channels // 2],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
             dist.all_to_all(
                 [empty, x_buffer], [empty, x], group=model_group, async_op=False
             )
-            y = y + F.conv1d(x_buffer, w[:, in_channels // 2 :])
+            y = y + F.conv1d(
+                x_buffer,
+                w[:, in_channels // 2 :],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
             return y, x, x_buffer
         case 1:
-            y = F.conv1d(x, w[:, in_channels // 2 :])
+            y = F.conv1d(
+                x,
+                w[:, in_channels // 2 :],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
             dist.all_to_all(
                 [x_buffer, empty], [x, empty], group=model_group, async_op=False
             )
-            y = y + F.conv1d(x_buffer, w[:, : in_channels // 2])
+            y = y + F.conv1d(
+                x_buffer,
+                w[:, : in_channels // 2],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
             return y, x_buffer, x
-        
+
+
 def conv1d_fourway_complete(
     x: torch.tensor,
     w: torch.tensor,
@@ -108,7 +149,7 @@ def conv1d_fourway_complete(
     in_channels: int,
     rank: int,
     spatial_group: dist.ProcessGroup,
-    channel_group: dist.ProcessGroup
+    channel_group: dist.ProcessGroup,
 ) -> torch.tensor:
     """Distributed 1d convolution"""
     # Setup
@@ -116,25 +157,23 @@ def conv1d_fourway_complete(
 
     # communicate x1, x0
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
-    
 
-    # Calculate overlap between two adjacent spatial domains
-    overlap = max(kernel_size + (kernel_size - 1) * (dilation - 1) - stride, 0)
     # global indices where you want to apply the convolutions:
     global_size = int(x.shape[-1] * 2)
-    global_steps = torch.arange(0, global_size - kernel_size, step=stride)
+    global_steps = torch.arange(0, global_size - kernel_size + 1, step=stride)
     len_global_size = global_steps.shape[-1]
 
     # midpoint calculation
-    mid_index = (
-        len_global_size // 2 - 1 if len_global_size % 2 == 0 else len_global_size // 2
+    mid_index = len_global_size // 2 - 1
+
+    right_to_left = (global_steps[mid_index] + kernel_size) - x.shape[-1]
+
+    left_to_right = (
+        global_steps[mid_index + 1] - x.shape[-1]
+        if global_steps[mid_index + 1] < x.shape[-1]
+        else 0
     )
-
-    right_to_left = (global_steps[mid_index] + kernel_size) - x.shape[
-        -1
-    ]  # right is how much you get from rank 1 
-
-    left_to_right = overlap - right_to_left
+    left_to_right = left_to_right * -1
 
     B, C, L = x.shape
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
@@ -164,32 +203,63 @@ def conv1d_fourway_complete(
                 [recv, empty], [send, empty], group=spatial_group, async_op=False
             )
             x_augment = torch.cat((recv if left_to_right > 0 else empty, x), dim=-1)
+
     x_buffer = torch.zeros(x_augment.shape, device=x.device, dtype=x.dtype)
-    
+
     # print(f'I am rank {rank} and the shape of x_augment is {x_augment.shape}. xbuffer is {x_buffer.shape}')
     # print(f'Rank {rank}, x shape {x_augment.shape}, x buffer shape {x_buffer.shape}')
-    
+
     # Channel-parallelism
     match mod:
         case 0 | 2:
-            y = F.conv1d(x_augment, w[:, : in_channels // 2], stride=stride, padding=padding, dilation=dilation)
+            y = F.conv1d(
+                x_augment,
+                w[:, : in_channels // 2],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
             dist.all_to_all(
-                [empty, x_buffer], [empty, x_augment], group=channel_group, async_op=False
+                [empty, x_buffer],
+                [empty, x_augment],
+                group=channel_group,
+                async_op=False,
             )
             # print(f'Rank {mod} before: x_augment: {x_augment.shape} y shape here {y.shape}, w shape {w[:, :in_channels//2].shape}, stride {stride}, padding{ padding}, dilation {dilation}')
-            y = y + F.conv1d(x_buffer, w[:, in_channels // 2 :], stride=stride, padding=padding, dilation=dilation)
+            y = y + F.conv1d(
+                x_buffer,
+                w[:, in_channels // 2 :],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
             # print(f'Rank {mod}, x augment {x_augment.shape}, x buffer {x_buffer.shape}, y shape {y.shape}')
-            return y, x_augment, x_buffer, L
+            return y, x_augment, x_buffer, right_to_left, left_to_right
         case 1 | 3:
-            y = F.conv1d(x_augment, w[:, in_channels // 2 :], stride=stride, padding=padding, dilation=dilation)
-            
+            y = F.conv1d(
+                x_augment,
+                w[:, in_channels // 2 :],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
+
             dist.all_to_all(
-                [x_buffer, empty], [x_augment, empty], group=channel_group, async_op=False
+                [x_buffer, empty],
+                [x_augment, empty],
+                group=channel_group,
+                async_op=False,
             )
             # print(f'Rank {mod} before: y shape here {y.shape}')
-            y = y + F.conv1d(x_buffer, w[:, : in_channels // 2], stride=stride, padding=padding, dilation=dilation)
+            y = y + F.conv1d(
+                x_buffer,
+                w[:, : in_channels // 2],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
             # print(f'Rank: {mod} x buffer: {x_buffer.shape}, x augment {x_augment.shape}, y shape {y.shape}')
-            return y, x_buffer, x_augment, L
+            return y, x_buffer, x_augment, right_to_left, left_to_right
 
 
 def conv2d_twoway_channel(
@@ -213,18 +283,42 @@ def conv2d_twoway_channel(
 
     match mod:
         case 0:
-            y = F.conv2d(x, w[:, : in_channels // 2], stride=stride, padding=padding, dilation=dilation)
+            y = F.conv2d(
+                x,
+                w[:, : in_channels // 2],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
             dist.all_to_all(
                 [empty, x_buffer], [empty, x], group=model_group, async_op=False
             )
-            y = y + F.conv2d(x_buffer, w[:, in_channels // 2 :], stride=stride, padding=padding, dilation=dilation)
+            y = y + F.conv2d(
+                x_buffer,
+                w[:, in_channels // 2 :],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
             return y, x, x_buffer
         case 1:
-            y = F.conv2d(x, w[:, in_channels // 2 :], stride=stride, padding=padding, dilation=dilation)
+            y = F.conv2d(
+                x,
+                w[:, in_channels // 2 :],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
             dist.all_to_all(
                 [x_buffer, empty], [x, empty], group=model_group, async_op=False
             )
-            y = y + F.conv2d(x_buffer, w[:, : in_channels // 2], stride=stride, padding=padding, dilation=dilation)
+            y = y + F.conv2d(
+                x_buffer,
+                w[:, : in_channels // 2],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
             return y, x_buffer, x
 
 
