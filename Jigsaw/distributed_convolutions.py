@@ -4,6 +4,8 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
+    
+
 
 def conv1d_twoway(
     x: torch.tensor,
@@ -166,7 +168,7 @@ def conv1d_fourway_complete(
     # midpoint calculation
     mid_index = len_global_size // 2 - 1
 
-    right_to_left = (global_steps[mid_index] + kernel_size) - x.shape[-1]
+    right_to_left = max((global_steps[mid_index] + kernel_size) - x.shape[-1], 0)
 
     left_to_right = (
         global_steps[mid_index + 1] - x.shape[-1]
@@ -205,9 +207,6 @@ def conv1d_fourway_complete(
             x_augment = torch.cat((recv if left_to_right > 0 else empty, x), dim=-1)
 
     x_buffer = torch.zeros(x_augment.shape, device=x.device, dtype=x.dtype)
-
-    # print(f'I am rank {rank} and the shape of x_augment is {x_augment.shape}. xbuffer is {x_buffer.shape}')
-    # print(f'Rank {rank}, x shape {x_augment.shape}, x buffer shape {x_buffer.shape}')
 
     # Channel-parallelism
     match mod:
