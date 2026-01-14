@@ -48,7 +48,7 @@ for split in splits:
     for type_ in types:
         path = os.path.join('data_processed', size, split, type_)
         os.makedirs(path, exist_ok=True)
-        print(f"Ordner erstellt/geprüft: {path}")
+        print(f"Created/checked directory: {path}")
 
 print(f'Total patients: {num_total}')
 print(f'Training patients: {len(train_ids)}')

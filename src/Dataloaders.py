@@ -7,10 +7,9 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from pathlib import Path 
 import torchvision.transforms as transforms 
-from perun import monitor
 
 class BasicDataset(Dataset):
-    def __init__(self, images_dir, masks_dir, target_size=(512, 512), num_slices=1):
+    def __init__(self, images_dir, masks_dir, target_size=(1024, 1024), num_slices=1):
         self.images_dir = Path(images_dir)
         self.masks_dir = Path(masks_dir)
         self.num_slices = num_slices
@@ -66,7 +65,6 @@ class BasicDataset(Dataset):
         return len(self.samples)
 
     # Retrieve a sample consisting of consecutive slices for a given index
-    @monitor()
     def __getitem__(self, index):
         pid, start_slice_index = self.samples[index]
         image_slices = []

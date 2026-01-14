@@ -883,6 +883,10 @@ def check_accuracy(loader, model, device="cpu", rank=0):
         #For example, if preds for a pixel is [0.2, 0.8], argmax gives class 1
         pred_mask = torch.argmax(preds, dim=1) 
         
+        # Squeeze channel dimension if needed
+        if true_mask.dim() == 4 and true_mask.shape[1] == 1:
+            true_mask = true_mask.squeeze(1)
+
         # Accuracy Calculation
         num_correct += (pred_mask == true_mask).sum().item()
         num_pixels += torch.numel(pred_mask)
@@ -911,7 +915,6 @@ def check_accuracy(loader, model, device="cpu", rank=0):
     return avg_dice
 
 @torch.no_grad()
-@torch.no_grad()
 def save_predictions_as_imgs(
     loader, model, folder="saved_images/", device="cpu", num_examples=8, epoch=0, rank=0
 ):
@@ -927,10 +930,12 @@ def save_predictions_as_imgs(
     
     images = batch[0].to(device)      
     true_masks = batch[1].to(device)
-
-    logits = model(images)            
-    probs = torch.softmax(logits, dim=1)
-    preds = torch.argmax(probs, dim=1) 
+    
+    logits = model(images)
+    probs = torch.sigmoid(logits)
+    preds = (probs > 0.5).float()
+    #probs = torch.softmax(logits, dim=1)
+    #preds = torch.argmax(probs, dim=1) 
 
     for i in range(min(num_examples, images.shape[0])):
         img_single = images[i]  

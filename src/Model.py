@@ -9,6 +9,7 @@ import Dataset
 from Mixer import MixerBlock, MixerBlockSequential, MixerBlockMegatron
 from util_fns.SwinMLP import SwinMLPEncoderLayer, SwinMLPDecoderLayer
 import Normalization as Norm
+from perun import monitor
 
 
 
@@ -1115,7 +1116,7 @@ class ModelSwinMLP(torch.nn.Module):
             padding=1,
             bias=False
             )           
-
+    @monitor()   
     def forward(self, x):
         x = self.conv(x)
         x = self.norm(x)

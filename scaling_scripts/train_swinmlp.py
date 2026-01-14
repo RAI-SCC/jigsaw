@@ -101,7 +101,7 @@ def main():
         # Learning Rate Step
         if rank == 0:
             current_lr = optimizer.param_groups[0]["lr"]
-            print(f"Epoch {epoch} | Loss: {avg_loss:.4f} | Dice: {val_dice:.4f} | LR: {current_lr:.1e} | Time: {(time.time()-start_time)/60:.1f} min")
+            print(f"Epoch {epoch} | Loss: {avg_loss:.4f} | Dice Score: {val_dice:.4f} | LR: {current_lr:.1e} | Time: {(time.time()-start_time)/60:.1f} min")
 
 
             utils.save_predictions_as_imgs(
