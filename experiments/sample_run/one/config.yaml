@@ -42,8 +42,8 @@ training:
   # loss: L2 
   loss: TopK_Dice
   lr_constant: false
-  train_batch: 16
-  valid_batch: 16
+  train_batch: 8
+  valid_batch: 8
   epochs: 10
   identity: false
   grad_clip: 1
