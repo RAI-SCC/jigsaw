@@ -882,7 +882,7 @@ def check_accuracy(loader, model, device="cpu", rank=0):
         # Used for accuracy, get prediceted class mask, for each pixel
         #For example, if preds for a pixel is [0.2, 0.8], argmax gives class 1
         pred_mask = torch.argmax(preds, dim=1) 
-        
+
         # Squeeze channel dimension if needed
         if true_mask.dim() == 4 and true_mask.shape[1] == 1:
             true_mask = true_mask.squeeze(1)
@@ -949,7 +949,7 @@ def save_predictions_as_imgs(
             img_rgb = img_disp
 
         true_single = true_masks[i].squeeze(0) if true_masks[i].dim() == 3 else true_masks[i]
-        pred_single = preds[i]
+        pred_single = preds[i].squeeze(0)
 
         overlay = img_rgb.clone() * 0.6 
         
