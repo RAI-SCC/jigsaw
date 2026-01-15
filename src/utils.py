@@ -928,19 +928,20 @@ def save_predictions_as_imgs(
     iterator = iter(loader)
     batch = next(iterator)
     
-    images = batch[0].to(device)      
-    true_masks = batch[1].to(device)
+    images = batch[0].to(device) # [B, C, H, W]      
+    true_masks = batch[1].to(device) # [B, H, W]
     
     logits = model(images)
-    probs = torch.sigmoid(logits)
-    preds = (probs > 0.5).float()
-    #probs = torch.softmax(logits, dim=1)
-    #preds = torch.argmax(probs, dim=1) 
+    #probs = torch.sigmoid(logits)
+    #preds = (probs > 0.5).float()
+    probs = torch.softmax(logits, dim=1) # [B, 2, H, W]
+    # argmax pics the class with highest probability, e.g. : (0.2, 0.8) -> class 1
+    preds = torch.argmax(probs, dim=1) # [B, H, W]
 
     for i in range(min(num_examples, images.shape[0])):
-        img_single = images[i]  
+        img_single = images[i] # [C, H, W]
         
-        img_disp = img_single * 0.5 + 0.5  
+        img_disp = img_single * 0.5 + 0.5  # unnormalize to [0, 1]
         img_disp = torch.clamp(img_disp, 0, 1)
 
         if img_disp.shape[0] == 1:
@@ -948,11 +949,12 @@ def save_predictions_as_imgs(
         else:
             img_rgb = img_disp
 
-        true_single = true_masks[i].squeeze(0) if true_masks[i].dim() == 3 else true_masks[i]
-        pred_single = preds[i].squeeze(0)
+        true_single = true_masks[i] # [H, W]
+        pred_single = preds[i]      # [H, W]
 
         overlay = img_rgb.clone() * 0.6 
         
+        # Calculate True Positives, False Positives, False Negatives
         tp = (pred_single == 1) & (true_single == 1) 
         fp = (pred_single == 1) & (true_single == 0)
         fn = (pred_single == 0) & (true_single == 1)
