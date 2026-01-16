@@ -927,20 +927,21 @@ def save_predictions_as_imgs(
     iterator = iter(loader)
     batch = next(iterator)
     
-    images = batch[0].to(device) # [B, C, H, W]      
-    true_masks = batch[1].to(device) # [B, H, W]
+    images = batch[0].to(device)      
+    true_masks = batch[1].to(device) 
+
+    if true_masks.dim() == 4:
+        true_masks = true_masks.squeeze(1)
+    true_masks = (true_masks > 0).float()
     
     logits = model(images)
     fg_logits = logits[:, 1]  
-    probs = torch.sigmoid(fg_logits) 
-    preds = (probs > 0.5).squeeze(1)
-    #probs = torch.softmax(logits, dim=1) # [B, 2, H, W]
-    # argmax pics the class with highest probability, e.g. : (0.2, 0.8) -> class 1
-    #preds = torch.argmax(probs, dim=1) # [B, H, W]
+    probs = torch.softmax(fg_logits, dim=1)
+    preds = (probs > 0.5).float()
 
     for i in range(min(num_examples, images.shape[0])):
+        img_single = images[i]
 
-        img_single = images[i] # [C, H, W]
         img_disp = img_single * 0.5 + 0.5  # unnormalize to [0, 1]
         img_disp = torch.clamp(img_disp, 0, 1)
         if img_disp.shape[0] == 1:
@@ -948,30 +949,26 @@ def save_predictions_as_imgs(
         else:
             img_rgb = img_disp
 
-        true_single = true_masks[i] # [1, H, W]
-        if true_single.dim() == 3:
-            true_single = true_single.squeeze(0)  # [H, W]
-        true_single = true_single.float()
-        true_single = (true_single > 0).float()
-
-        pred_single = preds[i]      # [H, W]
+        ground_truth = true_masks[i]
+        pred_single = preds[i]
 
         overlay = img_rgb.clone() * 0.6 
         
         # Calculate True Positives, False Positives, False Negatives
-        tp = (pred_single == 1) & (true_single == 1) 
-        fp = (pred_single == 1) & (true_single == 0)
-        fn = (pred_single == 0) & (true_single == 1)
+        tp = (pred_single == 1) & (ground_truth == 1) 
+        fp = (pred_single == 1) & (ground_truth == 0)
+        fn = (pred_single == 0) & (ground_truth == 1)
 
-        overlay[1, :, :] += tp.float() * 0.4
-        overlay[0, :, :] += fp.float() * 0.8
-        overlay[2, :, :] += fn.float() * 0.8
+        overlay[1] += tp.float() * 0.4
+        overlay[0] += fp.float() * 0.8
+        overlay[2] += fn.float() * 0.8
         
         overlay = torch.clamp(overlay, 0, 1)
-        true_rgb = torch.stack([true_single.float()]*3, dim=0)
-        pred_rgb = torch.stack([pred_single.float()]*3, dim=0)
 
-        combined = torch.cat((img_rgb, true_rgb, pred_rgb, overlay), dim=2)
+        ground_truth_rgb = ground_truth.unsqueeze(0).repeat(3, 1, 1)
+        pred_rgb = pred_single.unsqueeze(0).repeat(3, 1, 1)
+
+        combined = torch.cat([img_rgb, ground_truth_rgb, pred_rgb, overlay], dim=2)
         images_to_save.append(combined)
 
     grid = make_grid(images_to_save, nrow=4, padding=10, pad_value=1.0)
