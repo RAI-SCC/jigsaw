@@ -607,6 +607,64 @@ def convTranspose1d_twoway_channel(
                 dilation=dilation,
             )
             return y, x_buffer, x
+        
+def convTranspose2d_twoway_channel(
+    x: torch.tensor,
+    w: torch.tensor,
+    in_channels: int,
+    stride: int,
+    padding: int,
+    dilation: int,
+    rank: int,
+    channel_group: dist.ProcessGroup,
+) -> torch.tensor:
+    """Distributed 2d convolution across channels"""
+    # x shape
+    mod = rank % 2
+    # communicate x1, x0
+    empty = torch.empty(0, device=x.device, dtype=x.dtype)
+    x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
+
+    # TODO: dimension shapes may be modified after combining with torch_blue
+    match mod:
+        case 0:
+            y = F.conv_transpose2d(
+                x,
+                w[: in_channels // 2],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
+            dist.all_to_all(
+                [empty, x_buffer], [empty, x], group=channel_group, async_op=False
+            )
+            y = y + F.conv_transpose2d(
+                x_buffer,
+                w[in_channels // 2 :],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
+            return y, x, x_buffer
+        case 1:
+            y = F.conv_transpose2d(
+                x,
+                w[in_channels // 2 :],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
+            dist.all_to_all(
+                [x_buffer, empty], [x, empty], group=channel_group, async_op=False
+            )
+            y = y + F.conv_transpose2d(
+                x_buffer,
+                w[: in_channels // 2],
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
+            return y, x_buffer, x
 
 
 def conv1d_fourway_complete(
