@@ -92,8 +92,9 @@ def conv1dTranspose_halocalc_twoway(
     stride: int,
     padding: int,
     dilation: int,
-    rank: int,
-    model_group: dist.ProcessGroup,
+    local_rank: int,
+    spatial_group: dist.ProcessGroup,
+    parallelism: int
 ) -> torch.tensor:
     """Distributed 1d convolution"""
     # x shape
@@ -110,36 +111,40 @@ def conv1dTranspose_halocalc_twoway(
         local_size_left, local_size_right = global_shape // 2, global_shape // 2 + 1
 
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
-
-    match rank % 2:
-        case 0:
-            send = y[..., -overlap_size:] if overlap_size > 0 else empty
-            recv = (
-                torch.zeros(
-                    (*y.shape[:-1], overlap_size), device=x.device, dtype=x.dtype
-                )
-                if overlap_size > 0
-                else empty
+    
+    left_right_local_ranks = get_left_right_local_ranks(parallelism)
+    
+    if local_rank in left_right_local_ranks[0]:
+        send = y[..., -overlap_size:] if overlap_size > 0 else empty
+        recv = (
+            torch.zeros(
+                (*y.shape[:-1], overlap_size), device=x.device, dtype=x.dtype
             )
-            send = send.contiguous()
-            dist.all_to_all(
-                [empty, recv], [empty, send], group=model_group, async_op=False
+            if overlap_size > 0
+            else empty
+        )
+        send = send.contiguous()
+        dist.all_to_all(
+            [empty, recv], [empty, send], group=spatial_group, async_op=False
+        )
+    elif local_rank in left_right_local_ranks[1]:
+        send = y[..., :overlap_size] if overlap_size > 0 else empty
+        recv = (
+            torch.zeros(
+                (*y.shape[:-1], overlap_size), device=x.device, dtype=x.dtype
             )
-        case 1:
-            send = y[..., :overlap_size] if overlap_size > 0 else empty
-            recv = (
-                torch.zeros(
-                    (*y.shape[:-1], overlap_size), device=x.device, dtype=x.dtype
-                )
-                if overlap_size > 0
-                else empty
-            )
-            send = send.contiguous()
-            dist.all_to_all(
-                [recv, empty], [send, empty], group=model_group, async_op=False
-            )
+            if overlap_size > 0
+            else empty
+        )
+        send = send.contiguous()
+        
+        dist.all_to_all(
+            [recv, empty], [send, empty], group=spatial_group, async_op=False
+        )
 
     return recv, overlap_size, local_size_left, local_size_right
+
+
 
 
 def append_halos(
