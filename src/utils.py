@@ -873,7 +873,6 @@ def check_accuracy(loader, model, device="cpu", rank=0):
     print(f"=> Rank {rank}: Checking accuracy.")
 
     for batch in loader:
-        
         image = batch[0].to(device)
         true_mask = batch[1].to(device)
 
@@ -949,9 +948,12 @@ def save_predictions_as_imgs(
         else:
             img_rgb = img_disp
 
-        true_single = true_masks[i] # [H, W]
+        true_single = true_masks[i] # [1, H, W]
+        if true_single.dim() == 3:
+            true_single = true_single.squeeze(0)  # [H, W]
         pred_single = preds[i]      # [H, W]
-
+        print("pred_single:", pred_single.shape)
+        print("true_single:", true_single.shape)
         overlay = img_rgb.clone() * 0.6 
         
         # Calculate True Positives, False Positives, False Negatives
