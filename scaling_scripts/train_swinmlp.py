@@ -88,8 +88,14 @@ def main():
         log_file = f"training_log_{config['data']['image_height']}.csv"
         if not os.path.isfile(log_file):
             with open(log_file, mode='w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(['Epoch', 'Resolution', 'Train_Loss', 'Val_Dice', 'Duration_Sec'])
+                writer = csv.writer(f, delimiter=';')
+                writer.writerow([
+                    'Epoch',
+                    'Resolution',
+                    'Train_Loss', 
+                    'Val_Dice', 
+                    'Duration_Sec'
+                ])
 
     for epoch in range(num_epochs):
         start_time = time.time()
@@ -114,11 +120,17 @@ def main():
 
             log_file = f"training_log_{config['data']['image_height']}.csv"
             with open(log_file, mode='a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([epoch, config['data']['image_height'], avg_loss, val_dice, duration])
+                writer = csv.writer(f, delimiter=';')
+                writer.writerow([
+                    int(epoch),
+                    int(config['data']['image_height']),
+                    float(avg_loss),
+                    float(val_dice), 
+                    float(duration)
+                ])
 
             utils.save_predictions_as_imgs(
-                val_loader, model, folder=f"{config['training']['save_dir']}/images", 
+                val_loader, model,f"{config['training']['save_dir']}/images", 
                 device=device, epoch=epoch, rank=rank
             )
 
