@@ -160,14 +160,13 @@ def init_cuda() -> tuple[torch.device, int, int, int]:
         device = torch.device("cpu")
         print("Warning: CUDA not available, using CPU.")
 
-    if world_size > 1:
-        # Initialize DistributedDataParallel.
-        dist.init_process_group(
-            backend="nccl",
-            rank=rank, 
-            world_size=world_size, 
-            init_method="env://"
-        )
+    # Initialize DistributedDataParallel.
+    dist.init_process_group(
+        backend="nccl",
+        rank=rank, 
+        world_size=world_size, 
+        init_method="env://"
+    )
 
     if dist.is_initialized():
         print(
