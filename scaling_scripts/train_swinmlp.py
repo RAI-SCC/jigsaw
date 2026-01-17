@@ -133,8 +133,8 @@ def main():
                     learn_rate,
                     batch_size,
                     num_samples,
-                    round(avg_loss, 4), 
-                    round(val_dice, 4), 
+                    round(float(avg_loss), 4), 
+                    round(float(val_dice), 4), 
                     round(duration, 2)
                 ])
 
