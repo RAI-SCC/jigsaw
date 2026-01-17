@@ -97,7 +97,7 @@ def main():
                     'Resolution',
                     'Learning_Rate',
                     'Batch_Size', 
-                    'Num_Samples',
+                    'Num_Train_Samples',
                     'Train_Loss', 
                     'Val_Dice', 
                     'Duration_Sec'
@@ -130,9 +130,9 @@ def main():
                 writer.writerow([
                     int(epoch),
                     int(config['data']['image_height']),
+                    learn_rate,
                     batch_size,
                     num_samples,
-                    learn_rate,
                     round(avg_loss, 4), 
                     round(val_dice, 4), 
                     round(duration, 2)
