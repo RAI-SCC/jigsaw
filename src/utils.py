@@ -129,24 +129,45 @@ def init_cuda() -> tuple[torch.device, int, int, int]:
     Returns
     -------
     device: String
-    slurm_localid: int
+    local_rank: int
     rank: int
     world_size: int
     """
-    rank = int(os.getenv("SLURM_PROCID"))  # Get individual process ID.
-    # Get overall number of processes.
-    world_size = int(os.getenv("SLURM_NTASKS"))
-    slurm_localid = int(os.getenv("SLURM_LOCALID"))
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ["LOCAL_RANK"])
+        print(
+            f"Rank {rank}: world_size {world_size}, local_rank {local_rank} from env."
+        )
+    elif "SLURM_PROCID" in os.environ:
+        rank = int(os.getenv("SLURM_PROCID"))  # Get individual process ID.
+        # Get overall number of processes.
+        world_size = int(os.getenv("SLURM_NTASKS"))
+        local_rank = int(os.getenv("SLURM_LOCALID"))
+        print(f"Rank {rank}: world_size {world_size}, local_rank {local_rank} from SLURM.")
+    else:
+        rank = 0
+        world_size = 1
+        local_rank = 0
+        print("Init method: Single GPU / CPU")
 
-    print(f"Rank {rank}: world_size {world_size}, slurm_localid {slurm_localid}")
-    # Initialize GPUs and dataloaders
-    device = f"cuda:{slurm_localid}"
-    torch.cuda.set_device(slurm_localid)
+    if torch.cuda.is_available():
+        # Initialize GPUs and dataloaders
+        device = torch.device(f"cuda:{local_rank}")
+        torch.cuda.set_device(device)
+    else:
+        device = torch.device("cpu")
+        print("Warning: CUDA not available, using CPU.")
 
-    # Initialize DistributedDataParallel.
-    dist.init_process_group(
-        backend="nccl", rank=rank, world_size=world_size, init_method="env://"
-    )
+    if world_size > 1:
+        # Initialize DistributedDataParallel.
+        dist.init_process_group(
+            backend="nccl",
+            rank=rank, 
+            world_size=world_size, 
+            init_method="env://"
+        )
 
     if dist.is_initialized():
         print(
@@ -155,7 +176,7 @@ def init_cuda() -> tuple[torch.device, int, int, int]:
     else:
         print(f"Rank {rank} not initialized")
 
-    return device, slurm_localid, rank, world_size
+    return device, local_rank, rank, world_size
 
 
 def count_parameters(model: torch.nn.Module):

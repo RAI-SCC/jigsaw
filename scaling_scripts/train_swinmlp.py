@@ -83,6 +83,9 @@ def main():
     train_loader, val_loader = utils.build_swin_dataloaders(config, model_parallel=False, rank=rank)
 
     num_epochs = config["training"]["epochs"]
+    num_samples = len(train_loader.dataset)
+    batch_size = config["training"]["train_batch"]
+    learn_rate = config["training"]["lr"]
 
     if rank == 0:
         log_file = f"training_log_{config['data']['image_height']}.csv"
@@ -92,6 +95,9 @@ def main():
                 writer.writerow([
                     'Epoch',
                     'Resolution',
+                    'Learning_Rate',
+                    'Batch_Size', 
+                    'Num_Samples',
                     'Train_Loss', 
                     'Val_Dice', 
                     'Duration_Sec'
@@ -124,9 +130,12 @@ def main():
                 writer.writerow([
                     int(epoch),
                     int(config['data']['image_height']),
-                    float(avg_loss),
-                    float(val_dice), 
-                    float(duration)
+                    batch_size,
+                    num_samples,
+                    learn_rate,
+                    round(avg_loss, 4), 
+                    round(val_dice, 4), 
+                    round(duration, 2)
                 ])
 
             utils.save_predictions_as_imgs(
