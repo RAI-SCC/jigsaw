@@ -1,14 +1,14 @@
 data:
   dt: 6
-  train_data_path: "data_processed/256/train" 
-  valid_data_path: "data_processed/256/val"
+  train_data_path: "data_processed/512/train" 
+  valid_data_path: "data_processed/512/val"
   #train_data_path: /hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr
   #valid_data_path: /hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr
-  image_height: 256
-  image_width: 256
+  image_height: 512
+  image_width: 512
   in_channels: 1 
   num_classes: 2
-  num_workers: 4 # Number of subprocesses for data loading
+ # num_workers: 4 # Number of subprocesses for data loading
   preprocessed: false
   constant_masks_path: /hkfs/work/workspace/scratch/ke4365-jigsaw/Jigsaw/constant_masks
   #train_subset: 1250
@@ -16,7 +16,7 @@ data:
   train_subset: -1
   valid_subset: -1
   prefetch_factor: 2
-  num_workers: 16
+  num_workers: 4
   xlat: 720
   xlon: 1440
   lite: false
@@ -44,10 +44,10 @@ training:
   lr_constant: false
   train_batch: 8
   valid_batch: 8
-  epochs: 10
+  epochs: 50
   identity: false
   grad_clip: 1
-  save_dir: results_256
+  save_dir: results_512_50
   preload: false
   file_path: .
   load_path: .

@@ -44,7 +44,8 @@ def train_one_epoch(
         optimizer.step()
 
         # Sum loss across all processes from all GPUs
-        dist.all_reduce(loss, op=dist.ReduceOp.AVG)
+        dist.all_reduce(loss, op=dist.ReduceOp.SUM)
+        loss /= dist.get_world_size()
         epoch_loss += loss.item()
 
         if rank == 0 and i % 10 == 0:
@@ -124,7 +125,7 @@ def main():
             current_lr = optimizer.param_groups[0]["lr"]
             print(f"Epoch {epoch} | Loss: {avg_loss:.4f} | Dice Score: {val_dice:.4f} | LR: {current_lr:.1e} | Time: {(time.time()-start_time)/60:.1f} min")
 
-            log_file = f"training_log_{config['data']['image_height']}.csv"
+            log_file = f"training_log_{config['training']['save_dir']}.csv"
             with open(log_file, mode='a', newline='') as f:
                 writer = csv.writer(f, delimiter=';')
                 writer.writerow([
@@ -138,10 +139,9 @@ def main():
                     round(duration, 2)
                 ])
 
-            utils.save_predictions_as_imgs(
-                val_loader, model,f"{config['training']['save_dir']}/images", 
-                device=device, epoch=epoch, rank=rank
-            )
+           # utils.save_predictions_as_imgs(
+                #val_loader, model,f"{config['training']['save_dir']}/images", 
+                #device=device, epoch=epoch, rank=rank)
 
             utils.save_model(
                 model,

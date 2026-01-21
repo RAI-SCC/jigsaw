@@ -162,7 +162,7 @@ def init_cuda() -> tuple[torch.device, int, int, int]:
 
     # Initialize DistributedDataParallel.
     dist.init_process_group(
-        backend="nccl",
+        backend="gloo",
         rank=rank, 
         world_size=world_size, 
         init_method="env://"
