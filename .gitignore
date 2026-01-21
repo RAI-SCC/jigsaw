@@ -178,3 +178,5 @@ src/data_processed/
 data_processed/
 
 
+.DS_Store
+**/.DS_Store

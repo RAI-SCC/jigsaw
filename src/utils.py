@@ -934,6 +934,48 @@ def check_accuracy(loader, model, device="cpu", rank=0):
     return avg_dice
 
 @torch.no_grad()
+def compute_confusion_metrics(loader, model, device="cpu", threshold=0.5):
+    model.eval()
+    
+    TP = 0
+    FP = 0
+    FN = 0
+    TN = 0
+
+    for batch in loader:
+        images = batch[0].to(device)
+        true_masks = batch[1].to(device)
+
+        if true_masks.dim() == 4 and true_masks.shape[1] == 1:
+            true_masks = true_masks.squeeze(1)
+
+        logits = model(images)
+        probs = torch.softmax(logits, dim=1)[:, 1]
+        preds = (probs > threshold).float()
+
+        TP += ((preds == 1) & (true_masks == 1)).sum().item()
+        FP += ((preds == 1) & (true_masks == 0)).sum().item()
+        FN += ((preds == 0) & (true_masks == 1)).sum().item()
+        TN += ((preds == 0) & (true_masks == 0)).sum().item()
+
+        total = TP + FP + FN + TN
+        recall = TP / (TP + FN) if (TP + FN) > 0 else 0
+        precision = TP / (TP + FP) if (TP + FP) > 0 else 0
+        perc_tp = TP / total
+        perc_fp = FP / total
+        perc_fn = FN / total
+        perc_tn = TN / total
+
+    return {
+        "TP": perc_tp,
+        "FP": perc_fp,
+        "TN": perc_tn,
+        "FN": perc_fn,
+        "Precision": precision,
+        "Recall": recall,
+    }
+
+@torch.no_grad()
 def save_predictions_as_imgs(
     loader, model, folder="saved_images/", device="cpu", num_examples=8, epoch=0, rank=0
 ):

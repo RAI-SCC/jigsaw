@@ -53,6 +53,40 @@ def train_one_epoch(
 
     return epoch_loss / len(loader)
 
+def val_one_epoch(
+    config_dict, 
+    epoch, 
+    model, 
+    loader, 
+    optimizer, 
+    loss_fn, 
+    device, 
+    rank
+):
+    model.eval()
+    epoch_loss = 0.0
+
+    with torch.no_grad():
+        for i, batch in enumerate(loader):
+            # Load data to device
+            images = batch[0].to(device, non_blocking=True)
+            masks = batch[1].to(device, non_blocking=True)
+
+            # Swin Output ist [B, 2, H, W] (Logits)
+            predictions = model(images) 
+            loss = loss_fn(predictions, masks)
+
+            # Sum loss across all processes from all GPUs
+            dist.all_reduce(loss, op=dist.ReduceOp.SUM)
+            loss /= dist.get_world_size()
+            epoch_loss += loss.item()
+
+            if rank == 0 and i % 10 == 0:
+                print(f"[VAL] Epoch [{epoch}][{i}/{len(loader)}] Loss: {loss.item():.4f}")
+
+    return epoch_loss / len(loader)
+
+
 @monitor()
 def main():
     parser = argparse.ArgumentParser()
@@ -85,13 +119,16 @@ def main():
 
     num_epochs = config["training"]["epochs"]
     num_samples = len(train_loader.dataset)
+    num_samples_val = len(val_loader.dataset)
     batch_size = config["training"]["train_batch"]
     learn_rate = config["training"]["lr"]
+    save_dir = config["training"]["save_dir"]
 
     if rank == 0:
-        log_file = f"training_log_{config['data']['image_height']}.csv"
-        if not os.path.isfile(log_file):
-            with open(log_file, mode='w', newline='') as f:
+        log_file = f"log_{config['data']['image_height']}_{config['training']['train_batch']}.csv"
+        log_path = os.path.join(save_dir, log_file)
+        if not os.path.isfile(log_path):
+            with open(log_path, mode='w', newline='') as f:
                 writer = csv.writer(f, delimiter=';')
                 writer.writerow([
                     'Epoch',
@@ -99,20 +136,36 @@ def main():
                     'Learning_Rate',
                     'Batch_Size', 
                     'Num_Train_Samples',
+                    'Num_Val_Samples',
                     'Train_Loss', 
+                    'Val_Loss',
+                    'Train_Dice',
                     'Val_Dice', 
-                    'Duration_Sec'
+                    'Duration_Sec',
+                    'Train_TP',
+                    'Train_FP',
+                    'Train_TN',
+                    'Train_FN',
+                    'Train_Precision',
+                    'Train_Recall',
                 ])
 
     for epoch in range(num_epochs):
         start_time = time.time()
-        avg_loss = train_one_epoch(
+        train_loss = train_one_epoch(
             config, epoch, model, train_loader, optimizer, loss_fn, device, rank
         )
+        train_dice = utils.check_accuracy(train_loader, model, device, rank)
+
         # wait for all processes to finish epoch before validating
         dist.barrier() 
+        val_loss = val_one_epoch(
+            config, epoch, model, val_loader, optimizer, loss_fn, device, rank
+        )
         val_dice = utils.check_accuracy(val_loader, model, device, rank)
-        
+        train_metrics = utils.compute_confusion_metrics(train_loader, model, device)
+        val_metrics   = utils.compute_confusion_metrics(val_loader, model, device)
+
         dice_tensor = torch.tensor(val_dice).to(device)
         dist.broadcast(dice_tensor, src=0)
         scheduler.step(dice_tensor.item())
@@ -123,10 +176,11 @@ def main():
         # Learning Rate Step
         if rank == 0:
             current_lr = optimizer.param_groups[0]["lr"]
-            print(f"Epoch {epoch} | Loss: {avg_loss:.4f} | Dice Score: {val_dice:.4f} | LR: {current_lr:.1e} | Time: {(time.time()-start_time)/60:.1f} min")
+            print(f"Epoch {epoch} | Loss: {train_loss:.4f} | Dice Score: {train_dice:.4f} | LR: {current_lr:.1e} | Time: {(time.time()-start_time)/60:.1f} min")
 
-            log_file = f"training_log_{config['training']['save_dir']}.csv"
-            with open(log_file, mode='a', newline='') as f:
+            log_file = f"log_{config['data']['image_height']}_{config['training']['train_batch']}.csv"
+            log_path = os.path.join(save_dir, log_file)
+            with open(log_path, mode='a', newline='') as f:
                 writer = csv.writer(f, delimiter=';')
                 writer.writerow([
                     int(epoch),
@@ -134,23 +188,25 @@ def main():
                     learn_rate,
                     batch_size,
                     num_samples,
-                    round(float(avg_loss), 4), 
+                    num_samples_val,
+                    round(float(train_loss), 4), 
+                    round(float(val_loss), 4),
+                    round(float(train_dice), 4),
                     round(float(val_dice), 4), 
-                    round(duration, 2)
+                    round(duration, 2),
+                    int(train_metrics['TP']),
+                    int(train_metrics['FP']),
+                    int(train_metrics['TN']),
+                    int(train_metrics['FN']),
+                    round(float(train_metrics['Precision']), 4),
+                    round(float(train_metrics['Recall']), 4),
                 ])
 
            # utils.save_predictions_as_imgs(
                 #val_loader, model,f"{config['training']['save_dir']}/images", 
                 #device=device, epoch=epoch, rank=rank)
 
-            utils.save_model(
-                model,
-                optimizer,
-                scheduler,
-                config["training"]["save_dir"],
-                rank,
-                epoch,
-            )
+            # utils.save_model(model, optimizer,scheduler, config["training"]["save_dir"], rank, epoch)
         dist.barrier()
 
     dist.destroy_process_group()
