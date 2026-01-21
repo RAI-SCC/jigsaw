@@ -125,6 +125,7 @@ def main():
     save_dir = config["training"]["save_dir"]
 
     if rank == 0:
+        os.makedirs(save_dir, exist_ok=True)
         log_file = f"log_{config['data']['image_height']}_{config['training']['train_batch']}.csv"
         log_path = os.path.join(save_dir, log_file)
         if not os.path.isfile(log_path):
@@ -177,7 +178,7 @@ def main():
         if rank == 0:
             current_lr = optimizer.param_groups[0]["lr"]
             print(f"Epoch {epoch} | Loss: {train_loss:.4f} | Dice Score: {train_dice:.4f} | LR: {current_lr:.1e} | Time: {(time.time()-start_time)/60:.1f} min")
-
+            
             log_file = f"log_{config['data']['image_height']}_{config['training']['train_batch']}.csv"
             log_path = os.path.join(save_dir, log_file)
             with open(log_path, mode='a', newline='') as f:
