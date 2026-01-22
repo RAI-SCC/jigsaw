@@ -126,7 +126,7 @@ def main():
 
     if rank == 0:
         os.makedirs(save_dir, exist_ok=True)
-        log_file = f"log_{config['data']['image_height']}_{config['training']['train_batch']}.csv"
+        log_file = f"log_{config['data']['image_height']}_{num_epochs}.csv"
         log_path = os.path.join(save_dir, log_file)
         if not os.path.isfile(log_path):
             with open(log_path, mode='w', newline='') as f:
@@ -149,25 +149,31 @@ def main():
                     'Train_FN',
                     'Train_Precision',
                     'Train_Recall',
+                    'Val_TP',
+                    'Val_FP',
+                    'Val_TN',
+                    'Val_FN',
+                    'Val_Precision',
+                    'Val_Recall'
                 ])
 
     for epoch in range(num_epochs):
         start_time = time.time()
+
         train_loss = train_one_epoch(
             config, epoch, model, train_loader, optimizer, loss_fn, device, rank
         )
-        train_dice = utils.check_accuracy(train_loader, model, device, rank)
-
         # wait for all processes to finish epoch before validating
         dist.barrier() 
-        val_loss = val_one_epoch(
-            config, epoch, model, val_loader, optimizer, loss_fn, device, rank
-        )
-        val_dice = utils.check_accuracy(val_loader, model, device, rank)
-        train_metrics = utils.compute_confusion_metrics(train_loader, model, device)
-        val_metrics   = utils.compute_confusion_metrics(val_loader, model, device)
+        train_metrics = utils.evaluate(train_loader, model,loss_fn, device, rank)
+        val_metrics   = utils.evaluate(val_loader, model, loss_fn, device, rank)
 
-        dice_tensor = torch.tensor(val_dice).to(device)
+        if rank == 0:
+            current_val_dice = val_metrics["Dice"]
+        else:
+            current_val_dice = 0.0
+
+        dice_tensor = torch.tensor(current_val_dice).to(device)
         dist.broadcast(dice_tensor, src=0)
         scheduler.step(dice_tensor.item())
 
@@ -177,9 +183,14 @@ def main():
         # Learning Rate Step
         if rank == 0:
             current_lr = optimizer.param_groups[0]["lr"]
-            print(f"Epoch {epoch} | Loss: {train_loss:.4f} | Dice Score: {train_dice:.4f} | LR: {current_lr:.1e} | Time: {(time.time()-start_time)/60:.1f} min")
+
+            train_dice = train_metrics["Dice"]
+            val_loss = val_metrics["Loss"]
+            val_dice = val_metrics["Dice"]
+
+            print(f"Epoch {epoch} | Train Loss: {train_loss:.4f} | Dice Score: {train_dice:.4f} | LR: {current_lr:.1e} | Time: {(time.time()-start_time)/60:.1f} min")
             
-            log_file = f"log_{config['data']['image_height']}_{config['training']['train_batch']}.csv"
+            log_file = f"log_{config['data']['image_height']}_{num_epochs}.csv"
             log_path = os.path.join(save_dir, log_file)
             with open(log_path, mode='a', newline='') as f:
                 writer = csv.writer(f, delimiter=';')
@@ -195,12 +206,18 @@ def main():
                     round(float(train_dice), 4),
                     round(float(val_dice), 4), 
                     round(duration, 2),
-                    int(train_metrics['TP']),
-                    int(train_metrics['FP']),
-                    int(train_metrics['TN']),
-                    int(train_metrics['FN']),
+                    round(float(train_metrics['TP']), 4),
+                    round(float(train_metrics['FP']), 4),
+                    round(float(train_metrics['TN']), 4),
+                    round(float(train_metrics['FN']), 4),
                     round(float(train_metrics['Precision']), 4),
                     round(float(train_metrics['Recall']), 4),
+                    round(float(val_metrics['TP']), 4),
+                    round(float(val_metrics['FP']), 4),
+                    round(float(val_metrics['TN']), 4),
+                    round(float(val_metrics['FN']), 4),
+                    round(float(val_metrics['Precision']), 4),
+                    round(float(val_metrics['Recall']), 4)
                 ])
 
            # utils.save_predictions_as_imgs(

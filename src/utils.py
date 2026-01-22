@@ -879,7 +879,6 @@ from torchvision.utils import make_grid
 import torchvision.utils as vutils
 
 
-@monitor()
 @torch.no_grad()
 def check_accuracy(loader, model, device="cpu", rank=0): 
     if rank != 0:
@@ -1106,3 +1105,76 @@ def build_swin_dataloaders(
     )
 
     return train_loader, valid_loader
+
+@monitor()
+@torch.no_grad()
+def evaluate(loader, model, loss_fn, device, rank, threshold=0.5):
+    model.eval()
+
+    epoch_loss = 0.0
+    num_correct = 0
+    num_pixels = 0
+    dice_score = 0.0
+
+    TP = FP = FN = TN = 0
+    steps = 0
+
+    for images, true_masks in loader:
+        images = images.to(device)
+        true_masks = true_masks.to(device) 
+
+        if true_masks.dim() == 4 and true_masks.shape[1] == 1:
+            true_masks = true_masks.squeeze(1) 
+
+        logits = model(images) 
+        loss = loss_fn(logits, true_masks)
+
+        # DDP loss
+        dist.all_reduce(loss, op=dist.ReduceOp.SUM)
+        loss /= dist.get_world_size()
+        epoch_loss += loss.item()
+
+        # Accuracy
+        pred_mask = torch.argmax(logits, dim=1)
+        num_correct += (pred_mask == true_masks).sum().item()
+        num_pixels += torch.numel(pred_mask)
+
+        # Probabilities
+        probs = torch.softmax(logits, dim=1)[:, 1]
+        preds = (probs > threshold).float()
+
+        # Confusion
+        TP += ((preds == 1) & (true_masks == 1)).sum().item()
+        FP += ((preds == 1) & (true_masks == 0)).sum().item()
+        FN += ((preds == 0) & (true_masks == 1)).sum().item()
+        TN += ((preds == 0) & (true_masks == 0)).sum().item()
+
+        # Dice
+        dice_score += dice_coeff(
+            preds.unsqueeze(1),
+            true_masks.unsqueeze(1),
+            reduce_batch_first=False
+        )
+        steps += 1
+    avg_loss = epoch_loss / len(loader)
+
+    if rank == 0:
+        total = TP + FP + FN + TN
+        acc = num_correct / num_pixels * 100 if num_pixels > 0 else 0
+        avg_dice = dice_score / len(loader)
+        precision = TP / (TP + FP + 1e-6)
+        recall    = TP / (TP + FN + 1e-6)
+
+        return {
+        "Loss": avg_loss,
+        "Accuracy": acc,
+        "Dice": avg_dice,
+        "TP": TP,
+        "FP": FP,
+        "FN": FN,
+        "TN": TN,
+        "Precision": precision,
+        "Recall": recall,
+    }
+
+    return None
