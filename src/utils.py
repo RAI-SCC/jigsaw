@@ -1120,9 +1120,9 @@ def evaluate(loader, model, loss_fn, device, rank, threshold=0.5):
     TP = FP = FN = TN = 0
     steps = 0
 
-    for images, true_masks in loader:
-        images = images.to(device)
-        true_masks = true_masks.to(device) 
+    for batch in loader:
+        images = batch[0].to(device)
+        true_masks = batch[1].to(device) 
 
         if true_masks.dim() == 4 and true_masks.shape[1] == 1:
             true_masks = true_masks.squeeze(1) 
@@ -1135,8 +1135,6 @@ def evaluate(loader, model, loss_fn, device, rank, threshold=0.5):
         # DDP loss
         dist.all_reduce(loss, op=dist.ReduceOp.SUM)
         loss /= dist.get_world_size()
-        epoch_loss += loss.item()
-
         running_loss += loss.item() * batch_size
         total_samples += batch_size
 
