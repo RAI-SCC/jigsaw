@@ -101,6 +101,12 @@ def main():
 
     with open(args.config_file, "r") as f:
         config = yaml.load(f, Loader=yaml.SafeLoader)
+
+    if rank == 0:
+        print("--------------------------------------------------")
+        print(f"DEBUG: Config path: {args.config_file}")
+        print(f"DEBUG: Epochs in config: {config['training']['epochs']}")
+        print("--------------------------------------------------")
     
     # Initialize distributed training
     device, localid, rank, world_size = utils.init_cuda()
