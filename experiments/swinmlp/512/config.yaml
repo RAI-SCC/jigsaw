@@ -44,7 +44,7 @@ training:
   lr_constant: false
   train_batch: 8
   valid_batch: 8
-  epochs: 20
+  epochs: 30
   identity: false
   grad_clip: 1
   save_dir: results_512

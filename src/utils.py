@@ -1111,7 +1111,8 @@ def build_swin_dataloaders(
 def evaluate(loader, model, loss_fn, device, rank, threshold=0.5):
     model.eval()
 
-    epoch_loss = 0.0
+    running_loss = 0.0
+    total_samples = 0
     num_correct = 0
     num_pixels = 0
     dice_score = 0.0
@@ -1129,10 +1130,15 @@ def evaluate(loader, model, loss_fn, device, rank, threshold=0.5):
         logits = model(images) 
         loss = loss_fn(logits, true_masks)
 
+        batch_size = images.size(0)
+
         # DDP loss
         dist.all_reduce(loss, op=dist.ReduceOp.SUM)
         loss /= dist.get_world_size()
         epoch_loss += loss.item()
+
+        running_loss += loss.item() * batch_size
+        total_samples += batch_size
 
         # Accuracy
         pred_mask = torch.argmax(logits, dim=1)
@@ -1156,7 +1162,7 @@ def evaluate(loader, model, loss_fn, device, rank, threshold=0.5):
             reduce_batch_first=False
         )
         steps += 1
-    avg_loss = epoch_loss / len(loader)
+    avg_loss = running_loss / total_samples
 
     if rank == 0:
         total = TP + FP + FN + TN

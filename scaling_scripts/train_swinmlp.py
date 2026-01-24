@@ -21,7 +21,8 @@ def train_one_epoch(
     rank
 ):
     model.train()
-    epoch_loss = 0.0
+    running_loss = 0.0
+    total_samples = 0
 
     # Set epoch for sampler if distributed, to shuffle data differently each epoch
     # This ensures that each process sees a different shuffled version of the dataset
@@ -46,12 +47,14 @@ def train_one_epoch(
         # Sum loss across all processes from all GPUs
         dist.all_reduce(loss, op=dist.ReduceOp.SUM)
         loss /= dist.get_world_size()
-        epoch_loss += loss.item()
+        current_batch_size = images.size(0)
+        running_loss += loss.item() * current_batch_size
+        total_samples += current_batch_size
 
         if rank == 0 and i % 10 == 0:
             print(f"Epoch [{epoch}][{i}/{len(loader)}] Loss: {loss.item():.4f}")
 
-    return epoch_loss / len(loader)
+    return running_loss / total_samples
 
 def val_one_epoch(
     config_dict, 
