@@ -57,12 +57,15 @@ class SwinMLPBlock(nn.Module):
         self.input_resolution = input_resolution
         self.window_size = window_size
         
+        if shift_size == 0:
+            self.shift_size = window_size // 2
+        else:
+            self.shift_size = shift_size
+        
         # Handle the case when the input resolution is smaller than the window size
         if min(self.input_resolution) <= self.window_size:
             self.shift_size = 0
             self.window_size = min(self.input_resolution)
-        else:
-            self.shift_size = shift_size
 
         # Calculate number of pixels in each window
         self.num_pixels_in_window = self.window_size ** 2
