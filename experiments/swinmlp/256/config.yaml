@@ -44,7 +44,7 @@ training:
   lr_constant: false
   train_batch: 8
   valid_batch: 8
-  epochs: 30
+  epochs: 15
   identity: false
   grad_clip: 1
   save_dir: results_256
@@ -60,3 +60,5 @@ SWIN_MLP:
   window_size: 4       
   patch_size: 4        
   architecture: "swin"
+  dropout: 0.001
+  mlp_ratio: 4.0
