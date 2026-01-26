@@ -51,7 +51,7 @@ class SwinMLPBlock(nn.Module):
     # shift_size: amount to shift the window
     # mlp_ratio: ratio of hidden dimension to input dimension in MLP
     def __init__(self, dim, input_resolution, window_size=4, shift_size=0, 
-                 mlp_ratio=4.0):
+                 mlp_ratio=4.0, dropout=0.0):
         super().__init__()
         self.dim = dim
         self.input_resolution = input_resolution
@@ -75,14 +75,14 @@ class SwinMLPBlock(nn.Module):
             channels_mlp_dim = dim,
             spatial_hidden_dim_fraction = 1.0,
             channels_hidden_dim_fraction = mlp_ratio,
-            dropout = 0.0
+            dropout = dropout
         )
         self.mixer_block2 = MixerBlockSequential(
             tokens_mlp_dim = self.num_pixels_in_window,
             channels_mlp_dim = dim,
             spatial_hidden_dim_fraction = 1.0,
             channels_hidden_dim_fraction = mlp_ratio,
-            dropout = 0.0
+            dropout = dropout
         )
 
     def forward(self, x):
@@ -118,7 +118,7 @@ class SwinMLPBlock(nn.Module):
         return x
     
 class SwinMLPEncoderLayer(nn.Module):
-    def __init__(self, in_channels, out_channels, input_resolution, window_size = 4, stride = 2):
+    def __init__(self, in_channels, out_channels, input_resolution, window_size = 4, stride = 2, dropout=0.0, mlp_ratio=4.0):
         super().__init__()
 
         self.downsample_conv = nn.Conv2d(
@@ -135,7 +135,7 @@ class SwinMLPEncoderLayer(nn.Module):
 
         self.current_resolution = [i // stride for i in input_resolution]
         
-        self.swinMlpBlock = SwinMLPBlock(out_channels, self.current_resolution, window_size)
+        self.swinMlpBlock = SwinMLPBlock(dim=out_channels, input_resolution=self.current_resolution, window_size=window_size, dropout=dropout, mlp_ratio=mlp_ratio)
 
         self.norm2 = nn.InstanceNorm2d(out_channels)
 
@@ -152,7 +152,7 @@ class SwinMLPEncoderLayer(nn.Module):
         return x
      
 class SwinMLPDecoderLayer(nn.Module):
-    def __init__(self, in_channels, out_channels, input_resolution, window_size = 4, stride = 2):
+    def __init__(self, in_channels, out_channels, input_resolution, window_size = 4, stride = 2, dropout=0.0, mlp_ratio=4.0):
         super().__init__()
 
         self.upsample_conv = nn.ConvTranspose2d(
@@ -175,7 +175,7 @@ class SwinMLPDecoderLayer(nn.Module):
 
         self.current_resolution = [i * stride for i in input_resolution]
         
-        self.swinMlpBlock = SwinMLPBlock(out_channels, self.current_resolution, window_size)
+        self.swinMlpBlock = SwinMLPBlock(dim=out_channels, input_resolution=self.current_resolution, window_size=window_size, dropout=dropout, mlp_ratio=mlp_ratio)
 
         self.norm2 = nn.InstanceNorm2d(out_channels)
 

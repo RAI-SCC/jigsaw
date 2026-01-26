@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 import torchvision.transforms as T
 import yaml
+import json
 
 IMAGE_DIR = 'data/images/images/' 
 MASK_DIR = 'data/masks/masks/'
@@ -37,6 +38,18 @@ val_split_end = int(num_total * 0.8)
 train_ids = set(patient_ids[:train_split_end])
 val_ids = set(patient_ids[train_split_end:val_split_end])
 test_ids = set(patient_ids[val_split_end:])
+
+split_info = {
+    "seed": 42,
+    "train_ids": sorted(list(train_ids)),
+    "val_ids": sorted(list(val_ids)),
+    "test_ids": sorted(list(test_ids))
+}
+
+info_file_path = os.path.join(OUTPUT_DIR, str(H),"split_info.json")
+with open(info_file_path, "w") as f:
+    json.dump(split_info, f, indent=4)
+
 
 print(f'Total: {num_total} | Train: {len(train_ids)} | Val: {len(val_ids)} | Test: {len(test_ids)}')
 

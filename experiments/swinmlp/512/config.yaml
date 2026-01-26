@@ -60,3 +60,5 @@ SWIN_MLP:
   window_size: 4       
   patch_size: 4        
   architecture: "swin"
+  dropout: 0.001
+  mlp_ratio: 4.0

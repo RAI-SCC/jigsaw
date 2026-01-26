@@ -1060,7 +1060,9 @@ def build_swin_model(
         channels_in=data_cfg["in_channels"],
         input_resolution=resolution,
         classes=data_cfg["num_classes"],
-        window_size=swin_cfg["window_size"]
+        window_size=swin_cfg["window_size"],
+        dropout=swin_cfg["dropout"],
+        mlp_ratio=swin_cfg["mlp_ratio"],
     ).to(device)
 
     model = DDP(
@@ -1111,7 +1113,9 @@ def build_swin_dataloaders(
 def evaluate(loader, model, loss_fn, device, rank, threshold=0.5):
     model.eval()
 
+    loss_fn_all = TopKDiceLoss(k=100)
     running_loss = 0.0
+    running_loss_all = 0.0
     total_samples = 0
     num_correct = 0
     num_pixels = 0
@@ -1129,6 +1133,7 @@ def evaluate(loader, model, loss_fn, device, rank, threshold=0.5):
 
         logits = model(images) 
         loss = loss_fn(logits, true_masks)
+        loss_all = loss_fn_all(logits, true_masks)
 
         batch_size = images.size(0)
 
@@ -1136,6 +1141,11 @@ def evaluate(loader, model, loss_fn, device, rank, threshold=0.5):
         dist.all_reduce(loss, op=dist.ReduceOp.SUM)
         loss /= dist.get_world_size()
         running_loss += loss.item() * batch_size
+
+        dist.all_reduce(loss_all, op=dist.ReduceOp.SUM)     
+        loss_all /= dist.get_world_size()                   
+        running_loss_all += loss_all.item() * batch_size
+
         total_samples += batch_size
 
         # Accuracy
@@ -1161,6 +1171,7 @@ def evaluate(loader, model, loss_fn, device, rank, threshold=0.5):
         )
         steps += 1
     avg_loss = running_loss / total_samples
+    avg_loss_all = running_loss_all / total_samples
 
     if rank == 0:
         total = TP + FP + FN + TN
@@ -1171,6 +1182,7 @@ def evaluate(loader, model, loss_fn, device, rank, threshold=0.5):
 
         return {
         "Loss": avg_loss,
+        "Loss_All": avg_loss_all,
         "Accuracy": acc,
         "Dice": avg_dice,
         "TP": TP,

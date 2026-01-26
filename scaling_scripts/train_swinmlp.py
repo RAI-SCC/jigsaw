@@ -152,6 +152,7 @@ def main():
                     'Num_Val_Samples',
                     'Train_Loss', 
                     'Val_Loss',
+                    'Val_Loss_All',
                     'Train_Dice',
                     'Val_Dice', 
                     'Duration_Sec',
@@ -199,6 +200,7 @@ def main():
             train_dice = train_metrics["Dice"]
             val_loss = val_metrics["Loss"]
             val_dice = val_metrics["Dice"]
+            val_loss_all = val_metrics["Loss_All"]
 
             print(f"Epoch {epoch} | Train Loss: {train_loss:.4f} | Dice Score: {train_dice:.4f} | LR: {current_lr:.1e} | Time: {(time.time()-start_time)/60:.1f} min")
             
@@ -217,6 +219,7 @@ def main():
                     round(float(val_loss), 4),
                     round(float(train_dice), 4),
                     round(float(val_dice), 4), 
+                    round(float(val_loss_all), 4),
                     round(duration, 2),
                     round(float(train_metrics['TP']), 4),
                     round(float(train_metrics['FP']), 4),

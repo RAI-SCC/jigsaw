@@ -1044,7 +1044,7 @@ from perun import monitor
  """
 
 class ModelSwinMLP(torch.nn.Module):
-    def __init__(self, channels_in, input_resolution = (512,512), classes=2, window_size =4):
+    def __init__(self, channels_in, input_resolution = (512,512), classes=2, window_size =4, dropout=0.0, mlp_ratio=4.0):
         super().__init__()
 
         self.input_resolution = input_resolution
@@ -1066,46 +1066,68 @@ class ModelSwinMLP(torch.nn.Module):
 
         self.down1 = SwinMLPEncoderLayer(in_channels=32, out_channels=64, 
                                          input_resolution=current_res, 
-                                         window_size=window_size)
+                                         window_size=window_size,
+                                         dropout=dropout,
+                                         mlp_ratio=mlp_ratio
+                                         )
         
         current_res = [current_res[0] // 2, current_res[1] // 2]
 
         self.down2 = SwinMLPEncoderLayer(in_channels=64, out_channels=128, 
                                          input_resolution=current_res, 
-                                         window_size=2 * window_size)
+                                         window_size=2 * window_size,
+                                         dropout=dropout,
+                                         mlp_ratio=mlp_ratio
+                                         )
         
         current_res = [current_res[0] // 2, current_res[1] // 2] 
 
         self.down3 = SwinMLPEncoderLayer(in_channels=128, out_channels=256, 
                                          input_resolution=current_res, 
-                                         window_size=window_size)
+                                         window_size=window_size,
+                                         dropout=dropout,
+                                         mlp_ratio=mlp_ratio
+                                         )
         
         current_res = [current_res[0] // 2, current_res[1] // 2]
        
         self.down4 = SwinMLPEncoderLayer(in_channels=256, out_channels=512, 
                                          input_resolution=current_res, 
-                                         window_size=window_size)
+                                         window_size=window_size,
+                                         dropout=dropout,
+                                         mlp_ratio=mlp_ratio
+                                         )
         
         bottleneck_res = [current_res[0] // 2, current_res[1] // 2]
 
         self.up1 = SwinMLPDecoderLayer(in_channels=512, out_channels=256, 
                                        input_resolution=bottleneck_res, 
-                                       window_size=window_size)
-        current_res = [current_res[0] * 2, current_res[1] * 2]
+                                       window_size=window_size,
+                                       dropout=dropout,
+                                       mlp_ratio=mlp_ratio
+                                       )
+        current_res = [bottleneck_res[0] * 2, bottleneck_res[1] * 2]
 
         self.up2 = SwinMLPDecoderLayer(in_channels=256, out_channels=128, 
-                                       input_resolution=bottleneck_res, 
-                                       window_size=window_size)
+                                       input_resolution=current_res, 
+                                       window_size=window_size,
+                                       dropout=dropout,
+                                       mlp_ratio=mlp_ratio
+                                    )
         current_res = [current_res[0] * 2, current_res[1] * 2]
 
         self.up3 = SwinMLPDecoderLayer(in_channels=128, out_channels=64, 
-                                       input_resolution=bottleneck_res, 
-                                       window_size=window_size)
+                                       input_resolution=current_res, 
+                                       window_size=window_size,
+                                       dropout=dropout,
+                                       mlp_ratio=mlp_ratio)
         current_res = [current_res[0] * 2, current_res[1] * 2]
 
         self.up4 = SwinMLPDecoderLayer(in_channels=64, out_channels=32, 
-                                       input_resolution=bottleneck_res, 
-                                       window_size=window_size)
+                                       input_resolution=current_res, 
+                                       window_size=window_size,
+                                       dropout=dropout,
+                                       mlp_ratio=mlp_ratio)
         current_res = [current_res[0] * 2, current_res[1] * 2]
 
         self.final_upsample = nn.ConvTranspose2d(
