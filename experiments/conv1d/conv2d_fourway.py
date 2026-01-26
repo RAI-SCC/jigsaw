@@ -7,9 +7,9 @@ from Jigsaw import utils
 
 device, _, rank, _ = utils.init_cuda()
 batch = 1
-in_channels, out_channels = 88, 364  # global
+in_channels, out_channels = 364, 88  # global
 H, W = 721, 720  # local
-kernel_size = (4, 4)  # global kernel size
+kernel_size = (2, 2)  # global kernel size
 stride = (2, 2)
 padding, dilation = (0, 0), (1, 1)
 groups = 1
