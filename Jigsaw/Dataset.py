@@ -601,7 +601,7 @@ class ERA5DatasetDistributed(Dataset):
                 target_surface[i] = (target_surface[i] - self.s_mean) / self.s_std
 
                 temp = np.concatenate([target_surface[i], temp], axis=0)
-                target.append(torch.tensor(temp).permute(1, 2, 0))
+                target.append(torch.tensor(temp))
         else:
             input = (
                 input_pressure[
@@ -644,10 +644,10 @@ class ERA5DatasetDistributed(Dataset):
                 target.append(
                     torch.nn.functional.pad(
                         torch.tensor(temp), (0, 0, 0, 0, 0, 3)
-                    ).permute(1, 2, 0)
+                    )
                 )
 
-        input = torch.tensor(input).permute(1, 2, 0)
+        input = torch.tensor(input)
 
         return input, target
 
@@ -1249,7 +1249,7 @@ class ERAJigsaw(Dataset):
 
     def _get_spatial_ranges(self):
         match self.parallelism:
-            case 2:
+            case 1 | 2:
                 self.start, self.end = 0, self.xlon
             case 4:
                 if self.rank % 4 in [0, 1]:
@@ -1537,57 +1537,8 @@ class ERAJigsaw(Dataset):
         n_masks = self.constant_mask_data.shape[-1]
         return n_surface + n_pressure + n_masks
 
-    def __getitem__(self, global_idx):
-        """
-        Return single input, target.
-
-        global_idx: int
-                global index of item
-        """
-        target_surface = []
-        step = self.dt
-        # if forecast_length = 3, target_file_idx = global_idx + range(1, forecast_length+1)*step // 6
-        target_file_idxs = (
-            global_idx
-            + torch.arange(1, self.forecast_length + 1)
-            * step
-            // self.config["data"]["target_subsampling"]
-        )
-
-        input_pressure_ds = (
-            self.zarr_in.isel(time=global_idx)
-            .sel(level=self.config["data"]["in_pressure_levels"])
-            .isel(latitude=range(0, self.xlat), longitude=range(self.start, self.end))
-            .to_array("pressure_variables")
-            .stack(vl=("pressure_variables", "level"))
-            .transpose("latitude", "longitude", "vl")
-        )
-
-        input_surface_ds = (
-            self.zarr_in_surface.isel(time=global_idx)
-            .isel(latitude=range(0, self.xlat), longitude=range(self.start, self.end))
-            .to_array("surface_variables")
-            .transpose("latitude", "longitude", "surface_variables")
-        )
-
-        target_pressure_ds = (
-            self.zarr_out.isel(time=target_file_idxs)
-            .sel(level=self.config["data"]["out_pressure_levels"])
-            .isel(latitude=range(0, self.xlat), longitude=range(self.start, self.end))
-            .to_array("pressure_variables")
-            .stack(vl=("pressure_variables", "level"))
-            .transpose("time", "latitude", "longitude", "vl")
-        )
-
-        target_surface_ds = (
-            self.zarr_out_surface.isel(time=target_file_idxs)
-            .isel(latitude=range(0, self.xlat), longitude=range(self.start, self.end))
-            .to_array("surface_variables")
-            .transpose("time", "latitude", "longitude", "surface_variables")
-        )
-
-        target = []
-
+    def _getitem_distributed(self, input_surface_ds, input_pressure_ds, target_surface_ds, target_pressure_ds):
+        
         if self.rank % 2 == 0:  # first half of data
             # Input data
             input_surface = input_surface_ds.values
@@ -1614,7 +1565,82 @@ class ERAJigsaw(Dataset):
             target = (target - self.out_means) / self.out_stds
             target = torch.nn.functional.pad(torch.tensor(target), (0, self.constant_mask_data.shape[-1]))
             
-        input = torch.tensor(input)        
+        input = torch.tensor(input)
+        return input, target
+    
+    def _getitem_nondistributed(self, input_surface_ds, input_pressure_ds, target_surface_ds, target_pressure_ds):
+        target = []
+
+        # Input data
+        input_surface = input_surface_ds.values
+        input_pressure = input_pressure_ds.values
+            
+        input = np.concatenate([input_surface, input_pressure], axis=-1)
+        input = (input - self.in_means) / self.in_stds
+        
+        # Target data
+        target_surface = target_surface_ds.values
+        target_pressure = target_pressure_ds.values
+
+        target = np.concatenate([target_surface, target_pressure], axis=-1)
+        target = (target - self.out_means) / self.out_stds
+        target = torch.tensor(target)
+        
+        input = torch.tensor(input)
+        return input, target
+    
+    def __getitem__(self, global_idx):
+        """
+        Return single input, target.
+
+        global_idx: int
+                global index of item
+        """
+        step = self.dt
+        # if forecast_length = 3, target_file_idx = global_idx + range(1, forecast_length+1)*step // 6
+        target_file_idxs = (
+            global_idx
+            + torch.arange(1, self.forecast_length + 1)
+            * step
+            // self.config["data"]["target_subsampling"]
+        )
+
+        input_surface_ds = (
+            self.zarr_in_surface.isel(time=global_idx)
+            .isel(latitude=range(0, self.xlat), longitude=range(self.start, self.end))
+            .to_array("surface_variables")
+            .transpose("latitude", "longitude", "surface_variables")
+        )
+        
+        input_pressure_ds = (
+            self.zarr_in.isel(time=global_idx)
+            .sel(level=self.config["data"]["in_pressure_levels"])
+            .isel(latitude=range(0, self.xlat), longitude=range(self.start, self.end))
+            .to_array("pressure_variables")
+            .stack(vl=("pressure_variables", "level"))
+            .transpose("latitude", "longitude", "vl")
+        )
+
+        target_surface_ds = (
+            self.zarr_out_surface.isel(time=target_file_idxs)
+            .isel(latitude=range(0, self.xlat), longitude=range(self.start, self.end))
+            .to_array("surface_variables")
+            .transpose("time", "latitude", "longitude", "surface_variables")
+        )
+        
+        target_pressure_ds = (
+            self.zarr_out.isel(time=target_file_idxs)
+            .sel(level=self.config["data"]["out_pressure_levels"])
+            .isel(latitude=range(0, self.xlat), longitude=range(self.start, self.end))
+            .to_array("pressure_variables")
+            .stack(vl=("pressure_variables", "level"))
+            .transpose("time", "latitude", "longitude", "vl")
+        )
+
+        if self.parallelism > 1:
+            input, target = self._getitem_distributed(input_surface_ds, input_pressure_ds, target_surface_ds, target_pressure_ds)
+        else: # non distributed
+            input, target = self._getitem_nondistributed(input_surface_ds, input_pressure_ds, target_surface_ds, target_pressure_ds)
         return input.to(torch.float32), target.to(torch.float32)
 
 class DummyHighResDataset(Dataset):

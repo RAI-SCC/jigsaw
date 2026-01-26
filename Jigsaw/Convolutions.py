@@ -1804,7 +1804,7 @@ class Conv2d(torch.autograd.Function):
             channel_group=channel_group,
             empty=ctx.empty,
         )
-        print(f"Rank!!! {rank}, y result!! {y}")
+        # print(f"Rank!!! {rank}, y result!! {y}")
         ctx.right_to_left, ctx.left_to_right = right_to_left, left_to_right
 
         x_aug = torch.cat(
@@ -1954,7 +1954,7 @@ class Conv2d(torch.autograd.Function):
         g_w_handle.wait()
         # if local_rank in [0, 1]:
         #     print(f'local rank {local_rank}, gw {g_w}')
-        print(f"Rank {local_rank} and gw is {g_x}")
+        
         return (
             g_x,
             g_w,
@@ -2002,6 +2002,10 @@ class DistributedConvTranspose2D_complete(torch.nn.Module):
             kernel_size = (kernel_size, kernel_size)
         if isinstance(stride, int):
             stride = (stride, stride)
+        if isinstance(padding, int):
+            padding = (padding, padding)
+        if isinstance(dilation, int):
+            dilation = (dilation, dilation)
         assert in_channels % 2 == 0, (
             "number of input channels is not divisible by 2"
         )
@@ -2254,7 +2258,7 @@ class ConvTranspose2d_complete(torch.autograd.Function):
         
         
         g_w_handle.wait()
-        print(f'Local rank {local_rank}, gx {g_x}')
+        # print(f'Local rank {local_rank}, gx {g_x}')
         return (
             g_x,
             g_w,

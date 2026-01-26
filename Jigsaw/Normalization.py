@@ -86,9 +86,11 @@ class _DistributedSoftmax(torch.autograd.Function):
     def forward(x, dim, group):
         """Overloaded Autograd function for distributed SoftMax."""
         # local exponentials
-
         # -x.amax(dim=dim, keepdim=True)) # softmax fails with norm if only 1 variable
-        y = torch.exp(x)
+        local_max = x.amax(dim=-1, keepdim=True)
+        dist.all_reduce(local_max, op=dist.ReduceOp.MAX, group=group)
+        
+        y = torch.exp(x - local_max)
 
         local_sum = y.sum(dim=dim, keepdim=True)
         # global sum
@@ -98,6 +100,7 @@ class _DistributedSoftmax(torch.autograd.Function):
 
         # final softmax
         out = y / global_sum
+        # print(f'My device {x.device}, out {out}')
         return out
 
     @staticmethod
@@ -126,7 +129,10 @@ class _DistributedSoftmax(torch.autograd.Function):
         global_grad_sum = local_sum.clone()
         dist.all_reduce(global_grad_sum, op=dist.ReduceOp.SUM, group=group)
 
-        grad_x = local_grad - out * global_grad_sum
+        
+        grad_x = out * (grad_out - global_grad_sum)
+        
+        # print(f'device {grad_out.device} grad x {grad_x.sum()}')
         return grad_x, None, None
 
     @staticmethod

@@ -265,6 +265,8 @@ class PatchEmbedding1D(torch.nn.Module):
 
         """
         # Input should be padded already, according to the patch size
+        input = input.permute(0, 3, 1, 2)
+        
         input_shape = input.shape
 
         # Apply a linear projection for patch_size[1]*patch_size[2] patches

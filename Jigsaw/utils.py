@@ -234,7 +234,8 @@ def setup_comm_groups(rank: int, parallelism: int):
         case 4:
             groups = setup_groups(rank, parallelism, 2, 2)
     return groups
-    
+
+
 def setup_groups(rank: int, parallelism: int, nrows: int, ncols: int):
     """Return communication groups."""
     model_group = get_model_group(rank, parallelism)
@@ -267,7 +268,6 @@ def build_megatron_model(
         if ("blocks" not in name) or "layer_norm" in name:
             dist.all_reduce(param.data, op=dist.ReduceOp.AVG)
 
-    
     model = DDP(
         model, device_ids=[localid], output_device=localid, process_group=ddp_group
     )
@@ -305,7 +305,9 @@ def build_model(
             for name, param in model.named_parameters():
                 if param is not None:
                     if "bias" in name:
-                        dist.all_reduce(param.data, op=dist.ReduceOp.AVG, group=col_group)
+                        dist.all_reduce(
+                            param.data, op=dist.ReduceOp.AVG, group=col_group
+                        )
         case 8:
             model = Model.Model_eightway(
                 config_dict, rank, device, parallelism, model_group, col_group
@@ -313,7 +315,9 @@ def build_model(
             for name, param in model.named_parameters():
                 if param is not None:
                     if "bias" in name:
-                        dist.all_reduce(param.data, op=dist.ReduceOp.AVG, group=col_group)
+                        dist.all_reduce(
+                            param.data, op=dist.ReduceOp.AVG, group=col_group
+                        )
 
     model = DDP(
         model, device_ids=[localid], output_device=localid, process_group=ddp_group
@@ -489,7 +493,7 @@ def build_dataloaders(
     train_subset = -1 if train_subset < 0 else train_subset
     valid_subset = -1 if valid_subset < 0 else valid_subset
 
-    train_dataloader = Dataloaders.get_dataloader(
+    train_dataloader, dataset_train_info = Dataloaders.get_dataloader(
         config_dict,
         config_dict["data"]["train_data_path"],
         mode="train",
@@ -498,7 +502,7 @@ def build_dataloaders(
         subset_size=train_subset,
         rank=rank,
     )
-    valid_dataloader = Dataloaders.get_dataloader(
+    valid_dataloader, dataset_valid_info = Dataloaders.get_dataloader(
         config_dict,
         config_dict["data"]["valid_data_path"],
         mode="validation",
@@ -507,7 +511,8 @@ def build_dataloaders(
         subset_size=valid_subset,
         rank=rank,
     )
-    return train_dataloader, valid_dataloader
+
+    return train_dataloader, dataset_train_info, valid_dataloader, dataset_valid_info
 
 
 def get_weights(
