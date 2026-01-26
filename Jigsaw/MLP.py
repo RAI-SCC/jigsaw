@@ -250,6 +250,103 @@ class DistributedSynchronizedMLP(torch.nn.Module):
         return x
 
 
+class DistributedSynchronizedMLP(torch.nn.Module):
+    """Distributed MLP across n processes."""
+    def __init__(
+        self,
+        in_dim: int,
+        hidden_dim: int,
+        out_dim: int,
+        rank: int,
+        device: torch.device,
+        n_parallel: int,
+        model_group: torch.distributed.ProcessGroup,
+        sync_group: torch.distributed.ProcessGroup,
+        bias: bool = True,
+        dropout: float = 1e-3,
+    ):
+        super().__init__()
+        self.rank = rank
+        self.device = device
+        self.n_parallel = n_parallel
+        self.model_group = model_group
+
+        if n_parallel == 2:
+            # in, hidden, out dim are global sizes for two-way model parallelism
+            # required to maintain partitioning across final dimension
+            self.linear1 = Linear.DistributedXWTSync(
+                in_dim // 2,
+                hidden_dim,
+                rank,
+                device,
+                n_parallel,
+                model_group,
+                sync_group,
+                bias=bias,
+                init_method="linear",
+            )
+            self.linear2 = Linear.DistributedXWTSync(
+                hidden_dim // 2,
+                out_dim,
+                rank,
+                device,
+                n_parallel,
+                model_group,
+                sync_group,
+                bias=bias,
+                init_method="linear",
+            )
+        
+        # TODO: Is it necessary to re-initialize the values here?
+        init.uniform_(
+            self.linear1.weights, a=-1.0 / math.sqrt(in_dim), b=1.0 / math.sqrt(in_dim)
+        )
+        init.uniform_(
+            self.linear2.weights,
+            a=-1.0 / math.sqrt(hidden_dim),
+            b=1.0 / math.sqrt(hidden_dim),
+        )
+        if self.linear1.bias is not None:
+            init.uniform_(
+                self.linear1.bias, a=-1.0 / math.sqrt(in_dim), b=1.0 / math.sqrt(in_dim)
+            )
+        if self.linear2.bias is not None:
+            init.uniform_(
+                self.linear2.bias,
+                a=-1.0 / math.sqrt(hidden_dim),
+                b=1.0 / math.sqrt(hidden_dim),
+            )
+        self.activation = GELU()
+        self.drop = Dropout(p=dropout)
+        self.drop2 = Dropout(p=dropout)
+        self.rank = rank
+        
+        # self.average_gradients = Linear.AverageGradients(sync_group)
+
+    def forward(self, x):
+        """
+        Forward pass of MLP distributed across two or four processes.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input tensor of shape (B, x_in, in_dim).
+        model_group : torch.distributed.ProcessGroup, optional
+            Process group for an individual model-parallel instance.
+        """
+
+        x = self.linear1(x)
+        # x = self.average_gradients(x)
+        x = self.activation(x)
+        # x = self.average_gradients(x)
+        x = self.drop(x)
+        x = self.linear2(x)
+        # x = self.average_gradients(x)
+        x = self.drop2(x)
+        
+        return x
+
+
 class DistributedXTWMLP(torch.nn.Module):
     """Distributed MLP layer where inputs are transposed."""
 

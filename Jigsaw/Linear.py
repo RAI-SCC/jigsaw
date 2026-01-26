@@ -1218,7 +1218,7 @@ class XT(torch.autograd.Function):
         device = ctx.device
         parallelism = ctx.parallelism
         model_group = ctx.model_group
-
+        
         grad_output = select_x_transpose_kernel(parallelism)(
             grad_output, rank, device, model_group
         )

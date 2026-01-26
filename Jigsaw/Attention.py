@@ -18,7 +18,7 @@ class DistributedAttention(torch.nn.Module):
         n_parallel: int,
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
-        channel_group: dist.ProcessGroup,
+        channel_group: dist.ProcessGroup
     ):
         """
 
@@ -402,6 +402,7 @@ class DistributedTransformer(torch.nn.Module):
         x = self.attention_block(x)
         x = self.layer_norm(x)
         x = self.MLP(x)
+        x = self.average_gradients(x)
         return x
 
 
