@@ -583,7 +583,7 @@ def build_loss_fn(config_dict):
     loss_type = config_dict["training"]["loss"]
     match loss_type:
         case "TopK_Dice":
-            loss_fn = TopKDiceLoss(k=10)
+            loss_fn = TopKDiceLoss(k=20, smooth=1e-5)
         case "L1":
             loss_fn = torch.nn.L1Loss()
         case "L2":

@@ -5,6 +5,7 @@ import torch
 import os
 import csv
 import torch.distributed as dist
+from torch.optim.lr_scheduler import OneCycleLR
 import torch.optim as optim
 import utils 
 from perun import monitor
@@ -16,6 +17,7 @@ def train_one_epoch(
     model, 
     loader, 
     optimizer, 
+    sheduler,
     loss_fn, 
     device, 
     rank
@@ -43,6 +45,7 @@ def train_one_epoch(
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
+        sheduler.step()
 
         # Sum loss across all processes from all GPUs
         dist.all_reduce(loss, op=dist.ReduceOp.SUM)
@@ -121,10 +124,22 @@ def main():
     optimizer = optim.AdamW(
         model.parameters(),
         lr=config["training"]["lr"],
-        weight_decay=1e-4
+        weight_decay=1e-4,
+        betas = (0.9, 0.999)
     )
     
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=2)
+    #scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=2)
+    total_steps = len(train_loader) * num_epochs
+
+    scheduler = OneCycleLR(
+        optimizer,
+        max_lr=config["training"]["lr"], 
+        total_steps=total_steps,
+        pct_start=0.1,
+        anneal_strategy='cos',
+        div_factor=25.0,  
+        final_div_factor=1000.0
+    )
     loss_fn = utils.build_loss_fn(config) #Use TopKDiceLoss
 
     train_loader, val_loader = utils.build_swin_dataloaders(config, model_parallel=False, rank=rank)
@@ -138,7 +153,7 @@ def main():
 
     if rank == 0:
         os.makedirs(save_dir, exist_ok=True)
-        log_file = f"log_{config['data']['image_height']}_{num_epochs}.csv"
+        log_file = f"log_{config['data']['image_height']}_{num_epochs}_{learn_rate}.csv"
         log_path = os.path.join(save_dir, log_file)
         if not os.path.isfile(log_path):
             with open(log_path, mode='w', newline='') as f:
@@ -174,7 +189,7 @@ def main():
         start_time = time.time()
 
         train_loss = train_one_epoch(
-            config, epoch, model, train_loader, optimizer, loss_fn, device, rank
+            config, epoch, model, train_loader, optimizer, scheduler, loss_fn, device, rank
         )
         # wait for all processes to finish epoch before validating
         dist.barrier() 
@@ -188,7 +203,7 @@ def main():
 
         dice_tensor = torch.tensor(current_val_dice).to(device)
         dist.broadcast(dice_tensor, src=0)
-        scheduler.step(dice_tensor.item())
+        #scheduler.step(dice_tensor.item())
 
         end_time = time.time()
         duration = end_time - start_time
