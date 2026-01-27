@@ -109,21 +109,22 @@ def main():
     device, localid, rank, world_size = utils.init_cuda()
 
     if rank == 0:
-        print("--------------------------------------------------")
-        print(f"DEBUG: Config path: {args.config_file}")
-        print(f"DEBUG: Epochs in config: {config['training']['epochs']}")
-        print("--------------------------------------------------")
-
-    if rank == 0:
         print(f"Starting Training with Config: {args.config_file}")
 
     # Create DDP group
     ddp_group = dist.group.WORLD # all GPUs are in the same group
     model = utils.build_swin_model(config, device, localid, rank, ddp_group)
+    train_loader, val_loader = utils.build_swin_dataloaders(config, model_parallel=False, rank=rank)
+    num_epochs = config["training"]["epochs"]
+    num_samples = len(train_loader.dataset)
+    num_samples_val = len(val_loader.dataset)
+    batch_size = config["training"]["train_batch"]
+    learn_rate = config["training"]["lr"]
+    save_dir = config["training"]["save_dir"]
 
     optimizer = optim.AdamW(
         model.parameters(),
-        lr=config["training"]["lr"],
+        lr= learn_rate,
         weight_decay=1e-4,
         betas = (0.9, 0.999)
     )
@@ -133,7 +134,7 @@ def main():
 
     scheduler = OneCycleLR(
         optimizer,
-        max_lr=config["training"]["lr"], 
+        max_lr=learn_rate, 
         total_steps=total_steps,
         pct_start=0.1,
         anneal_strategy='cos',
@@ -141,15 +142,6 @@ def main():
         final_div_factor=1000.0
     )
     loss_fn = utils.build_loss_fn(config) #Use TopKDiceLoss
-
-    train_loader, val_loader = utils.build_swin_dataloaders(config, model_parallel=False, rank=rank)
-
-    num_epochs = config["training"]["epochs"]
-    num_samples = len(train_loader.dataset)
-    num_samples_val = len(val_loader.dataset)
-    batch_size = config["training"]["train_batch"]
-    learn_rate = config["training"]["lr"]
-    save_dir = config["training"]["save_dir"]
 
     if rank == 0:
         os.makedirs(save_dir, exist_ok=True)
