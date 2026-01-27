@@ -1131,31 +1131,24 @@ def evaluate(loader, model, loss_fn, device, rank, threshold=0.5):
         if true_masks.dim() == 4 and true_masks.shape[1] == 1:
             true_masks = true_masks.squeeze(1) 
 
+        true_masks = (true_masks > 0.5).float()
         logits = model(images) 
+
         loss = loss_fn(logits, true_masks)
         loss_all = loss_fn_all(logits, true_masks)
 
         batch_size = images.size(0)
-
-        # DDP loss
-        dist.all_reduce(loss, op=dist.ReduceOp.SUM)
-        loss /= dist.get_world_size()
-        running_loss += loss.item() * batch_size
-
-        dist.all_reduce(loss_all, op=dist.ReduceOp.SUM)     
-        loss_all /= dist.get_world_size()                   
+        running_loss += loss.item() * batch_size                 
         running_loss_all += loss_all.item() * batch_size
-
         total_samples += batch_size
-
-        # Accuracy
-        pred_mask = torch.argmax(logits, dim=1)
-        num_correct += (pred_mask == true_masks).sum().item()
-        num_pixels += torch.numel(pred_mask)
 
         # Probabilities
         probs = torch.softmax(logits, dim=1)[:, 1]
         preds = (probs > threshold).float()
+
+        # Accuracy
+        num_correct += (preds == true_masks).sum().item()
+        num_pixels += torch.numel(preds)
 
         # Confusion
         TP += ((preds == 1) & (true_masks == 1)).sum().item()
@@ -1164,23 +1157,22 @@ def evaluate(loader, model, loss_fn, device, rank, threshold=0.5):
         TN += ((preds == 0) & (true_masks == 0)).sum().item()
 
         # Dice
-        dice_score += dice_coeff(
+        batch_dice = dice_coeff(
             preds.unsqueeze(1),
             true_masks.unsqueeze(1),
             reduce_batch_first=False
         )
-        steps += 1
+        dice_score += batch_dice.item() * batch_size
+        
     avg_loss = running_loss / total_samples
     avg_loss_all = running_loss_all / total_samples
 
-    if rank == 0:
-        total = TP + FP + FN + TN
-        acc = num_correct / num_pixels * 100 if num_pixels > 0 else 0
-        avg_dice = dice_score / len(loader)
-        precision = TP / (TP + FP + 1e-6)
-        recall    = TP / (TP + FN + 1e-6)
+    acc = num_correct / num_pixels * 100 if num_pixels > 0 else 0
+    avg_dice = dice_score / total_samples
+    precision = TP / (TP + FP + 1e-6)
+    recall    = TP / (TP + FN + 1e-6)
 
-        return {
+    return {
         "Loss": avg_loss,
         "Loss_All": avg_loss_all,
         "Accuracy": acc,
@@ -1192,5 +1184,3 @@ def evaluate(loader, model, loss_fn, device, rank, threshold=0.5):
         "Precision": precision,
         "Recall": recall,
     }
-
-    return None
