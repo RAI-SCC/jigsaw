@@ -303,8 +303,10 @@ def distributed_conv2d_over_channels(
     channel_group: dist.ProcessGroup,
 ):
     x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
-    # print(f'Rank {local_rank}, x shape {x.shape}, w shape {w.shape}, in channels global {in_channels_global}')
-
+    if len(x.shape) == 5: # TODO: is there a better way to flag "if sampling for UQ is required"?
+        conv_func = torch.vmap(F.conv2d)
+    else:
+        conv_func = F.conv2d
     match local_rank:
         case 0 | 2:
             x_handle = dist.all_to_all(
@@ -313,7 +315,7 @@ def distributed_conv2d_over_channels(
                 group=channel_group,
                 async_op=True,
             )
-            y = F.conv2d(
+            y = conv_func(
                 x,
                 w[..., : in_channels_global // 2, :, :],
                 stride=stride,
@@ -321,15 +323,13 @@ def distributed_conv2d_over_channels(
                 dilation=dilation,
             )
             x_handle.wait()
-            # print(f'Rank! {local_rank} received {x_buffer}')
-            y = y + F.conv2d(
-                x_buffer,
+            y = y + conv_func(
+                x_buffer, # (sampling, batch, in_channels, x, y)
                 w[..., in_channels_global // 2 :, :, :],
                 stride=stride,
                 padding=padding,
                 dilation=dilation,
             )
-            # print(f'rank {local_rank}, but y has value {y} and shape {y.shape}')
             return y, x, x_buffer
         case 1 | 3:
             x_handle = dist.all_to_all(
@@ -338,7 +338,7 @@ def distributed_conv2d_over_channels(
                 group=channel_group,
                 async_op=True,
             )
-            y = F.conv2d(
+            y = conv_func(
                 x,
                 w[..., in_channels_global // 2 :, :, :],
                 stride=stride,
@@ -346,15 +346,15 @@ def distributed_conv2d_over_channels(
                 dilation=dilation,
             )
             x_handle.wait()
-            # print(f'Rank! {local_rank} received {x_buffer}')
-            y = y + F.conv2d(
+            
+            y = y + conv_func(
                 x_buffer,
                 w[..., : in_channels_global // 2, :, :],
                 stride=stride,
                 padding=padding,
                 dilation=dilation,
             )
-            # print(f'rank {local_rank}, but y has value {y} and shape {y.shape}')
+            
             return y, x_buffer, x
 
 
@@ -433,8 +433,6 @@ def conv1d_twoway(
 ) -> torch.tensor:
     """Distributed 1d convolution"""
     # x shape
-
-    overlap = max(kernel_size + (kernel_size - 1) * (dilation - 1) - stride, 0)
     mod = rank % 2
 
     # global indices where you want to apply the convolutions:
@@ -625,12 +623,16 @@ def convTranspose2d_twoway_channel(
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
     x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
 
-    # TODO: dimension shapes may be modified after combining with torch_blue
+    if len(x.shape) == 5:        
+        conv_func = torch.vmap(F.conv_transpose2d)
+    else:
+        conv_func = F.conv_transpose2d
+
     match mod:
         case 0:
-            y = F.conv_transpose2d(
+            y = conv_func(
                 x,
-                w[: in_channels // 2],
+                w[...,: in_channels // 2,:,:,:],
                 stride=stride,
                 padding=padding,
                 dilation=dilation,
@@ -638,18 +640,18 @@ def convTranspose2d_twoway_channel(
             dist.all_to_all(
                 [empty, x_buffer], [empty, x], group=channel_group, async_op=False
             )
-            y = y + F.conv_transpose2d(
+            y = y + conv_func(
                 x_buffer,
-                w[in_channels // 2 :],
+                w[...,in_channels // 2 :,:,:,:],
                 stride=stride,
                 padding=padding,
                 dilation=dilation,
             )
             return y, x, x_buffer
         case 1:
-            y = F.conv_transpose2d(
+            y = conv_func(
                 x,
-                w[in_channels // 2 :],
+                w[...,in_channels // 2 :,:,:,:],
                 stride=stride,
                 padding=padding,
                 dilation=dilation,
@@ -657,9 +659,9 @@ def convTranspose2d_twoway_channel(
             dist.all_to_all(
                 [x_buffer, empty], [x, empty], group=channel_group, async_op=False
             )
-            y = y + F.conv_transpose2d(
+            y = y + conv_func(
                 x_buffer,
-                w[: in_channels // 2],
+                w[...,: in_channels // 2,:,:,:],
                 stride=stride,
                 padding=padding,
                 dilation=dilation,
@@ -864,8 +866,6 @@ def conv2d_twoway(
     ]  # right is how much you get from rank 1 gets
 
     left_to_right = overlap - right_to_left
-    # print(f"from right perspective: {right}, {global_steps[mid_index+1]}")
-    # print(f'Rank {rank}, Right {right}, left {left}, total overlap {overlap}')
     B, C, H, W = x.shape
 
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
@@ -879,7 +879,6 @@ def conv2d_twoway(
                 else empty
             )
             send = send.contiguous()
-            # print(f'Rank {rank} recv shape {recv.shape}, send shape {send.shape}, left {left_to_right}, right {right_to_left}')
             dist.all_to_all(
                 [empty, recv], [empty, send], group=model_group, async_op=False
             )
@@ -896,7 +895,6 @@ def conv2d_twoway(
                 [recv, empty], [send, empty], group=model_group, async_op=False
             )
             x_augment = torch.cat((recv if left_to_right > 0 else empty, x), dim=-1)
-            # print(f'Rank {rank} recv shape {recv.shape}, send shape {send.shape}')
     return x_augment, H, W
 
 
@@ -966,17 +964,10 @@ def conv2d_fourway(
     w_right_to_left = (global_steps_w[mid_index_w] + kernel_size[1]) - x.shape[-1]
     if w_right_to_left < 0:
         w_right_to_left = 0
-    # w_local_max = global_steps_w[mid_index_w] + kernel_size[1]
-    # w_local_max = x.shape[-1] if w_local_max > x.shape[-1] else w_local_max
-    # print(f'wlocal max {w_local_max}')
     w_left_to_right = (x.shape[-1]) - global_steps_w[mid_index_w + 1]
     if w_left_to_right < 0:
         w_left_to_right = 0
 
-    # print(
-    #     f"Left to right {w_left_to_right}, Right to left {w_right_to_left}",
-    #     f"y top to bottom {h_top_to_bottom}, y bottom to top {h_bottom_to_top}",
-    # )
 
     B, C, H, W = x.shape
 
@@ -1104,8 +1095,6 @@ def conv2d_fourway(
                 global_steps_w[mid_index_w + 1],
             )
             x_augment = x_augment[..., w_coord:]
-            # print(f'Rank 1 X augment {x_augment}')
-            # print(f'Rank 1 recv from 2 {recv_2}')
         case 2:
             send_0 = x[..., :h_bottom_to_top, :] if h_bottom_to_top > 0 else empty
             send_1 = (
@@ -1113,7 +1102,7 @@ def conv2d_fourway(
                 if (h_bottom_to_top > 0 and w_left_to_right > 0)
                 else empty
             )
-            # print(f'Rank 2-->1 shape {send_1.shape}, bottom to top: {h_bottom_to_top}, left to right:')
+            
             send_3 = x[..., -w_left_to_right:] if w_left_to_right > 0 else empty
             recv_0 = (
                 torch.zeros(
@@ -1265,7 +1254,6 @@ def conv2d_fourway_complete(
     x_with_halos = append_halos(
         x, halo, right_to_left, left_to_right, local_model_rank, 4, empty
     )
-    # print(f'Rank {rank}, weight {w}, x {x}')
     (
         y,
         x_left,
