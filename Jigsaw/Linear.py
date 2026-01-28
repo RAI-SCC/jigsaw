@@ -785,7 +785,6 @@ class XW(torch.autograd.Function):
         parallelism = ctx.parallelism
         model_group = ctx.model_group
 
-        # TODO: needed add after introduction of multi-head attention value concat
         grad_output = grad_output.contiguous()
         grad_input = select_xw_transpose_kernel(parallelism)(
             grad_output, weight, rank=rank, device=device, model_group=model_group
@@ -1307,7 +1306,6 @@ class Roll(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx,
         x: torch.Tensor,
         shifts,
         dims,
@@ -1338,6 +1336,15 @@ class Roll(torch.autograd.Function):
         x_roll: torch.Tensor
             Local rolled tensor.
         """
+        
+        x = dist_roll.roll2d(x, shifts, dims, rank, device, empty, spatial_group)
+
+        return x
+    
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        x, shifts, dims, rank, device, empty, parallelism, spatial_group = inputs
+        
         ctx.shifts = shifts
         ctx.rank = rank
         ctx.dims = dims
@@ -1345,10 +1352,14 @@ class Roll(torch.autograd.Function):
         ctx.empty = empty
         ctx.spatial_group = spatial_group
 
-        x = dist_roll.roll2d(x, shifts, dims, rank, device, empty, spatial_group)
-
-        return x
-
+    @staticmethod
+    def vmap(
+        info, 
+        in_dims,
+        x, shifts, dims, rank, device, empty, parallelism, spatial_group
+    ):
+        out = Roll.apply(x, shifts, dims, rank, device, empty, parallelism, spatial_group)
+        return out, 0
     @staticmethod
     def backward(
         ctx: torch.autograd.Function, grad_output: torch.Tensor
