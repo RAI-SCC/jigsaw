@@ -310,35 +310,7 @@ class XWT(torch.autograd.Function):
         out_dim : Optional[int]
             Index of vmapped dimension in output (0 if batched, None if not).
         """
-        (
-            x_bdim,
-            w_bdim,
-            b_bdim,
-            rank_bdim,
-            device_bdim,
-            parallelism_bdim,
-            model_group_bdim,
-        ) = in_dims
-
-        # We only support vmapping over tensor arguments; non-tensors must not be batched.
-        assert rank_bdim is None
-        assert device_bdim is None
-        assert parallelism_bdim is None
-        assert model_group_bdim is None
-        # assert w_bdim is None
-        #        assert b_bdim is None
-
-        # Case 1: no vmapping at all → just call original op.
-        if x_bdim is None:
-            out = XWT.apply(x, w, b, rank, device, parallelism, model_group)
-            return out, None
-
-        # Only support vmap over dim 0 of x.
-        if x_bdim != 0:
-            raise NotImplementedError(
-                f"XWT.vmap only supports vmapping over x in dim 0, got x_bdim={x_bdim}"
-            )
-
+        
         # x under vmap has shape (V, B, x_in, in_dim).
         x = x.contiguous()
         V = x.shape[0]
@@ -352,7 +324,8 @@ class XWT(torch.autograd.Function):
 
         # out has vmapped dimension at dim 0
         return out, 0
-    
+
+
 class DistributedXWTSync(torch.nn.Module):
     """Batched matrix-matrix (XWT) multiplication distributed across n processes."""
 
@@ -438,7 +411,7 @@ class DistributedXWTSync(torch.nn.Module):
         self.parallelism = parallelism
         self.model_group = model_group
         self.sync_group = sync_group
-        self.XWT = XWT_sync().apply
+        self.XWT_sync = XWT_sync().apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -458,7 +431,7 @@ class DistributedXWTSync(torch.nn.Module):
             B, out_dim are global values.
             in_dim is local value.
         """
-        Cij = self.XWT(
+        Cij = self.XWT_sync(
             x,
             self.weights,
             self.bias,
@@ -466,7 +439,7 @@ class DistributedXWTSync(torch.nn.Module):
             self.device,
             self.parallelism,
             self.model_group,
-            self.sync_group
+            self.sync_group,
         )
         return Cij
 
@@ -483,7 +456,7 @@ class XWT_sync(torch.autograd.Function):
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
-        sync_group: dist.ProcessGroup
+        sync_group: dist.ProcessGroup,
     ) -> torch.Tensor:
         """
         Forward pass of linear layer (XWT) distributed across two processes.
@@ -597,6 +570,7 @@ class XWT_sync(torch.autograd.Function):
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
+        sync_group: dist.ProcessGroup,
     ) -> tuple[torch.Tensor, Optional[int]]:
         """
         Define XWT behavior under torch.vmap.
@@ -622,45 +596,19 @@ class XWT_sync(torch.autograd.Function):
         out_dim : Optional[int]
             Index of vmapped dimension in output (0 if batched, None if not).
         """
-        (
-            x_bdim,
-            w_bdim,
-            b_bdim,
-            rank_bdim,
-            device_bdim,
-            parallelism_bdim,
-            model_group_bdim,
-        ) = in_dims
-
-        # We only support vmapping over tensor arguments; non-tensors must not be batched.
-        assert rank_bdim is None
-        assert device_bdim is None
-        assert parallelism_bdim is None
-        assert model_group_bdim is None
-        # assert w_bdim is None
-        #        assert b_bdim is None
-
-        # Case 1: no vmapping at all → just call original op.
-        if x_bdim is None:
-            out = XWT.apply(x, w, b, rank, device, parallelism, model_group)
-            return out, None
-
-        # Only support vmap over dim 0 of x.
-        if x_bdim != 0:
-            raise NotImplementedError(
-                f"XWT.vmap only supports vmapping over x in dim 0, got x_bdim={x_bdim}"
-            )
-
         # x under vmap has shape (V, B, x_in, in_dim).
         x = x.contiguous()
         V = x.shape[0]
         B = x.shape[1]
         rest = w.shape[1:]  # (in_dim, out_dim)
 
+        # print(f'here! x shape {x.shape}, w shape {w.shape}')
         if len(x.shape) > len(w.shape):
             w = w.reshape(V, 1, *rest)
 
-        out = XWT.apply(x, w, b, rank, device, parallelism, model_group)
+        out = XWT_sync.apply(
+            x, w, b, rank, device, parallelism, model_group, sync_group
+        )
 
         # out has vmapped dimension at dim 0
         return out, 0
@@ -889,36 +837,7 @@ class XW(torch.autograd.Function):
         out_dim : Optional[int]
             Index of vmapped dimension in output (0 if batched, None if not).
         """
-        (
-            x_bdim,
-            w_bdim,
-            b_bdim,
-            rank_bdim,
-            device_bdim,
-            parallelism_bdim,
-            model_group_bdim,
-        ) = in_dims
 
-        # We only support vmapping over tensor arguments; non-tensors must not be batched.
-        assert rank_bdim is None
-        assert device_bdim is None
-        assert parallelism_bdim is None
-        assert model_group_bdim is None
-        # assert w_bdim is None
-        assert b_bdim is None
-
-        # Case 1: no vmapping at all → just call original op.
-        if x_bdim is None:
-            out = XWT.apply(x, w, b, rank, device, parallelism, model_group)
-            return out, None
-
-        # Only support vmap over dim 0 of x.
-        if x_bdim != 0:
-            raise NotImplementedError(
-                f"XWT.vmap only supports vmapping over x in dim 0, got x_bdim={x_bdim}"
-            )
-
-        # x under vmap has shape (V, B, x_in, in_dim).
         x = x.contiguous()
         V = x.shape[0]
         B = x.shape[1]
@@ -1167,35 +1086,6 @@ class XTW(torch.autograd.Function):
         out_dim : Optional[int]
             Index of vmapped dimension in output (0 if batched, None if not).
         """
-        (
-            x_bdim,
-            w_bdim,
-            b_bdim,
-            rank_bdim,
-            device_bdim,
-            parallelism_bdim,
-            model_group_bdim,
-        ) = in_dims
-
-        # We only support vmapping over tensor arguments; non-tensors must not be batched.
-        assert rank_bdim is None
-        assert device_bdim is None
-        assert parallelism_bdim is None
-        assert model_group_bdim is None
-        # assert w_bdim is None
-        # assert b_bdim is None
-
-        # Case 1: no vmapping at all → just call original op.
-        if x_bdim is None:
-            out = XWT.apply(x, w, b, rank, device, parallelism, model_group)
-            return out, None
-
-        # Only support vmap over dim 0 of x.
-        if x_bdim != 0:
-            raise NotImplementedError(
-                f"XWT.vmap only supports vmapping over x in dim 0, got x_bdim={x_bdim}"
-            )
-
         # x under vmap has shape (V, B, x_in, in_dim).
         x = x.contiguous()
         V = x.shape[0]
@@ -1327,7 +1217,7 @@ class XT(torch.autograd.Function):
         device = ctx.device
         parallelism = ctx.parallelism
         model_group = ctx.model_group
-        
+
         grad_output = select_x_transpose_kernel(parallelism)(
             grad_output, rank, device, model_group
         )
@@ -1343,6 +1233,7 @@ class XT(torch.autograd.Function):
         parallelism: int,
         model_group: dist.ProcessGroup,
     ) -> tuple[torch.Tensor, Optional[int]]:
+        
         x = x.contiguous()
         # x under vmap has shape (V, B, x_in, in_dim).
         out = XT.apply(x, rank, device, parallelism, model_group)
@@ -1619,7 +1510,7 @@ class AvgGradients(torch.autograd.Function):
         ctx: torch.autograd.Function, x: torch.Tensor, model_group: dist.ProcessGroup
     ) -> torch.Tensor:
         """Forward pass of all reduce."""
-        
+
         ctx.model_group = model_group
 
         return x
@@ -1646,5 +1537,5 @@ class AvgGradients(torch.autograd.Function):
             Gradient with respect to the bias.
         """
         dist.all_reduce(grad_output, op=dist.ReduceOp.AVG, group=ctx.model_group)
-        
+
         return grad_output, None
