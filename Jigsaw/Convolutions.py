@@ -1661,10 +1661,14 @@ class Conv2d_channel(torch.autograd.Function):
 
         return g_x, g_w, g_b, None, None, None, None, None, None, None, None, None
 
-def _average_weights(model: torch.nn.Module, spatial_group: dist.ProcessGroup, device: torch.device):
-        for name, param in model.named_parameters():
-            dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
-    
+
+def _average_weights(
+    model: torch.nn.Module, spatial_group: dist.ProcessGroup, device: torch.device
+):
+    for name, param in model.named_parameters():
+        dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
+
+
 class DistributedConv2D(torch.nn.Module):
     def __init__(
         self,
@@ -1681,6 +1685,7 @@ class DistributedConv2D(torch.nn.Module):
         device,
         n_parallel,
         bias=False,
+        bayesian=False
     ):
         """
         Distributed 1D Convolution.
@@ -1709,6 +1714,7 @@ class DistributedConv2D(torch.nn.Module):
         self.device = device
         self.n_parallel = n_parallel
         self.empty = torch.empty(0, device=device, dtype=torch.float32)
+        self.bayesian = bayesian
         self.conv2d = torch.nn.Conv2d(
             self.in_channels,
             self.out_channels,
@@ -1720,8 +1726,6 @@ class DistributedConv2D(torch.nn.Module):
 
         _average_weights(self, spatial_group, device)
         self.conv2d_apply = Conv2dDist().apply
-        
-        
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -1756,6 +1760,7 @@ class DistributedConv2D(torch.nn.Module):
             self.device,
             self.n_parallel,
             self.empty,
+            self.bayesian
         )
 
         return Cij[0]
@@ -1780,6 +1785,7 @@ class Conv2dDist(torch.autograd.Function):
         device: torch.device,
         n_parallel: int,
         empty: torch.Tensor,
+        bayesian: bool
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
         # Compute the forward pass
         y, x0, x1, right_to_left, left_to_right = dist_conv.conv2d_fourway_complete(
@@ -1831,6 +1837,7 @@ class Conv2dDist(torch.autograd.Function):
             device,
             n_parallel,
             empty,
+            bayesian
         ) = inputs
 
         # Unpack outputs
@@ -1861,7 +1868,7 @@ class Conv2dDist(torch.autograd.Function):
         ctx.padding = padding
         ctx.dilation = dilation
         ctx.has_bias = bias is not None
-        ctx.sampling = False  # TODO!!!!!!!!!
+        ctx.sampling = bayesian  # TODO!!!!!!!!!
 
     @staticmethod
     def backward(
@@ -2004,6 +2011,7 @@ class Conv2dDist(torch.autograd.Function):
             None,
             None,
             None,
+            None
         )
 
     @staticmethod
@@ -2024,6 +2032,7 @@ class Conv2dDist(torch.autograd.Function):
         device: torch.device,
         n_parallel: int,
         empty: torch.Tensor,
+        bayesian: bool
     ) -> tuple[torch.Tensor, Optional[int]]:
         out = Conv2dDist.apply(
             x,
@@ -2040,6 +2049,7 @@ class Conv2dDist(torch.autograd.Function):
             device,
             n_parallel,
             empty,
+            bayesian
         )
 
         return out, 0
@@ -2061,6 +2071,7 @@ class DistributedConvTranspose2D_complete(torch.nn.Module):
         device,
         n_parallel,
         bias=False,
+        bayesian=False
     ):
         """
         Distributed 1D Convolution.
@@ -2094,6 +2105,7 @@ class DistributedConvTranspose2D_complete(torch.nn.Module):
         self.n_parallel = n_parallel
         self.in_channels = in_channels
         self.out_channels = out_channels // 2
+        self.bayesian = bayesian
 
         self.convTranspose2d = torch.nn.ConvTranspose2d(
             self.in_channels,
@@ -2141,6 +2153,7 @@ class DistributedConvTranspose2D_complete(torch.nn.Module):
             self.device,
             self.n_parallel,
             self.empty,
+            self.bayesian
         )
 
         return Cij[0]
@@ -2165,6 +2178,7 @@ class ConvTranspose2d_complete(torch.autograd.Function):
         device: torch.device,
         n_parallel: int,
         empty: torch.Tensor,
+        bayesian: bool
     ) -> torch.Tensor:
         y, x0, x1 = dist_conv.convTranspose2d_twoway_channel(
             x,
@@ -2205,7 +2219,7 @@ class ConvTranspose2d_complete(torch.autograd.Function):
         x_aug = torch.cat([x0, x1], dim=-3)
 
         halo_sizes = torch.tensor([right_to_left, left_to_right])
-        
+
         # Return output AND any intermediate values needed for backward
         return y, x_aug, x, halo_sizes
 
@@ -2227,6 +2241,7 @@ class ConvTranspose2d_complete(torch.autograd.Function):
             device,
             n_parallel,
             empty,
+            bayesian
         ) = inputs
         _, x_aug, x_orig, halo_sizes = output
 
@@ -2236,7 +2251,7 @@ class ConvTranspose2d_complete(torch.autograd.Function):
         ctx.save_for_backward(x_aug, weight)
 
         ctx.halo_sizes = halo_sizes
-        ctx.x_shape_padded = x_aug.shape 
+        ctx.x_shape_padded = x_aug.shape
         ctx.x_shape = x_orig.shape
 
         ctx.stride, ctx.padding, ctx.dilation = (stride, padding, dilation)
@@ -2252,7 +2267,7 @@ class ConvTranspose2d_complete(torch.autograd.Function):
         ctx.in_channels_global = in_channels
         ctx.b = bias
         ctx.empty = empty  # pre-initialized empty tensor
-        ctx.sampling = False  # TODO!!!
+        ctx.sampling = bayesian
 
     @staticmethod
     def backward(
@@ -2383,6 +2398,7 @@ class ConvTranspose2d_complete(torch.autograd.Function):
             None,
             None,
             None,
+            None
         )
 
     @staticmethod
@@ -2403,6 +2419,7 @@ class ConvTranspose2d_complete(torch.autograd.Function):
         device: torch.device,
         n_parallel: int,
         empty: torch.Tensor,
+        bayesian: bool
     ) -> tuple[torch.Tensor, Optional[int]]:
         out = ConvTranspose2d_complete.apply(
             x,
@@ -2419,6 +2436,7 @@ class ConvTranspose2d_complete(torch.autograd.Function):
             device,
             n_parallel,
             empty,
+            bayesian
         )
 
         return out[0], 0
