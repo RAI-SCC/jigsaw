@@ -211,8 +211,8 @@ def main():
 
             print(f"Epoch {epoch} | Train Loss: {train_loss:.4f} | Dice Score: {train_dice:.4f} | LR: {current_lr:.1e} | Time: {(time.time()-start_time)/60:.1f} min")
             
-            log_file = f"log_{config['data']['image_height']}_{num_epochs}.csv"
-            log_path = os.path.join(save_dir, log_file)
+            #log_file = f"log_{config['data']['image_height']}_{num_epochs}_{learn_rate}.csv"
+            #log_path = os.path.join(save_dir, log_file)
             with open(log_path, mode='a', newline='') as f:
                 writer = csv.writer(f, delimiter=';')
                 writer.writerow([
