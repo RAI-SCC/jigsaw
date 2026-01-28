@@ -1661,7 +1661,10 @@ class Conv2d_channel(torch.autograd.Function):
 
         return g_x, g_w, g_b, None, None, None, None, None, None, None, None, None
 
-
+def _average_weights(model: torch.nn.Module, spatial_group: dist.ProcessGroup, device: torch.device):
+        for name, param in model.named_parameters():
+            dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
+    
 class DistributedConv2D(torch.nn.Module):
     def __init__(
         self,
@@ -1713,9 +1716,12 @@ class DistributedConv2D(torch.nn.Module):
             stride=self.stride,
             groups=groups,
             bias=bias,
-        )
+        ).to(device)
 
+        _average_weights(self, spatial_group, device)
         self.conv2d_apply = Conv2dDist().apply
+        
+        
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -2096,8 +2102,9 @@ class DistributedConvTranspose2D_complete(torch.nn.Module):
             stride=self.stride,
             padding=self.padding,
             bias=bias,
-        )
+        ).to(device)
         self.empty = torch.empty(0, device=device, dtype=torch.float32)
+        _average_weights(self, spatial_group, device)
 
         self.convTranspose2d_apply = ConvTranspose2d_complete().apply
 
