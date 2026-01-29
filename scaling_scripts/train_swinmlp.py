@@ -45,7 +45,7 @@ def train_one_epoch(
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
-        sheduler.step()
+        #sheduler.step()
 
         # Sum loss across all processes from all GPUs
         dist.all_reduce(loss, op=dist.ReduceOp.SUM)
@@ -129,10 +129,18 @@ def main():
         betas = (0.9, 0.999)
     )
     
-    #scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=2)
+    
     total_steps = len(train_loader) * num_epochs
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=2)
+    """ scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, 
+        mode='max', 
+        patience=5,    
+        factor=0.5,    
+        verbose=True
+    ) """
 
-    scheduler = OneCycleLR(
+    """ scheduler = OneCycleLR(
         optimizer,
         max_lr=learn_rate, 
         total_steps=total_steps,
@@ -140,7 +148,7 @@ def main():
         anneal_strategy='cos',
         div_factor=25.0,  
         final_div_factor=1000.0
-    )
+    ) """
     loss_fn = utils.build_loss_fn(config) #Use TopKDiceLoss
 
     if rank == 0:
@@ -195,7 +203,7 @@ def main():
 
         dice_tensor = torch.tensor(current_val_dice).to(device)
         dist.broadcast(dice_tensor, src=0)
-        #scheduler.step(dice_tensor.item())
+        scheduler.step(dice_tensor.item())
 
         end_time = time.time()
         duration = end_time - start_time
