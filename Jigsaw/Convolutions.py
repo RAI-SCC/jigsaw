@@ -1788,6 +1788,11 @@ class Conv2dDist(torch.autograd.Function):
         bayesian: bool
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
         # Compute the forward pass
+        
+        # Current fix for testing with torch blue NonBayesian vardist
+        if bayesian and len(weight.shape) < 5: 
+            weight = weight.expand(x.shape[0], *weight.shape)
+        
         y, x0, x1, right_to_left, left_to_right = dist_conv.conv2d_fourway_complete(
             x,
             weight,
@@ -1800,6 +1805,7 @@ class Conv2dDist(torch.autograd.Function):
             spatial_group=spatial_group,
             channel_group=channel_group,
             empty=empty,
+            bayesian=bayesian
         )
 
         x_aug = torch.cat([x0, x1], dim=-3)
@@ -1847,7 +1853,7 @@ class Conv2dDist(torch.autograd.Function):
         ctx.mark_non_differentiable(x_aug)
         ctx.mark_non_differentiable(x_orig)
         ctx.mark_non_differentiable(halo_sizes)
-        # TODO  start from here
+        
         ctx.halo_sizes = halo_sizes
 
         # Save everything needed for backward
@@ -1868,7 +1874,7 @@ class Conv2dDist(torch.autograd.Function):
         ctx.padding = padding
         ctx.dilation = dilation
         ctx.has_bias = bias is not None
-        ctx.sampling = bayesian  # TODO!!!!!!!!!
+        ctx.sampling = bayesian 
 
     @staticmethod
     def backward(
@@ -1907,12 +1913,16 @@ class Conv2dDist(torch.autograd.Function):
         right_to_left, left_to_right = ctx.halo_sizes[0], ctx.halo_sizes[1]
         x_shape_padded, x_shape = ctx.x_shape_padded, ctx.x_shape
 
-        # TODO: if sampling flag
         if ctx.sampling:
             conv2d_input_fn = torch.vmap(conv2d_input, in_dims=(None, 0, 0))
             conv2d_weight_fn = torch.vmap(conv2d_weight, in_dims=(0, None, 0))
+            if len(weight.shape) < 5:  # TODO : reduce complexity for compatability with torch_blue
+                weight_shape = weight.shape
+                weight = weight.expand(x_shape_padded[0], *weight.shape)
+            else:
+                weight_shape = weight.shape[1:]
             x_shape_padded = x_shape_padded[1:]
-            weight_shape = weight.shape[1:]
+
         else:
             conv2d_input_fn = conv2d_input
             conv2d_weight_fn = conv2d_weight
@@ -1924,8 +1934,7 @@ class Conv2dDist(torch.autograd.Function):
             grad_output,
             stride=stride,
             padding=padding,
-            dilation=dilation,
-            groups=1,
+            dilation=dilation
         )
 
         left_to_right, right_to_left = (right_to_left, left_to_right)
@@ -1974,8 +1983,7 @@ class Conv2dDist(torch.autograd.Function):
             grad_output,
             stride=stride,
             padding=padding,
-            dilation=dilation,
-            groups=1,
+            dilation=dilation
         )
         g_b = grad_output.sum(dim=(0, 2)) if ctx.has_bias else None
 
@@ -2034,6 +2042,7 @@ class Conv2dDist(torch.autograd.Function):
         empty: torch.Tensor,
         bayesian: bool
     ) -> tuple[torch.Tensor, Optional[int]]:
+        
         out = Conv2dDist.apply(
             x,
             weight,
@@ -2051,7 +2060,7 @@ class Conv2dDist(torch.autograd.Function):
             empty,
             bayesian
         )
-
+        # print(out[0].mean(dim=(1,2,3,4)))
         return out, 0
 
 
@@ -2180,6 +2189,9 @@ class ConvTranspose2d_complete(torch.autograd.Function):
         empty: torch.Tensor,
         bayesian: bool
     ) -> torch.Tensor:
+        if bayesian and len(weight.shape) < 5: 
+            weight = weight.expand(x.shape[0], *weight.shape)
+            
         y, x0, x1 = dist_conv.convTranspose2d_twoway_channel(
             x,
             weight,
@@ -2331,6 +2343,9 @@ class ConvTranspose2d_complete(torch.autograd.Function):
                 in_dims=(0, 0, 0, None, None, None, None, None, None, None, None),
                 out_dims=(0, 0, None),
             )
+            if len(weight.shape) < 5:  # TODO : reduce complexity for compatability with torch_blue
+                weight = weight.expand(x_aug.shape[0], *weight.shape)
+
         else:
             backward_op = torch.ops.aten.convolution_backward
 
@@ -2364,7 +2379,7 @@ class ConvTranspose2d_complete(torch.autograd.Function):
         )
 
         g_b = grad_output.sum(dim=(0, 2)) if ctx.has_bias else None
-
+        
         # make grads identical on all ranks
         g_w_handle = dist.all_reduce(
             g_w, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True
@@ -2383,6 +2398,7 @@ class ConvTranspose2d_complete(torch.autograd.Function):
 
         g_w_handle.wait()
 
+        # print(f'{g_x.mean(dims=())}')
         return (
             g_x,
             g_w,
@@ -2439,4 +2455,4 @@ class ConvTranspose2d_complete(torch.autograd.Function):
             bayesian
         )
 
-        return out[0], 0
+        return out, 0

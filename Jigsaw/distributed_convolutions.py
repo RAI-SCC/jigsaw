@@ -301,12 +301,14 @@ def distributed_conv2d_over_channels(
     dilation: int,
     empty: torch.tensor,
     channel_group: dist.ProcessGroup,
+    bayesian: bool
 ):
     x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
-    if len(x.shape) == 5: # TODO: is there a better way to flag "if sampling for UQ is required"?
+    if bayesian: 
         conv_func = torch.vmap(F.conv2d)
     else:
         conv_func = F.conv2d
+    # print(f'x shape {x.shape}, w shape {w.shape}')
     match local_rank:
         case 0 | 2:
             x_handle = dist.all_to_all(
@@ -622,7 +624,7 @@ def convTranspose2d_twoway_channel(
     # communicate x1, x0
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
     x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
-
+    x = x.contiguous()
     if len(x.shape) == 5:        
         conv_func = torch.vmap(F.conv_transpose2d)
     else:
@@ -1232,6 +1234,7 @@ def conv2d_fourway_complete(
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     empty: torch.Tensor,
+    bayesian: bool
 ) -> torch.Tensor:
     """Distributed 2d convolution"""
     # Setup
@@ -1268,5 +1271,6 @@ def conv2d_fourway_complete(
         dilation,
         empty,
         channel_group,
+        bayesian
     )
     return y, x_left, x_right, right_to_left, left_to_right
