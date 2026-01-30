@@ -3,6 +3,7 @@ import math
 import torch
 import torch.nn.init as init
 from torch.nn import GELU, Dropout
+import torch.distributed as dist
 
 from Jigsaw import Linear, Linear_Megatron
 
@@ -165,6 +166,11 @@ class DistributedMLP(torch.nn.Module):
 
         return x
 
+def _average_weights(
+    model: torch.nn.Module, spatial_group: dist.ProcessGroup, device: torch.device
+):
+    for name, param in model.named_parameters():
+        dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
 
 class DistributedSynchronizedMLP(torch.nn.Module):
     """Distributed MLP across n processes."""
@@ -178,7 +184,7 @@ class DistributedSynchronizedMLP(torch.nn.Module):
         n_parallel: int,
         model_group: torch.distributed.ProcessGroup,
         sync_group: torch.distributed.ProcessGroup,
-        bias: bool = True,
+        bias: bool = False,
         dropout: float = 1e-3,
     ):
         super().__init__()
@@ -200,7 +206,8 @@ class DistributedSynchronizedMLP(torch.nn.Module):
                 sync_group,
                 bias=bias,
                 init_method="linear",
-            )
+            ).to(device)
+            
             self.linear2 = Linear.DistributedXWTSync(
                 hidden_dim // 2,
                 out_dim,
@@ -211,33 +218,16 @@ class DistributedSynchronizedMLP(torch.nn.Module):
                 sync_group,
                 bias=bias,
                 init_method="linear",
-            )
+            ).to(device)
         
-        # TODO: Is it necessary to re-initialize the values here?
-        init.uniform_(
-            self.linear1.weights, a=-1.0 / math.sqrt(in_dim), b=1.0 / math.sqrt(in_dim)
-        )
-        init.uniform_(
-            self.linear2.weights,
-            a=-1.0 / math.sqrt(hidden_dim),
-            b=1.0 / math.sqrt(hidden_dim),
-        )
-        if self.linear1.bias is not None:
-            init.uniform_(
-                self.linear1.bias, a=-1.0 / math.sqrt(in_dim), b=1.0 / math.sqrt(in_dim)
-            )
-        if self.linear2.bias is not None:
-            init.uniform_(
-                self.linear2.bias,
-                a=-1.0 / math.sqrt(hidden_dim),
-                b=1.0 / math.sqrt(hidden_dim),
-            )
         self.activation = GELU()
         self.drop = Dropout(p=dropout)
         self.drop2 = Dropout(p=dropout)
         self.rank = rank
         
-        # self.average_gradients = Linear.AverageGradients(sync_group)
+        _average_weights(self, sync_group, device)
+        
+
 
     def forward(self, x):
         """
@@ -252,12 +242,9 @@ class DistributedSynchronizedMLP(torch.nn.Module):
         """
 
         x = self.linear1(x)
-        # x = self.average_gradients(x)
         x = self.activation(x)
-        # x = self.average_gradients(x)
         x = self.drop(x)
         x = self.linear2(x)
-        # x = self.average_gradients(x)
         x = self.drop2(x)
         
         return x
