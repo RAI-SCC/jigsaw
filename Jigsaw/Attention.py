@@ -250,11 +250,11 @@ class DistributedWindowedAttention(torch.nn.Module):
             self.channel_group,
             self.spatial_group,
             bias=True,
-            dropout=1e-3,
+            dropout=0,
         )
 
         self.heads = heads
-        # should be (embed_dim/heads)
+        
         self.scale = (embed_dim * 2 // self.heads) ** (-0.5)
         self.average_gradients = Linear.AverageGradients(self.spatial_group)
 
@@ -270,7 +270,6 @@ class DistributedWindowedAttention(torch.nn.Module):
         x_patches_local = x
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.qkv(x_patches_local)
-        # qkv = self.average_gradients(qkv)
 
         q, k, v = torch.tensor_split(qkv, 3, dim=-1)
 
@@ -281,19 +280,15 @@ class DistributedWindowedAttention(torch.nn.Module):
         q = self.scale * q
 
         attention = self.xwt(q, k, None)
-        # attention = self.average_gradients(attention)
 
         if mask is not None:
             attention = attention + mask
 
         attention = self.softmax(attention)
-        # attention = self.average_gradients(attention)
         values = self.xw(attention, v, None)
-        # values = self.average_gradients(values)
 
         values = rearrange(values, "... n h s d -> ... n s (h d)").contiguous()
         values = self.concatenator(values)
-        # values = self.average_gradients(values)
 
         # Output: [n_batch, seq_length, output_dim]
         return values
@@ -353,15 +348,11 @@ class DistributedWindowedTransformer(torch.nn.Module):
             sync_group=spatial_group,
         ).to(device)
 
-        self.average_gradients = Linear.AverageGradients(spatial_group)
-
         _average_weights(self, spatial_group, device)
 
     def forward(self, x: torch.tensor, mask=None):
         x = self.attention_block(self.layer_norm1(x), mask) + x
-        # x = self.average_gradients(x)
         x = self.layer_norm2(x)
-        # x = self.average_gradients(x)
         x = self.MLP(x) + x
         x = self.layer_norm3(x)
         return x
