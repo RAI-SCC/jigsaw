@@ -4,8 +4,8 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from Jigsaw.distributed_convolutions import (
-    conv1d_fourway_complete,
-    convTranspose1d_fourway_complete,
+    conv1d_fourway,
+    convTranspose1d_fourway,
     conv1d_twoway,
     conv1d_twoway_channel,
     conv2d_fourway,
@@ -213,13 +213,9 @@ class Conv1d(torch.autograd.Function):
         device = ctx.device
         dtype = grad_output.dtype
 
-        # if rank in [2, 3]:
-        #     conv_shape = (*ctx.x_shape[:-1], ctx.x_shape[-1] + left_to_right)
-        # else:
         x_shape_padded, x_shape = ctx.x_shape_padded, ctx.x_shape
         conv_shape = (*ctx.x_shape_padded[:-1], ctx.x_shape_padded[-1] + right_to_left)
 
-        # print(f'rank:{rank} {conv_shape}')
         g_x_aug = conv1d_input(
             conv_shape,
             weight,
@@ -230,12 +226,10 @@ class Conv1d(torch.autograd.Function):
             groups=1,
         )
 
-        # TODO: figure out correct crop
-
         left_to_right, right_to_left = (
             right_to_left,
             left_to_right,
-        )  # SWAP? # g_x_aug.shape[-1] - ctx.x_shape[-1]
+        )
 
         match rank % 2:
             case 0:
@@ -410,8 +404,6 @@ class ConvTranspose1d(torch.autograd.Function):
 
         right_to_left = y.shape[-1] - local_size_left
         left_to_right = y.shape[-1] - local_size_right
-
-        print(f"r2l {right_to_left}, l2r {left_to_right}")
 
         if rank % 2 == 0:  # LHS
             start_overlap_index = y.shape[-1] - overlap_size
@@ -866,9 +858,7 @@ class ConvTranspose1d_channel(torch.autograd.Function):
         x, weight = ctx.saved_tensors
         stride, padding, dilation = (ctx.stride, ctx.padding, ctx.dilation)
         rank, model_group = ctx.rank, ctx.model_group
-        print(
-            f"x shape {x.shape}, weight shape {weight.shape}, grad output shape {grad_output.shape}, stride padding, {stride}, {padding}"
-        )
+        
         # parameter grads from native conv1d gradient helpers
         g_x, g_w, _ = torch.ops.aten.convolution_backward(
             grad_output,
@@ -1723,9 +1713,19 @@ class DistributedConv2D(torch.nn.Module):
             groups=groups,
             bias=bias,
         ).to(device)
-
+        
+        if self.bayesian:
+            self.conv2d_fn = torch.vmap(F.conv2d)
+            self.conv2d_input_fn = torch.vmap(conv2d_input, in_dims=(None, 0, 0))
+            self.conv2d_weight_fn = torch.vmap(conv2d_weight, in_dims=(0, None, 0))
+        else:
+            self.conv2d_fn = F.conv2d
+            self.conv2d_input_fn = conv2d_input
+            self.conv2d_weight_fn = conv2d_weight
+        
         _average_weights(self, spatial_group, device)
-        self.conv2d_apply = Conv2dDist().apply
+        
+        self.conv2d_apply = Conv2d().apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -1760,13 +1760,16 @@ class DistributedConv2D(torch.nn.Module):
             self.device,
             self.n_parallel,
             self.empty,
-            self.bayesian
+            self.bayesian,
+            self.conv2d_fn,
+            self.conv2d_input_fn,
+            self.conv2d_weight_fn
         )
 
         return Cij[0]
 
 
-class Conv2dDist(torch.autograd.Function):
+class Conv2d(torch.autograd.Function):
     """Autograd function for batched matrix-matrix (XWT) multiplication distributed across n processes."""
 
     @staticmethod
@@ -1785,15 +1788,19 @@ class Conv2dDist(torch.autograd.Function):
         device: torch.device,
         n_parallel: int,
         empty: torch.Tensor,
-        bayesian: bool
+        bayesian: bool,
+        conv2d_fn,
+        conv2d_input_fn,
+        conv2d_weight_fn
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
-        # Compute the forward pass
         
-        # Current fix for testing with torch blue NonBayesian vardist
+        # Temporary fix for testing with torch blue NonBayesian vardist
         if bayesian and len(weight.shape) < 5: 
             weight = weight.expand(x.shape[0], *weight.shape)
         
-        y, x0, x1, right_to_left, left_to_right = dist_conv.conv2d_fourway_complete(
+        # Compute the forward pass
+            
+        y, x0, x1, right_to_left, left_to_right = dist_conv.conv2d_fourway(
             x,
             weight,
             kernel_size,
@@ -1805,12 +1812,13 @@ class Conv2dDist(torch.autograd.Function):
             spatial_group=spatial_group,
             channel_group=channel_group,
             empty=empty,
-            bayesian=bayesian
+            conv2d_fn=conv2d_fn
         )
 
-        x_aug = torch.cat([x0, x1], dim=-3)
-        halo_sizes = torch.tensor([right_to_left, left_to_right])
-        # Return output AND any intermediate values needed for backward
+        x_aug = torch.cat([x0, x1], dim=-3) # concatenate along the channel dimension
+        halo_sizes = torch.tensor([right_to_left, left_to_right]) # save halo sizes in tensor
+        
+        # y is result, rest of the outputs are required for the backward pass
         return y, x_aug, x, halo_sizes
 
     @staticmethod
@@ -1843,7 +1851,10 @@ class Conv2dDist(torch.autograd.Function):
             device,
             n_parallel,
             empty,
-            bayesian
+            bayesian,
+            conv2d_fn,
+            conv2d_input_fn,
+            conv2d_weight_fn
         ) = inputs
 
         # Unpack outputs
@@ -1874,8 +1885,13 @@ class Conv2dDist(torch.autograd.Function):
         ctx.padding = padding
         ctx.dilation = dilation
         ctx.has_bias = bias is not None
-        ctx.sampling = bayesian 
-
+        ctx.bayesian = bayesian 
+        
+        # Define conv2d and gradient functions
+        ctx.conv2d_fn = conv2d_fn
+        ctx.conv2d_input_fn = conv2d_input_fn
+        ctx.conv2d_weight_fn = conv2d_weight_fn
+        
     @staticmethod
     def backward(
         ctx: torch.autograd.Function,
@@ -1898,6 +1914,7 @@ class Conv2dDist(torch.autograd.Function):
         None,
         None,
         None,
+        None
     ]:
         """
         Backward pass of linear layer (XWT) distributed across two processes.
@@ -1913,9 +1930,7 @@ class Conv2dDist(torch.autograd.Function):
         right_to_left, left_to_right = ctx.halo_sizes[0], ctx.halo_sizes[1]
         x_shape_padded, x_shape = ctx.x_shape_padded, ctx.x_shape
 
-        if ctx.sampling:
-            conv2d_input_fn = torch.vmap(conv2d_input, in_dims=(None, 0, 0))
-            conv2d_weight_fn = torch.vmap(conv2d_weight, in_dims=(0, None, 0))
+        if ctx.bayesian:
             if len(weight.shape) < 5:  # TODO : reduce complexity for compatability with torch_blue
                 weight_shape = weight.shape
                 weight = weight.expand(x_shape_padded[0], *weight.shape)
@@ -1924,11 +1939,9 @@ class Conv2dDist(torch.autograd.Function):
             x_shape_padded = x_shape_padded[1:]
 
         else:
-            conv2d_input_fn = conv2d_input
-            conv2d_weight_fn = conv2d_weight
             weight_shape = weight.shape
 
-        g_x_aug = conv2d_input_fn(
+        g_x_aug = ctx.conv2d_input_fn(
             x_shape_padded,
             weight,
             grad_output,
@@ -1967,6 +1980,7 @@ class Conv2dDist(torch.autograd.Function):
             device=g_x.device,
             dtype=g_x.dtype,
         )
+        
         g_x_recv, g_x_handle = dist_conv.send_g_x_channels_2d(
             g_x,
             g_x_buffer,
@@ -1977,7 +1991,7 @@ class Conv2dDist(torch.autograd.Function):
             async_op=True,
         )
 
-        g_w = conv2d_weight_fn(
+        g_w = ctx.conv2d_weight_fn(
             x_aug,
             weight_shape,
             grad_output,
@@ -1985,6 +1999,8 @@ class Conv2dDist(torch.autograd.Function):
             padding=padding,
             dilation=dilation
         )
+        
+        # TODO compatability of bias term with torch_blue
         g_b = grad_output.sum(dim=(0, 2)) if ctx.has_bias else None
 
         g_w_handle = dist.all_reduce(
@@ -2019,6 +2035,9 @@ class Conv2dDist(torch.autograd.Function):
             None,
             None,
             None,
+            None,
+            None,
+            None,
             None
         )
 
@@ -2040,10 +2059,13 @@ class Conv2dDist(torch.autograd.Function):
         device: torch.device,
         n_parallel: int,
         empty: torch.Tensor,
-        bayesian: bool
+        bayesian: bool,
+        conv2d_fn,
+        conv2d_input_fn,
+        conv2d_weight_fn
     ) -> tuple[torch.Tensor, Optional[int]]:
         
-        out = Conv2dDist.apply(
+        out = Conv2d.apply(
             x,
             weight,
             bias,
@@ -2058,13 +2080,16 @@ class Conv2dDist(torch.autograd.Function):
             device,
             n_parallel,
             empty,
-            bayesian
+            bayesian,
+            conv2d_fn,
+            conv2d_input_fn,
+            conv2d_weight_fn
         )
-        # print(out[0].mean(dim=(1,2,3,4)))
+        
         return out, 0
 
 
-class DistributedConvTranspose2D_complete(torch.nn.Module):
+class DistributedConvTranspose2D(torch.nn.Module):
     def __init__(
         self,
         in_channels,
@@ -2125,9 +2150,20 @@ class DistributedConvTranspose2D_complete(torch.nn.Module):
             bias=bias,
         ).to(device)
         self.empty = torch.empty(0, device=device, dtype=torch.float32)
-        _average_weights(self, spatial_group, device)
 
-        self.convTranspose2d_apply = ConvTranspose2d_complete().apply
+        if self.bayesian:
+            self.conv_transpose2d_fn = torch.vmap(F.conv_transpose2d)
+            self.conv_transpose2d_grad_fn = torch.vmap(
+                torch.ops.aten.convolution_backward,
+                in_dims=(0, 0, 0, None, None, None, None, None, None, None, None),
+                out_dims=(0, 0, None),
+            )
+        else:
+            self.conv_transpose2d_fn = F.conv_transpose2d
+            self.conv_transpose2d_grad_fn = torch.ops.aten.convolution_backward
+            
+        _average_weights(self, spatial_group, device)
+        self.convTranspose2d_apply = ConvTranspose2d().apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -2162,13 +2198,15 @@ class DistributedConvTranspose2D_complete(torch.nn.Module):
             self.device,
             self.n_parallel,
             self.empty,
-            self.bayesian
+            self.bayesian,
+            self.conv_transpose2d_fn,
+            self.conv_transpose2d_grad_fn
         )
 
         return Cij[0]
 
 
-class ConvTranspose2d_complete(torch.autograd.Function):
+class ConvTranspose2d(torch.autograd.Function):
     """Autograd function for batched matrix-matrix (XWT) multiplication distributed across n processes."""
 
     @staticmethod
@@ -2187,52 +2225,19 @@ class ConvTranspose2d_complete(torch.autograd.Function):
         device: torch.device,
         n_parallel: int,
         empty: torch.Tensor,
-        bayesian: bool
+        bayesian: bool,
+        conv_transpose2d_fn,
+        conv_transpose2d_grad_fn
     ) -> torch.Tensor:
+        
         if bayesian and len(weight.shape) < 5: 
             weight = weight.expand(x.shape[0], *weight.shape)
             
-        y, x0, x1 = dist_conv.convTranspose2d_twoway_channel(
-            x,
-            weight,
-            in_channels,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-            rank=rank,
-            channel_group=channel_group,
+        y, x_aug, x, halo_sizes = dist_conv.conv_transpose2d_fourway(
+            x, weight, kernel_size, stride, padding, dilation, in_channels, rank, spatial_group, channel_group, empty, conv_transpose2d_fn
         )
-
-        y_buffer, overlap_size, local_size_left, local_size_right = (
-            dist_conv.conv1dTranspose_halocalc_twoway(
-                x,
-                y,
-                kernel_size[1],
-                stride=stride[1],
-                padding=padding[1],
-                dilation=dilation[1],
-                local_rank=rank,
-                spatial_group=spatial_group,
-                parallelism=4,
-            )
-        )
-
-        right_to_left = y.shape[-1] - local_size_left
-        left_to_right = y.shape[-1] - local_size_right
-
-        if rank // 2 == 0:  # LHS
-            start_overlap_index = y.shape[-1] - overlap_size
-            y[..., start_overlap_index:] = y[..., start_overlap_index:] + y_buffer
-            y = y[..., :local_size_left]
-        elif rank // 2 == 1:
-            y[..., :overlap_size] = y[..., :overlap_size] + y_buffer
-            y = y[..., -local_size_right:]
-
-        x_aug = torch.cat([x0, x1], dim=-3)
-
-        halo_sizes = torch.tensor([right_to_left, left_to_right])
-
-        # Return output AND any intermediate values needed for backward
+        
+        # Return output and any intermediate values needed for backward
         return y, x_aug, x, halo_sizes
 
     @staticmethod
@@ -2253,7 +2258,9 @@ class ConvTranspose2d_complete(torch.autograd.Function):
             device,
             n_parallel,
             empty,
-            bayesian
+            bayesian,
+            conv_transpose2d_fn,
+            conv_transpose2d_grad_fn
         ) = inputs
         _, x_aug, x_orig, halo_sizes = output
 
@@ -2279,7 +2286,10 @@ class ConvTranspose2d_complete(torch.autograd.Function):
         ctx.in_channels_global = in_channels
         ctx.b = bias
         ctx.empty = empty  # pre-initialized empty tensor
-        ctx.sampling = bayesian
+        ctx.bayesian = bayesian
+        ctx.conv_transpose2d_fn = conv_transpose2d_fn 
+        ctx.conv_transpose2d_grad_fn = conv_transpose2d_grad_fn
+        
 
     @staticmethod
     def backward(
@@ -2310,99 +2320,42 @@ class ConvTranspose2d_complete(torch.autograd.Function):
         """
         x_aug, weight = ctx.saved_tensors
         empty = ctx.empty
-        right_to_left, left_to_right = ctx.halo_sizes[0], ctx.halo_sizes[1]
 
         stride, padding, dilation = (ctx.stride, ctx.padding, ctx.dilation)
-        local_rank, spatial_group, channel_group = (
+        rank, spatial_group, channel_group = (
             ctx.rank % 4,  # TODO: verify with communicator group
             ctx.spatial_group,
             ctx.channel_group,
         )
 
-        empty = torch.empty(0, device=grad_output.device, dtype=grad_output.dtype)
-
-        halo, _ = dist_conv.communicate_halos(
-            grad_output,
-            right_to_left,
-            left_to_right,
-            local_rank,
-            4,
-            empty,
-            spatial_group=spatial_group,
-            async_op=False,
-        )
-
-        if local_rank // 2 == 0:  # left and right groups # TODO get from process group?
-            grad_output = torch.cat([grad_output, halo], dim=-1)
-        else:
-            grad_output = torch.cat([halo, grad_output], dim=-1)
-
-        if ctx.sampling:
-            backward_op = torch.vmap(
-                torch.ops.aten.convolution_backward,
-                in_dims=(0, 0, 0, None, None, None, None, None, None, None, None),
-                out_dims=(0, 0, None),
-            )
-            if len(weight.shape) < 5:  # TODO : reduce complexity for compatability with torch_blue
-                weight = weight.expand(x_aug.shape[0], *weight.shape)
-
-        else:
-            backward_op = torch.ops.aten.convolution_backward
-
-        g_x, g_w, _ = backward_op(
+        g_x, g_w = dist_conv.conv_transpose2d_fourway_backward(
             grad_output,
             x_aug,
             weight,
-            None,
+            halo_sizes,
+            ctx.in_channels_global,
+            rank,
             stride,
             padding,
             dilation,
-            True,
-            [0],
-            1,
-            [True, True, False],
-        )
-
-        g_x_buffer = torch.zeros(
-            (*g_x.shape[:-3], g_x.shape[-3] // 2, *g_x.shape[-2:]),
-            device=g_x.device,
-            dtype=g_x.dtype,
-        )
-        g_x_recv, g_x_handle = dist_conv.send_g_x_channels_2d(
-            g_x,
-            g_x_buffer,
             empty,
-            ctx.in_channels_global,
+            spatial_group,
             channel_group,
-            local_rank,
-            async_op=True,
+            ctx.conv_transpose2d_grad_fn
         )
 
+        # TODO: compatability with torch vmap
         g_b = grad_output.sum(dim=(0, 2)) if ctx.has_bias else None
         
-        # make grads identical on all ranks
-        g_w_handle = dist.all_reduce(
-            g_w, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True
-        )
         if g_b is not None:
             dist.all_reduce(g_b, op=dist.ReduceOp.AVG, group=spatial_group)
 
-        if g_x_handle is not None:
-            g_x_handle.wait()
-
-        g_x = (
-            g_x[..., : ctx.in_channels_global // 2, :, :] + g_x_recv
-            if local_rank % 2 == 0
-            else g_x[..., ctx.in_channels_global // 2 :, :, :] + g_x_recv
-        )
-
-        g_w_handle.wait()
-
-        # print(f'{g_x.mean(dims=())}')
         return (
             g_x,
             g_w,
             g_b,
+            None,
+            None,
             None,
             None,
             None,
@@ -2435,9 +2388,11 @@ class ConvTranspose2d_complete(torch.autograd.Function):
         device: torch.device,
         n_parallel: int,
         empty: torch.Tensor,
-        bayesian: bool
+        bayesian: bool,
+        conv_transpose2d_fn,
+        conv_transpose2d_grad_fn
     ) -> tuple[torch.Tensor, Optional[int]]:
-        out = ConvTranspose2d_complete.apply(
+        out = ConvTranspose2d.apply(
             x,
             weight,
             bias,
@@ -2452,7 +2407,9 @@ class ConvTranspose2d_complete(torch.autograd.Function):
             device,
             n_parallel,
             empty,
-            bayesian
+            bayesian,
+            conv_transpose2d_fn,
+            conv_transpose2d_grad_fn
         )
 
         return out, 0
