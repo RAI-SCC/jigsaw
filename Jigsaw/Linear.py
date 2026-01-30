@@ -487,13 +487,16 @@ class XWT_sync(torch.autograd.Function):
             B, out_dim are global values.
             in_dim is local value.
         """
-        xwt = select_xw_transpose_kernel(parallelism)(x, w, rank, device, model_group)
+        
 
+        xwt = select_xw_transpose_kernel(parallelism)(x, w, rank, device, model_group)
+        
         # Handle bias term here?
         if (b is not None) and (len(b.shape) > 1):
             b = b.reshape(b.shape[0], 1, 1, -1)
-
+        
         xwt = xwt if b is None else xwt.add(b)
+        
         return xwt
 
     @staticmethod
@@ -602,7 +605,6 @@ class XWT_sync(torch.autograd.Function):
         B = x.shape[1]
         rest = w.shape[1:]  # (in_dim, out_dim)
 
-        # print(f'here! x shape {x.shape}, w shape {w.shape}')
         if len(x.shape) > len(w.shape):
             w = w.reshape(V, 1, *rest)
 
@@ -1239,6 +1241,8 @@ class XT(torch.autograd.Function):
 
         # out has vmapped dimension at dim 0
         return out, 0
+    
+
 
 
 class DistributedRoll(torch.nn.Module):
