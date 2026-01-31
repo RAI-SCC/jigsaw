@@ -131,14 +131,14 @@ def main():
     
     
     total_steps = len(train_loader) * num_epochs
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=2)
-    """ scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 
         mode='max', 
-        patience=5,    
-        factor=0.5,    
-        verbose=True
-    ) """
+        patience=3,    
+        factor=0.5,   
+        threshold=1e-3,
+        min_lr=1e-6, 
+    )
 
     """ scheduler = OneCycleLR(
         optimizer,
@@ -211,7 +211,6 @@ def main():
         # Learning Rate Step
         if rank == 0:
             current_lr = optimizer.param_groups[0]["lr"]
-
             train_dice = train_metrics["Dice"]
             val_loss = val_metrics["Loss"]
             val_dice = val_metrics["Dice"]
@@ -226,7 +225,7 @@ def main():
                 writer.writerow([
                     int(epoch),
                     int(config['data']['image_height']),
-                    learn_rate,
+                    current_lr,
                     batch_size,
                     num_samples,
                     num_samples_val,
