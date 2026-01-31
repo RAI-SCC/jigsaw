@@ -39,7 +39,7 @@ httpcore==1.0.9
 httpx==0.28.1
 huggingface-hub==0.29.1
 idna==3.11
--e git+https://github.com/DeifiliaTo/Jigsaw.git@4fee200e86b2d2d02ebc29f471d6cff63f2bb09a#egg=Jigsaw
+#-e git+https://github.com/DeifiliaTo/Jigsaw.git@4fee200e86b2d2d02ebc29f471d6cff63f2bb09a#egg=Jigsaw
 Jinja2==3.1.6
 kiwisolver==1.4.9
 Markdown==3.10
