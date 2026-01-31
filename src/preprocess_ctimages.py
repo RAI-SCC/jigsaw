@@ -41,15 +41,14 @@ test_ids = set(patient_ids[val_split_end:])
 
 split_info = {
     "seed": 42,
+    "total_patients": num_total,
+    "train_count": len(train_ids),
+    "val_count": len(val_ids),
+    "test_count": len(test_ids),
     "train_ids": sorted(list(train_ids)),
     "val_ids": sorted(list(val_ids)),
     "test_ids": sorted(list(test_ids))
 }
-
-info_file_path = os.path.join(OUTPUT_DIR, str(H),"split_info.json")
-with open(info_file_path, "w") as f:
-    json.dump(split_info, f, indent=4)
-
 
 print(f'Total: {num_total} | Train: {len(train_ids)} | Val: {len(val_ids)} | Test: {len(test_ids)}')
 
@@ -57,11 +56,16 @@ splits = ['train', 'val', 'test']
 types = ['image', 'mask']
 size = str(H) 
 
+info_file_path = os.path.join(OUTPUT_DIR, size,"split_info.json")
+
 for split in splits:
     for type_ in types:
         path = os.path.join('data_processed', size, split, type_)
         os.makedirs(path, exist_ok=True)
         print(f"Created/checked directory: {path}")
+
+with open(info_file_path, "w") as f:
+    json.dump(split_info, f, indent=4)
 
 print(f'Total patients: {num_total}')
 print(f'Training patients: {len(train_ids)}')

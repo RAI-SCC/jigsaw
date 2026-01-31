@@ -1,11 +1,11 @@
 data:
   dt: 6
-  train_data_path: "data_processed/512/train" 
-  valid_data_path: "data_processed/512/val"
+  train_data_path: "data_processed/3000/train" 
+  valid_data_path: "data_processed/3000/val"
   #train_data_path: /hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr
   #valid_data_path: /hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr
-  image_height: 512
-  image_width: 512
+  image_height: 3000
+  image_width: 3000
   in_channels: 1 
   num_classes: 2
  # num_workers: 4 # Number of subprocesses for data loading
