@@ -121,11 +121,16 @@ class SwinMLPEncoderLayer(nn.Module):
     def __init__(self, in_channels, out_channels, input_resolution, window_size = 4, stride = 2, dropout=0.0, mlp_ratio=4.0):
         super().__init__()
 
+        current_res = input_resolution[0]
+        kernel_size = int(3 * (current_res / 256))
+        if kernel_size % 2 == 0: kernel_size += 1 
+        padding = kernel_size // 2
+
         self.downsample_conv = nn.Conv2d(
                                     in_channels = in_channels,
                                     out_channels = out_channels,
-                                    kernel_size = 3,
-                                    padding = 1,
+                                    kernel_size = kernel_size,
+                                    padding = padding,
                                     stride = stride,
                                     bias = False
                                     )
