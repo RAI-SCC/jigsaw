@@ -294,6 +294,7 @@ def distributed_convTranspose1d_over_channels(
 def distributed_conv2d_over_channels(
     x: torch.tensor,
     w: torch.tensor,
+    b: torch.tensor,
     local_rank: int,
     in_channels_global: int,
     stride: Tuple[int, int],
@@ -305,7 +306,6 @@ def distributed_conv2d_over_channels(
 ):
     x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
     
-    # print(f'x shape {x.shape}, w shape {w.shape}')
     match local_rank:
         case 0 | 2:
             x_handle = dist.all_to_all(
@@ -325,6 +325,7 @@ def distributed_conv2d_over_channels(
             y = y + conv_func(
                 x_buffer, # (sampling, batch, in_channels, x, y)
                 w[..., in_channels_global // 2 :, :, :],
+                b,
                 stride=stride,
                 padding=padding,
                 dilation=dilation,
@@ -349,6 +350,7 @@ def distributed_conv2d_over_channels(
             y = y + conv_func(
                 x_buffer,
                 w[..., : in_channels_global // 2, :, :],
+                b,
                 stride=stride,
                 padding=padding,
                 dilation=dilation,
@@ -610,6 +612,7 @@ def convTranspose1d_twoway_channel(
 def distributed_conv_transpose2d_over_channels(
     x: torch.tensor,
     w: torch.tensor,
+    b: torch.tensor,
     in_channels: int,
     stride: int,
     padding: int,
@@ -641,6 +644,7 @@ def distributed_conv_transpose2d_over_channels(
             y = y + conv_transpose2d_fn(
                 x_buffer,
                 w[...,in_channels // 2 :,:,:,:],
+                b,
                 stride=stride,
                 padding=padding,
                 dilation=dilation,
@@ -660,6 +664,7 @@ def distributed_conv_transpose2d_over_channels(
             y = y + conv_transpose2d_fn(
                 x_buffer,
                 w[...,: in_channels // 2,:,:,:],
+                b,
                 stride=stride,
                 padding=padding,
                 dilation=dilation,
@@ -1221,6 +1226,7 @@ def conv2d_fourway_spatial(
 def conv2d_fourway(
     x: torch.Tensor,
     w: torch.Tensor,
+    b: torch.Tensor,
     kernel_size: Tuple[int, int],
     stride: int,
     padding: int,
@@ -1260,6 +1266,7 @@ def conv2d_fourway(
     ) = distributed_conv2d_over_channels(
         x_with_halos,
         w,
+        b,
         local_model_rank,
         in_channels,
         stride,
@@ -1274,6 +1281,7 @@ def conv2d_fourway(
 def conv_transpose2d_fourway(
     x: torch.Tensor,
     w: torch.Tensor,
+    b: torch.Tensor,
     kernel_size: Tuple[int, int],
     stride: int,
     padding: int,
@@ -1292,6 +1300,7 @@ def conv_transpose2d_fourway(
     y, x0, x1 = distributed_conv_transpose2d_over_channels(
         x,
         w,
+        b,
         in_channels,
         stride=stride,
         padding=padding,

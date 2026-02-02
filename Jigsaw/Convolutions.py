@@ -1965,6 +1965,7 @@ class Conv2d(torch.autograd.Function):
         y, x0, x1, right_to_left, left_to_right = dist_conv.conv2d_fourway(
             x,
             weight,
+            bias,
             kernel_size,
             stride=stride,
             padding=padding,
@@ -2099,9 +2100,10 @@ class Conv2d(torch.autograd.Function):
             else:
                 weight_shape = weight.shape[1:]
             x_shape_padded = x_shape_padded[1:]
-
+            g_b = grad_output.sum(dim=(0,1,3,4))
         else:
             weight_shape = weight.shape
+            g_b = grad_output.sum(dim=(0, 2, 3)) if ctx.has_bias else None
 
         g_x_aug = ctx.conv2d_input_fn(
             x_shape_padded,
@@ -2162,14 +2164,11 @@ class Conv2d(torch.autograd.Function):
             dilation=dilation
         )
         
-        # TODO compatability of bias term with torch_blue
-        g_b = grad_output.sum(dim=(0, 2)) if ctx.has_bias else None
-
         g_w_handle = dist.all_reduce(
             g_w, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True
         )
         if g_b is not None:
-            dist.all_reduce(g_b, op=dist.ReduceOp.AVG, group=spatial_group)
+            dist.all_reduce(g_b, op=dist.ReduceOp.SUM, group=spatial_group)
 
         if g_x_handle is not None:
             g_x_handle.wait()
@@ -2396,7 +2395,7 @@ class ConvTranspose2d(torch.autograd.Function):
             weight = weight.expand(x.shape[0], *weight.shape)
             
         y, x_aug, x, halo_sizes = dist_conv.conv_transpose2d_fourway(
-            x, weight, kernel_size, stride, padding, dilation, in_channels, rank, spatial_group, channel_group, empty, conv_transpose2d_fn
+            x, weight, bias, kernel_size, stride, padding, dilation, in_channels, rank, spatial_group, channel_group, empty, conv_transpose2d_fn
         )
         
         # Return output and any intermediate values needed for backward
@@ -2506,12 +2505,13 @@ class ConvTranspose2d(torch.autograd.Function):
             ctx.conv_transpose2d_grad_fn
         )
 
-        # TODO: compatability with torch vmap
-        g_b = grad_output.sum(dim=(0, 2)) if ctx.has_bias else None
-        
+        if ctx.bayesian:
+            g_b = grad_output.sum(dim=(0, 1, 3, 4)) if ctx.has_bias else None        
+        else:
+            g_b = grad_output.sum(dim=(0, 2, 3)) if ctx.has_bias else None        
         if g_b is not None:
-            dist.all_reduce(g_b, op=dist.ReduceOp.AVG, group=spatial_group)
-
+            dist.all_reduce(g_b, op=dist.ReduceOp.SUM, group=spatial_group)
+        
         return (
             g_x,
             g_w,

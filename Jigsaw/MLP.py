@@ -169,7 +169,7 @@ class DistributedMLP(torch.nn.Module):
 def _average_weights(
     model: torch.nn.Module, spatial_group: dist.ProcessGroup, device: torch.device
 ):
-    for name, param in model.named_parameters():
+    for _, param in model.named_parameters():
         dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
 
 class DistributedSynchronizedMLP(torch.nn.Module):
@@ -184,7 +184,7 @@ class DistributedSynchronizedMLP(torch.nn.Module):
         n_parallel: int,
         model_group: torch.distributed.ProcessGroup,
         sync_group: torch.distributed.ProcessGroup,
-        bias: bool = False,
+        bias: bool = True,
         dropout: float = 1e-3,
     ):
         super().__init__()
