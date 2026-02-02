@@ -60,10 +60,8 @@ class DistributedXWT(torch.nn.Module):
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
-        n_channels: int = 1,
         bias: bool = True,
         stdev: float = None,
-        init_method: str = "linear",
         patch_size=None,
     ) -> None:
         """
@@ -81,38 +79,22 @@ class DistributedXWT(torch.nn.Module):
             Device to perform computation on.
         rank : int
             Global rank.
-        n_channels : int, optional
-            The number of channels (default is 1). Only used for parameter initialization.
         bias : bool, optional
             If True, adds a learnable bias to the output (default is True).
         stdev : float, optional
             The standard deviation for weight initialization (default is None).
-        init_method : str, optional
-            The method for weight initialization, either 'linear' or 'conv' (default is 'linear').
         """
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
 
-        if init_method == "linear":
-            stdev = (
-                1.0 / np.sqrt(in_dim * 2) if parallelism == 4 else 1.0 / np.sqrt(in_dim)
-            )  # TODO: multiply by 2 for parallelism = 4
-            self.weights = torch.nn.parameter.Parameter(
-                torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
-            )
-        elif init_method == "conv":
-            stdev = np.sqrt(1.0 / (69 * patch_size))  # TODO generalize to input script
-            self.weights = torch.nn.parameter.Parameter(
-                torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
-            )
-        elif init_method == "convTranspose":
-            stdev = np.sqrt(
-                1.0 / (69 * patch_size * 2)
-            )  # TODO generalize to input script
-            self.weights = torch.nn.parameter.Parameter(
-                torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
-            )
+        stdev = (
+            1.0 / np.sqrt(in_dim * 2) if parallelism == 4 else 1.0 / np.sqrt(in_dim)
+        )
+        self.weights = torch.nn.parameter.Parameter(
+            torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
+        )
+       
         if bias and parallelism == 2:
             self.bias = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim // 2).uniform_(-stdev, stdev)
@@ -338,11 +320,8 @@ class DistributedXWTSync(torch.nn.Module):
         parallelism: int,
         model_group: dist.ProcessGroup,
         sync_group: dist.ProcessGroup,
-        n_channels: int = 1,
         bias: bool = True,
         stdev: float = None,
-        init_method: str = "linear",
-        patch_size=None,
     ) -> None:
         """
         Initialize the XWT Linear layer sharded over n processes.
@@ -359,38 +338,22 @@ class DistributedXWTSync(torch.nn.Module):
             Device to perform computation on.
         rank : int
             Global rank.
-        n_channels : int, optional
-            The number of channels (default is 1). Only used for parameter initialization.
         bias : bool, optional
             If True, adds a learnable bias to the output (default is True).
         stdev : float, optional
             The standard deviation for weight initialization (default is None).
-        init_method : str, optional
-            The method for weight initialization, either 'linear' or 'conv' (default is 'linear').
         """
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
 
-        if init_method == "linear":
-            stdev = (
-                1.0 / np.sqrt(in_dim * 2) if parallelism == 4 else 1.0 / np.sqrt(in_dim)
-            )  # TODO: multiply by 2 for parallelism = 4
-            self.weights = torch.nn.parameter.Parameter(
-                torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
-            )
-        elif init_method == "conv":
-            stdev = np.sqrt(1.0 / (69 * patch_size))  # TODO generalize to input script
-            self.weights = torch.nn.parameter.Parameter(
-                torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
-            )
-        elif init_method == "convTranspose":
-            stdev = np.sqrt(
-                1.0 / (69 * patch_size * 2)
-            )  # TODO generalize to input script
-            self.weights = torch.nn.parameter.Parameter(
-                torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
-            )
+        stdev = (
+            1.0 / np.sqrt(in_dim * 2) if parallelism == 4 else 1.0 / np.sqrt(in_dim)
+        )  # TODO: multiply by 2 for parallelism = 4
+        self.weights = torch.nn.parameter.Parameter(
+            torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
+        )
+        
         if bias and parallelism == 2:
             self.bias = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim // 2).uniform_(-stdev, stdev)
@@ -627,10 +590,7 @@ class XW(torch.nn.Module):
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
-        n_channels: int = 1,
-        bias: bool = False,
-        stdev: float = None,
-        init_method: str = "linear",
+        bias: bool = True
     ) -> None:
         """
         Initialize distributed matrix-matrix multiplication module.
@@ -862,9 +822,7 @@ class DistributedXTW(torch.nn.Module):
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
-        n_channels: int = 72,
-        bias: bool = False,
-        init_method: str = "linear",
+        bias: bool = True
     ) -> None:
         """
         parallelism: int
@@ -877,28 +835,18 @@ class DistributedXTW(torch.nn.Module):
             Device to perform computation on.
         rank : int
             Global rank.
-        n_channels : int, optional
-            Number of channels for weight initialization in 'conv' mode. Default is 72.
         bias : bool, optional
             Whether to include a bias term. Default is True.
-        init_method : str, optional
-            Initialization method for weights ('linear' or 'conv'). Default is 'linear'.
         """
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
-        if init_method == "linear":
-            stdev = (
-                1.0 / np.sqrt(in_dim * 2) if parallelism == 2 else 1.0 / np.sqrt(in_dim)
-            )
-            self.weights = torch.nn.parameter.Parameter(
-                torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev)
-            )
-        elif init_method == "conv":
-            stdev = np.sqrt(6.0) / (60 * n_channels)  # TODO: 60?
-            self.weights = torch.nn.parameter.Parameter(
-                torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev)
-            )
+        
+        stdev = 1.0 / np.sqrt(in_dim * 2) if parallelism == 4 else 1.0 / np.sqrt(in_dim)
+        self.weights = torch.nn.parameter.Parameter(
+            torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev)
+        )
+        
         if bias:
             self.bias = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim).uniform_(-stdev, stdev)
