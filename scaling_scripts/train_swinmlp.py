@@ -20,7 +20,8 @@ def train_one_epoch(
     sheduler,
     loss_fn, 
     device, 
-    rank
+    rank,
+    prof = None
 ):
     model.train()
     running_loss = 0.0
@@ -53,6 +54,9 @@ def train_one_epoch(
         current_batch_size = images.size(0)
         running_loss += loss.item() * current_batch_size
         total_samples += current_batch_size
+
+        if prof:
+            prof.step()
 
         if rank == 0 and i % 10 == 0:
             print(f"Epoch [{epoch}][{i}/{len(loader)}] Loss: {loss.item():.4f}")
@@ -185,76 +189,83 @@ def main():
                     'Val_Recall'
                 ])
 
-    for epoch in range(num_epochs):
-        start_time = time.time()
-
-        train_loss = train_one_epoch(
-            config, epoch, model, train_loader, optimizer, scheduler, loss_fn, device, rank
-        )
-        # wait for all processes to finish epoch before validating
-        dist.barrier() 
-        train_metrics = utils.evaluate(train_loader, model,loss_fn, device, rank)
-        val_metrics   = utils.evaluate(val_loader, model, loss_fn, device, rank)
-
-        if rank == 0:
-            current_val_dice = val_metrics["Dice"]
-        else:
-            current_val_dice = 0.0
-
-        dice_tensor = torch.tensor(current_val_dice).to(device)
-        dist.broadcast(dice_tensor, src=0)
-        scheduler.step(dice_tensor.item())
-
-        end_time = time.time()
-        duration = end_time - start_time
+    with torch.profiler.profile(
+        schedule=torch.profiler.schedule(wait=0, warmup=2, active=5, repeat=1),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(save_dir),
+        record_shapes=True,
+        with_stack=True
+    ) as prof:
         
-        # Learning Rate Step
-        if rank == 0:
-            current_lr = optimizer.param_groups[0]["lr"]
-            train_dice = train_metrics["Dice"]
-            val_loss = val_metrics["Loss"]
-            val_dice = val_metrics["Dice"]
-            val_loss_all = val_metrics["Loss_All"]
+        for epoch in range(num_epochs):
+            start_time = time.time()
 
-            print(f"Epoch {epoch} | Train Loss: {train_loss:.4f} | Dice Score: {train_dice:.4f} | LR: {current_lr:.1e} | Time: {(time.time()-start_time)/60:.1f} min")
+            train_loss = train_one_epoch(
+                config, epoch, model, train_loader, optimizer, scheduler, loss_fn, device, rank, prof
+            )
+            # wait for all processes to finish epoch before validating
+            dist.barrier() 
+            train_metrics = utils.evaluate(train_loader, model,loss_fn, device, rank)
+            val_metrics   = utils.evaluate(val_loader, model, loss_fn, device, rank)
+
+            if rank == 0:
+                current_val_dice = val_metrics["Dice"]
+            else:
+                current_val_dice = 0.0
+
+            dice_tensor = torch.tensor(current_val_dice).to(device)
+            dist.broadcast(dice_tensor, src=0)
+            scheduler.step(dice_tensor.item())
+
+            end_time = time.time()
+            duration = end_time - start_time
             
-            #log_file = f"log_{config['data']['image_height']}_{num_epochs}_{learn_rate}.csv"
-            #log_path = os.path.join(save_dir, log_file)
-            with open(log_path, mode='a', newline='') as f:
-                writer = csv.writer(f, delimiter=';')
-                writer.writerow([
-                    int(epoch),
-                    int(config['data']['image_height']),
-                    current_lr,
-                    batch_size,
-                    num_samples,
-                    num_samples_val,
-                    round(float(train_loss), 4), 
-                    round(float(val_loss), 4),
-                    round(float(val_loss_all), 4),
-                    round(float(train_dice), 4),
-                    round(float(val_dice), 4), 
-                    round(duration, 2),
-                    round(float(train_metrics['TP']), 4),
-                    round(float(train_metrics['FP']), 4),
-                    round(float(train_metrics['TN']), 4),
-                    round(float(train_metrics['FN']), 4),
-                    round(float(train_metrics['Precision']), 4),
-                    round(float(train_metrics['Recall']), 4),
-                    round(float(val_metrics['TP']), 4),
-                    round(float(val_metrics['FP']), 4),
-                    round(float(val_metrics['TN']), 4),
-                    round(float(val_metrics['FN']), 4),
-                    round(float(val_metrics['Precision']), 4),
-                    round(float(val_metrics['Recall']), 4)
-                ])
+            # Learning Rate Step
+            if rank == 0:
+                current_lr = optimizer.param_groups[0]["lr"]
+                train_dice = train_metrics["Dice"]
+                val_loss = val_metrics["Loss"]
+                val_dice = val_metrics["Dice"]
+                val_loss_all = val_metrics["Loss_All"]
 
-           # utils.save_predictions_as_imgs(
-                #val_loader, model,f"{config['training']['save_dir']}/images", 
-                #device=device, epoch=epoch, rank=rank)
+                print(f"Epoch {epoch} | Train Loss: {train_loss:.4f} | Dice Score: {train_dice:.4f} | LR: {current_lr:.1e} | Time: {(time.time()-start_time)/60:.1f} min")
+                
+                #log_file = f"log_{config['data']['image_height']}_{num_epochs}_{learn_rate}.csv"
+                #log_path = os.path.join(save_dir, log_file)
+                with open(log_path, mode='a', newline='') as f:
+                    writer = csv.writer(f, delimiter=';')
+                    writer.writerow([
+                        int(epoch),
+                        int(config['data']['image_height']),
+                        current_lr,
+                        batch_size,
+                        num_samples,
+                        num_samples_val,
+                        round(float(train_loss), 4), 
+                        round(float(val_loss), 4),
+                        round(float(val_loss_all), 4),
+                        round(float(train_dice), 4),
+                        round(float(val_dice), 4), 
+                        round(duration, 2),
+                        round(float(train_metrics['TP']), 4),
+                        round(float(train_metrics['FP']), 4),
+                        round(float(train_metrics['TN']), 4),
+                        round(float(train_metrics['FN']), 4),
+                        round(float(train_metrics['Precision']), 4),
+                        round(float(train_metrics['Recall']), 4),
+                        round(float(val_metrics['TP']), 4),
+                        round(float(val_metrics['FP']), 4),
+                        round(float(val_metrics['TN']), 4),
+                        round(float(val_metrics['FN']), 4),
+                        round(float(val_metrics['Precision']), 4),
+                        round(float(val_metrics['Recall']), 4)
+                    ])
 
-            # utils.save_model(model, optimizer,scheduler, config["training"]["save_dir"], rank, epoch)
-        dist.barrier()
+            # utils.save_predictions_as_imgs(
+                    #val_loader, model,f"{config['training']['save_dir']}/images", 
+                    #device=device, epoch=epoch, rank=rank)
+
+                # utils.save_model(model, optimizer,scheduler, config["training"]["save_dir"], rank, epoch)
+            dist.barrier()
 
     dist.destroy_process_group()
 
