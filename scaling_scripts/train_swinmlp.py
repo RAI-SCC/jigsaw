@@ -6,6 +6,7 @@ import os
 import csv
 import torch.distributed as dist
 from torch.optim.lr_scheduler import OneCycleLR
+from torch.cuda.amp import GradScaler
 import torch.optim as optim
 import utils 
 from perun import monitor
@@ -21,11 +22,13 @@ def train_one_epoch(
     loss_fn, 
     device, 
     rank,
+    scaler,
     prof = None
 ):
     model.train()
     running_loss = 0.0
     total_samples = 0
+    
 
     # Set epoch for sampler if distributed, to shuffle data differently each epoch
     # This ensures that each process sees a different shuffled version of the dataset
@@ -39,14 +42,17 @@ def train_one_epoch(
 
         # Swin Output ist [B, 2, H, W] (Logits)
         optimizer.zero_grad()
-        predictions = model(images) 
-        loss = loss_fn(predictions, masks)
+
+        with torch.amp.autocast("cuda", dtype=torch.float16): 
+            predictions = model(images) 
+            loss = loss_fn(predictions, masks)
 
         # Backward
-        loss.backward()
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-        #sheduler.step()
+        scaler.step(optimizer)
+        scaler.update()
 
         # Sum loss across all processes from all GPUs
         dist.all_reduce(loss, op=dist.ReduceOp.SUM)
@@ -125,6 +131,7 @@ def main():
     batch_size = config["training"]["train_batch"]
     learn_rate = config["training"]["lr"]
     save_dir = config["training"]["save_dir"]
+    scaler = torch.amp.GradScaler("cuda")
 
     optimizer = optim.AdamW(
         model.parameters(),
@@ -200,7 +207,7 @@ def main():
             start_time = time.time()
 
             train_loss = train_one_epoch(
-                config, epoch, model, train_loader, optimizer, scheduler, loss_fn, device, rank, prof
+                config, epoch, model, train_loader, optimizer, scheduler, loss_fn, device, rank, scaler=scaler, prof=prof
             )
             # wait for all processes to finish epoch before validating
             dist.barrier() 
