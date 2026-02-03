@@ -3,6 +3,7 @@ import math
 import torch
 import torch.nn.init as init
 from torch.nn import GELU, Dropout
+import torch.distributed as dist
 
 from . import Linear, Linear_Megatron
 
@@ -56,92 +57,34 @@ class DistributedMLP(torch.nn.Module):
         self.n_parallel = n_parallel
         self.model_group = model_group
 
-        if n_parallel == 2:
-            # in, hidden, out dim are global sizes for two-way model parallelism
-            # required to maintain partitioning across final dimension
-            self.linear1 = Linear.DistributedXWT(
-                in_dim // 2,
-                hidden_dim,
-                rank,
-                device,
-                n_parallel,
-                model_group,
-                bias=bias,
-                init_method="linear",
-                
-            )
-            self.linear2 = Linear.DistributedXWT(
-                hidden_dim // 2,
-                out_dim,
-                rank,
-                device,
-                n_parallel,
-                model_group,
-                bias=bias,
-                init_method="linear",
-            )
-        elif n_parallel == 4:
-            self.linear1 = Linear.DistributedXWT(
-                in_dim // 2,
-                hidden_dim // 2,
-                rank,
-                device,
-                n_parallel,
-                model_group,
-                bias=bias,
-                init_method="linear",
-            )
-            self.linear2 = Linear.DistributedXWT(
-                hidden_dim // 2,
-                out_dim // 2,
-                rank,
-                device,
-                n_parallel,
-                model_group,
-                bias=bias,
-                init_method="linear",
-            )
-        elif n_parallel == 8:
-            self.linear1 = Linear.DistributedXWT(
-                in_dim // 2,
-                hidden_dim // 4,
-                rank,
-                device,
-                n_parallel,
-                model_group,
-                bias=bias,
-                init_method="linear",
-            )
-            self.linear2 = Linear.DistributedXWT(
-                hidden_dim // 2,
-                out_dim // 4,
-                rank,
-                device,
-                n_parallel,
-                model_group,
-                bias=bias,
-                init_method="linear",
-            )
+        match n_parallel:
+            case 2:
+                in_dim, hidden_dim1, hidden_dim2, out_dim = in_dim // 2, hidden_dim, hidden_dim // 2, out_dim
+            case 4:
+                in_dim, hidden_dim1, hidden_dim2, out_dim = in_dim // 2, hidden_dim // 2, hidden_dim // 2, out_dim // 2
+            case 8:
+                in_dim, hidden_dim1, hidden_dim2, out_dim = in_dim // 2, hidden_dim // 4, hidden_dim // 2, out_dim // 4
+        
+        
+        self.linear1 = Linear.DistributedXWT(
+            in_dim,
+            hidden_dim1,
+            rank,
+            device,
+            n_parallel,
+            model_group,
+            bias=bias
+        )
+        self.linear2 = Linear.DistributedXWT(
+            hidden_dim2,
+            out_dim,
+            rank,
+            device,
+            n_parallel,
+            model_group,
+            bias=bias
+        )
 
-        # TODO: Is it necessary to re-initialize the values here?
-        init.uniform_(
-            self.linear1.weights, a=-1.0 / math.sqrt(in_dim), b=1.0 / math.sqrt(in_dim)
-        )
-        init.uniform_(
-            self.linear2.weights,
-            a=-1.0 / math.sqrt(hidden_dim),
-            b=1.0 / math.sqrt(hidden_dim),
-        )
-        if self.linear1.bias is not None:
-            init.uniform_(
-                self.linear1.bias, a=-1.0 / math.sqrt(in_dim), b=1.0 / math.sqrt(in_dim)
-            )
-        if self.linear2.bias is not None:
-            init.uniform_(
-                self.linear2.bias,
-                a=-1.0 / math.sqrt(hidden_dim),
-                b= 1.0 / math.sqrt(hidden_dim),
-            )
         self.activation = GELU()
         self.drop = Dropout(p=dropout)
         self.drop2 = Dropout(p=dropout)
@@ -165,6 +108,93 @@ class DistributedMLP(torch.nn.Module):
         x = self.drop2(x)
 
         return x
+
+def _average_weights(
+    model: torch.nn.Module, spatial_group: dist.ProcessGroup, device: torch.device
+):
+    for _, param in model.named_parameters():
+        dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
+
+class DistributedSynchronizedMLP(torch.nn.Module):
+    """Distributed MLP across n processes."""
+    def __init__(
+        self,
+        in_dim: int,
+        hidden_dim: int,
+        out_dim: int,
+        rank: int,
+        device: torch.device,
+        n_parallel: int,
+        model_group: torch.distributed.ProcessGroup,
+        sync_group: torch.distributed.ProcessGroup,
+        bias: bool = True,
+        dropout: float = 1e-3,
+    ):
+        super().__init__()
+        self.rank = rank
+        self.device = device
+        self.n_parallel = n_parallel
+        self.model_group = model_group
+
+        if n_parallel == 2:
+            # in, hidden, out dim are global sizes for two-way model parallelism
+            # required to maintain partitioning across final dimension
+            self.linear1 = Linear.DistributedXWTSync(
+                in_dim // 2,
+                hidden_dim,
+                rank,
+                device,
+                n_parallel,
+                model_group,
+                sync_group,
+                bias=bias
+            ).to(device)
+            
+            self.linear2 = Linear.DistributedXWTSync(
+                hidden_dim // 2,
+                out_dim,
+                rank,
+                device,
+                n_parallel,
+                model_group,
+                sync_group,
+                bias=bias
+            ).to(device)
+        
+        self.activation = GELU()
+        self.drop = Dropout(p=dropout)
+        self.drop2 = Dropout(p=dropout)
+        self.rank = rank
+        
+        _average_weights(self, sync_group, device)
+        
+
+
+    def forward(self, x):
+        """
+        Forward pass of MLP distributed across two or four processes.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input tensor of shape (B, x_in, in_dim).
+        model_group : torch.distributed.ProcessGroup, optional
+            Process group for an individual model-parallel instance.
+        """
+
+        x = self.linear1(x)
+        x = self.activation(x)
+        x = self.drop(x)
+        x = self.linear2(x)
+        x = self.drop2(x)
+        
+        return x
+
+def _average_weights(
+    model: torch.nn.Module, spatial_group: dist.ProcessGroup, device: torch.device
+):
+    for name, param in model.named_parameters():
+        dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
 
 
 class DistributedXTWMLP(torch.nn.Module):
@@ -208,86 +238,33 @@ class DistributedXTWMLP(torch.nn.Module):
         self.n_parallel = n_parallel
         self.model_group = model_group
 
-        if n_parallel == 2:
-            self.linear1 = Linear.DistributedXTW(
-                in_dim,
-                hidden_dim // 2,
-                rank,
-                device,
-                n_parallel,
-                model_group,
-                bias=bias,
-                init_method="linear",
-            )
-            self.linear2 = Linear.DistributedXWT(
-                hidden_dim // 2,
-                out_dim,
-                rank,
-                device,
-                n_parallel,
-                model_group,
-                bias=bias,
-                init_method="linear",
-            )
-        elif n_parallel == 4:
-            self.linear1 = Linear.DistributedXTW(
-                in_dim // 2,
-                hidden_dim // 2,
-                rank,
-                device,
-                n_parallel,
-                model_group,
-                bias=bias,
-                init_method="linear",
-            )
-            self.linear2 = Linear.DistributedXWT(
-                hidden_dim // 2,
-                out_dim // 2,
-                rank,
-                device,
-                n_parallel,
-                model_group,
-                bias=bias,
-                init_method='linear'
-            )
-        elif n_parallel == 8:
-            self.linear1 = Linear.DistributedXTW(
-                in_dim // 4,
-                hidden_dim // 2,
-                rank,
-                device,
-                n_parallel,
-                model_group,
-                bias=bias,
-                init_method="linear",
-            )
-            self.linear2 = Linear.DistributedXWT(
-                hidden_dim // 2,
-                out_dim // 4,
-                rank,
-                device,
-                n_parallel,
-                model_group,
-                bias=bias,
-            )
-        init.uniform_(
-            self.linear1.weights, a=-1.0 / math.sqrt(in_dim), b=1.0 / math.sqrt(in_dim)
+        match n_parallel:
+            case 2:
+                in_dim, hidden_dim, out_dim = in_dim, hidden_dim // 2, out_dim
+            case 4:
+                in_dim, hidden_dim, out_dim = in_dim //2, hidden_dim // 2, out_dim // 2
+            case 8:
+                in_dim, hidden_dim, out_dim = in_dim //4, hidden_dim // 2, out_dim // 4
+        
+        self.linear1 = Linear.DistributedXTW(
+            in_dim,
+            hidden_dim,
+            rank,
+            device,
+            n_parallel,
+            model_group,
+            bias=bias
         )
-        init.uniform_(
-            self.linear2.weights,
-            a=-1.0 / math.sqrt(hidden_dim),
-            b=1.0 / math.sqrt(hidden_dim),
+        self.linear2 = Linear.DistributedXWT(
+            hidden_dim,
+            out_dim,
+            rank,
+            device,
+            n_parallel,
+            model_group,
+            bias=bias
         )
-        if self.linear1.bias is not None:
-            init.uniform_(
-                self.linear1.bias, a=-1.0 / math.sqrt(in_dim), b=1.0 / math.sqrt(in_dim)
-            )
-        if self.linear2.bias is not None:
-            init.uniform_(
-                self.linear2.bias,
-                a=-1.0 / math.sqrt(hidden_dim),
-                b= 1.0 / math.sqrt(hidden_dim),
-            )
+        
         self.activation = GELU()
         self.drop = Dropout(p=dropout)
         self.drop2 = Dropout(p=dropout)
@@ -306,9 +283,9 @@ class DistributedXTWMLP(torch.nn.Module):
         """
         x = self.linear1(x)
         x = self.activation(x)
-        #x = self.drop(x)
+        x = self.drop(x)
         x = self.linear2(x)
-        #x = self.drop2(x)
+        x = self.drop2(x)
         return x
 
 

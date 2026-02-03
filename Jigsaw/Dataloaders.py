@@ -9,6 +9,7 @@ from .Dataset import (
     ERA5Preprocessed,
     ERA5PreprocessedDistributed,
     HighResDataset,
+    ERAJigsaw
 )
 
 
@@ -95,7 +96,21 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
             else:
                 dataset = ERA5DatasetDistributed(config_dict, data_path, mode=mode, patch_size=(
                     2, 4, 4), rank=rank, forecast_length=config_dict['model']['latent_rollout'], normalize=normalize, dt=dt)
-            
+    
+    # dataset = ERAJigsaw(config_dict, data_path, mode=mode, patch_size=(
+    #                 2, 4, 4), rank=rank, forecast_length=config_dict['model']['latent_rollout'])
+    
+    # dataset_info = {
+    #     "out_surface_variables": dataset.out_surface_variables,
+    #     "out_pressure_variables": dataset.out_pressure_variables,
+    #     "out_means": dataset.out_means,
+    #     "out_stds": dataset.out_stds,
+    #     "resolution": dataset.resolution,
+    #     "padded_resolution": dataset.padded_resolution,
+    #     "padding": dataset.padding,
+    #     "size": len(dataset)
+    # }
+        
     if subset_size > 0:
         subset_indices = torch.randperm(len(dataset))[:subset_size]
         dataset = Subset(dataset, subset_indices)
@@ -118,7 +133,6 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
                                 prefetch_factor=config_dict['data']['prefetch_factor'],
                                 num_workers=config_dict['data']['num_workers']
                                 )
-        return dataloader
     else:
         sampler = DistributedSampler(dataset,
                                      shuffle=True,
@@ -135,4 +149,4 @@ def get_dataloader(config_dict, data_path, mode='train', subset_size=0, distribu
                                 prefetch_factor=config_dict['data']['prefetch_factor'],
                                 num_workers=config_dict['data']['num_workers']
                                 )
-    return dataloader
+    return dataloader, None # dataset_info

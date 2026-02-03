@@ -1,6 +1,6 @@
 import time
 from pathlib import Path
-
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
@@ -24,29 +24,6 @@ def calc_weight(n_lat: int, cossum: float = 458.36551167) -> torch.Tensor:
     latitude = np.linspace(np.pi / 2.0, -np.pi / 2.0, n_lat)
     weight = n_lat * np.cos(latitude) / cossum
     return torch.tensor(weight)
-
-
-# upper_variable options: [Z, Q, T, U, V]
-# surface_variable options: [MSLP, U10, V10, T2M]
-# PL options: [1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50]
-upper_variable_indexing = {"Z": 0, "Q": 1, "T": 2, "U": 3, "V": 4}
-surface_variable_indexing = {"MSL": 0, "U10": 1, "V10": 2, "T2M": 3}
-PL_indexing = {
-    1000: 0,
-    925: 1,
-    850: 2,
-    700: 3,
-    600: 4,
-    500: 5,
-    400: 6,
-    300: 7,
-    250: 8,
-    200: 9,
-    150: 10,
-    100: 11,
-    50: 12,
-}
-
 
 def get_var_names(prepend_variable=["epoch"]) -> list[str]:
     """Return string representation of variable names."""
@@ -75,11 +52,12 @@ def prepare_plot_data(input_data, output_data, target_data, device, model_group)
         input_tensor_gather, input_data, group=model_group
     )
 
-    top_row = torch.cat([input_tensor_gather[0], input_tensor_gather[1]], dim=2)
-    bottom_row = torch.cat([input_tensor_gather[2], input_tensor_gather[3]], dim=2)
+    # data has shape: [channel, lat, lon]
+    top_row = torch.cat([input_tensor_gather[0], input_tensor_gather[1]], dim=0)
+    bottom_row = torch.cat([input_tensor_gather[2], input_tensor_gather[3]], dim=0)
 
     # left/right side shape: [1, 720, 720, 72]
-    input_data_gathered = torch.cat([top_row, bottom_row], dim=1)[..., :69]
+    input_data_gathered = torch.cat([top_row, bottom_row], dim=-1)[:69]
 
     # gather first sample to rank 0
     output_tensor_gather = torch.zeros(4, *output.shape).to(device)
@@ -88,10 +66,10 @@ def prepare_plot_data(input_data, output_data, target_data, device, model_group)
         output_tensor_gather, output, group=model_group
     )
 
-    top_row2 = torch.cat([output_tensor_gather[0], output_tensor_gather[1]], dim=2)
-    bottom_row2 = torch.cat([output_tensor_gather[2], output_tensor_gather[3]], dim=2)
+    top_row2 = torch.cat([output_tensor_gather[0], output_tensor_gather[1]], dim=0)
+    bottom_row2 = torch.cat([output_tensor_gather[2], output_tensor_gather[3]], dim=0)
     # left/right side shape: [1, 720, 720, 72]
-    output_data_gathered = torch.cat([top_row2, bottom_row2], dim=1)[:, :, :69]
+    output_data_gathered = torch.cat([top_row2, bottom_row2], dim=-1)[:69]
 
     # Gather target data. Currently split between 4 devices as well.
     target_tensor_gather = torch.zeros(4, *target_data.shape).to(device)
@@ -100,10 +78,10 @@ def prepare_plot_data(input_data, output_data, target_data, device, model_group)
         target_tensor_gather, target_data, group=model_group
     )
 
-    top_row = torch.cat([target_tensor_gather[0], target_tensor_gather[1]], dim=2)
-    bottom_row = torch.cat([target_tensor_gather[2], target_tensor_gather[3]], dim=2)
+    top_row = torch.cat([target_tensor_gather[0], target_tensor_gather[1]], dim=0)
+    bottom_row = torch.cat([target_tensor_gather[2], target_tensor_gather[3]], dim=0)
     # left/right side shape: [1, 720, 720, 72]
-    target_data_gathered = torch.cat([top_row, bottom_row], dim=1)[:, :, :69]
+    target_data_gathered = torch.cat([top_row, bottom_row], dim=-1)[:69]
 
     return input_data_gathered, output_data_gathered, target_data_gathered
 
@@ -217,47 +195,49 @@ def gen_plots(
 
     elif parallelism == 4:
         input_print, output_print, target_print = input_data, output, target_data
-        input_print = input_print.reshape(xlat, xlon, 69).permute(2, 0, 1)
-        output_print = output_print.reshape(xlat, xlon, 69).permute(2, 0, 1)
-        target_print = target_print.reshape(xlat, xlon, 69).permute(2, 0, 1)
+        
+        input_print = input_print.reshape(69, xlat, xlon)
+        output_print = output_print.reshape(69, xlat, xlon)
+        target_print = target_print.reshape(69, xlat, xlon)
+        
         if rank == 0:
             save_path = f"{file_path}/u10_{epoch}.png"
             plot_fns.plot_fields(
                 input_print,
-                output_print - input_print,
-                target_print - input_print,
+                output_print,
+                target_print,
                 save_path=save_path,
                 index=1,
             )
             save_path = f"{file_path}/T2M_{epoch}.png"
             plot_fns.plot_fields(
                 input_print,
-                output_print - input_print,
-                target_print - input_print,
+                output_print,
+                target_print,
                 save_path=save_path,
                 index=3,
             )
             save_path = f"{file_path}/T850_{epoch}.png"
             plot_fns.plot_fields(
                 input_print,
-                output_print - input_print,
-                target_print - input_print,
+                output_print,
+                target_print,
                 save_path=save_path,
                 index=32,
             )
             save_path = f"{file_path}/U850_{epoch}.png"
             plot_fns.plot_fields(
                 input_print,
-                output_print - input_print,
-                target_print - input_print,
+                output_print,
+                target_print,
                 save_path=save_path,
                 index=45,
             )
             save_path = f"{file_path}/Z500_{epoch}.png"
             plot_fns.plot_fields(
                 input_print,
-                output_print - input_print,
-                target_print - input_print,
+                output_print,
+                target_print,
                 save_path=save_path,
                 index=9,
             )
@@ -279,6 +259,7 @@ def validate(
     model_subgroup_col: torch.distributed.ProcessGroup = None,
     ddp_group: torch.distributed.ProcessGroup = None,
     model_group: torch.distributed.ProcessGroup = None,
+    bayesian: bool = True
 ):
     if config_dict["model"]["model_parallel"]:
         mse_file_path = f"{mse_file_path}_{rank}.csv"
@@ -318,11 +299,11 @@ def validate(
         .flatten()
     )
     variable_weights = (
-        torch.concat([surface_weights, pressure_weights]).view(1, 1, 1, 69)
+        torch.concat([surface_weights, pressure_weights]).view(1, 69, 1, 1)
     ).to(device)
 
     # underground mask
-    area_weights = calc_weight(n_lat).view(1, n_lat, 1, 1).to(device)
+    area_weights = calc_weight(n_lat).view(1, 1, n_lat, 1).to(device)
 
     # Load climatology
     if parallelism < 4:
@@ -346,11 +327,11 @@ def validate(
         )
     elif parallelism == 4:
         mod = rank % parallelism
-        variable_weights = torch.nn.functional.pad(variable_weights, (0, 3))
+        variable_weights = torch.nn.functional.pad(variable_weights, (0,0,0,0, 0, 3))
         variable_weights = (
-            variable_weights[0, 0, 0, :36]
+            variable_weights[:, :36]
             if rank % parallelism in [0, 2]
-            else variable_weights[0, 0, 0, 36:]
+            else variable_weights[:, 36:]
         )
 
     xlat, xlon = config_dict["data"]["xlat"], config_dict["data"]["xlon"]
@@ -383,6 +364,7 @@ def validate(
             print(f"{batch}/{len(dataloader)}")
 
         input_data = data[0].to(device, non_blocking=True)
+        
         for step, rollout in enumerate(rollout_time):
             # Write epoch
             rmse[rollout][0] = epoch
@@ -392,7 +374,7 @@ def validate(
 
             # Input and target data loading
             target_data = data[1][step].to(device, non_blocking=True)
-
+            
             if step == 0:
                 model_input = input_data.detach()
             else:
@@ -403,11 +385,17 @@ def validate(
                     model_input[..., -3] = land_mask
                     model_input[..., -2] = soil_type
                     model_input[..., -1] = topography
-
-            model_output = model(model_input, rollout_=1)
-
+            
+            
+            
+            
+            if bayesian:
+                model_output = model(model_input, samples=config_dict["training"]["n_samples"])
+                model_output = model_output.mean(dim=0)
+            else:
+                model_output = model(model_input)
             output = model_output.detach()
-
+            
             match parallelism:
                 case 1:
                     # Permute input data for mse calculation
@@ -440,18 +428,18 @@ def validate(
                         std=std,
                         indices=indices,
                     ).to(torch.float32)
-                    acc[rollout][indices_key] = acc[rollout][
-                        indices_key
-                    ] + calc_acc_variable(
-                        target_data,
-                        output,
-                        device,
-                        area_weights,
-                        mean=mean,
-                        std=std,
-                        climatology=climatology,
-                        indices=indices,
-                    ).to(torch.float32)
+                    # acc[rollout][indices_key] = acc[rollout][
+                    #     indices_key
+                    # ] + calc_acc_variable(
+                    #     target_data,
+                    #     output,
+                    #     device,
+                    #     area_weights,
+                    #     mean=mean,
+                    #     std=std,
+                    #     climatology=climatology,
+                    #     indices=indices,
+                    # ).to(torch.float32)
 
                 case 2:
                     output = output.reshape(output.shape[0], xlat, xlon, 36)
@@ -503,7 +491,8 @@ def validate(
                         )
 
                 case 4:
-                    output = output.reshape(output.shape[0], xlat, xlon // 2, 36)
+                    output = output.reshape(output.shape[0], 36, xlat, xlon // 2)
+                    
                     # 0 and 2 handle the first half of the output variables
                     if rank % parallelism in [0, 2]:
                         norm_offset = 0
@@ -547,33 +536,33 @@ def validate(
                         indices=indices,
                         norm_offset=norm_offset,
                     ).to(torch.float32)
-                    acc[rollout][indices + norm_offset + index_offset] = acc[rollout][
-                        indices + norm_offset + index_offset
-                    ] + calc_acc_variable_parallel(
-                        target_data,
-                        output,
-                        device,
-                        area_weights,
-                        mean=mean,
-                        std=std,
-                        climatology=climatology,
-                        indices=indices,
-                        group=model_subgroup_col,
-                        rank=rank,
-                        norm_offset=norm_offset,
-                    ).to(torch.float32)
+                    # acc[rollout][indices + norm_offset + index_offset] = acc[rollout][
+                    #     indices + norm_offset + index_offset
+                    # ] + calc_acc_variable_parallel(
+                    #     target_data,
+                    #     output,
+                    #     device,
+                    #     area_weights,
+                    #     mean=mean,
+                    #     std=std,
+                    #     climatology=climatology,
+                    #     indices=indices,
+                    #     group=model_subgroup_col,
+                    #     rank=rank,
+                    #     norm_offset=norm_offset,
+                    # ).to(torch.float32)
 
             if parallelism > 1 and rank in [1, 3]:
                 output_loss = (
-                    output[..., :33] * area_weights * variable_weights[..., :33]
+                    output[..., :33] #* area_weights * variable_weights[..., :33]
                 )
                 target_loss = (
-                    target_data[..., :33] * area_weights * variable_weights[..., :33]
+                    target_data[..., :33] #* area_weights * variable_weights[..., :33]
                 )
 
             else:
-                output_loss = output * area_weights * variable_weights
-                target_loss = target_data * area_weights * variable_weights
+                output_loss = output #* area_weights * variable_weights
+                target_loss = target_data# * area_weights * variable_weights
 
             iter_loss = loss_fn(output_loss, target_loss)
 
@@ -591,8 +580,6 @@ def validate(
         torch.distributed.all_reduce(loss)
 
         loss /= total_samples
-
-        # print(f"I am rank {rank} and loss values are {loss} over {total_samples}")
     else:
         total_samples = [len(dataloader.dataset)]
         loss = loss / world_size / total_samples[0]
@@ -692,15 +679,17 @@ def calc_mse_variable(
     # target shape [n_batch, 721, 1440, vars]
     divisor = torch.sqrt(torch.tensor([n_lon * n_lat])).to(device)
 
-    std_multiplier = std[indices + norm_offset].view(1, 1, 1, len(indices)).to(device)
-    area_weights = area_weights.view(1, n_lat, 1, 1)
+    std_multiplier = std[indices + norm_offset].view(1, len(indices), 1, 1).to(device)
+    area_weights = area_weights.view(1, 1, n_lat, 1)
+    # print(f'target resutls {(target[:, indices]).shape}, {result.shape}')
     mean_squared_error = (
-        (target[..., indices] - result[..., indices])
-        * std_multiplier.flatten()
+        (target[:, indices] - result[:, indices])
+        * std_multiplier
         / divisor
-    ) ** 2 * area_weights
+    ) ** 2 # * area_weights
+    # print(f'mse shape {mean_squared_error.shape}')
     # MSE will have shape [n_batch, n_vars, ]
-    mean_squared_error = mean_squared_error.sum(dim=(0, 1, 2))
+    mean_squared_error = mean_squared_error.sum(dim=(0, 2, 3)).flatten()
     return mean_squared_error
 
 

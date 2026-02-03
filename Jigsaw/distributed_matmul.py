@@ -2,6 +2,7 @@ import os
 
 import torch
 import torch.distributed as dist
+import time 
 
 streams = [torch.cuda.Stream() for _ in range(2)]
 streamz = [torch.cuda.Stream() for _ in range(4)]
@@ -39,6 +40,7 @@ def _get_preallocated_buffer(
     torch.tensor
         Preallocated buffer.
     """
+    # TODO: re-introduce buffers
     key = (dtype, rank, index)
     if key not in _prealloc_buffers:
         _prealloc_buffers[key] = (None, 0)
@@ -51,16 +53,16 @@ def _get_preallocated_buffer(
         needed *= dim
 
     # Reallocate if buffer is None or too small
-    if buf is None or needed > buf_numel:
-        buf = torch.zeros(needed, dtype=dtype, device=device)
-        buf_numel = needed
-        _prealloc_buffers[key] = (buf, buf_numel)
-        return buf.view(*shape)
-    else:
-        out, _ = _prealloc_buffers[key]
-        out = out[:needed].view(*shape)
+    # if buf is None or needed > buf_numel:
+    buf = torch.zeros(needed, dtype=dtype, device=device)
+        # buf_numel = needed
+        # _prealloc_buffers[key] = (buf, buf_numel)
+    return buf.view(*shape)
+    # else:
+    #     out, _ = _prealloc_buffers[key]
+    #     out = out[:needed].view(*shape)
 
-        return out
+    #     return out
 
 
 def xw_transpose_twoway(
@@ -94,10 +96,11 @@ def xw_transpose_twoway(
     mod = rank % 2
 
     w0, w1 = torch.split(wij, wij.shape[-2] // 2, dim=-2)
+    # print(_prealloc_buffers.keys())
     buffer_xw = _get_preallocated_buffer(
         (*xij.shape[:-1], w0.shape[-2]), torch.float32, rank, device
     )
-
+    
     match mod:
         case 0:
             xw = torch.matmul(xij, w1.mT)
@@ -110,8 +113,8 @@ def xw_transpose_twoway(
 
     xw_handle = dist.all_to_all(
         xw_recv_list, xw_send_list, group=model_group, async_op=True
-    )
-
+    )    
+    
     match mod:
         case 0:
             cij = torch.matmul(xij, w0.mT)
@@ -121,7 +124,7 @@ def xw_transpose_twoway(
             cij = torch.matmul(xij, w1.mT)
             xw_handle.wait()
             cij = cij + xw_recv_list[0]
-
+    
     return cij
 
 
@@ -291,7 +294,6 @@ def x_transpose_twoway(
                 x_transpose = torch.empty(
                     *x_shape[:-2], x0.shape[-2] * 2, x0.shape[-1], device=device
                 )
-                # print(f'current x0 shape: {x0.shape} and x_transpose shape {x_transpose.shape}')
                 x_transpose[..., : x0.shape[-2], :] = x0
             else:
                 x_transpose = torch.empty(x0.shape[0] * 2, x0.shape[1], device=device)
@@ -308,7 +310,6 @@ def x_transpose_twoway(
                 x_transpose = torch.empty(
                     *x_shape[:-2], x1.shape[-2] * 2, x1.shape[-1], device=device
                 )
-                # print(f'x transpose shape: {x_transpose.shape}, x1 {x1.shape}')
                 x_transpose[..., x1.shape[-2] :, :] = x1
             else:
                 x_transpose = torch.empty(x1.shape[1] * 2, x1.shape[2], device=device)
@@ -725,7 +726,8 @@ def x_transpose_fourway(
         The transposed tensor.
     """
     mod = rank % 4
-
+    
+    x = x.contiguous()
     match mod:
         case 0:
             x_send_list = [empty, empty, empty, empty]
