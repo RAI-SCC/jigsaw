@@ -85,27 +85,23 @@ class DistributedXWT(torch.nn.Module):
             The standard deviation for weight initialization (default is None).
         """
         super().__init__()
-        self.in_dim = in_dim
-        self.out_dim = out_dim
-
-        stdev = (
-            1.0 / np.sqrt(in_dim * 2) if parallelism == 4 else 1.0 / np.sqrt(in_dim)
-        )
+        
+        stdev = 1.0 / np.sqrt(in_dim * 2)
         self.weights = torch.nn.parameter.Parameter(
             torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
         )
-       
-        if bias and parallelism == 2:
-            self.bias = torch.nn.parameter.Parameter(
-                torch.zeros(out_dim // 2).uniform_(-stdev, stdev)
-            )
-        elif bias and parallelism == 4:
+
+        match parallelism:
+            case 2:
+                out_dim = out_dim // 2
+            case 4:
+                out_dim = out_dim
+            case 8:
+                out_dim = out_dim * 2
+        
+        if bias:
             self.bias = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim).uniform_(-stdev, stdev)
-            )
-        elif bias and parallelism == 8:
-            self.bias = torch.nn.parameter.Parameter(
-                torch.zeros(out_dim * 2).uniform_(-stdev, stdev)
             )
         else:
             self.bias = None
@@ -292,7 +288,7 @@ class XWT(torch.autograd.Function):
         out_dim : Optional[int]
             Index of vmapped dimension in output (0 if batched, None if not).
         """
-        
+
         # x under vmap has shape (V, B, x_in, in_dim).
         x = x.contiguous()
         V = x.shape[0]
@@ -344,27 +340,25 @@ class DistributedXWTSync(torch.nn.Module):
             The standard deviation for weight initialization (default is None).
         """
         super().__init__()
-        self.in_dim = in_dim
-        self.out_dim = out_dim
-
+        
         stdev = (
-            1.0 / np.sqrt(in_dim * 2) if parallelism == 4 else 1.0 / np.sqrt(in_dim)
-        )  # TODO: multiply by 2 for parallelism = 4
+            1.0 / np.sqrt(in_dim * 2) if parallelism > 1 else 1.0 / np.sqrt(in_dim) # TODO CHECK
+        )  
         self.weights = torch.nn.parameter.Parameter(
             torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
         )
-        
-        if bias and parallelism == 2:
-            self.bias = torch.nn.parameter.Parameter(
-                torch.zeros(out_dim // 2).uniform_(-stdev, stdev)
-            )
-        elif bias and parallelism == 4:
+
+        match parallelism:
+            case 2:
+                out_dim = out_dim // 2
+            case 4:
+                out_dim = out_dim
+            case 8:
+                out_dim = out_dim * 2
+                
+        if bias:
             self.bias = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim).uniform_(-stdev, stdev)
-            )
-        elif bias and parallelism == 8:
-            self.bias = torch.nn.parameter.Parameter(
-                torch.zeros(out_dim * 2).uniform_(-stdev, stdev)
             )
         else:
             self.bias = None
@@ -450,16 +444,15 @@ class XWT_sync(torch.autograd.Function):
             B, out_dim are global values.
             in_dim is local value.
         """
-        
 
         xwt = select_xw_transpose_kernel(parallelism)(x, w, rank, device, model_group)
-        
+
         # Handle bias term here?
         if (b is not None) and (len(b.shape) > 1):
             b = b.reshape(b.shape[0], 1, 1, -1)
-        
+
         xwt = xwt if b is None else xwt.add(b)
-        
+
         return xwt
 
     @staticmethod
@@ -579,7 +572,7 @@ class XWT_sync(torch.autograd.Function):
         return out, 0
 
 
-class XW(torch.nn.Module):
+class DistributedXW(torch.nn.Module):
     """Batched matrix-matrix (XW) multiplication distributed across two processes."""
 
     def __init__(
@@ -590,7 +583,7 @@ class XW(torch.nn.Module):
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
-        bias: bool = True
+        bias: bool = True,
     ) -> None:
         """
         Initialize distributed matrix-matrix multiplication module.
@@ -608,8 +601,6 @@ class XW(torch.nn.Module):
         """
         super().__init__()
 
-        self.in_dim = in_dim
-        self.out_dim = out_dim
         stdev = 1.0 / np.sqrt(in_dim * 2) if parallelism == 4 else 1.0 / np.sqrt(in_dim)
 
         self.weights = torch.nn.parameter.Parameter(
@@ -822,7 +813,7 @@ class DistributedXTW(torch.nn.Module):
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
-        bias: bool = True
+        bias: bool = True,
     ) -> None:
         """
         parallelism: int
@@ -839,14 +830,12 @@ class DistributedXTW(torch.nn.Module):
             Whether to include a bias term. Default is True.
         """
         super().__init__()
-        self.in_dim = in_dim
-        self.out_dim = out_dim
-        
+
         stdev = 1.0 / np.sqrt(in_dim * 2) if parallelism == 4 else 1.0 / np.sqrt(in_dim)
         self.weights = torch.nn.parameter.Parameter(
             torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev)
         )
-        
+
         if bias:
             self.bias = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim).uniform_(-stdev, stdev)
@@ -1182,15 +1171,12 @@ class XT(torch.autograd.Function):
         parallelism: int,
         model_group: dist.ProcessGroup,
     ) -> tuple[torch.Tensor, Optional[int]]:
-        
         x = x.contiguous()
         # x under vmap has shape (V, B, x_in, in_dim).
         out = XT.apply(x, rank, device, parallelism, model_group)
 
         # out has vmapped dimension at dim 0
         return out, 0
-    
-
 
 
 class DistributedRoll(torch.nn.Module):
@@ -1288,15 +1274,15 @@ class Roll(torch.autograd.Function):
         x_roll: torch.Tensor
             Local rolled tensor.
         """
-        
+
         x = dist_roll.roll2d(x, shifts, dims, rank, device, empty, spatial_group)
 
         return x
-    
+
     @staticmethod
     def setup_context(ctx, inputs, output):
         x, shifts, dims, rank, device, empty, parallelism, spatial_group = inputs
-        
+
         ctx.shifts = shifts
         ctx.rank = rank
         ctx.dims = dims
@@ -1306,12 +1292,13 @@ class Roll(torch.autograd.Function):
 
     @staticmethod
     def vmap(
-        info, 
-        in_dims,
-        x, shifts, dims, rank, device, empty, parallelism, spatial_group
+        info, in_dims, x, shifts, dims, rank, device, empty, parallelism, spatial_group
     ):
-        out = Roll.apply(x, shifts, dims, rank, device, empty, parallelism, spatial_group)
+        out = Roll.apply(
+            x, shifts, dims, rank, device, empty, parallelism, spatial_group
+        )
         return out, 0
+
     @staticmethod
     def backward(
         ctx: torch.autograd.Function, grad_output: torch.Tensor

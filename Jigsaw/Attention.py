@@ -53,8 +53,6 @@ class DistributedAttention(torch.nn.Module):
                     self.device,
                     self.n_parallel,
                     self.model_group,
-                    n_channels=1,
-                    init_method="linear",
                     bias=False,
                 )
             case 4:
@@ -65,8 +63,6 @@ class DistributedAttention(torch.nn.Module):
                     self.device,
                     self.n_parallel,
                     self.model_group,
-                    n_channels=1,
-                    init_method="linear",
                     bias=False,
                 )
             case 8:
@@ -77,8 +73,6 @@ class DistributedAttention(torch.nn.Module):
                     self.device,
                     self.n_parallel,
                     self.model_group,
-                    n_channels=1,
-                    init_method="linear",
                     bias=False,
                 )
 
@@ -108,9 +102,7 @@ class DistributedAttention(torch.nn.Module):
                     self.rank,
                     self.device,
                     self.n_parallel,
-                    self.channel_group,  # TODO IN VIT THIS IS MODEL GROUP
-                    n_channels=1,
-                    init_method="linear",
+                    self.channel_group,
                     bias=False,
                 )
             case 4:
@@ -120,9 +112,7 @@ class DistributedAttention(torch.nn.Module):
                     self.rank,
                     self.device,
                     self.n_parallel,
-                    self.channel_group,  # TODO IN VIT THIS IS MODEL GROUP
-                    n_channels=1,
-                    init_method="linear",
+                    self.channel_group,
                     bias=False,
                 )
             case 8:
@@ -133,8 +123,6 @@ class DistributedAttention(torch.nn.Module):
                     self.device,
                     self.n_parallel,
                     self.model_group,
-                    n_channels=1,
-                    init_method="linear",
                     bias=False,
                 )
 
@@ -226,8 +214,6 @@ class DistributedWindowedAttention(torch.nn.Module):
             self.n_parallel,
             self.channel_group,
             self.spatial_group,
-            n_channels=1,
-            init_method="linear",
             bias=False,
         )
 

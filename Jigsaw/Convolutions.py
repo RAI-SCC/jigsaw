@@ -48,7 +48,7 @@ class DistributedConv1D(torch.nn.Module):
         self.rank = rank
         self.model_group = groups
         self.device = device
-        self.n_parallel = 2
+        self.parallelism = 2
         self.bias = bias
 
         self.conv1d = torch.nn.Conv1d(
@@ -93,7 +93,7 @@ class DistributedConv1D(torch.nn.Module):
             self.dilation,
             self.rank,
             self.device,
-            self.n_parallel,
+            self.parallelism,
             self.model_group,
         )
 
@@ -115,12 +115,12 @@ class Conv1d(torch.autograd.Function):
         dilation: int,
         rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
     ) -> torch.Tensor:
         ctx.rank = rank
         ctx.device = device
-        ctx.n_parallel = n_parallel
+        ctx.parallelism = parallelism
         ctx.model_group = model_group
         ctx.b = bias
 
@@ -413,8 +413,9 @@ class DistributedConv1D_channel(torch.nn.Module):
         self.rank = rank
         self.model_group = groups
         self.device = device
-        self.n_parallel = 2
+        self.parallelism = 2
         self.bias = bias
+        self.groups = groups
 
         self.convTranspose1d = torch.nn.ConvTranspose1d(
             self.in_channels,
@@ -422,8 +423,14 @@ class DistributedConv1D_channel(torch.nn.Module):
             kernel_size=self.kernel_size,
             stride=self.stride,
             bias=self.bias,
+            groups=self.groups
         )
 
+        k = np.sqrt(self.groups / (self.out_channels * 2 * self.kernel_size))
+        self.convTranspose1d.weight.data.uniform_(-k, k)
+        if bias:
+            self.convTranspose1d.bias.data.uniform_(-k, k)
+            
         self.convTranspose1d_apply = ConvTranspose1d().apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -454,7 +461,7 @@ class DistributedConv1D_channel(torch.nn.Module):
             self.dilation,
             self.rank,
             self.device,
-            self.n_parallel,
+            self.parallelism,
             self.model_group,
         )
 
@@ -476,12 +483,12 @@ class ConvTranspose1d(torch.autograd.Function):
         dilation: int,
         rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
     ) -> torch.Tensor:
         ctx.rank = rank
         ctx.device = device
-        ctx.n_parallel = n_parallel
+        ctx.parallelism = parallelism
         ctx.model_group = model_group
         ctx.b = bias
 
@@ -621,7 +628,7 @@ class DistributedConv1D_channel(torch.nn.Module):
         rank,
         groups,
         device,
-        n_parallel=2,
+        parallelism=2,
         bias=False,
         model_group=None,
     ):
@@ -643,7 +650,7 @@ class DistributedConv1D_channel(torch.nn.Module):
         self.rank = rank
         self.model_group = groups
         self.device = device
-        self.n_parallel = 2
+        self.parallelism = 2
         self.model_group = model_group
 
         self.conv1d = torch.nn.Conv1d(
@@ -684,7 +691,7 @@ class DistributedConv1D_channel(torch.nn.Module):
             self.dilation,
             self.rank,
             self.device,
-            self.n_parallel,
+            self.parallelism,
             self.model_group,
         )
 
@@ -706,12 +713,12 @@ class Conv1d_channel(torch.autograd.Function):
         dilation: int,
         rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
     ) -> torch.Tensor:
         ctx.rank = rank
         ctx.device = device
-        ctx.n_parallel = n_parallel
+        ctx.parallelism = parallelism
         ctx.model_group = model_group
         ctx.b = bias
 
@@ -818,7 +825,7 @@ class DistributedConvTranspose1D_channel(torch.nn.Module):
         rank,
         groups,
         device,
-        n_parallel=2,
+        parallelism=2,
         bias=False,
         model_group=None,
     ):
@@ -838,7 +845,7 @@ class DistributedConvTranspose1D_channel(torch.nn.Module):
         self.rank = rank
         self.model_group = groups
         self.device = device
-        self.n_parallel = 2
+        self.parallelism = 2
         self.model_group = model_group
 
         print(
@@ -882,7 +889,7 @@ class DistributedConvTranspose1D_channel(torch.nn.Module):
             self.dilation,
             self.rank,
             self.device,
-            self.n_parallel,
+            self.parallelism,
             self.model_group,
         )
 
@@ -904,12 +911,12 @@ class ConvTranspose1d_channel(torch.autograd.Function):
         dilation: int,
         rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
     ) -> torch.Tensor:
         ctx.rank = rank
         ctx.device = device
-        ctx.n_parallel = n_parallel
+        ctx.parallelism = parallelism
         ctx.model_group = model_group
         ctx.b = bias
 
@@ -1009,8 +1016,12 @@ class DistributedConv1D_complete(torch.nn.Module):
         spatial_group,
         channel_group,
         device,
+<<<<<<< HEAD
         n_parallel,
 <<<<<<< HEAD
+=======
+        parallelism,
+>>>>>>> 7a4756e (init function based on global size)
         bias=False,
 =======
         bias=False
@@ -1036,7 +1047,7 @@ class DistributedConv1D_complete(torch.nn.Module):
         self.spatial_group = spatial_group
         self.channel_group = channel_group
         self.device = device
-        self.n_parallel = n_parallel
+        self.parallelism = parallelism
 
 <<<<<<< HEAD
         assert self.in_channels % 2 == 0, (
@@ -1095,7 +1106,7 @@ class DistributedConv1D_complete(torch.nn.Module):
             self.spatial_group,
             self.channel_group,
             self.device,
-            self.n_parallel,
+            self.parallelism,
             self.empty,
         )
 
@@ -1120,12 +1131,12 @@ class Conv1d_complete(torch.autograd.Function):
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         empty: torch.Tensor,
     ) -> torch.Tensor:
         ctx.rank = rank
         ctx.device = device
-        ctx.n_parallel = n_parallel
+        ctx.parallelism = parallelism
         ctx.spatial_group = spatial_group
         ctx.channel_group = channel_group
         ctx.in_channels_global = in_channels
@@ -1335,7 +1346,7 @@ class DistributedConvTranspose1D_complete(torch.nn.Module):
         spatial_group,
         channel_group,
         device,
-        n_parallel,
+        parallelism,
         bias=False,
     ):
         """
@@ -1356,7 +1367,7 @@ class DistributedConvTranspose1D_complete(torch.nn.Module):
         self.spatial_group = spatial_group
         self.channel_group = channel_group
         self.device = device
-        self.n_parallel = n_parallel
+        self.parallelism = parallelism
 
         assert in_channels % 2 == 0, "number of input channels is not divisible by 2"
         assert out_channels % 2 == 0, "number of output channels is not divisible by 2"
@@ -1406,7 +1417,7 @@ class DistributedConvTranspose1D_complete(torch.nn.Module):
             self.spatial_group,
             self.channel_group,
             self.device,
-            self.n_parallel,
+            self.parallelism,
             self.empty,
         )
 
@@ -1431,12 +1442,12 @@ class ConvTranspose1d_complete(torch.autograd.Function):
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         empty: torch.Tensor,
     ) -> torch.Tensor:
         ctx.rank = rank
         ctx.device = device
-        ctx.n_parallel = n_parallel
+        ctx.parallelism = parallelism
         ctx.spatial_group = spatial_group
         ctx.channel_group = channel_group
         ctx.in_channels_global = in_channels
@@ -1652,7 +1663,7 @@ class DistributedConv2D_channel(torch.nn.Module):
         rank,
         model_group,
         device,
-        n_parallel=2,
+        parallelism=2,
     ):
         """
         Distributed 1D Convolution.
@@ -1673,7 +1684,7 @@ class DistributedConv2D_channel(torch.nn.Module):
         self.rank = rank
         self.model_group = model_group
         self.device = device
-        self.n_parallel = 2
+        self.parallelism = 2
 
         self.conv1d = torch.nn.Conv2d(
             self.in_channels,
@@ -1713,7 +1724,7 @@ class DistributedConv2D_channel(torch.nn.Module):
             self.groups,
             self.rank,
             self.device,
-            self.n_parallel,
+            self.parallelism,
             self.model_group,
         )
 
@@ -1736,12 +1747,12 @@ class Conv2d_channel(torch.autograd.Function):
         groups: int = 1,
         rank: int = 0,
         device: torch.device = "cuda",
-        n_parallel: int = 2,
+        parallelism: int = 2,
         model_group: dist.ProcessGroup = None,
     ) -> torch.Tensor:
         ctx.rank = rank
         ctx.device = device
-        ctx.n_parallel = n_parallel
+        ctx.parallelism = parallelism
         ctx.model_group = model_group
         ctx.b = bias
 
@@ -1835,7 +1846,7 @@ class DistributedConv2D(torch.nn.Module):
         spatial_group,
         channel_group,
         device,
-        n_parallel,
+        parallelism,
         bias=False,
         bayesian=False
     ):
@@ -1864,9 +1875,14 @@ class DistributedConv2D(torch.nn.Module):
         self.spatial_group = spatial_group
         self.channel_group = channel_group
         self.device = device
-        self.n_parallel = n_parallel
+        self.parallelism = parallelism
         self.empty = torch.empty(0, device=device, dtype=torch.float32)
         self.bayesian = bayesian
+        # TODO
+        self.conv2d.weights = torch.nn.Parameter(self.out_channels, self.in_channels//1, kernel_size[0], kernel_size[1])
+        self.conv2d.bias = torch.nn.Parameter(out_channels)
+        
+        
         self.conv2d = torch.nn.Conv2d(
             self.in_channels,
             self.out_channels,
@@ -1920,7 +1936,7 @@ class DistributedConv2D(torch.nn.Module):
             self.spatial_group,
             self.channel_group,
             self.device,
-            self.n_parallel,
+            self.parallelism,
             self.empty,
             self.bayesian,
             self.conv2d_fn,
@@ -1948,7 +1964,7 @@ class Conv2d(torch.autograd.Function):
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         empty: torch.Tensor,
         bayesian: bool,
         conv2d_fn,
@@ -2012,7 +2028,7 @@ class Conv2d(torch.autograd.Function):
             spatial_group,
             channel_group,
             device,
-            n_parallel,
+            parallelism,
             empty,
             bayesian,
             conv2d_fn,
@@ -2036,7 +2052,7 @@ class Conv2d(torch.autograd.Function):
         # Save non-tensor attributes
         ctx.rank = rank
         ctx.device = device
-        ctx.n_parallel = n_parallel
+        ctx.parallelism = parallelism
         ctx.spatial_group = spatial_group
         ctx.channel_group = channel_group
         ctx.in_channels_global = in_channels
@@ -2218,7 +2234,7 @@ class Conv2d(torch.autograd.Function):
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         empty: torch.Tensor,
         bayesian: bool,
         conv2d_fn,
@@ -2239,7 +2255,7 @@ class Conv2d(torch.autograd.Function):
             spatial_group,
             channel_group,
             device,
-            n_parallel,
+            parallelism,
             empty,
             bayesian,
             conv2d_fn,
@@ -2264,8 +2280,8 @@ class DistributedConvTranspose2D(torch.nn.Module):
         spatial_group,
         channel_group,
         device,
-        n_parallel,
-        bias=False,
+        parallelism,
+        bias=True,
         bayesian=False
     ):
         """
@@ -2288,6 +2304,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
 
         assert in_channels % 2 == 0, "number of input channels is not divisible by 2"
         assert out_channels % 2 == 0, "number of output channels is not divisible by 2"
+        
         self.kernel_size = kernel_size
         self.stride = stride
         self.padding = padding
@@ -2297,7 +2314,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
         self.spatial_group = spatial_group
         self.channel_group = channel_group
         self.device = device
-        self.n_parallel = n_parallel
+        self.parallelism = parallelism
         self.in_channels = in_channels
         self.out_channels = out_channels // 2
         self.bayesian = bayesian
@@ -2310,6 +2327,13 @@ class DistributedConvTranspose2D(torch.nn.Module):
             padding=self.padding,
             bias=bias,
         ).to(device)
+        
+        # Initialize 
+        k = np.sqrt(self.groups / (self.out_channels * 2 * self.kernel_size[0] * self.kernel_size[1]))
+        self.convTranspose2d.weight.data.uniform_(-k, k)
+        if bias:
+            self.convTranspose2d.bias.data.uniform_(-k, k)
+            
         self.empty = torch.empty(0, device=device, dtype=torch.float32)
 
         if self.bayesian:
@@ -2357,7 +2381,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
             self.spatial_group,
             self.channel_group,
             self.device,
-            self.n_parallel,
+            self.parallelism,
             self.empty,
             self.bayesian,
             self.conv_transpose2d_fn,
@@ -2384,7 +2408,7 @@ class ConvTranspose2d(torch.autograd.Function):
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         empty: torch.Tensor,
         bayesian: bool,
         conv_transpose2d_fn,
@@ -2417,7 +2441,7 @@ class ConvTranspose2d(torch.autograd.Function):
             spatial_group,
             channel_group,
             device,
-            n_parallel,
+            parallelism,
             empty,
             bayesian,
             conv_transpose2d_fn,
@@ -2441,7 +2465,7 @@ class ConvTranspose2d(torch.autograd.Function):
         ctx.has_bias = bias is not None
         ctx.rank = rank
         ctx.device = device
-        ctx.n_parallel = n_parallel
+        ctx.parallelism = parallelism
         ctx.spatial_group = spatial_group
         ctx.channel_group = channel_group
         ctx.in_channels_global = in_channels
@@ -2548,7 +2572,7 @@ class ConvTranspose2d(torch.autograd.Function):
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         empty: torch.Tensor,
         bayesian: bool,
         conv_transpose2d_fn,
@@ -2567,7 +2591,7 @@ class ConvTranspose2d(torch.autograd.Function):
             spatial_group,
             channel_group,
             device,
-            n_parallel,
+            parallelism,
             empty,
             bayesian,
             conv_transpose2d_fn,
