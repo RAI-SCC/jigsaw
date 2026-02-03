@@ -11,6 +11,7 @@ from .distributed_convolutions import (
     conv2d_twoway,
     conv2d_twoway_channel,
 )
+import numpy as np
 import Jigsaw.distributed_convolutions as dist_conv
 from torch.nn.grad import conv1d_input, conv1d_weight, conv2d_input, conv2d_weight
 from functools import partial
@@ -56,11 +57,7 @@ class DistributedConv1D(torch.nn.Module):
             self.out_channels,
             kernel_size=self.kernel_size,
             stride=self.stride,
-<<<<<<< HEAD
             bias=self.bias,
-=======
-            bias=self.bias
->>>>>>> d8faa63 (mwe of spatially distributed convolution, hard coded)
         )
 
         self.conv1d_apply = Conv1d().apply
@@ -133,29 +130,18 @@ class Conv1d(torch.autograd.Function):
             rank=rank,
             model_group=model_group,
         )
-<<<<<<< HEAD
         y = F.conv1d(
             x_aug, weight, bias, stride=stride, padding=padding, dilation=dilation
         )
 
         ctx.save_for_backward(x_aug, weight)
 
-=======
-        y = F.conv1d(x_aug, weight, bias, stride=stride, padding=padding)
-        local_length = y.shape[-1]
-        total_length = torch.tensor(y.shape[-1]).to(device)
-        dist.all_reduce(total_length, op=dist.ReduceOp.SUM, group=model_group)  # group should be spatial group
-        
-        ctx.save_for_backward(x_aug, weight, torch.tensor([L_local], device=x.device))
-        
->>>>>>> d8faa63 (mwe of spatially distributed convolution, hard coded)
         ctx.stride, ctx.padding, ctx.dilation, ctx.groups = (
             stride,
             padding,
             dilation,
             model_group,
         )
-<<<<<<< HEAD
         ctx.x_shape_padded = x_aug.shape
         ctx.x_shape = x.shape
 
@@ -164,13 +150,6 @@ class Conv1d(torch.autograd.Function):
         ctx.rank, ctx.model_group = rank, model_group
         ctx.has_bias = bias is not None
 
-=======
-        ctx.local_length, ctx.total_length = local_length, total_length
-        
-        ctx.rank, ctx.group = rank, model_group
-        ctx.has_bias = bias is not None
-        # print(f'I am rank {rank} and y is {y}')
->>>>>>> d8faa63 (mwe of spatially distributed convolution, hard coded)
         return y
 
     @staticmethod
@@ -203,45 +182,25 @@ class Conv1d(torch.autograd.Function):
             ctx.dilation,
             ctx.groups,
         )
-<<<<<<< HEAD
         rank, model_group = ctx.rank, ctx.model_group
         # TODO: how to acess the total shape of the convolution?
 
-=======
-        rank, group = ctx.rank, ctx.group
-        # TODO: how to acess the total shape of the convolution?
-        L_local = int(L_local_t.item())
-        
->>>>>>> d8faa63 (mwe of spatially distributed convolution, hard coded)
         # parameter grads from native conv1d gradient helpers
         g_w = conv1d_weight(
             x_aug,
             weight.shape,
-<<<<<<< HEAD
             grad_output,  # * ctx.local_length / ctx.total_length.item(),
-=======
-            grad_output * ctx.local_length / ctx.total_length.item(),
->>>>>>> d8faa63 (mwe of spatially distributed convolution, hard coded)
             stride=stride,
             padding=padding,
             dilation=dilation,
             groups=1,
         )
-<<<<<<< HEAD
 
         # print(f'rank {rank}, gw {g_w}, local length {ctx.local_length}, total length {ctx.total_length}')
-=======
-        
-        # g_w = g_w * ctx.local_length / ctx.total_length.item()
-        # print(f'I am rank {rank} and local length is {ctx.local_length} and total length {ctx.total_length.item()}\n grad output is {grad_output}, gw {g_w}')
-        # print(f'I am rank {rank} and value of xaug is {x_aug}')
-        
->>>>>>> d8faa63 (mwe of spatially distributed convolution, hard coded)
         # TODO: same weighing factor needed for bias term
         g_b = grad_output.sum(dim=(0, 2)) if ctx.has_bias else None
 
         # make grads identical on all ranks
-<<<<<<< HEAD
         dist.all_reduce(g_w, op=dist.ReduceOp.SUM, group=model_group)
         if g_b is not None:
             dist.all_reduce(g_b, op=dist.ReduceOp.SUM, group=model_group)
@@ -259,55 +218,6 @@ class Conv1d(torch.autograd.Function):
 
         g_x_aug = conv1d_input(
             conv_shape,
-=======
-        dist.all_reduce(g_w, op=dist.ReduceOp.SUM, group=group)
-        
-        if g_b is not None:
-            # print(f'is this accessed?')
-            dist.all_reduce(g_b, op=dist.ReduceOp.SUM, group=group)
-
-        # input grad then crop back to local slice
-        # print(f'whole x shape: {x_aug.shape}')
-        # lets start by concatenating the grad outputs
-        
-        dummy = torch.zeros(1,1,4)
-        right_to_left = 1
-        left_to_right = 0
-        
-        empty = torch.empty(0,device=grad_output.device,dtype=grad_output.dtype)
-        device = ctx.device
-        dtype = grad_output.dtype
-        # TODO: figure out the correct message to send
-        match rank % 2:
-            case 0:
-                send = grad_output[..., -left_to_right:] if left_to_right > 0 else empty
-                recv = (
-                    torch.zeros((*grad_output.shape[:-1], right_to_left), device=device, dtype=dtype)
-                    if right_to_left > 0
-                    else empty
-                )
-                send = send.contiguous()
-                dist.all_to_all(
-                    [empty, recv], [empty, send], group=ctx.model_group, async_op=False
-                )
-                grad_output_augment = torch.cat((grad_output, recv if right_to_left > 0 else empty), dim=-1)
-            case 1:
-                send = grad_output[..., :right_to_left] if right_to_left > 0 else empty
-                recv = (
-                    torch.zeros((*grad_output.shape[:-1], left_to_right), device=device, dtype=dtype)
-                    if left_to_right > 0
-                    else empty
-                )
-                send = send.contiguous()
-                dist.all_to_all(
-                    [recv, empty], [send, empty], group=ctx.model_group, async_op=False
-                )
-                grad_output_augment = torch.cat((recv if left_to_right > 0 else empty, grad_output), dim=-1)
-
-        # print(f'rank {rank}, grad_output_augment {grad_output_augment}')
-        g_x_aug = conv1d_input( 
-            dummy.shape, # total x shape in # TODO: FIGURE OUT TOTAL X SHAPE 
->>>>>>> d8faa63 (mwe of spatially distributed convolution, hard coded)
             weight,
             grad_output_augment,
             stride=stride,
@@ -315,7 +225,6 @@ class Conv1d(torch.autograd.Function):
             dilation=dilation,
             groups=1,
         )
-<<<<<<< HEAD
 
         left_to_right, right_to_left = (
             right_to_left,
@@ -372,16 +281,6 @@ class Conv1d(torch.autograd.Function):
 
 
 class DistributedConvTranspose1D(torch.nn.Module):
-=======
-        # TODO: figure out correct crop
-        g_x = g_x_aug[..., :2] if (rank % 2 == 0) else g_x_aug[..., 1:-1]
-        print(f'local grad output: gx {g_x}')
-        return g_x, g_w, g_b, None, None, None, None, None, None, None, None
-
-
-class DistributedConv1D_channel(torch.nn.Module):
-    
->>>>>>> d8faa63 (mwe of spatially distributed convolution, hard coded)
     def __init__(
         self,
         in_channels,
@@ -798,12 +697,8 @@ class Conv1d_channel(torch.autograd.Function):
             groups=1,
         )
 
-<<<<<<< HEAD
         dist.all_reduce(g_x, op=dist.ReduceOp.SUM, group=model_group)
         n_channels_out = g_x.shape[1] // 2
-=======
-        # dist.all_reduce(g_x, op=dist.ReduceOp.AVG, group=model_group)
->>>>>>> d8faa63 (mwe of spatially distributed convolution, hard coded)
 
         match rank % 2:
             case 0:
@@ -1016,16 +911,8 @@ class DistributedConv1D_complete(torch.nn.Module):
         spatial_group,
         channel_group,
         device,
-<<<<<<< HEAD
-        n_parallel,
-<<<<<<< HEAD
-=======
         parallelism,
->>>>>>> 7a4756e (init function based on global size)
-        bias=False,
-=======
         bias=False
->>>>>>> d8faa63 (mwe of spatially distributed convolution, hard coded)
     ):
         """
         Distributed 1D Convolution.
@@ -1049,7 +936,6 @@ class DistributedConv1D_complete(torch.nn.Module):
         self.device = device
         self.parallelism = parallelism
 
-<<<<<<< HEAD
         assert self.in_channels % 2 == 0, (
             "number of input channels is not divisible by 2"
         )
@@ -1057,19 +943,13 @@ class DistributedConv1D_complete(torch.nn.Module):
             "number of output channels is not divisible by 2"
         )
 
-=======
->>>>>>> d8faa63 (mwe of spatially distributed convolution, hard coded)
         self.conv1d = torch.nn.Conv1d(
             self.in_channels,
             self.out_channels // 2,
             kernel_size=self.kernel_size,
             stride=self.stride,
             padding=self.padding,
-<<<<<<< HEAD
             bias=bias,
-=======
-            bias=bias
->>>>>>> d8faa63 (mwe of spatially distributed convolution, hard coded)
         )
         self.empty = torch.empty(0, device=device, dtype=torch.float32)
 
@@ -1143,7 +1023,7 @@ class Conv1d_complete(torch.autograd.Function):
         ctx.b = bias
         ctx.empty = empty  # pre-initialized empty tensor
 
-        y, x0, x1, right_to_left, left_to_right = conv1d_fourway_complete(
+        y, x0, x1, right_to_left, left_to_right = conv1d_fourway(
             x,
             weight,
             kernel_size,
@@ -1156,15 +1036,9 @@ class Conv1d_complete(torch.autograd.Function):
             channel_group=channel_group,
             empty=ctx.empty,
         )
-<<<<<<< HEAD
 
         ctx.right_to_left, ctx.left_to_right = right_to_left, left_to_right
 
-=======
-        
-        # print(f'I am rank {rank} and data has shape {x0.shape}, {x1.shape}')
-        
->>>>>>> d8faa63 (mwe of spatially distributed convolution, hard coded)
         x_aug = torch.cat([x0, x1], dim=1)
 
         ctx.x_shape_padded = x_aug.shape  # TODO: is this the correct
@@ -1201,7 +1075,6 @@ class Conv1d_complete(torch.autograd.Function):
         grad_bias: torch.Tensor
             Gradient with respect to the bias.
         """
-<<<<<<< HEAD
         x_aug, weight = ctx.saved_tensors
         empty = ctx.empty
         stride, padding, dilation = (ctx.stride, ctx.padding, ctx.dilation)
@@ -1271,18 +1144,6 @@ class Conv1d_complete(torch.autograd.Function):
             local_rank,
             async_op=True,
         )
-=======
-        x_aug, weight, L_local_t = ctx.saved_tensors
-        
-        stride, padding, dilation = (
-            ctx.stride,
-            ctx.padding,
-            ctx.dilation
-        )
-        rank, spatial_group, channel_group = ctx.rank, ctx.spatial_group, ctx.channel_group
-        # print(f'I am rank {rank} with weights {weight}')
-        L_local = int(L_local_t.item())
->>>>>>> d8faa63 (mwe of spatially distributed convolution, hard coded)
 
         # parameter grads from native conv1d gradient helpers
         # x_aug should have the local shape
@@ -1297,7 +1158,6 @@ class Conv1d_complete(torch.autograd.Function):
         )
         g_b = grad_output.sum(dim=(0, 2)) if ctx.has_bias else None
 
-<<<<<<< HEAD
         # make grads identical on all ranks
         g_w_handle = dist.all_reduce(
             g_w, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True
@@ -1456,11 +1316,6 @@ class ConvTranspose1d_complete(torch.autograd.Function):
 
         y, x0, x1 = dist_conv.convTranspose1d_twoway_channel(
             x,
-=======
-        # input grad then crop back to local slice
-        g_x_aug = conv1d_input(
-            x_aug.shape,
->>>>>>> d8faa63 (mwe of spatially distributed convolution, hard coded)
             weight,
             in_channels,
             stride=stride,
@@ -1469,27 +1324,6 @@ class ConvTranspose1d_complete(torch.autograd.Function):
             rank=rank,
             model_group=channel_group,
         )
-<<<<<<< HEAD
-=======
-        # make grads identical on all ranks
-        dist.all_reduce(g_w, op=dist.ReduceOp.AVG, group=spatial_group)
-        # print(f'rank {rank}, g_w: {g_w}')
-        if g_b is not None:
-            dist.all_reduce(g_b, op=dist.ReduceOp.AVG, group=spatial_group)
-
-        c0 = x_aug.shape[1]//2
-        
-        match rank % 4:
-            case 0:
-                g_x = g_x_aug[..., :c0, :L_local]
-            case 1:
-                g_x = g_x_aug[..., c0:, :L_local]
-            case 2:
-                g_x = g_x_aug[..., :c0, -L_local:]
-            case 3:
-                g_x = g_x_aug[..., c0:, -L_local:]
-                
->>>>>>> d8faa63 (mwe of spatially distributed convolution, hard coded)
 
         y_buffer, overlap_size, local_size_left, local_size_right = (
             dist_conv.conv1dTranspose_halocalc_twoway(
@@ -1878,9 +1712,9 @@ class DistributedConv2D(torch.nn.Module):
         self.parallelism = parallelism
         self.empty = torch.empty(0, device=device, dtype=torch.float32)
         self.bayesian = bayesian
-        # TODO
-        self.conv2d.weights = torch.nn.Parameter(self.out_channels, self.in_channels//1, kernel_size[0], kernel_size[1])
-        self.conv2d.bias = torch.nn.Parameter(out_channels)
+        # # TODO
+        # self.conv2d.weights = torch.nn.Parameter(self.out_channels, self.in_channels//1, kernel_size[0], kernel_size[1])
+        # self.conv2d.bias = torch.nn.Parameter(out_channels)
         
         
         self.conv2d = torch.nn.Conv2d(

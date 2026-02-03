@@ -496,7 +496,7 @@ def build_dataloaders(
     train_subset = -1 if train_subset < 0 else train_subset
     valid_subset = -1 if valid_subset < 0 else valid_subset
 
-    train_dataloader = get_dataloader(
+    train_dataloader, _ = Dataloaders.get_dataloader(
         config_dict,
         config_dict["data"]["train_data_path"],
         mode="train",
@@ -505,8 +505,7 @@ def build_dataloaders(
         subset_size=train_subset,
         rank=rank,
     )
-    #valid_dataloader, dataset_valid_info = Dataloaders.get_dataloader(
-    valid_dataloader = get_dataloader(
+    valid_dataloader, _ = Dataloaders.get_dataloader(
         config_dict,
         config_dict["data"]["valid_data_path"],
         mode="validation",
