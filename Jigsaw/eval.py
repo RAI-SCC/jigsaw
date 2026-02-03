@@ -259,6 +259,7 @@ def validate(
     model_subgroup_col: torch.distributed.ProcessGroup = None,
     ddp_group: torch.distributed.ProcessGroup = None,
     model_group: torch.distributed.ProcessGroup = None,
+    bayesian: bool = True
 ):
     if config_dict["model"]["model_parallel"]:
         mse_file_path = f"{mse_file_path}_{rank}.csv"
@@ -385,10 +386,14 @@ def validate(
                     model_input[..., -2] = soil_type
                     model_input[..., -1] = topography
             
-            model_output = model(model_input)#, samples=config_dict["training"]["n_samples"])
             
-            # if len(model_output.shape) > 3:
-            #     model_output = model_output.mean(dim=0)
+            
+            
+            if bayesian:
+                model_output = model(model_input, samples=config_dict["training"]["n_samples"])
+                model_output = model_output.mean(dim=0)
+            else:
+                model_output = model(model_input)
             output = model_output.detach()
             
             match parallelism:

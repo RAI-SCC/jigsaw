@@ -7,8 +7,8 @@ from Jigsaw import utils
 
 device, _, rank, _ = utils.init_cuda()
 batch = 1
-in_channels, out_channels = 364, 88  # global
-H, W = 721, 720  # local
+in_channels, out_channels = 4, 4  # global
+H, W = 4, 4  # local
 kernel_size = (2, 2)  # global kernel size
 stride = (2, 2)
 padding, dilation = (0, 0), (1, 1)
@@ -35,7 +35,7 @@ torch.manual_seed(
 
 
 model_truth = (
-    torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride, bias=False)
+    torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride, bias=True)
     .to(torch.float32)
     .to(device)
 )  # GROUND TRUTH: can the model learn this kernel?
@@ -57,16 +57,21 @@ model = (
         channel_group,
         device,
         n_parallel=4,
-        bias=False,
+        bias=True,
     )
     .to(torch.float32)
     .to(device)
 )
+
 if rank in [0, 2]:
     for model_p, truth_p in zip(model.parameters(), model_truth.parameters()):
         model_p.requires_grad_(False)
         model_p.copy_(truth_p[: out_channels // 2].detach())
         model_p.requires_grad_(True)
+        # if len(model_p.shape) == 1:
+        #     print(f'shape {model_p.shape} model_p  {model_p}, truth sum {truth_p}')
+        if rank == 0:
+            print(f'truth param shape {truth_p.shape}, model p shape {model_p.shape}')
 else:
     for model_p, truth_p in zip(model.parameters(), model_truth.parameters()):
         model_p.requires_grad_(False)
@@ -149,8 +154,11 @@ loss_ref = torch.nn.MSELoss(reduction="sum")(y, torch.ones(y.shape).to(device))
 loss_parallel.backward()
 loss_ref.backward()
 
-if rank == 0:
-    # print(f"model weights {model_truth.weight.grad}")
-    print(f"weights {X_total.grad}")
+weights_grad = model_truth.weight.grad
+
+print(f'truth {y}, parallel output {values}')
+# if rank == 0:
+    # print(f"model weights {model_truth.bias.grad}") #, weight_grad_shape {weights_grad.shape}, sum {weights_grad.sum(dim=(0,2,3))}")
+    # print(f"weights {X_total.grad}")
 
 torch.distributed.destroy_process_group()
