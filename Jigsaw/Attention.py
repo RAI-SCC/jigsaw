@@ -235,7 +235,7 @@ class DistributedWindowedAttention(torch.nn.Module):
             self.device,
             self.n_parallel,
             model_group=self.channel_group,
-            spatial_group=self.spatial_group,
+            sync_group=self.spatial_group,
             bias=True,
             dropout=0,
         )
