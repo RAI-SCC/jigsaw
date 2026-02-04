@@ -137,7 +137,8 @@ def main():
         model.parameters(),
         lr= learn_rate,
         weight_decay=1e-4,
-        betas = (0.9, 0.999)
+        betas = (0.9, 0.999),
+        eps=1e-4
     )
     
     
