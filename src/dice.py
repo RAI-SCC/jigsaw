@@ -30,9 +30,10 @@ class TopKDiceLoss(nn.Module):
     # logits: (Batch, 2, H, W) -> From Modell
     # target: (Batch, 1, H, W) -> From DataLoader    
     def forward(self, logits: Tensor, target: Tensor):
+        logits = logits.float()
+
         # Calculate probabilities
         probs = torch.softmax(logits, dim=1)
-
         probs = probs[:, 1, ...]  # Assuming class 1 is the foreground class
         
         # Ensure the dimensions match
@@ -40,6 +41,8 @@ class TopKDiceLoss(nn.Module):
             target = target.squeeze(1)
         elif target.dim() == 3:
             pass
+
+        target = target.float()
 
         assert probs.shape == target.shape, f"Shapes dont match: {probs.shape} vs {target.shape}"
             
