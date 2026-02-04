@@ -212,8 +212,8 @@ class DistributedWindowedAttention(torch.nn.Module):
             self.rank,
             self.device,
             self.n_parallel,
-            self.channel_group,
-            self.spatial_group,
+            model_group=self.channel_group,
+            sync_group=self.spatial_group,
             bias=False,
         )
 
@@ -234,8 +234,8 @@ class DistributedWindowedAttention(torch.nn.Module):
             self.rank,
             self.device,
             self.n_parallel,
-            self.channel_group,
-            self.spatial_group,
+            model_group=self.channel_group,
+            spatial_group=self.spatial_group,
             bias=True,
             dropout=0,
         )
@@ -243,7 +243,6 @@ class DistributedWindowedAttention(torch.nn.Module):
         self.heads = heads
         
         self.scale = (embed_dim * 2 // self.heads) ** (-0.5)
-        self.average_gradients = Linear.AverageGradients(self.spatial_group)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """
@@ -284,7 +283,7 @@ class DistributedWindowedAttention(torch.nn.Module):
 def _average_weights(
     model: torch.nn.Module, spatial_group: dist.ProcessGroup, device: torch.device
 ):
-    for name, param in model.named_parameters():
+    for _, param in model.named_parameters():
         dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
 
 

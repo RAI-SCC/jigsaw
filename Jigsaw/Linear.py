@@ -1423,7 +1423,7 @@ class AverageGradients(torch.nn.Module):
 
     def __init__(
         self,
-        model_group: dist.ProcessGroup,
+        sync_group: dist.ProcessGroup,
     ) -> None:
         super().__init__()
 
