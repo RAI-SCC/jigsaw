@@ -1950,7 +1950,7 @@ class Conv2d(torch.autograd.Function):
             else:
                 weight_shape = weight.shape[1:]
             x_shape_padded = x_shape_padded[1:]
-            g_b = grad_output.sum(dim=(0,1,3,4))
+            g_b = grad_output.sum(dim=(1,3,4))
         else:
             weight_shape = weight.shape
             g_b = grad_output.sum(dim=(0, 2, 3)) if ctx.has_bias else None
