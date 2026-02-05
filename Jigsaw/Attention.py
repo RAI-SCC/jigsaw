@@ -359,7 +359,7 @@ class DistributedTransformer(torch.nn.Module):
         channel_group: dist.ProcessGroup,
     ):
         super().__init__()
-        self.attention_block = DistributedTransformer(
+        self.attention_block = DistributedAttention(
             x_features,
             embed_dim,
             output_dim,
