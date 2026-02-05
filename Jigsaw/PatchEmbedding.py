@@ -841,10 +841,7 @@ class Distributed1DPatchRecovery(torch.nn.Module):
                     self.device,
                     self.n_parallel,
                     self.model_group,
-                    n_channels=embed_dim,
-                    init_method="convTranspose",
-                    bias=bias,
-                    patch_size=patch_size
+                    bias=bias
                 )
             else:
                 self.conv = Linear.DistributedXWT(
@@ -854,10 +851,7 @@ class Distributed1DPatchRecovery(torch.nn.Module):
                     self.device,
                     self.n_parallel,
                     self.model_group,
-                    n_channels=embed_dim,
-                    init_method="convTranspose",
                     bias=bias,
-                    patch_size=patch_size
                 )
         else:
             self.conv = Linear.DistributedXWT(
@@ -867,10 +861,7 @@ class Distributed1DPatchRecovery(torch.nn.Module):
                 self.device,
                 self.n_parallel,
                 self.model_group,
-                n_channels=embed_dim,
-                init_method="convTranspose",
                 bias=bias,
-                patch_size=patch_size
             )
         self.patch_size = patch_size
 
