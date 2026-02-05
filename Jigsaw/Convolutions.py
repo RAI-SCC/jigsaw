@@ -2364,7 +2364,7 @@ class ConvTranspose2d(torch.autograd.Function):
         )
 
         if ctx.bayesian:
-            g_b = grad_output.sum(dim=(0, 1, 3, 4)) if ctx.has_bias else None        
+            g_b = grad_output.sum(dim=(1, 3, 4)) if ctx.has_bias else None        
         else:
             g_b = grad_output.sum(dim=(0, 2, 3)) if ctx.has_bias else None        
         if g_b is not None:
