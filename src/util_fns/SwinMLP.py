@@ -130,8 +130,8 @@ class SwinMLPEncoderLayer(nn.Module):
         self.downsample_conv = nn.Conv2d(
                                     in_channels = in_channels,
                                     out_channels = out_channels,
-                                    kernel_size = 3,
-                                    padding = 1,
+                                    kernel_size = kernel_size,
+                                    padding = padding,
                                     stride = stride,
                                     bias = False
                                     )
