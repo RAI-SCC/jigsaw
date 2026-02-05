@@ -358,6 +358,9 @@ class DistributedTransformer(torch.nn.Module):
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
     ):
+        
+      
+        
         super().__init__()
         self.attention_block = DistributedAttention(
             x_features,
@@ -369,6 +372,7 @@ class DistributedTransformer(torch.nn.Module):
             n_parallel,
             model_group,
             spatial_group,
+            channel_group
         )
         self.layer_norm = Norm.DistributedLayerNorm(
             output_dim // 2, rank, device, spatial_group
