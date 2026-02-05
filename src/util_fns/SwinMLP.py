@@ -57,11 +57,11 @@ class SwinMLPBlock(nn.Module):
         self.input_resolution = input_resolution
         self.window_size = window_size
         
-        """ if shift_size == 0:
+        if shift_size == 0:
             self.shift_size = window_size // 2
         else:
-            self.shift_size = shift_size """
-        self.shift_size = 0
+            self.shift_size = shift_size
+        #self.shift_size = 0
         
         # Handle the case when the input resolution is smaller than the window size
         if min(self.input_resolution) <= self.window_size:
