@@ -315,8 +315,7 @@ class DistributedXWTSync(torch.nn.Module):
         parallelism: int,
         model_group: dist.ProcessGroup,
         sync_group: dist.ProcessGroup,
-        bias: bool = True,
-        stdev: float = None,
+        bias: bool = True
     ) -> None:
         """
         Initialize the XWT Linear layer sharded over n processes.
