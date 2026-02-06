@@ -322,14 +322,23 @@ def distributed_conv2d_over_channels(
                 dilation=dilation,
             )
             x_handle.wait()
-            y = y + conv_func(
-                x_buffer, # (sampling, batch, in_channels, x, y)
-                w[..., in_channels_global // 2 :, :, :],
-                b,
-                stride=stride,
-                padding=padding,
-                dilation=dilation,
-            )
+            if b is not None:
+                y = y + conv_func(
+                    x_buffer, # (sampling, batch, in_channels, x, y)
+                    w[..., in_channels_global // 2 :, :, :],
+                    b,
+                    stride=stride,
+                    padding=padding,
+                    dilation=dilation,
+                )
+            else:
+                y = y + conv_func(
+                    x_buffer, # (sampling, batch, in_channels, x, y)
+                    w[..., in_channels_global // 2 :, :, :],
+                    stride=stride,
+                    padding=padding,
+                    dilation=dilation,
+                )
             return y, x, x_buffer
         case 1 | 3:
             x_handle = dist.all_to_all(
@@ -346,15 +355,23 @@ def distributed_conv2d_over_channels(
                 dilation=dilation,
             )
             x_handle.wait()
-            
-            y = y + conv_func(
-                x_buffer,
-                w[..., : in_channels_global // 2, :, :],
-                b,
-                stride=stride,
-                padding=padding,
-                dilation=dilation,
-            )
+            if b is not None:
+                y = y + conv_func(
+                    x_buffer,
+                    w[..., : in_channels_global // 2, :, :],
+                    b,
+                    stride=stride,
+                    padding=padding,
+                    dilation=dilation,
+                )
+            else:
+                y = y + conv_func(
+                    x_buffer,
+                    w[..., : in_channels_global // 2, :, :],
+                    stride=stride,
+                    padding=padding,
+                    dilation=dilation,
+                )
             
             return y, x_buffer, x
 
@@ -641,14 +658,23 @@ def distributed_conv_transpose2d_over_channels(
             dist.all_to_all(
                 [empty, x_buffer], [empty, x], group=channel_group, async_op=False
             )
-            y = y + conv_transpose2d_fn(
-                x_buffer,
-                w[...,in_channels // 2 :,:,:,:],
-                b,
-                stride=stride,
-                padding=padding,
-                dilation=dilation,
-            )
+            if b is not None:
+                y = y + conv_transpose2d_fn(
+                    x_buffer,
+                    w[...,in_channels // 2 :,:,:,:],
+                    b,
+                    stride=stride,
+                    padding=padding,
+                    dilation=dilation,
+                )
+            else:
+                y = y + conv_transpose2d_fn(
+                    x_buffer,
+                    w[...,in_channels // 2 :,:,:,:],
+                    stride=stride,
+                    padding=padding,
+                    dilation=dilation,
+                )
             return y, x, x_buffer
         case 1:
             y = conv_transpose2d_fn(
@@ -661,14 +687,23 @@ def distributed_conv_transpose2d_over_channels(
             dist.all_to_all(
                 [x_buffer, empty], [x, empty], group=channel_group, async_op=False
             )
-            y = y + conv_transpose2d_fn(
-                x_buffer,
-                w[...,: in_channels // 2,:,:,:],
-                b,
-                stride=stride,
-                padding=padding,
-                dilation=dilation,
-            )
+            if b is not None:
+                y = y + conv_transpose2d_fn(
+                    x_buffer,
+                    w[...,: in_channels // 2,:,:,:],
+                    b,
+                    stride=stride,
+                    padding=padding,
+                    dilation=dilation,
+                )
+            else:
+                y = y + conv_transpose2d_fn(
+                    x_buffer,
+                    w[...,: in_channels // 2,:,:,:],
+                    stride=stride,
+                    padding=padding,
+                    dilation=dilation,
+                )
             return y, x_buffer, x
 
 

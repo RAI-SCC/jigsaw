@@ -1810,8 +1810,7 @@ class Conv2d(torch.autograd.Function):
         if bayesian and len(weight.shape) < 5: 
             weight = weight.expand(x.shape[0], *weight.shape)
         
-        # Compute the forward pass
-            
+        # Compute the forward pass        
         y, x0, x1, right_to_left, left_to_right = dist_conv.conv2d_fourway(
             x,
             weight,
@@ -1950,7 +1949,7 @@ class Conv2d(torch.autograd.Function):
             else:
                 weight_shape = weight.shape[1:]
             x_shape_padded = x_shape_padded[1:]
-            g_b = grad_output.sum(dim=(1,3,4))
+            g_b = grad_output.sum(dim=(1, 3, 4)) if ctx.has_bias else None
         else:
             weight_shape = weight.shape
             g_b = grad_output.sum(dim=(0, 2, 3)) if ctx.has_bias else None
@@ -2172,11 +2171,13 @@ class DistributedConvTranspose2D(torch.nn.Module):
 
         if self.bayesian:
             self.conv_transpose2d_fn = torch.vmap(F.conv_transpose2d)
+            #if bias:
             self.conv_transpose2d_grad_fn = torch.vmap(
                 torch.ops.aten.convolution_backward,
                 in_dims=(0, 0, 0, None, None, None, None, None, None, None, None),
                 out_dims=(0, 0, None),
             )
+            
         else:
             self.conv_transpose2d_fn = F.conv_transpose2d
             self.conv_transpose2d_grad_fn = torch.ops.aten.convolution_backward
