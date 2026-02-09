@@ -8,7 +8,7 @@ import torch.distributed as dist
 class DistributedLayerNorm(torch.nn.Module):
     """LayerNorm with synchronized gradients across a process group."""
 
-    def __init__(self, dim, rank, device, sync_group, split_group):
+    def __init__(self, normalized_dim, rank, device, sync_group, split_group):
         super().__init__()
         self.rank = rank
         self.device = device
@@ -16,9 +16,9 @@ class DistributedLayerNorm(torch.nn.Module):
         self.split_group = split_group
 
         # Learnable parameters
-        self.weight = torch.nn.Parameter(torch.ones(dim, device=device))
-        self.bias = torch.nn.Parameter(torch.zeros(dim, device=device))
-        self.dim = dim
+        self.weight = torch.nn.Parameter(torch.ones(normalized_dim, device=device))
+        self.bias = torch.nn.Parameter(torch.zeros(normalized_dim, device=device))
+        self.normalized_dim = normalized_dim
         self.eps = 1e-5
         self.layernorm = DistributedLNFunction().apply
 
@@ -39,7 +39,7 @@ class DistributedLNFunction(torch.autograd.Function):
         N_g = N_l * split_group.size()  # normalized dimension size (global)
 
         local_mean = x.mean(dim=-1, keepdim=True)
-        local_var = x.var(dim=-1, unbiased=False, keepdim=True)
+        local_var = x.var(dim=-1, keepdim=True)
 
         mean = local_mean.clone()
         dist.all_reduce(mean, op=dist.ReduceOp.AVG, group=split_group)
@@ -97,17 +97,20 @@ class DistributedLNFunction(torch.autograd.Function):
         grad_bias = grad_output.sum(dim=tuple(range(grad_output.dim() - 1)))
 
         # Synchronize parameter gradients across the process group
-        dist.all_reduce(grad_weight, op=dist.ReduceOp.SUM, group=sync_group)
-        dist.all_reduce(grad_bias, op=dist.ReduceOp.SUM, group=sync_group)
+        g_w_handle = dist.all_reduce(grad_weight, op=dist.ReduceOp.SUM, group=sync_group, async_op=True)
+        g_b_handle = dist.all_reduce(grad_bias, op=dist.ReduceOp.SUM, group=sync_group, async_op=True)
 
         # Gradient for input (standard LayerNorm backward)
         grad_x_norm = grad_output * weight
 
         grad_x_norm_mean = grad_x_norm.mean(dim=-1, keepdim=True)
-        dist.all_reduce(grad_x_norm_mean, op=dist.ReduceOp.AVG, group=split_group)
+        g_gx_handle = dist.all_reduce(grad_x_norm_mean, op=dist.ReduceOp.AVG, group=split_group, async_op=True)
 
         x_grad_x_term = (grad_x_norm * x_norm).sum(dim=-1, keepdim=True)
-        dist.all_reduce(x_grad_x_term, op=dist.ReduceOp.SUM, group=split_group)
+        x_g_x_handle = dist.all_reduce(x_grad_x_term, op=dist.ReduceOp.SUM, group=split_group, async_op=True)
+
+        g_gx_handle.wait()
+        x_g_x_handle.wait()
 
         # LayerNorm backward formula
         grad_x = (1.0 / std) * (
@@ -115,6 +118,9 @@ class DistributedLNFunction(torch.autograd.Function):
             - grad_x_norm_mean
             - x_norm * x_grad_x_term / (N - 1)
         )
+
+        g_w_handle.wait()
+        g_b_handle.wait()
 
         # If input gradients also need sync (depends on your parallelism strategy)
         # dist.all_reduce(grad_x, op=dist.ReduceOp.AVG, group=norm_group)
