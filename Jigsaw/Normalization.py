@@ -8,11 +8,12 @@ import torch.distributed as dist
 class DistributedLayerNorm(torch.nn.Module):
     """LayerNorm with synchronized gradients across a process group."""
 
-    def __init__(self, dim, rank, device, norm_group):
+    def __init__(self, dim, rank, device, sync_group, split_group):
         super().__init__()
         self.rank = rank
         self.device = device
-        self.norm_group = norm_group
+        self.sync_group = sync_group
+        self.split_group = split_group
 
         # Learnable parameters
         self.weight = torch.nn.Parameter(torch.ones(dim, device=device))
@@ -23,7 +24,7 @@ class DistributedLayerNorm(torch.nn.Module):
 
     def forward(self, x):
         return self.layernorm(
-            x, self.weight, self.bias, self.norm_group, self.eps
+            x, self.weight, self.bias, self.sync_group, self.split_group, self.eps
         )[0]
 
 
@@ -31,11 +32,20 @@ class DistributedLNFunction(torch.autograd.Function):
     """Autograd function for distributed LayerNorm."""
 
     @staticmethod
-    def forward(x, weight, bias, norm_group, eps):
+    def forward(x, weight, bias, sync_group, split_group, eps):
         # Compute mean and variance locally
-        
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, unbiased=False, keepdim=True)
+
+        N_l = x.shape[-1]  # normalized dimension size (local)
+        N_g = N_l * split_group.size()  # normalized dimension size (global)
+
+        local_mean = x.mean(dim=-1, keepdim=True)
+        local_var = x.var(dim=-1, unbiased=False, keepdim=True)
+
+        mean = local_mean.clone()
+        dist.all_reduce(mean, op=dist.ReduceOp.AVG, group=split_group)
+
+        var = ((N_l - 1) / (N_g - 1)) * local_var + (N_l / (N_g - 1)) * (mean - local_mean)**2
+        dist.all_reduce(var, op=dist.ReduceOp.SUM, group=split_group)
 
         # Normalize
         x_norm = (x - mean) / torch.sqrt(var + eps)
@@ -46,19 +56,20 @@ class DistributedLNFunction(torch.autograd.Function):
 
     @staticmethod
     def setup_context(ctx, inputs, output):
-        x, weight, bias, norm_group, eps = inputs
+        x, weight, bias, sync_group, split_group, eps = inputs
         _, x_norm, weight, var = output
 
         ctx.mark_non_differentiable(x_norm, weight, var)
-        ctx.norm_group = norm_group
+        ctx.sync_group = sync_group
+        ctx.split_group = split_group
 
         # Save for backward
         ctx.save_for_backward(x_norm, weight, torch.sqrt(var))
 
     @staticmethod
-    def vmap(info, in_dims, x, weight, bias, norm_group, eps):
+    def vmap(info, in_dims, x, weight, bias, sync_group, split_group, eps):
         out = DistributedLNFunction.apply(
-            x, weight, bias, norm_group, eps    
+            x, weight, bias, sync_group, split_group, eps
         )
         
         return out, 0
@@ -69,9 +80,10 @@ class DistributedLNFunction(torch.autograd.Function):
     ):
         
         x_norm, weight, std = ctx.saved_tensors
-        norm_group = ctx.norm_group
+        sync_group = ctx.sync_group
+        split_group = ctx.split_group
 
-        N = x_norm.shape[-1]  # normalized dimension size
+        N = x_norm.shape[-1] * split_group.size()  # normalized dimension size (global)
 
         # Gradients for weight and bias
         # Sum over batch and sequence dimensions, keep feature dim
@@ -85,17 +97,23 @@ class DistributedLNFunction(torch.autograd.Function):
         grad_bias = grad_output.sum(dim=tuple(range(grad_output.dim() - 1)))
 
         # Synchronize parameter gradients across the process group
-        dist.all_reduce(grad_weight, op=dist.ReduceOp.SUM, group=norm_group)
-        dist.all_reduce(grad_bias, op=dist.ReduceOp.SUM, group=norm_group)
+        dist.all_reduce(grad_weight, op=dist.ReduceOp.SUM, group=sync_group)
+        dist.all_reduce(grad_bias, op=dist.ReduceOp.SUM, group=sync_group)
 
         # Gradient for input (standard LayerNorm backward)
         grad_x_norm = grad_output * weight
 
+        grad_x_norm_mean = grad_x_norm.mean(dim=-1, keepdim=True)
+        dist.all_reduce(grad_x_norm_mean, op=dist.ReduceOp.AVG, group=split_group)
+
+        x_grad_x_term = (grad_x_norm * x_norm).sum(dim=-1, keepdim=True)
+        dist.all_reduce(x_grad_x_term, op=dist.ReduceOp.SUM, group=split_group)
+
         # LayerNorm backward formula
         grad_x = (1.0 / std) * (
             grad_x_norm
-            - grad_x_norm.mean(dim=-1, keepdim=True)
-            - x_norm * (grad_x_norm * x_norm).mean(dim=-1, keepdim=True)
+            - grad_x_norm_mean
+            - x_norm * x_grad_x_term / (N - 1)
         )
 
         # If input gradients also need sync (depends on your parallelism strategy)
