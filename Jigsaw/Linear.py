@@ -2,6 +2,7 @@ from typing import Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F # noqa
 import torch.distributed as dist
 
 from Jigsaw import distributed_matmul as dist_mm
@@ -1425,7 +1426,7 @@ class AverageGradients(torch.nn.Module):
     ) -> None:
         super().__init__()
 
-        self.model_group = model_group
+        self.model_group = sync_group
         self.all_reduce = AvgGradients().apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1487,3 +1488,229 @@ class AvgGradients(torch.autograd.Function):
         dist.all_reduce(grad_output, op=dist.ReduceOp.AVG, group=ctx.model_group)
 
         return grad_output, None
+
+
+class DistributedXWT_Nice(torch.nn.Module):
+    """Batched matrix-matrix (XWT) multiplication distributed across n processes."""
+
+    def __init__(
+            self,
+            in_dim: int,
+            out_dim: int,
+            sync_group: dist.ProcessGroup,
+            split_group: dist.ProcessGroup,
+            bias: bool = True
+    ) -> None:
+        """
+        Initialize the XWT Linear layer sharded over n processes.
+
+        Parameters
+        ----------
+        parallelism: int
+            number of processes it is distributed over
+        in_dim : int
+            input dimension of local weight matrix.
+        out_dim : int
+            output dimension of local weight matrix.
+        device : torch.device
+            Device to perform computation on.
+        rank : int
+            Global rank.
+        bias : bool, optional
+            If True, adds a learnable bias to the output (default is True).
+        stdev : float, optional
+            The standard deviation for weight initialization (default is None).
+        """
+        super().__init__()
+
+        stdev = 1.0 / np.sqrt(in_dim)
+
+        self.weights = torch.nn.parameter.Parameter(
+            torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
+        )
+
+        if bias:
+            self.bias = torch.nn.parameter.Parameter(
+                torch.zeros(out_dim).uniform_(-stdev, stdev)
+            )
+        else:
+            self.bias = None
+
+        self.split_group = split_group
+        self.sync_group = sync_group
+        self.XWT_Nice = XWT_Nice().apply
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of linear layer (XWT) distributed across two processes.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input tensor of shape (B, x_in, in_dim).
+        model_group : dist.ProcessGroup, optional
+            Process group for an individual model-parallel instance.
+
+        Returns
+        -------
+        Cij: torch.Tensor
+            Local output tensor of shape (B, out_dim, in_dim).
+            B, out_dim are global values.
+            in_dim is local value.
+        """
+        Cij = self.XWT_Nice(
+            x,
+            self.weights,
+            self.bias,
+            self.split_group,
+            self.sync_group,
+        )
+        return Cij
+
+class XWT_Nice(torch.autograd.Function):
+    """Autograd function for batched matrix-matrix (XWT) multiplication distributed across n processes."""
+
+    @staticmethod
+    def forward(
+        x: torch.Tensor,
+        w: torch.Tensor,
+        b: torch.Tensor,
+        split_group: dist.ProcessGroup,
+        sync_group: dist.ProcessGroup
+    ) -> torch.Tensor:
+        """
+        Forward pass of linear layer (XWT) distributed across two processes.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input tensor of shape (B, x_in, in_dim).
+        W : torch.Tensor
+            Local weight tensor of shape (in_dim, out_dim).
+        b : torch.Tensor
+            Local bias tensor of shape (out_dim).
+        split_group : dist.ProcessGroup, optional
+            Process group for an individual model-parallel instance.
+        sync_group : dist.ProcessGroup, optional
+            Process group for an individual domain-parallel instance.
+
+        Returns
+        -------
+        Cij: torch.Tensor
+            Local output tensor of shape (B, out_dim, in_dim).
+            B, out_dim are global values.
+            in_dim is local value.
+        """
+        # Handle bias term here?
+        if (b is not None) and (len(b.shape) > 1):
+            b = b.reshape(b.shape[0], 1, 1, -1)
+
+        xwt = F.linear(x, w, b)
+
+        return xwt
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        """
+        ctx: FunctionCtx
+        inputs: tuple(x, w, b, rank, device, parallelism, model_group)
+        output: xwt
+        """
+        x, w, b, split_group, sync_group = inputs
+        ctx.save_for_backward(x, w)
+        ctx.split_group = split_group
+        ctx.sync_group = sync_group
+        ctx.has_bias = True if b is not None else False
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.Function, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None]:
+        """
+        Backward pass of linear layer (XWT) distributed across two processes.
+
+        Parameters
+        ----------
+        ctx : torch.autograd.Function
+            Context object to save information for backward computation.
+        grad_output : tensor
+            The gradient of the loss with respect to the output of the layer.
+
+        Returns
+        -------
+        grad_input: torch.Tensor
+            Gradient with respect to the input.
+        grad_weight: torch.Tensor
+            Gradient with respect to the weights.
+        grad_bias: torch.Tensor
+            Gradient with respect to the bias.
+        """
+        x, weight = ctx.saved_tensors
+        sync_group = ctx.sync_group
+        split_group = ctx.split_group
+
+        grad_input = grad_output @ weight
+        g_i_handler = dist.all_reduce(grad_input, op=dist.ReduceOp.SUM, group=split_group, async_op=True)
+
+        grad_weight = (grad_output.mT @ x).sum(dim=tuple(range(grad_output.dim() - 2)))
+
+        grad_bias = grad_output.sum(dim=tuple(range(grad_output.dim() - 1))) if ctx.has_bias else None
+
+        g_w_handler = dist.all_reduce(grad_weight, op=dist.ReduceOp.SUM, group=sync_group, async_op=True)
+        if grad_bias is not None:
+            g_b_handler = dist.all_reduce(grad_bias, op=dist.ReduceOp.SUM, group=sync_group, async_op=True)
+            g_b_handler.wait()
+
+        g_w_handler.wait()
+        g_i_handler.wait()
+
+        return grad_input, grad_weight, grad_bias, None, None
+
+    @staticmethod
+    def vmap(
+        info,
+        in_dims: tuple[Optional[int], ...],
+        x: torch.Tensor,
+        w: torch.Tensor,
+        b: Optional[torch.Tensor],
+        split_group: dist.ProcessGroup
+    ) -> tuple[torch.Tensor, Optional[int]]:
+        """
+        Define XWT behavior under torch.vmap.
+
+        Parameters
+        ----------
+        info :
+            Metadata object with info.batch_size (size of vmapped dimension).
+        in_dims :
+            Tuple of Optional[int] describing which dimension of each input
+            is vmapped over. Structure matches (x, w, b, rank, device, parallelism, model_group).
+        x : Tensor
+            Possibly batched input.
+        w : Tensor
+            Possibly shared or batched weights.
+        b : Tensor or None
+            Possibly shared or batched bias.
+
+        Returns
+        -------
+        output : Tensor
+            Batched output with vmapped dimension in front.
+        out_dim : Optional[int]
+            Index of vmapped dimension in output (0 if batched, None if not).
+        """
+        # x under vmap has shape (V, B, x_in, in_dim).
+        x = x.contiguous()
+        V = x.shape[0]
+        # B = x.shape[1]
+        rest = w.shape[1:]  # (in_dim, out_dim)
+
+        if len(x.shape) > len(w.shape):
+            w = w.reshape(V, 1, *rest)
+
+        out = XWT_sync.apply(
+            x, w, b, split_group
+        )
+
+        # out has vmapped dimension at dim 0
+        return out, 0
