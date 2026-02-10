@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 
+from Jigsaw import Linear as jlin
 
 class DistributedLayerNorm(torch.nn.Module):
     """LayerNorm with synchronized gradients across a process group."""
@@ -248,3 +249,79 @@ class _DistributedSoftmax(torch.autograd.Function):
 
         # out has vmapped dimension at dim 0
         return out, 0
+
+
+
+class DistributedNICENorm(torch.nn.Module):
+    def __init__(
+        self,
+        dim,
+        noise_dim,
+        rank,
+        device,
+        parallelism: int,
+        spatial_group,
+        channel_group
+    ):
+        super().__init__()
+
+        self.global_dim = dim
+        self.noise_dim = noise_dim
+        self.rank = rank
+        self.device = device
+        self.parallelism = parallelism
+        self.spatial_group = spatial_group
+        self.channel_group = channel_group
+
+        self.local_dim = dim // channel_group.size()
+
+        self.ln = DistributedNoParamLayerNorm(dim, rank, device, split_group=self.channel_group)
+        self.non_linearity = torch.nn.GELU()
+
+        self.scale_linear1 = jlin.DistributedXWT_Nice(
+            in_dim=self.noise_dim,
+            out_dim=self.local_dim,
+            sync_group=self.spatial_group,
+            split_group=self.channel_group
+        )
+        self.scale_linear2 = jlin.DistributedXWTSync(
+            in_dim=self.local_dim,
+            out_dim=self.local_dim,
+            rank=self.rank,
+            device=self.device,
+            parallelism=self.parallelism,
+            sync_group=self.spatial_group,
+            model_group=self.channel_group
+        )
+
+        self.shift_linear1 = jlin.DistributedXWT_Nice(
+            in_dim=self.noise_dim,
+            out_dim=self.local_dim,
+            sync_group=self.spatial_group,
+            split_group=self.channel_group
+        )
+        self.shift_linear2 = jlin.DistributedXWTSync(
+            in_dim=self.local_dim,
+            out_dim=self.local_dim,
+            rank=self.rank,
+            device=self.device,
+            parallelism=self.parallelism,
+            sync_group=self.spatial_group,
+            model_group=self.channel_group
+        )
+
+
+    def forward(self, x, noise):
+        x = self.ln(x)
+
+        scale = self.scale_linear1(noise)
+        scale = self.non_linearity(scale)
+        scale = self.scale_linear2(scale)
+
+        shift = self.shift_linear1(noise)
+        shift = self.non_linearity(shift)
+        shift = self.shift_linear2(shift)
+
+        x = scale * x + shift
+
+        return x
