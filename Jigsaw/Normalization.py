@@ -8,12 +8,12 @@ import torch.distributed as dist
 class DistributedLayerNorm(torch.nn.Module):
     """LayerNorm with synchronized gradients across a process group."""
 
-    def __init__(self, normalized_dim, rank, device, sync_group, split_group):
+    def __init__(self, normalized_dim, rank, device, spatial_group, channel_group):
         super().__init__()
         self.rank = rank
         self.device = device
-        self.sync_group = sync_group
-        self.split_group = split_group
+        self.spatial_group = spatial_group
+        self.channel_group = channel_group
 
         # Learnable parameters
         self.weight = torch.nn.Parameter(torch.ones(normalized_dim, device=device))
@@ -24,7 +24,7 @@ class DistributedLayerNorm(torch.nn.Module):
 
     def forward(self, x):
         return self.layernorm(
-            x, self.weight, self.bias, self.sync_group, self.split_group, self.eps
+            x, self.weight, self.bias, self.spatial_group, self.channel_group, self.eps
         )[0]
 
 
@@ -32,20 +32,20 @@ class DistributedLNFunction(torch.autograd.Function):
     """Autograd function for distributed LayerNorm."""
 
     @staticmethod
-    def forward(x, weight, bias, sync_group, split_group, eps):
+    def forward(x, weight, bias, spatial_group, channel_group, eps):
         # Compute mean and variance locally
 
         N_l = x.shape[-1]  # normalized dimension size (local)
-        N_g = N_l * split_group.size()  # normalized dimension size (global)
+        N_g = N_l * channel_group.size()  # normalized dimension size (global)
 
         local_mean = x.mean(dim=-1, keepdim=True)
         local_var = x.var(dim=-1, keepdim=True)
 
         mean = local_mean.clone()
-        dist.all_reduce(mean, op=dist.ReduceOp.AVG, group=split_group)
+        dist.all_reduce(mean, op=dist.ReduceOp.AVG, group=channel_group)
 
         var = ((N_l - 1) / (N_g - 1)) * local_var + (N_l / (N_g - 1)) * (mean - local_mean)**2
-        dist.all_reduce(var, op=dist.ReduceOp.SUM, group=split_group)
+        dist.all_reduce(var, op=dist.ReduceOp.SUM, group=channel_group)
 
         # Normalize
         x_norm = (x - mean) / torch.sqrt(var + eps)
@@ -56,20 +56,20 @@ class DistributedLNFunction(torch.autograd.Function):
 
     @staticmethod
     def setup_context(ctx, inputs, output):
-        x, weight, bias, sync_group, split_group, eps = inputs
+        x, weight, bias, spatial_group, channel_group, eps = inputs
         _, x_norm, weight, var = output
 
         ctx.mark_non_differentiable(x_norm, weight, var)
-        ctx.sync_group = sync_group
-        ctx.split_group = split_group
+        ctx.spatial_group = spatial_group
+        ctx.channel_group = channel_group
 
         # Save for backward
         ctx.save_for_backward(x_norm, weight, torch.sqrt(var))
 
     @staticmethod
-    def vmap(info, in_dims, x, weight, bias, sync_group, split_group, eps):
+    def vmap(info, in_dims, x, weight, bias, spatial_group, channel_group, eps):
         out = DistributedLNFunction.apply(
-            x, weight, bias, sync_group, split_group, eps
+            x, weight, bias, spatial_group, channel_group, eps
         )
         
         return out, 0
@@ -80,10 +80,10 @@ class DistributedLNFunction(torch.autograd.Function):
     ):
         
         x_norm, weight, std = ctx.saved_tensors
-        sync_group = ctx.sync_group
-        split_group = ctx.split_group
+        spatial_group = ctx.spatial_group
+        channel_group = ctx.channel_group
 
-        N = x_norm.shape[-1] * split_group.size()  # normalized dimension size (global)
+        N = x_norm.shape[-1] * channel_group.size()  # normalized dimension size (global)
 
         # Gradients for weight and bias
         # Sum over batch and sequence dimensions, keep feature dim
@@ -97,17 +97,17 @@ class DistributedLNFunction(torch.autograd.Function):
         grad_bias = grad_output.sum(dim=tuple(range(grad_output.dim() - 1)))
 
         # Synchronize parameter gradients across the process group
-        g_w_handle = dist.all_reduce(grad_weight, op=dist.ReduceOp.SUM, group=sync_group, async_op=True)
-        g_b_handle = dist.all_reduce(grad_bias, op=dist.ReduceOp.SUM, group=sync_group, async_op=True)
+        g_w_handle = dist.all_reduce(grad_weight, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True)
+        g_b_handle = dist.all_reduce(grad_bias, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True)
 
         # Gradient for input (standard LayerNorm backward)
         grad_x_norm = grad_output * weight
 
         grad_x_norm_mean = grad_x_norm.mean(dim=-1, keepdim=True)
-        g_gx_handle = dist.all_reduce(grad_x_norm_mean, op=dist.ReduceOp.AVG, group=split_group, async_op=True)
+        g_gx_handle = dist.all_reduce(grad_x_norm_mean, op=dist.ReduceOp.AVG, group=channel_group, async_op=True)
 
         x_grad_x_term = (grad_x_norm * x_norm).sum(dim=-1, keepdim=True)
-        x_g_x_handle = dist.all_reduce(x_grad_x_term, op=dist.ReduceOp.SUM, group=split_group, async_op=True)
+        x_g_x_handle = dist.all_reduce(x_grad_x_term, op=dist.ReduceOp.SUM, group=channel_group, async_op=True)
 
         g_gx_handle.wait()
         x_g_x_handle.wait()
@@ -131,18 +131,18 @@ class DistributedLNFunction(torch.autograd.Function):
 class DistributedNoParamLayerNorm(torch.nn.Module):
     """LayerNorm with synchronized gradients across a process group."""
 
-    def __init__(self, rank, device, split_group):
+    def __init__(self, rank, device, channel_group):
         super().__init__()
         self.rank = rank
         self.device = device
-        self.split_group = split_group
+        self.channel_group = channel_group
 
         self.eps = 1e-5
         self.layernorm = DistributedNoParamLNFunction().apply
 
     def forward(self, x):
         return self.layernorm(
-            x, self.split_group, self.eps
+            x, self.channel_group, self.eps
         )[0]
 
 
@@ -150,20 +150,20 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
     """Autograd function for distributed LayerNorm."""
 
     @staticmethod
-    def forward(x, split_group, eps):
+    def forward(x, channel_group, eps):
         # Compute mean and variance locally
 
         N_l = x.shape[-1]  # normalized dimension size (local)
-        N_g = N_l * split_group.size()  # normalized dimension size (global)
+        N_g = N_l * channel_group.size()  # normalized dimension size (global)
 
         local_mean = x.mean(dim=-1, keepdim=True)
         local_var = x.var(dim=-1, keepdim=True)
 
         mean = local_mean.clone()
-        dist.all_reduce(mean, op=dist.ReduceOp.AVG, group=split_group)
+        dist.all_reduce(mean, op=dist.ReduceOp.AVG, group=channel_group)
 
         var = ((N_l - 1) / (N_g - 1)) * local_var + (N_l / (N_g - 1)) * (mean - local_mean) ** 2
-        dist.all_reduce(var, op=dist.ReduceOp.SUM, group=split_group)
+        dist.all_reduce(var, op=dist.ReduceOp.SUM, group=channel_group)
 
         # Normalize
         x_norm = (x - mean) / torch.sqrt(var + eps)
@@ -173,19 +173,19 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
 
     @staticmethod
     def setup_context(ctx, inputs, output):
-        x, sync_group, split_group, eps = inputs
+        x, spatial_group, channel_group, eps = inputs
         x_norm, var = output
 
         ctx.mark_non_differentiable(var)
-        ctx.split_group = split_group
+        ctx.channel_group = channel_group
 
         # Save for backward
         ctx.save_for_backward(x_norm, torch.sqrt(var))
 
     @staticmethod
-    def vmap(info, in_dims, x, sync_group, split_group, eps):
+    def vmap(info, in_dims, x, spatial_group, channel_group, eps):
         out = DistributedNoParamLNFunction.apply(
-            x, sync_group, split_group, eps
+            x, spatial_group, channel_group, eps
         )
 
         return out, 0
@@ -195,9 +195,9 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
             ctx, grad_output, var_grad: None
     ):
         x_norm, std = ctx.saved_tensors
-        split_group = ctx.split_group
+        channel_group = ctx.channel_group
 
-        N = x_norm.shape[-1] * split_group.size()  # normalized dimension size (global)
+        N = x_norm.shape[-1] * channel_group.size()  # normalized dimension size (global)
 
         # Gradients for weight and bias
         # Sum over batch and sequence dimensions, keep feature dim
@@ -205,10 +205,10 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
         # Gradient for input (standard LayerNorm backward)
 
         grad_x_norm_mean = grad_output.mean(dim=-1, keepdim=True)
-        g_gx_handle = dist.all_reduce(grad_x_norm_mean, op=dist.ReduceOp.AVG, group=split_group, async_op=True)
+        g_gx_handle = dist.all_reduce(grad_x_norm_mean, op=dist.ReduceOp.AVG, group=channel_group, async_op=True)
 
         x_grad_x_term = (grad_output * x_norm).sum(dim=-1, keepdim=True)
-        x_g_x_handle = dist.all_reduce(x_grad_x_term, op=dist.ReduceOp.SUM, group=split_group, async_op=True)
+        x_g_x_handle = dist.all_reduce(x_grad_x_term, op=dist.ReduceOp.SUM, group=channel_group, async_op=True)
 
         g_gx_handle.wait()
         x_g_x_handle.wait()
