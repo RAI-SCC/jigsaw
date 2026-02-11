@@ -275,14 +275,14 @@ class DistributedNICENorm(torch.nn.Module):
 
         self.local_dim = dim // channel_group.size()
 
-        self.ln = DistributedNoParamLayerNorm(dim, rank, device, split_group=self.channel_group)
+        self.ln = DistributedNoParamLayerNorm(dim, rank, device, channel_group=self.channel_group)
         self.non_linearity = torch.nn.GELU()
 
         self.scale_linear1 = jlin.DistributedXWT_Nice(
             in_dim=self.noise_dim,
             out_dim=self.local_dim,
-            sync_group=self.spatial_group,
-            split_group=self.channel_group
+            spatial_group=self.spatial_group,
+            channel_group=self.channel_group
         )
         self.scale_linear2 = jlin.DistributedXWTSync(
             in_dim=self.local_dim,
@@ -290,15 +290,15 @@ class DistributedNICENorm(torch.nn.Module):
             rank=self.rank,
             device=self.device,
             parallelism=self.parallelism,
-            sync_group=self.spatial_group,
+            spatial_group=self.spatial_group,
             model_group=self.channel_group
         )
 
         self.shift_linear1 = jlin.DistributedXWT_Nice(
             in_dim=self.noise_dim,
             out_dim=self.local_dim,
-            sync_group=self.spatial_group,
-            split_group=self.channel_group
+            spatial_group=self.spatial_group,
+            channel_group=self.channel_group
         )
         self.shift_linear2 = jlin.DistributedXWTSync(
             in_dim=self.local_dim,

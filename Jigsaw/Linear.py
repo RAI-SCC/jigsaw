@@ -1497,8 +1497,8 @@ class DistributedXWT_Nice(torch.nn.Module):
             self,
             in_dim: int,
             out_dim: int,
-            sync_group: dist.ProcessGroup,
-            split_group: dist.ProcessGroup,
+            spatial_group: dist.ProcessGroup,
+            channel_group: dist.ProcessGroup,
             bias: bool = True
     ) -> None:
         """
@@ -1536,8 +1536,8 @@ class DistributedXWT_Nice(torch.nn.Module):
         else:
             self.bias = None
 
-        self.split_group = split_group
-        self.sync_group = sync_group
+        self.channel_group = channel_group
+        self.spatial_group = spatial_group
         self.XWT_Nice = XWT_Nice().apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1562,8 +1562,8 @@ class DistributedXWT_Nice(torch.nn.Module):
             x,
             self.weights,
             self.bias,
-            self.split_group,
-            self.sync_group,
+            self.channel_group,
+            self.spatial_group,
         )
         return Cij
 
@@ -1575,8 +1575,8 @@ class XWT_Nice(torch.autograd.Function):
         x: torch.Tensor,
         w: torch.Tensor,
         b: torch.Tensor,
-        split_group: dist.ProcessGroup,
-        sync_group: dist.ProcessGroup
+        channel_group: dist.ProcessGroup,
+        spatial_group: dist.ProcessGroup
     ) -> torch.Tensor:
         """
         Forward pass of linear layer (XWT) distributed across two processes.
@@ -1589,9 +1589,9 @@ class XWT_Nice(torch.autograd.Function):
             Local weight tensor of shape (in_dim, out_dim).
         b : torch.Tensor
             Local bias tensor of shape (out_dim).
-        split_group : dist.ProcessGroup, optional
+        channel_group : dist.ProcessGroup, optional
             Process group for an individual model-parallel instance.
-        sync_group : dist.ProcessGroup, optional
+        spatial_group : dist.ProcessGroup, optional
             Process group for an individual domain-parallel instance.
 
         Returns
@@ -1616,10 +1616,10 @@ class XWT_Nice(torch.autograd.Function):
         inputs: tuple(x, w, b, rank, device, parallelism, model_group)
         output: xwt
         """
-        x, w, b, split_group, sync_group = inputs
+        x, w, b, channel_group, spatial_group = inputs
         ctx.save_for_backward(x, w)
-        ctx.split_group = split_group
-        ctx.sync_group = sync_group
+        ctx.channel_group = channel_group
+        ctx.spatial_group = spatial_group
         ctx.has_bias = True if b is not None else False
 
     @staticmethod
@@ -1646,19 +1646,19 @@ class XWT_Nice(torch.autograd.Function):
             Gradient with respect to the bias.
         """
         x, weight = ctx.saved_tensors
-        sync_group = ctx.sync_group
-        split_group = ctx.split_group
+        spatial_group = ctx.spatial_group
+        channel_group = ctx.channel_group
 
         grad_input = grad_output @ weight
-        g_i_handler = dist.all_reduce(grad_input, op=dist.ReduceOp.SUM, group=split_group, async_op=True)
+        g_i_handler = dist.all_reduce(grad_input, op=dist.ReduceOp.SUM, group=channel_group, async_op=True)
 
         grad_weight = (grad_output.mT @ x).sum(dim=tuple(range(grad_output.dim() - 2)))
 
         grad_bias = grad_output.sum(dim=tuple(range(grad_output.dim() - 1))) if ctx.has_bias else None
 
-        g_w_handler = dist.all_reduce(grad_weight, op=dist.ReduceOp.SUM, group=sync_group, async_op=True)
+        g_w_handler = dist.all_reduce(grad_weight, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True)
         if grad_bias is not None:
-            g_b_handler = dist.all_reduce(grad_bias, op=dist.ReduceOp.SUM, group=sync_group, async_op=True)
+            g_b_handler = dist.all_reduce(grad_bias, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True)
             g_b_handler.wait()
 
         g_w_handler.wait()
@@ -1673,7 +1673,8 @@ class XWT_Nice(torch.autograd.Function):
         x: torch.Tensor,
         w: torch.Tensor,
         b: Optional[torch.Tensor],
-        split_group: dist.ProcessGroup
+        channel_group: dist.ProcessGroup,
+        spatial_group: dist.ProcessGroup
     ) -> tuple[torch.Tensor, Optional[int]]:
         """
         Define XWT behavior under torch.vmap.
@@ -1709,7 +1710,7 @@ class XWT_Nice(torch.autograd.Function):
             w = w.reshape(V, 1, *rest)
 
         out = XWT_sync.apply(
-            x, w, b, split_group
+            x, w, b, channel_group, spatial_group
         )
 
         # out has vmapped dimension at dim 0
