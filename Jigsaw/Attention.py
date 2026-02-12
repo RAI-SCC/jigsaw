@@ -344,6 +344,7 @@ class DistributedWindowedTransformer(torch.nn.Module):
             2,
             model_group=channel_group,
             sync_group=spatial_group,
+            bayesian=bayesian
         ).to(device)
 
         _average_weights(self, spatial_group, device)
