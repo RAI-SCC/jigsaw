@@ -314,7 +314,7 @@ class XWT(torch.autograd.Function):
         rest = w.shape[1:]  # (in_dim, out_dim)
 
 
-        out = XWT.apply(x, w, b, rank, device, parallelism, model_group)
+        out = XWT.apply(x, w, b, rank, device, parallelism, model_group, bayesian)
 
         # out has vmapped dimension at dim 0
         return out, 0
@@ -581,7 +581,7 @@ class XWT_sync(torch.autograd.Function):
         x = x.contiguous()
 
         out = XWT_sync.apply(
-            x, w, b, rank, device, parallelism, model_group, sync_group
+            x, w, b, rank, device, parallelism, model_group, sync_group, bayesian
         )
 
         # out has vmapped dimension at dim 0
@@ -816,7 +816,7 @@ class XW(torch.autograd.Function):
         """
 
         x = x.contiguous()
-        out = XW.apply(x, w, b, rank, device, parallelism, model_group)
+        out = XW.apply(x, w, b, rank, device, parallelism, model_group, bayesian)
 
         # out has vmapped dimension at dim 0
         return out, 0
@@ -1065,7 +1065,7 @@ class XTW(torch.autograd.Function):
         """
         # x under vmap has shape (V, B, x_in, in_dim).
         x = x.contiguous()
-        out = XTW.apply(x, w, b, rank, device, parallelism, model_group)
+        out = XTW.apply(x, w, b, rank, device, parallelism, model_group, bayesian)
 
         # out has vmapped dimension at dim 0
         return out, 0
