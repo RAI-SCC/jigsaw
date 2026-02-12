@@ -129,6 +129,7 @@ class DistributedSynchronizedMLP(torch.nn.Module):
         sync_group: torch.distributed.ProcessGroup,
         bias: bool = True,
         dropout: float = 1e-3,
+        bayesian: bool = False
     ):
         super().__init__()
         self.rank = rank
@@ -147,7 +148,8 @@ class DistributedSynchronizedMLP(torch.nn.Module):
                 n_parallel,
                 model_group,
                 sync_group,
-                bias=bias
+                bias=bias, 
+                bayesian=bayesian
             ).to(device)
             
             self.linear2 = Linear.DistributedXWTSync(
@@ -158,7 +160,8 @@ class DistributedSynchronizedMLP(torch.nn.Module):
                 n_parallel,
                 model_group,
                 sync_group,
-                bias=bias
+                bias=bias,
+                bayesian=bayesian
             ).to(device)
         
         self.activation = GELU()

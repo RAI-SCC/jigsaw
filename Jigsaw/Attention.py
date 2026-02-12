@@ -18,7 +18,8 @@ class DistributedAttention(torch.nn.Module):
         n_parallel: int,
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
-        channel_group: dist.ProcessGroup
+        channel_group: dist.ProcessGroup,
+        bayesian: bool
     ):
         """
 
@@ -54,6 +55,7 @@ class DistributedAttention(torch.nn.Module):
                     self.n_parallel,
                     self.model_group,
                     bias=False,
+                    bayesian=bayesian
                 )
             case 4:
                 self.qkv = Linear.DistributedXWT(
@@ -64,6 +66,7 @@ class DistributedAttention(torch.nn.Module):
                     self.n_parallel,
                     self.model_group,
                     bias=False,
+                    bayesian=bayesian
                 )
             case 8:
                 self.qkv = Linear.DistributedXWT(
@@ -74,6 +77,7 @@ class DistributedAttention(torch.nn.Module):
                     self.n_parallel,
                     self.model_group,
                     bias=False,
+                    bayesian=bayesian
                 )
 
         if self.n_parallel > 1:
@@ -104,6 +108,7 @@ class DistributedAttention(torch.nn.Module):
                     self.n_parallel,
                     self.channel_group,
                     bias=False,
+                    bayesian=bayesian
                 )
             case 4:
                 self.concatenator = Linear.DistributedXWT(
@@ -114,6 +119,7 @@ class DistributedAttention(torch.nn.Module):
                     self.n_parallel,
                     self.channel_group,
                     bias=False,
+                    bayesian=bayesian
                 )
             case 8:
                 self.concatenator = Linear.DistributedXWT(
@@ -124,6 +130,7 @@ class DistributedAttention(torch.nn.Module):
                     self.n_parallel,
                     self.model_group,
                     bias=False,
+                    bayesian=bayesian
                 )
 
         self.heads = heads
@@ -179,6 +186,7 @@ class DistributedWindowedAttention(torch.nn.Module):
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
+        bayesian: bool
     ):
         """
 
@@ -215,16 +223,17 @@ class DistributedWindowedAttention(torch.nn.Module):
             model_group=self.channel_group,
             sync_group=self.spatial_group,
             bias=False,
+            bayesian=bayesian
         )
 
         self.softmax = Norm.DistributedSoftMax(
             dim=-1, group=self.channel_group
         )  # TODO: define softmax groups
         self.xwt = Linear.DistributedMatMulXWTranspose(
-            self.rank, self.device, 2, model_group=self.channel_group
+            self.rank, self.device, 2, model_group=self.channel_group, bayesian=bayesian
         )
         self.xw = Linear.DistributedMatMulXW(
-            rank, device, 2, model_group=self.channel_group
+            rank, device, 2, model_group=self.channel_group, bayesian=bayesian
         )
 
         self.concatenator = MLP.DistributedSynchronizedMLP(
@@ -238,6 +247,7 @@ class DistributedWindowedAttention(torch.nn.Module):
             sync_group=self.spatial_group,
             bias=True,
             dropout=0,
+            bayesian=bayesian
         )
 
         self.heads = heads
@@ -300,6 +310,7 @@ class DistributedWindowedTransformer(torch.nn.Module):
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
+        bayesian: bool
     ):
         super().__init__()
         self.attention_block = DistributedWindowedAttention(
@@ -313,6 +324,7 @@ class DistributedWindowedTransformer(torch.nn.Module):
             model_group,
             spatial_group,
             channel_group,
+            bayesian
         ).to(device)
         self.layer_norm1 = Norm.DistributedLayerNorm(
             output_dim // 2, rank, device, spatial_group
@@ -332,6 +344,7 @@ class DistributedWindowedTransformer(torch.nn.Module):
             2,
             model_group=channel_group,
             sync_group=spatial_group,
+            bayesian=bayesian
         ).to(device)
 
         _average_weights(self, spatial_group, device)
@@ -358,9 +371,6 @@ class DistributedTransformer(torch.nn.Module):
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
     ):
-        
-      
-        
         super().__init__()
         self.attention_block = DistributedAttention(
             x_features,

@@ -1,5 +1,4 @@
 h5netcdf==1.5.0
-h5py==3.13.0
 huggingface-hub==0.29.1
 matplotlib==3.10.0
 matplotlib-inline==0.1.7
