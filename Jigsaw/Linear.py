@@ -188,7 +188,7 @@ class XWT(torch.autograd.Function):
             B, out_dim are global values.
             in_dim is local value.
         """
-        if bayesian:
+        if bayesian and len(w.shape) < len(x.shape):
             w = w.unsqueeze(1) # expand to include batch dimension
             if b is not None:
                 b = b.unsqueeze(1).unsqueeze(1)
@@ -244,7 +244,9 @@ class XWT(torch.autograd.Function):
         model_group = ctx.model_group
         bayesian = ctx.bayesian
         
-        if bayesian:
+        weight_orig = weight.shape
+        
+        if bayesian and len(weight.shape) < len(grad_output.shape):
             weight = weight.unsqueeze(1)
 
         grad_input = select_xw_kernel(parallelism)(
@@ -254,9 +256,10 @@ class XWT(torch.autograd.Function):
             grad_output, input, rank=rank, device=device, model_group=model_group
         )
         
-        grad_weight = grad_weight.sum(dim=-3) # sum along batch dimension
+        if len(grad_weight.shape) > len(weight_orig):
+            grad_weight = grad_weight.sum(dim=int(self.bayesian)) # sum along batch dimension
 
-        grad_b = grad_output.sum(dim=range(bayesian, -2)) if ctx.has_bias else None
+        grad_b = grad_output.sum(dim=(-3, -2)) if ctx.has_bias else None
         
         # TODO: reduce across spatial dimension
         
@@ -267,7 +270,7 @@ class XWT(torch.autograd.Function):
         # else:
         #     grad_b = None if bias is None else grad_output.sum(dim=(0, 1))
 
-        return grad_input, grad_weight, grad_b, None, None, None, None
+        return grad_input, grad_weight, grad_b, None, None, None, None, None
 
     @staticmethod
     def vmap(
@@ -465,7 +468,7 @@ class XWT_sync(torch.autograd.Function):
             in_dim is local value.
         """
 
-        if bayesian:
+        if bayesian and len(w.shape) < len(x.shape):
             w = w.unsqueeze(1) # expand to include batch dimension
             if b is not None:
                 b = b.unsqueeze(1).unsqueeze(1)
@@ -491,6 +494,7 @@ class XWT_sync(torch.autograd.Function):
         ctx.model_group = model_group
         ctx.sync_group = sync_group
         ctx.bayesian = bayesian
+        ctx.has_bias = (b is not None)
 
     @staticmethod
     def backward(
@@ -522,7 +526,9 @@ class XWT_sync(torch.autograd.Function):
         model_group = ctx.model_group
         bayesian = ctx.bayesian
         
-        if bayesian:
+        weight_shape_orig = weight.shape
+        
+        if bayesian and len(weight.shape) < len(grad_output.shape):
             weight = weight.unsqueeze(1)
 
         grad_input = select_xw_kernel(parallelism)(
@@ -532,12 +538,16 @@ class XWT_sync(torch.autograd.Function):
             grad_output, input, rank=rank, device=device, model_group=model_group
         )
 
-        grad_b = grad_output.sum(dim=range(bayesian, -2)) if ctx.has_bias else None
-
+        grad_b = grad_output.sum(dim=(-3, -2)) if ctx.has_bias else None
+        
+        if len(grad_weight.shape) > len(weight_shape_orig):
+            grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
+        
         dist.all_reduce(grad_weight, group=ctx.sync_group)
         if grad_b is not None:
             dist.all_reduce(grad_b, group=ctx.sync_group)
-        return grad_input, grad_weight, grad_b, None, None, None, None, None
+            
+        return grad_input, grad_weight, grad_b, None, None, None, None, None, None
 
     @staticmethod
     def vmap(
@@ -709,7 +719,7 @@ class XW(torch.autograd.Function):
             B, x_in are global values.
             out_dim is local value.
         """
-        if bayesian:
+        if bayesian and len(w.shape) < len(x.shape):
             w = w.unsqueeze(1)
             if b is not None:
                 b = b.unsqueeze(1).unsqueeze(1)
@@ -734,6 +744,7 @@ class XW(torch.autograd.Function):
         ctx.model_group = model_group
         ctx.b = b
         ctx.bayesian = bayesian
+        ctx.has_bias = b is not None
 
     @staticmethod
     def backward(ctx: torch.autograd.Function, grad_output: torch.Tensor):
@@ -761,8 +772,9 @@ class XW(torch.autograd.Function):
         device = ctx.device
         parallelism = ctx.parallelism
         model_group = ctx.model_group
-
-        if ctx.bayesian:
+        weight_orig = weight.shape
+        
+        if ctx.bayesian and len(weight.shape) < len(grad_output.shape):
             weight = weight.unsqueeze(1)
             
         grad_input = select_xw_transpose_kernel(parallelism)(
@@ -771,11 +783,12 @@ class XW(torch.autograd.Function):
         grad_weight = select_x_transpose_w_kernel(parallelism)(
             input, grad_output, rank=rank, device=device, model_group=model_group
         )
-        
-        grad_weight = grad_weight.sum(dim=-3) # sum along batch dimension
-        grad_b = grad_output.sum(dim=range(bayesian, -2)) if ctx.has_bias else None
 
-        return grad_input, grad_weight, grad_b, None, None, None, None
+        if len(grad_output.shape) > len(weight_orig):
+            grad_weight = grad_weight.sum(dim=int(ctx.bayesian)) # sum along batch dimension
+        grad_b = grad_output.sum(dim=(-3, -2)) if ctx.has_bias else None
+
+        return grad_input, grad_weight, grad_b, None, None, None, None, None
 
     @staticmethod
     def vmap(
@@ -946,7 +959,7 @@ class XTW(torch.autograd.Function):
             out_dim is local value.
         """
         
-        if bayesian:
+        if bayesian and len(w.shape) < len(x.shape):
             w = w.unsqueeze(1)
             if b is not None:
                 b = b.unsqueeze(1).unsqueeze(1)
@@ -971,6 +984,7 @@ class XTW(torch.autograd.Function):
         ctx.parallelism = parallelism
         ctx.model_group = model_group
         ctx.b = b
+        ctx.has_bias = b is not None
         ctx.bayesian
 
     @staticmethod
@@ -1003,9 +1017,9 @@ class XTW(torch.autograd.Function):
         device = ctx.device
         parallelism = ctx.parallelism
         model_group = ctx.model_group
-        bayesian = ctx.bayesian
+        weight_orig = weight.shape
 
-        if bayesian:
+        if ctx.bayesian and len(weight.shape) < len(x.shape):
             weight = weight.unsqueeze(1)
             
         grad_input = select_xw_transpose_kernel(parallelism)(
@@ -1015,16 +1029,17 @@ class XTW(torch.autograd.Function):
             input, grad_output, rank, device, model_group
         )
 
-        grad_weight = grad_weight.sum(dim=-3)
+        if len(grad_weight.shape) > len(weight_orig):
+            grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
         
-        grad_b = grad_output.sum(dim=range(bayesian, -2)) if ctx.has_bias else None
+        grad_b = grad_output.sum(dim=(-3, -2)) if ctx.has_bias else None
         
         # if len(grad_output.shape) == 4:
         #     grad_b = None if bias is None else grad_output.sum(dim=(1, 2))
         # else:
         #     grad_b = None if bias is None else grad_output.sum(dim=(0, 1))
 
-        return grad_input, grad_weight, grad_b, None, None, None, None
+        return grad_input, grad_weight, grad_b, None, None, None, None, None
 
     @staticmethod
     def vmap(
