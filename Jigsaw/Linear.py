@@ -188,14 +188,14 @@ class XWT(torch.autograd.Function):
             B, out_dim are global values.
             in_dim is local value.
         """
-        if self.bayesian:
+        if bayesian:
             w = w.unsqueeze(1) # expand to include batch dimension
-            if self.has_bias:
+            if bias is not None:
                 b = b.unsqueeze(1).unsqueeze(1)
             
         xwt = select_xw_transpose_kernel(parallelism)(x, w, rank, device, model_group)
 
-        xwt = xwt if self.has_bias else xwt.add(b)
+        xwt = xwt if bias is not None else xwt.add(b)
         return xwt
 
     @staticmethod
@@ -465,14 +465,14 @@ class XWT_sync(torch.autograd.Function):
             in_dim is local value.
         """
 
-        if self.bayesian:
+        if bayesian:
             w = w.unsqueeze(1) # expand to include batch dimension
-            if self.has_bias:
+            if bias is not None:
                 b = b.unsqueeze(1).unsqueeze(1)
             
         xwt = select_xw_transpose_kernel(parallelism)(x, w, rank, device, model_group)
 
-        xwt = xwt if self.has_bias else xwt.add(b)
+        xwt = xwt if bias is not None else xwt.add(b)
 
         return xwt
 
@@ -711,7 +711,7 @@ class XW(torch.autograd.Function):
         """
         if bayesian:
             w = w.unsqueeze(1)
-            if self.has_bias:
+            if bias is not None:
                 b = b.unsqueeze(1).unsqueeze(1)
             
         xw = select_xw_kernel(parallelism)(x, w, rank, device, model_group)
