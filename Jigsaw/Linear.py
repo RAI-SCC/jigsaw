@@ -1370,6 +1370,7 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
+        bayesian: bool
     ) -> None:
         """Initialize the XWT Linear layer sharded over two processes."""
         self.rank = rank
@@ -1401,7 +1402,7 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
             in_dim is local value.
         """
         Cij = self.XWT(
-            x, w, b, self.rank, self.device, self.parallelism, self.model_group
+            x, w, b, self.rank, self.device, self.parallelism, self.model_group, self.bayesian
         )
 
         return Cij
