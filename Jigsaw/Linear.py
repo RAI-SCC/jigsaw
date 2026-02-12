@@ -1416,12 +1416,14 @@ class DistributedMatMulXW(torch.nn.Module):
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
+        bayesian: bool
     ):
         """Initialize the XWT Linear layer sharded over n processes."""
         self.rank = rank
         self.device = device
-        self.parallelism = parallelism  # TODO: no bias term
+        self.parallelism = parallelism
         self.model_group = model_group
+        self.bayesian = bayesian
 
         super().__init__()
         self.XW = XW().apply
@@ -1445,7 +1447,7 @@ class DistributedMatMulXW(torch.nn.Module):
             in_dim is local value.
         """
         Cij = self.XW(
-            x, w, b, self.rank, self.device, self.parallelism, self.model_group
+            x, w, b, self.rank, self.device, self.parallelism, self.model_group, self.bayesian
         )
 
         return Cij

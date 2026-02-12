@@ -18,7 +18,8 @@ class DistributedAttention(torch.nn.Module):
         n_parallel: int,
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
-        channel_group: dist.ProcessGroup
+        channel_group: dist.ProcessGroup,
+        bayesian: bool
     ):
         """
 
@@ -179,6 +180,7 @@ class DistributedWindowedAttention(torch.nn.Module):
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
+        bayesian: bool
     ):
         """
 
@@ -215,6 +217,7 @@ class DistributedWindowedAttention(torch.nn.Module):
             model_group=self.channel_group,
             sync_group=self.spatial_group,
             bias=False,
+            bayesian=bayesian
         )
 
         self.softmax = Norm.DistributedSoftMax(
@@ -224,7 +227,7 @@ class DistributedWindowedAttention(torch.nn.Module):
             self.rank, self.device, 2, model_group=self.channel_group
         )
         self.xw = Linear.DistributedMatMulXW(
-            rank, device, 2, model_group=self.channel_group
+            rank, device, 2, model_group=self.channel_group, bayesian=bayesian
         )
 
         self.concatenator = MLP.DistributedSynchronizedMLP(
@@ -238,6 +241,7 @@ class DistributedWindowedAttention(torch.nn.Module):
             sync_group=self.spatial_group,
             bias=True,
             dropout=0,
+            bayesian=bayesian
         )
 
         self.heads = heads
@@ -300,6 +304,7 @@ class DistributedWindowedTransformer(torch.nn.Module):
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
+        bayesian: bool
     ):
         super().__init__()
         self.attention_block = DistributedWindowedAttention(
@@ -313,6 +318,7 @@ class DistributedWindowedTransformer(torch.nn.Module):
             model_group,
             spatial_group,
             channel_group,
+            bayesian
         ).to(device)
         self.layer_norm1 = Norm.DistributedLayerNorm(
             output_dim // 2, rank, device, spatial_group
