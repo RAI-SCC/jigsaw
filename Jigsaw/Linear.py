@@ -195,7 +195,7 @@ class XWT(torch.autograd.Function):
             
         xwt = select_xw_transpose_kernel(parallelism)(x, w, rank, device, model_group)
 
-        xwt = xwt if b is not None else xwt.add(b)
+        xwt = xwt if b is None else xwt.add(b)
         return xwt
 
     @staticmethod
@@ -472,7 +472,7 @@ class XWT_sync(torch.autograd.Function):
             
         xwt = select_xw_transpose_kernel(parallelism)(x, w, rank, device, model_group)
 
-        xwt = xwt if b is not None else xwt.add(b)
+        xwt = xwt if b is None else xwt.add(b)
 
         return xwt
 
