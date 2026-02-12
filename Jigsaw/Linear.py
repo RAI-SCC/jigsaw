@@ -1377,7 +1377,8 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
         self.device = device
         self.parallelism = parallelism
         self.model_group = model_group
-
+        self.bayesian = bayesian
+        
         super().__init__()
         self.XWT = XWT().apply
 
