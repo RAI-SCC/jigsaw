@@ -280,6 +280,7 @@ class XWT(torch.autograd.Function):
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
+        bayesian: bool
     ) -> tuple[torch.Tensor, Optional[int]]:
         """
         Define XWT behavior under torch.vmap.
@@ -550,6 +551,7 @@ class XWT_sync(torch.autograd.Function):
         parallelism: int,
         model_group: dist.ProcessGroup,
         sync_group: dist.ProcessGroup,
+        bayesian: bool
     ) -> tuple[torch.Tensor, Optional[int]]:
         """
         Define XWT behavior under torch.vmap.
@@ -786,6 +788,7 @@ class XW(torch.autograd.Function):
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
+        bayesian: bool
     ) -> tuple[torch.Tensor, Optional[int]]:
         """
         Define XWT behavior under torch.vmap.
@@ -1034,6 +1037,7 @@ class XTW(torch.autograd.Function):
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
+        bayesian: bool
     ) -> tuple[torch.Tensor, Optional[int]]:
         """
         Define XWT behavior under torch.vmap.
