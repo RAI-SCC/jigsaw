@@ -55,6 +55,7 @@ class DistributedAttention(torch.nn.Module):
                     self.n_parallel,
                     self.model_group,
                     bias=False,
+                    bayesian=bayesian
                 )
             case 4:
                 self.qkv = Linear.DistributedXWT(
@@ -65,6 +66,7 @@ class DistributedAttention(torch.nn.Module):
                     self.n_parallel,
                     self.model_group,
                     bias=False,
+                    bayesian=bayesian
                 )
             case 8:
                 self.qkv = Linear.DistributedXWT(
@@ -75,6 +77,7 @@ class DistributedAttention(torch.nn.Module):
                     self.n_parallel,
                     self.model_group,
                     bias=False,
+                    bayesian=bayesian
                 )
 
         if self.n_parallel > 1:
@@ -105,6 +108,7 @@ class DistributedAttention(torch.nn.Module):
                     self.n_parallel,
                     self.channel_group,
                     bias=False,
+                    bayesian=bayesian
                 )
             case 4:
                 self.concatenator = Linear.DistributedXWT(
@@ -115,6 +119,7 @@ class DistributedAttention(torch.nn.Module):
                     self.n_parallel,
                     self.channel_group,
                     bias=False,
+                    bayesian=bayesian
                 )
             case 8:
                 self.concatenator = Linear.DistributedXWT(
@@ -125,6 +130,7 @@ class DistributedAttention(torch.nn.Module):
                     self.n_parallel,
                     self.model_group,
                     bias=False,
+                    bayesian=bayesian
                 )
 
         self.heads = heads
@@ -224,7 +230,7 @@ class DistributedWindowedAttention(torch.nn.Module):
             dim=-1, group=self.channel_group
         )  # TODO: define softmax groups
         self.xwt = Linear.DistributedMatMulXWTranspose(
-            self.rank, self.device, 2, model_group=self.channel_group
+            self.rank, self.device, 2, model_group=self.channel_group, bayesian=bayesian
         )
         self.xw = Linear.DistributedMatMulXW(
             rank, device, 2, model_group=self.channel_group, bayesian=bayesian
