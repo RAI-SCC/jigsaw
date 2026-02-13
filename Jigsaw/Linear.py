@@ -186,7 +186,7 @@ class DistributedXWT(torch.nn.Module):
         self.parallelism = parallelism
         self.model_group = model_group
         self.bayesian = bayesian
-        self.selector = LinearSelectionStrategy(parallelism, self.bias, self.model_group, self.bayesian) # TODO: this will change after 8-way?
+        self.selector = LinearSelectionStrategy(self.parallelism, self.bias, self.model_group, self.bayesian) # TODO: this will change after 8-way?
         self.XWT = XWT().apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -265,7 +265,7 @@ class XWT(torch.autograd.Function):
         """
         if bayesian and len(w.shape) < len(x.shape):
             w = w.unsqueeze(1) # expand to include batch dimension
-            
+        print(f'selector? {selector}')
         xwt = selector.mm_kernels[0](x, w, rank, device, model_group)
         xwt = selector.add_bias(x, b)
 
