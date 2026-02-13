@@ -22,18 +22,22 @@ class SelectionStrategy:
     
     def _bias_reduction_selection(self, parallelism, bias, spatial_group):
         if bias is None:
-            return self._no_reduce_bias
+            return self._no_bias
         elif parallelism == 2:
             return self._no_reduce_bias
         else:
             return self._reduce_bias_over_spatial_group
         
-    def _reduce_bias_over_spatial_group(self, bias, spatial_group):
-        dist.all_reduce(bias, group=spatial_group, op=dist.ReduceOp.SUM)
-        return bias
+    def _reduce_bias_over_spatial_group(self, grad_output, spatial_group):
+        grad_b = grad_output.sum(dim=(-3,-2))
+        dist.all_reduce(grad_b, group=spatial_group, op=dist.ReduceOp.SUM)
+        return grad_b
     
-    def _no_reduce_bias(self, bias, spatial_group):
-        return bias
+    def _no_reduce_bias(self, grad_output, spatial_group=None):
+        return grad_output.sum(dim=(-3,-2))
+
+    def _no_bias(self, grad_output=None, spatial_group=None):
+        return None
         
     
     def _mm_kernel_selection(self, parallelism):
@@ -579,19 +583,15 @@ class XWT_sync(torch.autograd.Function):
         grad_weight = mm_kernels[2](
             grad_output, input, rank=rank, device=device, model_group=model_group
         )
-
-        grad_b = grad_output.sum(dim=(-3, -2)) if ctx.has_bias else None
+        
+        grad_b = ctx.selector.bias_reduction(grad_output, ctx.sync_group) #  TODO start here
         
         if len(grad_weight.shape) > len(weight_shape_orig):
             grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
         
+        # Reduce weights across sync group
         dist.all_reduce(grad_weight, group=ctx.sync_group)
         
-        grad_b = ctx.selector.bias_reduction(grad_b, ctx.model_group) #  TODO start here
-        
-        if grad_b is not None:
-            dist.all_reduce(grad_b, group=ctx.sync_group)
-            
         return grad_input, grad_weight, grad_b, None, None, None, None, None, None
 
     @staticmethod
