@@ -8,6 +8,24 @@ from Jigsaw import distributed_matmul as dist_mm
 from Jigsaw import distributed_roll as dist_roll
 from typing import Tuple
 
+class SelectionStrategy:
+    def __init__(
+        self,
+        parallelism: int,
+        # has_bias: bool,
+        # spatial_group: dist.ProcessGroup,
+        # channel_group: dist.ProcessGroup,
+        # model_group: dist.ProcessGroup,
+    ):
+        self.mm_kernels = self._mm_kernel_selection(parallelism)      
+        
+    
+    def _mm_kernel_selection(self, parallelism):
+        xw_t_kernel = select_xw_transpose_kernel(parallelism)
+        xw_kernel = select_xw_kernel(parallelism)
+        x_t_w_kernel = select_x_transpose_w_kernel(parallelism)
+        
+        return [xw_t_kernel, xw_kernel, x_t_w_kernel]        
 
 def select_xw_transpose_kernel(parallelism: int):
     """Return correct xw_t kernel."""
@@ -384,19 +402,20 @@ class DistributedXWTSync(torch.nn.Module):
 
         self.device = device
         self.rank = rank
-        self.mm_kernels = self._mm_kernel_selection(parallelism)
+        # self.mm_kernels = self._mm_kernel_selection(parallelism)
         self.model_group = model_group
         self.sync_group = sync_group
         self.bayesian = bayesian
+        self.selector = SelectionStrategy(parallelism)
         
         self.XWT_sync = XWT_sync().apply
         
-    def _mm_kernel_selection(self, parallelism):
-        xw_t_kernel = select_xw_transpose_kernel(parallelism)
-        xw_kernel = select_xw_kernel(parallelism)
-        x_t_w_kernel = select_x_transpose_w_kernel(parallelism)
+    # def _mm_kernel_selection(self, parallelism):
+    #     xw_t_kernel = select_xw_transpose_kernel(parallelism)
+    #     xw_kernel = select_xw_kernel(parallelism)
+    #     x_t_w_kernel = select_x_transpose_w_kernel(parallelism)
         
-        return [xw_t_kernel, xw_kernel, x_t_w_kernel]
+    #     return [xw_t_kernel, xw_kernel, x_t_w_kernel]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -422,7 +441,7 @@ class DistributedXWTSync(torch.nn.Module):
             self.bias,
             self.rank,
             self.device,
-            self.mm_kernels,
+            self.selector,
             self.model_group,
             self.sync_group,
             self.bayesian
@@ -440,7 +459,7 @@ class XWT_sync(torch.autograd.Function):
         b: torch.Tensor,
         rank: int,
         device: torch.device,
-        mm_kernels,
+        selector,
         model_group: dist.ProcessGroup,
         sync_group: dist.ProcessGroup,
         bayesian: bool
@@ -480,7 +499,7 @@ class XWT_sync(torch.autograd.Function):
             if b is not None:
                 b = b.unsqueeze(1).unsqueeze(1)
             
-        xwt = mm_kernels[0](x, w, rank, device, model_group)
+        xwt = selector.mm_kernels[0](x, w, rank, device, model_group)
 
         xwt = xwt if b is None else xwt.add(b)
 
@@ -493,11 +512,11 @@ class XWT_sync(torch.autograd.Function):
         inputs: tuple(x, w, b, rank, device, parallelism, model_group)
         output: xwt
         """
-        x, w, b, rank, device, mm_kernels, model_group, sync_group, bayesian = inputs
+        x, w, b, rank, device, selector, model_group, sync_group, bayesian = inputs
         ctx.save_for_backward(x, w, b)
         ctx.rank = rank
         ctx.device = device
-        ctx.mm_kernels = mm_kernels
+        ctx.selector = selector
         ctx.model_group = model_group
         ctx.sync_group = sync_group
         ctx.bayesian = bayesian
@@ -529,7 +548,7 @@ class XWT_sync(torch.autograd.Function):
         input, weight, bias = ctx.saved_tensors
         rank = ctx.rank
         device = ctx.device
-        mm_kernels = ctx.mm_kernels
+        mm_kernels = ctx.selector.mm_kernels
         model_group = ctx.model_group
         bayesian = ctx.bayesian
         
@@ -565,7 +584,7 @@ class XWT_sync(torch.autograd.Function):
         b: Optional[torch.Tensor],
         rank: int,
         device: torch.device,
-        mm_kernels,
+        selector,
         model_group: dist.ProcessGroup,
         sync_group: dist.ProcessGroup,
         bayesian: bool
@@ -598,7 +617,7 @@ class XWT_sync(torch.autograd.Function):
         x = x.contiguous()
 
         out = XWT_sync.apply(
-            x, w, b, rank, device, mm_kernels, model_group, sync_group, bayesian
+            x, w, b, rank, device, selector, model_group, sync_group, bayesian
         )
 
         # out has vmapped dimension at dim 0
