@@ -9,9 +9,6 @@ streams = [torch.cuda.Stream() for _ in range(2)]
 streamz = [torch.cuda.Stream() for _ in range(4)]
 
 _prealloc_buffers = {}
-device_id = torch.cuda.current_device()
-device = torch.device("cuda", device_id)
-empty = torch.empty(0, device=device, dtype=torch.float32)
 
 def xw_transpose_columnwise_twoway(
     xij: torch.tensor,
@@ -42,6 +39,7 @@ def xw_transpose_columnwise_twoway(
         Local result.
     """
     mod = rank % 2
+    empty = torch.empty(0, device=device, dtype=torch.float32)
 
     w0, w1 = torch.split(wij, wij.shape[-2] // 2, dim=-2)
     buffer_xw = dist_mm._get_preallocated_buffer(

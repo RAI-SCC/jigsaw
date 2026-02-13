@@ -8,9 +8,6 @@ streams = [torch.cuda.Stream() for _ in range(2)]
 streamz = [torch.cuda.Stream() for _ in range(4)]
 
 _prealloc_buffers = {}
-device_id = torch.cuda.current_device()
-device = torch.device("cuda", device_id)
-empty = torch.empty(0, device=device, dtype=torch.float32)
 
 
 def _get_preallocated_buffer(
@@ -102,6 +99,7 @@ def xw_transpose_twoway(
         (*xij.shape[:-1], w0.shape[-2]), torch.float32, rank, device
     )
     
+    empty = torch.empty(0, device=device, dtype=torch.float32)
     match mod:
         case 0:
             xw = torch.matmul(xij, w1.mT)
@@ -160,6 +158,7 @@ def xw_twoway(
     mod = rank % 2
     w0, w1 = torch.split(wij, wij.shape[-2] // 2, dim=-2)
     buffer_x = _get_preallocated_buffer(xij.shape, torch.float32, rank, device)
+    empty = torch.empty(0, device=device, dtype=torch.float32)
 
     match mod:
         case 0:
@@ -215,6 +214,7 @@ def x_transpose_w_twoway(
         Local result.
     """
     mod = rank % 2
+    empty = torch.empty(0, device=device, dtype=torch.float32)
 
     buffer_x = _get_preallocated_buffer(xij.shape, torch.float32, rank, device)
 
@@ -272,6 +272,7 @@ def x_transpose_twoway(
     x0, x1 = torch.split(x, x.shape[-2] // 2, dim=-2)
     x0, x1 = x0.contiguous(), x1.contiguous()
     buffer_x = _get_preallocated_buffer(x1.shape, x1.dtype, rank, device)
+    empty = torch.empty(0, device=device, dtype=torch.float32)
 
     match mod:
         case 0:
@@ -352,6 +353,7 @@ def xw_transpose_fourway(
         Local result.
     """
     mod = rank % 4
+    empty = torch.empty(0, device=device, dtype=torch.float32)
 
     match mod:
         case 0:
@@ -478,6 +480,7 @@ def xw_fourway(
         Local result.
     """
     mod = rank % 4
+    empty = torch.empty(0, device=device, dtype=torch.float32)
 
     xdtype, wdtype = xij.dtype, wij.dtype
     xij = xij.contiguous()
@@ -606,6 +609,7 @@ def x_transpose_w_fourway(
         Local result.
     """
     mod = rank % 4
+    empty = torch.empty(0, device=device, dtype=torch.float32)
 
     xdtype, wdtype = xij.dtype, wij.dtype
 
@@ -727,6 +731,7 @@ def x_transpose_fourway(
         The transposed tensor.
     """
     mod = rank % 4
+    empty = torch.empty(0, device=device, dtype=torch.float32)
     
     x = x.contiguous()
     match mod:
@@ -795,6 +800,7 @@ def xw_transpose_eightway_(
         Local result.
     """
     mod = rank % 8
+    empty = torch.empty(0, device=device, dtype=torch.float32)
 
     match mod:
         case 0:
@@ -1119,6 +1125,7 @@ def xw_transpose_eightway(
         Local result.
     """
     mod = rank % 8
+    empty = torch.empty(0, device=device, dtype=torch.float32)
 
     match mod:
         case 0:
@@ -1767,6 +1774,7 @@ def xw_eightway(
         Local result.
     """
     mod = rank % 8
+    empty = torch.empty(0, device=device, dtype=torch.float32)
     w0 = _get_preallocated_buffer(
         (*wij.shape[:-2], wij.shape[-2] * 2, wij.shape[-1]),
         dtype=wij.dtype,
@@ -1784,6 +1792,7 @@ def xw_eightway(
 
     w0_shape = w0.shape
     split_size = w0_shape[-2] // 2
+    empty = torch.empty(0, device=device, dtype=torch.float32)
 
     match mod:
         case 0:
@@ -2108,6 +2117,7 @@ def x_transpose_w_eightway_(
         Local result.
     """
     mod = rank % 8
+    empty = torch.empty(0, device=device, dtype=torch.float32)
 
     # split upon last dimension
     x0, x1 = torch.split(xij, xij.shape[-1] // 2, dim=-1)
@@ -2418,6 +2428,7 @@ def x_transpose_w_eightway(
         Local result.
     """
     mod = rank % 8
+    empty = torch.empty(0, device=device, dtype=torch.float32)
 
     x0, x1 = torch.split(xij.mT, xij.shape[-1] // 2, dim=-2)
     x0, x1 = x0.contiguous(), x1.contiguous()
@@ -2742,6 +2753,7 @@ def x_transpose_eightway(
         The transposed tensor.
     """
     mod = rank % 8
+    empty = torch.empty(0, device=device, dtype=torch.float32)
 
     # split upon last dimension
     x0, x1 = torch.split(xij, xij.shape[-1] // 2, dim=-1)
