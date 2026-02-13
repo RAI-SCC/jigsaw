@@ -1577,8 +1577,8 @@ class XWTMulOnly(torch.autograd.Function):
             grad_output, input, rank=rank, device=device, model_group=model_group
         )
         
-        if len(grad_weight.shape) > len(weight_orig):
-            grad_weight = grad_weight.sum(dim=int(self.bayesian)) # sum along batch dimension
+        # if len(grad_weight.shape) > len(weight_orig):
+        #     grad_weight = grad_weight.sum(dim=int(self.bayesian)) # sum along batch dimension
 
         grad_b = selector.bias_reduction(grad_output) 
         
