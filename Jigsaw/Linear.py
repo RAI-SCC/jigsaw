@@ -262,6 +262,7 @@ class XWT(torch.autograd.Function):
             B, out_dim are global values.
             in_dim is local value.
         """
+        print(f'am I here?')
         if bayesian and len(w.shape) < len(x.shape):
             w = w.unsqueeze(1) # expand to include batch dimension
             if b is not None:
@@ -588,7 +589,6 @@ class XWT_sync(torch.autograd.Function):
         model_group = ctx.model_group
         bayesian = ctx.bayesian
         selector = ctx.selector
-        weight_shape_orig = weight.shape
         
         #
         weight = selector.reshape_weights(weight)
