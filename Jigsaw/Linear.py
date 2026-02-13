@@ -1531,11 +1531,6 @@ class XWTMulOnly(torch.autograd.Function):
             in_dim is local value.
         """
         
-        if bayesian and len(w.shape) < len(x.shape):
-            w = w.unsqueeze(1) # expand to include batch dimension
-            if b is not None:
-                b = b.unsqueeze(1).unsqueeze(1)
-            
         xwt = selector.mm_kernels[0](x, w, rank, device, model_group)
         xwt = selector.add_bias(xwt, b)
         return xwt
@@ -1549,7 +1544,6 @@ class XWTMulOnly(torch.autograd.Function):
         """
         x, w, b, rank, device, selector, model_group, bayesian = inputs
         ctx.save_for_backward(x, w, b)
-        ctx.has_bias = (b is not None)
         ctx.rank = rank
         ctx.device = device
         ctx.selector = selector
@@ -1586,11 +1580,7 @@ class XWTMulOnly(torch.autograd.Function):
         model_group = ctx.model_group
         bayesian = ctx.bayesian
         
-        weight_orig = weight.shape
-        
-        # if bayesian and len(weight.shape) < len(grad_output.shape):
-        #     weight = weight.unsqueeze(1)
-
+    
         grad_input = selector.mm_kernels[1](
             grad_output, weight, rank=rank, device=device, model_group=model_group
         )
