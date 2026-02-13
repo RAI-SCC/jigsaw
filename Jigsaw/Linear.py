@@ -21,7 +21,21 @@ class LinearSelectionStrategy:
         self.mm_kernels = self._mm_kernel_selection(parallelism)
         self.bias_reduction = self._bias_reduction_selection(parallelism, bias, spatial_group)
         self.add_bias = self._add_bias_selection(bias, bayesian)
+        self.reshape_weights = self._reshape_weights_selection(bayesian)
     
+    def _reshape_weights_selection(bayesian):
+        if bayesian:
+            return self._reshape_weights
+        else:
+            return self._no_reshape_weights
+        
+    def _reshape_weights(self, w):
+        w = w.unsqueeze(1)
+        return w
+
+    def _no_reshape_weights(self, w):
+        return w
+        
     # Adding xwt + b
     def _add_bias_selection(self, bias, bayesian):
         if bias is None:
@@ -522,12 +536,7 @@ class XWT_sync(torch.autograd.Function):
             in_dim is local value.
         """
 
-        if bayesian and len(w.shape) < len(x.shape):
-            w = w.unsqueeze(1) # expand to include batch dimension
-            print(f'needed to unsqueeze')
-        else:
-            print(f'is this happening?')
-            
+        w = selector.reshape_weights(w) # reshape if necessary for bayesian
         xwt = selector.mm_kernels[0](x, w, rank, device, model_group)
         xwt = selector.add_bias(xwt, b) # Add bias if not None
 
@@ -581,8 +590,11 @@ class XWT_sync(torch.autograd.Function):
         
         weight_shape_orig = weight.shape
         
+        #
         if bayesian and len(weight.shape) < len(grad_output.shape):
             weight = weight.unsqueeze(1)
+        else:
+            print('dont need to unsqueeze weights')
 
         grad_input = mm_kernels[1](
             grad_output, weight, rank=rank, device=device, model_group=model_group
@@ -591,7 +603,7 @@ class XWT_sync(torch.autograd.Function):
             grad_output, input, rank=rank, device=device, model_group=model_group
         )
         
-        grad_b = ctx.selector.bias_reduction(grad_output, ctx.model_group) #  TODO start here
+        grad_b = ctx.selector.bias_reduction(grad_output, ctx.sync_group) #  TODO start here
         
         if len(grad_weight.shape) > len(weight_shape_orig):
             grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
