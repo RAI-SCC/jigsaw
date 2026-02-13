@@ -435,20 +435,13 @@ class DistributedXWTSync(torch.nn.Module):
             case 8:
                 out_dim = out_dim * 2
                 
-        if bias:
-            self.bias = torch.nn.parameter.Parameter(
-                torch.zeros(out_dim).uniform_(-stdev, stdev)
-            )
-        else:
-            self.bias = None
-
+        self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev)) if bias else None
         self.device = device
         self.rank = rank
-        # self.mm_kernels = self._mm_kernel_selection(parallelism)
         self.model_group = model_group
         self.sync_group = sync_group
         self.bayesian = bayesian
-        self.selector = LinearSelectionStrategy(parallelism, self.bias, model_group, self.bayesian) # TODO: this will change after 8-way?
+        self.selector = LinearSelectionStrategy(parallelism, self.bias, self.model_group, self.bayesian) # TODO: this will change after 8-way?
         
         self.XWT_sync = XWT_sync().apply
 
@@ -533,7 +526,7 @@ class XWT_sync(torch.autograd.Function):
             w = w.unsqueeze(1) # expand to include batch dimension
             
         xwt = selector.mm_kernels[0](x, w, rank, device, model_group)
-        xwt = selector._add_bias(xwt, b) # Add bias if not None
+        xwt = selector.add_bias(xwt, b) # Add bias if not None
 
         return xwt
 
