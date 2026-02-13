@@ -1529,10 +1529,14 @@ class DistributedXWT_Nice(torch.nn.Module):
             torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
         )
 
+        dist.all_reduce(self.weights, op=dist.ReduceOp.AVG, group=spatial_group)
+
         if bias:
             self.bias = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim).uniform_(-stdev, stdev)
             )
+
+            dist.all_reduce(self.bias, op=dist.ReduceOp.AVG, group=spatial_group)
         else:
             self.bias = None
 
