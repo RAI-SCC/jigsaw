@@ -14,6 +14,7 @@ class SelectionStrategy:
         parallelism: int,
         bias: torch.Tensor,
         spatial_group: dist.ProcessGroup,
+        bayesian
         # channel_group: dist.ProcessGroup,
         # model_group: dist.ProcessGroup,
     ):
@@ -461,7 +462,7 @@ class DistributedXWTSync(torch.nn.Module):
         self.model_group = model_group
         self.sync_group = sync_group
         self.bayesian = bayesian
-        self.selector = SelectionStrategy(parallelism, self.bias, model_group) # TODO: this will change after 8-way?
+        self.selector = SelectionStrategy(parallelism, self.bias, model_group, self.bayesian) # TODO: this will change after 8-way?
         
         self.XWT_sync = XWT_sync().apply
         
