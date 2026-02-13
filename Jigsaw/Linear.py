@@ -22,11 +22,11 @@ class SelectionStrategy:
     
     def _bias_reduction_selection(parallelism, bias, spatial_group):
         if bias is None:
-            return _no_reduce_bias
+            return self._no_reduce_bias
         elif parallelism == 2:
-            return _no_reduce_bias
+            return self._no_reduce_bias
         else:
-            return _reduce_bias_over_spatial_group
+            return self._reduce_bias_over_spatial_group
         
     def _reduce_bias_over_spatial_group(bias, spatial_group):
         dist.all_reduce(bias, group=spatial_group, op=dist.ReduceOp.SUM)
