@@ -591,7 +591,7 @@ class XWT_sync(torch.autograd.Function):
         weight_shape_orig = weight.shape
         
         #
-        weight = selector.reshape_weights(w)
+        weight = selector.reshape_weights(weight)
         
         grad_input = mm_kernels[1](
             grad_output, weight, rank=rank, device=device, model_group=model_group
