@@ -586,7 +586,9 @@ class XWT_sync(torch.autograd.Function):
             grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
         
         dist.all_reduce(grad_weight, group=ctx.sync_group)
-        bias = ctx.selector.bias_reduction(b, ctx.model_group)
+        
+        grad_b = ctx.selector.bias_reduction(grad_b, ctx.model_group) #  TODO start here
+        
         if grad_b is not None:
             dist.all_reduce(grad_b, group=ctx.sync_group)
             
