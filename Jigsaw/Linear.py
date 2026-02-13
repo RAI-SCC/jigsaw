@@ -1709,7 +1709,7 @@ class XWT_Nice(torch.autograd.Function):
         if len(x.shape) > len(w.shape):
             w = w.reshape(V, 1, *rest)
 
-        out = XWT_sync.apply(
+        out = XWT_Nice.apply(
             x, w, b, channel_group, spatial_group
         )
 
