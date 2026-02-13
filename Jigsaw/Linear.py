@@ -465,13 +465,6 @@ class DistributedXWTSync(torch.nn.Module):
         self.selector = SelectionStrategy(parallelism, self.bias, model_group, self.bayesian) # TODO: this will change after 8-way?
         
         self.XWT_sync = XWT_sync().apply
-        
-    # def _mm_kernel_selection(self, parallelism):
-    #     xw_t_kernel = select_xw_transpose_kernel(parallelism)
-    #     xw_kernel = select_xw_kernel(parallelism)
-    #     x_t_w_kernel = select_x_transpose_w_kernel(parallelism)
-        
-    #     return [xw_t_kernel, xw_kernel, x_t_w_kernel]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -1461,12 +1454,12 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
         """Initialize the XWT Linear layer sharded over two processes."""
         self.rank = rank
         self.device = device
-        self.parallelism = parallelism
+        self.selector = SelectionStrategy(parallelism, self.bias, model_group, self.bayesian) 
         self.model_group = model_group
         self.bayesian = bayesian
         
         super().__init__()
-        self.XWT = XWT().apply
+        self.XWTMulOnly = XWTMulOnly().apply
 
     def forward(
         self, x: torch.Tensor, w: torch.Tensor, b: torch.Tensor
@@ -1488,12 +1481,188 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
             B, out_dim are global values.
             in_dim is local value.
         """
-        Cij = self.XWT(
-            x, w, b, self.rank, self.device, self.parallelism, self.model_group, self.bayesian
+        Cij = self.XWTMulOnly(
+            x, w, b, self.rank, self.device, self.selector, self.model_group, self.bayesian
         )
 
         return Cij
 
+class XWTMulOnly(torch.autograd.Function):
+    """Autograd function for batched matrix-matrix (XWT) multiplication distributed across n processes."""
+
+    @staticmethod
+    def forward(
+        x: torch.Tensor,
+        w: torch.Tensor,
+        b: torch.Tensor,
+        rank: int,
+        device: torch.device,
+        selector,
+        model_group: dist.ProcessGroup,
+        bayesian: bool,
+    ) -> torch.Tensor:
+        """
+        Forward pass of linear layer (XWT) distributed across two processes.
+
+        Parameters
+        ----------
+        ctx : torch.autograd.Function
+            Context object to save information for backward computation.
+        x : torch.Tensor
+            Local input tensor of shape (B, x_in, in_dim).
+        W : torch.Tensor
+            Local weight tensor of shape (in_dim, out_dim).
+        b : torch.Tensor
+            Local bias tensor of shape (out_dim).
+        device : torch.device
+            Device to perform computation on.
+        rank : int
+            Global rank.
+        parallelism : int
+            Number of processes to distribute operation across
+        model_group : dist.ProcessGroup, optional
+            Process group for an individual model-parallel instance.
+
+        Returns
+        -------
+        Cij: torch.Tensor
+            Local output tensor of shape (B, out_dim, in_dim).
+            B, out_dim are global values.
+            in_dim is local value.
+        """
+        
+        if bayesian and len(w.shape) < len(x.shape):
+            w = w.unsqueeze(1) # expand to include batch dimension
+            if b is not None:
+                b = b.unsqueeze(1).unsqueeze(1)
+            
+        xwt = selector.mm_kernels[0](x, w, rank, device, model_group)
+        xwt = selector.add_bias(xwt, b)
+        return xwt
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        """
+        ctx: FunctionCtx
+        inputs: tuple(x, w, b, rank, device, parallelism, model_group)
+        output: xwt
+        """
+        x, w, b, rank, device, selector, model_group, bayesian = inputs
+        ctx.save_for_backward(x, w, b)
+        ctx.has_bias = (b is not None)
+        ctx.rank = rank
+        ctx.device = device
+        ctx.selector = selector
+        ctx.model_group = model_group
+        ctx.bayesian = bayesian
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.Function, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None]:
+        """
+        Backward pass of linear layer (XWT) distributed across two processes.
+
+        Parameters
+        ----------
+        ctx : torch.autograd.Function
+            Context object to save information for backward computation.
+        grad_output : tensor
+            The gradient of the loss with respect to the output of the layer.
+
+        Returns
+        -------
+        grad_input: torch.Tensor
+            Gradient with respect to the input.
+        grad_weight: torch.Tensor
+            Gradient with respect to the weights.
+        grad_bias: torch.Tensor
+            Gradient with respect to the bias.
+        """
+        input, weight, bias = ctx.saved_tensors
+        rank = ctx.rank
+        device = ctx.device
+        selector = ctx.selector
+        model_group = ctx.model_group
+        bayesian = ctx.bayesian
+        
+        weight_orig = weight.shape
+        
+        if bayesian and len(weight.shape) < len(grad_output.shape):
+            weight = weight.unsqueeze(1)
+
+        grad_input = select_xw_kernel(parallelism)(
+            grad_output, weight, rank=rank, device=device, model_group=model_group
+        )
+        grad_weight = select_x_transpose_w_kernel(parallelism)(
+            grad_output, input, rank=rank, device=device, model_group=model_group
+        )
+        
+        if len(grad_weight.shape) > len(weight_orig):
+            grad_weight = grad_weight.sum(dim=int(self.bayesian)) # sum along batch dimension
+
+        grad_b = grad_output.sum(dim=(-3, -2)) if ctx.has_bias else None
+        
+        # TODO: reduce across spatial dimension
+        
+        # if len(grad_output.shape) == 4:
+        #     grad_b = None if bias is None else grad_output.sum(dim=(1, 2))
+        # elif len(grad_output.shape) == 5:
+        #     grad_b = None if bias is None else grad_output.sum(dim=(1, 2, 3))
+        # else:
+        #     grad_b = None if bias is None else grad_output.sum(dim=(0, 1))
+
+        return grad_input, grad_weight, grad_b, None, None, None, None, None
+
+    @staticmethod
+    def vmap(
+        info,
+        in_dims: tuple[Optional[int], ...],
+        x: torch.Tensor,
+        w: torch.Tensor,
+        b: Optional[torch.Tensor],
+        rank: int,
+        device: torch.device,
+        selector: int,
+        model_group: dist.ProcessGroup,
+        bayesian: bool
+    ) -> tuple[torch.Tensor, Optional[int]]:
+        """
+        Define XWT behavior under torch.vmap.
+
+        Parameters
+        ----------
+        info :
+            Metadata object with info.batch_size (size of vmapped dimension).
+        in_dims :
+            Tuple of Optional[int] describing which dimension of each input
+            is vmapped over. Structure matches (x, w, b, rank, device, parallelism, model_group).
+        x : Tensor
+            Possibly batched input.
+        w : Tensor
+            Possibly shared or batched weights.
+        b : Tensor or None
+            Possibly shared or batched bias.
+
+        Returns
+        -------
+        output : Tensor
+            Batched output with vmapped dimension in front.
+        out_dim : Optional[int]
+            Index of vmapped dimension in output (0 if batched, None if not).
+        """
+
+        # x under vmap has shape (V, B, x_in, in_dim).
+        x = x.contiguous()
+        V = x.shape[0]
+        B = x.shape[1]
+        rest = w.shape[1:]  # (in_dim, out_dim)
+
+
+        out = XWT.apply(x, w, b, rank, device, selector, model_group, bayesian)
+
+        # out has vmapped dimension at dim 0
+        return out, 0
 
 class DistributedMatMulXW(torch.nn.Module):
     """Batched matrix-matrix (XWT) multiplication distributed across two processes."""
