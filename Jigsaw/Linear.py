@@ -1591,10 +1591,10 @@ class XWTMulOnly(torch.autograd.Function):
         if bayesian and len(weight.shape) < len(grad_output.shape):
             weight = weight.unsqueeze(1)
 
-        grad_input = select_xw_kernel(parallelism)(
+        grad_input = selector.mm_kernels[1](
             grad_output, weight, rank=rank, device=device, model_group=model_group
         )
-        grad_weight = select_x_transpose_w_kernel(parallelism)(
+        grad_weight = selector.mm_kernels[2](
             grad_output, input, rank=rank, device=device, model_group=model_group
         )
         
@@ -1659,7 +1659,7 @@ class XWTMulOnly(torch.autograd.Function):
         rest = w.shape[1:]  # (in_dim, out_dim)
 
 
-        out = XWT.apply(x, w, b, rank, device, selector, model_group, bayesian)
+        out = XWTMulOnly.apply(x, w, b, rank, device, selector, model_group, bayesian)
 
         # out has vmapped dimension at dim 0
         return out, 0
