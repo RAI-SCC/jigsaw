@@ -9,7 +9,8 @@ streams = [torch.cuda.Stream() for _ in range(2)]
 streamz = [torch.cuda.Stream() for _ in range(4)]
 
 _prealloc_buffers = {}
-device = f"cuda:{int(os.getenv('SLURM_LOCALID'))}"
+device_id = torch.cuda.current_device()
+device = torch.device("cuda", device_id)
 empty = torch.empty(0, device=device, dtype=torch.float32)
 
 def xw_transpose_columnwise_twoway(
