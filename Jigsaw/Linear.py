@@ -1447,7 +1447,7 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
         self.bayesian = bayesian
         self.selector = SelectionStrategy(parallelism, None, model_group, self.bayesian, False)
         
-        self.XWTMulOnly = XWTMulOnly().apply
+        self.XWT = XWT().apply
 
     def forward(
         self, x: torch.Tensor, w: torch.Tensor, b: torch.Tensor
@@ -1469,7 +1469,7 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
             B, out_dim are global values.
             in_dim is local value.
         """
-        Cij = self.XWTMulOnly(
+        Cij = self.XWT(
             x, w, b, self.rank, self.device, self.selector, self.model_group, self.bayesian
         )
 
