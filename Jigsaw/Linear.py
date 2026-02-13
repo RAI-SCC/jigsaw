@@ -263,9 +263,7 @@ class XWT(torch.autograd.Function):
             B, out_dim are global values.
             in_dim is local value.
         """
-        if bayesian and len(w.shape) < len(x.shape):
-            w = w.unsqueeze(1) # expand to include batch dimension
-            
+        w = selector.reshape_weights(w)
         xwt = selector.mm_kernels[0](x, w, rank, device, model_group)
         xwt = selector.add_bias(xwt, b)
         
@@ -280,7 +278,6 @@ class XWT(torch.autograd.Function):
         """
         x, w, b, rank, device, selector, model_group, bayesian = inputs
         ctx.save_for_backward(x, w, b)
-        ctx.has_bias = (b is not None)
         ctx.rank = rank
         ctx.device = device
         ctx.selector = selector
@@ -317,8 +314,6 @@ class XWT(torch.autograd.Function):
         model_group = ctx.model_group
         bayesian = ctx.bayesian
         
-        weight_orig = weight.shape
-        
         weight = selector.reshape_weights(weight)
         
         grad_input = xwt = selector.mm_kernels[1](
@@ -327,7 +322,6 @@ class XWT(torch.autograd.Function):
         grad_weight = xwt = selector.mm_kernels[2](
             grad_output, input, rank=rank, device=device, model_group=model_group
         )
-        
         
         grad_weight = grad_weight.sum(dim=int(self.bayesian)) # sum along batch dimension
 
@@ -375,11 +369,6 @@ class XWT(torch.autograd.Function):
 
         # x under vmap has shape (V, B, x_in, in_dim).
         x = x.contiguous()
-        V = x.shape[0]
-        B = x.shape[1]
-        rest = w.shape[1:]  # (in_dim, out_dim)
-
-
         out = XWT.apply(x, w, b, rank, device, selector, model_group, bayesian)
 
         # out has vmapped dimension at dim 0
@@ -1577,9 +1566,6 @@ class XWTMulOnly(torch.autograd.Function):
             grad_output, input, rank=rank, device=device, model_group=model_group
         )
         
-        # if len(grad_weight.shape) > len(weight_orig):
-        #     grad_weight = grad_weight.sum(dim=int(self.bayesian)) # sum along batch dimension
-
         grad_b = selector.bias_reduction(grad_output) 
         
         return grad_input, grad_weight, grad_b, None, None, None, None, None
@@ -1624,11 +1610,6 @@ class XWTMulOnly(torch.autograd.Function):
 
         # x under vmap has shape (V, B, x_in, in_dim).
         x = x.contiguous()
-        V = x.shape[0]
-        B = x.shape[1]
-        rest = w.shape[1:]  # (in_dim, out_dim)
-
-
         out = XWTMulOnly.apply(x, w, b, rank, device, selector, model_group, bayesian)
 
         # out has vmapped dimension at dim 0
