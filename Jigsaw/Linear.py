@@ -1588,8 +1588,8 @@ class XWTMulOnly(torch.autograd.Function):
         
         weight_orig = weight.shape
         
-        if bayesian and len(weight.shape) < len(grad_output.shape):
-            weight = weight.unsqueeze(1)
+        # if bayesian and len(weight.shape) < len(grad_output.shape):
+        #     weight = weight.unsqueeze(1)
 
         grad_input = selector.mm_kernels[1](
             grad_output, weight, rank=rank, device=device, model_group=model_group
@@ -1601,17 +1601,8 @@ class XWTMulOnly(torch.autograd.Function):
         if len(grad_weight.shape) > len(weight_orig):
             grad_weight = grad_weight.sum(dim=int(self.bayesian)) # sum along batch dimension
 
-        grad_b = grad_output.sum(dim=(-3, -2)) if ctx.has_bias else None
+        grad_b = selector.bias_reduction(grad_output) 
         
-        # TODO: reduce across spatial dimension
-        
-        # if len(grad_output.shape) == 4:
-        #     grad_b = None if bias is None else grad_output.sum(dim=(1, 2))
-        # elif len(grad_output.shape) == 5:
-        #     grad_b = None if bias is None else grad_output.sum(dim=(1, 2, 3))
-        # else:
-        #     grad_b = None if bias is None else grad_output.sum(dim=(0, 1))
-
         return grad_input, grad_weight, grad_b, None, None, None, None, None
 
     @staticmethod
