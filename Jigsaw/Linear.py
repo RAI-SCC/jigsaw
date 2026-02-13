@@ -524,6 +524,9 @@ class XWT_sync(torch.autograd.Function):
 
         if bayesian and len(w.shape) < len(x.shape):
             w = w.unsqueeze(1) # expand to include batch dimension
+            print(f'needed to unsqueeze')
+        else:
+            print(f'is this happening?')
             
         xwt = selector.mm_kernels[0](x, w, rank, device, model_group)
         xwt = selector.add_bias(xwt, b) # Add bias if not None
@@ -588,7 +591,7 @@ class XWT_sync(torch.autograd.Function):
             grad_output, input, rank=rank, device=device, model_group=model_group
         )
         
-        grad_b = ctx.selector.bias_reduction(grad_output, ctx.sync_group) #  TODO start here
+        grad_b = ctx.selector.bias_reduction(grad_output, ctx.model_group) #  TODO start here
         
         if len(grad_weight.shape) > len(weight_shape_orig):
             grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
