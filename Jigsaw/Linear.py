@@ -8,13 +8,12 @@ from Jigsaw import distributed_matmul as dist_mm
 from Jigsaw import distributed_roll as dist_roll
 from typing import Tuple
 
-class LinearSelectionStrategy:
+class SelectionStrategy:
     def __init__(
         self,
         parallelism: int,
         bias: torch.Tensor,
         spatial_group: dist.ProcessGroup,
-        bayesian: bool
         # channel_group: dist.ProcessGroup,
         # model_group: dist.ProcessGroup,
     ):
@@ -23,7 +22,7 @@ class LinearSelectionStrategy:
         self.add_bias = self._add_bias_selection(bias, bayesian)
         self.reshape_weights = self._reshape_weights_selection(bayesian)
     
-    def _reshape_weights_selection(self, bayesian):
+    def _reshape_weights_selection(bayesian):
         if bayesian:
             return self._reshape_weights
         else:
@@ -74,8 +73,8 @@ class LinearSelectionStrategy:
 
     def _no_bias(self, grad_output=None, spatial_group=None):
         return None
+        
     
-    # Select mat-mul kernels        
     def _mm_kernel_selection(self, parallelism):
         xw_t_kernel = select_xw_transpose_kernel(parallelism)
         xw_kernel = select_xw_kernel(parallelism)
@@ -449,15 +448,29 @@ class DistributedXWTSync(torch.nn.Module):
             case 8:
                 out_dim = out_dim * 2
                 
-        self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev)) if bias else None
+        if bias:
+            self.bias = torch.nn.parameter.Parameter(
+                torch.zeros(out_dim).uniform_(-stdev, stdev)
+            )
+        else:
+            self.bias = None
+
         self.device = device
         self.rank = rank
+        # self.mm_kernels = self._mm_kernel_selection(parallelism)
         self.model_group = model_group
         self.sync_group = sync_group
         self.bayesian = bayesian
-        self.selector = LinearSelectionStrategy(parallelism, self.bias, self.model_group, self.bayesian) # TODO: this will change after 8-way?
+        self.selector = SelectionStrategy(parallelism, self.bias, model_group) # TODO: this will change after 8-way?
         
         self.XWT_sync = XWT_sync().apply
+        
+    # def _mm_kernel_selection(self, parallelism):
+    #     xw_t_kernel = select_xw_transpose_kernel(parallelism)
+    #     xw_kernel = select_xw_kernel(parallelism)
+    #     x_t_w_kernel = select_x_transpose_w_kernel(parallelism)
+        
+    #     return [xw_t_kernel, xw_kernel, x_t_w_kernel]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -536,9 +549,14 @@ class XWT_sync(torch.autograd.Function):
             in_dim is local value.
         """
 
-        w = selector.reshape_weights(w) # reshape if necessary for bayesian
+        if bayesian and len(w.shape) < len(x.shape):
+            w = w.unsqueeze(1) # expand to include batch dimension
+            if b is not None:
+                b = b.unsqueeze(1).unsqueeze(1)
+            
         xwt = selector.mm_kernels[0](x, w, rank, device, model_group)
-        xwt = selector.add_bias(xwt, b) # Add bias if not None
+
+        xwt = xwt if b is None else xwt.add(b)
 
         return xwt
 
@@ -557,6 +575,7 @@ class XWT_sync(torch.autograd.Function):
         ctx.model_group = model_group
         ctx.sync_group = sync_group
         ctx.bayesian = bayesian
+        ctx.has_bias = (b is not None)
 
     @staticmethod
     def backward(
@@ -587,12 +606,12 @@ class XWT_sync(torch.autograd.Function):
         mm_kernels = ctx.selector.mm_kernels
         model_group = ctx.model_group
         bayesian = ctx.bayesian
-        selector = ctx.selector
+        
         weight_shape_orig = weight.shape
         
-        #
-        weight = selector.reshape_weights(w)
-        
+        if bayesian and len(weight.shape) < len(grad_output.shape):
+            weight = weight.unsqueeze(1)
+
         grad_input = mm_kernels[1](
             grad_output, weight, rank=rank, device=device, model_group=model_group
         )
@@ -601,8 +620,9 @@ class XWT_sync(torch.autograd.Function):
         )
         
         grad_b = ctx.selector.bias_reduction(grad_output, ctx.sync_group) #  TODO start here
-        
-        grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
+        print(f'is bias? {ctx.has_bias}, grad_b {grad_b}')
+        if len(grad_weight.shape) > len(weight_shape_orig):
+            grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
         
         # Reduce weights across sync group
         dist.all_reduce(grad_weight, group=ctx.sync_group)
