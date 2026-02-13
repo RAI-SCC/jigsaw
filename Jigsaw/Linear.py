@@ -587,15 +587,12 @@ class XWT_sync(torch.autograd.Function):
         mm_kernels = ctx.selector.mm_kernels
         model_group = ctx.model_group
         bayesian = ctx.bayesian
-        
+        selector = ctx.selector
         weight_shape_orig = weight.shape
         
         #
-        if bayesian and len(weight.shape) < len(grad_output.shape):
-            weight = weight.unsqueeze(1)
-        else:
-            print('dont need to unsqueeze weights')
-
+        weight = selector.reshape_weights(w)
+        
         grad_input = mm_kernels[1](
             grad_output, weight, rank=rank, device=device, model_group=model_group
         )
@@ -605,8 +602,7 @@ class XWT_sync(torch.autograd.Function):
         
         grad_b = ctx.selector.bias_reduction(grad_output, ctx.sync_group) #  TODO start here
         
-        if len(grad_weight.shape) > len(weight_shape_orig):
-            grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
+        grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
         
         # Reduce weights across sync group
         dist.all_reduce(grad_weight, group=ctx.sync_group)
