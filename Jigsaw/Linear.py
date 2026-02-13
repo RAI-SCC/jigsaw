@@ -10,6 +10,7 @@ from typing import Tuple
 
 class SelectionStrategy:
     def __init__(
+        self,
         parallelism: int,
         # has_bias: bool,
         # spatial_group: dist.ProcessGroup,
