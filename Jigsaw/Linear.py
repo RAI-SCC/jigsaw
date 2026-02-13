@@ -23,7 +23,7 @@ class LinearSelectionStrategy:
         self.add_bias = self._add_bias_selection(bias, bayesian)
         self.reshape_weights = self._reshape_weights_selection(bayesian)
     
-    def _reshape_weights_selection(bayesian):
+    def _reshape_weights_selection(self, bayesian):
         if bayesian:
             return self._reshape_weights
         else:
