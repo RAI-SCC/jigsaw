@@ -1437,7 +1437,7 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
         self.parallelism = parallelism
         self.model_group = model_group
         self.bayesian = bayesian
-        self.selector = LinearSelectionStrategy(self.parallelism, self.bias, self.model_group, self.bayesian) # TODO: this will change after 8-way?
+        self.selector = LinearSelectionStrategy(self.parallelism, None, self.model_group, self.bayesian) # TODO: this will change after 8-way?
         
         super().__init__()
         self.XWT = XWT().apply
