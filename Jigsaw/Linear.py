@@ -12,12 +12,28 @@ class SelectionStrategy:
     def __init__(
         self,
         parallelism: int,
-        # has_bias: bool,
-        # spatial_group: dist.ProcessGroup,
+        bias: torch.Tensor,
+        spatial_group: dist.ProcessGroup,
         # channel_group: dist.ProcessGroup,
         # model_group: dist.ProcessGroup,
     ):
-        self.mm_kernels = self._mm_kernel_selection(parallelism)      
+        self.mm_kernels = self._mm_kernel_selection(parallelism)
+        self.bias_reduction = self._bias_reduction_selection(parallelism)
+    
+    def _bias_reduction_selection(parallelism, bias, spatial_group):
+        if bias is None:
+            return _no_reduce_bias
+        elif parallelism == 2:
+            return _no_reduce_bias
+        else:
+            return _reduce_bias_over_spatial_group(bias, spatial_group)
+        
+    def _reduce_bias_over_spatial_group(bias, spatial_group):
+        dist.all_reduce(bias, group=spatial_group, op=dist.ReduceOp.SUM)
+        return bias
+    
+    def _no_reduce_bias(bias):
+        return bias
         
     
     def _mm_kernel_selection(self, parallelism):
@@ -406,7 +422,7 @@ class DistributedXWTSync(torch.nn.Module):
         self.model_group = model_group
         self.sync_group = sync_group
         self.bayesian = bayesian
-        self.selector = SelectionStrategy(parallelism)
+        self.selector = SelectionStrategy(parallelism, bias, model_group) # TODO: this will change after 8-way?
         
         self.XWT_sync = XWT_sync().apply
         
