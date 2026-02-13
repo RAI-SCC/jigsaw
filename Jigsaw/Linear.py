@@ -18,7 +18,7 @@ class SelectionStrategy:
         # model_group: dist.ProcessGroup,
     ):
         self.mm_kernels = self._mm_kernel_selection(parallelism)
-        self.bias_reduction = self._bias_reduction_selection(parallelism)
+        self.bias_reduction = self._bias_reduction_selection(bias, spatial_group)
     
     def _bias_reduction_selection(parallelism, bias, spatial_group):
         if bias is None:
@@ -26,7 +26,7 @@ class SelectionStrategy:
         elif parallelism == 2:
             return _no_reduce_bias
         else:
-            return _reduce_bias_over_spatial_group(bias, spatial_group)
+            return _reduce_bias_over_spatial_group
         
     def _reduce_bias_over_spatial_group(bias, spatial_group):
         dist.all_reduce(bias, group=spatial_group, op=dist.ReduceOp.SUM)
