@@ -585,7 +585,7 @@ class XWT_sync(torch.autograd.Function):
         )
         
         grad_b = ctx.selector.bias_reduction(grad_output, ctx.sync_group) #  TODO start here
-        
+        print(f'is bias? {ctx.has_bias}, grad_b {grad_b}')
         if len(grad_weight.shape) > len(weight_shape_orig):
             grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
         
