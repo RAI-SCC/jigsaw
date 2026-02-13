@@ -1452,13 +1452,13 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
         bayesian: bool
     ) -> None:
         """Initialize the XWT Linear layer sharded over two processes."""
+        super().__init__()
         self.rank = rank
         self.device = device
-        self.selector = SelectionStrategy(parallelism, None, model_group, self.bayesian) 
         self.model_group = model_group
         self.bayesian = bayesian
+        self.selector = SelectionStrategy(parallelism, None, model_group, self.bayesian) 
         
-        super().__init__()
         self.XWTMulOnly = XWTMulOnly().apply
 
     def forward(
