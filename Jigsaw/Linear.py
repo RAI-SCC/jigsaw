@@ -186,6 +186,7 @@ class DistributedXWT(torch.nn.Module):
         self.parallelism = parallelism
         self.model_group = model_group
         self.bayesian = bayesian
+        self.selector = SelectionStrategy(parallelism, self.bias, model_group, self.bayesian)
         self.XWT = XWT().apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -212,7 +213,7 @@ class DistributedXWT(torch.nn.Module):
             self.bias,
             self.rank,
             self.device,
-            self.parallelism,
+            self.selector,
             self.model_group,
             self.bayesian
         )
@@ -229,7 +230,7 @@ class XWT(torch.autograd.Function):
         b: torch.Tensor,
         rank: int,
         device: torch.device,
-        parallelism: int,
+        selector: int,
         model_group: dist.ProcessGroup,
         bayesian: bool,
     ) -> torch.Tensor:
@@ -264,12 +265,10 @@ class XWT(torch.autograd.Function):
         """
         if bayesian and len(w.shape) < len(x.shape):
             w = w.unsqueeze(1) # expand to include batch dimension
-            if b is not None:
-                b = b.unsqueeze(1).unsqueeze(1)
             
-        xwt = select_xw_transpose_kernel(parallelism)(x, w, rank, device, model_group)
-
-        xwt = xwt if b is None else xwt.add(b)
+        xwt = selector.mm_kernels[0](x, w, rank, device, model_group)
+        xwt = selector.add_bias(xwt, b)
+        
         return xwt
 
     @staticmethod
@@ -279,12 +278,12 @@ class XWT(torch.autograd.Function):
         inputs: tuple(x, w, b, rank, device, parallelism, model_group)
         output: xwt
         """
-        x, w, b, rank, device, parallelism, model_group, bayesian = inputs
+        x, w, b, rank, device, selector, model_group, bayesian = inputs
         ctx.save_for_backward(x, w, b)
         ctx.has_bias = (b is not None)
         ctx.rank = rank
         ctx.device = device
-        ctx.parallelism = parallelism
+        ctx.selector = selector
         ctx.model_group = model_group
         ctx.bayesian = bayesian
 
@@ -314,35 +313,25 @@ class XWT(torch.autograd.Function):
         input, weight, bias = ctx.saved_tensors
         rank = ctx.rank
         device = ctx.device
-        parallelism = ctx.parallelism
+        selector = ctx.selector
         model_group = ctx.model_group
         bayesian = ctx.bayesian
         
         weight_orig = weight.shape
         
-        if bayesian and len(weight.shape) < len(grad_output.shape):
-            weight = weight.unsqueeze(1)
-
-        grad_input = select_xw_kernel(parallelism)(
+        weight = selector.reshape_weights(weight)
+        
+        grad_input = xwt = selector.mm_kernels[1](
             grad_output, weight, rank=rank, device=device, model_group=model_group
         )
-        grad_weight = select_x_transpose_w_kernel(parallelism)(
+        grad_weight = xwt = selector.mm_kernels[2](
             grad_output, input, rank=rank, device=device, model_group=model_group
         )
         
-        if len(grad_weight.shape) > len(weight_orig):
-            grad_weight = grad_weight.sum(dim=int(self.bayesian)) # sum along batch dimension
+        
+        grad_weight = grad_weight.sum(dim=int(self.bayesian)) # sum along batch dimension
 
-        grad_b = grad_output.sum(dim=(-3, -2)) if ctx.has_bias else None
-        
-        # TODO: reduce across spatial dimension
-        
-        # if len(grad_output.shape) == 4:
-        #     grad_b = None if bias is None else grad_output.sum(dim=(1, 2))
-        # elif len(grad_output.shape) == 5:
-        #     grad_b = None if bias is None else grad_output.sum(dim=(1, 2, 3))
-        # else:
-        #     grad_b = None if bias is None else grad_output.sum(dim=(0, 1))
+        grad_b = selector.bias_reduction(grad_output)
 
         return grad_input, grad_weight, grad_b, None, None, None, None, None
 
@@ -355,7 +344,7 @@ class XWT(torch.autograd.Function):
         b: Optional[torch.Tensor],
         rank: int,
         device: torch.device,
-        parallelism: int,
+        selector: int,
         model_group: dist.ProcessGroup,
         bayesian: bool
     ) -> tuple[torch.Tensor, Optional[int]]:
@@ -391,7 +380,7 @@ class XWT(torch.autograd.Function):
         rest = w.shape[1:]  # (in_dim, out_dim)
 
 
-        out = XWT.apply(x, w, b, rank, device, parallelism, model_group, bayesian)
+        out = XWT.apply(x, w, b, rank, device, selector, model_group, bayesian)
 
         # out has vmapped dimension at dim 0
         return out, 0
