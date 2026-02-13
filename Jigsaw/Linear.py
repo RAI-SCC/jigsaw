@@ -384,12 +384,19 @@ class DistributedXWTSync(torch.nn.Module):
 
         self.device = device
         self.rank = rank
-        self.parallelism = parallelism
+        self.mm_kernels = self._mm_kernel_selection(parallelism)
         self.model_group = model_group
         self.sync_group = sync_group
         self.bayesian = bayesian
         
         self.XWT_sync = XWT_sync().apply
+        
+    def _mm_kernel_selection(self, parallelism):
+        xw_t_kernel = select_xw_transpose_kernel(parallelism)
+        xw_kernel = select_xw_kernel(parallelism)
+        x_t_w_kernel = select_x_transpose_w_kernel(parallelism)
+        
+        return [xw_t_kernel, xw_kernel, x_t_w_kernel]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -415,7 +422,7 @@ class DistributedXWTSync(torch.nn.Module):
             self.bias,
             self.rank,
             self.device,
-            self.parallelism,
+            self.mm_kernels,
             self.model_group,
             self.sync_group,
             self.bayesian
@@ -433,7 +440,7 @@ class XWT_sync(torch.autograd.Function):
         b: torch.Tensor,
         rank: int,
         device: torch.device,
-        parallelism: int,
+        mm_kernels,
         model_group: dist.ProcessGroup,
         sync_group: dist.ProcessGroup,
         bayesian: bool
@@ -473,7 +480,7 @@ class XWT_sync(torch.autograd.Function):
             if b is not None:
                 b = b.unsqueeze(1).unsqueeze(1)
             
-        xwt = select_xw_transpose_kernel(parallelism)(x, w, rank, device, model_group)
+        xwt = mm_kernels[0](x, w, rank, device, model_group)
 
         xwt = xwt if b is None else xwt.add(b)
 
@@ -486,11 +493,11 @@ class XWT_sync(torch.autograd.Function):
         inputs: tuple(x, w, b, rank, device, parallelism, model_group)
         output: xwt
         """
-        x, w, b, rank, device, parallelism, model_group, sync_group, bayesian = inputs
+        x, w, b, rank, device, mm_kernels, model_group, sync_group, bayesian = inputs
         ctx.save_for_backward(x, w, b)
         ctx.rank = rank
         ctx.device = device
-        ctx.parallelism = parallelism
+        ctx.mm_kernels = mm_kernels
         ctx.model_group = model_group
         ctx.sync_group = sync_group
         ctx.bayesian = bayesian
@@ -522,7 +529,7 @@ class XWT_sync(torch.autograd.Function):
         input, weight, bias = ctx.saved_tensors
         rank = ctx.rank
         device = ctx.device
-        parallelism = ctx.parallelism
+        mm_kernels = ctx.mm_kernels
         model_group = ctx.model_group
         bayesian = ctx.bayesian
         
@@ -531,10 +538,10 @@ class XWT_sync(torch.autograd.Function):
         if bayesian and len(weight.shape) < len(grad_output.shape):
             weight = weight.unsqueeze(1)
 
-        grad_input = select_xw_kernel(parallelism)(
+        grad_input = mm_kernels[1](
             grad_output, weight, rank=rank, device=device, model_group=model_group
         )
-        grad_weight = select_x_transpose_w_kernel(parallelism)(
+        grad_weight = mm_kernels[2](
             grad_output, input, rank=rank, device=device, model_group=model_group
         )
 
@@ -558,7 +565,7 @@ class XWT_sync(torch.autograd.Function):
         b: Optional[torch.Tensor],
         rank: int,
         device: torch.device,
-        parallelism: int,
+        mm_kernels,
         model_group: dist.ProcessGroup,
         sync_group: dist.ProcessGroup,
         bayesian: bool
@@ -591,7 +598,7 @@ class XWT_sync(torch.autograd.Function):
         x = x.contiguous()
 
         out = XWT_sync.apply(
-            x, w, b, rank, device, parallelism, model_group, sync_group, bayesian
+            x, w, b, rank, device, mm_kernels, model_group, sync_group, bayesian
         )
 
         # out has vmapped dimension at dim 0
