@@ -550,14 +550,9 @@ class XWT_sync(torch.autograd.Function):
             in_dim is local value.
         """
 
-        if bayesian and len(w.shape) < len(x.shape):
-            w = w.unsqueeze(1) # expand to include batch dimension
-            if b is not None:
-                b = b.unsqueeze(1).unsqueeze(1)
-            
+        w = selector.reshape_weights(w)
         xwt = selector.mm_kernels[0](x, w, rank, device, model_group)
-
-        xwt = xwt if b is None else xwt.add(b)
+        xwt = selector.add_bias(xwt, b)
 
         return xwt
 
@@ -576,7 +571,6 @@ class XWT_sync(torch.autograd.Function):
         ctx.model_group = model_group
         ctx.sync_group = sync_group
         ctx.bayesian = bayesian
-        ctx.has_bias = (b is not None)
 
     @staticmethod
     def backward(
@@ -608,9 +602,7 @@ class XWT_sync(torch.autograd.Function):
         model_group = ctx.model_group
         bayesian = ctx.bayesian
         
-        weight_shape_orig = weight.shape
-        
-        weight = selector.reshape_weights(weight)
+        weight = ctx.selector.reshape_weights(weight)
         
         grad_input = mm_kernels[1](
             grad_output, weight, rank=rank, device=device, model_group=model_group
@@ -619,7 +611,7 @@ class XWT_sync(torch.autograd.Function):
             grad_output, input, rank=rank, device=device, model_group=model_group
         )
         
-        grad_b = ctx.selector.bias_reduction(grad_output, ctx.sync_group) #  TODO start here
+        grad_b = ctx.selector.bias_reduction(grad_output, ctx.sync_group)
         
         grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
         
