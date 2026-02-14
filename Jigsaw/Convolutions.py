@@ -24,6 +24,7 @@ class ConvSelectionStrategy:
         self.conv2d_fn = self._select_conv2d_fn(bayesian)
         self.conv2d_input_fn = self._select_conv2d_input_fn(bayesian)
         self.conv2d_weight_fn = self._select_conv2d_weight_fn(bayesian)
+        self.weight_reshape = self._select_reshape_weights(bayesian)
     
     def _select_conv2d_fn(self, bayesian):
         if bayesian:
@@ -42,6 +43,19 @@ class ConvSelectionStrategy:
             return torch.vmap(conv2d_weight, in_dims=(0, None, 0))
         else:
             return conv2d_weight
+        
+    def _select_reshape_weights(self, bayesian):
+        if bayesian: 
+            return self._reshape_weights
+        else:
+            return self._no_reshape_weights
+        
+    def _reshape_weights(self, w, x):
+        w = w.expand(x.shape[0], *w.shape)
+        return w
+    
+    def _no_reshape_weights(self, w, x=None):
+        return w
     
 class DistributedConv1D(torch.nn.Module):
     def __init__(
@@ -1822,8 +1836,7 @@ class Conv2d(torch.autograd.Function):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
         
         # Temporary fix for testing with torch blue NonBayesian vardist
-        if bayesian and len(weight.shape) < 5: 
-            weight = weight.expand(x.shape[0], *weight.shape)
+        weight = selector.weight_reshape(weight, x)
         
         # Compute the forward pass        
         y, x0, x1, right_to_left, left_to_right = dist_conv.conv2d_fourway(
