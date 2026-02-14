@@ -80,12 +80,67 @@ class ConvSelectionStrategy:
         dist.all_reduce(grad_b, op=dist.ReduceOp.SUM, group=spatial_group)
         return grad_b
     
-    # def _weight_x_shape_selection(self, bayesian):
-        
-    # def _w_x_non_bayesian(self, w, x):
-    #     return w.shape, x.shape
 
-    # def w_x_bayesian
+class ConvTransposeSelectionStrategy:
+    def __init__(
+        self,
+        bayesian,  
+        parallelism,
+        bias
+    ):
+        self.convTranspose2d_fn = self._select_convTranspose2d_fn(bayesian)
+        self.convTranspose2d_grad_fn = self._select_convTranspose2d_grad_fn(bayesian)
+        self.weight_reshape = self._select_reshape_weights(bayesian)
+        self.bias_reduction = self._bias_reduction_selection(parallelism, bias)
+        # self.w_and_x_shape = self._weight_x_shape_selection(bayesian)
+    
+    def _select_convTranspose2d_fn(self, bayesian):
+        if bayesian:
+            return torch.vmap(F.conv_transpose2d)
+        else:
+            return F.conv_transpose2d
+    
+    def _select_convTranspose2d_grad_fn(self, bayesian):
+        if bayesian:
+            return torch.vmap(
+                torch.ops.aten.convolution_backward,
+                in_dims=(0, 0, 0, None, None, None, None, None, None, None, None),
+                out_dims=(0, 0, None),
+            )
+        else:
+            return torch.ops.aten.convolution_backward
+        
+    def _select_reshape_weights(self, bayesian):
+        if bayesian: 
+            return self._reshape_weights
+        else:
+            return self._no_reshape_weights
+        
+    def _reshape_weights(self, w, x):
+        w = w.expand(x.shape[0], *w.shape)
+        return w
+    
+    def _no_reshape_weights(self, w, x=None):
+        return w
+    
+    def _bias_reduction_selection(self, parallelism, bias):
+        if bias is None:
+            return self._no_bias
+        elif parallelism == 2:
+            return self._no_reduce_grad_bias
+        else:
+            return self._reduce_bias_over_spatial_group
+    
+    def _no_bias(self, grad_output, spatial_group=None):
+        return None
+    
+    def _no_reduce_grad_bias(self, grad_output, spatial_group=None):
+        return grad_output.sum(dim=(-4, -2, -1))
+    
+    def _reduce_bias_over_spatial_group(self, grad_output, spatial_group):
+        grad_b = grad_output.sum(dim=(-4, -2, -1))
+        dist.all_reduce(grad_b, op=dist.ReduceOp.SUM, group=spatial_group)
+        return grad_b
     
     
 class DistributedConv1D(torch.nn.Module):
@@ -1950,7 +2005,6 @@ class Conv2d(torch.autograd.Function):
         ctx.stride = stride
         ctx.padding = padding
         ctx.dilation = dilation
-        ctx.has_bias = bias is not None
         ctx.bayesian = bayesian 
         ctx.selector = selector
         
@@ -1994,12 +2048,6 @@ class Conv2d(torch.autograd.Function):
         
         right_to_left, left_to_right = ctx.halo_sizes[0], ctx.halo_sizes[1]
         x_shape_padded, x_shape = ctx.x_shape_padded, ctx.x_shape
-
-        if ctx.bayesian:
-            y=3
-        else:
-            weight_shape = weight.shape
-            g_b = grad_output.sum(dim=(0, 2, 3)) if ctx.has_bias else None
 
         g_b = selector.bias_reduction(grad_output, ctx.spatial_group)
         
@@ -2210,19 +2258,8 @@ class DistributedConvTranspose2D(torch.nn.Module):
             
         self.empty = torch.empty(0, device=device, dtype=torch.float32)
 
-        if self.bayesian:
-            self.conv_transpose2d_fn = torch.vmap(F.conv_transpose2d)
-            #if bias:
-            self.conv_transpose2d_grad_fn = torch.vmap(
-                torch.ops.aten.convolution_backward,
-                in_dims=(0, 0, 0, None, None, None, None, None, None, None, None),
-                out_dims=(0, 0, None),
-            )
-            
-        else:
-            self.conv_transpose2d_fn = F.conv_transpose2d
-            self.conv_transpose2d_grad_fn = torch.ops.aten.convolution_backward
-            
+        self.selector = ConvTransposeSelectionStrategy(self.bayesian, self.parallelism, self.convTranspose2d.bias)
+       
         _average_weights(self, spatial_group, device)
         self.convTranspose2d_apply = ConvTranspose2d().apply
 
@@ -2260,8 +2297,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
             self.parallelism,
             self.empty,
             self.bayesian,
-            self.conv_transpose2d_fn,
-            self.conv_transpose2d_grad_fn
+            self.selector
         )
 
         return Cij[0]
@@ -2287,15 +2323,11 @@ class ConvTranspose2d(torch.autograd.Function):
         parallelism: int,
         empty: torch.Tensor,
         bayesian: bool,
-        conv_transpose2d_fn,
-        conv_transpose2d_grad_fn
+        selector
     ) -> torch.Tensor:
         
-        if bayesian and len(weight.shape) < 5: 
-            weight = weight.expand(x.shape[0], *weight.shape)
-            
         y, x_aug, x, halo_sizes = dist_conv.conv_transpose2d_fourway(
-            x, weight, bias, kernel_size, stride, padding, dilation, in_channels, rank, spatial_group, channel_group, empty, conv_transpose2d_fn
+            x, weight, bias, kernel_size, stride, padding, dilation, in_channels, rank, spatial_group, channel_group, empty, selector.convTranspose2d_fn
         )
         
         # Return output and any intermediate values needed for backward
@@ -2320,8 +2352,7 @@ class ConvTranspose2d(torch.autograd.Function):
             parallelism,
             empty,
             bayesian,
-            conv_transpose2d_fn,
-            conv_transpose2d_grad_fn
+            selector
         ) = inputs
         _, x_aug, x_orig, halo_sizes = output
 
@@ -2338,7 +2369,6 @@ class ConvTranspose2d(torch.autograd.Function):
         ctx.rank = rank
         ctx.spatial_group = spatial_group
         ctx.channel_group = channel_group
-        ctx.has_bias = bias is not None
         ctx.rank = rank
         ctx.device = device
         ctx.parallelism = parallelism
@@ -2348,8 +2378,7 @@ class ConvTranspose2d(torch.autograd.Function):
         ctx.b = bias
         ctx.empty = empty  # pre-initialized empty tensor
         ctx.bayesian = bayesian
-        ctx.conv_transpose2d_fn = conv_transpose2d_fn 
-        ctx.conv_transpose2d_grad_fn = conv_transpose2d_grad_fn
+        ctx.selector = selector
         
 
     @staticmethod
@@ -2388,6 +2417,7 @@ class ConvTranspose2d(torch.autograd.Function):
             ctx.spatial_group,
             ctx.channel_group,
         )
+        selector = ctx.selector
 
         g_x, g_w = dist_conv.conv_transpose2d_fourway_backward(
             grad_output,
@@ -2402,21 +2432,15 @@ class ConvTranspose2d(torch.autograd.Function):
             empty,
             spatial_group,
             channel_group,
-            ctx.conv_transpose2d_grad_fn
+            selector.convTranspose2d_grad_fn
         )
 
-        if ctx.bayesian:
-            g_b = grad_output.sum(dim=(1, 3, 4)) if ctx.has_bias else None        
-        else:
-            g_b = grad_output.sum(dim=(0, 2, 3)) if ctx.has_bias else None        
-        if g_b is not None:
-            dist.all_reduce(g_b, op=dist.ReduceOp.SUM, group=spatial_group)
+        g_b = selector.bias_reduction(grad_output, spatial_group)
         
         return (
             g_x,
             g_w,
             g_b,
-            None,
             None,
             None,
             None,
@@ -2451,8 +2475,7 @@ class ConvTranspose2d(torch.autograd.Function):
         parallelism: int,
         empty: torch.Tensor,
         bayesian: bool,
-        conv_transpose2d_fn,
-        conv_transpose2d_grad_fn
+        selector
     ) -> tuple[torch.Tensor, Optional[int]]:
         out = ConvTranspose2d.apply(
             x,
@@ -2470,8 +2493,7 @@ class ConvTranspose2d(torch.autograd.Function):
             parallelism,
             empty,
             bayesian,
-            conv_transpose2d_fn,
-            conv_transpose2d_grad_fn
+            selector
         )
 
         return out, 0
