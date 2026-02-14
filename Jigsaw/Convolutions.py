@@ -16,7 +16,33 @@ import Jigsaw.distributed_convolutions as dist_conv
 from torch.nn.grad import conv1d_input, conv1d_weight, conv2d_input, conv2d_weight
 from functools import partial
 
-
+class ConvSelectionStrategy:
+    def __init__(
+        self,
+        bayesian,  
+    ):
+        self.conv2d_fn = self._select_conv2d_fn(bayesian)
+        self.conv2d_input_fn = self._select_conv2d_input_fn(bayesian)
+        self.conv2d_weight_fn = self._select_conv2d_weight_fn(bayesian)
+    
+    def _select_conv2d_fn(self, bayesian):
+        if bayesian:
+            return torch.vmap(F.conv2d)
+        else:
+            return F.conv2d
+    
+    def _select_conv2d_input_fn(self, bayesian):
+        if bayesian:
+            return torch.vmap(conv2d_input, in_dims=(None, 0, 0))
+        else:
+            return conv2d_input
+    
+    def _select_conv2d_weight_fn(self, bayesian):
+        if bayesian:
+            return torch.vmap(conv2d_weight, in_dims=(0, None, 0))
+        else:
+            return conv2d_weight
+    
 class DistributedConv1D(torch.nn.Module):
     def __init__(
         self,
@@ -1726,14 +1752,7 @@ class DistributedConv2D(torch.nn.Module):
             bias=bias,
         ).to(device)
         
-        if self.bayesian:
-            self.conv2d_fn = torch.vmap(F.conv2d)
-            self.conv2d_input_fn = torch.vmap(conv2d_input, in_dims=(None, 0, 0))
-            self.conv2d_weight_fn = torch.vmap(conv2d_weight, in_dims=(0, None, 0))
-        else:
-            self.conv2d_fn = F.conv2d
-            self.conv2d_input_fn = conv2d_input
-            self.conv2d_weight_fn = conv2d_weight
+        self.selector = ConvSelectionStrategy(self.bayesian)
         
         _average_weights(self, spatial_group, device)
         
@@ -1773,9 +1792,7 @@ class DistributedConv2D(torch.nn.Module):
             self.parallelism,
             self.empty,
             self.bayesian,
-            self.conv2d_fn,
-            self.conv2d_input_fn,
-            self.conv2d_weight_fn
+            self.selector
         )
 
         return Cij[0]
@@ -1801,9 +1818,7 @@ class Conv2d(torch.autograd.Function):
         parallelism: int,
         empty: torch.Tensor,
         bayesian: bool,
-        conv2d_fn,
-        conv2d_input_fn,
-        conv2d_weight_fn
+        selector
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
         
         # Temporary fix for testing with torch blue NonBayesian vardist
@@ -1824,7 +1839,7 @@ class Conv2d(torch.autograd.Function):
             spatial_group=spatial_group,
             channel_group=channel_group,
             empty=empty,
-            conv2d_fn=conv2d_fn
+            conv2d_fn=selector.conv2d_fn
         )
 
         x_aug = torch.cat([x0, x1], dim=-3) # concatenate along the channel dimension
@@ -1864,9 +1879,7 @@ class Conv2d(torch.autograd.Function):
             parallelism,
             empty,
             bayesian,
-            conv2d_fn,
-            conv2d_input_fn,
-            conv2d_weight_fn
+            selector
         ) = inputs
 
         # Unpack outputs
@@ -1898,11 +1911,7 @@ class Conv2d(torch.autograd.Function):
         ctx.dilation = dilation
         ctx.has_bias = bias is not None
         ctx.bayesian = bayesian 
-        
-        # Define conv2d and gradient functions
-        ctx.conv2d_fn = conv2d_fn
-        ctx.conv2d_input_fn = conv2d_input_fn
-        ctx.conv2d_weight_fn = conv2d_weight_fn
+        ctx.selector = selector
         
     @staticmethod
     def backward(
@@ -1915,6 +1924,7 @@ class Conv2d(torch.autograd.Function):
         torch.Tensor,
         torch.Tensor,
         Optional[torch.Tensor],
+        None,
         None,
         None,
         None,
@@ -1939,6 +1949,8 @@ class Conv2d(torch.autograd.Function):
             ctx.spatial_group,
             ctx.channel_group,
         )
+        selector = ctx.selector
+        
         right_to_left, left_to_right = ctx.halo_sizes[0], ctx.halo_sizes[1]
         x_shape_padded, x_shape = ctx.x_shape_padded, ctx.x_shape
 
@@ -1954,7 +1966,7 @@ class Conv2d(torch.autograd.Function):
             weight_shape = weight.shape
             g_b = grad_output.sum(dim=(0, 2, 3)) if ctx.has_bias else None
 
-        g_x_aug = ctx.conv2d_input_fn(
+        g_x_aug = selector.conv2d_input_fn(
             x_shape_padded,
             weight,
             grad_output,
@@ -2004,7 +2016,7 @@ class Conv2d(torch.autograd.Function):
             async_op=True,
         )
 
-        g_w = ctx.conv2d_weight_fn(
+        g_w = selector.conv2d_weight_fn(
             x_aug,
             weight_shape,
             grad_output,
@@ -2047,8 +2059,6 @@ class Conv2d(torch.autograd.Function):
             None,
             None,
             None,
-            None,
-            None
         )
 
     @staticmethod
@@ -2070,9 +2080,7 @@ class Conv2d(torch.autograd.Function):
         parallelism: int,
         empty: torch.Tensor,
         bayesian: bool,
-        conv2d_fn,
-        conv2d_input_fn,
-        conv2d_weight_fn
+        selector
     ) -> tuple[torch.Tensor, Optional[int]]:
         
         out = Conv2d.apply(
@@ -2091,9 +2099,7 @@ class Conv2d(torch.autograd.Function):
             parallelism,
             empty,
             bayesian,
-            conv2d_fn,
-            conv2d_input_fn,
-            conv2d_weight_fn
+            selector
         )
         
         return out, 0
