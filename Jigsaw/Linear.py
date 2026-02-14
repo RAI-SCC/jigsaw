@@ -8,7 +8,23 @@ from Jigsaw import distributed_matmul as dist_mm
 from Jigsaw import distributed_roll as dist_roll
 from typing import Tuple
 
-class SelectionStrategy:
+class TransposeSelectionStrategy:
+    def __init__(
+        self,
+        parallelism: int
+    ):
+        self.x_t = self._select_transpose_kernel(parallelism)
+    
+    def _select_x_transpose_kernel(parallelism: int):
+        """Return x_tw kernel."""
+        if parallelism == 2:
+            return dist_mm.x_transpose_twoway
+        elif parallelism == 4:
+            return dist_mm.x_transpose_fourway
+        elif parallelism == 8:
+            return dist_mm.x_transpose_eightway
+        
+class LinearSelectionStrategy:
     def __init__(
         self,
         parallelism: int,
@@ -51,8 +67,6 @@ class SelectionStrategy:
     def _grad_sum(self, grad_weight, batch_dim):
         return grad_weight.sum(dim=int(batch_dim))
 
-    
-    
     # Adding xwt + b
     def _add_bias_selection(self, bias, bayesian):
         if bias is None:
@@ -130,14 +144,6 @@ def select_x_transpose_w_kernel(parallelism: int):
         return dist_mm.x_transpose_w_eightway
 
 
-def select_x_transpose_kernel(parallelism: int):
-    """Return x_tw kernel."""
-    if parallelism == 2:
-        return dist_mm.x_transpose_twoway
-    elif parallelism == 4:
-        return dist_mm.x_transpose_fourway
-    elif parallelism == 8:
-        return dist_mm.x_transpose_eightway
 
 
 class DistributedXWT(torch.nn.Module):
@@ -203,7 +209,7 @@ class DistributedXWT(torch.nn.Module):
         self.parallelism = parallelism
         self.model_group = model_group
         self.bayesian = bayesian
-        self.selector = SelectionStrategy(parallelism, self.bias, model_group, self.bayesian, True)
+        self.selector = LinearSelectionStrategy(parallelism, self.bias, model_group, self.bayesian, True)
         self.XWT = XWT().apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -451,7 +457,7 @@ class DistributedXWTSync(torch.nn.Module):
         self.model_group = model_group
         self.sync_group = sync_group
         self.bayesian = bayesian
-        self.selector = SelectionStrategy(parallelism, self.bias, model_group, self.bayesian, True) # TODO: this will change after 8-way?
+        self.selector = LinearSelectionStrategy(parallelism, self.bias, model_group, self.bayesian, True) # TODO: this will change after 8-way?
         
         self.XWT_sync = XWT_sync().apply
 
@@ -697,7 +703,7 @@ class DistributedXW(torch.nn.Module):
         self.parallelism = parallelism
         self.model_group = model_group
         self.bayesian = bayesian
-        self.selector = SelectionStrategy(parallelism, self.bias, self.model_gorup, self.bayesian, True)
+        self.selector = LinearSelectionStrategy(parallelism, self.bias, self.model_gorup, self.bayesian, True)
         self.XW = XW().apply
 
     def forward(self, x: torch.Tensor):
@@ -925,18 +931,15 @@ class DistributedXTW(torch.nn.Module):
         self.weights = torch.nn.parameter.Parameter(
             torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev)
         )
-
-        if bias:
-            self.bias = torch.nn.parameter.Parameter(
-                torch.zeros(out_dim).uniform_(-stdev, stdev)
-            )
-        else:
-            self.bias = None
+        
+        self.bias = torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev,stdev)) if bias else None
+        
         self.rank = rank
         self.device = device
         self.parallelism = parallelism
         self.model_group = model_group
         self.bayesian = bayesian
+        self.selector = SelectionStrategy(parallelism, self.bias, self.model_group, self.bayesian, True)
         
         self.XTW = XTW().apply
 
@@ -964,7 +967,7 @@ class DistributedXTW(torch.nn.Module):
             self.bias,
             self.rank,
             self.device,
-            self.parallelism,
+            self.selector,
             self.model_group,
             self.bayesian
         )
@@ -982,7 +985,7 @@ class XTW(torch.autograd.Function):
         b: torch.Tensor,
         rank: int,
         device: torch.device,
-        parallelism: int,
+        selector: int,
         model_group: dist.ProcessGroup,
         bayesian: bool
     ) -> torch.Tensor:
@@ -1015,14 +1018,10 @@ class XTW(torch.autograd.Function):
             out_dim is local value.
         """
         
-        if bayesian and len(w.shape) < len(x.shape):
-            w = w.unsqueeze(1)
-            if b is not None:
-                b = b.unsqueeze(1).unsqueeze(1)
-                
-        xtw = select_x_transpose_w_kernel(parallelism)(x, w, rank, device, model_group)
+        w = selector.reshape_weights(w)
+        xtw = selector.mm_kernels[2](x, w, rank, device, model_group)
+        xtw = selector.add_bias(xtw, b)
         
-        xtw = xtw if b is None else xtw.add(b)
         return xtw
 
     @staticmethod
@@ -1033,15 +1032,15 @@ class XTW(torch.autograd.Function):
         output: xwt
         """
 
-        x, w, b, rank, device, parallelism, model_group, bayesian = inputs
+        x, w, b, rank, device, selector, model_group, bayesian = inputs
         ctx.save_for_backward(x, w, b)
         ctx.rank = rank
         ctx.device = device
-        ctx.parallelism = parallelism
+        ctx.selector = selector
         ctx.model_group = model_group
         ctx.b = b
         ctx.has_bias = b is not None
-        ctx.bayesian
+        ctx.bayesian = bayesian
 
     @staticmethod
     def backward(
@@ -1071,29 +1070,22 @@ class XTW(torch.autograd.Function):
         input, weight, bias = ctx.saved_tensors
         rank = ctx.rank
         device = ctx.device
-        parallelism = ctx.parallelism
+        selector = ctx.selector
         model_group = ctx.model_group
         weight_orig = weight.shape
 
-        if ctx.bayesian and len(weight.shape) < len(x.shape):
-            weight = weight.unsqueeze(1)
+        weight = selector.reshape_weights(weight)  
             
-        grad_input = select_xw_transpose_kernel(parallelism)(
+        grad_input = selector.mm_kernels[0](
             weight, grad_output, rank, device, model_group
         )
-        grad_weight = select_xw_kernel(parallelism)(
+        grad_weight = selector.mm_kernels[1](
             input, grad_output, rank, device, model_group
         )
 
-        if len(grad_weight.shape) > len(weight_orig):
-            grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
+        grad_weight = selector.grad_sum(grad_weight, ctx.bayesian)
+        grad_b = selector.bias_reduction(grad_output)
         
-        grad_b = grad_output.sum(dim=(-3, -2)) if ctx.has_bias else None
-        
-        # if len(grad_output.shape) == 4:
-        #     grad_b = None if bias is None else grad_output.sum(dim=(1, 2))
-        # else:
-        #     grad_b = None if bias is None else grad_output.sum(dim=(0, 1))
 
         return grad_input, grad_weight, grad_b, None, None, None, None, None
 
@@ -1106,7 +1098,7 @@ class XTW(torch.autograd.Function):
         b: Optional[torch.Tensor],
         rank: int,
         device: torch.device,
-        parallelism: int,
+        selector: int,
         model_group: dist.ProcessGroup,
         bayesian: bool
     ) -> tuple[torch.Tensor, Optional[int]]:
@@ -1136,7 +1128,7 @@ class XTW(torch.autograd.Function):
         """
         # x under vmap has shape (V, B, x_in, in_dim).
         x = x.contiguous()
-        out = XTW.apply(x, w, b, rank, device, parallelism, model_group, bayesian)
+        out = XTW.apply(x, w, b, rank, device, selector, model_group, bayesian)
 
         # out has vmapped dimension at dim 0
         return out, 0
@@ -1158,6 +1150,8 @@ class DistributedXTranspose(torch.nn.Module):
         self.device = device
         self.parallelism = parallelism
         self.model_group = model_group
+        self.selector = TransposeSelectionStrategy(self.parallelism)
+        
         self.transpose = XT().apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1195,7 +1189,7 @@ class XT(torch.autograd.Function):
         x: torch.Tensor,
         rank: int,
         device: torch.device,
-        parallelism: int,
+        selector: int,
         model_group: dist.ProcessGroup,
     ) -> torch.Tensor:
         """
@@ -1220,7 +1214,7 @@ class XT(torch.autograd.Function):
             Local transposed tensor.
         """
 
-        x = select_x_transpose_kernel(parallelism)(x, rank, device, model_group)
+        x = self.selector.x_t(x, rank, device, model_group)
         return x
 
     @staticmethod
@@ -1231,10 +1225,10 @@ class XT(torch.autograd.Function):
         output: xwt
         """
 
-        x, rank, device, parallelism, model_group = inputs
+        x, rank, device, selector, model_group = inputs
         ctx.device = device
         ctx.rank = rank
-        ctx.parallelism = parallelism
+        ctx.selector = selector
         ctx.model_group = model_group
 
     @staticmethod
@@ -1257,10 +1251,10 @@ class XT(torch.autograd.Function):
         """
         rank = ctx.rank
         device = ctx.device
-        parallelism = ctx.parallelism
+        selector = ctx.selector
         model_group = ctx.model_group
         
-        grad_output = select_x_transpose_kernel(parallelism)(
+        grad_output = self.selector.x_t(
             grad_output, rank, device, model_group
         )
         return grad_output, None, None, None, None
@@ -1272,12 +1266,12 @@ class XT(torch.autograd.Function):
         x: torch.Tensor,
         rank: int,
         device: torch.device,
-        parallelism: int,
+        selector: int,
         model_group: dist.ProcessGroup,
     ) -> tuple[torch.Tensor, Optional[int]]:
         x = x.contiguous()
         # x under vmap has shape (V, B, x_in, in_dim).
-        out = XT.apply(x, rank, device, parallelism, model_group)
+        out = XT.apply(x, rank, device, selector, model_group)
 
         # out has vmapped dimension at dim 0
         return out, 0
@@ -1449,7 +1443,7 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
         self.device = device
         self.model_group = model_group
         self.bayesian = bayesian
-        self.selector = SelectionStrategy(parallelism, None, model_group, self.bayesian, False)
+        self.selector = LinearSelectionStrategy(parallelism, None, model_group, self.bayesian, False)
         
         self.XWT = XWT().apply
 
@@ -1648,7 +1642,7 @@ class DistributedMatMulXW(torch.nn.Module):
         self.model_group = model_group
         self.bayesian = bayesian
 
-        self.selector = SelectionStrategy(parallelism, None, self.model_group, self.bayesian, False)
+        self.selector = LinearSelectionStrategy(parallelism, None, self.model_group, self.bayesian, False)
         self.XW = XW().apply
 
     def forward(self, x, w, b):
