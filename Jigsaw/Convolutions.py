@@ -20,11 +20,15 @@ class ConvSelectionStrategy:
     def __init__(
         self,
         bayesian,  
+        parallelism,
+        bias
     ):
         self.conv2d_fn = self._select_conv2d_fn(bayesian)
         self.conv2d_input_fn = self._select_conv2d_input_fn(bayesian)
         self.conv2d_weight_fn = self._select_conv2d_weight_fn(bayesian)
         self.weight_reshape = self._select_reshape_weights(bayesian)
+        self.bias_reduction = self._bias_reduction_selection(parallelism, bias)
+        # self.w_and_x_shape = self._weight_x_shape_selection(bayesian)
     
     def _select_conv2d_fn(self, bayesian):
         if bayesian:
@@ -56,6 +60,33 @@ class ConvSelectionStrategy:
     
     def _no_reshape_weights(self, w, x=None):
         return w
+    
+    def _bias_reduction_selection(self, parallelism, bias):
+        if bias is None:
+            return self._no_bias
+        elif parallelism == 2:
+            return self._no_reduce_grad_bias
+        else:
+            return self._reduce_bias_over_spatial_group
+    
+    def _no_bias(self, grad_output, spatial_group=None):
+        return None
+    
+    def _no_reduce_grad_bias(self, grad_output, spatial_group=None):
+        return grad_output.sum(dim=(-4, -2, -1))
+    
+    def _reduce_bias_over_spatial_group(self, grad_output, spatial_group):
+        grad_b = grad_output.sum(dim=(-4, -2, -1))
+        dist.all_reduce(grad_b, op=dist.ReduceOp.SUM, group=spatial_group)
+        return grad_b
+    
+    # def _weight_x_shape_selection(self, bayesian):
+        
+    # def _w_x_non_bayesian(self, w, x):
+    #     return w.shape, x.shape
+
+    # def w_x_bayesian
+    
     
 class DistributedConv1D(torch.nn.Module):
     def __init__(
@@ -1766,7 +1797,7 @@ class DistributedConv2D(torch.nn.Module):
             bias=bias,
         ).to(device)
         
-        self.selector = ConvSelectionStrategy(self.bayesian)
+        self.selector = ConvSelectionStrategy(self.bayesian, self.parallelism, self.conv2d.bias)
         
         _average_weights(self, spatial_group, device)
         
@@ -1834,9 +1865,6 @@ class Conv2d(torch.autograd.Function):
         bayesian: bool,
         selector
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
-        
-        # Temporary fix for testing with torch blue NonBayesian vardist
-        weight = selector.weight_reshape(weight, x)
         
         # Compute the forward pass        
         y, x0, x1, right_to_left, left_to_right = dist_conv.conv2d_fourway(
@@ -1968,19 +1996,15 @@ class Conv2d(torch.autograd.Function):
         x_shape_padded, x_shape = ctx.x_shape_padded, ctx.x_shape
 
         if ctx.bayesian:
-            if len(weight.shape) < 5:  # TODO : reduce complexity for compatability with torch_blue
-                weight_shape = weight.shape
-                weight = weight.expand(x_shape_padded[0], *weight.shape)
-            else:
-                weight_shape = weight.shape[1:]
-            x_shape_padded = x_shape_padded[1:]
-            g_b = grad_output.sum(dim=(1, 3, 4)) if ctx.has_bias else None
+            y=3
         else:
             weight_shape = weight.shape
             g_b = grad_output.sum(dim=(0, 2, 3)) if ctx.has_bias else None
 
+        g_b = selector.bias_reduction(grad_output, ctx.spatial_group)
+        
         g_x_aug = selector.conv2d_input_fn(
-            x_shape_padded,
+            x_shape_padded[int(ctx.bayesian):],
             weight,
             grad_output,
             stride=stride,
@@ -2031,7 +2055,7 @@ class Conv2d(torch.autograd.Function):
 
         g_w = selector.conv2d_weight_fn(
             x_aug,
-            weight_shape,
+            weight.shape[int(ctx.bayesian):],
             grad_output,
             stride=stride,
             padding=padding,
@@ -2041,9 +2065,7 @@ class Conv2d(torch.autograd.Function):
         g_w_handle = dist.all_reduce(
             g_w, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True
         )
-        if g_b is not None:
-            dist.all_reduce(g_b, op=dist.ReduceOp.SUM, group=spatial_group)
-
+        
         if g_x_handle is not None:
             g_x_handle.wait()
 
