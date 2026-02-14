@@ -21,7 +21,8 @@ class DistributedMLP(torch.nn.Module):
         rank: int,
         device: torch.device,
         parallelism: int,
-        model_group: torch.distributed.ProcessGroup
+        model_group: dist.ProcessGroup,
+        spatial_group: dist.ProcessGroup = None,
     ):
         """
         Initialize the MLP module for either two- or four-way model parallelism.
@@ -56,7 +57,8 @@ class DistributedMLP(torch.nn.Module):
         self.device = device
         self.parallelism = parallelism
         self.model_group = model_group
-
+        self.spatial_group = spatial_group
+        
         match parallelism:
             case 2:
                 in_dim, hidden_dim1, hidden_dim2, out_dim = in_dim // 2, hidden_dim, hidden_dim // 2, out_dim
@@ -73,7 +75,8 @@ class DistributedMLP(torch.nn.Module):
             rank,
             device,
             parallelism,
-            model_group
+            model_group,
+            spatial_group
         )
         self.linear2 = Linear.DistributedXWT(
             hidden_dim2,
@@ -82,7 +85,8 @@ class DistributedMLP(torch.nn.Module):
             rank,
             device,
             parallelism,
-            model_group
+            model_group,
+            spatial_group
         )
 
         self.activation = GELU()

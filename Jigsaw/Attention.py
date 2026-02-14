@@ -230,7 +230,7 @@ class DistributedWindowedAttention(torch.nn.Module):
             dim=-1, group=self.channel_group
         )  # TODO: define softmax groups
         self.xwt = Linear.DistributedMatMulXWTranspose(
-            self.rank, self.device, 2, model_group=self.channel_group, bayesian=bayesian
+            self.rank, self.device, 2, model_group=self.channel_group, spatial_group=self.spatial_group, bayesian=bayesian
         )
         self.xw = Linear.DistributedMatMulXW(
             rank, device, 2, model_group=self.channel_group, bayesian=bayesian
