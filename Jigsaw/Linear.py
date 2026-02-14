@@ -108,42 +108,40 @@ class LinearSelectionStrategy:
         
     
     def _mm_kernel_selection(self, parallelism):
-        xw_t_kernel = select_xw_transpose_kernel(parallelism)
-        xw_kernel = select_xw_kernel(parallelism)
-        x_t_w_kernel = select_x_transpose_w_kernel(parallelism)
+        xw_t_kernel = self._select_xw_transpose_kernel(parallelism)
+        xw_kernel = self._select_xw_kernel(parallelism)
+        x_t_w_kernel = self._select_x_transpose_w_kernel(parallelism)
         
         return [xw_t_kernel, xw_kernel, x_t_w_kernel]        
 
-def select_xw_transpose_kernel(parallelism: int):
-    """Return correct xw_t kernel."""
-    if parallelism == 2:
-        return dist_mm.xw_transpose_twoway
-    elif parallelism == 4:
-        return dist_mm.xw_transpose_fourway
-    elif parallelism == 8:
-        return dist_mm.xw_transpose_eightway
+    def _select_xw_transpose_kernel(self, parallelism: int):
+        """Return correct xw_t kernel."""
+        if parallelism == 2:
+            return dist_mm.xw_transpose_twoway
+        elif parallelism == 4:
+            return dist_mm.xw_transpose_fourway
+        elif parallelism == 8:
+            return dist_mm.xw_transpose_eightway
 
 
-def select_xw_kernel(parallelism: int):
-    """Return xw kernel."""
-    if parallelism == 2:
-        return dist_mm.xw_twoway
-    elif parallelism == 4:
-        return dist_mm.xw_fourway
-    elif parallelism == 8:
-        return dist_mm.xw_eightway
+    def _select_xw_kernel(self, parallelism: int):
+        """Return xw kernel."""
+        if parallelism == 2:
+            return dist_mm.xw_twoway
+        elif parallelism == 4:
+            return dist_mm.xw_fourway
+        elif parallelism == 8:
+            return dist_mm.xw_eightway
 
 
-def select_x_transpose_w_kernel(parallelism: int):
-    """Return x_tw kernel."""
-    if parallelism == 2:
-        return dist_mm.x_transpose_w_twoway
-    elif parallelism == 4:
-        return dist_mm.x_transpose_w_fourway
-    elif parallelism == 8:
-        return dist_mm.x_transpose_w_eightway
-
-
+    def _select_x_transpose_w_kernel(self, parallelism: int):
+        """Return x_tw kernel."""
+        if parallelism == 2:
+            return dist_mm.x_transpose_w_twoway
+        elif parallelism == 4:
+            return dist_mm.x_transpose_w_fourway
+        elif parallelism == 8:
+            return dist_mm.x_transpose_w_eightway
 
 
 class DistributedXWT(torch.nn.Module):
