@@ -23,32 +23,31 @@ class ConvSelectionStrategy:
         parallelism,
         bias
     ):
-        self.conv2d_fn = self._select_conv2d_fn(bayesian)
-        self.conv2d_input_fn = self._select_conv2d_input_fn(bayesian)
-        self.conv2d_weight_fn = self._select_conv2d_weight_fn(bayesian)
-        self.weight_reshape = self._select_reshape_weights(bayesian)
-        self.bias_reduction = self._bias_reduction_selection(parallelism, bias)
-        # self.w_and_x_shape = self._weight_x_shape_selection(bayesian)
+        self.conv2d_fn = self._conv2d_fn_selection(bayesian)
+        self.conv2d_input_fn = self._conv2d_input_fn_selection(bayesian)
+        self.conv2d_weight_fn = self._conv2d_weight_fn_selection(bayesian)
+        self.weight_reshape = self._reshape_weights_selection(bayesian)
+        self.grad_bias = self._grad_bias_selection(parallelism, bias)
     
-    def _select_conv2d_fn(self, bayesian):
+    def _conv2d_fn_selection(self, bayesian):
         if bayesian:
             return torch.vmap(F.conv2d)
         else:
             return F.conv2d
     
-    def _select_conv2d_input_fn(self, bayesian):
+    def _conv2d_input_fn_selection(self, bayesian):
         if bayesian:
             return torch.vmap(conv2d_input, in_dims=(None, 0, 0))
         else:
             return conv2d_input
     
-    def _select_conv2d_weight_fn(self, bayesian):
+    def _conv2d_weight_fn_selection(self, bayesian):
         if bayesian:
             return torch.vmap(conv2d_weight, in_dims=(0, None, 0))
         else:
             return conv2d_weight
         
-    def _select_reshape_weights(self, bayesian):
+    def _reshape_weights_selection(self, bayesian):
         if bayesian: 
             return self._reshape_weights
         else:
@@ -61,7 +60,7 @@ class ConvSelectionStrategy:
     def _no_reshape_weights(self, w, x=None):
         return w
     
-    def _bias_reduction_selection(self, parallelism, bias):
+    def _grad_bias_selection(self, parallelism, bias):
         if bias is None:
             return self._no_bias
         elif parallelism == 2:
@@ -88,19 +87,18 @@ class ConvTransposeSelectionStrategy:
         parallelism,
         bias
     ):
-        self.convTranspose2d_fn = self._select_convTranspose2d_fn(bayesian)
-        self.convTranspose2d_grad_fn = self._select_convTranspose2d_grad_fn(bayesian)
-        self.weight_reshape = self._select_reshape_weights(bayesian)
-        self.bias_reduction = self._bias_reduction_selection(parallelism, bias)
-        # self.w_and_x_shape = self._weight_x_shape_selection(bayesian)
+        self.convTranspose2d_fn = self._convTranspose2d_fn_selection(bayesian)
+        self.convTranspose2d_grad_fn = self._convTranspose2d_grad_fn_selection(bayesian)
+        self.weight_reshape = self._reshape_weights_selection(bayesian)
+        self.grad_bias = self._grad_bias_selection(parallelism, bias)
     
-    def _select_convTranspose2d_fn(self, bayesian):
+    def _convTranspose2d_fn_selection(self, bayesian):
         if bayesian:
             return torch.vmap(F.conv_transpose2d)
         else:
             return F.conv_transpose2d
     
-    def _select_convTranspose2d_grad_fn(self, bayesian):
+    def _convTranspose2d_grad_fn_selection(self, bayesian):
         if bayesian:
             return torch.vmap(
                 torch.ops.aten.convolution_backward,
@@ -110,7 +108,7 @@ class ConvTransposeSelectionStrategy:
         else:
             return torch.ops.aten.convolution_backward
         
-    def _select_reshape_weights(self, bayesian):
+    def _reshape_weights_selection(self, bayesian):
         if bayesian: 
             return self._reshape_weights
         else:
@@ -123,7 +121,7 @@ class ConvTransposeSelectionStrategy:
     def _no_reshape_weights(self, w, x=None):
         return w
     
-    def _bias_reduction_selection(self, parallelism, bias):
+    def _grad_bias_selection(self, parallelism, bias):
         if bias is None:
             return self._no_bias
         elif parallelism == 2:
@@ -2049,7 +2047,7 @@ class Conv2d(torch.autograd.Function):
         right_to_left, left_to_right = ctx.halo_sizes[0], ctx.halo_sizes[1]
         x_shape_padded, x_shape = ctx.x_shape_padded, ctx.x_shape
 
-        g_b = selector.bias_reduction(grad_output, ctx.spatial_group)
+        g_b = selector.grad_bias(grad_output, ctx.spatial_group)
         
         g_x_aug = selector.conv2d_input_fn(
             x_shape_padded[int(ctx.bayesian):],
@@ -2435,7 +2433,7 @@ class ConvTranspose2d(torch.autograd.Function):
             selector.convTranspose2d_grad_fn
         )
 
-        g_b = selector.bias_reduction(grad_output, spatial_group)
+        g_b = selector.grad_bias(grad_output, spatial_group)
         
         return (
             g_x,

@@ -13,9 +13,9 @@ class TransposeSelectionStrategy:
         self,
         parallelism: int
     ):
-        self.x_t = self._select_transpose_kernel(parallelism)
+        self.x_t = self._transpose_kernel_selection(parallelism)
     
-    def _select_x_transpose_kernel(parallelism: int) -> Callable:
+    def _transpose_kernel_selection(parallelism: int) -> Callable:
         """Return x_t kernel."""
         if parallelism == 2:
             return dist_mm.x_transpose_twoway
@@ -35,7 +35,7 @@ class LinearSelectionStrategy:
         linear_layer=True
     ):
         self.mm_kernels = self._mm_kernel_selection(parallelism)
-        self.bias_reduction = self._bias_reduction_selection(parallelism, bias,  synchronized_layer)
+        self.grad_bias = self._grad_bias_selection(parallelism, bias,  synchronized_layer)
         self.add_bias = self._add_bias_selection(bias, bayesian)
         self.reshape_weights = self._reshape_weights_selection(bayesian, linear_layer)
         self.grad_sum = self._sum_grad_weights_selection(linear_layer)
@@ -129,7 +129,7 @@ class LinearSelectionStrategy:
         return x
     
     # Reduce bias terms over spatial groups
-    def _bias_reduction_selection(self, parallelism: int, bias: Union[torch.Tensor, None], synchronized_layer: bool) -> Callable:
+    def _grad_bias_selection(self, parallelism: int, bias: Union[torch.Tensor, None], synchronized_layer: bool) -> Callable:
         """
         Selector function for calculating gradient of bias.
         
@@ -434,7 +434,7 @@ class XWT(torch.autograd.Function):
         
         grad_weight = selector.grad_sum(grad_weight, ctx.bayesian) # sum along batch dimension
 
-        grad_b = selector.bias_reduction(grad_output, spatial_group)
+        grad_b = selector.grad_bias(grad_output, spatial_group)
 
         return grad_input, grad_weight, grad_b, None, None, None, None, None, None
 
@@ -683,7 +683,7 @@ class XWT_sync(torch.autograd.Function):
             grad_output, input, rank=rank, device=device, model_group=model_group
         )
         
-        grad_b = ctx.selector.bias_reduction(grad_output, ctx.sync_group)
+        grad_b = ctx.selector.grad_bias(grad_output, ctx.sync_group)
         
         # Sum over batch dimension.
         # Batch dim = 0 if not bayesian, = 1 if bayesian
@@ -928,7 +928,7 @@ class XW(torch.autograd.Function):
         )
 
         grad_weight = selector.grad_sum(grad_weight, ctx.bayesian)
-        grad_b = selector.bias_reduction(grad_output)
+        grad_b = selector.grad_bias(grad_output)
 
         return grad_input, grad_weight, grad_b, None, None, None, None, None
 
@@ -1163,7 +1163,7 @@ class XTW(torch.autograd.Function):
         )
 
         grad_weight = selector.grad_sum(grad_weight, ctx.bayesian)
-        grad_b = selector.bias_reduction(grad_output)
+        grad_b = selector.grad_bias(grad_output)
         
 
         return grad_input, grad_weight, grad_b, None, None, None, None, None
