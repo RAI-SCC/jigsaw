@@ -210,7 +210,7 @@ class DistributedConv2D(torch.nn.Module):
 
     def get_parameter_count(self):
         num_param = 0 if self.conv2d.bias.data is None else self.conv2d.bias.data.numel() // dist.get_world_size(group=self.spatial_group)
-        return num_param + self.conv2d.bias.weight.numel() // dist.get_world_size(group=self.spatial_group) // dist.get_world_size(group=self.channel_group)
+        return num_param + self.conv2d.weight.data.numel() // dist.get_world_size(group=self.spatial_group) // dist.get_world_size(group=self.channel_group)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
