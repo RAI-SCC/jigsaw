@@ -328,13 +328,13 @@ class DistributedWindowedTransformer(torch.nn.Module):
             bayesian
         ).to(device)
         self.layer_norm1 = Norm.DistributedLayerNorm(
-            output_dim // 2, local_rank, device, spatial_group
+            output_dim // 2, local_rank, device, spatial_group, channel_group
         ).to(device)
         self.layer_norm2 = Norm.DistributedLayerNorm(
-            output_dim // 2, local_rank, device, spatial_group
+            output_dim // 2, local_rank, device, spatial_group, channel_group
         ).to(device)
         self.layer_norm3 = Norm.DistributedLayerNorm(
-            output_dim // 2, local_rank, device, spatial_group
+            output_dim // 2, local_rank, device, spatial_group, channel_group
         ).to(device)
         self.MLP = MLP.DistributedSynchronizedMLP(
             output_dim,
@@ -388,7 +388,7 @@ class DistributedTransformer(torch.nn.Module):
             channel_group
         )
         self.layer_norm = Norm.DistributedLayerNorm(
-            output_dim // 2, local_rank, device, spatial_group
+            output_dim // 2, local_rank, device, spatial_group, channel_group
         )
         self.MLP = MLP.DistributedMLP(
             output_dim,
