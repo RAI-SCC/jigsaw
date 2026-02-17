@@ -21,6 +21,9 @@ class DistributedLayerNorm(torch.nn.Module):
         self.normalized_dim = normalized_dim
         self.eps = 1e-5
         self.layernorm = DistributedLNFunction().apply
+        
+    def get_parameter_count(self):
+        return (self.weight.numel() + self.bias.numel()) // self.spatial_group.get_size()
 
     def forward(self, x):
         return self.layernorm(
@@ -133,6 +136,9 @@ class DistributedNoParamLayerNorm(torch.nn.Module):
 
         self.eps = 1e-5
         self.layernorm = DistributedNoParamLNFunction().apply
+        
+    def get_parameter_count(self):
+        return 0
 
     def forward(self, x):
         return self.layernorm(
@@ -223,6 +229,9 @@ class DistributedSoftMax(torch.nn.Module):
         self.dim = dim
         self.group = group  
         self.func = _DistributedSoftmax.apply
+    
+    def get_parameter_count(self):
+        return 0
 
     def forward(self, x):
         return self.func(x, self.dim, self.group)

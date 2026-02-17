@@ -208,6 +208,10 @@ class DistributedConv2D(torch.nn.Module):
         
         self.conv2d_apply = Conv2d().apply
 
+    def get_parameter_count(self):
+        num_param = 0 if self.bias is None else self.bias.numel() // self.spatial_group.get_size()
+        return num_param + self.weights.numel() // self.spatial_group.get_size() // self.channel_group.get_size()
+    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of linear layer (XWT) distributed across two processes.
@@ -611,7 +615,12 @@ class DistributedConvTranspose2D(torch.nn.Module):
         self.selector = ConvTransposeSelectionStrategy(self.bayesian, self.parallelism, self.convTranspose2d.bias)
        
         _average_weights(self, spatial_group, device)
+        
         self.convTranspose2d_apply = ConvTranspose2d().apply
+        
+    def get_parameter_count(self):
+        num_param = 0 if self.bias is None else self.bias.numel() // self.spatial_group.get_size()
+        return num_param + self.weights.numel() // self.spatial_group.get_size() // self.channel_group.get_size()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

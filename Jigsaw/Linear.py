@@ -327,6 +327,10 @@ class DistributedXWT(torch.nn.Module):
         )
         return Cij
 
+    def get_parameter_count(self):
+        num_param = 0 if self.bias is None else self.bias.numel() // self.spatial_group.get_size()
+        return num_param + self.weights.numel()       
+
 
 class XWT(torch.autograd.Function):
     """Autograd function for batched matrix-matrix (XWT) multiplication distributed across n processes."""
@@ -548,6 +552,10 @@ class DistributedXWTSync(torch.nn.Module):
         self.selector = LinearSelectionStrategy(parallelism, self.bias, self.model_group, self.bayesian, synchronized_layer=True, linear_layer=True) 
         
         self.XWT_sync = XWT_sync().apply
+        
+    def get_parameter_count(self):
+        num_param = 0 if self.bias is None else self.bias.numel() // self.spatial_group.get_size()
+        return num_param + self.weights.numel() // self.spatial_group.get_size()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -795,6 +803,10 @@ class DistributedXW(torch.nn.Module):
         self.bayesian = bayesian
         self.selector = LinearSelectionStrategy(parallelism, self.bias, self.model_group, self.bayesian, synchronized_layer=False, linear_layer=True)
         self.XW = XW().apply
+    
+    def get_parameter_count(self):
+        num_param = 0 if self.bias is None else self.bias.numel() // self.spatial_group.get_size()
+        return num_param + self.weights.numel()
 
     def forward(self, x: torch.Tensor):
         """
@@ -1026,6 +1038,10 @@ class DistributedXTW(torch.nn.Module):
         self.selector = SelectionStrategy(parallelism, self.bias, self.model_group, self.bayesian, synchronized_layer=False, linear_layer=True)
         
         self.XTW = XTW().apply
+    
+    def get_parameter_count(self):
+        num_param = 0 if self.bias is None else self.bias.numel() // self.spatial_group.get_size()
+        return num_param + self.weights.numel()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -1245,6 +1261,9 @@ class DistributedXTranspose(torch.nn.Module):
         self.selector = TransposeSelectionStrategy(self.parallelism)
         
         self.transpose = XT().apply
+        
+    def get_parameter_count(self):
+        return 0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -1389,6 +1408,9 @@ class DistributedRoll(torch.nn.Module):
         self.empty = torch.empty(0, device=device, dtype=torch.float32)
         if dims is not None:
             print(f"Alert, dims is {dims} in roll; this is not yet implemented")
+            
+    def get_parameter_count(self):
+        return 0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -1553,6 +1575,9 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
         
         self.XWT = XWT().apply
 
+    def get_parameter_count(self):
+        return 0
+    
     def forward(
         self, x: torch.Tensor, w: torch.Tensor, b: torch.Tensor
     ) -> torch.Tensor:
@@ -1616,6 +1641,9 @@ class DistributedMatMulXW(torch.nn.Module):
 
         self.selector = LinearSelectionStrategy(parallelism, None, self.model_group, self.bayesian, synchronized_layer=False, linear_layer=False)
         self.XW = XW().apply
+        
+    def get_parameter_count(self):
+        return 0
 
     def forward(self, x, w, b):
         """
