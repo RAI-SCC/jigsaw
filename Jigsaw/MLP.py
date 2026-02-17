@@ -18,7 +18,7 @@ class DistributedMLP(torch.nn.Module):
         out_dim: int,
         bias: bool,
         dropout: float,
-        rank: int,
+        local_rank: int,
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
@@ -43,8 +43,8 @@ class DistributedMLP(torch.nn.Module):
             Four-way model: local value.
         device : torch.device
             Device to perform computation on.
-        rank : int
-            Global rank.
+        local_rank : int
+            Model local_rank.
         parallelism : int, optional
             Degree of parallelism (default is 4).
         bias : bool, optional
@@ -53,7 +53,7 @@ class DistributedMLP(torch.nn.Module):
             dropout rate. Default value is 1e-3.
         """
         super().__init__()
-        self.rank = rank
+        self.local_rank = local_rank
         self.device = device
         self.parallelism = parallelism
         self.model_group = model_group
@@ -72,7 +72,7 @@ class DistributedMLP(torch.nn.Module):
             in_dim,
             hidden_dim1,
             bias,
-            rank,
+            local_rank,
             device,
             parallelism,
             model_group,
@@ -82,7 +82,7 @@ class DistributedMLP(torch.nn.Module):
             hidden_dim2,
             out_dim,
             bias,
-            rank,
+            local_rank,
             device,
             parallelism,
             model_group,
@@ -92,7 +92,7 @@ class DistributedMLP(torch.nn.Module):
         self.activation = GELU()
         self.drop = Dropout(p=dropout)
         self.drop2 = Dropout(p=dropout)
-        self.rank = rank
+        self.local_rank = local_rank
 
     def forward(self, x):
         """
@@ -128,7 +128,7 @@ class DistributedSynchronizedMLP(torch.nn.Module):
         out_dim: int,
         bias: bool,
         dropout: float,
-        rank: int,
+        local_rank: int,
         device: torch.device,
         parallelism: int,
         model_group: torch.distributed.ProcessGroup,
@@ -136,7 +136,7 @@ class DistributedSynchronizedMLP(torch.nn.Module):
         bayesian: bool = False
     ):
         super().__init__()
-        self.rank = rank
+        self.local_rank = local_rank
         self.device = device
         self.parallelism = parallelism
         self.model_group = model_group
@@ -148,7 +148,7 @@ class DistributedSynchronizedMLP(torch.nn.Module):
                 in_dim // 2,
                 hidden_dim,
                 bias,
-                rank,
+                local_rank,
                 device,
                 parallelism,
                 model_group,
@@ -160,7 +160,7 @@ class DistributedSynchronizedMLP(torch.nn.Module):
                 hidden_dim // 2,
                 out_dim,
                 bias,
-                rank,
+                local_rank,
                 device,
                 parallelism,
                 model_group,
@@ -171,7 +171,7 @@ class DistributedSynchronizedMLP(torch.nn.Module):
         self.activation = GELU()
         self.drop = Dropout(p=dropout)
         self.drop2 = Dropout(p=dropout)
-        self.rank = rank
+        self.local_rank = local_rank
         
         _average_weights(self, sync_group, device)
         
@@ -207,7 +207,7 @@ class DistributedXTWMLP(torch.nn.Module):
         out_dim,
         bias,
         dropout,
-        rank,
+        local_rank,
         device,
         parallelism,
         model_group,
@@ -225,15 +225,15 @@ class DistributedXTWMLP(torch.nn.Module):
             Global output dimension of MLP.
         device : torch.device
             Device to perform computation on.
-        rank : int
-            Global rank.
+        local_rank : int
+            Local model rank.
         parallelism : int, optional
             The level of parallelism (default is 4).
         bias : bool, optional
             If True, adds a learnable bias to the output (default is True).
         """
         super().__init__()
-        self.rank = rank
+        self.local_rank = local_rank
         self.device = device
         self.parallelism = parallelism
         self.model_group = model_group
@@ -250,7 +250,7 @@ class DistributedXTWMLP(torch.nn.Module):
             in_dim,
             hidden_dim,
             bias,
-            rank,
+            local_rank,
             device,
             parallelism,
             model_group
@@ -259,7 +259,7 @@ class DistributedXTWMLP(torch.nn.Module):
             hidden_dim,
             out_dim,
             bias,
-            rank,
+            local_rank,
             device,
             parallelism,
             model_group
@@ -268,7 +268,7 @@ class DistributedXTWMLP(torch.nn.Module):
         self.activation = GELU()
         self.drop = Dropout(p=dropout)
         self.drop2 = Dropout(p=dropout)
-        self.rank = rank
+        self.local_rank = local_rank
 
     def forward(self, x):
         """
@@ -342,7 +342,7 @@ class DistributedMLP_Megatron(torch.nn.Module):
         out_dim: int,
         bias: bool,
         dropout: float,
-        rank: int,
+        local_rank: int,
         device: torch.device,
         parallelism: int,
         model_group: torch.distributed.ProcessGroup,
@@ -366,8 +366,8 @@ class DistributedMLP_Megatron(torch.nn.Module):
             Four-way model: local value.
         device : torch.device
             Device to perform computation on.
-        rank : int
-            Global rank.
+        local_rank : int
+            Local model rank.
         parallelism : int, optional
             Degree of parallelism (default is 4).
         bias : bool, optional
@@ -376,7 +376,7 @@ class DistributedMLP_Megatron(torch.nn.Module):
             dropout rate. Default value is 1e-3.
         """
         super().__init__()
-        self.rank = rank
+        self.local_rank = local_rank
         self.device = device
         self.parallelism = parallelism
         self.model_group = model_group
@@ -401,7 +401,7 @@ class DistributedMLP_Megatron(torch.nn.Module):
         self.activation = GELU()
         self.drop = Dropout(p=dropout)
         self.drop2 = Dropout(p=dropout)
-        self.rank = rank
+        self.local_rank = local_rank
 
     def forward(self, x):
         """

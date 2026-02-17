@@ -13,7 +13,7 @@ class DistributedAttention(torch.nn.Module):
         embed_dim: int,
         output_dim: int,
         heads: int,
-        rank: int,
+        local_rank: int,
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
@@ -33,7 +33,7 @@ class DistributedAttention(torch.nn.Module):
             global
         """
         super().__init__()
-        self.rank = rank
+        self.local_rank = local_rank
         self.device = device
         self.parallelism = parallelism
         self.model_group = model_group
@@ -51,7 +51,7 @@ class DistributedAttention(torch.nn.Module):
                     x_features // 2,
                     embed_dim * 3,
                     bias=False,
-                    rank=self.rank,
+                    local_rank=self.local_rank,
                     device=self.device,
                     parallelism=self.parallelism,
                     model_group=self.model_group,
@@ -62,7 +62,7 @@ class DistributedAttention(torch.nn.Module):
                     x_features // 2,
                     embed_dim // 2 * 3,
                     bias=False,
-                    rank=self.rank,
+                    local_rank=self.local_rank,
                     device=self.device,
                     parallelism=self.parallelism,
                     model_group=self.model_group,
@@ -73,7 +73,7 @@ class DistributedAttention(torch.nn.Module):
                     x_features // 4,
                     embed_dim // 2 * 3,
                     bias=False,
-                    rank=self.rank,
+                    local_rank=self.local_rank,
                     device=self.device,
                     parallelism=self.parallelism,
                     model_group=self.model_group,
@@ -85,10 +85,10 @@ class DistributedAttention(torch.nn.Module):
                 dim=-1, group=self.channel_group
             )  # TODO: define softmax groups
             self.xwt = Linear.DistributedMatMulXWTranspose(
-                self.rank, self.device, self.parallelism, model_group=self.model_group
+                self.local_rank, self.device, self.parallelism, model_group=self.model_group
             )  # model group TODO
             self.xw = Linear.DistributedMatMulXW(
-                rank, device, self.parallelism, model_group=self.model_group
+                local_rank, device, self.parallelism, model_group=self.model_group
             )  # model group TODO
         else:
             self.softmax = torch.nn.Softmax(dim=-1)
@@ -104,7 +104,7 @@ class DistributedAttention(torch.nn.Module):
                     embed_dim // 2,
                     output_dim,
                     bias=False,
-                    rank=self.rank,
+                    local_rank=self.local_rank,
                     device=self.device,
                     parallelism=self.parallelism,
                     model_group=self.model_group,
@@ -115,7 +115,7 @@ class DistributedAttention(torch.nn.Module):
                     embed_dim // 2,
                     output_dim // 2,
                     bias=False,
-                    rank=self.rank,
+                    local_rank=self.local_rank,
                     device=self.device,
                     parallelism=self.parallelism,
                     model_group=self.model_group,
@@ -126,7 +126,7 @@ class DistributedAttention(torch.nn.Module):
                     embed_dim // 2,
                     output_dim // 4,
                     bias=False,
-                    rank=self.rank,
+                    local_rank=self.local_rank,
                     device=self.device,
                     parallelism=self.parallelism,
                     model_group=self.model_group,
@@ -180,7 +180,7 @@ class DistributedWindowedAttention(torch.nn.Module):
         embed_dim: int,
         output_dim: int,
         heads: int,
-        rank: int,
+        local_rank: int,
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
@@ -200,7 +200,7 @@ class DistributedWindowedAttention(torch.nn.Module):
             global
         """
         super().__init__()
-        self.rank = rank
+        self.local_rank = local_rank
         self.device = device
         self.parallelism = parallelism
         self.model_group = model_group
@@ -218,7 +218,7 @@ class DistributedWindowedAttention(torch.nn.Module):
             x_features // 2,
             embed_dim * 3,
             bias=False,
-            rank=self.rank,
+            local_rank=self.local_rank,
             device=self.device,
             parallelism=self.parallelism,
             model_group=self.channel_group,
@@ -230,10 +230,10 @@ class DistributedWindowedAttention(torch.nn.Module):
             dim=-1, group=self.channel_group
         )  # TODO: define softmax groups
         self.xwt = Linear.DistributedMatMulXWTranspose(
-            self.rank, self.device, 2, model_group=self.channel_group, spatial_group=self.spatial_group, bayesian=bayesian
+            self.local_rank, self.device, 2, model_group=self.channel_group, spatial_group=self.spatial_group, bayesian=bayesian
         )
         self.xw = Linear.DistributedMatMulXW(
-            rank, device, 2, model_group=self.channel_group, bayesian=bayesian
+            local_rank, device, 2, model_group=self.channel_group, bayesian=bayesian
         )
 
         self.concatenator = MLP.DistributedSynchronizedMLP(
@@ -242,7 +242,7 @@ class DistributedWindowedAttention(torch.nn.Module):
             output_dim,
             bias=True,
             dropout=0,
-            rank=self.rank,
+            local_rank=self.local_rank,
             device=self.device,
             parallelism=self.parallelism,
             model_group=self.channel_group,
@@ -305,7 +305,7 @@ class DistributedWindowedTransformer(torch.nn.Module):
         output_dim: int,
         heads: int,
         dropout: float,
-        rank: int,
+        local_rank: int,
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
@@ -319,7 +319,7 @@ class DistributedWindowedTransformer(torch.nn.Module):
             embed_dim,
             output_dim,
             heads,
-            rank,
+            local_rank,
             device,
             parallelism,
             model_group,
@@ -328,13 +328,13 @@ class DistributedWindowedTransformer(torch.nn.Module):
             bayesian
         ).to(device)
         self.layer_norm1 = Norm.DistributedLayerNorm(
-            output_dim // 2, rank, device, spatial_group
+            output_dim // 2, local_rank, device, spatial_group
         ).to(device)
         self.layer_norm2 = Norm.DistributedLayerNorm(
-            output_dim // 2, rank, device, spatial_group
+            output_dim // 2, local_rank, device, spatial_group
         ).to(device)
         self.layer_norm3 = Norm.DistributedLayerNorm(
-            output_dim // 2, rank, device, spatial_group
+            output_dim // 2, local_rank, device, spatial_group
         ).to(device)
         self.MLP = MLP.DistributedSynchronizedMLP(
             output_dim,
@@ -342,7 +342,7 @@ class DistributedWindowedTransformer(torch.nn.Module):
             output_dim,
             bias=True,
             dropout=dropout,
-            rank=rank,
+            local_rank=local_rank,
             device=device,
             parallelism=parallelism,
             model_group=channel_group,
@@ -367,7 +367,7 @@ class DistributedTransformer(torch.nn.Module):
         embed_dim: int,
         output_dim: int,
         heads: int,
-        rank: int,
+        local_rank: int,
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
@@ -380,7 +380,7 @@ class DistributedTransformer(torch.nn.Module):
             embed_dim,
             output_dim,
             heads,
-            rank,
+            local_rank,
             device,
             parallelism,
             model_group,
@@ -388,13 +388,13 @@ class DistributedTransformer(torch.nn.Module):
             channel_group
         )
         self.layer_norm = Norm.DistributedLayerNorm(
-            output_dim // 2, rank, device, spatial_group
+            output_dim // 2, local_rank, device, spatial_group
         )
         self.MLP = MLP.DistributedMLP(
             output_dim,
             output_dim // 2,
             output_dim,
-            rank,
+            local_rank,
             device,
             parallelism,
             model_group,
@@ -415,7 +415,7 @@ class MegatronTransformer(torch.nn.Module):
         embed_dim: int,
         output_dim: int,
         heads: int,
-        rank: int,
+        local_rank: int,
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
@@ -433,7 +433,7 @@ class MegatronTransformer(torch.nn.Module):
             global
         """
         super().__init__()
-        self.rank = rank
+        self.local_rank = local_rank
         self.device = device
         self.parallelism = parallelism
         self.model_group = model_group
@@ -503,7 +503,7 @@ class MegatronTransformerLayer(torch.nn.Module):
         embed_dim: int,
         output_dim: int,
         heads: int,
-        rank: int,
+        local_rank: int,
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
@@ -516,7 +516,7 @@ class MegatronTransformerLayer(torch.nn.Module):
             embed_dim,
             output_dim,
             heads,
-            rank,
+            local_rank,
             device,
             parallelism,
             model_group,
@@ -527,7 +527,7 @@ class MegatronTransformerLayer(torch.nn.Module):
             output_dim,
             output_dim // 2,
             output_dim,
-            rank,
+            local_rank,
             device,
             parallelism,
             model_group,
