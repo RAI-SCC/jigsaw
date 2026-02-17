@@ -619,7 +619,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
         self.convTranspose2d_apply = ConvTranspose2d().apply
         
     def get_parameter_count(self):
-        num_param = 0 if self.convTranspose2d.bias.data is None else convTranspose2d.bias.data.numel() // dist.get_world_size(group=self.spatial_group)
+        num_param = 0 if self.convTranspose2d.bias.data is None else self.convTranspose2d.bias.data.numel() // dist.get_world_size(group=self.spatial_group)
         return num_param + self.convTranspose2d.weight.data.numel() // dist.get_world_size(group=self.spatial_group) // dist.get_world_size(group=self.channel_group)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
