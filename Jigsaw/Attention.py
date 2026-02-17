@@ -13,12 +13,13 @@ class DistributedAttention(torch.nn.Module):
         embed_dim: int,
         output_dim: int,
         heads: int,
-        rank: int,
+        local_rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
-        channel_group: dist.ProcessGroup
+        channel_group: dist.ProcessGroup,
+        bayesian: bool
     ):
         """
 
@@ -32,9 +33,9 @@ class DistributedAttention(torch.nn.Module):
             global
         """
         super().__init__()
-        self.rank = rank
+        self.local_rank = local_rank
         self.device = device
-        self.n_parallel = n_parallel
+        self.parallelism = parallelism
         self.model_group = model_group
         self.spatial_group = spatial_group
         self.channel_group = channel_group
@@ -42,49 +43,52 @@ class DistributedAttention(torch.nn.Module):
         self.embed_dim = embed_dim
         self.x_features = x_features
 
-        match n_parallel:
+        match parallelism:
             case 1:
                 self.qkv = torch.nn.Linear(x_features, embed_dim * 3, bias=False)
             case 2:
                 self.qkv = Linear.DistributedXWT(
                     x_features // 2,
                     embed_dim * 3,
-                    self.rank,
-                    self.device,
-                    self.n_parallel,
-                    self.model_group,
                     bias=False,
+                    local_rank=self.local_rank,
+                    device=self.device,
+                    parallelism=self.parallelism,
+                    model_group=self.model_group,
+                    bayesian=bayesian
                 )
             case 4:
                 self.qkv = Linear.DistributedXWT(
                     x_features // 2,
                     embed_dim // 2 * 3,
-                    self.rank,
-                    self.device,
-                    self.n_parallel,
-                    self.model_group,
                     bias=False,
+                    local_rank=self.local_rank,
+                    device=self.device,
+                    parallelism=self.parallelism,
+                    model_group=self.model_group,
+                    bayesian=bayesian
                 )
             case 8:
                 self.qkv = Linear.DistributedXWT(
                     x_features // 4,
                     embed_dim // 2 * 3,
-                    self.rank,
-                    self.device,
-                    self.n_parallel,
-                    self.model_group,
                     bias=False,
+                    local_rank=self.local_rank,
+                    device=self.device,
+                    parallelism=self.parallelism,
+                    model_group=self.model_group,
+                    bayesian=bayesian
                 )
 
-        if self.n_parallel > 1:
+        if self.parallelism > 1:
             self.softmax = Norm.DistributedSoftMax(
                 dim=-1, group=self.channel_group
             )  # TODO: define softmax groups
             self.xwt = Linear.DistributedMatMulXWTranspose(
-                self.rank, self.device, self.n_parallel, model_group=self.model_group
+                self.local_rank, self.device, self.parallelism, model_group=self.model_group
             )  # model group TODO
             self.xw = Linear.DistributedMatMulXW(
-                rank, device, self.n_parallel, model_group=self.model_group
+                local_rank, device, self.parallelism, model_group=self.model_group
             )  # model group TODO
         else:
             self.softmax = torch.nn.Softmax(dim=-1)
@@ -92,38 +96,41 @@ class DistributedAttention(torch.nn.Module):
             self.xwt = torch.nn.Identity()  # Placeholder for non-parallel case
             self.xw = torch.nn.Identity()
 
-        match self.n_parallel:
+        match self.parallelism:
             case 1:
                 self.concatenator = torch.nn.Linear(embed_dim, output_dim, bias=False)
             case 2:
                 self.concatenator = Linear.DistributedXWT(
                     embed_dim // 2,
                     output_dim,
-                    self.rank,
-                    self.device,
-                    self.n_parallel,
-                    self.channel_group,
                     bias=False,
+                    local_rank=self.local_rank,
+                    device=self.device,
+                    parallelism=self.parallelism,
+                    model_group=self.model_group,
+                    bayesian=bayesian
                 )
             case 4:
                 self.concatenator = Linear.DistributedXWT(
                     embed_dim // 2,
                     output_dim // 2,
-                    self.rank,
-                    self.device,
-                    self.n_parallel,
-                    self.channel_group,
                     bias=False,
+                    local_rank=self.local_rank,
+                    device=self.device,
+                    parallelism=self.parallelism,
+                    model_group=self.model_group,
+                    bayesian=bayesian
                 )
             case 8:
                 self.concatenator = Linear.DistributedXWT(
                     embed_dim // 2,
                     output_dim // 4,
-                    self.rank,
-                    self.device,
-                    self.n_parallel,
-                    self.model_group,
                     bias=False,
+                    local_rank=self.local_rank,
+                    device=self.device,
+                    parallelism=self.parallelism,
+                    model_group=self.model_group,
+                    bayesian=bayesian
                 )
 
         self.heads = heads
@@ -150,7 +157,7 @@ class DistributedAttention(torch.nn.Module):
         v = rearrange(v, "... n i (h d) -> ... n h i d", h=self.heads).contiguous()
 
         q = self.scale * q
-        if self.n_parallel > 1:
+        if self.parallelism > 1:
             attention = self.xwt(q, k, None)
             attention = self.softmax(attention)
 
@@ -173,12 +180,13 @@ class DistributedWindowedAttention(torch.nn.Module):
         embed_dim: int,
         output_dim: int,
         heads: int,
-        rank: int,
+        local_rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
+        bayesian: bool
     ):
         """
 
@@ -192,9 +200,9 @@ class DistributedWindowedAttention(torch.nn.Module):
             global
         """
         super().__init__()
-        self.rank = rank
+        self.local_rank = local_rank
         self.device = device
-        self.n_parallel = n_parallel
+        self.parallelism = parallelism
         self.model_group = model_group
         self.spatial_group = spatial_group
         self.channel_group = channel_group
@@ -202,42 +210,44 @@ class DistributedWindowedAttention(torch.nn.Module):
         self.embed_dim = embed_dim
         self.x_features = x_features
 
-        assert self.n_parallel == 2, (
-            "windowed attention is only designed for n_parallel=2"
+        assert self.parallelism == 2, (
+            "windowed attention is only designed for parallelism = 2"
         )
 
         self.qkv = Linear.DistributedXWTSync(
             x_features // 2,
             embed_dim * 3,
-            self.rank,
-            self.device,
-            self.n_parallel,
+            bias=False,
+            local_rank=self.local_rank,
+            device=self.device,
+            parallelism=self.parallelism,
             model_group=self.channel_group,
             sync_group=self.spatial_group,
-            bias=False,
+            bayesian=bayesian
         )
 
         self.softmax = Norm.DistributedSoftMax(
             dim=-1, group=self.channel_group
         )  # TODO: define softmax groups
         self.xwt = Linear.DistributedMatMulXWTranspose(
-            self.rank, self.device, 2, model_group=self.channel_group
+            self.local_rank, self.device, 2, model_group=self.channel_group, spatial_group=self.spatial_group, bayesian=bayesian
         )
         self.xw = Linear.DistributedMatMulXW(
-            rank, device, 2, model_group=self.channel_group
+            local_rank, device, 2, model_group=self.channel_group, bayesian=bayesian
         )
 
         self.concatenator = MLP.DistributedSynchronizedMLP(
             embed_dim,
             embed_dim,  # hidden dimension
             output_dim,
-            self.rank,
-            self.device,
-            self.n_parallel,
-            model_group=self.channel_group,
-            sync_group=self.spatial_group,
             bias=True,
             dropout=0,
+            local_rank=self.local_rank,
+            device=self.device,
+            parallelism=self.parallelism,
+            model_group=self.channel_group,
+            sync_group=self.spatial_group,
+            bayesian=bayesian
         )
 
         self.heads = heads
@@ -294,12 +304,14 @@ class DistributedWindowedTransformer(torch.nn.Module):
         embed_dim: int,
         output_dim: int,
         heads: int,
-        rank: int,
+        dropout: float,
+        local_rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
+        bayesian: bool
     ):
         super().__init__()
         self.attention_block = DistributedWindowedAttention(
@@ -307,31 +319,35 @@ class DistributedWindowedTransformer(torch.nn.Module):
             embed_dim,
             output_dim,
             heads,
-            rank,
+            local_rank,
             device,
-            n_parallel,
+            parallelism,
             model_group,
             spatial_group,
             channel_group,
+            bayesian
         ).to(device)
         self.layer_norm1 = Norm.DistributedLayerNorm(
-            output_dim // 2, rank, device, spatial_group
+            output_dim // 2, local_rank, device, spatial_group
         ).to(device)
         self.layer_norm2 = Norm.DistributedLayerNorm(
-            output_dim // 2, rank, device, spatial_group
+            output_dim // 2, local_rank, device, spatial_group
         ).to(device)
         self.layer_norm3 = Norm.DistributedLayerNorm(
-            output_dim // 2, rank, device, spatial_group
+            output_dim // 2, local_rank, device, spatial_group
         ).to(device)
         self.MLP = MLP.DistributedSynchronizedMLP(
             output_dim,
             output_dim,
             output_dim,
-            rank,
-            device,
-            2,
+            bias=True,
+            dropout=dropout,
+            local_rank=local_rank,
+            device=device,
+            parallelism=parallelism,
             model_group=channel_group,
             sync_group=spatial_group,
+            bayesian=bayesian
         ).to(device)
 
         _average_weights(self, spatial_group, device)
@@ -351,39 +367,36 @@ class DistributedTransformer(torch.nn.Module):
         embed_dim: int,
         output_dim: int,
         heads: int,
-        rank: int,
+        local_rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
     ):
-        
-      
-        
         super().__init__()
         self.attention_block = DistributedAttention(
             x_features,
             embed_dim,
             output_dim,
             heads,
-            rank,
+            local_rank,
             device,
-            n_parallel,
+            parallelism,
             model_group,
             spatial_group,
             channel_group
         )
         self.layer_norm = Norm.DistributedLayerNorm(
-            output_dim // 2, rank, device, spatial_group
+            output_dim // 2, local_rank, device, spatial_group
         )
         self.MLP = MLP.DistributedMLP(
             output_dim,
             output_dim // 2,
             output_dim,
-            rank,
+            local_rank,
             device,
-            n_parallel,
+            parallelism,
             model_group,
         )
 
@@ -402,9 +415,9 @@ class MegatronTransformer(torch.nn.Module):
         embed_dim: int,
         output_dim: int,
         heads: int,
-        rank: int,
+        local_rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
         softmax_group: dist.ProcessGroup,
     ):
@@ -420,9 +433,9 @@ class MegatronTransformer(torch.nn.Module):
             global
         """
         super().__init__()
-        self.rank = rank
+        self.local_rank = local_rank
         self.device = device
-        self.n_parallel = n_parallel
+        self.parallelism = parallelism
         self.model_group = model_group
         self.softmax_group = softmax_group
         self.bias = False
@@ -441,7 +454,7 @@ class MegatronTransformer(torch.nn.Module):
 
         self.softmax = torch.nn.Softmax(dim=-1)
 
-        self.heads = heads // n_parallel
+        self.heads = heads // parallelism
         # should be (embed_dim/heads)
         self.scale = (embed_dim * 2 // self.heads) ** (-0.5)
 
@@ -490,9 +503,9 @@ class MegatronTransformerLayer(torch.nn.Module):
         embed_dim: int,
         output_dim: int,
         heads: int,
-        rank: int,
+        local_rank: int,
         device: torch.device,
-        n_parallel: int,
+        parallelism: int,
         model_group: dist.ProcessGroup,
         softmax_group: dist.ProcessGroup,
         column_subgroup: dist.ProcessGroup,
@@ -503,9 +516,9 @@ class MegatronTransformerLayer(torch.nn.Module):
             embed_dim,
             output_dim,
             heads,
-            rank,
+            local_rank,
             device,
-            n_parallel,
+            parallelism,
             model_group,
             softmax_group,
         )
@@ -514,9 +527,9 @@ class MegatronTransformerLayer(torch.nn.Module):
             output_dim,
             output_dim // 2,
             output_dim,
-            rank,
+            local_rank,
             device,
-            n_parallel,
+            parallelism,
             model_group,
         )
 

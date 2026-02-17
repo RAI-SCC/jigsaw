@@ -446,14 +446,14 @@ def conv1d_twoway(
     stride: int,
     padding: int,
     dilation: int,
-    rank: int,
+    local_rank: int,
     model_group: dist.ProcessGroup,
 ) -> torch.tensor:
     """Distributed 1d convolution"""
     # x shape
     
     overlap = max(kernel_size + (kernel_size - 1) * (dilation - 1) - stride, 0)
-    mod = rank % 2
+    mod = local_rank % 2
 
     # global indices where you want to apply the convolutions:
     global_size = int(x.shape[-1] * 2)
@@ -517,12 +517,12 @@ def conv1d_twoway_channel(
     stride: int,
     padding: int,
     dilation: int,
-    rank: int,
+    local_rank: int,
     model_group: dist.ProcessGroup,
 ) -> torch.tensor:
     """Distributed 1d convolution across channels"""
     # x shape
-    mod = rank % 2
+    mod = local_rank % 2
     # communicate x1, x0
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
     x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
@@ -575,12 +575,12 @@ def convTranspose1d_twoway_channel(
     stride: int,
     padding: int,
     dilation: int,
-    rank: int,
+    local_rank: int,
     model_group: dist.ProcessGroup,
 ) -> torch.tensor:
     """Distributed 1d convolution across channels"""
     # x shape
-    mod = rank % 2
+    mod = local_rank % 2
     # communicate x1, x0
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
     x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
@@ -634,13 +634,13 @@ def distributed_conv_transpose2d_over_channels(
     stride: int,
     padding: int,
     dilation: int,
-    rank: int,
+    local_rank: int,
     channel_group: dist.ProcessGroup,
     conv_transpose2d_fn
 ) -> torch.tensor:
     """Distributed 2d convolution across channels"""
     # x shape
-    mod = rank % 2
+    mod = local_rank % 2
     # communicate x1, x0
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
     x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
@@ -715,14 +715,14 @@ def conv1d_fourway(
     padding: int,
     dilation: int,
     in_channels: int,
-    rank: int,
+    local_rank: int,
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     empty: torch.Tensor,
 ) -> torch.Tensor:
     """Distributed 1d convolution"""
     # Setup
-    local_model_rank = rank % 4
+    local_rank = local_rank % 4
 
     # communicate x1, x0
     right_to_left, left_to_right = calc_halo_sizes(x.shape, kernel_size, stride)
@@ -732,14 +732,14 @@ def conv1d_fourway(
         x,
         right_to_left,
         left_to_right,
-        local_model_rank,
+        local_rank,
         4,
         empty,
         spatial_group,
         async_op=False,
     )
     x_with_halos = append_halos(
-        x, halo, right_to_left, left_to_right, local_model_rank, 4, empty
+        x, halo, right_to_left, left_to_right, local_rank, 4, empty
     )
 
     (
@@ -749,7 +749,7 @@ def conv1d_fourway(
     ) = distributed_conv1d_over_channels(
         x_with_halos,
         w,
-        local_model_rank,
+        local_rank,
         in_channels,
         stride,
         padding,
@@ -768,14 +768,14 @@ def convTranspose1d_fourway(
     padding: int,
     dilation: int,
     in_channels: int,
-    rank: int,
+    local_rank: int,
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     empty: torch.Tensor,
 ) -> torch.Tensor:
     """Distributed 1d convolution"""
     # Setup
-    local_model_rank = rank % 4
+    local_rank = local_rank % 4
 
     # communicate x1, x0
     right_to_left, left_to_right = calc_halo_sizes(x.shape, kernel_size, stride)
@@ -785,14 +785,14 @@ def convTranspose1d_fourway(
         x,
         right_to_left,
         left_to_right,
-        local_model_rank,
+        local_rank,
         4,
         empty,
         spatial_group,
         async_op=False,
     )
     x_with_halos = append_halos(
-        x, halo, right_to_left, left_to_right, local_model_rank, 4, empty
+        x, halo, right_to_left, left_to_right, local_rank, 4, empty
     )
 
     (
@@ -802,7 +802,7 @@ def convTranspose1d_fourway(
     ) = distributed_convTranspose1d_over_channels(
         x_with_halos,
         w,
-        local_model_rank,
+        local_rank,
         in_channels,
         stride,
         padding,
@@ -821,13 +821,13 @@ def conv2d_twoway_channel(
     padding: int = 0,
     dilation: int = 1,
     groups: int = 1,
-    rank: int = 0,
+    local_rank: int = 0,
     model_group: dist.ProcessGroup = None,
 ) -> torch.tensor:
     """Distributed 2d convolution across channels (two-way split)"""
     ## TODO : include bias as well
     # x shape
-    mod = rank % 2
+    mod = local_rank % 2
     # communicate x1, x0
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
     x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
@@ -879,7 +879,7 @@ def conv2d_twoway(
     stride: int,
     padding: int,
     dilation: int,
-    rank: int,
+    local_rank: int,
     model_group: dist.ProcessGroup,
 ) -> torch.tensor:
     """Distributed 1d convolution"""
@@ -888,7 +888,7 @@ def conv2d_twoway(
     overlap = max(
         kernel_size[1] + (kernel_size[1] - 1) * (dilation[1] - 1) - stride[1], 0
     )
-    mod = rank % 2
+    mod = local_rank % 2
 
     # global indices where you want to apply the convolutions:
     global_size = int(x.shape[-1] * 2)
@@ -939,16 +939,16 @@ def conv2d_twoway(
 def global_to_local_mapping(
     h_size: int,
     w_size: int,
-    rank: int,
+    local_rank: int,
     world_size: int,
     global_index_h: int,
     global_index_w: int,
 ):
-    if rank in [2, 3]:
+    if local_rank in [2, 3]:
         global_mapping_y = global_index_h - h_size
     else:
         global_mapping_y = global_index_h
-    if rank in [1, 3]:
+    if local_rank in [1, 3]:
         global_mapping_x = global_index_w - w_size
     else:
         global_mapping_x = global_index_w
@@ -963,14 +963,14 @@ def conv2d_fourway_spatial(
     stride: int,
     padding: int,
     dilation: int,
-    rank: int,
+    local_rank: int,
     model_group: dist.ProcessGroup,
 ) -> torch.tensor:
     """Distributed 2d convolution"""
     # x shape
 
     h_size, w_size = x.shape[-2], x.shape[-1]
-    mod = rank % 4
+    mod = local_rank % 4
 
     # global indices where you want to apply the convolutions:
     global_size_h = int(x.shape[-2] * 2)
@@ -1127,7 +1127,7 @@ def conv2d_fourway_spatial(
             h_coord, w_coord = global_to_local_mapping(
                 h_size,
                 w_size,
-                rank,
+                local_rank,
                 4,
                 global_steps_h[mid_index_h],
                 global_steps_w[mid_index_w + 1],
@@ -1187,7 +1187,7 @@ def conv2d_fourway_spatial(
             h_coord, w_coord = global_to_local_mapping(
                 h_size,
                 w_size,
-                rank,
+                local_rank,
                 4,
                 global_steps_h[mid_index_h + 1],
                 global_steps_w[mid_index_w],
@@ -1247,7 +1247,7 @@ def conv2d_fourway_spatial(
             h_coord, w_coord = global_to_local_mapping(
                 h_size,
                 w_size,
-                rank,
+                local_rank,
                 4,
                 global_steps_h[mid_index_h + 1],
                 global_steps_w[mid_index_w + 1],
@@ -1267,7 +1267,7 @@ def conv2d_fourway(
     padding: int,
     dilation: int,
     in_channels: int,
-    rank: int,
+    local_rank: int,
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     empty: torch.Tensor,
@@ -1275,7 +1275,7 @@ def conv2d_fourway(
 ) -> torch.Tensor:
     """Distributed 2d convolution"""
     # Setup
-    local_model_rank = rank % 4
+    local_rank = local_rank % 4
 
     # communicate x1, x0
     right_to_left, left_to_right = calc_halo_sizes(x.shape, kernel_size[1], stride[1])
@@ -1285,14 +1285,14 @@ def conv2d_fourway(
         x,
         right_to_left,
         left_to_right,
-        local_model_rank,
+        local_rank,
         4,
         empty,
         spatial_group,
         async_op=False,
     )
     x_with_halos = append_halos(
-        x, halo, right_to_left, left_to_right, local_model_rank, 4, empty
+        x, halo, right_to_left, left_to_right, local_rank, 4, empty
     )
     (
         y,
@@ -1302,7 +1302,7 @@ def conv2d_fourway(
         x_with_halos,
         w,
         b,
-        local_model_rank,
+        local_rank,
         in_channels,
         stride,
         padding,
@@ -1322,7 +1322,7 @@ def conv_transpose2d_fourway(
     padding: int,
     dilation: int,
     in_channels: int,
-    rank: int,
+    local_rank: int,
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     empty: torch.Tensor,
@@ -1330,7 +1330,7 @@ def conv_transpose2d_fourway(
 ) -> torch.Tensor:
     """Distributed 2d convolution"""
     # Setup
-    local_model_rank = rank % 4
+    local_rank = local_rank % 4
 
     y, x0, x1 = distributed_conv_transpose2d_over_channels(
         x,
@@ -1340,7 +1340,7 @@ def conv_transpose2d_fourway(
         stride=stride,
         padding=padding,
         dilation=dilation,
-        rank=rank,
+        local_rank=local_rank,
         channel_group=channel_group,
         conv_transpose2d_fn=conv_transpose2d_fn
     )
@@ -1353,7 +1353,7 @@ def conv_transpose2d_fourway(
         stride=stride[1],
         padding=padding[1],
         dilation=dilation[1],
-        local_rank=rank,
+        local_rank=local_rank,
         spatial_group=spatial_group,
         parallelism=4,
     )
@@ -1362,11 +1362,11 @@ def conv_transpose2d_fourway(
     left_to_right = y.shape[-1] - local_size_right
     
     # Add overlapping bounds
-    if rank // 2 == 0:  # LHS
+    if local_rank // 2 == 0:  # LHS
         start_overlap_index = y.shape[-1] - overlap_size
         y[..., start_overlap_index:] = y[..., start_overlap_index:] + y_buffer
         y = y[..., :local_size_left]
-    elif rank // 2 == 1:
+    elif local_rank // 2 == 1:
         y[..., :overlap_size] = y[..., :overlap_size] + y_buffer
         y = y[..., -local_size_right:]
     
@@ -1382,7 +1382,7 @@ def conv_transpose2d_fourway_backward(
     weight: torch.tensor,
     halo_sizes: torch.tensor,
     in_channels_global: int,
-    rank: int,
+    local_rank: int,
     stride: Tuple[int,int],
     padding: Tuple[int,int],
     dilation: Tuple[int,int],
@@ -1397,14 +1397,14 @@ def conv_transpose2d_fourway_backward(
         grad_output,
         right_to_left,
         left_to_right,
-        rank,
+        local_rank,
         4,
         empty,
         spatial_group=spatial_group,
         async_op=False,
     )
     
-    if rank // 2 == 0:  # left and right groups # TODO get from process group?
+    if local_rank // 2 == 0:  # left and right groups # TODO get from process group?
         grad_output = torch.cat([grad_output, halo], dim=-1)
     else:
         grad_output = torch.cat([halo, grad_output], dim=-1)
@@ -1435,7 +1435,7 @@ def conv_transpose2d_fourway_backward(
         empty,
         in_channels_global,
         channel_group,
-        rank,
+        local_rank,
         async_op=True,
     )
     
@@ -1449,7 +1449,7 @@ def conv_transpose2d_fourway_backward(
 
     g_x = (
         g_x[..., : in_channels_global // 2, :, :] + g_x_recv
-        if rank % 2 == 0 # TODO: left/right definitions
+        if local_rank % 2 == 0 # TODO: left/right definitions
         else g_x[..., in_channels_global // 2 :, :, :] + g_x_recv
     )
 
