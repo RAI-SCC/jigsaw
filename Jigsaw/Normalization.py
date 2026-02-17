@@ -91,9 +91,6 @@ class DistributedLNFunction(torch.autograd.Function):
         grad_weight = (grad_output * x_norm).sum(
             dim=tuple(range(grad_output.dim() - 1))
         )
-        # print(f'grad x {grad_output.sum()}')
-
-        # print(f"grad out shape {grad_output.shape}, grad weight shape {grad_weight.shape}")
         grad_bias = grad_output.sum(dim=tuple(range(grad_output.dim() - 1)))
 
         # Synchronize parameter gradients across the process group
@@ -121,9 +118,6 @@ class DistributedLNFunction(torch.autograd.Function):
 
         g_w_handle.wait()
         g_b_handle.wait()
-
-        # If input gradients also need sync (depends on your parallelism strategy)
-        # dist.all_reduce(grad_x, op=dist.ReduceOp.AVG, group=norm_group)
 
         return grad_x, grad_weight, grad_bias, None, None, None
 
@@ -202,11 +196,10 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
         # Gradients for weight and bias
         # Sum over batch and sequence dimensions, keep feature dim
 
-        # Gradient for input (standard LayerNorm backward)
-
         grad_x_norm_mean = grad_output.mean(dim=-1, keepdim=True)
         g_gx_handle = dist.all_reduce(grad_x_norm_mean, op=dist.ReduceOp.AVG, group=channel_group, async_op=True)
 
+        # Gradient for input (standard LayerNorm backward)
         x_grad_x_term = (grad_output * x_norm).sum(dim=-1, keepdim=True)
         x_g_x_handle = dist.all_reduce(x_grad_x_term, op=dist.ReduceOp.SUM, group=channel_group, async_op=True)
 
@@ -220,83 +213,15 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
                 - x_norm * x_grad_x_term / (N - 1)
         )
 
-        # If input gradients also need sync (depends on your parallelism strategy)
-        # dist.all_reduce(grad_x, op=dist.ReduceOp.AVG, group=norm_group)
-
         return grad_x, None, None
-
-
-# class DistributedLayerNorm(torch.nn.Module):
-#     """Batched layer norm distributed across four processes."""
-
-#     def __init__(self, dim, rank, device, norm_group):
-#         """
-#         Initialize layer normalization.
-
-#         Parameters.
-#         ----------
-#         dim : int
-#             The dimension of the input features.
-#         rank : int
-#             Global rank.
-#         device : torch.device
-#             Device to perform computation on.
-#         """
-#         super().__init__()
-
-#         self.rank = rank
-#         self.device = device
-#         self.norm_group = norm_group
-#         self.layer_norm = torch.nn.LayerNorm(dim).to(device)
-
-#     def forward(self, x):
-#         """Forward pass of layer norm distributed across n processes."""
-#         x = self.layer_norm(x)
-
-#         return x
-
-
-# class DistributedLN(torch.autograd.Function):
-#     """Autograd function for layer norm function distributed across four processes."""
-
-#     @staticmethod
-#     def forward(ctx, x, norm_group):
-#         """
-#         Forward pass of layer norm distributed across four processes.
-
-#         ctx : torch.autograd.Function
-#             Context object to save information for backward computation.
-#         """
-#         ctx.norm_group = norm_group
-#         return x
-
-#     @staticmethod
-#     def backward(ctx, grad_output):
-#         """
-#         Backward pass of layer norm distributed across four processes.
-
-#         Parameters
-#         ----------
-#         ctx : torch.autograd.Function
-#             Context object to save information for backward computation.
-#         grad_output: torch.torch.Tensor
-#             Gradient of the loss with respect to the input of the layer.
-#         """
-#         dist.all_reduce(
-#             grad_output, op=dist.ReduceOp.AVG, group=ctx.norm_group, async_op=False
-#         )
-
-#         return grad_output, None, None
-
 
 class DistributedSoftMax(torch.nn.Module):
     """Distributed Softmax operation."""
 
-    # TODO: check for correctness
     def __init__(self, dim=-1, group=None):
         super().__init__()
         self.dim = dim
-        self.group = group  # is not None else dist.group.WORLD
+        self.group = group  
         self.func = _DistributedSoftmax.apply
 
     def forward(self, x):
@@ -308,7 +233,6 @@ class _DistributedSoftmax(torch.autograd.Function):
     def forward(x, dim, group):
         """Overloaded Autograd function for distributed SoftMax."""
         # local exponentials
-        # -x.amax(dim=dim, keepdim=True)) # softmax fails with norm if only 1 variable
         local_max = x.amax(dim=-1, keepdim=True)
         dist.all_reduce(local_max, op=dist.ReduceOp.MAX, group=group)
 
@@ -322,7 +246,6 @@ class _DistributedSoftmax(torch.autograd.Function):
 
         # final softmax
         out = y / global_sum
-        # print(f'My device {x.device}, out {out}')
         return out
 
     @staticmethod
@@ -353,7 +276,6 @@ class _DistributedSoftmax(torch.autograd.Function):
 
         grad_x = out * (grad_out - global_grad_sum)
 
-        # print(f'device {grad_out.device} grad x {grad_x.sum()}')
         return grad_x, None, None
 
     @staticmethod
