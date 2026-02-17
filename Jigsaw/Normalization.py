@@ -167,7 +167,7 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
 
     @staticmethod
     def setup_context(ctx, inputs, output):
-        x, spatial_group, channel_group, eps = inputs
+        x, channel_group, eps = inputs
         x_norm, var = output
 
         ctx.mark_non_differentiable(var)
@@ -177,9 +177,9 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
         ctx.save_for_backward(x_norm, torch.sqrt(var))
 
     @staticmethod
-    def vmap(info, in_dims, x, spatial_group, channel_group, eps):
+    def vmap(info, in_dims, x, channel_group, eps):
         out = DistributedNoParamLNFunction.apply(
-            x, spatial_group, channel_group, eps
+            x, channel_group, eps
         )
 
         return out, 0
@@ -263,7 +263,7 @@ class _DistributedSoftmax(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_out):
-        (out,) = ctx.saved_tensors  # CHANGED: unpack tuple
+        (out,) = ctx.saved_tensors  
         dim = ctx.dim
         group = ctx.group
 
