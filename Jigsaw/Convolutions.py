@@ -4,17 +4,11 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from .distributed_convolutions import (
-    conv1d_fourway,
-    conv1d_twoway,
-    conv1d_twoway_channel,
     conv2d_fourway,
-    conv2d_twoway,
-    conv2d_twoway_channel,
 )
 import numpy as np
 import Jigsaw.distributed_convolutions as dist_conv
-from torch.nn.grad import conv1d_input, conv1d_weight, conv2d_input, conv2d_weight
-from functools import partial
+from torch.nn.grad import conv2d_input, conv2d_weight
 
 class ConvSelectionStrategy:
     def __init__(
