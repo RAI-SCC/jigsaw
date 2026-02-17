@@ -328,7 +328,7 @@ class DistributedXWT(torch.nn.Module):
         return Cij
 
     def get_parameter_count(self):
-        num_param = 0 if self.bias is None else self.bias.numel() // self.spatial_group.get_size()
+        num_param = 0 if self.bias is None else self.bias.numel() // dist.get_world_size(group=self.spatial_group)
         return num_param + self.weights.numel()       
 
 
@@ -554,8 +554,8 @@ class DistributedXWTSync(torch.nn.Module):
         self.XWT_sync = XWT_sync().apply
         
     def get_parameter_count(self):
-        num_param = 0 if self.bias is None else self.bias.numel() // self.spatial_group.get_size()
-        return num_param + self.weights.numel() // self.spatial_group.get_size()
+        num_param = 0 if self.bias is None else self.bias.numel() // dist.get_world_size(group=self.sync_group)
+        return num_param + self.weights.numel() // dist.get_world_size(group=self.sync_group)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -805,7 +805,7 @@ class DistributedXW(torch.nn.Module):
         self.XW = XW().apply
     
     def get_parameter_count(self):
-        num_param = 0 if self.bias is None else self.bias.numel() // self.spatial_group.get_size()
+        num_param = 0 if self.bias is None else self.bias.numel() // dist.get_world_size(group=self.spatial_group)
         return num_param + self.weights.numel()
 
     def forward(self, x: torch.Tensor):
@@ -1040,7 +1040,7 @@ class DistributedXTW(torch.nn.Module):
         self.XTW = XTW().apply
     
     def get_parameter_count(self):
-        num_param = 0 if self.bias is None else self.bias.numel() // self.spatial_group.get_size()
+        num_param = 0 if self.bias is None else self.bias.numel() // dist.get_world_size(group=self.spatial_group)
         return num_param + self.weights.numel()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

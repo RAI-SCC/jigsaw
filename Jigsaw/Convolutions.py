@@ -209,8 +209,8 @@ class DistributedConv2D(torch.nn.Module):
         self.conv2d_apply = Conv2d().apply
 
     def get_parameter_count(self):
-        num_param = 0 if self.conv2d.bias.data is None else self.conv2d.bias.data.numel() // self.spatial_group.get_size()
-        return num_param + self.conv2d.bias.weight.numel() // self.spatial_group.get_size() // self.channel_group.get_size()
+        num_param = 0 if self.conv2d.bias.data is None else self.conv2d.bias.data.numel() // dist.get_world_size(group=self.spatial_group)
+        return num_param + self.conv2d.bias.weight.numel() // dist.get_world_size(group=self.spatial_group) // dist.get_world_size(group=self.channel_group)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -619,8 +619,8 @@ class DistributedConvTranspose2D(torch.nn.Module):
         self.convTranspose2d_apply = ConvTranspose2d().apply
         
     def get_parameter_count(self):
-        num_param = 0 if self.convTranspose2d.bias.data is None else convTranspose2d.bias.data.numel() // self.spatial_group.get_size()
-        return num_param + self.convTranspose2d.weight.data.numel() // self.spatial_group.get_size() // self.channel_group.get_size()
+        num_param = 0 if self.convTranspose2d.bias.data is None else convTranspose2d.bias.data.numel() // dist.get_world_size(group=self.spatial_group)
+        return num_param + self.convTranspose2d.weight.data.numel() // dist.get_world_size(group=self.spatial_group) // dist.get_world_size(group=self.channel_group)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

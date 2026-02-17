@@ -23,7 +23,7 @@ class DistributedLayerNorm(torch.nn.Module):
         self.layernorm = DistributedLNFunction().apply
         
     def get_parameter_count(self):
-        return (self.weight.numel() + self.bias.numel()) // self.spatial_group.get_size()
+        return (self.weight.numel() + self.bias.numel()) // dist.get_world_size(group=self.spatial_group)
 
     def forward(self, x):
         return self.layernorm(
