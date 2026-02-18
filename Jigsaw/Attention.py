@@ -397,10 +397,10 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
             output_dim, self.noise_dim, local_rank, device, parallelism, spatial_group, channel_group
         ).to(device)
         self.layer_norm2 = Norm.DistributedNICENorm(
-            output_dim, local_rank, device, spatial_group, channel_group
+            output_dim, self.noise_dim, local_rank, device, parallelism, spatial_group, channel_group
         ).to(device)
         self.layer_norm3 = Norm.DistributedNICENorm(
-            output_dim, local_rank, device, spatial_group, channel_group
+            output_dim, self.noise_dim, local_rank, device, parallelism, spatial_group, channel_group
         ).to(device)
         
         self.MLP = MLP.DistributedSynchronizedMLP(
