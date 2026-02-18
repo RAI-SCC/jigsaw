@@ -353,7 +353,6 @@ class DistributedWindowedTransformer(torch.nn.Module):
         _average_weights(self, spatial_group, device)
 
     def forward(self, x: torch.tensor, mask=None):
-        # needs batch dimension
         x = self.attention_block(self.layer_norm1(x), mask) + x
         x = self.layer_norm2(x)
         x = self.MLP(x) + x
@@ -419,12 +418,12 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
 
         _average_weights(self, spatial_group, device)
 
-    def forward(self, x: torch.tensor, mask=None, noise=None):
-        # needs batch dimension
+    def forward(self, x: torch.tensor, noise: torch.tensor, mask=None):
         x = self.attention_block(self.layer_norm1(x, noise), mask) + x
         x = self.layer_norm2(x, noise)
         x = self.MLP(x) + x
         x = self.layer_norm3(x, noise)
+        
         return x
 
 class DistributedTransformer(torch.nn.Module):
