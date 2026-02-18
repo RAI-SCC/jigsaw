@@ -28,12 +28,45 @@ def calc_halo_sizes(
 
     return right_to_left, left_to_right
 
+def calc_halo_sizes_eightway(
+    x_shape: torch.tensor,
+    kernel_size: int,
+    stride: int,
+):
+    # global indices where you want to apply the convolutions:
+    global_size = int(x_shape[-1] * 4)
+    global_steps = torch.arange(0, global_size - kernel_size + 1, step=stride)
+    len_global_size = global_steps.shape[-1]
+    mid_indices = [ len_global_size // 4 - 1,  len_global_size // 2 - 1,  len_global_size * 3 // 4 - 1] 
+
+    right_to_left = [max((global_steps[mid_index[0]] + kernel_size) - x_shape[-1], 0), 
+                     max((global_steps[mid_index[1]] + kernel_size) - x_shape[-1], 0), 
+                     max((global_steps[mid_index[2]] + kernel_size) - x_shape[-1], 0)]
+
+    left_to_right = [
+        global_steps[mid_index[0] + 1] - x_shape[-1]
+        if global_steps[mid_index[0] + 1] < x_shape[-1]
+        else 0,
+        global_steps[mid_index[1] + 1] - x_shape[-1]
+        if global_steps[mid_index[1] + 1] < x_shape[-1]
+        else 0,
+        global_steps[mid_index[2] + 1] - x_shape[-1]
+        if global_steps[mid_index[2] + 1] < x_shape[-1]
+        else 0
+    ]
+
+    left_to_right = [l * -1 for l in left_to_right]
+
+    return right_to_left, left_to_right
+
 
 def get_left_right_local_ranks(parallelism: int):
     if parallelism == 2:
         return [[0], [1]]
     elif parallelism == 4:
         return [[0, 1], [2, 3]]
+    elif parallelism == 8:
+        return [[0, 1], [2, 3], [4, 5], [6,7]]
 
 
 def communicate_halos(
@@ -47,6 +80,58 @@ def communicate_halos(
     async_op: bool,
 ):
     #TODO: calc left and right ranks here
+    left_right_local_ranks = get_left_right_local_ranks(parallelism)
+    
+    if local_rank in left_right_local_ranks[0]:
+        send = x[..., -left_to_right:] if left_to_right > 0 else empty
+        recv = (
+            torch.zeros((*x.shape[:-1], right_to_left), device=x.device, dtype=x.dtype)
+            if right_to_left > 0
+            else empty
+        )
+        send = send.contiguous()
+        if async_op:
+            wait_handle = dist.all_to_all(
+                [empty, recv], [empty, send], group=spatial_group, async_op=async_op
+            )
+            return recv, wait_handle
+        else:
+            dist.all_to_all(
+                [empty, recv], [empty, send], group=spatial_group, async_op=async_op
+            )
+            return recv, None
+    elif local_rank in left_right_local_ranks[1]:
+        send = x[..., :right_to_left] if right_to_left > 0 else empty
+        recv = (
+            torch.zeros((*x.shape[:-1], left_to_right), device=x.device, dtype=x.dtype)
+            if left_to_right > 0
+            else empty
+        )
+        send = send.contiguous()
+        if async_op:
+            wait_handle = dist.all_to_all(
+                [recv, empty], [send, empty], group=spatial_group, async_op=async_op
+            )
+            return recv, wait_handle
+        else:
+            dist.all_to_all(
+                [recv, empty], [send, empty], group=spatial_group, async_op=async_op
+            )
+            return recv, None
+        
+def communicate_halos(
+    x: torch.tensor,
+    right_to_left: int,
+    left_to_right: int,
+    local_rank: int,
+    parallelism: int,
+    empty: torch.tensor,
+    spatial_group: dist.ProcessGroup,
+    async_op: bool,
+):
+    #TODO: calc left and right ranks here
+    
+    # DO WE WANT P2P OPS HERE? since we don't have the process group
     left_right_local_ranks = get_left_right_local_ranks(parallelism)
     
     if local_rank in left_right_local_ranks[0]:
@@ -1287,6 +1372,61 @@ def conv2d_fourway(
         left_to_right,
         local_rank,
         4,
+        empty,
+        spatial_group,
+        async_op=False,
+    )
+    x_with_halos = append_halos(
+        x, halo, right_to_left, left_to_right, local_rank, 4, empty
+    )
+    (
+        y,
+        x_left,
+        x_right,
+    ) = distributed_conv2d_over_channels(
+        x_with_halos,
+        w,
+        b,
+        local_rank,
+        in_channels,
+        stride,
+        padding,
+        dilation,
+        empty,
+        channel_group,
+        conv2d_fn
+    )
+    return y, x_left, x_right, right_to_left, left_to_right
+
+def conv2d_eightway(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    b: torch.Tensor,
+    kernel_size: Tuple[int, int],
+    stride: int,
+    padding: int,
+    dilation: int,
+    in_channels: int,
+    local_rank: int,
+    spatial_group: dist.ProcessGroup,
+    channel_group: dist.ProcessGroup,
+    empty: torch.Tensor,
+    conv2d_fn: torch.nn.functional.conv2d
+) -> torch.Tensor:
+    """Distributed 2d convolution"""
+    # Setup
+    local_rank = local_rank % 8
+
+    # communicate x1, x0
+    right_to_left, left_to_right = calc_halo_sizes(x.shape, kernel_size[1], stride[1])
+
+    # Spatial split
+    halo, _ = communicate_halos(
+        x,
+        right_to_left,
+        left_to_right,
+        local_rank,
+        8,
         empty,
         spatial_group,
         async_op=False,
