@@ -327,8 +327,9 @@ class DistributedWindowedTransformer(torch.nn.Module):
             channel_group,
             bayesian
         ).to(device)
-        self.layer_norm1 = Norm.DistributedLayerNorm(
-            output_dim // 2, local_rank, device, spatial_group, channel_group
+        self.noise_dim = 36
+        self.layer_norm1 = Norm.DistributedNICENorm(
+            output_dim, self.noise_dim, local_rank, device, parallelism, spatial_group, channel_group
         ).to(device)
         self.layer_norm2 = Norm.DistributedLayerNorm(
             output_dim // 2, local_rank, device, spatial_group, channel_group
@@ -353,7 +354,9 @@ class DistributedWindowedTransformer(torch.nn.Module):
         _average_weights(self, spatial_group, device)
 
     def forward(self, x: torch.tensor, mask=None):
-        x = self.attention_block(self.layer_norm1(x), mask) + x
+        # needs batch dimension
+        noise = torch.randn(x.shape[0], self.noise_dim).to(x.device)
+        x = self.attention_block(self.layer_norm1(x, noise), mask) + x
         x = self.layer_norm2(x)
         x = self.MLP(x) + x
         x = self.layer_norm3(x)

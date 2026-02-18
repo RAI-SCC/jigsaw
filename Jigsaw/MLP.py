@@ -144,6 +144,8 @@ class DistributedSynchronizedMLP(torch.nn.Module):
         if parallelism == 2:
             # in, hidden, out dim are global sizes for two-way model parallelism
             # required to maintain partitioning across final dimension
+            
+            # local X has shape [seq_length, in_dim//2]
             self.linear1 = Linear.DistributedXWTSync(
                 in_dim // 2,
                 hidden_dim,

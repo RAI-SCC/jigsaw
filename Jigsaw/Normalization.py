@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 
-from Jigsaw import Linear as jlin
+from Jigsaw import Linear
 
 class DistributedLayerNorm(torch.nn.Module):
     """LayerNorm with synchronized gradients across a process group."""
@@ -326,37 +326,43 @@ class DistributedNICENorm(torch.nn.Module):
         self.spatial_group = spatial_group
         self.channel_group = channel_group
 
-        self.local_dim = dim // channel_group.size()
+        self.global_dim = dim # // channel_group.size()
 
-        self.ln = DistributedNoParamLayerNorm(dim, rank, device, channel_group=self.channel_group)
-        self.non_linearity = torch.nn.GELU()
+        self.ln = DistributedNoParamLayerNorm(self.rank, self.device, channel_group=self.channel_group)
+        self.gelu = torch.nn.GELU()
 
-        self.scale_linear1 = jlin.DistributedXWT_Nice(
+        self.scale_linear1 = Linear.DistributedXWT_Nice(
             in_dim=self.noise_dim,
-            out_dim=self.local_dim,
+            out_dim=self.global_dim // 2,
+            bias=True, # TODO: do we default to true in bias?
+            device=self.device,
             spatial_group=self.spatial_group,
             channel_group=self.channel_group
         )
-        self.scale_linear2 = jlin.DistributedXWTSync(
-            in_dim=self.local_dim,
-            out_dim=self.local_dim,
-            rank=self.rank,
+        self.scale_linear2 = Linear.DistributedXWTSync(
+            in_dim=self.global_dim // 2,
+            out_dim=self.global_dim,
+            bias=True,
+            local_rank=self.rank,
             device=self.device,
             parallelism=self.parallelism,
-            spatial_group=self.spatial_group,
+            sync_group=self.spatial_group,
             model_group=self.channel_group
         )
 
-        self.shift_linear1 = jlin.DistributedXWT_Nice(
+        self.shift_linear1 = Linear.DistributedXWT_Nice(
             in_dim=self.noise_dim,
-            out_dim=self.local_dim,
+            out_dim=self.global_dim // 2,
+            bias=True,
+            device=self.device,
             spatial_group=self.spatial_group,
             channel_group=self.channel_group
         )
-        self.shift_linear2 = jlin.DistributedXWTSync(
-            in_dim=self.local_dim,
-            out_dim=self.local_dim,
-            rank=self.rank,
+        self.shift_linear2 = Linear.DistributedXWTSync(
+            in_dim=self.global_dim // 2,
+            out_dim=self.global_dim,
+            bias=True,
+            local_rank=self.rank,
             device=self.device,
             parallelism=self.parallelism,
             sync_group=self.spatial_group,
@@ -366,14 +372,16 @@ class DistributedNICENorm(torch.nn.Module):
 
     def forward(self, x, noise):
         x = self.ln(x)
-
         scale = self.scale_linear1(noise)
-        scale = self.non_linearity(scale)
+        scale = self.gelu(scale)
         scale = self.scale_linear2(scale)
 
         shift = self.shift_linear1(noise)
-        shift = self.non_linearity(shift)
+        shift = self.gelu(shift)
         shift = self.shift_linear2(shift)
+        
+        scale = scale.unsqueeze(1)
+        shift = shift.unsqueeze(1)
 
         x = scale * x + shift
 

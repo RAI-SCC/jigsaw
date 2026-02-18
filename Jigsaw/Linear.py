@@ -1677,9 +1677,10 @@ class DistributedXWT_Nice(torch.nn.Module):
             self,
             in_dim: int,
             out_dim: int,
+            bias: bool,
+            device: torch.device,
             spatial_group: dist.ProcessGroup,
             channel_group: dist.ProcessGroup,
-            bias: bool = True
     ) -> None:
         """
         Initialize the XWT Linear layer sharded over n processes.
@@ -1707,14 +1708,14 @@ class DistributedXWT_Nice(torch.nn.Module):
 
         self.weights = torch.nn.parameter.Parameter(
             torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
-        )
+        ).to(device)
 
         dist.all_reduce(self.weights, op=dist.ReduceOp.AVG, group=spatial_group)
 
         if bias:
             self.bias = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim).uniform_(-stdev, stdev)
-            )
+            ).to(device)
 
             dist.all_reduce(self.bias, op=dist.ReduceOp.AVG, group=spatial_group)
         else:
@@ -1890,8 +1891,8 @@ class XWT_Nice(torch.autograd.Function):
         # B = x.shape[1]
         rest = w.shape[1:]  # (in_dim, out_dim)
 
-        if len(x.shape) > len(w.shape):
-            w = w.reshape(V, 1, *rest)
+        # if len(x.shape) > len(w.shape):
+        #     w = w.reshape(V, 1, *rest)
 
         out = XWT_Nice.apply(
             x, w, b, channel_group, spatial_group
