@@ -367,6 +367,7 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
         embed_dim: int,
         output_dim: int,
         heads: int,
+        noise_dim: int,
         dropout: float,
         local_rank: int,
         device: torch.device,
@@ -377,6 +378,7 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
         bayesian: bool
     ):
         super().__init__()
+        self.noise_dim = noise_dim
         self.attention_block = DistributedWindowedAttention(
             x_features,
             embed_dim,
