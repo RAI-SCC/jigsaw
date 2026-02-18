@@ -333,9 +333,6 @@ class DistributedWindowedTransformer(torch.nn.Module):
         self.layer_norm2 = Norm.DistributedLayerNorm(
             output_dim // 2, local_rank, device, spatial_group, channel_group
         ).to(device)
-        self.layer_norm3 = Norm.DistributedLayerNorm(
-            output_dim // 2, local_rank, device, spatial_group, channel_group
-        ).to(device)
         self.MLP = MLP.DistributedSynchronizedMLP(
             output_dim,
             output_dim,
@@ -353,10 +350,8 @@ class DistributedWindowedTransformer(torch.nn.Module):
         _average_weights(self, spatial_group, device)
 
     def forward(self, x: torch.tensor, mask=None):
-        x = self.attention_block(self.layer_norm1(x), mask) + x
-        x = self.layer_norm2(x)
-        x = self.MLP(x) + x
-        x = self.layer_norm3(x)
+        x = self.attention_block(self.layer_norm1(x, noise), mask) + x
+        x = self.MLP(self.layer_norm2(x, noise)) + x
         return x
 
 class DistributedNICEWindowedTransformer(torch.nn.Module):
@@ -398,9 +393,6 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
         self.layer_norm2 = Norm.DistributedNICENorm(
             output_dim, self.noise_dim, local_rank, device, parallelism, spatial_group, channel_group
         ).to(device)
-        self.layer_norm3 = Norm.DistributedNICENorm(
-            output_dim, self.noise_dim, local_rank, device, parallelism, spatial_group, channel_group
-        ).to(device)
         
         self.MLP = MLP.DistributedSynchronizedMLP(
             output_dim,
@@ -420,9 +412,7 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
 
     def forward(self, x: torch.tensor, noise: torch.tensor, mask=None):
         x = self.attention_block(self.layer_norm1(x, noise), mask) + x
-        x = self.layer_norm2(x, noise)
-        x = self.MLP(x) + x
-        x = self.layer_norm3(x, noise)
+        x = self.MLP(self.layer_norm2(x, noise)) + x
         
         return x
 
