@@ -327,8 +327,7 @@ class DistributedWindowedTransformer(torch.nn.Module):
             channel_group,
             bayesian
         ).to(device)
-        self.noise_dim = 36
-        self.layer_norm1 = Norm.DistributedNICENorm(
+        self.layer_norm1 = Norm.DistributedLayer(
             output_dim, self.noise_dim, local_rank, device, parallelism, spatial_group, channel_group
         ).to(device)
         self.layer_norm2 = Norm.DistributedLayerNorm(
@@ -355,13 +354,76 @@ class DistributedWindowedTransformer(torch.nn.Module):
 
     def forward(self, x: torch.tensor, mask=None):
         # needs batch dimension
-        noise = torch.randn(x.shape[0], self.noise_dim).to(x.device)
-        x = self.attention_block(self.layer_norm1(x, noise), mask) + x
+        x = self.attention_block(self.layer_norm1(x), mask) + x
         x = self.layer_norm2(x)
         x = self.MLP(x) + x
         x = self.layer_norm3(x)
         return x
 
+class DistributedNICEWindowedTransformer(torch.nn.Module):
+    def __init__(
+        self,
+        x_features: int,
+        embed_dim: int,
+        output_dim: int,
+        heads: int,
+        dropout: float,
+        local_rank: int,
+        device: torch.device,
+        parallelism: int,
+        model_group: dist.ProcessGroup,
+        spatial_group: dist.ProcessGroup,
+        channel_group: dist.ProcessGroup,
+        bayesian: bool
+    ):
+        super().__init__()
+        self.attention_block = DistributedWindowedAttention(
+            x_features,
+            embed_dim,
+            output_dim,
+            heads,
+            local_rank,
+            device,
+            parallelism,
+            model_group,
+            spatial_group,
+            channel_group,
+            bayesian
+        ).to(device)
+
+        self.layer_norm1 = Norm.DistributedNICENorm(
+            output_dim, self.noise_dim, local_rank, device, parallelism, spatial_group, channel_group
+        ).to(device)
+        self.layer_norm2 = Norm.DistributedNICENorm(
+            output_dim, local_rank, device, spatial_group, channel_group
+        ).to(device)
+        self.layer_norm3 = Norm.DistributedNICENorm(
+            output_dim, local_rank, device, spatial_group, channel_group
+        ).to(device)
+        
+        self.MLP = MLP.DistributedSynchronizedMLP(
+            output_dim,
+            output_dim,
+            output_dim,
+            bias=True,
+            dropout=dropout,
+            local_rank=local_rank,
+            device=device,
+            parallelism=parallelism,
+            model_group=channel_group,
+            sync_group=spatial_group,
+            bayesian=bayesian
+        ).to(device)
+
+        _average_weights(self, spatial_group, device)
+
+    def forward(self, x: torch.tensor, mask=None, noise=None):
+        # needs batch dimension
+        x = self.attention_block(self.layer_norm1(x, noise), mask) + x
+        x = self.layer_norm2(x, noise)
+        x = self.MLP(x) + x
+        x = self.layer_norm3(x, noise)
+        return x
 
 class DistributedTransformer(torch.nn.Module):
     def __init__(
