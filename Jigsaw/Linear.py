@@ -1460,7 +1460,10 @@ class Roll(torch.autograd.Function):
             Local rolled tensor.
         """
 
-        x = dist_roll.roll2d(x, shifts, dims, local_rank, device, empty, spatial_group)
+        if parallelism == 4:
+            x = dist_roll.roll2d(x, shifts, dims, local_rank, device, empty, spatial_group)
+        else:
+            x = dist_roll.roll2d_8way(x, shifts, dims, local_rank, device, empty, spatial_group)
 
         return x
 
