@@ -587,6 +587,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
         self.dilation = dilation
         self.groups = groups
         self.local_rank = local_rank
+        self.device = device
         self.spatial_group = spatial_group
         self.channel_group = channel_group
         self.device = device
@@ -602,7 +603,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
             stride=self.stride,
             padding=self.padding,
             bias=bias,
-        ).to(device)
+        ).to(self.device)
         
         # Initialize 
         k = np.sqrt(self.groups / (self.out_channels * 2 * self.kernel_size[0] * self.kernel_size[1]))
@@ -610,11 +611,11 @@ class DistributedConvTranspose2D(torch.nn.Module):
         if bias:
             self.convTranspose2d.bias.data.uniform_(-k, k)
             
-        self.empty = torch.empty(0, device=device, dtype=torch.float32)
+        self.empty = torch.empty(0, device=self.device, dtype=torch.float32)
 
         self.selector = ConvTransposeSelectionStrategy(self.bayesian, self.parallelism, self.convTranspose2d.bias)
        
-        _average_weights(self, spatial_group, device)
+        _average_weights(self, self.spatial_group, self.device)
         
         self.convTranspose2d_apply = ConvTranspose2d().apply
         
