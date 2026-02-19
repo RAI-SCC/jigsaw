@@ -159,8 +159,8 @@ class DistributedWindowedTransformer(torch.nn.Module):
             channel_group,
             bayesian
         ).to(device)
-        self.layer_norm1 = Norm.DistributedLayer(
-            output_dim, self.noise_dim, local_rank, device, parallelism, spatial_group, channel_group
+        self.layer_norm1 = Norm.DistributedLayerNorm(
+            output_dim // 2, local_rank, device, spatial_group, channel_group
         ).to(device)
         self.layer_norm2 = Norm.DistributedLayerNorm(
             output_dim // 2, local_rank, device, spatial_group, channel_group
