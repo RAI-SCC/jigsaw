@@ -136,7 +136,7 @@ class ConvTransposeSelectionStrategy:
     
  
 def _average_weights(
-    model: torch.nn.Module, spatial_group: dist.ProcessGroup, device: torch.device
+    model: torch.nn.Module, spatial_group: dist.ProcessGroup
 ):
     for name, param in model.named_parameters():
         dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
@@ -204,7 +204,7 @@ class DistributedConv2D(torch.nn.Module):
         
         self.selector = ConvSelectionStrategy(self.bayesian, self.parallelism, self.conv2d.bias)
         
-        _average_weights(self, spatial_group, device)
+        _average_weights(self, spatial_group)
         
         self.conv2d_apply = Conv2d().apply
 
@@ -615,7 +615,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
 
         self.selector = ConvTransposeSelectionStrategy(self.bayesian, self.parallelism, self.convTranspose2d.bias)
        
-        _average_weights(self, self.spatial_group, self.device)
+        _average_weights(self, self.spatial_group)
         
         self.convTranspose2d_apply = ConvTranspose2d().apply
         
