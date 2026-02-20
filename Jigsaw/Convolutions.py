@@ -783,6 +783,8 @@ class Conv2d_8way(torch.autograd.Function):
         """
         Backward pass of linear layer (XWT) distributed across two processes.
         """
+        # print(f'am I here????')
+        # print(f'made it to start of conv2d backward? {grad_output}')
         x_aug, weight = ctx.saved_tensors
         empty = ctx.empty
         stride, padding, dilation = (ctx.stride, ctx.padding, ctx.dilation)
@@ -792,10 +794,9 @@ class Conv2d_8way(torch.autograd.Function):
             ctx.channel_group,
         )
         selector = ctx.selector
-        
         right_to_left, left_to_right = ctx.halo_sizes[0], ctx.halo_sizes[1]
         x_shape_padded, x_shape = ctx.x_shape_padded, ctx.x_shape
-
+        
         g_b = selector.grad_bias(grad_output, ctx.spatial_group)
         
         g_x_aug = selector.conv2d_input_fn(
@@ -806,11 +807,9 @@ class Conv2d_8way(torch.autograd.Function):
             padding=padding,
             dilation=dilation
         )
-
         left_to_right, right_to_left = (right_to_left, left_to_right)
-
         # g_x calculation
-        _, wait_handle = dist_conv.communicate_halos_8way(
+        halo, _ = dist_conv.communicate_halos_8way(
             g_x_aug,
             right_to_left,
             left_to_right,
@@ -820,8 +819,7 @@ class Conv2d_8way(torch.autograd.Function):
             spatial_group,
             async_op=False,
         )
-
-        wait_handle.wait()
+        # wait_handle.wait()
 
         if local_rank in [0, 1]:
             g_x = g_x_aug[..., : x_shape[-1]]
@@ -843,7 +841,6 @@ class Conv2d_8way(torch.autograd.Function):
             g_x = g_x_aug[..., -x_shape[-1] :]
             if left_to_right[2] > 0:
                 g_x[..., :left_to_right[2]] = g_x[..., :left_to_right[2]] + halo[0]
-    
 
         g_x_buffer = torch.zeros(
             (*g_x.shape[:-3], g_x.shape[-3] // 2, *g_x.shape[-2:]),
@@ -877,13 +874,14 @@ class Conv2d_8way(torch.autograd.Function):
         if g_x_handle is not None:
             g_x_handle.wait()
 
-        # g_x_recv.wait()
+        
         g_x = (
             g_x[..., : ctx.in_channels_global // 2, :, :] + g_x_recv
             if local_rank % 2 == 0
             else g_x[..., ctx.in_channels_global // 2 :, :, :] + g_x_recv
         )
 
+        # print(f'rank {local_rank} and g_x{g_x} g_w {g_w} gb {g_b}')
         g_w_handle.wait()
 
         return (
@@ -1489,6 +1487,7 @@ class ConvTranspose2d_8way(torch.autograd.Function):
             ctx.channel_group,
         )
         selector = ctx.selector
+        
 
         g_x, g_w = dist_conv.conv_transpose2d_eightway_backward(
             grad_output,
@@ -1505,7 +1504,7 @@ class ConvTranspose2d_8way(torch.autograd.Function):
             channel_group,
             selector.convTranspose2d_grad_fn
         )
-
+        
         g_b = selector.grad_bias(grad_output, spatial_group)
         
         return (

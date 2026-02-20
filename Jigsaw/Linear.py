@@ -1473,6 +1473,7 @@ class Roll(torch.autograd.Function):
 
         ctx.shifts = shifts
         ctx.local_rank = local_rank
+        ctx.parallelism = parallelism
         ctx.dims = dims
         ctx.device = device
         ctx.empty = empty
@@ -1509,10 +1510,16 @@ class Roll(torch.autograd.Function):
         local_rank, device = ctx.local_rank, ctx.device
         spatial_group = ctx.spatial_group
         dims = ctx.dims
+        
+        if ctx.parallelism == 4:
+            grad_output = dist_roll.roll2d(
+                grad_output, shifts, dims, local_rank, device, ctx.empty, spatial_group
+            )
+        else:
+            grad_output = dist_roll.roll2d_8way(
+                grad_output, shifts, dims, local_rank, device, ctx.empty, spatial_group
+            )
 
-        grad_output = dist_roll.roll2d(
-            grad_output, shifts, dims, local_rank, device, ctx.empty, spatial_group
-        )
         return grad_output, None, None, None, None, None, None, None
 
 

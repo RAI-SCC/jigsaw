@@ -45,8 +45,7 @@ def get_halo_8way(
     empty: torch.Tensor,
     spatial_group: dist.ProcessGroup
 ):
-    local_rank = spatial_group.get_rank()
-    
+    local_rank = spatial_group.rank()
     if window_size > 0:
         halo_to_send = x[..., :window_size, :].contiguous()    
         recv = torch.zeros(*halo_to_send.shape, device=device, dtype=x.dtype)
@@ -116,7 +115,8 @@ def roll2d_8way(
     
     x = torch.roll(x, shifts=shifts, dims=(-3,-2))
     
-    x = get_halo_8way(x, shifts[1], device, empty, spatial_group)
+    x = get_halo_8way(x, shifts[1], rank, device, empty, spatial_group)
+    # print(f'Rank {rank} with x {x.shape}')
     
     return x
     
