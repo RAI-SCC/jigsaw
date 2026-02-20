@@ -48,7 +48,7 @@ def get_halo_8way(
     local_rank = spatial_group.get_rank()
     
     if window_size > 0:
-        halo_to_send = x[.., :window_size, :].contiguous()    
+        halo_to_send = x[..., :window_size, :].contiguous()    
         recv = torch.zeros(*halo_to_send.shape, device=device, dtype=x.dtype)
         match local_rank: 
             case 0:
