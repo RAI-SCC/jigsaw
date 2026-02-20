@@ -810,7 +810,7 @@ class Conv2d_8way(torch.autograd.Function):
         left_to_right, right_to_left = (right_to_left, left_to_right)
 
         # g_x calculation
-        halo, wait_handle = dist_conv.communicate_halos_8way(
+        _, wait_handle = dist_conv.communicate_halos_8way(
             g_x_aug,
             right_to_left,
             left_to_right,
@@ -818,7 +818,7 @@ class Conv2d_8way(torch.autograd.Function):
             8,
             empty,
             spatial_group,
-            async_op=True,
+            async_op=False,
         )
 
         wait_handle.wait()
@@ -858,7 +858,7 @@ class Conv2d_8way(torch.autograd.Function):
             ctx.in_channels_global,
             channel_group,
             local_rank,
-            async_op=True,
+            async_op=False,
         )
 
         g_w = selector.conv2d_weight_fn(
@@ -877,6 +877,7 @@ class Conv2d_8way(torch.autograd.Function):
         if g_x_handle is not None:
             g_x_handle.wait()
 
+        # g_x_recv.wait()
         g_x = (
             g_x[..., : ctx.in_channels_global // 2, :, :] + g_x_recv
             if local_rank % 2 == 0

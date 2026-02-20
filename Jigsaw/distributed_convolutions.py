@@ -321,7 +321,7 @@ def convTranspose_halocalc_fourway(
 
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
     
-    local_rank = spatial_group.get_rank()
+    local_rank = spatial_group.rank()
     
     match local_rank:
         case 0:
@@ -335,7 +335,7 @@ def convTranspose_halocalc_fourway(
             )
             send_1 = send_1.contiguous()
             dist.all_to_all(
-                [empty, recv, empty, empty], [empty, empty, empty, send], group=spatial_group, async_op=False
+                [empty, recv_1, empty, empty], [empty, empty, empty, send_1], group=spatial_group, async_op=False
             )
             recv_A, recv_B = empty, recv_1
         case 1:
@@ -1748,26 +1748,28 @@ def conv_transpose2d_8way(
     
     # Add overlapping bounds
     # TODO: how to calculate overlapping bounds in 8-way conv?
-    match spatial_group.get_rank():
+    match spatial_group.rank():
         case 0:
             start_overlap_index = y.shape[-1] - overlap[0] # overlap_size in 4-way
             y[..., start_overlap_index:] = y[..., start_overlap_index:] + y_buffer_right
             y = y[..., :local_size[0]]
         case 1:
-            y[..., :overlap_size[0]] = y[..., :overlap[1]] + y_buffer_left
-            y[..., :overlap_size[0]] = y[..., overlap[0]:] + y_buffer_right
+            start_overlap_index = y.shape[-1] - overlap[1] # overlap_size in 4-way
+            y[..., :overlap[0]] = y[..., :overlap[0]] + y_buffer_left
+            y[..., start_overlap_index:] = y[..., start_overlap_index:] + y_buffer_right 
             
         case 2:
-            y[..., :overlap_size[0]] = y[..., :overlap[2]] + y_buffer_left
-            y[..., :overlap_size[0]] = y[..., overlap[1]:] + y_buffer_right
+            start_overlap_index = y.shape[-1] - overlap[1] # overlap_size in 4-way
+            y[..., :overlap[1]] = y[..., :overlap[1]] + y_buffer_left
+            y[..., start_overlap_index:] = y[..., start_overlap_index:] + y_buffer_right 
             
         case 3:
-            y[..., :overlap_size] = y[..., :overlap[2]] + y_buffer
-            y = y[..., -local_size_right:]
+            y[..., :overlap[2]] = y[..., :overlap[2]] + y_buffer_left
+            y = y[..., -local_size[3]:]
     
     x_aug = torch.cat([x0, x1], dim=-3)
     
-    halo_sizes = torch.tensor([overlap])
+    halo_sizes = torch.tensor(overlap)
     
     return y, x_aug, x, halo_sizes
 
