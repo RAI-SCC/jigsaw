@@ -823,15 +823,27 @@ class Conv2d_8way(torch.autograd.Function):
 
         wait_handle.wait()
 
-        # TODO: sort out halos for backward pass
-        if local_rank % 4 in [0, 1]:
+        if local_rank in [0, 1]:
             g_x = g_x_aug[..., : x_shape[-1]]
-            if right_to_left > 0:
-                g_x[..., -right_to_left:] = g_x[..., -right_to_left:] + halo
-        else:
+            if right_to_left[0] > 0:
+                g_x[..., -right_to_left:] = g_x[..., -right_to_left[0]:] + halo[1]
+        elif local_rank in [2, 3]:
             g_x = g_x_aug[..., -x_shape[-1] :]
-            if left_to_right > 0:
-                g_x[..., :left_to_right] = g_x[..., :left_to_right] + halo
+            if left_to_right[0] > 0:
+                g_x[..., :left_to_right[0]] = g_x[..., :left_to_right[0]] + halo[0]
+            if right_to_left[1] > 0:
+                g_x[..., -right_to_left[1]] = g_x[..., -right_to_left[1]] + halo[1]
+        elif local_rank in [4, 5]:
+            g_x = g_x_aug[..., -x_shape[-1] :]
+            if left_to_right[1] > 0:
+                g_x[..., :left_to_right[1]] = g_x[..., :left_to_right[1]] + halo[0]
+            if right_to_left[2] > 0:
+                g_x[..., -right_to_left[2]] = g_x[..., -right_to_left[2]] + halo[1]
+        elif local_rank in [6, 7]:
+            g_x = g_x_aug[..., -x_shape[-1] :]
+            if left_to_right[2] > 0:
+                g_x[..., :left_to_right[2]] = g_x[..., :left_to_right[2]] + halo[0]
+    
 
         g_x_buffer = torch.zeros(
             (*g_x.shape[:-3], g_x.shape[-3] // 2, *g_x.shape[-2:]),

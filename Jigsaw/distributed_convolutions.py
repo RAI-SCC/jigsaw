@@ -37,21 +37,22 @@ def calc_halo_sizes_8way(
     global_size = int(x_shape[-1] * 4)
     global_steps = torch.arange(0, global_size - kernel_size + 1, step=stride)
     len_global_size = global_steps.shape[-1]
-    mid_indices = [ len_global_size // 4 - 1,  len_global_size // 2 - 1,  len_global_size * 3 // 4 - 1] 
+    mid_indices = [len_global_size // 4 - 1,  len_global_size // 2 - 1,  len_global_size * 3 // 4 - 1] 
 
-    right_to_left = [max((global_steps[mid_index[0]] + kernel_size) - x_shape[-1], 0), 
-                     max((global_steps[mid_index[1]] + kernel_size) - x_shape[-1], 0), 
-                     max((global_steps[mid_index[2]] + kernel_size) - x_shape[-1], 0)]
-
+    
+    right_to_left = [max((global_steps[mid_indices[0]] + kernel_size) - x_shape[-1], 0), 
+                     max((global_steps[mid_indices[1]] + kernel_size) - 2*x_shape[-1], 0), 
+                     max((global_steps[mid_indices[2]] + kernel_size) - 3*x_shape[-1], 0)]
+    
     left_to_right = [
-        global_steps[mid_index[0] + 1] - x_shape[-1]
-        if global_steps[mid_index[0] + 1] < x_shape[-1]
+        global_steps[mid_indices[0] + 1] - x_shape[-1]
+        if global_steps[mid_indices[0] + 1] < x_shape[-1]
         else 0,
-        global_steps[mid_index[1] + 1] - x_shape[-1]
-        if global_steps[mid_index[1] + 1] < x_shape[-1]
+        global_steps[mid_indices[1] + 1] - 2*x_shape[-1]
+        if global_steps[mid_indices[1] + 1] < 2*x_shape[-1]
         else 0,
-        global_steps[mid_index[2] + 1] - x_shape[-1]
-        if global_steps[mid_index[2] + 1] < x_shape[-1]
+        global_steps[mid_indices[2] + 1] - 3*x_shape[-1]
+        if global_steps[mid_indices[2] + 1] < 3*x_shape[-1]
         else 0
     ]
 
@@ -129,10 +130,9 @@ def communicate_halos_8way(
     spatial_group: dist.ProcessGroup,
     async_op: bool,
 ):
-    local_rank = spatial_group.get_rank()
+    local_rank = spatial_group.rank()
     # right_to_left is a list of 3 numbers
     # left to right is a list of 3 numbers
-    
     match local_rank:
         case 0:
             send_1 = x[..., -left_to_right[0]:] if left_to_right[0] > 0 else empty
@@ -178,15 +178,15 @@ def communicate_halos_8way(
                 return [recv_0, recv_2], None
         case 2:
             send_1 = x[..., :right_to_left[1]] if right_to_left[1] > 0 else empty
-            send_3 = x[..., -left_to_right[3]:] if left_to_right[3] > 0 else empty
+            send_3 = x[..., -left_to_right[2]:] if left_to_right[2] > 0 else empty
             recv_1 = (
                 torch.zeros((*x.shape[:-1], left_to_right[1]), device=x.device, dtype=x.dtype)
                 if left_to_right[1] > 0
                 else empty
             )
             recv_3 = (
-                torch.zeros((*x.shape[:-1], right_to_left[3]), device=x.device, dtype=x.dtype)
-                if left_to_right[3] > 0
+                torch.zeros((*x.shape[:-1], right_to_left[2]), device=x.device, dtype=x.dtype)
+                if left_to_right[2] > 0
                 else empty
             )
             send_1, send_3 = send_1.contiguous(), send_3.contiguous()
@@ -686,7 +686,7 @@ def send_g_x_channels_2d(
     async_op: bool,
 ):
     match local_rank:
-        case 0 | 2:
+        case 0 | 2 | 4 | 6:
             send = g_x[..., in_channels_global // 2 :, :, :]
             send = send.contiguous()
             wait_handle = dist.all_to_all(
@@ -696,7 +696,7 @@ def send_g_x_channels_2d(
                 async_op=async_op,
             )
 
-        case 1 | 3:
+        case 1 | 3 | 5 | 7:
             send = g_x[..., : in_channels_global // 2, :, :]
             send = send.contiguous()
             wait_handle = dist.all_to_all(
@@ -1601,7 +1601,6 @@ def conv2d_eightway(
 
     # communicate x1, x0
     right_to_left, left_to_right = calc_halo_sizes_8way(x.shape, kernel_size[1], stride[1])
-
     # Spatial split
     halo, _ = communicate_halos_8way(
         x,
@@ -1614,7 +1613,7 @@ def conv2d_eightway(
         async_op=False,
     )
     x_with_halos = append_halos_8way(
-        x, halo, right_to_left, left_to_right, spatial_group, empty
+        x, halo, spatial_group, empty
     )
     (
         y,
@@ -1633,6 +1632,7 @@ def conv2d_eightway(
         channel_group,
         conv2d_fn
     )
+    
     return y, x_left, x_right, right_to_left, left_to_right
 
 def conv_transpose2d_fourway(

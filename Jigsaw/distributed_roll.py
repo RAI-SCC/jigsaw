@@ -106,6 +106,7 @@ def roll2d_8way(
     x: torch.Tensor,
     shifts,
     dims,
+    rank,
     device: torch.device,
     empty: torch.Tensor,
     spatial_group: dist.ProcessGroup
