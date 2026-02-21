@@ -4,9 +4,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
 from pathlib import Path 
-import torchvision.transforms as transforms 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import numpy as np
@@ -79,43 +77,11 @@ class BasicDataset(Dataset):
 
         return image_tensor, mask_tensor
 
-def get_dataloader(config_dict, data_path, mode, distributed, batch_size, subset_size=None, rank=0):
-    
-    h = config_dict["data"]["image_height"]
-    w = config_dict["data"]["image_width"]
-    target_res = (h, w)
-    
-    images_dir = os.path.join(data_path, "image")
-    masks_dir = os.path.join(data_path, "mask")
-    
-    if rank == 0:
-        print(f"[{mode}] Creating Dataset from {images_dir}")
-
-    dataset = BasicDataset(
-        images_dir=images_dir,
-        masks_dir=masks_dir,
-        target_size=target_res,
-        num_slices=1,
-        is_train=(mode=="train")
-    )
-
-    sampler = None
-    if distributed:
-        # Use DistributedSampler to split the dataset among multiple processes
-        # for example GPU 0 gets the first 100 samples, GPU 1 the next 100 samples, etc.
-        sampler = DistributedSampler(
-            dataset,
-            num_replicas=torch.distributed.get_world_size(),
-            rank=rank,
-            shuffle=(mode == "train"), 
-            drop_last= (mode == "train")
-        )
-
+def get_dataloader(config_dict, dataset, mode, batch_size, subset_size=None):
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=(mode == "train" and sampler is None),
-        sampler=sampler,
+        shuffle=(mode == "train"),
         num_workers=config_dict["data"]["num_workers"],
         pin_memory=True,
         drop_last=(mode == "train")

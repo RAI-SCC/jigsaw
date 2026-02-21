@@ -875,186 +875,18 @@ def reduce_ddp_layernorms(model, col_groups):
     return handles, flat_grad, gradients
 
 from dice import dice_coeff
-from torchvision.utils import make_grid
-import torchvision.utils as vutils
-
-
-@torch.no_grad()
-def check_accuracy(loader, model, device="cpu", rank=0): 
-    if rank != 0:
-        return 0.0
-
-    num_correct = 0
-    num_pixels = 0
-    dice_score = 0
-    model.eval()
-
-    print(f"=> Rank {rank}: Checking accuracy.")
-
-    for batch in loader:
-        image = batch[0].to(device)
-        true_mask = batch[1].to(device)
-
-        preds = model(image)
-        
-        # Used for accuracy, get prediceted class mask, for each pixel
-        #For example, if preds for a pixel is [0.2, 0.8], argmax gives class 1
-        pred_mask = torch.argmax(preds, dim=1) 
-
-        # Squeeze channel dimension if needed
-        if true_mask.dim() == 4 and true_mask.shape[1] == 1:
-            true_mask = true_mask.squeeze(1)
-
-        # Accuracy Calculation
-        num_correct += (pred_mask == true_mask).sum().item()
-        num_pixels += torch.numel(pred_mask)
-        
-        # Dice Score Calculation
-        # Turn logits into probabilities for class 1
-        pred_class1 = torch.softmax(preds, dim=1)[:, 1, :, :]
-        # Binarize predictions at 0.5 threshold
-        pred_binary = (pred_class1 > 0.5).float()
-        
-        # Expand true_mask to have channel dimension if needed
-        if true_mask.dim() == 3:
-            true_mask_expanded = true_mask.unsqueeze(1)
-        else:
-            true_mask_expanded = true_mask
-            
-        dice_score += dice_coeff(pred_binary.unsqueeze(1), true_mask_expanded, reduce_batch_first=False)
-
-    acc = num_correct/num_pixels*100
-    avg_dice = dice_score/len(loader)
-    
-    print(f"Rank {rank} | Accuracy: {acc:.2f}%")
-    print(f"Rank {rank} | Dice Score: {avg_dice:.4f}")
-    
-    model.train()
-    return avg_dice
-
-@torch.no_grad()
-def compute_confusion_metrics(loader, model, device="cpu", threshold=0.5):
-    model.eval()
-    
-    TP = 0
-    FP = 0
-    FN = 0
-    TN = 0
-
-    for batch in loader:
-        images = batch[0].to(device)
-        true_masks = batch[1].to(device)
-
-        if true_masks.dim() == 4 and true_masks.shape[1] == 1:
-            true_masks = true_masks.squeeze(1)
-
-        logits = model(images)
-        probs = torch.softmax(logits, dim=1)[:, 1]
-        preds = (probs > threshold).float()
-
-        TP += ((preds == 1) & (true_masks == 1)).sum().item()
-        FP += ((preds == 1) & (true_masks == 0)).sum().item()
-        FN += ((preds == 0) & (true_masks == 1)).sum().item()
-        TN += ((preds == 0) & (true_masks == 0)).sum().item()
-
-        total = TP + FP + FN + TN
-        recall = TP / (TP + FN) if (TP + FN) > 0 else 0
-        precision = TP / (TP + FP) if (TP + FP) > 0 else 0
-        perc_tp = TP / total
-        perc_fp = FP / total
-        perc_fn = FN / total
-        perc_tn = TN / total
-
-    return {
-        "TP": perc_tp,
-        "FP": perc_fp,
-        "TN": perc_tn,
-        "FN": perc_fn,
-        "Precision": precision,
-        "Recall": recall,
-    }
-
-@torch.no_grad()
-def save_predictions_as_imgs(
-    loader, model, folder="saved_images/", device="cpu", num_examples=8, epoch=0, rank=0
-):
-    if rank != 0:
-        return
-
-    model.eval()
-    os.makedirs(folder, exist_ok=True)
-    images_to_save = []
-
-    iterator = iter(loader)
-    batch = next(iterator)
-    
-    images = batch[0].to(device)      
-    true_masks = batch[1].to(device) 
-
-    if true_masks.dim() == 4:
-        true_masks = true_masks.squeeze(1)
-    true_masks = (true_masks > 0).float()
-    
-    logits = model(images)
-    fg_logits = logits[:, 1]  
-    probs = torch.softmax(fg_logits, dim=1)
-    preds = (probs > 0.5).float()
-
-    for i in range(min(num_examples, images.shape[0])):
-        img_single = images[i]
-
-        img_disp = img_single * 0.5 + 0.5  # unnormalize to [0, 1]
-        img_disp = torch.clamp(img_disp, 0, 1)
-        if img_disp.shape[0] == 1:
-            img_rgb = img_disp.repeat(3, 1, 1)
-        else:
-            img_rgb = img_disp
-
-        ground_truth = true_masks[i]
-        pred_single = preds[i]
-
-        overlay = img_rgb.clone() * 0.6 
-        
-        # Calculate True Positives, False Positives, False Negatives
-        tp = (pred_single == 1) & (ground_truth == 1) 
-        fp = (pred_single == 1) & (ground_truth == 0)
-        fn = (pred_single == 0) & (ground_truth == 1)
-
-        overlay[1] += tp.float() * 0.4
-        overlay[0] += fp.float() * 0.8
-        overlay[2] += fn.float() * 0.8
-        
-        overlay = torch.clamp(overlay, 0, 1)
-
-        ground_truth_rgb = ground_truth.unsqueeze(0).repeat(3, 1, 1)
-        pred_rgb = pred_single.unsqueeze(0).repeat(3, 1, 1)
-
-        combined = torch.cat([img_rgb, ground_truth_rgb, pred_rgb, overlay], dim=2)
-        images_to_save.append(combined)
-
-    grid = make_grid(images_to_save, nrow=4, padding=10, pad_value=1.0)
-    save_path = f"{folder}/prediction_epoch_{epoch}.png"
-    vutils.save_image(grid, save_path)
-    print(f"Visualization saved to {save_path}")
-    model.train()
-
 from Model import ModelSwinMLP
+from Dataloaders import BasicDataset
 
 def build_swin_model(
     config_dict: Dict,
     device: torch.device,
-    localid: int, # local GPU id
-    rank: int,    # global rank, means the ID of the GPU of all nodes
-    ddp_group: dist.ProcessGroup
 ) -> torch.nn.Module:
     
     data_cfg = config_dict["data"]
     swin_cfg = config_dict["SWIN_MLP"]
     
     resolution = (data_cfg["image_height"], data_cfg["image_width"])
-    
-    if rank == 0:
-        print(f"Building SwinMLP with Resolution: {resolution}, Window: {swin_cfg['window_size']}")
 
     model = ModelSwinMLP(
         channels_in=data_cfg["in_channels"],
@@ -1063,20 +895,15 @@ def build_swin_model(
         window_size=swin_cfg["window_size"],
         dropout=swin_cfg["dropout"],
         mlp_ratio=swin_cfg["mlp_ratio"],
+        shifted_windows= swin_cfg["shifted_windows"],
+        kernel_flex= swin_cfg["kernel_flex"]
     ).to(device)
-
-    model = DDP(
-        model, 
-        device_ids=[localid], 
-        output_device=localid, 
-        process_group=ddp_group,
-    )
 
     return model
 
 
 def build_swin_dataloaders(
-        config_dict: dict, model_parallel: bool, rank: int
+        config_dict: dict
     ) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
     
     train_path = config_dict["data"]["train_data_path"]
@@ -1084,33 +911,47 @@ def build_swin_dataloaders(
     train_batch = config_dict["training"]["train_batch"]
     valid_batch = config_dict["training"]["valid_batch"]
 
-    is_distributed = (not model_parallel)
+    h = config_dict["data"]["image_height"]
+    w = config_dict["data"]["image_width"]
+    target_res = (h, w)
+
+    train_dataset = BasicDataset(
+        images_dir=os.path.join(train_path, "image"),
+        masks_dir=os.path.join(train_path, "mask"),
+        target_size=target_res,
+        num_slices=1,
+        is_train=True
+    )
+
+    valid_dataset = BasicDataset(
+        images_dir=os.path.join(valid_path, "image"),
+        masks_dir=os.path.join(valid_path, "mask"),
+        target_size=target_res,
+        num_slices=1,
+        is_train=False
+    )
 
     train_loader = Dataloaders.get_dataloader(
         config_dict=config_dict,
-        data_path=train_path,
+        dataset=train_dataset,
         mode="train",
-        distributed=is_distributed, 
         batch_size=train_batch,
         subset_size=config_dict["data"]["train_subset"],
-        rank=rank
     )
 
     valid_loader = Dataloaders.get_dataloader(
         config_dict=config_dict,
-        data_path=valid_path,
-        mode="validation",
-        distributed=is_distributed, 
+        dataset=valid_dataset,
+        mode="val",
         batch_size=valid_batch,
         subset_size=config_dict["data"]["valid_subset"],
-        rank=rank
     )
 
     return train_loader, valid_loader
 
 @monitor()
 @torch.no_grad()
-def evaluate(loader, model, loss_fn, device, rank, threshold=0.5):
+def evaluate(loader, model, loss_fn, device, threshold=0.5):
     model.eval()
 
     loss_fn_all = TopKDiceLoss(k=100)
@@ -1122,12 +963,12 @@ def evaluate(loader, model, loss_fn, device, rank, threshold=0.5):
     dice_score = 0.0
 
     TP = FP = FN = TN = 0
-    steps = 0
 
     for batch in loader:
         images = batch[0].to(device)
         true_masks = batch[1].to(device) 
-        with torch.amp.autocast("cuda", dtype=torch.float16):
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+
             if true_masks.dim() == 4 and true_masks.shape[1] == 1:
                 true_masks = true_masks.squeeze(1) 
 

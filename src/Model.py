@@ -13,8 +13,8 @@ from perun import monitor
 
 
 
-#class Model_eightway(torch.nn.Module):
-""" def __init__(
+class Model_eightway(torch.nn.Module):
+    def __init__(
         self, config_dict, rank, device, n_parallel, model_group, col_subgroup
     ):
         super().__init__()
@@ -228,9 +228,8 @@ from perun import monitor
                 x = x.reshape(x.shape[0], -1, x.shape[-1])
                 x = self.linearlayer(x)
         return x
- """
 
-""" #class Model(torch.nn.Module):
+class Model(torch.nn.Module):
     def __init__(
         self, config_dict, rank, device, n_parallel, model_group, col_subgroup
     ):
@@ -443,10 +442,10 @@ from perun import monitor
                 x = self.layer_norm3(x)
                 x = x.reshape(x.shape[0], -1, x.shape[-1])
                 x = self.linearlayer(x)
-        return x """
+        return x
 
 
-""" #class Model_twoway(torch.nn.Module):
+class Model_twoway(torch.nn.Module):
     def __init__(self, config_dict, rank, device, n_parallel, model_group):
         super().__init__()
         self.rank = rank
@@ -605,10 +604,10 @@ from perun import monitor
             return x
         else:
             return x
- """
 
 
-""" class ModelSequential(torch.nn.Module):
+
+class ModelSequential(torch.nn.Module):
     def __init__(self, config_dict, rank, device):
         super().__init__()
         # 1. Dimensionen laden
@@ -724,7 +723,6 @@ from perun import monitor
 
         self.layer_norm = torch.nn.LayerNorm(hidden_dimension)
 
-        #TODO: 69 = number of output variables, needs to be changed for image segmentation!
         if self.rank == 3:
             self.num_variables = 69
         else:
@@ -748,9 +746,8 @@ from perun import monitor
                     hidden_dimension,
                     padding=padding,
                     stride=self.stride,
-                    out_channels=69, #TODO: number of output variables, needs to be changed for image segmentation!
+                    out_channels=69,
                     concat=True,
-                    #TODO: turn into height and width for image segmentation
                     xlat=self.xlat,
                     xlon=self.xlon,
                 )
@@ -821,43 +818,22 @@ from perun import monitor
                 }
             )
 
-    #TODO: modify for image segmentation, remove rollout, latent rollout
     def forward(self, x, rollout_=1):
-        # x Input Shape beim Wetter: [Batch, 72, 720, 1440] (Variablen, Lat, Lon)
-        
-        # RESIDUAL CONNECTION: Das Modell merkt sich den Input (x_res),
-        # um später nur die ÄNDERUNG (Delta) vorherzusagen.
         x_shape = x.shape
         x_res = x.clone()
         x_res = x_res.permute(0, 2, 3, 1)
-
-        # 1. Patch-Embedding, Macht aus den Pixeln abstrakte "Token".
-        # x wird zu: [Batch, Anzahl_Patches, Hidden_Dim]
-
-        # x shape: [1, 69, 720, 1440]
-        x = self.embedding(x)  # x: latent_t
-
-        # x: shape [1, n_patches, hidden_dim]
-        # if self.pos_encoding:
-        #    x = x + self.positional_encoding
-
+        x = self.embedding(x)
         x_res2 = x.clone()
-
-        # 2. Der Loop (Mixer Blöcke)
-        # rollout_ ist für Zeitreihen. Bei dir ist rollout_=1.
-        # x shape: [1, 1152, 2000]
         for rollout in torch.arange(rollout_):
             for i in range(self.n_blocks):
-                x = self.blocks[i](x)  # x: latent_tplus1
-
-        # 3. Skip Connection verarbeiten
+                x = self.blocks[i](x)
         if self.concat:
             x = self.layer_norm(x)
             x = torch.concat((x, x_res2), dim=2)
         else:
             x = self.layer_norm(x + x_res2)
 
-        if self.patch_embed == 2:  # Case: Decoder is 2D embedding
+        if self.patch_embed == 2: 
             x = self.recovery(
                 x,
                 self.n_lat,
@@ -869,29 +845,23 @@ from perun import monitor
                     x_res.shape[2],
                 ),
             )
-        else:  # Case: Decoder is 1D convolution
+        else: 
             x = self.recovery(x)
-
-        # WETTER-ALARM: Addiert den Input wieder drauf.
-            # Das macht man bei Regression (Vorhersage der Änderung).
-            # Bei Segmentierung (Maske erstellen) ist das FALSCH! 
-            # Du willst nicht Bild + Maske rechnen.
         if self.add:  # Recovery
             x = x.reshape(x_shape[0], self.xlat, self.xlon, self.num_variables)
             return x + x_res
 
         if self.linear_residual:
-            x = self.layer_norm2(x)  # layer norm must go before concat
+            x = self.layer_norm2(x)
             x = torch.concat((x[:, :, :, : self.num_variables], x_res[..., :69]), dim=3)
             x = self.layer_norm3(x)
             x = x.reshape(x_shape[0], self.xlat * self.xlon, self.num_variables * 2)
             x = self.linearlayer(x)
             x = x.reshape(x_shape[0], self.xlat, self.xlon, self.num_variables)
         return x
- """
 
-#class ModelMegatron(torch.nn.Module):
-""" def __init__(self, config_dict, rank, device, n_parallel, model_group):
+class ModelMegatron(torch.nn.Module):
+    def __init__(self, config_dict, rank, device, n_parallel, model_group):
         super().__init__()
         self.rank = rank
         hidden_dimension = config_dict["model"]["hidden_dim"]
@@ -1041,21 +1011,22 @@ from perun import monitor
             x = self.linearlayer(x)
             x = x.reshape(x_shape[0], self.xlat, self.xlon, self.num_variables)
         return x
- """
 
 class ModelSwinMLP(torch.nn.Module):
-    def __init__(self, channels_in, input_resolution = (512,512), classes=2, window_size =4, dropout=0.0, mlp_ratio=4.0):
+    def __init__(self, channels_in, input_resolution = (512,512), classes=2, window_size =4, mlp_ratio=4.0, shifted_windows=False, kernel_flex = False):
         super().__init__()
 
         self.input_resolution = input_resolution
         self.window_size = window_size
         self.channels_in = channels_in
         self.classes = classes
+        self.shifted_windows = shifted_windows
+        self.kernel_flex = kernel_flex
 
         self.conv = nn.Conv2d(in_channels=channels_in,
                               out_channels=32,
-                              kernel_size=1,
-                              padding=0,
+                              kernel_size=3,
+                              padding=1,
                               stride=2,
                               bias=False)
         
@@ -1068,7 +1039,9 @@ class ModelSwinMLP(torch.nn.Module):
                                          input_resolution=current_res, 
                                          window_size=window_size,
                                          dropout=0.1,
-                                         mlp_ratio=mlp_ratio
+                                         mlp_ratio=mlp_ratio,
+                                         shifted_windows=shifted_windows,
+                                         kernel_flex=kernel_flex
                                          )
         
         current_res = [current_res[0] // 2, current_res[1] // 2]
@@ -1077,7 +1050,9 @@ class ModelSwinMLP(torch.nn.Module):
                                          input_resolution=current_res, 
                                          window_size=2 * window_size,
                                          dropout=0.1,
-                                         mlp_ratio=mlp_ratio
+                                         mlp_ratio=mlp_ratio,
+                                         shifted_windows=shifted_windows,
+                                         kernel_flex=kernel_flex
                                          )
         
         current_res = [current_res[0] // 2, current_res[1] // 2] 
@@ -1086,7 +1061,9 @@ class ModelSwinMLP(torch.nn.Module):
                                          input_resolution=current_res, 
                                          window_size=window_size,
                                          dropout=0.2,
-                                         mlp_ratio=mlp_ratio
+                                         mlp_ratio=mlp_ratio,
+                                         shifted_windows=shifted_windows,
+                                         kernel_flex=kernel_flex
                                          )
         
         current_res = [current_res[0] // 2, current_res[1] // 2]
@@ -1095,7 +1072,9 @@ class ModelSwinMLP(torch.nn.Module):
                                          input_resolution=current_res, 
                                          window_size=window_size,
                                          dropout=0.3,
-                                         mlp_ratio=mlp_ratio
+                                         mlp_ratio=mlp_ratio,
+                                         shifted_windows=shifted_windows,
+                                         kernel_flex=kernel_flex
                                          )
         
         bottleneck_res = [current_res[0] // 2, current_res[1] // 2]
@@ -1104,7 +1083,10 @@ class ModelSwinMLP(torch.nn.Module):
                                        input_resolution=bottleneck_res, 
                                        window_size=window_size,
                                        dropout=0.0,
-                                       mlp_ratio=mlp_ratio
+                                       mlp_ratio=mlp_ratio,
+                                       shifted_windows=shifted_windows,
+                                       kernel_flex=kernel_flex,
+                                       skip= False
                                        )
         current_res = [bottleneck_res[0] * 2, bottleneck_res[1] * 2]
 
@@ -1112,7 +1094,9 @@ class ModelSwinMLP(torch.nn.Module):
                                        input_resolution=current_res, 
                                        window_size=window_size,
                                        dropout=0.0,
-                                       mlp_ratio=mlp_ratio
+                                       mlp_ratio=mlp_ratio,
+                                       shifted_windows=shifted_windows,
+                                       kernel_flex=kernel_flex
                                     )
         current_res = [current_res[0] * 2, current_res[1] * 2]
 
@@ -1120,39 +1104,51 @@ class ModelSwinMLP(torch.nn.Module):
                                        input_resolution=current_res, 
                                        window_size=window_size,
                                        dropout=0.0,
-                                       mlp_ratio=mlp_ratio)
+                                       mlp_ratio=mlp_ratio,
+                                       shifted_windows=shifted_windows,
+                                       kernel_flex=kernel_flex
+                                       )
         current_res = [current_res[0] * 2, current_res[1] * 2]
 
         self.up4 = SwinMLPDecoderLayer(in_channels=64, out_channels=32, 
                                        input_resolution=current_res, 
                                        window_size=window_size,
                                        dropout=0.0,
-                                       mlp_ratio=mlp_ratio)
+                                       mlp_ratio=mlp_ratio,
+                                       shifted_windows=shifted_windows,
+                                       kernel_flex=kernel_flex
+                                       )
         current_res = [current_res[0] * 2, current_res[1] * 2]
 
         self.final_upsample = nn.ConvTranspose2d(
-            in_channels=32,
+            in_channels=64,
             out_channels=classes,
-            kernel_size=4, 
+            kernel_size=3, 
             stride=2, 
             padding=1,
+            output_padding=1,
             bias=False
-            )           
+            ) 
     @monitor()   
     def forward(self, x):
-        x = self.conv(x)
-        x = self.norm(x)
-        x0 = self.act(x) 
-        x1 = self.down1(x0)
+        # Initial convolution to reduce spatial dimensions and increase channels
+        x_init = self.conv(x) 
+        x_init = self.norm(x_init)
+        x_init = self.act(x_init) 
+
+        # Encoding path
+        x1 = self.down1(x_init)
         x2 = self.down2(x1)
         x3 = self.down3(x2)
         x_bottleneck = self.down4(x3)
 
-        x = self.up1(x_bottleneck, x_skip=x3) 
-        x = self.up2(x, x_skip=x2)
-        x = self.up3(x, x_skip=x1)
-        x = self.up4(x, x_skip=x0)
+        # Decoding path with skip connections
+        x = self.up1(x_bottleneck) 
+        x = self.up2(x, x_skip=x3)
+        x = self.up3(x, x_skip=x2)
+        x = self.up4(x, x_skip=x1)
 
+        # Final upsampling to get back to original resolution and desired number of classes
+        x = torch.cat((x, x_init), dim=1)
         logits = self.final_upsample(x)
-
         return logits
