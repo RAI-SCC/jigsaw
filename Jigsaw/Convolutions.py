@@ -25,27 +25,38 @@ class ConvSelectionStrategy:
         self.weight_reshape = self._reshape_weights_selection(bayesian)
         self.grad_bias = self._grad_bias_selection(parallelism, bias)
         self.communicate_halos_forward, self.communicate_halos_backward = self._communicate_halos_selection(kernel_size, stride, parallelism)
+        
+        # Select communicate halos
+        self._communicate_halos_fn_selection(parallelism)
     
+    def _communicate_halos_fn_selection(self, parallelism):
+        if parallelism == 4:
+            self.communicate_halos = dist_conv.communicate_halos
+            self.append_halos = dist_conv.append_halos
+        elif parallelism == 8:
+            self.communicate_halos = dist_conv.communicate_halos_8way
+            self.append_halos = dist_conv.append_halos_8way
+
     def _communicate_halos_selection(self, kernel_size, stride, parallelism):
         if isinstance(kernel_size, int) and isinstance(stride, int):
             if kernel_size == stride:
                 return self._no_communicate_halos_forward, self._no_communicate_halos_backward
             else:
                 if parallelism == 4:
-                    return self._communicate_halos_forward_4way, self._communicate_halos_backward_4way
+                    return self._communicate_halos_forward, self._communicate_halos_backward_4way
                 else:
-                    return self._communicate_halos_forward_8way, self._communicate_halos_backward_8way
+                    return self._communicate_halos_forward, self._communicate_halos_backward_8way
         else:
             if all(p == k for (p, k) in zip(kernel_size, stride)):
                 return self._no_communicate_halos_forward, self._no_communicate_halos_backward
             else:
                 if parallelism == 4:
-                    return self._communicate_halos_forward_4way, self._communicate_halos_backward_4way
+                    return self._communicate_halos_forward, self._communicate_halos_backward_4way
                 else:
-                    return self._communicate_halos_forward_8way, self._communicate_halos_backward_8way
+                    return self._communicate_halos_forward, self._communicate_halos_backward_8way
             
-    def _communicate_halos_forward_4way(self, x, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
-        halo, _ = dist_conv.communicate_halos(
+    def _communicate_halos_forward(self, x, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
+        halo, _ = self.communicate_halos(
             x,
             right_to_left,
             left_to_right,
@@ -55,26 +66,27 @@ class ConvSelectionStrategy:
             spatial_group,
             async_op=async_op,
         )
-        x_with_halos = dist_conv.append_halos(
+        x_with_halos = self.append_halos(
             x, halo, right_to_left, left_to_right, local_rank, 4, empty
         )
+        
         return x_with_halos
     
-    def _communicate_halos_forward_8way(self, x, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
-        halo, _ = dist_conv.communicate_halos_8way(
-            x,
-            right_to_left,
-            left_to_right,
-            local_rank,
-            8,
-            empty,
-            spatial_group,
-            async_op=False,
-        )
-        x_with_halos = dist_conv.append_halos_8way(
-            x, halo, spatial_group, empty
-        )
-        return x_with_halos
+    # def _communicate_halos_forward_8way(self, x, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
+    #     halo, _ = dist_conv.communicate_halos_8way(
+    #         x,
+    #         right_to_left,
+    #         left_to_right,
+    #         local_rank,
+    #         8,
+    #         empty,
+    #         spatial_group,
+    #         async_op=False,
+    #     )
+    #     x_with_halos = dist_conv.append_halos_8way(
+    #         x, halo, spatial_group, empty
+    #     )
+    #     return x_with_halos
     
     def _no_communicate_halos_forward(self, x, *args, **kwargs):
         x = x.contiguous()
