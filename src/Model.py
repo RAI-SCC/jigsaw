@@ -1086,7 +1086,6 @@ class ModelSwinMLP(torch.nn.Module):
                                        mlp_ratio=mlp_ratio,
                                        shifted_windows=shifted_windows,
                                        kernel_flex=kernel_flex,
-                                       skip= False
                                        )
         current_res = [bottleneck_res[0] * 2, bottleneck_res[1] * 2]
 
@@ -1121,7 +1120,7 @@ class ModelSwinMLP(torch.nn.Module):
         current_res = [current_res[0] * 2, current_res[1] * 2]
 
         self.final_upsample = nn.ConvTranspose2d(
-            in_channels=64,
+            in_channels=32,
             out_channels=classes,
             kernel_size=3, 
             stride=2, 
@@ -1143,12 +1142,10 @@ class ModelSwinMLP(torch.nn.Module):
         x_bottleneck = self.down4(x3)
 
         # Decoding path with skip connections
-        x = self.up1(x_bottleneck) 
-        x = self.up2(x, x_skip=x3)
-        x = self.up3(x, x_skip=x2)
-        x = self.up4(x, x_skip=x1)
+        x = self.up1(x_bottleneck, x_skip=x3)
+        x = self.up2(x, x_skip=x2)
+        x = self.up3(x, x_skip=x1)
+        x = self.up4(x, x_skip=x_init)
 
-        # Final upsampling to get back to original resolution and desired number of classes
-        x = torch.cat((x, x_init), dim=1)
         logits = self.final_upsample(x)
         return logits

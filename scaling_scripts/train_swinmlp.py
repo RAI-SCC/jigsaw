@@ -75,6 +75,14 @@ def main():
     num_samples = len(train_loader.dataset)
     num_samples_val = len(val_loader.dataset)
 
+    kernel_flex = config['SWIN_MLP']['kernel_flex']
+    if kernel_flex:
+        kernel_str = "flex"
+    else:        
+        kernel_str = "fixed"
+
+    seed = config["SWIN_MLP"]["seed"]
+
     optimizer = optim.AdamW(
         model.parameters(),
         lr= learn_rate,
@@ -94,10 +102,8 @@ def main():
 
     loss_fn = utils.build_loss_fn(config)
 
-    num_params = sum(p.numel() for p in model.parameters())
-
     os.makedirs(save_dir, exist_ok=True)
-    log_file = f"log_{config['data']['image_height']}_{num_epochs}_{learn_rate}.csv"
+    log_file = f"log_{config['data']['image_height']}_{num_epochs}_{learn_rate}_{kernel_str}_{seed}.csv"
     log_path = os.path.join(save_dir, log_file)
 
     if not os.path.isfile(log_path):
@@ -135,8 +141,12 @@ def main():
                 'Val_Recall'
             ])
 
+    # Calculate the number of batches per epoch to determine the profiling schedule
+    batches_per_epoch = len(train_loader)
+    wait_steps = max(0, batches_per_epoch - 6)
+
     with torch.profiler.profile(
-        schedule=torch.profiler.schedule(wait=2, warmup=3, active=3, repeat=1),
+        schedule=torch.profiler.schedule(wait=wait_steps, warmup=3, active=3, repeat=3),
         on_trace_ready=torch.profiler.tensorboard_trace_handler(save_dir),
         with_flops=True,
         record_shapes=True,
@@ -144,19 +154,15 @@ def main():
         profile_memory=True,
         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]
     ) as prof:  
+        
         for epoch in range(num_epochs):
             torch.cuda.reset_peak_memory_stats() 
             torch.cuda.synchronize()
             start_time = time.time()
 
-            if epoch == 0:
-                profiler = prof
-            else:
-                profiler = None
-
             train_loss = train_one_epoch(
                 model= model, loader=train_loader, optimizer=optimizer,
-                loss_fn=loss_fn, device=device, profiler=profiler)
+                loss_fn=loss_fn, device=device, profiler=prof)
            
             train_metrics = utils.evaluate(train_loader, model,loss_fn, device)
             val_metrics   = utils.evaluate(val_loader, model, loss_fn, device)
@@ -172,17 +178,16 @@ def main():
             latency_ms = (duration / num_samples) * 1000
             throughput = num_samples / duration
 
-            if epoch == 0:
+            if epoch <= 2:
                 raw_flops = sum(item.flops for item in prof.key_averages())
-                active_steps = 3 
-                total_flops = raw_flops / (active_steps * batch_size)
+                total_flops = raw_flops / (3 * batch_size)
             else:
                 total_flops = 0
 
             with open(log_path, mode='a', newline='') as f:
                 writer = csv.writer(f, delimiter=';')
                 writer.writerow([
-                    num_params,
+                    sum(p.numel() for p in model.parameters()),
                     int(epoch),
                     int(config['data']['image_height']),
                     optimizer.param_groups[0]["lr"],
@@ -211,10 +216,7 @@ def main():
                     round(float(val_metrics['FN']), 4),
                     round(float(val_metrics['Precision']), 4),
                     round(float(val_metrics['Recall']), 4)
-                ])
-    check_flops = sum(item.flops for item in prof.key_averages())
-    total_flops_per_image = check_flops / (3 * batch_size)
-    print(f"FLOPs per image: {total_flops_per_image}")               
+                ])            
 
 if __name__ == "__main__":
     main()

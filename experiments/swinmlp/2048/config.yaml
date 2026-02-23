@@ -60,4 +60,5 @@ SWIN_MLP:
   dropout: 0.2
   mlp_ratio: 4.0
   shifted_windows: true
-  kernel_flex: false
+  kernel_flex: true
+  seed: 42

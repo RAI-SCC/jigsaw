@@ -122,8 +122,12 @@ class SwinMLPBlock(nn.Module):
         return x
     
 class SwinMLPEncoderLayer(nn.Module):
-    def __init__(self, in_channels, out_channels, input_resolution, window_size = 4, stride = 2, dropout=0.0, mlp_ratio=4.0, shifted_windows=False, kernel_flex=False):
+    def __init__(self, in_channels, out_channels, input_resolution,
+                window_size = 4, dropout=0.0, mlp_ratio=4.0,
+                shifted_windows=False, kernel_flex=False):
         super().__init__()
+
+        self.pool = nn.MaxPool2d(stride=2, kernel_size=2)
 
         if kernel_flex:
             current_res = input_resolution[0]
@@ -137,75 +141,72 @@ class SwinMLPEncoderLayer(nn.Module):
             kernel_size = 3
             padding = 1
 
-        self.downsample_conv = nn.Conv2d(
-                                    in_channels = in_channels,
-                                    out_channels = out_channels,
-                                    kernel_size = kernel_size,
-                                    padding = padding,
-                                    stride = stride,
-                                    bias = False
-                                    )
+        self.conv = nn.Conv2d(in_channels = in_channels,
+                            out_channels = out_channels,
+                            kernel_size = kernel_size,
+                            padding = padding,
+                            stride = 1,
+                            bias = False
+                            )
 
         self.act = nn.GELU()
 
-        self.current_resolution = [i // stride for i in input_resolution]
+        self.current_resolution = [i // 2 for i in input_resolution]
         
-        self.swinMlpBlock = SwinMLPBlock(dim=out_channels, input_resolution=self.current_resolution, window_size=window_size, dropout=dropout, mlp_ratio=mlp_ratio, shifted_windows=shifted_windows)
+        self.swinMlpBlock = SwinMLPBlock(dim=out_channels, input_resolution=self.current_resolution,
+                                        window_size=window_size, dropout=dropout,
+                                        mlp_ratio=mlp_ratio, shifted_windows=shifted_windows)
 
 
     def forward(self, x):
-        x = self.downsample_conv(x)
+        x = self.pool(x)
+        x = self.conv(x)
         x = self.act(x)
         x = x.permute(0, 2, 3, 1)
         x = self.swinMlpBlock(x)
         x = x.permute(0, 3, 1, 2)
         x = self.act(x)
-    
         return x
      
 class SwinMLPDecoderLayer(nn.Module):
-    def __init__(self, in_channels, out_channels,
-                 input_resolution, window_size = 4, stride = 2,
-                 dropout=0.0, mlp_ratio=4.0,
-                 shifted_windows=False, kernel_flex=False, skip = True):
+    def __init__(self, in_channels, out_channels, input_resolution,
+                window_size = 4, dropout=0.0, mlp_ratio=4.0,
+                shifted_windows=False, kernel_flex=False, skip = True):
         super().__init__()
         self.skip = skip
-        self.stride = stride
-        self.input_resolution = input_resolution
+
+        self.up = nn.ConvTranspose2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=2,
+            stride=2
+        )
+
+        conv_in = out_channels * 2 if skip else out_channels
 
         if kernel_flex:
-            current_res = input_resolution[0] 
-            kernel_size = int(3 * (current_res / 256)) 
-            
-            if kernel_size % 2 == 0: kernel_size += 1
+            current_res = input_resolution[0] * 2       # because of upsample, so resolution doubles
+            kernel_size = int(3 * (current_res / 256))
+
+            if kernel_size % 2 == 0: kernel_size += 1 
             if kernel_size < 3: kernel_size = 3
 
             padding = kernel_size // 2
-            output_padding = 2 + 2 * padding - kernel_size
         else:
             kernel_size = 3
             padding = 1
-            output_padding = 1
 
-        # TODO
-        if skip: 
-            upsample_in = in_channels * 2 # because of skip connection concatenation 
-        else:
-            upsample_in = in_channels  # if no skip connection
-
-        self.upsample_conv = nn.ConvTranspose2d(
-                                    in_channels = upsample_in,
-                                    out_channels = out_channels,
-                                    kernel_size = kernel_size,
-                                    stride = stride,
-                                    padding = padding,
-                                    output_padding = output_padding,
-                                    bias = False
-                                    )
+        self.conv = nn.Conv2d(
+            in_channels=conv_in,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            bias=False
+        )
             
         self.act = nn.GELU()
 
-        self.current_resolution = [i * stride for i in input_resolution]
+        self.current_resolution = [i * 2 for i in input_resolution]
         
         self.swinMlpBlock = SwinMLPBlock(dim=out_channels,
                                          input_resolution=self.current_resolution, 
@@ -216,10 +217,16 @@ class SwinMLPDecoderLayer(nn.Module):
                                          )
 
     def forward(self, x, x_skip = None):
-        if self.skip and x_skip is not None:
-            x = torch.cat((x, x_skip), dim=1)
+        x1 = self.up(x)
 
-        x = self.upsample_conv(x)
+        if self.skip and x_skip is not None:
+            diffY = x_skip.size()[2] - x1.size()[2]
+            diffX = x_skip.size()[3] - x1.size()[3]
+            x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
+                             diffY // 2, diffY - diffY // 2])
+            x1 = torch.cat([x1, x_skip], dim=1) 
+
+        x = self.conv(x1)
         x = self.act(x)
 
         x = x.permute(0, 2, 3, 1)
@@ -227,14 +234,3 @@ class SwinMLPDecoderLayer(nn.Module):
         x = x.permute(0, 3, 1, 2)
         x = self.act(x)
         return x
-
-
-#if self.skip and x_skip is not None:
-        # x = torch.cat((x, x_skip), dim=1)
-        # cat output (B, 512, 16, 16)
-
-    # x = self.resample_block(x)
-    # ResampleBlock(512→128):
-    # Pfad A: interpolate -> Conv3x3(512→128)  -> (B, 128, 32, 32)
-    # Pfad B: interpolste -> Conv1x1(512→128)  -> (B, 128, 32, 32)
-    # Addition                            -> (B, 128, 32, 32)

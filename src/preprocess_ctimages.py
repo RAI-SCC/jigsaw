@@ -18,6 +18,7 @@ def main():
     IMAGE_DIR = config['data']['image_dir']
     MASK_DIR = config['data']['mask_dir']
     BASE_DIR = config['data']['base_dir']
+    SEED = config['SWIN_MLP']['seed']
 
     H = config['data']['image_height']
     W = config['data']['image_width']
@@ -34,7 +35,7 @@ def main():
         patient_ids.add(patient_id)
 
     patient_ids = list(patient_ids)
-    random.seed(42)
+    random.seed(SEED)
     random.shuffle(patient_ids)
 
     num_total = len(patient_ids)
@@ -46,7 +47,7 @@ def main():
     test_ids = set(patient_ids[val_split_end:])
 
     split_info = {
-        "seed": 42,
+        "seed": SEED,
         "total_patients": num_total,
         "train_count": len(train_ids),
         "val_count": len(val_ids),
