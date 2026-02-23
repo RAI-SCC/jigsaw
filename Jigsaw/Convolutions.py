@@ -33,9 +33,11 @@ class ConvSelectionStrategy:
         if parallelism == 4:
             self.communicate_halos = dist_conv.communicate_halos
             self.append_halos = dist_conv.append_halos
+            self.dist_conv2d_fn = dist_conv.conv2d_fourway
         elif parallelism == 8:
             self.communicate_halos = dist_conv.communicate_halos_8way
             self.append_halos = dist_conv.append_halos_8way
+            self.dist_conv2d_fn = dist_conv.conv2d_eightway
 
     def _communicate_halos_selection(self, kernel_size, stride, parallelism):
         if isinstance(kernel_size, int) and isinstance(stride, int):
@@ -546,7 +548,7 @@ class Conv2d(torch.autograd.Function):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
         
         # Compute the forward pass        
-        y, x0, x1, right_to_left, left_to_right = dist_conv.conv2d_fourway(
+        y, x0, x1, right_to_left, left_to_right = selector.dist_conv2d_fn(
             x,
             weight,
             bias,
@@ -694,7 +696,7 @@ class Conv2d(torch.autograd.Function):
             right_to_left,
             left_to_right,
             local_rank,
-            4,
+            ctx.parallelism,
             empty,
             spatial_group,
             async_op=True
@@ -934,7 +936,7 @@ class Conv2d_8way(torch.autograd.Function):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
         
         # Compute the forward pass        
-        y, x0, x1, right_to_left, left_to_right = dist_conv.conv2d_eightway(
+        y, x0, x1, right_to_left, left_to_right = selector.dist_conv2d_fn(
             x,
             weight,
             bias,
