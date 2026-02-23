@@ -893,7 +893,6 @@ def build_swin_model(
         input_resolution=resolution,
         classes=data_cfg["num_classes"],
         window_size=swin_cfg["window_size"],
-        dropout=swin_cfg["dropout"],
         mlp_ratio=swin_cfg["mlp_ratio"],
         shifted_windows= swin_cfg["shifted_windows"],
         kernel_flex= swin_cfg["kernel_flex"]
