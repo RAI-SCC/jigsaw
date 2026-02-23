@@ -636,7 +636,7 @@ def distributed_conv_transpose2d_over_channels(
     dilation: int,
     local_rank: int,
     channel_group: dist.ProcessGroup,
-    conv_transpose2d_fn
+    convTranspose2d_fn
 ) -> torch.tensor:
     """Distributed 2d convolution across channels"""
     # x shape
@@ -648,7 +648,7 @@ def distributed_conv_transpose2d_over_channels(
     
     match mod:
         case 0:
-            y = conv_transpose2d_fn(
+            y = convTranspose2d_fn(
                 x,
                 w[...,: in_channels // 2,:,:,:],
                 stride=stride,
@@ -659,7 +659,7 @@ def distributed_conv_transpose2d_over_channels(
                 [empty, x_buffer], [empty, x], group=channel_group, async_op=False
             )
             if b is not None:
-                y = y + conv_transpose2d_fn(
+                y = y + convTranspose2d_fn(
                     x_buffer,
                     w[...,in_channels // 2 :,:,:,:],
                     b,
@@ -668,7 +668,7 @@ def distributed_conv_transpose2d_over_channels(
                     dilation=dilation,
                 )
             else:
-                y = y + conv_transpose2d_fn(
+                y = y + convTranspose2d_fn(
                     x_buffer,
                     w[...,in_channels // 2 :,:,:,:],
                     stride=stride,
@@ -677,7 +677,7 @@ def distributed_conv_transpose2d_over_channels(
                 )
             return y, x, x_buffer
         case 1:
-            y = conv_transpose2d_fn(
+            y = convTranspose2d_fn(
                 x,
                 w[..., in_channels // 2 :,:,:,:],
                 stride=stride,
@@ -688,7 +688,7 @@ def distributed_conv_transpose2d_over_channels(
                 [x_buffer, empty], [x, empty], group=channel_group, async_op=False
             )
             if b is not None:
-                y = y + conv_transpose2d_fn(
+                y = y + convTranspose2d_fn(
                     x_buffer,
                     w[...,: in_channels // 2,:,:,:],
                     b,
@@ -697,7 +697,7 @@ def distributed_conv_transpose2d_over_channels(
                     dilation=dilation,
                 )
             else:
-                y = y + conv_transpose2d_fn(
+                y = y + convTranspose2d_fn(
                     x_buffer,
                     w[...,: in_channels // 2,:,:,:],
                     stride=stride,
@@ -1271,7 +1271,7 @@ def conv2d_fourway(
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     empty: torch.Tensor,
-    conv2d_fn: torch.nn.functional.conv2d
+    selector
 ) -> torch.Tensor:
     """Distributed 2d convolution"""
     # Setup
@@ -1281,7 +1281,7 @@ def conv2d_fourway(
     right_to_left, left_to_right = calc_halo_sizes(x.shape, kernel_size[1], stride[1])
 
     # Spatial split
-    halo, _ = communicate_halos(
+    x_with_halos = selector.communicate_halos_forward(
         x,
         right_to_left,
         left_to_right,
@@ -1289,10 +1289,8 @@ def conv2d_fourway(
         4,
         empty,
         spatial_group,
-        async_op=False,
-    )
-    x_with_halos = append_halos(
-        x, halo, right_to_left, left_to_right, local_rank, 4, empty
+        channel_group,
+        async_op=False
     )
     (
         y,
@@ -1309,7 +1307,7 @@ def conv2d_fourway(
         dilation,
         empty,
         channel_group,
-        conv2d_fn
+        selector.conv2d_fn
     )
     return y, x_left, x_right, right_to_left, left_to_right
 
@@ -1326,7 +1324,7 @@ def conv_transpose2d_fourway(
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     empty: torch.Tensor,
-    conv_transpose2d_fn: torch.nn.functional.conv2d
+    selector
 ) -> torch.Tensor:
     """Distributed 2d convolution"""
     # Setup
@@ -1342,11 +1340,11 @@ def conv_transpose2d_fourway(
         dilation=dilation,
         local_rank=local_rank,
         channel_group=channel_group,
-        conv_transpose2d_fn=conv_transpose2d_fn
+        convTranspose2d_fn=selector.convTranspose2d_fn
     )
     
     # communicate x1, x0
-    y_buffer, overlap_size, local_size_left, local_size_right = convTranspose_halocalc_twoway(
+    y, halo_sizes = selector.communicate_halos_forward(
         x,
         y,
         kernel_size[1],
@@ -1358,21 +1356,8 @@ def conv_transpose2d_fourway(
         parallelism=4,
     )
     
-    right_to_left = y.shape[-1] - local_size_left
-    left_to_right = y.shape[-1] - local_size_right
-    
-    # Add overlapping bounds
-    if local_rank // 2 == 0:  # LHS
-        start_overlap_index = y.shape[-1] - overlap_size
-        y[..., start_overlap_index:] = y[..., start_overlap_index:] + y_buffer
-        y = y[..., :local_size_left]
-    elif local_rank // 2 == 1:
-        y[..., :overlap_size] = y[..., :overlap_size] + y_buffer
-        y = y[..., -local_size_right:]
     
     x_aug = torch.cat([x0, x1], dim=-3)
-    
-    halo_sizes = torch.tensor([right_to_left, left_to_right])
     
     return y, x_aug, x, halo_sizes
 
@@ -1389,11 +1374,10 @@ def conv_transpose2d_fourway_backward(
     empty: torch.tensor,
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
-    conv_transpose2d_grad_fn,
+    selector,
 ):
     right_to_left, left_to_right = halo_sizes[0], halo_sizes[1]
-
-    halo, _ = communicate_halos(
+    grad_output = selector.communicate_halos_backward(
         grad_output,
         right_to_left,
         left_to_right,
@@ -1403,13 +1387,8 @@ def conv_transpose2d_fourway_backward(
         spatial_group=spatial_group,
         async_op=False,
     )
-    
-    if local_rank // 2 == 0:  # left and right groups # TODO get from process group?
-        grad_output = torch.cat([grad_output, halo], dim=-1)
-    else:
-        grad_output = torch.cat([halo, grad_output], dim=-1)
-        
-    g_x, g_w, _ = conv_transpose2d_grad_fn(
+            
+    g_x, g_w, _ = selector.convTranspose2d_grad_fn(
         grad_output,
         x_aug,
         weight,
@@ -1449,7 +1428,7 @@ def conv_transpose2d_fourway_backward(
 
     g_x = (
         g_x[..., : in_channels_global // 2, :, :] + g_x_recv
-        if local_rank % 2 == 0 # TODO: left/right definitions
+        if channel_group.rank() == 0 # TODO: left/right definitions [0, 2]
         else g_x[..., in_channels_global // 2 :, :, :] + g_x_recv
     )
 
