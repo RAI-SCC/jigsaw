@@ -1680,7 +1680,7 @@ def conv_transpose2d_fourway(
     return y, x_aug, x, halo_sizes
 
 
-def conv_transpose2d_8way(
+def conv_transpose2d_eightway(
     x: torch.Tensor,
     w: torch.Tensor,
     b: torch.Tensor,

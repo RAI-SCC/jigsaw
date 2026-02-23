@@ -215,13 +215,13 @@ class ConvTransposeSelectionStrategy:
             self.communicate_halos = dist_conv.convTranspose_halocalc_twoway
             self.append_halos = dist_conv.append_halos
             self.dummy_tensor = torch.tensor([0,0])
-            self.dist_conv_transpose2d_fn = dist_conv.conv_transpose2d_4way
+            self.dist_conv_transpose2d_fn = dist_conv.conv_transpose2d_fourway
             self.dist_conv_transpose2d_backward_fn = dist_conv.conv_transpose2d_fourway_backward
         elif parallelism == 8:
             self.communicate_halos = dist_conv.convTranspose_halocalc_fourway
             self.append_halos = dist_conv.append_halos_8way
             self.dummy_tensor = torch.tensor([[0,0,0],[0,0,0]])
-            self.dist_conv_transpose2d_fn = dist_conv.conv_transpose2d_4way
+            self.dist_conv_transpose2d_fn = dist_conv.conv_transpose2d_eightway
             self.dist_conv_transpose2d_backward_fn = dist_conv.conv_transpose2d_eightway_backward
     
     def _communicate_halos_selection(self, kernel_size, stride, parallelism):
