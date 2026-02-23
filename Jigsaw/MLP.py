@@ -114,7 +114,7 @@ class DistributedMLP(torch.nn.Module):
         return x
 
 def _average_weights(
-    model: torch.nn.Module, spatial_group: dist.ProcessGroup, device: torch.device
+    model: torch.nn.Module, spatial_group: dist.ProcessGroup
 ):
     for _, param in model.named_parameters():
         dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
@@ -144,6 +144,8 @@ class DistributedSynchronizedMLP(torch.nn.Module):
         if parallelism == 2:
             # in, hidden, out dim are global sizes for two-way model parallelism
             # required to maintain partitioning across final dimension
+            
+            # local X has shape [seq_length, in_dim//2]
             self.linear1 = Linear.DistributedXWTSync(
                 in_dim // 2,
                 hidden_dim,
@@ -173,7 +175,7 @@ class DistributedSynchronizedMLP(torch.nn.Module):
         self.drop2 = Dropout(p=dropout)
         self.local_rank = local_rank
         
-        _average_weights(self, sync_group, device)
+        _average_weights(self, sync_group)
         
 
 

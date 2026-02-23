@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 
+from Jigsaw import Linear
 
 class DistributedLayerNorm(torch.nn.Module):
     """LayerNorm with synchronized gradients across a process group."""
@@ -21,6 +22,9 @@ class DistributedLayerNorm(torch.nn.Module):
         self.normalized_dim = normalized_dim
         self.eps = 1e-5
         self.layernorm = DistributedLNFunction().apply
+        
+    def get_parameter_count(self):
+        return (self.weight.numel() + self.bias.numel()) // dist.get_world_size(group=self.spatial_group)
 
     def forward(self, x):
         return self.layernorm(
@@ -133,6 +137,9 @@ class DistributedNoParamLayerNorm(torch.nn.Module):
 
         self.eps = 1e-5
         self.layernorm = DistributedNoParamLNFunction().apply
+        
+    def get_parameter_count(self):
+        return 0
 
     def forward(self, x):
         return self.layernorm(
@@ -223,6 +230,9 @@ class DistributedSoftMax(torch.nn.Module):
         self.dim = dim
         self.group = group  
         self.func = _DistributedSoftmax.apply
+    
+    def get_parameter_count(self):
+        return 0
 
     def forward(self, x):
         return self.func(x, self.dim, self.group)
@@ -292,3 +302,87 @@ class _DistributedSoftmax(torch.autograd.Function):
 
         # out has vmapped dimension at dim 0
         return out, 0
+
+
+
+class DistributedNICENorm(torch.nn.Module):
+    def __init__(
+        self,
+        dim,
+        noise_dim,
+        rank,
+        device,
+        parallelism: int,
+        spatial_group,
+        channel_group
+    ):
+        super().__init__()
+
+        self.global_dim = dim
+        self.noise_dim = noise_dim
+        self.rank = rank
+        self.device = device
+        self.parallelism = parallelism
+        self.spatial_group = spatial_group
+        self.channel_group = channel_group
+
+        self.global_dim = dim # // channel_group.size()
+
+        self.ln = DistributedNoParamLayerNorm(self.rank, self.device, channel_group=self.channel_group)
+        self.gelu = torch.nn.GELU()
+
+        self.scale_linear1 = Linear.DistributedXWT_Nice(
+            in_dim=self.noise_dim,
+            out_dim=self.global_dim // 2,
+            bias=True, # TODO: do we default to true in bias?
+            device=self.device,
+            spatial_group=self.spatial_group,
+            channel_group=self.channel_group
+        )
+        self.scale_linear2 = Linear.DistributedXWTSync(
+            in_dim=self.global_dim // 2,
+            out_dim=self.global_dim,
+            bias=True,
+            local_rank=self.rank,
+            device=self.device,
+            parallelism=self.parallelism,
+            sync_group=self.spatial_group,
+            model_group=self.channel_group
+        )
+
+        self.shift_linear1 = Linear.DistributedXWT_Nice(
+            in_dim=self.noise_dim,
+            out_dim=self.global_dim // 2,
+            bias=True,
+            device=self.device,
+            spatial_group=self.spatial_group,
+            channel_group=self.channel_group
+        )
+        self.shift_linear2 = Linear.DistributedXWTSync(
+            in_dim=self.global_dim // 2,
+            out_dim=self.global_dim,
+            bias=True,
+            local_rank=self.rank,
+            device=self.device,
+            parallelism=self.parallelism,
+            sync_group=self.spatial_group,
+            model_group=self.channel_group
+        )
+
+
+    def forward(self, x, noise):
+        x = self.ln(x)
+        scale = self.scale_linear1(noise)
+        scale = self.gelu(scale)
+        scale = self.scale_linear2(scale)
+
+        shift = self.shift_linear1(noise)
+        shift = self.gelu(shift)
+        shift = self.shift_linear2(shift)
+        
+        scale = scale.unsqueeze(1)
+        shift = shift.unsqueeze(1)
+
+        x = scale * x + shift
+
+        return x

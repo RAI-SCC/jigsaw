@@ -15,13 +15,76 @@ class ConvSelectionStrategy:
         self,
         bayesian,  
         parallelism,
-        bias
+        bias,
+        kernel_size, 
+        stride
     ):
         self.conv2d_fn = self._conv2d_fn_selection(bayesian)
         self.conv2d_input_fn = self._conv2d_input_fn_selection(bayesian)
         self.conv2d_weight_fn = self._conv2d_weight_fn_selection(bayesian)
         self.weight_reshape = self._reshape_weights_selection(bayesian)
         self.grad_bias = self._grad_bias_selection(parallelism, bias)
+        self.communicate_halos_forward, self.communicate_halos_backward = self._communicate_halos_selection(kernel_size, stride)
+    
+    def _communicate_halos_selection(self, kernel_size, stride):
+        if isinstance(kernel_size, int) and isinstance(stride, int):
+            if kernel_size == stride:
+                return self._no_communicate_halos_forward, self._no_communicate_halos_backward
+            else:
+                return self._communicate_halos_forward, self._communicate_halos_backward
+        else:
+            if all(p == k for (p, k) in zip(kernel_size, stride)):
+                return self._no_communicate_halos_forward, self._no_communicate_halos_backward
+            else:
+                return self._communicate_halos_forward, self._communicate_halos_backward
+            
+    def _communicate_halos_forward(self, x, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
+        halo, _ = dist_conv.communicate_halos(
+            x,
+            right_to_left,
+            left_to_right,
+            local_rank,
+            parallelism,
+            empty,
+            spatial_group,
+            async_op=async_op,
+        )
+        x_with_halos = dist_conv.append_halos(
+            x, halo, right_to_left, left_to_right, local_rank, 4, empty
+        )
+        return x_with_halos
+    
+    def _no_communicate_halos_forward(self, x, *args, **kwargs):
+        x = x.contiguous()
+        return x
+    
+    def _communicate_halos_backward(self, g_x_aug, x_shape, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
+        halo, wait_handle = dist_conv.communicate_halos(
+            g_x_aug,
+            right_to_left,
+            left_to_right,
+            local_rank,
+            parallelism,
+            empty,
+            spatial_group,
+            async_op=async_op,
+        )
+        
+        wait_handle.wait()
+        
+        if spatial_group.rank() == 0:
+            g_x = g_x_aug[..., : x_shape[-1]]
+            if right_to_left > 0:
+                g_x[..., -right_to_left:] = g_x[..., -right_to_left:] + halo
+        elif spatial_group.rank() == 1:
+            g_x = g_x_aug[..., -x_shape[-1] :]
+            if left_to_right > 0:
+                g_x[..., :left_to_right] = g_x[..., :left_to_right] + halo
+
+        return g_x
+    
+    def _no_communicate_halos_backward(self, g_x_aug,  *args, **kwargs):
+        return g_x_aug
     
     def _conv2d_fn_selection(self, bayesian):
         if bayesian:
@@ -79,12 +142,95 @@ class ConvTransposeSelectionStrategy:
         self,
         bayesian,  
         parallelism,
-        bias
+        bias,
+        kernel_size,
+        stride
     ):
         self.convTranspose2d_fn = self._convTranspose2d_fn_selection(bayesian)
         self.convTranspose2d_grad_fn = self._convTranspose2d_grad_fn_selection(bayesian)
         self.weight_reshape = self._reshape_weights_selection(bayesian)
         self.grad_bias = self._grad_bias_selection(parallelism, bias)
+        self.communicate_halos_forward, self.communicate_halos_backward = self._communicate_halos_selection(kernel_size, stride)
+    
+    def _communicate_halos_selection(self, kernel_size, stride):
+        if isinstance(kernel_size, int) and isinstance(stride, int):
+            if kernel_size == stride:
+                return self._no_communicate_halos_forward, self._no_communicate_halos_backward
+            else:
+                return self._communicate_halos_forward, self._communicate_halos_backward
+        else:
+            if all(p == k for (p, k) in zip(kernel_size, stride)):
+                return self._no_communicate_halos_forward, self._no_communicate_halos_backward
+            else:
+                return self._communicate_halos_forward, self._communicate_halos_backward
+            
+    def _communicate_halos_forward(
+        self, 
+        x, 
+        y, 
+        kernel_size,
+        stride, 
+        padding, 
+        dilation, 
+        local_rank, 
+        spatial_group, 
+        parallelism
+    ):
+        y_buffer, overlap_size, local_size_left, local_size_right = dist_conv.convTranspose_halocalc_twoway(
+            x,
+            y,
+            kernel_size[1],
+            stride=stride[1],
+            padding=padding[1],
+            dilation=dilation[1],
+            local_rank=local_rank,
+            spatial_group=spatial_group,
+            parallelism=parallelism,
+        )
+        
+        right_to_left = y.shape[-1] - local_size_left
+        left_to_right = y.shape[-1] - local_size_right
+        
+        # Add overlapping bounds
+        if local_rank // 2 == 0:  # LHS
+            start_overlap_index = y.shape[-1] - overlap_size
+            y[..., start_overlap_index:] = y[..., start_overlap_index:] + y_buffer
+            y = y[..., :local_size_left]
+        elif local_rank // 2 == 1:
+            y[..., :overlap_size] = y[..., :overlap_size] + y_buffer
+            y = y[..., -local_size_right:]
+            
+        
+        halo_sizes = torch.tensor([right_to_left, left_to_right])
+    
+        return y, halo_sizes
+    
+    def _no_communicate_halos_forward(self, x, y, *args, **kwargs):
+
+        return y, torch.tensor([0, 0])
+    
+    def _communicate_halos_backward(self, grad_output, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
+        
+        halo, _ = dist_conv.communicate_halos(
+            grad_output,
+            right_to_left,
+            left_to_right,
+            local_rank,
+            parallelism,
+            empty,
+            spatial_group=spatial_group,
+            async_op=async_op,
+        )
+        
+        if spatial_group.rank() ==  0:  # left and right groups # TODO get from process group?
+            grad_output = torch.cat([grad_output, halo], dim=-1)
+        else:
+            grad_output = torch.cat([halo, grad_output], dim=-1)
+            
+        return grad_output
+    
+    def _no_communicate_halos_backward(self, grad_output,  *args, **kwargs):
+        return grad_output
     
     def _convTranspose2d_fn_selection(self, bayesian):
         if bayesian:
@@ -136,7 +282,7 @@ class ConvTransposeSelectionStrategy:
     
  
 def _average_weights(
-    model: torch.nn.Module, spatial_group: dist.ProcessGroup, device: torch.device
+    model: torch.nn.Module, spatial_group: dist.ProcessGroup
 ):
     for name, param in model.named_parameters():
         dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
@@ -202,12 +348,16 @@ class DistributedConv2D(torch.nn.Module):
             bias=bias,
         ).to(device)
         
-        self.selector = ConvSelectionStrategy(self.bayesian, self.parallelism, self.conv2d.bias)
+        self.selector = ConvSelectionStrategy(self.bayesian, self.parallelism, self.conv2d.bias, self.kernel_size, self.stride)
         
-        _average_weights(self, spatial_group, device)
+        _average_weights(self, spatial_group)
         
         self.conv2d_apply = Conv2d().apply
 
+    def get_parameter_count(self):
+        num_param = 0 if self.conv2d.bias.data is None else self.conv2d.bias.data.numel() // dist.get_world_size(group=self.spatial_group)
+        return num_param + self.conv2d.weight.data.numel() // dist.get_world_size(group=self.spatial_group)
+    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of linear layer (XWT) distributed across two processes.
@@ -285,7 +435,7 @@ class Conv2d(torch.autograd.Function):
             spatial_group=spatial_group,
             channel_group=channel_group,
             empty=empty,
-            conv2d_fn=selector.conv2d_fn
+            selector=selector
         )
 
         x_aug = torch.cat([x0, x1], dim=-3) # concatenate along the channel dimension
@@ -398,7 +548,7 @@ class Conv2d(torch.autograd.Function):
         
         right_to_left, left_to_right = ctx.halo_sizes[0], ctx.halo_sizes[1]
         x_shape_padded, x_shape = ctx.x_shape_padded, ctx.x_shape
-
+        
         g_b = selector.grad_bias(grad_output, ctx.spatial_group)
         
         g_x_aug = selector.conv2d_input_fn(
@@ -413,28 +563,19 @@ class Conv2d(torch.autograd.Function):
         left_to_right, right_to_left = (right_to_left, left_to_right)
 
         # g_x calculation
-        halo, wait_handle = dist_conv.communicate_halos(
+        # only communicates halos if they exist
+        g_x = selector.communicate_halos_backward(
             g_x_aug,
+            x_shape,
             right_to_left,
             left_to_right,
             local_rank,
             4,
             empty,
             spatial_group,
-            async_op=True,
+            async_op=True
         )
-
-        wait_handle.wait()
-
-        if local_rank % 4 in [0, 1]:
-            g_x = g_x_aug[..., : x_shape[-1]]
-            if right_to_left > 0:
-                g_x[..., -right_to_left:] = g_x[..., -right_to_left:] + halo
-        else:
-            g_x = g_x_aug[..., -x_shape[-1] :]
-            if left_to_right > 0:
-                g_x[..., :left_to_right] = g_x[..., :left_to_right] + halo
-
+        
         g_x_buffer = torch.zeros(
             (*g_x.shape[:-3], g_x.shape[-3] // 2, *g_x.shape[-2:]),
             device=g_x.device,
@@ -992,6 +1133,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
         self.dilation = dilation
         self.groups = groups
         self.local_rank = local_rank
+        self.device = device
         self.spatial_group = spatial_group
         self.channel_group = channel_group
         self.device = device
@@ -1007,7 +1149,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
             stride=self.stride,
             padding=self.padding,
             bias=bias,
-        ).to(device)
+        ).to(self.device)
         
         # Initialize 
         k = np.sqrt(self.groups / (self.out_channels * 2 * self.kernel_size[0] * self.kernel_size[1]))
@@ -1015,12 +1157,17 @@ class DistributedConvTranspose2D(torch.nn.Module):
         if bias:
             self.convTranspose2d.bias.data.uniform_(-k, k)
             
-        self.empty = torch.empty(0, device=device, dtype=torch.float32)
+        self.empty = torch.empty(0, device=self.device, dtype=torch.float32)
 
-        self.selector = ConvTransposeSelectionStrategy(self.bayesian, self.parallelism, self.convTranspose2d.bias)
+        self.selector = ConvTransposeSelectionStrategy(self.bayesian, self.parallelism, self.convTranspose2d.bias, self.kernel_size, self.stride)
        
-        _average_weights(self, spatial_group, device)
+        _average_weights(self, self.spatial_group)
+        
         self.convTranspose2d_apply = ConvTranspose2d().apply
+        
+    def get_parameter_count(self):
+        num_param = 0 if self.convTranspose2d.bias.data is None else self.convTranspose2d.bias.data.numel() // dist.get_world_size(group=self.spatial_group)
+        return num_param + self.convTranspose2d.weight.data.numel() // dist.get_world_size(group=self.spatial_group)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -1086,7 +1233,7 @@ class ConvTranspose2d(torch.autograd.Function):
     ) -> torch.Tensor:
         
         y, x_aug, x, halo_sizes = dist_conv.conv_transpose2d_fourway(
-            x, weight, bias, kernel_size, stride, padding, dilation, in_channels, local_rank, spatial_group, channel_group, empty, selector.convTranspose2d_fn
+            x, weight, bias, kernel_size, stride, padding, dilation, in_channels, local_rank, spatial_group, channel_group, empty, selector
         )
         
         # Return output and any intermediate values needed for backward
@@ -1191,7 +1338,7 @@ class ConvTranspose2d(torch.autograd.Function):
             empty,
             spatial_group,
             channel_group,
-            selector.convTranspose2d_grad_fn
+            selector
         )
 
         g_b = selector.grad_bias(grad_output, spatial_group)
