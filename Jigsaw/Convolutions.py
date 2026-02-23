@@ -215,10 +215,14 @@ class ConvTransposeSelectionStrategy:
             self.communicate_halos = dist_conv.convTranspose_halocalc_twoway
             self.append_halos = dist_conv.append_halos
             self.dummy_tensor = torch.tensor([0,0])
+            self.dist_conv_transpose2d_fn = dist_conv.conv_transpose2d_4way
+            self.dist_conv_transpose2d_backward_fn = dist_conv.conv_transpose2d_fourway_backward
         elif parallelism == 8:
             self.communicate_halos = dist_conv.convTranspose_halocalc_fourway
             self.append_halos = dist_conv.append_halos_8way
             self.dummy_tensor = torch.tensor([[0,0,0],[0,0,0]])
+            self.dist_conv_transpose2d_fn = dist_conv.conv_transpose2d_4way
+            self.dist_conv_transpose2d_backward_fn = dist_conv.conv_transpose2d_eightway_backward
     
     def _communicate_halos_selection(self, kernel_size, stride, parallelism):
         if isinstance(kernel_size, int) and isinstance(stride, int):
@@ -948,7 +952,7 @@ class ConvTranspose2d(torch.autograd.Function):
         selector
     ) -> torch.Tensor:
         
-        y, x_aug, x, halo_sizes = dist_conv.conv_transpose2d_fourway(
+        y, x_aug, x, halo_sizes = selector.dist_conv_transpose2d_fn(
             x, weight, bias, kernel_size, stride, padding, dilation, in_channels, local_rank, spatial_group, channel_group, empty, selector
         )
         
@@ -1035,13 +1039,13 @@ class ConvTranspose2d(torch.autograd.Function):
 
         stride, padding, dilation = (ctx.stride, ctx.padding, ctx.dilation)
         local_rank, spatial_group, channel_group = (
-            ctx.local_rank % 4,  # TODO: verify with communicator group
+            ctx.local_rank,  # TODO: verify with communicator group
             ctx.spatial_group,
             ctx.channel_group,
         )
         selector = ctx.selector
 
-        g_x, g_w = dist_conv.conv_transpose2d_fourway_backward(
+        g_x, g_w = selector.dist_conv_transpose2d_backward_fn(
             grad_output,
             x_aug,
             weight,
