@@ -24,21 +24,27 @@ class ConvSelectionStrategy:
         self.conv2d_weight_fn = self._conv2d_weight_fn_selection(bayesian)
         self.weight_reshape = self._reshape_weights_selection(bayesian)
         self.grad_bias = self._grad_bias_selection(parallelism, bias)
-        self.communicate_halos_forward, self.communicate_halos_backward = self._communicate_halos_selection(kernel_size, stride)
+        self.communicate_halos_forward, self.communicate_halos_backward = self._communicate_halos_selection(kernel_size, stride, parallelism)
     
-    def _communicate_halos_selection(self, kernel_size, stride):
+    def _communicate_halos_selection(self, kernel_size, stride, parallelism):
         if isinstance(kernel_size, int) and isinstance(stride, int):
             if kernel_size == stride:
                 return self._no_communicate_halos_forward, self._no_communicate_halos_backward
             else:
-                return self._communicate_halos_forward, self._communicate_halos_backward
+                if parallelism == 4:
+                    return self._communicate_halos_forward_4way, self._communicate_halos_backward_4way
+                else:
+                    return self._communicate_halos_forward_8way, self._communicate_halos_backward_8way
         else:
             if all(p == k for (p, k) in zip(kernel_size, stride)):
                 return self._no_communicate_halos_forward, self._no_communicate_halos_backward
             else:
-                return self._communicate_halos_forward, self._communicate_halos_backward
+                if parallelism == 4:
+                    return self._communicate_halos_forward_4way, self._communicate_halos_backward_4way
+                else:
+                    return self._communicate_halos_forward_8way, self._communicate_halos_backward_8way
             
-    def _communicate_halos_forward(self, x, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
+    def _communicate_halos_forward_4way(self, x, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
         halo, _ = dist_conv.communicate_halos(
             x,
             right_to_left,
@@ -54,11 +60,27 @@ class ConvSelectionStrategy:
         )
         return x_with_halos
     
+    def _communicate_halos_forward_8way(self, x, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
+        halo, _ = dist_conv.communicate_halos_8way(
+            x,
+            right_to_left,
+            left_to_right,
+            local_rank,
+            8,
+            empty,
+            spatial_group,
+            async_op=False,
+        )
+        x_with_halos = dist_conv.append_halos_8way(
+            x, halo, spatial_group, empty
+        )
+        return x_with_halos
+    
     def _no_communicate_halos_forward(self, x, *args, **kwargs):
         x = x.contiguous()
         return x
     
-    def _communicate_halos_backward(self, g_x_aug, x_shape, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
+    def _communicate_halos_backward_4way(self, g_x_aug, x_shape, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
         halo, wait_handle = dist_conv.communicate_halos(
             g_x_aug,
             right_to_left,
@@ -80,6 +102,42 @@ class ConvSelectionStrategy:
             g_x = g_x_aug[..., -x_shape[-1] :]
             if left_to_right > 0:
                 g_x[..., :left_to_right] = g_x[..., :left_to_right] + halo
+
+        return g_x
+    
+    def _communicate_halos_backward_8way(self, g_x_aug, x_shape, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
+        halo, _ = dist_conv.communicate_halos_8way(
+            g_x_aug,
+            right_to_left,
+            left_to_right,
+            local_rank,
+            8,
+            empty,
+            spatial_group,
+            async_op=False,
+        )
+        # wait_handle.wait()
+
+        if local_rank in [0, 1]:
+            g_x = g_x_aug[..., : x_shape[-1]]
+            if right_to_left[0] > 0:
+                g_x[..., -right_to_left:] = g_x[..., -right_to_left[0]:] + halo[1]
+        elif local_rank in [2, 3]:
+            g_x = g_x_aug[..., -x_shape[-1] :]
+            if left_to_right[0] > 0:
+                g_x[..., :left_to_right[0]] = g_x[..., :left_to_right[0]] + halo[0]
+            if right_to_left[1] > 0:
+                g_x[..., -right_to_left[1]] = g_x[..., -right_to_left[1]] + halo[1]
+        elif local_rank in [4, 5]:
+            g_x = g_x_aug[..., -x_shape[-1] :]
+            if left_to_right[1] > 0:
+                g_x[..., :left_to_right[1]] = g_x[..., :left_to_right[1]] + halo[0]
+            if right_to_left[2] > 0:
+                g_x[..., -right_to_left[2]] = g_x[..., -right_to_left[2]] + halo[1]
+        elif local_rank in [6, 7]:
+            g_x = g_x_aug[..., -x_shape[-1] :]
+            if left_to_right[2] > 0:
+                g_x[..., :left_to_right[2]] = g_x[..., :left_to_right[2]] + halo[0]
 
         return g_x
     
@@ -150,21 +208,33 @@ class ConvTransposeSelectionStrategy:
         self.convTranspose2d_grad_fn = self._convTranspose2d_grad_fn_selection(bayesian)
         self.weight_reshape = self._reshape_weights_selection(bayesian)
         self.grad_bias = self._grad_bias_selection(parallelism, bias)
-        self.communicate_halos_forward, self.communicate_halos_backward = self._communicate_halos_selection(kernel_size, stride)
+        self.communicate_halos_forward, self.communicate_halos_backward = self._communicate_halos_selection(kernel_size, stride, parallelism)
     
-    def _communicate_halos_selection(self, kernel_size, stride):
+    def _communicate_halos_selection(self, kernel_size, stride, parallelism):
         if isinstance(kernel_size, int) and isinstance(stride, int):
             if kernel_size == stride:
-                return self._no_communicate_halos_forward, self._no_communicate_halos_backward
+                if parallelism == 4:
+                    return self._no_communicate_halos_forward_4way, self._no_communicate_halos_backward
+                elif parallelism == 8:
+                    return self._no_communicate_halos_forward_8way, self._no_communicate_halos_backward
             else:
-                return self._communicate_halos_forward, self._communicate_halos_backward
+                if parallelism == 4:
+                    return self._communicate_halos_forward_4way, self._communicate_halos_backward_4way
+                else:
+                    return self._communicate_halos_forward_8way, self._communicate_halos_backward_8way
         else:
             if all(p == k for (p, k) in zip(kernel_size, stride)):
-                return self._no_communicate_halos_forward, self._no_communicate_halos_backward
+                if parallelism == 4:
+                    return self._no_communicate_halos_forward_4way, self._no_communicate_halos_backward
+                elif parallelism == 8:
+                    return self._no_communicate_halos_forward_8way, self._no_communicate_halos_backward
             else:
-                return self._communicate_halos_forward, self._communicate_halos_backward
+                if parallelism == 4:
+                    return self._communicate_halos_forward_4way, self._communicate_halos_backward_4way
+                else:
+                    return self._communicate_halos_forward_8way, self._communicate_halos_backward_8way
             
-    def _communicate_halos_forward(
+    def _communicate_halos_forward_4way(
         self, 
         x, 
         y, 
@@ -205,13 +275,87 @@ class ConvTransposeSelectionStrategy:
     
         return y, halo_sizes
     
-    def _no_communicate_halos_forward(self, x, y, *args, **kwargs):
-
+    def _communicate_halos_forward_8way(
+        self, 
+        x, 
+        y, 
+        kernel_size,
+        stride, 
+        padding, 
+        dilation, 
+        local_rank, 
+        spatial_group, 
+        parallelism
+    ):
+        y_buffer_left, y_buffer_right, overlap, local_size = dist_conv.convTranspose_halocalc_fourway(
+            x,
+            y,
+            kernel_size[1],
+            stride=stride[1],
+            padding=padding[1],
+            dilation=dilation[1],
+            local_rank=local_rank,
+            spatial_group=spatial_group,
+            parallelism=parallelism,
+        )
+        
+        right_to_left = [y.shape[-1] - local_size[0], y.shape[-1] - local_size[1], y.shape[-1] - local_size[2]]
+        # todo: proper boundaries for transpose convolutions
+        left_to_right = [y.shape[-1] - local_size[0], y.shape[-1] - local_size[1], y.shape[-1] - local_size[2]]
+        
+        # Add overlapping bounds
+        match spatial_group.rank():
+            case 0:
+                start_overlap_index = y.shape[-1] - overlap[0] # overlap_size in 4-way
+                y[..., start_overlap_index:] = y[..., start_overlap_index:] + y_buffer_right
+                y = y[..., :local_size[0]]
+            case 1:
+                start_overlap_index = y.shape[-1] - overlap[1] # overlap_size in 4-way
+                y[..., :overlap[0]] = y[..., :overlap[0]] + y_buffer_left
+                y[..., start_overlap_index:] = y[..., start_overlap_index:] + y_buffer_right 
+                
+            case 2:
+                start_overlap_index = y.shape[-1] - overlap[1] # overlap_size in 4-way
+                y[..., :overlap[1]] = y[..., :overlap[1]] + y_buffer_left
+                y[..., start_overlap_index:] = y[..., start_overlap_index:] + y_buffer_right 
+                
+            case 3:
+                y[..., :overlap[2]] = y[..., :overlap[2]] + y_buffer_left
+                y = y[..., -local_size[3]:]
+                
+        halo_sizes = torch.tensor([left_to_right, right_to_left])
+    
+        return y, halo_sizes
+    
+    def _no_communicate_halos_forward_4way(self, x, y, *args, **kwargs):
         return y, torch.tensor([0, 0])
     
-    def _communicate_halos_backward(self, grad_output, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
+    def _no_communicate_halos_forward_8way(self, x, y, *args, **kwargs):
+        return y, torch.tensor([[0,0,0], [0,0,0]])
+    
+    def _communicate_halos_backward_4way(self, grad_output, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
         
         halo, _ = dist_conv.communicate_halos(
+            grad_output,
+            right_to_left,
+            left_to_right,
+            local_rank,
+            parallelism,
+            empty,
+            spatial_group=spatial_group,
+            async_op=async_op,
+        )
+        
+        if spatial_group.rank() ==  0:  # left and right groups # TODO get from process group?
+            grad_output = torch.cat([grad_output, halo], dim=-1)
+        else:
+            grad_output = torch.cat([halo, grad_output], dim=-1)
+            
+        return grad_output
+    
+    def _communicate_halos_backward_8way(self, grad_output, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
+        
+        halo, _ = dist_conv.communicate_halos_8way(
             grad_output,
             right_to_left,
             left_to_right,
@@ -350,7 +494,7 @@ class DistributedConv2D(torch.nn.Module):
         
         self.selector = ConvSelectionStrategy(self.bayesian, self.parallelism, self.conv2d.bias, self.kernel_size, self.stride)
         
-        _average_weights(self, spatial_group)
+        _average_weights(self, self.spatial_group)
         
         self.conv2d_apply = Conv2d().apply
 
@@ -740,9 +884,9 @@ class DistributedConv2D_8way(torch.nn.Module):
             bias=bias,
         ).to(device)
         
-        self.selector = ConvSelectionStrategy(self.bayesian, self.parallelism, self.conv2d.bias)
+        self.selector = ConvSelectionStrategy(self.bayesian, self.parallelism, self.conv2d.bias, self.kernel_size, self.stride)
         
-        _average_weights(self, spatial_group, device)
+        _average_weights(self, self.spatial_group)
         
         self.conv2d_apply = Conv2d_8way().apply
 
@@ -823,7 +967,7 @@ class Conv2d_8way(torch.autograd.Function):
             spatial_group=spatial_group,
             channel_group=channel_group,
             empty=empty,
-            conv2d_fn=selector.conv2d_fn
+            selector=selector
         )
 
         x_aug = torch.cat([x0, x1], dim=-3) # concatenate along the channel dimension
@@ -934,6 +1078,7 @@ class Conv2d_8way(torch.autograd.Function):
             ctx.spatial_group,
             ctx.channel_group,
         )
+        
         selector = ctx.selector
         right_to_left, left_to_right = ctx.halo_sizes[0], ctx.halo_sizes[1]
         x_shape_padded, x_shape = ctx.x_shape_padded, ctx.x_shape
@@ -948,41 +1093,22 @@ class Conv2d_8way(torch.autograd.Function):
             padding=padding,
             dilation=dilation
         )
+        
         left_to_right, right_to_left = (right_to_left, left_to_right)
+        
         # g_x calculation
-        halo, _ = dist_conv.communicate_halos_8way(
+        g_x = selector.communicate_halos_backward(
             g_x_aug,
+            x_shape,
             right_to_left,
             left_to_right,
             local_rank,
-            8,
+            4,
             empty,
             spatial_group,
-            async_op=False,
+            async_op=True
         )
-        # wait_handle.wait()
-
-        if local_rank in [0, 1]:
-            g_x = g_x_aug[..., : x_shape[-1]]
-            if right_to_left[0] > 0:
-                g_x[..., -right_to_left:] = g_x[..., -right_to_left[0]:] + halo[1]
-        elif local_rank in [2, 3]:
-            g_x = g_x_aug[..., -x_shape[-1] :]
-            if left_to_right[0] > 0:
-                g_x[..., :left_to_right[0]] = g_x[..., :left_to_right[0]] + halo[0]
-            if right_to_left[1] > 0:
-                g_x[..., -right_to_left[1]] = g_x[..., -right_to_left[1]] + halo[1]
-        elif local_rank in [4, 5]:
-            g_x = g_x_aug[..., -x_shape[-1] :]
-            if left_to_right[1] > 0:
-                g_x[..., :left_to_right[1]] = g_x[..., :left_to_right[1]] + halo[0]
-            if right_to_left[2] > 0:
-                g_x[..., -right_to_left[2]] = g_x[..., -right_to_left[2]] + halo[1]
-        elif local_rank in [6, 7]:
-            g_x = g_x_aug[..., -x_shape[-1] :]
-            if left_to_right[2] > 0:
-                g_x[..., :left_to_right[2]] = g_x[..., :left_to_right[2]] + halo[0]
-
+        
         g_x_buffer = torch.zeros(
             (*g_x.shape[:-3], g_x.shape[-3] // 2, *g_x.shape[-2:]),
             device=g_x.device,
@@ -1474,9 +1600,9 @@ class DistributedConvTranspose2D_8way(torch.nn.Module):
             
         self.empty = torch.empty(0, device=device, dtype=torch.float32)
 
-        self.selector = ConvTransposeSelectionStrategy(self.bayesian, self.parallelism, self.convTranspose2d.bias)
+        self.selector = ConvTransposeSelectionStrategy(self.bayesian, self.parallelism, self.convTranspose2d.bias, self.kernel_size, self.stride)
        
-        _average_weights(self, spatial_group, device)
+        _average_weights(self, self.spatial_group)
         self.convTranspose2d_apply = ConvTranspose2d_8way().apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1543,7 +1669,7 @@ class ConvTranspose2d_8way(torch.autograd.Function):
     ) -> torch.Tensor:
         
         y, x_aug, x, halo_sizes = dist_conv.conv_transpose2d_8way(
-            x, weight, bias, kernel_size, stride, padding, dilation, in_channels, local_rank, spatial_group, channel_group, empty, selector.convTranspose2d_fn
+            x, weight, bias, kernel_size, stride, padding, dilation, in_channels, local_rank, spatial_group, channel_group, empty, selector
         )
         
         # Return output and any intermediate values needed for backward
@@ -1649,7 +1775,7 @@ class ConvTranspose2d_8way(torch.autograd.Function):
             empty,
             spatial_group,
             channel_group,
-            selector.convTranspose2d_grad_fn
+            selector
         )
         
         g_b = selector.grad_bias(grad_output, spatial_group)

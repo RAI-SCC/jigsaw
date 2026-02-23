@@ -130,9 +130,7 @@ def communicate_halos_8way(
     async_op: bool,
 ):
     local_rank = spatial_group.rank()
-    # right_to_left is a list of 3 numbers
-    # left to right is a list of 3 numbers
-    # print(f'right to left, left to right {right_to_left}, {left_to_right}')
+    
     match local_rank:
         case 0:
             send_1 = x[..., -left_to_right[0]:] if left_to_right[0] > 0 else empty
@@ -915,9 +913,6 @@ def distributed_conv_transpose2d_over_channels(
     
     match local_rank:
         case 0 | 2 | 4 | 6:
-            y = conv_transpose2d_fn(
-    match mod:
-        case 0:
             y = convTranspose2d_fn(
                 x,
                 w[...,: in_channels // 2,:,:,:],
@@ -947,8 +942,6 @@ def distributed_conv_transpose2d_over_channels(
                 )
             return y, x, x_buffer
         case 1 | 3 | 5 | 7:
-            y = conv_transpose2d_fn(
-        case 1:
             y = convTranspose2d_fn(
                 x,
                 w[..., in_channels // 2 :,:,:,:],
@@ -1596,7 +1589,7 @@ def conv2d_eightway(
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     empty: torch.Tensor,
-    conv2d_fn: torch.nn.functional.conv2d
+    selector
 ) -> torch.Tensor:
     """Distributed 2d convolution"""
     # Setup
@@ -1605,16 +1598,16 @@ def conv2d_eightway(
     # communicate x1, x0
     right_to_left, left_to_right = calc_halo_sizes_8way(x.shape, kernel_size[1], stride[1])
     # Spatial split
-    halo, _ = communicate_halos_8way(
-        x,
+    x_with_halos = selector.communicate_halos_forward(
+        x, 
         right_to_left,
         left_to_right,
         local_rank,
-        8,
+        8, 
         empty,
         spatial_group,
         channel_group,
-        async_op=False
+        False
     )
     (
         y,
@@ -1632,61 +1625,6 @@ def conv2d_eightway(
         empty,
         channel_group,
         selector.conv2d_fn
-    )
-    
-    return y, x_left, x_right, right_to_left, left_to_right
-
-def conv2d_eightway(
-    x: torch.Tensor,
-    w: torch.Tensor,
-    b: torch.Tensor,
-    kernel_size: Tuple[int, int],
-    stride: int,
-    padding: int,
-    dilation: int,
-    in_channels: int,
-    local_rank: int,
-    spatial_group: dist.ProcessGroup,
-    channel_group: dist.ProcessGroup,
-    empty: torch.Tensor,
-    conv2d_fn: torch.nn.functional.conv2d
-) -> torch.Tensor:
-    """Distributed 2d convolution"""
-    # Setup
-    local_rank = local_rank % 8
-
-    # communicate x1, x0
-    right_to_left, left_to_right = calc_halo_sizes_8way(x.shape, kernel_size[1], stride[1])
-    # Spatial split
-    halo, _ = communicate_halos_8way(
-        x,
-        right_to_left,
-        left_to_right,
-        local_rank,
-        8,
-        empty,
-        spatial_group,
-        async_op=False,
-    )
-    x_with_halos = append_halos_8way(
-        x, halo, spatial_group, empty
-    )
-    (
-        y,
-        x_left,
-        x_right,
-    ) = distributed_conv2d_over_channels(
-        x_with_halos,
-        w,
-        b,
-        local_rank,
-        in_channels,
-        stride,
-        padding,
-        dilation,
-        empty,
-        channel_group,
-        conv2d_fn
     )
     
     return y, x_left, x_right, right_to_left, left_to_right
@@ -1755,7 +1693,7 @@ def conv_transpose2d_8way(
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     empty: torch.Tensor,
-    conv_transpose2d_fn: torch.nn.functional.conv2d
+    selector
 ) -> torch.Tensor:
     """Distributed 2d convolution"""
     # Setup
@@ -1769,11 +1707,10 @@ def conv_transpose2d_8way(
         dilation=dilation,
         local_rank=local_rank,
         channel_group=channel_group,
-        conv_transpose2d_fn=conv_transpose2d_fn
+        convTranspose2d_fn=selector.convTranspose2d_fn
     )
     
-    # communicate x1, x0
-    y_buffer_left, y_buffer_right, overlap, local_size = convTranspose_halocalc_fourway(
+    y, halo_sizes = selector.communicate_halos_forward(
         x,
         y,
         kernel_size[1],
@@ -1785,34 +1722,8 @@ def conv_transpose2d_8way(
         parallelism=8,
     )
     
-    right_to_left = [y.shape[-1] - local_size[0], y.shape[-1] - local_size[1], y.shape[-1] - local_size[2]]
-    # todo: proper boundaries for transpose convolutions
-    left_to_right = [y.shape[-1] - local_size[0], y.shape[-1] - local_size[1], y.shape[-1] - local_size[2]]
-    
-    # Add overlapping bounds
-    # TODO: how to calculate overlapping bounds in 8-way conv?
-    match spatial_group.rank():
-        case 0:
-            start_overlap_index = y.shape[-1] - overlap[0] # overlap_size in 4-way
-            y[..., start_overlap_index:] = y[..., start_overlap_index:] + y_buffer_right
-            y = y[..., :local_size[0]]
-        case 1:
-            start_overlap_index = y.shape[-1] - overlap[1] # overlap_size in 4-way
-            y[..., :overlap[0]] = y[..., :overlap[0]] + y_buffer_left
-            y[..., start_overlap_index:] = y[..., start_overlap_index:] + y_buffer_right 
-            
-        case 2:
-            start_overlap_index = y.shape[-1] - overlap[1] # overlap_size in 4-way
-            y[..., :overlap[1]] = y[..., :overlap[1]] + y_buffer_left
-            y[..., start_overlap_index:] = y[..., start_overlap_index:] + y_buffer_right 
-            
-        case 3:
-            y[..., :overlap[2]] = y[..., :overlap[2]] + y_buffer_left
-            y = y[..., -local_size[3]:]
-    
     x_aug = torch.cat([x0, x1], dim=-3)
     
-    halo_sizes = torch.tensor([left_to_right, right_to_left])
     
     return y, x_aug, x, halo_sizes
 
@@ -1905,10 +1816,10 @@ def conv_transpose2d_eightway_backward(
     empty: torch.tensor,
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
-    conv_transpose2d_grad_fn,
+    selector,
 ):
     right_to_left, left_to_right = halo_sizes[0], halo_sizes[1]
-    halo, _ = communicate_halos_8way(
+    grad_output = selector.communicate_halos_backward(
         grad_output,
         right_to_left,
         left_to_right,
@@ -1918,13 +1829,8 @@ def conv_transpose2d_eightway_backward(
         spatial_group=spatial_group,
         async_op=False,
     )
-
-    if local_rank // 4 == 0:  # left and right groups # TODO get from process group?
-        grad_output = torch.cat([grad_output, halo[0]], dim=-1)
-    else:
-        grad_output = torch.cat([halo[1], grad_output], dim=-1)
-
-    g_x, g_w, _ = conv_transpose2d_grad_fn(
+    
+    g_x, g_w, _ = selector.convTranspose2d_grad_fn(
         grad_output,
         x_aug,
         weight,
@@ -1937,8 +1843,7 @@ def conv_transpose2d_eightway_backward(
         1,
         [True, True, False],
     )
-    # print(f'2. rank {local_rank}')
-
+    
     g_x_buffer = torch.zeros(
         (*g_x.shape[:-3], g_x.shape[-3] // 2, *g_x.shape[-2:]),
         device=g_x.device,
@@ -1955,7 +1860,6 @@ def conv_transpose2d_eightway_backward(
         async_op=True,
     )
     
-    # print(f'3. rank {local_rank} {g_x_recv}')
     # make grads identical on all ranks
     g_w_handle = dist.all_reduce(
         g_w, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True
