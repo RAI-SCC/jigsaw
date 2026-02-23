@@ -212,9 +212,11 @@ class ConvTransposeSelectionStrategy:
         if parallelism == 4:
             self.communicate_halos = dist_conv.convTranspose_halocalc_twoway
             self.append_halos = dist_conv.append_halos
+            self.dummy_tensor = torch.tensor([0,0])
         elif parallelism == 8:
             self.communicate_halos = dist_conv.convTranspose_halocalc_fourway
             self.append_halos = dist_conv.append_halos_8way
+            self.dummy_tensor = torch.tensor([[0,0,0],[0,0,0]])
     
     def _communicate_halos_selection(self, kernel_size, stride, parallelism):
         if isinstance(kernel_size, int) and isinstance(stride, int):
