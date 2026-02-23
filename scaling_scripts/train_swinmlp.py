@@ -74,12 +74,17 @@ def main():
     save_dir = config["training"]["save_dir"]
     num_samples = len(train_loader.dataset)
     num_samples_val = len(val_loader.dataset)
-
+    shifted_windows = config['SWIN_MLP']['shifted_windows']
     kernel_flex = config['SWIN_MLP']['kernel_flex']
     if kernel_flex:
         kernel_str = "flex"
     else:        
         kernel_str = "fixed"
+    
+    if shifted_windows:
+        shift_str = "shift"
+    else:
+        shift_str = "nonshift"
 
     seed = config["SWIN_MLP"]["seed"]
 
@@ -103,7 +108,7 @@ def main():
     loss_fn = utils.build_loss_fn(config)
 
     os.makedirs(save_dir, exist_ok=True)
-    log_file = f"log_{config['data']['image_height']}_{num_epochs}_{learn_rate}_{kernel_str}_{seed}.csv"
+    log_file = f"log_{config['data']['image_height']}_{num_epochs}_{learn_rate}_{kernel_str}_{shift_str}_{seed}.csv"
     log_path = os.path.join(save_dir, log_file)
 
     if not os.path.isfile(log_path):
