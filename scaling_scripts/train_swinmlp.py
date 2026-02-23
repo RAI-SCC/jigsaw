@@ -146,6 +146,23 @@ def main():
                 'Val_Recall'
             ])
 
+    model.eval()
+    with torch.no_grad():
+        batch = next(iter(train_loader))
+        img = batch['image'].to(device)
+        mask = batch['mask'].to(device)
+        
+        out = model(img)
+        print(f"Output shape:    {out.shape}")
+        print(f"Output min/max:  {out.min():.4f} / {out.max():.4f}")
+        print(f"Mask unique:     {mask.unique()}")
+        print(f"Mask shape:      {mask.shape}")
+        
+        probs = torch.softmax(out, dim=1)
+        pred = probs.argmax(dim=1)
+        print(f"Pred unique:     {pred.unique()}")
+    model.train()
+
     # Calculate the number of batches per epoch to determine the profiling schedule
     batches_per_epoch = len(train_loader)
     wait_steps = max(0, batches_per_epoch - 6)
