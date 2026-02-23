@@ -71,23 +71,7 @@ class ConvSelectionStrategy:
         )
         
         return x_with_halos
-    
-    # def _communicate_halos_forward_8way(self, x, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
-    #     halo, _ = dist_conv.communicate_halos_8way(
-    #         x,
-    #         right_to_left,
-    #         left_to_right,
-    #         local_rank,
-    #         8,
-    #         empty,
-    #         spatial_group,
-    #         async_op=False,
-    #     )
-    #     x_with_halos = dist_conv.append_halos_8way(
-    #         x, halo, spatial_group, empty
-    #     )
-    #     return x_with_halos
-    
+        
     def _no_communicate_halos_forward(self, x, *args, **kwargs):
         x = x.contiguous()
         return x
@@ -118,18 +102,18 @@ class ConvSelectionStrategy:
         return g_x
     
     def _communicate_halos_backward_8way(self, g_x_aug, x_shape, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
-        halo, _ = dist_conv.communicate_halos_8way(
+        # NOTE: this is currently not used, since the backward pass doesn't require a halo
+        halo, _ = self.communicate_halos_8way(
             g_x_aug,
             right_to_left,
             left_to_right,
             local_rank,
-            8,
+            parallelism,
             empty,
             spatial_group,
             async_op=False,
         )
-        # wait_handle.wait()
-
+        
         if local_rank in [0, 1]:
             g_x = g_x_aug[..., : x_shape[-1]]
             if right_to_left[0] > 0:
@@ -221,30 +205,35 @@ class ConvTransposeSelectionStrategy:
         self.weight_reshape = self._reshape_weights_selection(bayesian)
         self.grad_bias = self._grad_bias_selection(parallelism, bias)
         self.communicate_halos_forward, self.communicate_halos_backward = self._communicate_halos_selection(kernel_size, stride, parallelism)
+        # Select communicate halos
+        self._communicate_halos_fn_selection(parallelism)
+    
+    def _communicate_halos_fn_selection(self, parallelism):
+        if parallelism == 4:
+            self.communicate_halos = dist_conv.convTranspose_halocalc_twoway
+            self.append_halos = dist_conv.append_halos
+        elif parallelism == 8:
+            self.communicate_halos = dist_conv.convTranspose_halocalc_fourway
+            self.append_halos = dist_conv.append_halos_8way
     
     def _communicate_halos_selection(self, kernel_size, stride, parallelism):
         if isinstance(kernel_size, int) and isinstance(stride, int):
             if kernel_size == stride:
-                if parallelism == 4:
-                    return self._no_communicate_halos_forward_4way, self._no_communicate_halos_backward
-                elif parallelism == 8:
-                    return self._no_communicate_halos_forward_8way, self._no_communicate_halos_backward
+                return self._no_communicate_halos_forward, self._no_communicate_halos_backward
             else:
                 if parallelism == 4:
-                    return self._communicate_halos_forward_4way, self._communicate_halos_backward_4way
+                    return self._communicate_halos_forward, self._communicate_halos_backward_4way
                 else:
-                    return self._communicate_halos_forward_8way, self._communicate_halos_backward_8way
+                    return self._communicate_halos_forward, self._communicate_halos_backward_8way
         else:
             if all(p == k for (p, k) in zip(kernel_size, stride)):
-                if parallelism == 4:
-                    return self._no_communicate_halos_forward_4way, self._no_communicate_halos_backward
-                elif parallelism == 8:
-                    return self._no_communicate_halos_forward_8way, self._no_communicate_halos_backward
+                return self._no_communicate_halos_forward, self._no_communicate_halos_backward
+                
             else:
                 if parallelism == 4:
-                    return self._communicate_halos_forward_4way, self._communicate_halos_backward_4way
+                    return self._communicate_halos_forward_4way, self._communicate_halos_backward
                 else:
-                    return self._communicate_halos_forward_8way, self._communicate_halos_backward_8way
+                    return self._communicate_halos_forward_8way, self._communicate_halos_backward
             
     def _communicate_halos_forward_4way(
         self, 
@@ -258,7 +247,7 @@ class ConvTransposeSelectionStrategy:
         spatial_group, 
         parallelism
     ):
-        y_buffer, overlap_size, local_size_left, local_size_right = dist_conv.convTranspose_halocalc_twoway(
+        y_buffer, overlap_size, local_size_left, local_size_right = self.convTranspose_halocalc_twoway(
             x,
             y,
             kernel_size[1],
@@ -299,7 +288,7 @@ class ConvTransposeSelectionStrategy:
         spatial_group, 
         parallelism
     ):
-        y_buffer_left, y_buffer_right, overlap, local_size = dist_conv.convTranspose_halocalc_fourway(
+        y_buffer_left, y_buffer_right, overlap, local_size = self.convTranspose_halocalc_fourway(
             x,
             y,
             kernel_size[1],
@@ -339,35 +328,12 @@ class ConvTransposeSelectionStrategy:
     
         return y, halo_sizes
     
-    def _no_communicate_halos_forward_4way(self, x, y, *args, **kwargs):
-        return y, torch.tensor([0, 0])
+    def _no_communicate_halos_forward(self, x, y, *args, **kwargs):
+        return y, self.dummy_tensor
     
-    def _no_communicate_halos_forward_8way(self, x, y, *args, **kwargs):
-        return y, torch.tensor([[0,0,0], [0,0,0]])
-    
-    def _communicate_halos_backward_4way(self, grad_output, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
+    def _communicate_halos_backward(self, grad_output, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
         
-        halo, _ = dist_conv.communicate_halos(
-            grad_output,
-            right_to_left,
-            left_to_right,
-            local_rank,
-            parallelism,
-            empty,
-            spatial_group=spatial_group,
-            async_op=async_op,
-        )
-        
-        if spatial_group.rank() ==  0:  # left and right groups # TODO get from process group?
-            grad_output = torch.cat([grad_output, halo], dim=-1)
-        else:
-            grad_output = torch.cat([halo, grad_output], dim=-1)
-            
-        return grad_output
-    
-    def _communicate_halos_backward_8way(self, grad_output, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
-        
-        halo, _ = dist_conv.communicate_halos_8way(
+        halo, _ = self.communicate_halos(
             grad_output,
             right_to_left,
             left_to_right,
