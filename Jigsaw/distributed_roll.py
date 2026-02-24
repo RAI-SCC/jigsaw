@@ -111,12 +111,10 @@ def roll2d_8way(
     spatial_group: dist.ProcessGroup
 ):
     # For now, assume that dims is always (-3, -2)
-    # roll first
     
     x = torch.roll(x, shifts=shifts, dims=(-3,-2))
     
     x = get_halo_8way(x, shifts[1], rank, device, empty, spatial_group)
-    # print(f'Rank {rank} with x {x.shape}')
     
     return x
     

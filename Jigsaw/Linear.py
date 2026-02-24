@@ -9,6 +9,21 @@ from Jigsaw import distributed_matmul as dist_mm
 from Jigsaw import distributed_roll as dist_roll
 from typing import Tuple
 
+class RollSelectionStrategy:
+    def __init__(
+        self,
+        parallelism: int
+    ):
+        self.roll = self._roll_kernel_selection(parallelism)
+        
+    def _roll_kernel_selection(parallelism: int) -> Callable:
+        """Return roll kernel."""
+        if parallelism == 4:
+            return dist_roll.roll2d
+        elif parallelism == 8:
+            return dist_roll.roll2d_8way
+        
+        
 class TransposeSelectionStrategy:
     def __init__(
         self,
@@ -1401,12 +1416,14 @@ class DistributedRoll(torch.nn.Module):
 
         self.local_rank = local_rank
         self.device = device
-        self.parallelism = parallelism
         self.spatial_group = spatial_group
         self.shifts = shifts
         self.dims = dims
         self.roll = Roll().apply
         self.empty = torch.empty(0, device=device, dtype=torch.float32)
+        
+        self.selector = RollSelectionStrategy(self.parallelism)
+        
         if dims is not None:
             print(f"Alert, dims is {dims} in roll; this is not yet implemented")
             
@@ -1437,7 +1454,7 @@ class DistributedRoll(torch.nn.Module):
             self.local_rank,
             self.device,
             self.empty,
-            self.parallelism,
+            self.selector,
             self.spatial_group,
         )
         return x_roll
@@ -1454,7 +1471,7 @@ class Roll(torch.autograd.Function):
         local_rank: int,
         device: torch.device,
         empty: torch.Tensor,
-        parallelism: int,
+        selector: RollSelectionStrategy,
         spatial_group: dist.ProcessGroup,
     ) -> torch.Tensor:
         """
@@ -1483,11 +1500,8 @@ class Roll(torch.autograd.Function):
             Local rolled tensor.
         """
 
-        if parallelism == 4:
-            x = dist_roll.roll2d(x, shifts, dims, local_rank, device, empty, spatial_group)
-        else:
-            x = dist_roll.roll2d_8way(x, shifts, dims, local_rank, device, empty, spatial_group)
-
+        x = selector.roll(x, shifts, dims, local_rank, device, empty, spatial_group)
+        
         return x
 
     @staticmethod
@@ -1530,19 +1544,16 @@ class Roll(torch.autograd.Function):
             Transposed gradient of the loss with respect to the input of the layer.
         """
         shifts = ctx.shifts
+        selector = ctx.selector
         local_rank, device = ctx.local_rank, ctx.device
         spatial_group = ctx.spatial_group
         dims = ctx.dims
         
-        if ctx.parallelism == 4:
-            grad_output = dist_roll.roll2d(
-                grad_output, shifts, dims, local_rank, device, ctx.empty, spatial_group
-            )
-        else:
-            grad_output = dist_roll.roll2d_8way(
-                grad_output, shifts, dims, local_rank, device, ctx.empty, spatial_group
-            )
-
+        shifts = [-shift for shift in shifts]
+        grad_output = selector.roll(
+            grad_output, shifts, dims, local_rank, device, ctx.empty, spatial_group
+        )
+        
         return grad_output, None, None, None, None, None, None, None
 
 
