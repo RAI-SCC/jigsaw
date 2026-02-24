@@ -16,7 +16,7 @@ class RollSelectionStrategy:
     ):
         self.roll = self._roll_kernel_selection(parallelism)
         
-    def _roll_kernel_selection(parallelism: int) -> Callable:
+    def _roll_kernel_selection(self, parallelism: int) -> Callable:
         """Return roll kernel."""
         if parallelism == 4:
             return dist_roll.roll2d
@@ -31,7 +31,7 @@ class TransposeSelectionStrategy:
     ):
         self.x_t = self._transpose_kernel_selection(parallelism)
     
-    def _transpose_kernel_selection(parallelism: int) -> Callable:
+    def _transpose_kernel_selection(self, parallelism: int) -> Callable:
         """Return x_t kernel."""
         if parallelism == 2:
             return dist_mm.x_transpose_twoway
