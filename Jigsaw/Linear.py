@@ -1411,7 +1411,7 @@ class DistributedRoll(torch.nn.Module):
         parallelism: int,
         spatial_group: dist.ProcessGroup,
     ) -> None:
-        """Initialize the Linear class."""
+        """Initialize the Roll class."""
         super().__init__()
 
         self.local_rank = local_rank
@@ -1420,9 +1420,9 @@ class DistributedRoll(torch.nn.Module):
         self.shifts = shifts
         self.dims = dims
         self.roll = Roll().apply
-        self.empty = torch.empty(0, device=device, dtype=torch.float32)
+        self.empty = torch.empty(0, device=self.device, dtype=torch.float32)
         
-        self.selector = RollSelectionStrategy(self.parallelism)
+        self.selector = RollSelectionStrategy(parallelism)
         
         if dims is not None:
             print(f"Alert, dims is {dims} in roll; this is not yet implemented")
@@ -1432,7 +1432,7 @@ class DistributedRoll(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass of distributed roll 4 processes.
+        Forward pass of distributed roll.
         
         Function currently only works when rolled across the -2 and -3 dimensions.
 

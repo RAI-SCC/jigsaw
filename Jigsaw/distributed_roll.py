@@ -92,8 +92,7 @@ def roll2d(
 ):
     # For now, assume that dims is always (-3, -2)
     # roll first
-    # TODO adjust rolling dimension
-    # print(f'here! shifts is {shifts} and x has shape {x.shape}')
+    
     x = torch.roll(x, shifts=shifts, dims=(-3,-2))
     
     x = get_halo(x, shifts[1], rank, device, 4, empty, spatial_group)
