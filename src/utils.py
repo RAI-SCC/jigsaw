@@ -966,43 +966,44 @@ def evaluate(loader, model, loss_fn, device, threshold=0.5):
     for batch in loader:
         images = batch[0].to(device)
         true_masks = batch[1].to(device) 
+
+        if true_masks.dim() == 4 and true_masks.shape[1] == 1:
+            true_masks = true_masks.squeeze(1) 
+
+        true_masks = (true_masks > 0.5).float()
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-
-            if true_masks.dim() == 4 and true_masks.shape[1] == 1:
-                true_masks = true_masks.squeeze(1) 
-
-            true_masks = (true_masks > 0.5).float()
             logits = model(images) 
 
-            loss = loss_fn(logits, true_masks)
-            loss_all = loss_fn_all(logits, true_masks)
+        logits_f32 = logits.float()
+        loss = loss_fn(logits_f32, true_masks)
+        loss_all = loss_fn_all(logits_f32, true_masks)
 
-            batch_size = images.size(0)
-            running_loss += loss.item() * batch_size                 
-            running_loss_all += loss_all.item() * batch_size
-            total_samples += batch_size
+        batch_size = images.size(0)
+        running_loss += loss.item() * batch_size                 
+        running_loss_all += loss_all.item() * batch_size
+        total_samples += batch_size
 
-            # Probabilities
-            probs = torch.softmax(logits, dim=1)[:, 1]
-            preds = (probs > threshold).float()
+        # Probabilities
+        probs = torch.softmax(logits_f32, dim=1)[:, 1]
+        preds = (probs > threshold).float()
 
-            # Accuracy
-            num_correct += (preds == true_masks).sum().item()
-            num_pixels += torch.numel(preds)
+        # Accuracy
+        num_correct += (preds == true_masks).sum().item()
+        num_pixels += torch.numel(preds)
 
-            # Confusion
-            TP += ((preds == 1) & (true_masks == 1)).sum().item()
-            FP += ((preds == 1) & (true_masks == 0)).sum().item()
-            FN += ((preds == 0) & (true_masks == 1)).sum().item()
-            TN += ((preds == 0) & (true_masks == 0)).sum().item()
+        # Confusion
+        TP += ((preds == 1) & (true_masks == 1)).sum().item()
+        FP += ((preds == 1) & (true_masks == 0)).sum().item()
+        FN += ((preds == 0) & (true_masks == 1)).sum().item()
+        TN += ((preds == 0) & (true_masks == 0)).sum().item()
 
-            # Dice
-            batch_dice = dice_coeff(
-                preds.unsqueeze(1),
-                true_masks.unsqueeze(1),
-                reduce_batch_first=False
-            )
-            dice_score += batch_dice.item() * batch_size
+        # Dice
+        batch_dice = dice_coeff(
+            preds.unsqueeze(1),
+            true_masks.unsqueeze(1),
+            reduce_batch_first=False
+        )
+        dice_score += batch_dice.item() * batch_size
         
     avg_loss = running_loss / total_samples
     avg_loss_all = running_loss_all / total_samples
