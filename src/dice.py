@@ -30,7 +30,9 @@ class TopKDiceLoss(nn.Module):
     # logits: (Batch, 2, H, W) -> From Modell
     # target: (Batch, 1, H, W) -> From DataLoader    
     def forward(self, logits: Tensor, target: Tensor):
-        
+        logits = logits.float()
+        target = target.float()
+
         # Calculate probabilities
         probs = torch.softmax(logits, dim=1)
         probs = probs[:, 1, ...]  # Assuming class 1 is the foreground class
@@ -38,10 +40,6 @@ class TopKDiceLoss(nn.Module):
         # Ensure the dimensions match
         if target.dim() == 4 and target.shape[1] == 1:
             target = target.squeeze(1)
-        elif target.dim() == 3:
-            pass
-
-        assert probs.shape == target.shape, f"Shapes dont match: {probs.shape} vs {target.shape}"
             
         # Flatten everything to work on a pixel-wise basis
         probs_flat = probs.reshape(probs.shape[0], -1)
@@ -50,22 +48,27 @@ class TopKDiceLoss(nn.Module):
         # Compute "True Positive Map"
         tp_map = probs_flat * target_flat
         
-        mask = torch.ones_like(tp_map)
+        # .detch() to seperate the "Ignore Map" from the computational graph,
+        # so it doesn't affect gradients
+        mask = torch.ones_like(tp_map).detach()
         
-        for i in range(probs.shape[0]):
-            foreground_indices = (target_flat[i] == 1)
-            
-            if foreground_indices.sum() > 0:
-                foreground_tp = tp_map[i][foreground_indices]
+        # Determine the threshold for top K% pixels in the foreground class
+        # use torch.no_grad() to ensure this doesn't affect the computational graph
+        with torch.no_grad():
+            for i in range(probs.shape[0]):
+                foreground_indices = (target_flat[i] == 1)
+                
+                if foreground_indices.sum() > 0:
+                    foreground_tp = tp_map[i][foreground_indices]
 
-                k_num = int(foreground_tp.numel() * (self.k / 100.0))
-                k_num = max(1, k_num) 
-                
-                threshold_val, _ = torch.kthvalue(foreground_tp, k_num)
-                
-                # Create "Ignore Map"
-                pixel_to_ignore = (target_flat[i] == 1) & (tp_map[i] > threshold_val)
-                mask[i][pixel_to_ignore] = 0.0
+                    k_num = int(foreground_tp.numel() * (self.k / 100.0))
+                    k_num = max(1, k_num) 
+                    
+                    threshold_val, _ = torch.kthvalue(foreground_tp, k_num)
+                    
+                    # Create "Ignore Map"
+                    pixel_to_ignore = (target_flat[i] == 1) & (tp_map[i] > threshold_val)
+                    mask[i][pixel_to_ignore] = 0.0
 
         probs_k = probs_flat * mask
         target_k = target_flat * mask

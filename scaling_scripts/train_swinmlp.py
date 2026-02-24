@@ -37,11 +37,11 @@ def train_one_epoch(
 
         with torch.amp.autocast("cuda", dtype=torch.bfloat16): 
             predictions = model(images) 
-            loss = loss_fn(predictions, masks)
+            loss = loss_fn(predictions.float(), masks)
 
         # Backward Pass
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
         optimizer.step()
 
         current_batch_size = images.size(0)
@@ -99,8 +99,8 @@ def main():
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 
         mode='max', 
-        patience=3,    
-        factor=0.5,   
+        patience=4,    
+        factor=0.8,   
         threshold=1e-3,
         min_lr=1e-6, 
     )
@@ -145,23 +145,6 @@ def main():
                 'Val_Precision',
                 'Val_Recall'
             ])
-
-    model.eval()
-    with torch.no_grad():
-        batch = next(iter(train_loader))
-        img = batch[0].to(device)
-        mask = batch[1].to(device)
-        
-        out = model(img)
-        print(f"Output shape:    {out.shape}")
-        print(f"Output min/max:  {out.min():.4f} / {out.max():.4f}")
-        print(f"Mask unique:     {mask.unique()}")
-        print(f"Mask shape:      {mask.shape}")
-        
-        probs = torch.softmax(out, dim=1)
-        pred = probs.argmax(dim=1)
-        print(f"Pred unique:     {pred.unique()}")
-    model.train()
 
     # Calculate the number of batches per epoch to determine the profiling schedule
     batches_per_epoch = len(train_loader)
