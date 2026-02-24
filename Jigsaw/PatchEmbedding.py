@@ -207,7 +207,7 @@ class PatchEmbedding1D(torch.nn.Module):
         padding=(0, 0),
         stride=(8, 8),
         xlat=721,
-        bias=True
+        bias=True,
     ):
         """
         Initialize patch embedding operation.
@@ -238,7 +238,7 @@ class PatchEmbedding1D(torch.nn.Module):
             out_channels=self.dim,
             kernel_size=self.patch_size,
             stride=self.stride,
-            bias=bias
+            bias=bias,
         )
 
     def forward(self, input):
@@ -266,7 +266,7 @@ class PatchEmbedding1D(torch.nn.Module):
         """
         # Input should be padded already, according to the patch size
         input = input.permute(0, 3, 1, 2)
-        
+
         input_shape = input.shape
 
         # Apply a linear projection for patch_size[1]*patch_size[2] patches
@@ -295,7 +295,7 @@ class PatchRecovery1D(torch.nn.Module):
         concat=False,
         xlat=721,
         xlon=1440,
-        bias=True
+        bias=True,
     ):
         """
         2D Patch recovery.
@@ -322,7 +322,7 @@ class PatchRecovery1D(torch.nn.Module):
                 out_channels=69,
                 kernel_size=self.patch_size,
                 stride=self.stride,
-                bias=bias
+                bias=bias,
             )
         else:
             self.conv = torch.nn.ConvTranspose1d(
@@ -330,7 +330,7 @@ class PatchRecovery1D(torch.nn.Module):
                 out_channels=69,
                 kernel_size=self.patch_size,
                 stride=self.stride,
-                bias=bias
+                bias=bias,
             )
         self.out_channels = out_channels
         self.patch_size = patch_size
@@ -550,9 +550,12 @@ class PatchRecoveryTest(torch.nn.Module):
 
 
 class DistributedPatchEmbedding(torch.nn.Module):
+    """Distributed patch embedding."""
+
     def __init__(
         self, n_lat, n_lon, patch_size, var_in, embed_dim, comm, rank, device, xlat=720
     ):
+        """Patch embedding implemented via Linear layer."""
         super().__init__()
         self.n_lat, self.n_lon = n_lat, n_lon
         self.patch_size = patch_size
@@ -578,9 +581,7 @@ class DistributedPatchEmbedding(torch.nn.Module):
         # self.layernorm = torch.nn.LayerNorm(self.patch_size[0]*self.patch_size[1]*self.var_in)
 
     def forward(self, x, model_group=None):
-        """
-        x: (n_batch, vars, n_lat, n_lon)
-        """
+        """Forward pass of distributed patch embedding."""
         # Load constant masks from the disc
         x_shape = x.shape
         # land_mask  = torch.broadcast_to(self.land_mask,   (x_shape[0], 1, x_shape[2], x_shape[3]))
@@ -591,7 +592,7 @@ class DistributedPatchEmbedding(torch.nn.Module):
 
         x_shape = x.shape
 
-        n_batch, n_x, n_y, n_var = x_shape[0], x_shape[1], x_shape[2], x_shape[3]
+        n_batch, n_x, n_y, _ = x_shape[0], x_shape[1], x_shape[2], x_shape[3]
 
         fraction_1 = x.shape[2] // 2  # num_patches_lon
         fraction_2 = x.shape[3] // 2  # num_variables
@@ -627,7 +628,7 @@ class DistributedPatchEmbedding(torch.nn.Module):
         x_patches_local = x_patches_local.contiguous().to(self.device)
 
         x = self.patch_embed(x_patches_local, model_group)
-        
+
         # x shape: (n_batch, n_lat/p0, n_lon/01, embed_dim)
         return x
 
@@ -694,7 +695,6 @@ class DistributedPatchRecovery(torch.nn.Module):
         output_surface: Tensor
           of shape (n_batch, n_fields, n_lat, n_lon)
         """
-
         # Call the transposed convolution
 
         output = self.conv(x)  # distributed
@@ -724,6 +724,8 @@ class DistributedPatchRecovery(torch.nn.Module):
 
 
 class Distributed1DPatchEmbedding(torch.nn.Module):
+    """One-dimensional patch embedding performed via linear layer."""
+
     def __init__(
         self,
         n_lat,
@@ -733,52 +735,68 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
         embed_dim,
         rank,
         device,
-        n_parallel,
+        parallelism,
         model_group,
-        bias=True
+        bias=True,
     ):
+        """
+        Initialize Distributed1DPatchEmbedding.
+
+        inputs
+        ------
+        n_lat: int
+        n_lon: int
+        patch_size: Tuple(int, int)
+        var_in: int
+        embed_dim: int
+        rank: int
+        device: torch.device
+        parallelism: number of model-parallel instances.
+        model_group: dist.ProcessGroup
+        bias: bool
+        """
         super().__init__()
 
         self.n_lat, self.n_lon = n_lat, n_lon
         self.patch_size = patch_size
         self.var_in = var_in
         self.embed_dim = embed_dim
-        if n_parallel == 2:
+        if parallelism == 2:
             self.patch_embed = Linear.DistributedXWT(
                 patch_size * var_in // 2,
                 embed_dim,
                 rank,
                 device,
-                n_parallel,
+                parallelism,
                 model_group,
                 bias=bias,
             )
-        elif n_parallel == 4:
+        elif parallelism == 4:
             self.patch_embed = Linear.DistributedXWT(
                 patch_size * var_in // 2,
                 embed_dim // 2,
                 rank,
                 device,
-                n_parallel,
+                parallelism,
                 model_group,
-                bias=bias
+                bias=bias,
             )
-        elif n_parallel == 8:
+        elif parallelism == 8:
             self.patch_embed = Linear.DistributedXWT(
                 patch_size * var_in // 2,
                 embed_dim // 4,
                 rank,
                 device,
-                n_parallel,
+                parallelism,
                 model_group,
-                bias=bias
+                bias=bias,
             )
 
         self.rank = rank
         self.device = device
 
     def forward(self, x):
-        """x: (n_batch, vars, n_lat, n_lon)"""
+        """Forward pass of distributed 1D Patch Embedding."""
         # Load constant masks from the disc
 
         n_batch, n_x, n_y, n_var = x.shape
@@ -810,10 +828,11 @@ class Distributed1DPatchRecovery(torch.nn.Module):
         concat=False,
         group=None,
         stride=None,
-        bias=False
+        bias=False,
     ):
         """
         1D Patch recovery.
+
         A transpose convolution operation is performed over the pressure and surface outputs to recover the forecasted fields.
         patch_size: Tuple(int, int, int)
             Number of pixels in (lat, lon) dimensions per patch
@@ -841,7 +860,7 @@ class Distributed1DPatchRecovery(torch.nn.Module):
                     self.device,
                     self.n_parallel,
                     self.model_group,
-                    bias=bias
+                    bias=bias,
                 )
             else:
                 self.conv = Linear.DistributedXWT(
@@ -888,7 +907,6 @@ class Distributed1DPatchRecovery(torch.nn.Module):
         output_surface: Tensor
           of shape (n_batch, n_fields, n_lat, n_lon)
         """
-
         # Call the transposed convolution
         output = self.conv(x)  # distributed convolution
         output = output.view(
@@ -905,7 +923,9 @@ class Distributed1DPatchRecovery(torch.nn.Module):
 
 
 # Transformer-based patch embedding
-class DistributedAttention_twoway(torch.nn.Module):
+class DistributedAttentionTwoway(torch.nn.Module):
+    """Distributed attention over 2way model."""
+
     def __init__(
         self,
         n_lat,
@@ -974,9 +994,7 @@ class DistributedAttention_twoway(torch.nn.Module):
         self.Softmax = Softmax(dim=-1)
 
     def forward(self, x, model_group):
-        """
-        x: (n_batch, vars, n_lat, n_lon)
-        """
+        """Forward pass of distributed attention."""
         # Load constant masks from the disc
 
         n_batch, n_x, n_y, n_var = x.shape

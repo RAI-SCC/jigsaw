@@ -1,8 +1,5 @@
-import os
-
 import torch
 import torch.distributed as dist
-import time 
 
 streams = [torch.cuda.Stream() for _ in range(2)]
 streamz = [torch.cuda.Stream() for _ in range(4)]
@@ -53,8 +50,8 @@ def _get_preallocated_buffer(
     # Reallocate if buffer is None or too small
     # if buf is None or needed > buf_numel:
     buf = torch.zeros(needed, dtype=dtype, device=device)
-        # buf_numel = needed
-        # _prealloc_buffers[key] = (buf, buf_numel)
+    # buf_numel = needed
+    # _prealloc_buffers[key] = (buf, buf_numel)
     return buf.view(*shape)
     # else:
     #     out, _ = _prealloc_buffers[key]
@@ -98,7 +95,7 @@ def xw_transpose_twoway(
     buffer_xw = _get_preallocated_buffer(
         (*xij.shape[:-1], w0.shape[-2]), torch.float32, local_rank, device
     )
-    
+
     empty = torch.empty(0, device=device, dtype=torch.float32)
     match mod:
         case 0:
@@ -112,8 +109,8 @@ def xw_transpose_twoway(
 
     xw_handle = dist.all_to_all(
         xw_recv_list, xw_send_list, group=model_group, async_op=True
-    )    
-    
+    )
+
     match mod:
         case 0:
             cij = torch.matmul(xij, w0.mT)
@@ -123,7 +120,7 @@ def xw_transpose_twoway(
             cij = torch.matmul(xij, w1.mT)
             xw_handle.wait()
             cij = cij + xw_recv_list[0]
-    
+
     return cij
 
 
@@ -246,7 +243,10 @@ def x_transpose_w_twoway(
 
 
 def x_transpose_twoway(
-    x: torch.tensor, local_rank: int, device: torch.device, model_group: dist.ProcessGroup
+    x: torch.tensor,
+    local_rank: int,
+    device: torch.device,
+    model_group: dist.ProcessGroup,
 ) -> torch.tensor:
     """
     Batched transpose (x_transpose) operation distributed across two processes.
@@ -285,12 +285,11 @@ def x_transpose_twoway(
     xt_handle = dist.all_to_all(
         x_recv_list, x_send_list, group=model_group, async_op=True
     )
-    
-    
+
     match mod:
         case 0:
             x0 = x0.mT
-            
+
             x_shape = x0.shape
             if len(x_shape) >= 3:
                 x_transpose = torch.empty(
@@ -711,7 +710,10 @@ def x_transpose_w_fourway(
 
 
 def x_transpose_fourway(
-    x: torch.tensor, local_rank: int, device: torch.device, model_group: dist.ProcessGroup
+    x: torch.tensor,
+    local_rank: int,
+    device: torch.device,
+    model_group: dist.ProcessGroup,
 ) -> torch.tensor:
     """
     Batched transpose (x_transpose) operation distributed across four processes.
@@ -732,7 +734,7 @@ def x_transpose_fourway(
     """
     mod = local_rank % 4
     empty = torch.empty(0, device=device, dtype=torch.float32)
-    
+
     x = x.contiguous()
     match mod:
         case 0:
@@ -2080,7 +2082,7 @@ def xw_eightway(
                 handle_w.wait()
                 handle_x.wait()
                 cij1 = torch.matmul(x_recv_list[6], w1)
-    
+
     for s in streams:
         s.synchronize()
 
@@ -2441,11 +2443,17 @@ def x_transpose_w_eightway(
             x_recv_list = [
                 empty,
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 0),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 0
+                ),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 1),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 1
+                ),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 2),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 2
+                ),
                 empty,
             ]
             w_send_list = [empty, empty, wij, empty, wij, empty, wij, empty]
@@ -2462,13 +2470,21 @@ def x_transpose_w_eightway(
         case 1:
             x_send_list = [empty, empty, empty, empty, x0, x0, x1, x1]
             x_recv_list = [
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 0),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 0
+                ),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 1),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 1
+                ),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 2),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 2
+                ),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 3),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 3
+                ),
                 empty,
             ]
             w_send_list = [empty, empty, empty, wij, empty, wij, empty, wij]
@@ -2485,13 +2501,19 @@ def x_transpose_w_eightway(
         case 2:
             x_send_list = [x0, x0, empty, x1, empty, empty, empty, empty]
             x_recv_list = [
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 0),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 0
+                ),
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 1),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 1
+                ),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 2),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 2
+                ),
                 empty,
             ]
             w_send_list = [wij, empty, empty, empty, wij, empty, wij, empty]
@@ -2508,13 +2530,21 @@ def x_transpose_w_eightway(
         case 3:
             x_send_list = [empty, empty, empty, empty, x0, x0, x1, x1]
             x_recv_list = [
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 0),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 0
+                ),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 1),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 1
+                ),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 2),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 2
+                ),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 3),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 3
+                ),
                 empty,
             ]
             w_send_list = [empty, wij, empty, empty, empty, wij, empty, wij]
@@ -2532,13 +2562,21 @@ def x_transpose_w_eightway(
             x_send_list = [x0, x0, x1, x1, empty, empty, empty, empty]
             x_recv_list = [
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 0),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 0
+                ),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 1),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 1
+                ),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 2),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 2
+                ),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 3),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 3
+                ),
             ]
             w_send_list = [wij, empty, wij, empty, empty, empty, wij, empty]
             w_recv_list = [
@@ -2555,13 +2593,19 @@ def x_transpose_w_eightway(
             x_send_list = [empty, empty, empty, empty, x0, empty, x1, x1]
             x_recv_list = [
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 0),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 0
+                ),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 1),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 1
+                ),
                 empty,
                 empty,
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 2),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 2
+                ),
             ]
             w_send_list = [empty, wij, empty, wij, empty, empty, empty, wij]
             w_recv_list = [
@@ -2578,13 +2622,21 @@ def x_transpose_w_eightway(
             x_send_list = [x0, x0, x1, x1, empty, empty, empty, empty]
             x_recv_list = [
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 0),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 0
+                ),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 1),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 1
+                ),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 2),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 2
+                ),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 3),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 3
+                ),
             ]
             w_send_list = [wij, empty, wij, empty, wij, empty, empty, empty]
             w_recv_list = [
@@ -2601,11 +2653,17 @@ def x_transpose_w_eightway(
             x_send_list = [empty, empty, empty, empty, x0, x0, x1, empty]
             x_recv_list = [
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 0),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 0
+                ),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 1),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 1
+                ),
                 empty,
-                _get_preallocated_buffer(x_transpose_shape, xij.dtype, local_rank, device, 2),
+                _get_preallocated_buffer(
+                    x_transpose_shape, xij.dtype, local_rank, device, 2
+                ),
                 empty,
                 empty,
             ]
@@ -2733,7 +2791,10 @@ def x_transpose_w_eightway(
 
 
 def x_transpose_eightway(
-    xij: torch.tensor, local_rank: int, device: torch.device, model_group: dist.ProcessGroup
+    xij: torch.tensor,
+    local_rank: int,
+    device: torch.device,
+    model_group: dist.ProcessGroup,
 ) -> torch.tensor:
     """
     Batched transpose (x_transpose) operation distributed across eight processes.

@@ -1,16 +1,14 @@
 import argparse
 import time
 
+import eval
+import timm
 import torch
 import torch.distributed as dist
 import torch.optim as optim
-import timm
-import yaml
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.nn.utils import vector_to_parameters
-
-import eval
 import utils
+import yaml
+from torch.nn.utils import vector_to_parameters
 
 
 def training_loop(
@@ -21,8 +19,6 @@ def training_loop(
     model_parallel = n_parallel > 1
     # Set all seeds in the same model group to be different
     utils.set_all_seeds(1 + rank % n_parallel)
-
-    best_val_loss = 1e5
 
     xlat, xlon = config_dict["data"]["xlat"], config_dict["data"]["xlon"]
     variable_weights, area_weights = utils.get_weights(
@@ -86,8 +82,12 @@ def training_loop(
     utils.setup_precision(config_dict["training"]["tf32"])
 
     max_rollout = config_dict["model"]["latent_rollout"]
-    epoch_end = epoch + 11 
-    epoch_end = config_dict['training']['n_epochs'] if epoch_end > config_dict['training']['n_epochs'] else epoch_end
+    epoch_end = epoch + 11
+    epoch_end = (
+        config_dict["training"]["n_epochs"]
+        if epoch_end > config_dict["training"]["n_epochs"]
+        else epoch_end
+    )
     for epoch in range(epoch, epoch_end):
         avg_loss = train_one_epoch(
             config_dict,
@@ -106,7 +106,7 @@ def training_loop(
             max_rollout=max_rollout,
             rank=rank,
             start_lr=1e-6,
-            col_group=model_subgroup_col
+            col_group=model_subgroup_col,
         )
 
         torch.cuda.synchronize()
@@ -164,7 +164,7 @@ def train_one_epoch(
     max_rollout: int,
     rank: int,
     start_lr: float,
-    col_group: dist.ProcessGroup
+    col_group: dist.ProcessGroup,
 ) -> float:
     """
     Train for one epoch.
@@ -198,12 +198,12 @@ def train_one_epoch(
             for index, g in enumerate(optimizer.param_groups):
                 warm = i * (max_values[index] - start_lr) / 5000 + start_lr
                 g["lr"] = warm
-        
+
         input_data = data[0].to(device, non_blocking=True)
         target_data = data[1][rollout].to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-        
+
         output = model(input_data, rollout_=rollout + 1)  # [B, 720, 720, 36]
         output = output.reshape(-1, xlat, xlon, n_vars_local)
 
@@ -216,12 +216,14 @@ def train_one_epoch(
         torch.nn.utils.clip_grad_norm_(
             model.parameters(), config_dict["training"]["grad_clip"]
         )
-        
-        if config_dict['model_parallel']['parallelism'] == 4:
-            handles, flat_grad, gradients = utils.reduce_ddp_layernorms(model, col_group)
+
+        if config_dict["model_parallel"]["parallelism"] == 4:
+            handles, flat_grad, gradients = utils.reduce_ddp_layernorms(
+                model, col_group
+            )
             handles.wait()
             vector_to_parameters(flat_grad, gradients)
-            
+
         optimizer.step()
         dist.all_reduce(loss, op=dist.ReduceOp.AVG)
         epoch_loss = epoch_loss + float(loss.detach())

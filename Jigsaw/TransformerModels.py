@@ -1,11 +1,12 @@
-import numpy as np
 import torch
 
-from . import Normalization as Norm
 from . import Attention, Dataset, Linear, PatchEmbedding
+from . import Normalization as Norm
 
 
-class Transformer_Sequential(torch.nn.Module):
+class TransformerSequential(torch.nn.Module):
+    """Non-parallel Transformer module."""
+
     def __init__(
         self,
         config_dict,
@@ -16,6 +17,7 @@ class Transformer_Sequential(torch.nn.Module):
         row_subgroup,
         col_subgroup,
     ):
+        """Define non-parallel ViT."""
         super().__init__()
         self.rank = rank
         self.device = device
@@ -125,6 +127,7 @@ class Transformer_Sequential(torch.nn.Module):
             )
 
     def forward(self, x, rollout_=1):
+        """Perform forward pass of non-parallel Transformer model."""
         x_shape = x.shape
         x_res = x.clone()
         x_res = x_res.permute(0, 2, 3, 1)
@@ -161,7 +164,9 @@ class Transformer_Sequential(torch.nn.Module):
         return x
 
 
-class Transformer_Twoway(torch.nn.Module):
+class TransformerTwoway(torch.nn.Module):
+    """Define ViT over 2 GPUs."""
+
     def __init__(
         self,
         config_dict,
@@ -172,6 +177,7 @@ class Transformer_Twoway(torch.nn.Module):
         row_subgroup,
         col_subgroup,
     ):
+        """Define ViT over 2 GPUs."""
         super().__init__()
         self.rank = rank
         self.device = device
@@ -197,7 +203,7 @@ class Transformer_Twoway(torch.nn.Module):
             device,
             n_parallel,
             model_group,
-            bias=False
+            bias=False,
         )
         self.n_blocks = config_dict["model"]["mixing_blocks"]
         self.blocks = torch.nn.ModuleList(
@@ -232,7 +238,7 @@ class Transformer_Twoway(torch.nn.Module):
                 device,
                 n_parallel=n_parallel,
                 model_group=model_group,
-                bias=False
+                bias=False,
             )
 
         if self.concat:
@@ -246,7 +252,7 @@ class Transformer_Twoway(torch.nn.Module):
                 model_group,
                 concat=True,
                 stride=self.stride,
-                bias=False
+                bias=False,
             )
         else:
             self.recovery = PatchEmbedding.Distributed1DPatchRecovery(
@@ -259,7 +265,7 @@ class Transformer_Twoway(torch.nn.Module):
                 model_group,
                 concat=False,
                 stride=self.stride,
-                bias=False
+                bias=False,
             )
         self.activation = torch.nn.GELU()
 
@@ -289,6 +295,7 @@ class Transformer_Twoway(torch.nn.Module):
             )
 
     def forward(self, x, rollout_=1):
+        """Perform forward pass of 2way Transformer model."""
         x_res = x
         x_res = x_res.flatten(start_dim=1, end_dim=2)
 
@@ -328,7 +335,9 @@ class Transformer_Twoway(torch.nn.Module):
             return x
 
 
-class Transformer_Fourway(torch.nn.Module):
+class TransformerFourway(torch.nn.Module):
+    """Define ViT over 4 GPUs."""
+
     def __init__(
         self,
         config_dict,
@@ -339,6 +348,7 @@ class Transformer_Fourway(torch.nn.Module):
         row_subgroup,
         col_subgroup,
     ):
+        """Define ViT over 4 GPUs."""
         super().__init__()
         self.rank = rank
         self.device = device
@@ -368,7 +378,7 @@ class Transformer_Fourway(torch.nn.Module):
         self.n_blocks = config_dict["model"]["mixing_blocks"]
         self.blocks = torch.nn.ModuleList(
             [
-                Attention.TransformerLayer( # Transformer layer including MLP block
+                Attention.TransformerLayer(  # Transformer layer including MLP block
                     hidden_dimension,
                     transformer_dimension,
                     hidden_dimension,
@@ -378,7 +388,7 @@ class Transformer_Fourway(torch.nn.Module):
                     self.n_parallel,
                     self.model_group,
                     self.softmax_subgroup,
-                    self.column_subgroup
+                    self.column_subgroup,
                 )
                 for i in range(self.n_blocks)
             ]
@@ -470,6 +480,7 @@ class Transformer_Fourway(torch.nn.Module):
         self.topography = torch.unsqueeze(self.topography[:, self.start : self.end], 0)
 
     def forward(self, x, rollout_=1):
+        """Forward pass of four-way ViT."""
         x_res = x
         if len(x_res.shape) > 3:
             x_res = x_res.flatten(start_dim=1, end_dim=2)
@@ -518,7 +529,9 @@ class Transformer_Fourway(torch.nn.Module):
 
 
 ## Megatron Implementations
-class Megatron_Transformer(torch.nn.Module):
+class MegatronTransformer(torch.nn.Module):
+    """Megatron-like Transformer implementation."""
+
     def __init__(
         self,
         config_dict,
@@ -529,6 +542,7 @@ class Megatron_Transformer(torch.nn.Module):
         row_subgroup,
         col_subgroup,
     ):
+        """Megatron-like Transformer implementation."""
         super().__init__()
         self.rank = rank
         self.device = device
@@ -568,7 +582,7 @@ class Megatron_Transformer(torch.nn.Module):
                     self.n_parallel,
                     self.model_group,
                     self.softmax_subgroup,
-                    self.column_subgroup
+                    self.column_subgroup,
                 )
                 for i in range(self.n_blocks)
             ]
@@ -637,6 +651,7 @@ class Megatron_Transformer(torch.nn.Module):
             )
 
     def forward(self, x, rollout_=1):
+        """Forward pass of Megatron Transformer."""
         x_shape = x.shape
         x_res = x.clone()
         x_res = x_res.permute(0, 2, 3, 1)

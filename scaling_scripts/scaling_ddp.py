@@ -1,13 +1,12 @@
 import argparse
 
+import Model
 import numpy as np
 import torch
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-import yaml
-
 import utils
-import Model
+import yaml
+from torch.nn.parallel import DistributedDataParallel
 
 
 def training_loop(
@@ -15,7 +14,6 @@ def training_loop(
 ) -> None:
     """Training loop for scaling experiments."""
     model_parallel = config_dict["model"]["model_parallel"]
-    n_parallel = config_dict["model_parallel"]["parallelism"] if model_parallel else 1
 
     utils.set_all_seeds(1)
 
@@ -24,7 +22,7 @@ def training_loop(
     n_vars_out = 69
 
     # Set up model, optimizer, loss function
-    model = model = DDP(
+    model = DistributedDataParallel(
         Model.ModelSequential(config_dict, rank, device).to(device),
         device_ids=[localid],
         output_device=localid,

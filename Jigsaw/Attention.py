@@ -2,10 +2,13 @@ import torch
 import torch.distributed as dist
 from einops import rearrange
 
+from . import MLP, Linear
 from . import Normalization as Norm
-from . import MLP, Linear, Linear_Megatron
+
 
 class DistributedWindowedAttention(torch.nn.Module):
+    """Distributed windowed attention."""
+
     def __init__(
         self,
         x_features: int,
@@ -18,7 +21,7 @@ class DistributedWindowedAttention(torch.nn.Module):
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
-        bayesian: bool
+        bayesian: bool,
     ):
         """
 
@@ -55,14 +58,17 @@ class DistributedWindowedAttention(torch.nn.Module):
             parallelism=self.parallelism,
             model_group=self.channel_group,
             sync_group=self.spatial_group,
-            bayesian=bayesian
+            bayesian=bayesian,
         )
 
-        self.softmax = Norm.DistributedSoftMax(
-            dim=-1, group=self.channel_group
-        )  # TODO: define softmax groups
+        self.softmax = Norm.DistributedSoftMax(dim=-1, group=self.channel_group)
         self.xwt = Linear.DistributedMatMulXWTranspose(
-            self.local_rank, self.device, 2, model_group=self.channel_group, spatial_group=self.spatial_group, bayesian=bayesian
+            self.local_rank,
+            self.device,
+            2,
+            model_group=self.channel_group,
+            spatial_group=self.spatial_group,
+            bayesian=bayesian,
         )
         self.xw = Linear.DistributedMatMulXW(
             local_rank, device, 2, model_group=self.channel_group, bayesian=bayesian
@@ -79,11 +85,11 @@ class DistributedWindowedAttention(torch.nn.Module):
             parallelism=self.parallelism,
             model_group=self.channel_group,
             sync_group=self.spatial_group,
-            bayesian=bayesian
+            bayesian=bayesian,
         )
 
         self.heads = heads
-        
+
         self.scale = (embed_dim * 2 // self.heads) ** (-0.5)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -130,6 +136,13 @@ def _average_weights(
 
 
 class DistributedWindowedTransformer(torch.nn.Module):
+    """
+    Windowed Transformer across multiple processes.
+
+    The spatial domain is split across domain-parallel instances,
+    and the channel domain retains domain and tensor parallel approaches.
+    """
+
     def __init__(
         self,
         x_features: int,
@@ -143,7 +156,7 @@ class DistributedWindowedTransformer(torch.nn.Module):
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
-        bayesian: bool
+        bayesian: bool,
     ):
         super().__init__()
         self.attention_block = DistributedWindowedAttention(
@@ -157,7 +170,7 @@ class DistributedWindowedTransformer(torch.nn.Module):
             model_group,
             spatial_group,
             channel_group,
-            bayesian
+            bayesian,
         ).to(device)
         self.layer_norm1 = Norm.DistributedLayerNorm(
             output_dim // 2, local_rank, device, spatial_group, channel_group
@@ -176,17 +189,27 @@ class DistributedWindowedTransformer(torch.nn.Module):
             parallelism=parallelism,
             model_group=channel_group,
             sync_group=spatial_group,
-            bayesian=bayesian
+            bayesian=bayesian,
         ).to(device)
 
         _average_weights(self, spatial_group, device)
 
     def forward(self, x: torch.tensor, mask=None):
+        """Forward pass of distributed windowed transformer."""
         x = self.attention_block(self.layer_norm1(x), mask) + x
         x = self.MLP(self.layer_norm2(x)) + x
         return x
 
+
 class DistributedNICEWindowedTransformer(torch.nn.Module):
+    """
+    Module for Distributed NICE Windowed Transformer.
+
+    The spatial domain is split across domain-parallel instances,
+    and the channel domain retains domain and tensor parallel approaches.
+    Noise is replicated across all dtp processes.
+    """
+
     def __init__(
         self,
         x_features: int,
@@ -201,8 +224,9 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
-        bayesian: bool
+        bayesian: bool,
     ):
+        """Initialize DistributedNICEWindowedTransformer."""
         super().__init__()
         self.noise_dim = noise_dim
         self.attention_block = DistributedWindowedAttention(
@@ -216,16 +240,28 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
             model_group,
             spatial_group,
             channel_group,
-            bayesian
+            bayesian,
         ).to(device)
 
         self.layer_norm1 = Norm.DistributedNICENorm(
-            output_dim, self.noise_dim, local_rank, device, parallelism, spatial_group, channel_group
+            output_dim,
+            self.noise_dim,
+            local_rank,
+            device,
+            parallelism,
+            spatial_group,
+            channel_group,
         ).to(device)
         self.layer_norm2 = Norm.DistributedNICENorm(
-            output_dim, self.noise_dim, local_rank, device, parallelism, spatial_group, channel_group
+            output_dim,
+            self.noise_dim,
+            local_rank,
+            device,
+            parallelism,
+            spatial_group,
+            channel_group,
         ).to(device)
-        
+
         self.MLP = MLP.DistributedSynchronizedMLP(
             output_dim,
             output_dim,
@@ -237,13 +273,22 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
             parallelism=parallelism,
             model_group=channel_group,
             sync_group=spatial_group,
-            bayesian=bayesian
+            bayesian=bayesian,
         ).to(device)
 
         _average_weights(self, spatial_group, device)
 
-    def forward(self, x: torch.tensor, noise: torch.tensor, mask=None):
+    def forward(self, x: torch.Tensor, noise: torch.Tensor, mask=None):
+        """
+        Perform forward pass for DistribuedNICEWindowedTransformer.
+
+        inputs
+        ------
+        x: torch.Tensor
+        noise: torch.Tensor
+        mask: Union[None, torch.Tensor]
+        """
         x = self.attention_block(self.layer_norm1(x, noise), mask) + x
         x = self.MLP(self.layer_norm2(x, noise)) + x
-        
+
         return x

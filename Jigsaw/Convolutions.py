@@ -1,34 +1,30 @@
-from typing import Optional, Tuple, Union
+from typing import Optional
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from .distributed_convolutions import (
-    conv2d_fourway,
-)
-import numpy as np
-import Jigsaw.distributed_convolutions as dist_conv
 from torch.nn.grad import conv2d_input, conv2d_weight
 
+import Jigsaw.distributed_convolutions as dist_conv
+
+
 class ConvSelectionStrategy:
-    def __init__(
-        self,
-        bayesian,  
-        parallelism,
-        bias,
-        kernel_size, 
-        stride
-    ):
+    """Selection strategy for convolution kernels and halo communications."""
+
+    def __init__(self, bayesian, parallelism, bias, kernel_size, stride):
         self.conv2d_fn = self._conv2d_fn_selection(bayesian)
         self.conv2d_input_fn = self._conv2d_input_fn_selection(bayesian)
         self.conv2d_weight_fn = self._conv2d_weight_fn_selection(bayesian)
         self.weight_reshape = self._reshape_weights_selection(bayesian)
         self.grad_bias = self._grad_bias_selection(parallelism, bias)
-        self.communicate_halos_forward, self.communicate_halos_backward = self._communicate_halos_selection(kernel_size, stride, parallelism)
-        
+        self.communicate_halos_forward, self.communicate_halos_backward = (
+            self._communicate_halos_selection(kernel_size, stride, parallelism)
+        )
+
         # Select communicate halos
         self._communicate_halos_fn_selection(parallelism)
-    
+
     def _communicate_halos_fn_selection(self, parallelism):
         if parallelism == 4:
             self.communicate_halos = dist_conv.communicate_halos
@@ -42,22 +38,50 @@ class ConvSelectionStrategy:
     def _communicate_halos_selection(self, kernel_size, stride, parallelism):
         if isinstance(kernel_size, int) and isinstance(stride, int):
             if kernel_size == stride:
-                return self._no_communicate_halos_forward, self._no_communicate_halos_backward
+                return (
+                    self._no_communicate_halos_forward,
+                    self._no_communicate_halos_backward,
+                )
             else:
                 if parallelism == 4:
-                    return self._communicate_halos_forward, self._communicate_halos_backward_4way
+                    return (
+                        self._communicate_halos_forward,
+                        self._communicate_halos_backward_4way,
+                    )
                 else:
-                    return self._communicate_halos_forward, self._communicate_halos_backward_8way
+                    return (
+                        self._communicate_halos_forward,
+                        self._communicate_halos_backward_8way,
+                    )
         else:
             if all(p == k for (p, k) in zip(kernel_size, stride)):
-                return self._no_communicate_halos_forward, self._no_communicate_halos_backward
+                return (
+                    self._no_communicate_halos_forward,
+                    self._no_communicate_halos_backward,
+                )
             else:
                 if parallelism == 4:
-                    return self._communicate_halos_forward, self._communicate_halos_backward_4way
+                    return (
+                        self._communicate_halos_forward,
+                        self._communicate_halos_backward_4way,
+                    )
                 else:
-                    return self._communicate_halos_forward, self._communicate_halos_backward_8way
-            
-    def _communicate_halos_forward(self, x, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
+                    return (
+                        self._communicate_halos_forward,
+                        self._communicate_halos_backward_8way,
+                    )
+
+    def _communicate_halos_forward(
+        self,
+        x,
+        right_to_left,
+        left_to_right,
+        local_rank,
+        parallelism,
+        empty,
+        spatial_group,
+        async_op,
+    ):
         halo, _ = self.communicate_halos(
             x,
             right_to_left,
@@ -71,14 +95,25 @@ class ConvSelectionStrategy:
         x_with_halos = self.append_halos(
             x, halo, right_to_left, left_to_right, local_rank, 4, empty
         )
-        
+
         return x_with_halos
-        
+
     def _no_communicate_halos_forward(self, x, *args, **kwargs):
         x = x.contiguous()
         return x
-    
-    def _communicate_halos_backward_4way(self, g_x_aug, x_shape, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
+
+    def _communicate_halos_backward_4way(
+        self,
+        g_x_aug,
+        x_shape,
+        right_to_left,
+        left_to_right,
+        local_rank,
+        parallelism,
+        empty,
+        spatial_group,
+        async_op,
+    ):
         halo, wait_handle = dist_conv.communicate_halos(
             g_x_aug,
             right_to_left,
@@ -89,9 +124,9 @@ class ConvSelectionStrategy:
             spatial_group,
             async_op=async_op,
         )
-        
+
         wait_handle.wait()
-        
+
         if spatial_group.rank() == 0:
             g_x = g_x_aug[..., : x_shape[-1]]
             if right_to_left > 0:
@@ -102,9 +137,19 @@ class ConvSelectionStrategy:
                 g_x[..., :left_to_right] = g_x[..., :left_to_right] + halo
 
         return g_x
-    
-    def _communicate_halos_backward_8way(self, g_x_aug, x_shape, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
-        # NOTE: this is currently not used, since the backward pass doesn't require a halo
+
+    def _communicate_halos_backward_8way(
+        self,
+        g_x_aug,
+        x_shape,
+        right_to_left,
+        left_to_right,
+        local_rank,
+        parallelism,
+        empty,
+        spatial_group,
+        async_op,
+    ):
         halo, _ = self.communicate_halos_8way(
             g_x_aug,
             right_to_left,
@@ -115,64 +160,64 @@ class ConvSelectionStrategy:
             spatial_group,
             async_op=False,
         )
-        
+
         if local_rank in [0, 1]:
             g_x = g_x_aug[..., : x_shape[-1]]
             if right_to_left[0] > 0:
-                g_x[..., -right_to_left:] = g_x[..., -right_to_left[0]:] + halo[1]
+                g_x[..., -right_to_left:] = g_x[..., -right_to_left[0] :] + halo[1]
         elif local_rank in [2, 3]:
             g_x = g_x_aug[..., -x_shape[-1] :]
             if left_to_right[0] > 0:
-                g_x[..., :left_to_right[0]] = g_x[..., :left_to_right[0]] + halo[0]
+                g_x[..., : left_to_right[0]] = g_x[..., : left_to_right[0]] + halo[0]
             if right_to_left[1] > 0:
                 g_x[..., -right_to_left[1]] = g_x[..., -right_to_left[1]] + halo[1]
         elif local_rank in [4, 5]:
             g_x = g_x_aug[..., -x_shape[-1] :]
             if left_to_right[1] > 0:
-                g_x[..., :left_to_right[1]] = g_x[..., :left_to_right[1]] + halo[0]
+                g_x[..., : left_to_right[1]] = g_x[..., : left_to_right[1]] + halo[0]
             if right_to_left[2] > 0:
                 g_x[..., -right_to_left[2]] = g_x[..., -right_to_left[2]] + halo[1]
         elif local_rank in [6, 7]:
             g_x = g_x_aug[..., -x_shape[-1] :]
             if left_to_right[2] > 0:
-                g_x[..., :left_to_right[2]] = g_x[..., :left_to_right[2]] + halo[0]
+                g_x[..., : left_to_right[2]] = g_x[..., : left_to_right[2]] + halo[0]
 
         return g_x
-    
-    def _no_communicate_halos_backward(self, g_x_aug,  *args, **kwargs):
+
+    def _no_communicate_halos_backward(self, g_x_aug, *args, **kwargs):
         return g_x_aug
-    
+
     def _conv2d_fn_selection(self, bayesian):
         if bayesian:
             return torch.vmap(F.conv2d)
         else:
             return F.conv2d
-    
+
     def _conv2d_input_fn_selection(self, bayesian):
         if bayesian:
             return torch.vmap(conv2d_input, in_dims=(None, 0, 0))
         else:
             return conv2d_input
-    
+
     def _conv2d_weight_fn_selection(self, bayesian):
         if bayesian:
             return torch.vmap(conv2d_weight, in_dims=(0, None, 0))
         else:
             return conv2d_weight
-        
+
     def _reshape_weights_selection(self, bayesian):
-        if bayesian: 
+        if bayesian:
             return self._reshape_weights
         else:
             return self._no_reshape_weights
-        
+
     def _reshape_weights(self, w, x):
         w = w.expand(x.shape[0], *w.shape)
         return w
-    
+
     def _no_reshape_weights(self, w, x=None):
         return w
-    
+
     def _grad_bias_selection(self, parallelism, bias):
         if bias is None:
             return self._no_bias
@@ -180,96 +225,120 @@ class ConvSelectionStrategy:
             return self._no_reduce_grad_bias
         else:
             return self._reduce_bias_over_spatial_group
-    
+
     def _no_bias(self, grad_output, spatial_group=None):
         return None
-    
+
     def _no_reduce_grad_bias(self, grad_output, spatial_group=None):
         return grad_output.sum(dim=(-4, -2, -1))
-    
+
     def _reduce_bias_over_spatial_group(self, grad_output, spatial_group):
         grad_b = grad_output.sum(dim=(-4, -2, -1))
         dist.all_reduce(grad_b, op=dist.ReduceOp.SUM, group=spatial_group)
         return grad_b
-    
+
 
 class ConvTransposeSelectionStrategy:
-    def __init__(
-        self,
-        bayesian,  
-        parallelism,
-        bias,
-        kernel_size,
-        stride
-    ):
-        self.convTranspose2d_fn = self._convTranspose2d_fn_selection(bayesian)
-        self.convTranspose2d_grad_fn = self._convTranspose2d_grad_fn_selection(bayesian)
+    """Selection strategy for convolution transpose kernels and halo communications."""
+
+    def __init__(self, bayesian, parallelism, bias, kernel_size, stride):
+        """Initialize ConvTransposeSelectionStrategy."""
+        self.convTranspose2d_fn = self._conv_transpose2d_fn_selection(bayesian)
+        self.convTranspose2d_grad_fn = self._conv_transpose2d_grad_fn_selection(
+            bayesian
+        )
         self.weight_reshape = self._reshape_weights_selection(bayesian)
         self.grad_bias = self._grad_bias_selection(parallelism, bias)
-        self.communicate_halos_forward, self.communicate_halos_backward = self._communicate_halos_selection(kernel_size, stride, parallelism)
+        self.communicate_halos_forward, self.communicate_halos_backward = (
+            self._communicate_halos_selection(kernel_size, stride, parallelism)
+        )
         # Select communicate halos
         self._communicate_halos_fn_selection(parallelism)
-    
+
     def _communicate_halos_fn_selection(self, parallelism):
         if parallelism == 4:
-            self.communicate_halos = dist_conv.convTranspose_halocalc_twoway
+            self.communicate_halos = dist_conv.conv_transpose_halocalc_twoway
             self.append_halos = dist_conv.append_halos
-            self.dummy_tensor = torch.tensor([0,0])
+            self.dummy_tensor = torch.tensor([0, 0])
             self.dist_conv_transpose2d_fn = dist_conv.conv_transpose2d_fourway
-            self.dist_conv_transpose2d_backward_fn = dist_conv.conv_transpose2d_fourway_backward
+            self.dist_conv_transpose2d_backward_fn = (
+                dist_conv.conv_transpose2d_fourway_backward
+            )
         elif parallelism == 8:
-            self.communicate_halos = dist_conv.convTranspose_halocalc_fourway
+            self.communicate_halos = dist_conv.conv_transpose_halocalc_fourway
             self.append_halos = dist_conv.append_halos_8way
-            self.dummy_tensor = torch.tensor([[0,0,0],[0,0,0]])
+            self.dummy_tensor = torch.tensor([[0, 0, 0], [0, 0, 0]])
             self.dist_conv_transpose2d_fn = dist_conv.conv_transpose2d_eightway
-            self.dist_conv_transpose2d_backward_fn = dist_conv.conv_transpose2d_eightway_backward
-    
+            self.dist_conv_transpose2d_backward_fn = (
+                dist_conv.conv_transpose2d_eightway_backward
+            )
+
     def _communicate_halos_selection(self, kernel_size, stride, parallelism):
         if isinstance(kernel_size, int) and isinstance(stride, int):
             if kernel_size == stride:
-                return self._no_communicate_halos_forward, self._no_communicate_halos_backward
+                return (
+                    self._no_communicate_halos_forward,
+                    self._no_communicate_halos_backward,
+                )
             else:
                 if parallelism == 4:
-                    return self._communicate_halos_forward, self._communicate_halos_backward_4way
+                    return (
+                        self._communicate_halos_forward,
+                        self._communicate_halos_backward_4way,
+                    )
                 else:
-                    return self._communicate_halos_forward, self._communicate_halos_backward_8way
+                    return (
+                        self._communicate_halos_forward,
+                        self._communicate_halos_backward_8way,
+                    )
         else:
             if all(p == k for (p, k) in zip(kernel_size, stride)):
-                return self._no_communicate_halos_forward, self._no_communicate_halos_backward
-                
+                return (
+                    self._no_communicate_halos_forward,
+                    self._no_communicate_halos_backward,
+                )
+
             else:
                 if parallelism == 4:
-                    return self._communicate_halos_forward_4way, self._communicate_halos_backward
+                    return (
+                        self._communicate_halos_forward_4way,
+                        self._communicate_halos_backward,
+                    )
                 else:
-                    return self._communicate_halos_forward_8way, self._communicate_halos_backward
-            
+                    return (
+                        self._communicate_halos_forward_8way,
+                        self._communicate_halos_backward,
+                    )
+
     def _communicate_halos_forward_4way(
-        self, 
-        x, 
-        y, 
+        self,
+        x,
+        y,
         kernel_size,
-        stride, 
-        padding, 
-        dilation, 
-        local_rank, 
-        spatial_group, 
-        parallelism
+        stride,
+        padding,
+        dilation,
+        local_rank,
+        spatial_group,
+        parallelism,
     ):
-        y_buffer, overlap_size, local_size_left, local_size_right = self.convTranspose_halocalc_twoway(
-            x,
-            y,
-            kernel_size[1],
-            stride=stride[1],
-            padding=padding[1],
-            dilation=dilation[1],
-            local_rank=local_rank,
-            spatial_group=spatial_group,
-            parallelism=parallelism,
+        y_buffer, overlap_size, local_size_left, local_size_right = (
+            self.convTranspose_halocalc_twoway(
+                x,
+                y,
+                kernel_size[1],
+                stride=stride[1],
+                padding=padding[1],
+                dilation=dilation[1],
+                local_rank=local_rank,
+                spatial_group=spatial_group,
+                parallelism=parallelism,
+            )
         )
-        
+
         right_to_left = y.shape[-1] - local_size_left
         left_to_right = y.shape[-1] - local_size_right
-        
+
         # Add overlapping bounds
         if local_rank // 2 == 0:  # LHS
             start_overlap_index = y.shape[-1] - overlap_size
@@ -278,69 +347,94 @@ class ConvTransposeSelectionStrategy:
         elif local_rank // 2 == 1:
             y[..., :overlap_size] = y[..., :overlap_size] + y_buffer
             y = y[..., -local_size_right:]
-            
-        
+
         halo_sizes = torch.tensor([right_to_left, left_to_right])
-    
+
         return y, halo_sizes
-    
+
     def _communicate_halos_forward_8way(
-        self, 
-        x, 
-        y, 
+        self,
+        x,
+        y,
         kernel_size,
-        stride, 
-        padding, 
-        dilation, 
-        local_rank, 
-        spatial_group, 
-        parallelism
+        stride,
+        padding,
+        dilation,
+        local_rank,
+        spatial_group,
+        parallelism,
     ):
-        y_buffer_left, y_buffer_right, overlap, local_size = self.convTranspose_halocalc_fourway(
-            x,
-            y,
-            kernel_size[1],
-            stride=stride[1],
-            padding=padding[1],
-            dilation=dilation[1],
-            local_rank=local_rank,
-            spatial_group=spatial_group,
-            parallelism=parallelism,
+        y_buffer_left, y_buffer_right, overlap, local_size = (
+            self.convTranspose_halocalc_fourway(
+                x,
+                y,
+                kernel_size[1],
+                stride=stride[1],
+                padding=padding[1],
+                dilation=dilation[1],
+                local_rank=local_rank,
+                spatial_group=spatial_group,
+                parallelism=parallelism,
+            )
         )
-        
-        right_to_left = [y.shape[-1] - local_size[0], y.shape[-1] - local_size[1], y.shape[-1] - local_size[2]]
+
+        right_to_left = [
+            y.shape[-1] - local_size[0],
+            y.shape[-1] - local_size[1],
+            y.shape[-1] - local_size[2],
+        ]
         # todo: proper boundaries for transpose convolutions
-        left_to_right = [y.shape[-1] - local_size[0], y.shape[-1] - local_size[1], y.shape[-1] - local_size[2]]
-        
+        left_to_right = [
+            y.shape[-1] - local_size[0],
+            y.shape[-1] - local_size[1],
+            y.shape[-1] - local_size[2],
+        ]
+
         # Add overlapping bounds
         match spatial_group.rank():
             case 0:
-                start_overlap_index = y.shape[-1] - overlap[0] # overlap_size in 4-way
-                y[..., start_overlap_index:] = y[..., start_overlap_index:] + y_buffer_right
-                y = y[..., :local_size[0]]
+                start_overlap_index = y.shape[-1] - overlap[0]  # overlap_size in 4-way
+                y[..., start_overlap_index:] = (
+                    y[..., start_overlap_index:] + y_buffer_right
+                )
+                y = y[..., : local_size[0]]
             case 1:
-                start_overlap_index = y.shape[-1] - overlap[1] # overlap_size in 4-way
-                y[..., :overlap[0]] = y[..., :overlap[0]] + y_buffer_left
-                y[..., start_overlap_index:] = y[..., start_overlap_index:] + y_buffer_right 
-                
+                start_overlap_index = y.shape[-1] - overlap[1]  # overlap_size in 4-way
+                y[..., : overlap[0]] = y[..., : overlap[0]] + y_buffer_left
+                y[..., start_overlap_index:] = (
+                    y[..., start_overlap_index:] + y_buffer_right
+                )
+
             case 2:
-                start_overlap_index = y.shape[-1] - overlap[1] # overlap_size in 4-way
-                y[..., :overlap[1]] = y[..., :overlap[1]] + y_buffer_left
-                y[..., start_overlap_index:] = y[..., start_overlap_index:] + y_buffer_right 
-                
+                start_overlap_index = y.shape[-1] - overlap[1]  # overlap_size in 4-way
+                y[..., : overlap[1]] = y[..., : overlap[1]] + y_buffer_left
+                y[..., start_overlap_index:] = (
+                    y[..., start_overlap_index:] + y_buffer_right
+                )
+
             case 3:
-                y[..., :overlap[2]] = y[..., :overlap[2]] + y_buffer_left
-                y = y[..., -local_size[3]:]
-                
+                y[..., : overlap[2]] = y[..., : overlap[2]] + y_buffer_left
+                y = y[..., -local_size[3] :]
+
         halo_sizes = torch.tensor([left_to_right, right_to_left])
-    
+
         return y, halo_sizes
-    
+
     def _no_communicate_halos_forward(self, x, y, *args, **kwargs):
         return y, self.dummy_tensor
-    
-    def _communicate_halos_backward(self, grad_output, right_to_left, left_to_right, local_rank, parallelism, empty, spatial_group, async_op):
-        
+
+    def _communicate_halos_backward(
+        self,
+        grad_output,
+        right_to_left,
+        left_to_right,
+        local_rank,
+        parallelism,
+        empty,
+        spatial_group,
+        async_op,
+    ):
+
         halo, _ = self.communicate_halos(
             grad_output,
             right_to_left,
@@ -351,24 +445,26 @@ class ConvTransposeSelectionStrategy:
             spatial_group=spatial_group,
             async_op=async_op,
         )
-        
-        if spatial_group.rank() ==  0:  # left and right groups # TODO get from process group?
+
+        if (
+            spatial_group.rank() == 0
+        ):  # left and right groups # TODO get from process group?
             grad_output = torch.cat([grad_output, halo], dim=-1)
         else:
             grad_output = torch.cat([halo, grad_output], dim=-1)
-            
+
         return grad_output
-    
-    def _no_communicate_halos_backward(self, grad_output,  *args, **kwargs):
+
+    def _no_communicate_halos_backward(self, grad_output, *args, **kwargs):
         return grad_output
-    
-    def _convTranspose2d_fn_selection(self, bayesian):
+
+    def _conv_transpose2d_fn_selection(self, bayesian):
         if bayesian:
             return torch.vmap(F.conv_transpose2d)
         else:
             return F.conv_transpose2d
-    
-    def _convTranspose2d_grad_fn_selection(self, bayesian):
+
+    def _conv_transpose2d_grad_fn_selection(self, bayesian):
         if bayesian:
             return torch.vmap(
                 torch.ops.aten.convolution_backward,
@@ -377,20 +473,20 @@ class ConvTransposeSelectionStrategy:
             )
         else:
             return torch.ops.aten.convolution_backward
-        
+
     def _reshape_weights_selection(self, bayesian):
-        if bayesian: 
+        if bayesian:
             return self._reshape_weights
         else:
             return self._no_reshape_weights
-        
+
     def _reshape_weights(self, w, x):
         w = w.expand(x.shape[0], *w.shape)
         return w
-    
+
     def _no_reshape_weights(self, w, x=None):
         return w
-    
+
     def _grad_bias_selection(self, parallelism, bias):
         if bias is None:
             return self._no_bias
@@ -398,27 +494,27 @@ class ConvTransposeSelectionStrategy:
             return self._no_reduce_grad_bias
         else:
             return self._reduce_bias_over_spatial_group
-    
+
     def _no_bias(self, grad_output, spatial_group=None):
         return None
-    
+
     def _no_reduce_grad_bias(self, grad_output, spatial_group=None):
         return grad_output.sum(dim=(-4, -2, -1))
-    
+
     def _reduce_bias_over_spatial_group(self, grad_output, spatial_group):
         grad_b = grad_output.sum(dim=(-4, -2, -1))
         dist.all_reduce(grad_b, op=dist.ReduceOp.SUM, group=spatial_group)
         return grad_b
-    
- 
-def _average_weights(
-    model: torch.nn.Module, spatial_group: dist.ProcessGroup
-):
+
+
+def _average_weights(model: torch.nn.Module, spatial_group: dist.ProcessGroup):
     for name, param in model.named_parameters():
         dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
 
 
 class DistributedConv2D(torch.nn.Module):
+    """Distributed 2D Convolution."""
+
     def __init__(
         self,
         in_channels,
@@ -434,10 +530,10 @@ class DistributedConv2D(torch.nn.Module):
         channel_group=None,
         device=None,
         parallelism=4,
-        bayesian=False
+        bayesian=False,
     ):
         """
-        Distributed 1D Convolution.
+        Distributed 2D Convolution.
 
         random seed is required because of initialization/synchronization between "partner processes"
 
@@ -467,8 +563,7 @@ class DistributedConv2D(torch.nn.Module):
         # # TODO
         # self.conv2d.weights = torch.nn.Parameter(self.out_channels, self.in_channels//1, kernel_size[0], kernel_size[1])
         # self.conv2d.bias = torch.nn.Parameter(out_channels)
-        
-        
+
         self.conv2d = torch.nn.Conv2d(
             self.in_channels,
             self.out_channels,
@@ -477,17 +572,31 @@ class DistributedConv2D(torch.nn.Module):
             groups=groups,
             bias=bias,
         ).to(device)
-        
-        self.selector = ConvSelectionStrategy(self.bayesian, self.parallelism, self.conv2d.bias, self.kernel_size, self.stride)
-        
+
+        self.selector = ConvSelectionStrategy(
+            self.bayesian,
+            self.parallelism,
+            self.conv2d.bias,
+            self.kernel_size,
+            self.stride,
+        )
+
         _average_weights(self, self.spatial_group)
-        
+
         self.conv2d_apply = Conv2d().apply
 
     def get_parameter_count(self):
-        num_param = 0 if self.conv2d.bias.data is None else self.conv2d.bias.data.numel() // dist.get_world_size(group=self.spatial_group)
-        return num_param + self.conv2d.weight.data.numel() // dist.get_world_size(group=self.spatial_group)
-    
+        """Return effective number of local parameters for Distributed Conv2D module."""
+        num_param = (
+            0
+            if self.conv2d.bias.data is None
+            else self.conv2d.bias.data.numel()
+            // dist.get_world_size(group=self.spatial_group)
+        )
+        return num_param + self.conv2d.weight.data.numel() // dist.get_world_size(
+            group=self.spatial_group
+        )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of linear layer (XWT) distributed across two processes.
@@ -506,7 +615,7 @@ class DistributedConv2D(torch.nn.Module):
             B, out_dim are global values.
             in_dim is local value.
         """
-        Cij = self.conv2d_apply(
+        cij = self.conv2d_apply(
             x,
             self.conv2d.weight,
             self.conv2d.bias,
@@ -522,10 +631,10 @@ class DistributedConv2D(torch.nn.Module):
             self.parallelism,
             self.empty,
             self.bayesian,
-            self.selector
+            self.selector,
         )
 
-        return Cij[0]
+        return cij[0]
 
 
 class Conv2d(torch.autograd.Function):
@@ -548,10 +657,10 @@ class Conv2d(torch.autograd.Function):
         parallelism: int,
         empty: torch.Tensor,
         bayesian: bool,
-        selector
+        selector,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
-        
-        # Compute the forward pass        
+        """Forward pass of distributed Conv2d function."""
+        # Compute the forward pass
         y, x0, x1, right_to_left, left_to_right = selector.dist_conv2d_fn(
             x,
             weight,
@@ -565,19 +674,21 @@ class Conv2d(torch.autograd.Function):
             spatial_group=spatial_group,
             channel_group=channel_group,
             empty=empty,
-            selector=selector
+            selector=selector,
         )
 
-        x_aug = torch.cat([x0, x1], dim=-3) # concatenate along the channel dimension
-        halo_sizes = torch.tensor([right_to_left, left_to_right]) # save halo sizes in tensor
-        
+        x_aug = torch.cat([x0, x1], dim=-3)  # concatenate along the channel dimension
+        halo_sizes = torch.tensor(
+            [right_to_left, left_to_right]
+        )  # save halo sizes in tensor
+
         # y is result, rest of the outputs are required for the backward pass
         return y, x_aug, x, halo_sizes
 
     @staticmethod
     def setup_context(ctx, inputs, output):
         """
-        Setup context for backward pass.
+        Set up context for backward pass.
 
         Parameters
         ----------
@@ -605,7 +716,7 @@ class Conv2d(torch.autograd.Function):
             parallelism,
             empty,
             bayesian,
-            selector
+            selector,
         ) = inputs
 
         # Unpack outputs
@@ -615,7 +726,7 @@ class Conv2d(torch.autograd.Function):
         ctx.mark_non_differentiable(x_aug)
         ctx.mark_non_differentiable(x_orig)
         ctx.mark_non_differentiable(halo_sizes)
-        
+
         ctx.halo_sizes = halo_sizes
 
         # Save everything needed for backward
@@ -635,9 +746,9 @@ class Conv2d(torch.autograd.Function):
         ctx.stride = stride
         ctx.padding = padding
         ctx.dilation = dilation
-        ctx.bayesian = bayesian 
+        ctx.bayesian = bayesian
         ctx.selector = selector
-        
+
     @staticmethod
     def backward(
         ctx: torch.autograd.Function,
@@ -661,11 +772,9 @@ class Conv2d(torch.autograd.Function):
         None,
         None,
         None,
-        None
+        None,
     ]:
-        """
-        Backward pass of linear layer (XWT) distributed across two processes.
-        """
+        """Backward pass of Conv2d distributed across 4 or 8 processes."""
         x_aug, weight = ctx.saved_tensors
         empty = ctx.empty
         stride, padding, dilation = (ctx.stride, ctx.padding, ctx.dilation)
@@ -675,19 +784,19 @@ class Conv2d(torch.autograd.Function):
             ctx.channel_group,
         )
         selector = ctx.selector
-        
+
         right_to_left, left_to_right = ctx.halo_sizes[0], ctx.halo_sizes[1]
         x_shape_padded, x_shape = ctx.x_shape_padded, ctx.x_shape
-        
+
         g_b = selector.grad_bias(grad_output, ctx.spatial_group)
-        
+
         g_x_aug = selector.conv2d_input_fn(
-            x_shape_padded[int(ctx.bayesian):],
+            x_shape_padded[int(ctx.bayesian) :],
             weight,
             grad_output,
             stride=stride,
             padding=padding,
-            dilation=dilation
+            dilation=dilation,
         )
 
         left_to_right, right_to_left = (right_to_left, left_to_right)
@@ -703,15 +812,15 @@ class Conv2d(torch.autograd.Function):
             ctx.parallelism,
             empty,
             spatial_group,
-            async_op=True
+            async_op=True,
         )
-        
+
         g_x_buffer = torch.zeros(
             (*g_x.shape[:-3], g_x.shape[-3] // 2, *g_x.shape[-2:]),
             device=g_x.device,
             dtype=g_x.dtype,
         )
-        
+
         g_x_recv, g_x_handle = dist_conv.send_g_x_channels_2d(
             g_x,
             g_x_buffer,
@@ -724,17 +833,17 @@ class Conv2d(torch.autograd.Function):
 
         g_w = selector.conv2d_weight_fn(
             x_aug,
-            weight.shape[int(ctx.bayesian):],
+            weight.shape[int(ctx.bayesian) :],
             grad_output,
             stride=stride,
             padding=padding,
-            dilation=dilation
+            dilation=dilation,
         )
-        
+
         g_w_handle = dist.all_reduce(
             g_w, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True
         )
-        
+
         if g_x_handle is not None:
             g_x_handle.wait()
 
@@ -784,9 +893,9 @@ class Conv2d(torch.autograd.Function):
         parallelism: int,
         empty: torch.Tensor,
         bayesian: bool,
-        selector
+        selector,
     ) -> tuple[torch.Tensor, Optional[int]]:
-        
+        """Handle vmap for Distributed Conv2d."""
         out = Conv2d.apply(
             x,
             weight,
@@ -803,12 +912,15 @@ class Conv2d(torch.autograd.Function):
             parallelism,
             empty,
             bayesian,
-            selector
+            selector,
         )
-        
+
         return out, 0
-    
+
+
 class DistributedConvTranspose2D(torch.nn.Module):
+    """Distributed ConvTranspose 2D."""
+
     def __init__(
         self,
         in_channels,
@@ -824,15 +936,15 @@ class DistributedConvTranspose2D(torch.nn.Module):
         channel_group=None,
         device=0,
         parallelism=4,
-        bayesian=False
+        bayesian=False,
     ):
         """
-        Distributed 1D Convolution.
+        Distributed ConvTranspose2D.
 
         random seed is required because of initialization/synchronization between "partner processes"
 
-        input shape of forward pass: (N, Cin, Lin) or (Cin, Lin)
-        output shape of forward pass: (N, Cout, Lout)
+        input shape of forward pass: (N, Cin, Lin) or (S, N, Cin, Lin)
+        output shape of forward pass: (N, Cout, Lout) or (S, N, Cout, Lout)
         """
         super().__init__()
         if isinstance(kernel_size, int):
@@ -846,7 +958,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
 
         assert in_channels % 2 == 0, "number of input channels is not divisible by 2"
         assert out_channels % 2 == 0, "number of output channels is not divisible by 2"
-        
+
         self.kernel_size = kernel_size
         self.stride = stride
         self.padding = padding
@@ -870,24 +982,43 @@ class DistributedConvTranspose2D(torch.nn.Module):
             padding=self.padding,
             bias=bias,
         ).to(self.device)
-        
-        # Initialize 
-        k = np.sqrt(self.groups / (self.out_channels * 2 * self.kernel_size[0] * self.kernel_size[1]))
+
+        # Initialize
+        k = np.sqrt(
+            self.groups
+            / (self.out_channels * 2 * self.kernel_size[0] * self.kernel_size[1])
+        )
         self.convTranspose2d.weight.data.uniform_(-k, k)
         if bias:
             self.convTranspose2d.bias.data.uniform_(-k, k)
-            
+
         self.empty = torch.empty(0, device=self.device, dtype=torch.float32)
 
-        self.selector = ConvTransposeSelectionStrategy(self.bayesian, self.parallelism, self.convTranspose2d.bias, self.kernel_size, self.stride)
-       
+        self.selector = ConvTransposeSelectionStrategy(
+            self.bayesian,
+            self.parallelism,
+            self.convTranspose2d.bias,
+            self.kernel_size,
+            self.stride,
+        )
+
         _average_weights(self, self.spatial_group)
-        
+
         self.convTranspose2d_apply = ConvTranspose2d().apply
-        
+
     def get_parameter_count(self):
-        num_param = 0 if self.convTranspose2d.bias.data is None else self.convTranspose2d.bias.data.numel() // dist.get_world_size(group=self.spatial_group)
-        return num_param + self.convTranspose2d.weight.data.numel() // dist.get_world_size(group=self.spatial_group)
+        """Return effective number of local parameters for distributed model."""
+        num_param = (
+            0
+            if self.convTranspose2d.bias.data is None
+            else self.convTranspose2d.bias.data.numel()
+            // dist.get_world_size(group=self.spatial_group)
+        )
+        return (
+            num_param
+            + self.convTranspose2d.weight.data.numel()
+            // dist.get_world_size(group=self.spatial_group)
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -907,7 +1038,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
             B, out_dim are global values.
             in_dim is local value.
         """
-        Cij = self.convTranspose2d_apply(
+        cij = self.convTranspose2d_apply(
             x,
             self.convTranspose2d.weight,
             self.convTranspose2d.bias,
@@ -923,10 +1054,10 @@ class DistributedConvTranspose2D(torch.nn.Module):
             self.parallelism,
             self.empty,
             self.bayesian,
-            self.selector
+            self.selector,
         )
 
-        return Cij[0]
+        return cij[0]
 
 
 class ConvTranspose2d(torch.autograd.Function):
@@ -949,18 +1080,31 @@ class ConvTranspose2d(torch.autograd.Function):
         parallelism: int,
         empty: torch.Tensor,
         bayesian: bool,
-        selector
+        selector,
     ) -> torch.Tensor:
-        
+        """Forward pass for distributed conv transpose 2d."""
         y, x_aug, x, halo_sizes = selector.dist_conv_transpose2d_fn(
-            x, weight, bias, kernel_size, stride, padding, dilation, in_channels, local_rank, spatial_group, channel_group, empty, selector
+            x,
+            weight,
+            bias,
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            in_channels,
+            local_rank,
+            spatial_group,
+            channel_group,
+            empty,
+            selector,
         )
-        
+
         # Return output and any intermediate values needed for backward
         return y, x_aug, x, halo_sizes
 
     @staticmethod
     def setup_context(ctx, inputs, output):
+        """Set up context."""
         # Unpack inputs
         (
             x,
@@ -978,8 +1122,9 @@ class ConvTranspose2d(torch.autograd.Function):
             parallelism,
             empty,
             bayesian,
-            selector
+            selector,
         ) = inputs
+
         _, x_aug, x_orig, halo_sizes = output
 
         ctx.mark_non_differentiable(x_aug)
@@ -1005,7 +1150,6 @@ class ConvTranspose2d(torch.autograd.Function):
         ctx.empty = empty  # pre-initialized empty tensor
         ctx.bayesian = bayesian
         ctx.selector = selector
-        
 
     @staticmethod
     def backward(
@@ -1058,11 +1202,11 @@ class ConvTranspose2d(torch.autograd.Function):
             empty,
             spatial_group,
             channel_group,
-            selector
+            selector,
         )
 
         g_b = selector.grad_bias(grad_output, spatial_group)
-        
+
         return (
             g_x,
             g_w,
@@ -1079,7 +1223,7 @@ class ConvTranspose2d(torch.autograd.Function):
             None,
             None,
             None,
-            None
+            None,
         )
 
     @staticmethod
@@ -1101,8 +1245,9 @@ class ConvTranspose2d(torch.autograd.Function):
         parallelism: int,
         empty: torch.Tensor,
         bayesian: bool,
-        selector
+        selector,
     ) -> tuple[torch.Tensor, Optional[int]]:
+        """Handle vmap for ConvTranspose2d function."""
         out = ConvTranspose2d.apply(
             x,
             weight,
@@ -1119,7 +1264,7 @@ class ConvTranspose2d(torch.autograd.Function):
             parallelism,
             empty,
             bayesian,
-            selector
+            selector,
         )
 
         return out, 0

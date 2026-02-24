@@ -2,19 +2,22 @@
 # define based on global in/hid/out dimensions
 
 
-def AB_flop_global(in_dim, hidden_dim, out_dim):
+def ab_flop_global(in_dim, hidden_dim, out_dim):
+    """Calc global FLOPs in distributed matrix multiplication."""
     return in_dim * out_dim * (2 * hidden_dim - 1)
 
 
-def AB_flop_local(in_dim, hidden_dim, out_dim):
+def ab_flop_local(in_dim, hidden_dim, out_dim):
+    """Calc local FLOPs in distributed matrix multiplication."""
     in_local, hidden_local, out_local = in_dim / 2, hidden_dim / 2, out_dim / 2
     flop = 4 * (
-        2 * AB_flop_global(in_local, hidden_local, out_local) + in_local * out_local
+        2 * ab_flop_global(in_local, hidden_local, out_local) + in_local * out_local
     )
     return flop / 1e12
 
 
-def AB_communication(parallelism, in_dim, hidden_dim, out_dim, dtype="float32"):
+def ab_communication(parallelism, in_dim, hidden_dim, out_dim, dtype="float32"):
+    """Calc comm in distributed matrix multiplication."""
     in_local, hidden_local, out_local = in_dim / 2, hidden_dim / 2, out_dim / 2
 
     match parallelism:
@@ -34,11 +37,15 @@ def AB_communication(parallelism, in_dim, hidden_dim, out_dim, dtype="float32"):
 
 
 def transpose_communication(in_dim, out_dim):
+    """Calc comm in transformer block."""
     in_local, out_local = in_dim / 2, out_dim / 2
     return in_local * out_local * 2 / (2**30)
 
 
-def mixing_block(parallelism, ntokens, patch_embedding_out, spatial_hidden_dim, channels_hidden_dim):
+def mixing_block(
+    parallelism, ntokens, patch_embedding_out, spatial_hidden_dim, channels_hidden_dim
+):
+    """Calc FLOPs and comm in mixing block."""
     # input shape = output of patch embedding shape
     input_shape = (ntokens, patch_embedding_out)
     flop = 0
@@ -48,19 +55,23 @@ def mixing_block(parallelism, ntokens, patch_embedding_out, spatial_hidden_dim, 
     # Token mixing
     flop = (
         flop
-        + AB_flop_local(patch_embedding_out, ntokens, spatial_hidden_dim)
+        + ab_flop_local(patch_embedding_out, ntokens, spatial_hidden_dim)
         + spatial_hidden_dim / 1e12
     )
-    comm = comm + AB_communication(parallelism, patch_embedding_out, ntokens, spatial_hidden_dim)
+    comm = comm + ab_communication(
+        parallelism, patch_embedding_out, ntokens, spatial_hidden_dim
+    )
     # activation
     flop = flop + patch_embedding_out * spatial_hidden_dim / 1e12
     # token mixing 2
     flop = (
         flop
-        + AB_flop_local(patch_embedding_out, spatial_hidden_dim, ntokens)
+        + ab_flop_local(patch_embedding_out, spatial_hidden_dim, ntokens)
         + ntokens / 1e12
     )
-    comm = comm + AB_communication(parallelism, patch_embedding_out, spatial_hidden_dim, ntokens)
+    comm = comm + ab_communication(
+        parallelism, patch_embedding_out, spatial_hidden_dim, ntokens
+    )
 
     # transpose
     comm = comm + transpose_communication(patch_embedding_out, ntokens)
@@ -71,19 +82,23 @@ def mixing_block(parallelism, ntokens, patch_embedding_out, spatial_hidden_dim, 
     # channel mixing
     flop = (
         flop
-        + AB_flop_local(ntokens, patch_embedding_out, channels_hidden_dim)
+        + ab_flop_local(ntokens, patch_embedding_out, channels_hidden_dim)
         + channels_hidden_dim / 1e12
     )
-    comm = comm + AB_communication(parallelism, ntokens, patch_embedding_out, channels_hidden_dim)
+    comm = comm + ab_communication(
+        parallelism, ntokens, patch_embedding_out, channels_hidden_dim
+    )
     # activation
     flop = flop + ntokens * channels_hidden_dim / 1e12
     # channel mixing 2
     flop = (
         flop
-        + AB_flop_local(ntokens, channels_hidden_dim, patch_embedding_out)
+        + ab_flop_local(ntokens, channels_hidden_dim, patch_embedding_out)
         + patch_embedding_out / 1e12
     )
-    comm = comm + AB_communication(parallelism, ntokens, channels_hidden_dim, patch_embedding_out)
+    comm = comm + ab_communication(
+        parallelism, ntokens, channels_hidden_dim, patch_embedding_out
+    )
 
     # residual addition
     flop = flop + ntokens * patch_embedding_out / 1e12
@@ -91,34 +106,39 @@ def mixing_block(parallelism, ntokens, patch_embedding_out, spatial_hidden_dim, 
     return flop, comm  # FLOP: GigaFLOP, Comm: GBs
 
 
-def transformer_block(parallelism, ntokens, hidden_dim, transformer_dim, out_dim, heads):
+def transformer_block(
+    parallelism, ntokens, hidden_dim, transformer_dim, out_dim, heads
+):
+    """Calc FLOPs and comm in a Transformer block."""
     # input shape = output of patch embedding shape
-    input_shape = (ntokens, hidden_dim)
     flop = 0
     comm = 0
 
     # qkv calculation
     # X: (n_tokens, hidden_dim) @ (hidden_dim, 3 * transformer_dimension)
-    flop = flop + AB_flop_local(ntokens, hidden_dim, 3 * transformer_dim)
-    comm = comm + AB_communication(parallelism, ntokens, hidden_dim, 3 * transformer_dim)
+    flop = flop + ab_flop_local(ntokens, hidden_dim, 3 * transformer_dim)
+    comm = comm + ab_communication(
+        parallelism, ntokens, hidden_dim, 3 * transformer_dim
+    )
 
     # Q @ K.mT
     # Q: (n_tokens, transformer_dim) K.mT : (transformer_dim, n_tokens)
-    flop = flop + heads * AB_flop_local(ntokens, transformer_dim // heads, ntokens)
+    flop = flop + heads * ab_flop_local(ntokens, transformer_dim // heads, ntokens)
     # TODO: currently ignore softmax
     # (Q@K.mT) @ V
     # (Q@K.mT): (n_tokens, n_tokens) @ (n_tokens, transformer_dim)
-    flop = flop + heads * AB_flop_local(ntokens, ntokens, transformer_dim // heads)
+    flop = flop + heads * ab_flop_local(ntokens, ntokens, transformer_dim // heads)
 
     # concatenator
-    flop = flop + AB_flop_local(ntokens, transformer_dim, out_dim)
+    flop = flop + ab_flop_local(ntokens, transformer_dim, out_dim)
 
     return flop, comm  # FLOP: GigaFLOP, Comm: GBs
 
 
 def calc_flops_comm(config):
+    """Calc FLOPs based on config file."""
     nlat, nlon = config["data"]["xlat"], config["data"]["xlon"]
-    parallelism = config["modelparallel"]["parallelism"]
+    parallelism = config["model_parallel"]["parallelism"]
     nvars_in, nvars_out = 72, 72
     patch_size = config["model"]["patch_size"]
     patch_embedding_in = patch_size * nvars_in
@@ -131,29 +151,29 @@ def calc_flops_comm(config):
         config["model"]["features_hidden_dim_fraction"] * patch_embedding_out
     )
 
-    patch_embedding_comm = AB_communication(
+    patch_embedding_comm = ab_communication(
         parallelism, ntokens, patch_size * nvars_in, patch_embedding_out
     )  # GBs of data communicated
     patch_embedding_flop = (
-        AB_flop_local(ntokens, patch_size * nvars_in, patch_embedding_out)
+        ab_flop_local(ntokens, patch_size * nvars_in, patch_embedding_out)
         + patch_embedding_out / 1e12
     )
 
     # including concat
     # (ntokens, patch_embedding_out)
-    patch_recovery_comm = AB_communication(
+    patch_recovery_comm = ab_communication(
         parallelism, ntokens, patch_embedding_out * 2, patch_embedding_in
     )  # GBs of data communicated
     patch_recovery_flop = (
-        AB_flop_local(ntokens, patch_embedding_out * 2, patch_embedding_in)
+        ab_flop_local(ntokens, patch_embedding_out * 2, patch_embedding_in)
         + patch_embedding_in / 1e12
     )
 
-    linlayer_comm = AB_communication(
+    linlayer_comm = ab_communication(
         nlat * nlon, nvars_out * 2, nvars_out
     )  # GBs of data communicated
     linlayer_flop = (
-        AB_flop_local(nlat * nlon, nvars_out * 2, nvars_out) + nvars_out / 1e12
+        ab_flop_local(nlat * nlon, nvars_out * 2, nvars_out) + nvars_out / 1e12
     )
 
     tflop_per_block, gb_per_block = mixing_block(
@@ -177,6 +197,7 @@ def calc_flops_comm(config):
 
 
 def calc_flops_transformer(config):
+    """Calculate flops in transformer."""
     nlat, nlon = config["data"]["xlat"], config["data"]["xlon"]
     nvars_in, nvars_out = 72, 72
     patch_size = config["model"]["patch_size"]
@@ -186,29 +207,29 @@ def calc_flops_transformer(config):
     # where ntokens = nlat*nlon/patch_size
     input_data = (nlat * nlon / patch_size, patch_size * nvars_in)
     ntokens = nlat * nlon / patch_size
-    patch_embedding_comm = AB_communication(
+    patch_embedding_comm = ab_communication(
         ntokens, patch_size * nvars_in, patch_embedding_out
     )  # GBs of data communicated
     patch_embedding_flop = (
-        AB_flop_local(ntokens, patch_size * nvars_in, patch_embedding_out)
+        ab_flop_local(ntokens, patch_size * nvars_in, patch_embedding_out)
         + patch_embedding_out / 1e12
     )
 
     # including concat
     # (ntokens, patch_embedding_out)
-    patch_recovery_comm = AB_communication(
+    patch_recovery_comm = ab_communication(
         ntokens, patch_embedding_out * 2, patch_embedding_in
     )  # GBs of data communicated
     patch_recovery_flop = (
-        AB_flop_local(ntokens, patch_embedding_out * 2, patch_embedding_in)
+        ab_flop_local(ntokens, patch_embedding_out * 2, patch_embedding_in)
         + patch_embedding_in / 1e12
     )
 
-    linlayer_comm = AB_communication(
+    linlayer_comm = ab_communication(
         nlat * nlon, nvars_out * 2, nvars_out
     )  # GBs of data communicated
     linlayer_flop = (
-        AB_flop_local(nlat * nlon, nvars_out * 2, nvars_out) + nvars_out / 1e12
+        ab_flop_local(nlat * nlon, nvars_out * 2, nvars_out) + nvars_out / 1e12
     )
 
     tflop_per_block, gb_per_block = transformer_block(

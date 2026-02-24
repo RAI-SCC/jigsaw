@@ -1,16 +1,14 @@
 import argparse
 import time
 
+import eval
+import timm
 import torch
 import torch.distributed as dist
 import torch.optim as optim
-import timm
-import yaml
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.nn.utils import vector_to_parameters
-
-import eval
 import utils
+import yaml
+from torch.nn.utils import vector_to_parameters
 
 
 def training_loop(
@@ -21,8 +19,6 @@ def training_loop(
     model_parallel = n_parallel > 1
     # Set all seeds in the same model group to be different
     utils.set_all_seeds(1 + rank % n_parallel)
-
-    best_val_loss = 1e5
 
     xlat, xlon = config_dict["data"]["xlat"], config_dict["data"]["xlon"]
     variable_weights, area_weights = utils.get_weights(

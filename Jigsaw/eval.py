@@ -1,6 +1,6 @@
 import time
 from pathlib import Path
-import matplotlib.pyplot as plt
+
 import numpy as np
 import pandas as pd
 import torch
@@ -25,6 +25,7 @@ def calc_weight(n_lat: int, cossum: float = 458.36551167) -> torch.Tensor:
     weight = n_lat * np.cos(latitude) / cossum
     return torch.tensor(weight)
 
+
 def get_var_names(prepend_variable=["epoch"]) -> list[str]:
     """Return string representation of variable names."""
     surface_variables = ["msl", "u10", "v10", "t2m"]
@@ -39,6 +40,7 @@ def get_var_names(prepend_variable=["epoch"]) -> list[str]:
 
 
 def prepare_plot_data(input_data, output_data, target_data, device, model_group):
+    """All-gather data onto single process for plotting."""
     # Gather input data
     # input data has shape [nvar, lat, lon]
     input_data, output, target_data = (
@@ -96,6 +98,7 @@ def gen_plots(
     epoch,
     model_parallel=False,
 ):
+    """Perform plotting."""
     xlat, xlon = config_dict["data"]["xlat"], config_dict["data"]["xlon"]
     parallelism = config_dict["model_parallel"]["parallelism"]
 
@@ -195,11 +198,11 @@ def gen_plots(
 
     elif parallelism == 4:
         input_print, output_print, target_print = input_data, output, target_data
-        
+
         input_print = input_print.reshape(69, xlat, xlon)
         output_print = output_print.reshape(69, xlat, xlon)
         target_print = target_print.reshape(69, xlat, xlon)
-        
+
         if rank == 0:
             save_path = f"{file_path}/u10_{epoch}.png"
             plot_fns.plot_fields(
@@ -259,8 +262,9 @@ def validate(
     model_subgroup_col: torch.distributed.ProcessGroup = None,
     ddp_group: torch.distributed.ProcessGroup = None,
     model_group: torch.distributed.ProcessGroup = None,
-    bayesian: bool = True
+    bayesian: bool = True,
 ):
+    """Perform validation through RMSE and ACC calculations."""
     if config_dict["model"]["model_parallel"]:
         mse_file_path = f"{mse_file_path}_{rank}.csv"
         acc_file_path = f"{acc_file_path}_{rank}.csv"
@@ -327,7 +331,7 @@ def validate(
         )
     elif parallelism == 4:
         mod = rank % parallelism
-        variable_weights = torch.nn.functional.pad(variable_weights, (0,0,0,0, 0, 3))
+        variable_weights = torch.nn.functional.pad(variable_weights, (0, 0, 0, 0, 0, 3))
         variable_weights = (
             variable_weights[:, :36]
             if rank % parallelism in [0, 2]
@@ -364,7 +368,7 @@ def validate(
             print(f"{batch}/{len(dataloader)}")
 
         input_data = data[0].to(device, non_blocking=True)
-        
+
         for step, rollout in enumerate(rollout_time):
             # Write epoch
             rmse[rollout][0] = epoch
@@ -374,7 +378,7 @@ def validate(
 
             # Input and target data loading
             target_data = data[1][step].to(device, non_blocking=True)
-            
+            model_output = 0  # dummy placeholder.
             if step == 0:
                 model_input = input_data.detach()
             else:
@@ -385,17 +389,16 @@ def validate(
                     model_input[..., -3] = land_mask
                     model_input[..., -2] = soil_type
                     model_input[..., -1] = topography
-            
-            
-            
-            
+
             if bayesian:
-                model_output = model(model_input, samples=config_dict["training"]["n_samples"])
+                model_output = model(
+                    model_input, samples=config_dict["training"]["n_samples"]
+                )
                 model_output = model_output.mean(dim=0)
             else:
                 model_output = model(model_input)
             output = model_output.detach()
-            
+
             match parallelism:
                 case 1:
                     # Permute input data for mse calculation
@@ -492,7 +495,7 @@ def validate(
 
                 case 4:
                     output = output.reshape(output.shape[0], 36, xlat, xlon // 2)
-                    
+
                     # 0 and 2 handle the first half of the output variables
                     if rank % parallelism in [0, 2]:
                         norm_offset = 0
@@ -554,15 +557,15 @@ def validate(
 
             if parallelism > 1 and rank in [1, 3]:
                 output_loss = (
-                    output[..., :33] #* area_weights * variable_weights[..., :33]
+                    output[..., :33]  # * area_weights * variable_weights[..., :33]
                 )
                 target_loss = (
-                    target_data[..., :33] #* area_weights * variable_weights[..., :33]
+                    target_data[..., :33]  # * area_weights * variable_weights[..., :33]
                 )
 
             else:
-                output_loss = output #* area_weights * variable_weights
-                target_loss = target_data# * area_weights * variable_weights
+                output_loss = output  # * area_weights * variable_weights
+                target_loss = target_data  # * area_weights * variable_weights
 
             iter_loss = loss_fn(output_loss, target_loss)
 
@@ -641,6 +644,7 @@ def validate(
 
 
 def load_averages(config):
+    """Load normalization values."""
     static_slevel = np.load(f"{config['data']['constant_masks_path']}/surface_zarr.npy")
     static_plevel = np.load(
         f"{config['data']['constant_masks_path']}/pressure_zarr.npy"
@@ -656,6 +660,7 @@ def load_averages(config):
 
 
 def get_climatology(config):
+    """Load climatology files."""
     climatology_plevel = torch.tensor(
         np.load(f"{config['data']['constant_masks_path']}/pressure_climatology.npy")
     ).reshape(65, 721, 1440)
@@ -673,6 +678,7 @@ def get_climatology(config):
 def calc_mse_variable(
     target, result, device, area_weights, std, indices, norm_offset=0
 ):
+    """Calculate local RMSE."""
     n_lon = 1440
     n_lat = area_weights.numel()
 
@@ -683,10 +689,8 @@ def calc_mse_variable(
     area_weights = area_weights.view(1, 1, n_lat, 1)
     # print(f'target resutls {(target[:, indices]).shape}, {result.shape}')
     mean_squared_error = (
-        (target[:, indices] - result[:, indices])
-        * std_multiplier
-        / divisor
-    ) ** 2 # * area_weights
+        (target[:, indices] - result[:, indices]) * std_multiplier / divisor
+    ) ** 2  # * area_weights
     # print(f'mse shape {mean_squared_error.shape}')
     # MSE will have shape [n_batch, n_vars, ]
     mean_squared_error = mean_squared_error.sum(dim=(0, 2, 3)).flatten()
@@ -696,6 +700,7 @@ def calc_mse_variable(
 def calc_acc_variable(
     target, result, device, weights, mean, std, climatology, indices=0, norm_offset=0
 ):
+    """Calculate local ACC."""
     mean, std = (
         mean[indices + norm_offset].to(device),
         std[indices + norm_offset].flatten().to(device),
@@ -737,6 +742,7 @@ def calc_acc_variable_parallel(
     indices=0,
     norm_offset=0,
 ):
+    """Calculate distributed ACC."""
     # per process: target has shape [n_patches, nlat, nlon//2, nvar/2]
     mean, std = (
         mean[indices + norm_offset].to(device),

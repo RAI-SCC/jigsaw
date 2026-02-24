@@ -1,5 +1,4 @@
 import os
-import time
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -9,14 +8,14 @@ import torch.distributed as dist
 import torch.optim as optim
 from timm.scheduler.cosine_lr import CosineLRScheduler
 from timm.scheduler.step_lr import StepLRScheduler
-from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.nn.parallel import DistributedDataParallel
 from torch.nn.utils import parameters_to_vector
 
-#from Jigsaw import Dataloaders, Model, TransformerModels, eval
+from . import Model, TransformerModels, eval
+
+# from Jigsaw import Dataloaders, Model, TransformerModels, eval
 from .Dataloaders import get_dataloader
-from . import Model
-from . import TransformerModels
-from . import eval
+
 
 def get_ddp_groups(rank: int, parallelism: int) -> dist.ProcessGroup:
     """Return DDP groups."""
@@ -211,14 +210,14 @@ def load_model(
 
 def get_position_encoding(seq_len: int, d: int, n: int = 10000):
     """Return fixed positional encoding for a given sequence length."""
-    P = np.zeros((seq_len, d))
+    p = np.zeros((seq_len, d))
     for k in range(seq_len):
         for i in np.arange(int(d / 2)):
             denominator = np.power(n, 2 * i / d)
-            P[k, 2 * i] = np.sin(k / denominator)
-            P[k, 2 * i + 1] = np.cos(k / denominator)
-    P = torch.tensor(P).to(torch.float32)
-    return P
+            p[k, 2 * i] = np.sin(k / denominator)
+            p[k, 2 * i + 1] = np.cos(k / denominator)
+    p = torch.tensor(p).to(torch.float32)
+    return p
 
 
 def setup_precision(tf32: bool) -> None:
@@ -229,6 +228,7 @@ def setup_precision(tf32: bool) -> None:
 
 
 def setup_comm_groups(rank: int, parallelism: int):
+    """Define and initialize process groups."""
     match parallelism:
         case 1:
             groups = setup_groups(rank, parallelism, 1, 1)
@@ -259,6 +259,7 @@ def build_megatron_model(
     ddp_group: dist.ProcessGroup,
     col_group: dist.ProcessGroup = None,
 ):
+    """Build Megatron model from config file."""
     match parallelism:
         case 1:
             model = Model.ModelSequential(config_dict, rank, device).to(device)
@@ -271,7 +272,7 @@ def build_megatron_model(
         if ("blocks" not in name) or "layer_norm" in name:
             dist.all_reduce(param.data, op=dist.ReduceOp.AVG)
 
-    model = DDP(
+    model = DistributedDataParallel(
         model, device_ids=[localid], output_device=localid, process_group=ddp_group
     )
 
@@ -298,7 +299,7 @@ def build_model(
         case 1:
             model = Model.ModelSequential(config_dict, rank, device).to(device)
         case 2:
-            model = Model.Model_twoway(
+            model = Model.ModelTwoway(
                 config_dict, rank, device, parallelism, model_group
             ).to(device)
         case 4:
@@ -312,7 +313,7 @@ def build_model(
                             param.data, op=dist.ReduceOp.AVG, group=col_group
                         )
         case 8:
-            model = Model.Model_eightway(
+            model = Model.ModelEightway(
                 config_dict, rank, device, parallelism, model_group, col_group
             ).to(device)
             for name, param in model.named_parameters():
@@ -322,7 +323,7 @@ def build_model(
                             param.data, op=dist.ReduceOp.AVG, group=col_group
                         )
 
-    model = DDP(
+    model = DistributedDataParallel(
         model, device_ids=[localid], output_device=localid, process_group=ddp_group
     )
 
@@ -345,10 +346,11 @@ def build_transformer_model(
     row_group: dist.ProcessGroup = None,
     col_group: dist.ProcessGroup = None,
 ):
+    """Build transformer model from config file."""
     if config_dict["model_parallel"]["type"] == "megatron":
         match parallelism:
             case 1:
-                model = TransformerModels.Transformer_Sequential(
+                model = TransformerModels.TransformerSequential(
                     config_dict,
                     rank,
                     device,
@@ -358,7 +360,7 @@ def build_transformer_model(
                     col_group,
                 ).to(device)
             case _:
-                model = TransformerModels.Megatron_Transformer(
+                model = TransformerModels.MegatronTransformer(
                     config_dict,
                     rank,
                     device,
@@ -373,7 +375,7 @@ def build_transformer_model(
     else:
         match parallelism:
             case 1:
-                model = TransformerModels.Transformer_Sequential(
+                model = TransformerModels.TransformerSequential(
                     config_dict,
                     rank,
                     device,
@@ -383,7 +385,7 @@ def build_transformer_model(
                     col_group,
                 ).to(device)
             case 2:
-                model = TransformerModels.Transformer_Twoway(
+                model = TransformerModels.TransformerTwoway(
                     config_dict,
                     rank,
                     device,
@@ -393,7 +395,7 @@ def build_transformer_model(
                     col_group,
                 ).to(device)
             case 4:
-                model = TransformerModels.Transformer_Fourway(
+                model = TransformerModels.TransformerFourway(
                     config_dict,
                     rank,
                     device,
@@ -403,7 +405,7 @@ def build_transformer_model(
                     col_group,
                 ).to(device)
 
-    model = DDP(
+    model = DistributedDataParallel(
         model, device_ids=[localid], output_device=localid, process_group=ddp_group
     )
     if rank == 0:
@@ -415,9 +417,7 @@ def build_transformer_model(
 
 
 def iter_layer_norm_params(model: torch.nn.Module):
-    """
-    Yield (name, parameter) pairs for LayerNorm weights and biases.
-    """
+    """Yield (name, parameter) pairs for LayerNorm weights and biases."""
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.LayerNorm):
             for suffix, p in (("weight", module.weight), ("bias", module.bias)):
@@ -431,6 +431,7 @@ def ddp_average_layer_norm_weights(
 ) -> None:
     """
     All-reduce and in-place average LayerNorm weights/biases across processes.
+
     Shapes: each param is [hidden_dim].
     """
     if not torch.distributed.is_available() or not torch.distributed.is_initialized():
@@ -578,46 +579,45 @@ def build_loss_fn(config_dict):
     return loss_fn
 
 
-# For an AB multiplication,
-# define based on global in/hid/out dimensions
-
-
-def AB_flop_global(in_dim, hidden_dim, out_dim):
+def ab_flop_global(in_dim, hidden_dim, out_dim):
+    """Global FLOPs in distributed matrix multiplication."""
     return in_dim * out_dim * (2 * hidden_dim - 1)
 
 
-def AB_flop_local(in_dim, hidden_dim, out_dim):
+def ab_flop_local(in_dim, hidden_dim, out_dim):
+    """Local FLOPs in distributed matrix multiplication."""
     in_local, hidden_local, out_local = in_dim / 2, hidden_dim / 2, out_dim / 2
     flop = 0
     for proc in range(4):
         if proc == 0:
             flop = (
                 flop
-                + 2 * AB_flop_global(in_local, hidden_local, out_local)
+                + 2 * ab_flop_global(in_local, hidden_local, out_local)
                 + in_local * out_local
             )
         elif proc == 1:
             flop = (
                 flop
-                + 2 * AB_flop_global(in_local, hidden_local, out_local)
+                + 2 * ab_flop_global(in_local, hidden_local, out_local)
                 + in_local * out_local
             )
         elif proc == 2:
             flop = (
                 flop
-                + 2 * AB_flop_global(in_local, hidden_local, out_local)
+                + 2 * ab_flop_global(in_local, hidden_local, out_local)
                 + in_local * out_local
             )
         elif proc == 3:
             flop = (
                 flop
-                + 2 * AB_flop_global(in_local, hidden_local, out_local)
+                + 2 * ab_flop_global(in_local, hidden_local, out_local)
                 + in_local * out_local
             )
     return flop / 1e12
 
 
-def AB_communication(in_dim, hidden_dim, out_dim, dtype="float32"):
+def ab_communication(in_dim, hidden_dim, out_dim, dtype="float32"):
+    """Communication for matrix multiplication."""
     # four processes
     # return parameters only
     in_local, hidden_local, out_local = in_dim / 2, hidden_dim / 2, out_dim / 2
@@ -636,11 +636,13 @@ def AB_communication(in_dim, hidden_dim, out_dim, dtype="float32"):
 
 
 def transpose_communication(in_dim, out_dim):
+    """Calculate volume of data transferred in a transpose."""
     in_local, out_local = in_dim / 2, out_dim / 2
     return in_local * out_local * 2 / (2**30)
 
 
 def mixing_block(ntokens, patch_embedding_out, spatial_hidden_dim, channels_hidden_dim):
+    """Estimate FLOPs and volume of data transfered for a mixing block."""
     # input shape = output of patch embedding shape
     input_shape = (ntokens, patch_embedding_out)
     flop = 0
@@ -650,19 +652,19 @@ def mixing_block(ntokens, patch_embedding_out, spatial_hidden_dim, channels_hidd
     # Token mixing
     flop = (
         flop
-        + AB_flop_local(patch_embedding_out, ntokens, spatial_hidden_dim)
+        + ab_flop_local(patch_embedding_out, ntokens, spatial_hidden_dim)
         + spatial_hidden_dim / 1e12
     )
-    comm = comm + AB_communication(patch_embedding_out, ntokens, spatial_hidden_dim)
+    comm = comm + ab_communication(patch_embedding_out, ntokens, spatial_hidden_dim)
     # activation
     flop = flop + patch_embedding_out * spatial_hidden_dim / 1e12
     # token mixing 2
     flop = (
         flop
-        + AB_flop_local(patch_embedding_out, spatial_hidden_dim, ntokens)
+        + ab_flop_local(patch_embedding_out, spatial_hidden_dim, ntokens)
         + ntokens / 1e12
     )
-    comm = comm + AB_communication(patch_embedding_out, spatial_hidden_dim, ntokens)
+    comm = comm + ab_communication(patch_embedding_out, spatial_hidden_dim, ntokens)
 
     # transpose
     comm = comm + transpose_communication(patch_embedding_out, ntokens)
@@ -673,19 +675,19 @@ def mixing_block(ntokens, patch_embedding_out, spatial_hidden_dim, channels_hidd
     # channel mixing
     flop = (
         flop
-        + AB_flop_local(ntokens, patch_embedding_out, channels_hidden_dim)
+        + ab_flop_local(ntokens, patch_embedding_out, channels_hidden_dim)
         + channels_hidden_dim / 1e12
     )
-    comm = comm + AB_communication(ntokens, patch_embedding_out, channels_hidden_dim)
+    comm = comm + ab_communication(ntokens, patch_embedding_out, channels_hidden_dim)
     # activation
     flop = flop + ntokens * channels_hidden_dim / 1e12
     # channel mixing 2
     flop = (
         flop
-        + AB_flop_local(ntokens, channels_hidden_dim, patch_embedding_out)
+        + ab_flop_local(ntokens, channels_hidden_dim, patch_embedding_out)
         + patch_embedding_out / 1e12
     )
-    comm = comm + AB_communication(ntokens, channels_hidden_dim, patch_embedding_out)
+    comm = comm + ab_communication(ntokens, channels_hidden_dim, patch_embedding_out)
 
     # residual addition
     flop = flop + ntokens * patch_embedding_out / 1e12
@@ -694,31 +696,32 @@ def mixing_block(ntokens, patch_embedding_out, spatial_hidden_dim, channels_hidd
 
 
 def transformer_block(ntokens, hidden_dim, transformer_dim, out_dim, heads):
+    """Calculate the FLOPs and data volume transferred for a Transformer."""
     # input shape = output of patch embedding shape
-    input_shape = (ntokens, hidden_dim)
     flop = 0
     comm = 0
 
     # qkv calculation
     # X: (n_tokens, hidden_dim) @ (hidden_dim, 3 * transformer_dimension)
-    flop = flop + AB_flop_local(ntokens, hidden_dim, 3 * transformer_dim)
-    comm = comm + AB_communication(ntokens, hidden_dim, 3 * transformer_dim)
+    flop = flop + ab_flop_local(ntokens, hidden_dim, 3 * transformer_dim)
+    comm = comm + ab_communication(ntokens, hidden_dim, 3 * transformer_dim)
 
     # Q @ K.mT
     # Q: (n_tokens, transformer_dim) K.mT : (transformer_dim, n_tokens)
-    flop = flop + heads * AB_flop_local(ntokens, transformer_dim // heads, ntokens)
+    flop = flop + heads * ab_flop_local(ntokens, transformer_dim // heads, ntokens)
     # TODO: currently ignore softmax
     # (Q@K.mT) @ V
     # (Q@K.mT): (n_tokens, n_tokens) @ (n_tokens, transformer_dim)
-    flop = flop + heads * AB_flop_local(ntokens, ntokens, transformer_dim // heads)
+    flop = flop + heads * ab_flop_local(ntokens, ntokens, transformer_dim // heads)
 
     # concatenator
-    flop = flop + AB_flop_local(ntokens, transformer_dim, out_dim)
+    flop = flop + ab_flop_local(ntokens, transformer_dim, out_dim)
 
     return flop, comm  # FLOP: GigaFLOP, Comm: GBs
 
 
 def calc_flops_comm(config):
+    """Estimates the number of FLOPs and volume of communicated data."""
     nlat, nlon = config["data"]["xlat"], config["data"]["xlon"]
     nvars_in, nvars_out = 72, 72
     patch_size = config["model"]["patch_size"]
@@ -732,29 +735,29 @@ def calc_flops_comm(config):
         config["model"]["features_hidden_dim_fraction"] * patch_embedding_out
     )
 
-    patch_embedding_comm = AB_communication(
+    patch_embedding_comm = ab_communication(
         ntokens, patch_size * nvars_in, patch_embedding_out
     )  # GBs of data communicated
     patch_embedding_flop = (
-        AB_flop_local(ntokens, patch_size * nvars_in, patch_embedding_out)
+        ab_flop_local(ntokens, patch_size * nvars_in, patch_embedding_out)
         + patch_embedding_out / 1e12
     )
 
     # including concat
     # (ntokens, patch_embedding_out)
-    patch_recovery_comm = AB_communication(
+    patch_recovery_comm = ab_communication(
         ntokens, patch_embedding_out * 2, patch_embedding_in
     )  # GBs of data communicated
     patch_recovery_flop = (
-        AB_flop_local(ntokens, patch_embedding_out * 2, patch_embedding_in)
+        ab_flop_local(ntokens, patch_embedding_out * 2, patch_embedding_in)
         + patch_embedding_in / 1e12
     )
 
-    linlayer_comm = AB_communication(
+    linlayer_comm = ab_communication(
         nlat * nlon, nvars_out * 2, nvars_out
     )  # GBs of data communicated
     linlayer_flop = (
-        AB_flop_local(nlat * nlon, nvars_out * 2, nvars_out) + nvars_out / 1e12
+        ab_flop_local(nlat * nlon, nvars_out * 2, nvars_out) + nvars_out / 1e12
     )
 
     tflop_per_block, gb_per_block = mixing_block(
@@ -778,6 +781,7 @@ def calc_flops_comm(config):
 
 
 def calc_flops_transformer(config):
+    """Estimates the number of FLOPS in the Transformer block."""
     nlat, nlon = config["data"]["xlat"], config["data"]["xlon"]
     nvars_in, nvars_out = 72, 72
     patch_size = config["model"]["patch_size"]
@@ -787,29 +791,29 @@ def calc_flops_transformer(config):
     # where ntokens = nlat*nlon/patch_size
     input_data = (nlat * nlon / patch_size, patch_size * nvars_in)
     ntokens = nlat * nlon / patch_size
-    patch_embedding_comm = AB_communication(
+    patch_embedding_comm = ab_communication(
         ntokens, patch_size * nvars_in, patch_embedding_out
     )  # GBs of data communicated
     patch_embedding_flop = (
-        AB_flop_local(ntokens, patch_size * nvars_in, patch_embedding_out)
+        ab_flop_local(ntokens, patch_size * nvars_in, patch_embedding_out)
         + patch_embedding_out / 1e12
     )
 
     # including concat
     # (ntokens, patch_embedding_out)
-    patch_recovery_comm = AB_communication(
+    patch_recovery_comm = ab_communication(
         ntokens, patch_embedding_out * 2, patch_embedding_in
     )  # GBs of data communicated
     patch_recovery_flop = (
-        AB_flop_local(ntokens, patch_embedding_out * 2, patch_embedding_in)
+        ab_flop_local(ntokens, patch_embedding_out * 2, patch_embedding_in)
         + patch_embedding_in / 1e12
     )
 
-    linlayer_comm = AB_communication(
+    linlayer_comm = ab_communication(
         nlat * nlon, nvars_out * 2, nvars_out
     )  # GBs of data communicated
     linlayer_flop = (
-        AB_flop_local(nlat * nlon, nvars_out * 2, nvars_out) + nvars_out / 1e12
+        ab_flop_local(nlat * nlon, nvars_out * 2, nvars_out) + nvars_out / 1e12
     )
 
     tflop_per_block, gb_per_block = transformer_block(

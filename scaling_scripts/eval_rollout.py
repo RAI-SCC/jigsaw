@@ -1,16 +1,10 @@
 import argparse
-import time
-
-import torch
-import torch.distributed as dist
-import torch.optim as optim
-import timm
-import yaml
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.nn.utils import vector_to_parameters
 
 import eval
+import torch
+import torch.distributed as dist
 import utils
+import yaml
 
 
 def training_loop(
@@ -22,30 +16,20 @@ def training_loop(
     # Set all seeds in the same model group to be different
     utils.set_all_seeds(1 + rank % n_parallel)
 
-    best_val_loss = 1e5
-
-    xlat, xlon = config_dict["data"]["xlat"], config_dict["data"]["xlon"]
-    variable_weights, area_weights = utils.get_weights(
-        config_dict, device, n_parallel, rank
-    )
-
     # Set up model  groups
     match n_parallel:
         case 1:
             model_group, ddp_group, _, model_subgroup_col = utils.setup_groups(
                 rank, n_parallel, 1, 1
             )
-            n_vars_local = 69
         case 2:
             model_group, ddp_group, _, model_subgroup_col = utils.setup_groups(
                 rank, n_parallel, 1, 2
             )
-            n_vars_local = 36
         case 4:
             model_group, ddp_group, _, model_subgroup_col = utils.setup_groups(
                 rank, n_parallel, 2, 2
             )
-            n_vars_local = 36
 
     # Define model and load model
     model = utils.build_model(
@@ -67,28 +51,21 @@ def training_loop(
         model_parallel=model_parallel,
         n_parallel=n_parallel,
     )
-    scheduler = utils.build_scheduler(
-        config_dict,
-        optimizer,
-        epoch,
-        n_epochs=config_dict["training"]["n_epochs"],
-        lr_min=config_dict["training"]["lr_min"],
-    )
-    loss_fn = utils.build_loss_fn(config_dict)
 
     # Set random seed and ensure the same model groups same seeds
     # Set all GPUs to the same seed so that they read the same data
     utils.set_all_seeds_model_group(1, rank=rank, n_parallel=n_parallel)
-    _, valid_dataloader = utils.build_dataloaders(
-        config_dict, model_parallel, rank
-    )
+    _, valid_dataloader = utils.build_dataloaders(config_dict, model_parallel, rank)
 
     utils.setup_precision(config_dict["training"]["tf32"])
 
-    max_rollout = config_dict["model"]["latent_rollout"]
-    epoch_end = epoch + 11 
-    epoch_end = config_dict['training']['n_epochs'] if epoch_end > config_dict['training']['n_epochs'] else epoch_end
-    
+    epoch_end = epoch + 11
+    epoch_end = (
+        config_dict["training"]["n_epochs"]
+        if epoch_end > config_dict["training"]["n_epochs"]
+        else epoch_end
+    )
+
     model.eval()
     val_loss = eval.validate(
         config_dict,
@@ -108,12 +85,11 @@ def training_loop(
     )
 
     if rank == 0:
-        print(
-            f"Epoch {epoch}. Average validation loss: {val_loss}"
-        )
+        print(f"Epoch {epoch}. Average validation loss: {val_loss}")
 
         torch.cuda.synchronize()
-        
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_file")

@@ -1,16 +1,13 @@
 import argparse
 import time
 
+import eval
+import timm
 import torch
 import torch.distributed as dist
 import torch.optim as optim
-import timm
-import yaml
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.nn.utils import vector_to_parameters
-
-import eval
 import utils
+import yaml
 
 
 def training_loop(
@@ -20,9 +17,11 @@ def training_loop(
     n_parallel = config_dict["model_parallel"]["parallelism"]
     model_parallel = n_parallel > 1
     # Set all seeds in the same model group to be different
-    utils.set_all_seeds(1 + rank % n_parallel) # TODO: for now, set all random seeds to be same 
-                           # for data loading and model weight initialization 
-                           # purposes
+    utils.set_all_seeds(
+        1 + rank % n_parallel
+    )  # TODO: for now, set all random seeds to be same
+    # for data loading and model weight initialization
+    # purposes
 
     xlat, xlon = config_dict["data"]["xlat"], config_dict["data"]["xlon"]
     variable_weights, area_weights = utils.get_weights(
@@ -32,16 +31,16 @@ def training_loop(
     # Set up model  groups
     match n_parallel:
         case 1:
-            model_group, ddp_group, model_subgroup_row, model_subgroup_col = utils.setup_groups(
-                rank, n_parallel, 1, 1
+            model_group, ddp_group, model_subgroup_row, model_subgroup_col = (
+                utils.setup_groups(rank, n_parallel, 1, 1)
             )
         case 2:
-            model_group, ddp_group, model_subgroup_row, model_subgroup_col = utils.setup_groups(
-                rank, n_parallel, 1, 2
+            model_group, ddp_group, model_subgroup_row, model_subgroup_col = (
+                utils.setup_groups(rank, n_parallel, 1, 2)
             )
         case 4:
-            model_group, ddp_group, model_subgroup_row, model_subgroup_col = utils.setup_groups(
-                rank, n_parallel, 2, 2
+            model_group, ddp_group, model_subgroup_row, model_subgroup_col = (
+                utils.setup_groups(rank, n_parallel, 2, 2)
             )
     n_vars_local = 69
 
@@ -70,9 +69,9 @@ def training_loop(
                 ddp_group,
                 model_subgroup_col,
             )
-        case model_type : 
+        case model_type:
             print(f"Model type {model_type} does not exist.")
-    
+
     optimizer = utils.build_optimizer(config_dict, model)
     model, optimizer, epoch = utils.load_model(
         model,
@@ -93,7 +92,7 @@ def training_loop(
 
     # Set random seed and ensure the same model groups same seeds
     # Set all GPUs to the same seed so that they read the same data
-    #utils.set_all_seeds_model_group(1, rank=rank, n_parallel=n_parallel)
+    # utils.set_all_seeds_model_group(1, rank=rank, n_parallel=n_parallel)
     utils.set_all_seeds(1)
     train_dataloader, valid_dataloader = utils.build_dataloaders(
         config_dict, model_parallel, rank
@@ -102,8 +101,12 @@ def training_loop(
     utils.setup_precision(config_dict["training"]["tf32"])
 
     max_rollout = config_dict["model"]["latent_rollout"]
-    epoch_end = epoch + 11 
-    epoch_end = config_dict['training']['n_epochs'] if epoch_end > config_dict['training']['n_epochs'] else epoch_end
+    epoch_end = epoch + 11
+    epoch_end = (
+        config_dict["training"]["n_epochs"]
+        if epoch_end > config_dict["training"]["n_epochs"]
+        else epoch_end
+    )
     for epoch in range(epoch, epoch_end):
         avg_loss = train_one_epoch(
             config_dict,
@@ -122,15 +125,15 @@ def training_loop(
             max_rollout=max_rollout,
             rank=rank,
             start_lr=1e-6,
-            col_group=model_subgroup_col
+            col_group=model_subgroup_col,
         )
 
         torch.cuda.synchronize()
 
         model.eval()
-        if config_dict["model_parallel"]["type"] == 'megatron':
-            config_dict['model_parallel']['parallelism'] = 1
-            
+        if config_dict["model_parallel"]["type"] == "megatron":
+            config_dict["model_parallel"]["parallelism"] = 1
+
         val_loss = eval.validate(
             config_dict,
             model,
@@ -183,7 +186,7 @@ def train_one_epoch(
     max_rollout: int,
     rank: int,
     start_lr: float,
-    col_group: dist.ProcessGroup
+    col_group: dist.ProcessGroup,
 ) -> float:
     """
     Train for one epoch.
@@ -202,25 +205,25 @@ def train_one_epoch(
         train_dataloader.sampler.set_epoch(epoch)
 
     start_time = time.perf_counter()
-    
+
     if rank == 0:
         print(f"Epoch {epoch}, learning rate {scheduler._get_lr(epoch)}")
 
     for i, data in enumerate(train_dataloader):
         rollout = i % max_rollout
-        
+
         # warmup lr only in epoch 0
         if epoch == 0 and i < 5000:
             max_values = scheduler._get_lr(epoch)
             for index, g in enumerate(optimizer.param_groups):
                 warm = i * (max_values[index] - start_lr) / 5000 + start_lr
                 g["lr"] = warm
-        
+
         input_data = data[0].to(device, non_blocking=True)
         target_data = data[1][rollout].to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-        
+
         output = model(input_data, rollout_=rollout + 1)  # [B, 720, 720, 36]
         output = output.reshape(-1, xlat, xlon, n_vars_local)
 
@@ -228,13 +231,13 @@ def train_one_epoch(
         vw = variable_weights.view(1, 1, 1, n_vars_local)
         ow = output * area_weights * vw
         tw = target_data * area_weights * vw
-        
+
         loss = loss_fn(ow, tw)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
             model.parameters(), config_dict["training"]["grad_clip"]
         )
-            
+
         optimizer.step()
         dist.all_reduce(loss, op=dist.ReduceOp.AVG)
         epoch_loss = epoch_loss + float(loss.detach())

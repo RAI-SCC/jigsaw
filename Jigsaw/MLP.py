@@ -1,9 +1,9 @@
 import math
 
 import torch
+import torch.distributed as dist
 import torch.nn.init as init
 from torch.nn import GELU, Dropout
-import torch.distributed as dist
 
 from . import Linear, Linear_Megatron
 
@@ -58,16 +58,30 @@ class DistributedMLP(torch.nn.Module):
         self.parallelism = parallelism
         self.model_group = model_group
         self.spatial_group = spatial_group
-        
+
         match parallelism:
             case 2:
-                in_dim, hidden_dim1, hidden_dim2, out_dim = in_dim // 2, hidden_dim, hidden_dim // 2, out_dim
+                in_dim, hidden_dim1, hidden_dim2, out_dim = (
+                    in_dim // 2,
+                    hidden_dim,
+                    hidden_dim // 2,
+                    out_dim,
+                )
             case 4:
-                in_dim, hidden_dim1, hidden_dim2, out_dim = in_dim // 2, hidden_dim // 2, hidden_dim // 2, out_dim // 2
+                in_dim, hidden_dim1, hidden_dim2, out_dim = (
+                    in_dim // 2,
+                    hidden_dim // 2,
+                    hidden_dim // 2,
+                    out_dim // 2,
+                )
             case 8:
-                in_dim, hidden_dim1, hidden_dim2, out_dim = in_dim // 2, hidden_dim // 4, hidden_dim // 2, out_dim // 4
-        
-        
+                in_dim, hidden_dim1, hidden_dim2, out_dim = (
+                    in_dim // 2,
+                    hidden_dim // 4,
+                    hidden_dim // 2,
+                    out_dim // 4,
+                )
+
         self.linear1 = Linear.DistributedXWT(
             in_dim,
             hidden_dim1,
@@ -76,7 +90,7 @@ class DistributedMLP(torch.nn.Module):
             device,
             parallelism,
             model_group,
-            spatial_group
+            spatial_group,
         )
         self.linear2 = Linear.DistributedXWT(
             hidden_dim2,
@@ -86,7 +100,7 @@ class DistributedMLP(torch.nn.Module):
             device,
             parallelism,
             model_group,
-            spatial_group
+            spatial_group,
         )
 
         self.activation = GELU()
@@ -113,14 +127,15 @@ class DistributedMLP(torch.nn.Module):
 
         return x
 
-def _average_weights(
-    model: torch.nn.Module, spatial_group: dist.ProcessGroup
-):
+
+def _average_weights(model: torch.nn.Module, spatial_group: dist.ProcessGroup):
     for _, param in model.named_parameters():
         dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
 
+
 class DistributedSynchronizedMLP(torch.nn.Module):
     """Distributed MLP across n processes."""
+
     def __init__(
         self,
         in_dim: int,
@@ -133,7 +148,7 @@ class DistributedSynchronizedMLP(torch.nn.Module):
         parallelism: int,
         model_group: torch.distributed.ProcessGroup,
         sync_group: torch.distributed.ProcessGroup,
-        bayesian: bool = False
+        bayesian: bool = False,
     ):
         super().__init__()
         self.local_rank = local_rank
@@ -144,7 +159,7 @@ class DistributedSynchronizedMLP(torch.nn.Module):
         if parallelism == 2:
             # in, hidden, out dim are global sizes for two-way model parallelism
             # required to maintain partitioning across final dimension
-            
+
             # local X has shape [seq_length, in_dim//2]
             self.linear1 = Linear.DistributedXWTSync(
                 in_dim // 2,
@@ -154,10 +169,10 @@ class DistributedSynchronizedMLP(torch.nn.Module):
                 device,
                 parallelism,
                 model_group,
-                sync_group, 
-                bayesian=bayesian
+                sync_group,
+                bayesian=bayesian,
             ).to(device)
-            
+
             self.linear2 = Linear.DistributedXWTSync(
                 hidden_dim // 2,
                 out_dim,
@@ -167,17 +182,15 @@ class DistributedSynchronizedMLP(torch.nn.Module):
                 parallelism,
                 model_group,
                 sync_group,
-                bayesian=bayesian
+                bayesian=bayesian,
             ).to(device)
-        
+
         self.activation = GELU()
         self.drop = Dropout(p=dropout)
         self.drop2 = Dropout(p=dropout)
         self.local_rank = local_rank
-        
-        _average_weights(self, sync_group)
-        
 
+        _average_weights(self, sync_group)
 
     def forward(self, x):
         """
@@ -190,14 +203,14 @@ class DistributedSynchronizedMLP(torch.nn.Module):
         model_group : torch.distributed.ProcessGroup, optional
             Process group for an individual model-parallel instance.
         """
-
         x = self.linear1(x)
         x = self.activation(x)
         x = self.drop(x)
         x = self.linear2(x)
         x = self.drop2(x)
-        
+
         return x
+
 
 class DistributedXTWMLP(torch.nn.Module):
     """Distributed MLP layer where inputs are transposed."""
@@ -244,29 +257,17 @@ class DistributedXTWMLP(torch.nn.Module):
             case 2:
                 in_dim, hidden_dim, out_dim = in_dim, hidden_dim // 2, out_dim
             case 4:
-                in_dim, hidden_dim, out_dim = in_dim //2, hidden_dim // 2, out_dim // 2
+                in_dim, hidden_dim, out_dim = in_dim // 2, hidden_dim // 2, out_dim // 2
             case 8:
-                in_dim, hidden_dim, out_dim = in_dim //4, hidden_dim // 2, out_dim // 4
-        
+                in_dim, hidden_dim, out_dim = in_dim // 4, hidden_dim // 2, out_dim // 4
+
         self.linear1 = Linear.DistributedXTW(
-            in_dim,
-            hidden_dim,
-            bias,
-            local_rank,
-            device,
-            parallelism,
-            model_group
+            in_dim, hidden_dim, bias, local_rank, device, parallelism, model_group
         )
         self.linear2 = Linear.DistributedXWT(
-            hidden_dim,
-            out_dim,
-            bias,
-            local_rank,
-            device,
-            parallelism,
-            model_group
+            hidden_dim, out_dim, bias, local_rank, device, parallelism, model_group
         )
-        
+
         self.activation = GELU()
         self.drop = Dropout(p=dropout)
         self.drop2 = Dropout(p=dropout)
@@ -334,7 +335,7 @@ class SequentialMLP(torch.nn.Module):
         return x
 
 
-class DistributedMLP_Megatron(torch.nn.Module):
+class DistributedMLPMegatron(torch.nn.Module):
     """Distributed MLP across n processes."""
 
     def __init__(
@@ -416,7 +417,6 @@ class DistributedMLP_Megatron(torch.nn.Module):
         model_group : torch.distributed.ProcessGroup, optional
             Process group for an individual model-parallel instance.
         """
-
         x = self.linear1(x)
 
         x = self.activation(x)

@@ -1,15 +1,17 @@
-import numpy as np
 import torch
 
-from . import Dataset, Linear, PatchEmbedding
+from . import Dataset, Linear, PatchEmbedding, flop_comm_estimation
 from . import Normalization as Norm
 from .Mixer import MixerBlock, MixerBlockMegatron, MixerBlockSequential
 
 
 class WeatherMixer(torch.nn.Module):
+    """WeatherMixer model for different model-parallel numbers."""
+
     def __init__(
         self, config_dict, rank, device, parallelism, model_group, col_subgroup
     ):
+        """Initialize WeatherMixer model."""
         super().__init__()
         self.rank = rank
         self.device = device
@@ -272,10 +274,10 @@ class WeatherMixer(torch.nn.Module):
         return flop_forward, comm_forward
 
     def forward(self, x, rollout_=0):
-        print(f'hello')
+        """Perform forward pass for general weathermixer."""
         for i in range(rollout_):
             x_res = x
-            
+
             if len(x_res.shape) > 3:
                 x_res = x_res.flatten(start_dim=1, end_dim=2)
             else:
@@ -321,10 +323,13 @@ class WeatherMixer(torch.nn.Module):
         return x
 
 
-class Model_eightway(torch.nn.Module):
+class ModelEightway(torch.nn.Module):
+    """Eight-way distributed WeatherMixer model."""
+
     def __init__(
         self, config_dict, rank, device, parallelism, model_group, col_subgroup
     ):
+        """Initialize eight-way distributed WeatherMixer model."""
         super().__init__()
         self.rank = rank
         self.device = device
@@ -493,6 +498,7 @@ class Model_eightway(torch.nn.Module):
         self.topography = torch.unsqueeze(self.topography[:, self.start : self.end], 0)
 
     def forward(self, x, rollout_=0):
+        """Perform forward pass for 8way model."""
         for i in range(rollout_):
             x_res = x
             if len(x_res.shape) > 3:
@@ -540,9 +546,12 @@ class Model_eightway(torch.nn.Module):
 
 
 class Model(torch.nn.Module):
+    """Four-way distributed WeatherMixer model."""
+
     def __init__(
         self, config_dict, rank, device, parallelism, model_group, col_subgroup
     ):
+        """Initialize 4-way distributed WeatherMixer model."""
         super().__init__()
         self.rank = rank
         self.device = device
@@ -715,6 +724,7 @@ class Model(torch.nn.Module):
         self.flop_comm = self._calc_flop_comm(config_dict)
 
     def _calc_flop_comm(self, config_dict):
+        """Calculate flop and comm."""
         nlat, nlon = config_dict["data"]["xlat"], config_dict["data"]["xlon"]
         parallelism = 4
         nvars_in, nvars_out = 72, 72
@@ -786,6 +796,7 @@ class Model(torch.nn.Module):
         return flop_forward, comm_forward
 
     def forward(self, x, rollout_=0):
+        """Perform forward pass for 4-way distributed model."""
         x_res = x
         if len(x_res.shape) > 3:
             x_res = x_res.flatten(start_dim=1, end_dim=2)
@@ -833,8 +844,11 @@ class Model(torch.nn.Module):
         return x
 
 
-class Model_twoway(torch.nn.Module):
+class ModelTwoway(torch.nn.Module):
+    """Define WeatherMixer model across 2 GPUs."""
+
     def __init__(self, config_dict, rank, device, parallelism, model_group):
+        """Initialize WeatherMixer model across 2 GPUs."""
         super().__init__()
         self.rank = rank
         self.device = device
@@ -955,6 +969,7 @@ class Model_twoway(torch.nn.Module):
             )
 
     def forward(self, x, rollout_=0):
+        """Perform forward pass for 2-way model."""
         x_res = x
         x_res = x_res.flatten(start_dim=1, end_dim=2)
 
@@ -992,7 +1007,10 @@ class Model_twoway(torch.nn.Module):
 
 
 class ModelSequential(torch.nn.Module):
+    """WeatherMixer with no model parallelism."""
+
     def __init__(self, config_dict, rank, device):
+        """Initialize module based on config file."""
         super().__init__()
         self.rank = rank
         hidden_dimension = config_dict["model"]["hidden_dim"]
@@ -1187,6 +1205,7 @@ class ModelSequential(torch.nn.Module):
             )
 
     def forward(self, x, rollout_=1):
+        """Define forward pass for WeatherMixer."""
         x_shape = x.shape
         x_res = x.clone()
         x_res = x_res.permute(0, 2, 3, 1)
@@ -1241,6 +1260,8 @@ class ModelSequential(torch.nn.Module):
 
 
 class ModelMegatron(torch.nn.Module):
+    """Define Megatron-like WeatherMixer model."""
+
     def __init__(self, config_dict, rank, device, parallelism, model_group):
         super().__init__()
         self.rank = rank
@@ -1360,6 +1381,7 @@ class ModelMegatron(torch.nn.Module):
             )
 
     def forward(self, x, rollout_=1):
+        """Perform forward pass for megatron-like WeatherMixer."""
         x_shape = x.shape
         x_res = x.clone()
         x_res = x_res.permute(0, 2, 3, 1)

@@ -1,5 +1,3 @@
-import os
-
 import torch
 import torch.distributed as dist
 
@@ -9,6 +7,7 @@ streams = [torch.cuda.Stream() for _ in range(2)]
 streamz = [torch.cuda.Stream() for _ in range(4)]
 
 _prealloc_buffers = {}
+
 
 def xw_transpose_columnwise_twoway(
     xij: torch.tensor,

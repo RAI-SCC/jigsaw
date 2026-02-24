@@ -1,9 +1,7 @@
-import numpy as np
 import torch
 import torch.distributed as dist
 
-from Jigsaw import Convolutions
-from Jigsaw import utils
+from Jigsaw import Convolutions, utils
 
 device, _, rank, _ = utils.init_cuda()
 batch = 1
@@ -71,7 +69,7 @@ if rank in [0, 2]:
         # if len(model_p.shape) == 1:
         #     print(f'shape {model_p.shape} model_p  {model_p}, truth sum {truth_p}')
         if rank == 0:
-            print(f'truth param shape {truth_p.shape}, model p shape {model_p.shape}')
+            print(f"truth param shape {truth_p.shape}, model p shape {model_p.shape}")
 else:
     for model_p, truth_p in zip(model.parameters(), model_truth.parameters()):
         model_p.requires_grad_(False)
@@ -83,7 +81,7 @@ iter_ = 0
 
 torch.manual_seed(rank)
 
-X = torch.rand([1, in_channels//2, H, W]).to(torch.float32).to(device)
+X = torch.rand([1, in_channels // 2, H, W]).to(torch.float32).to(device)
 
 empty = torch.empty(0, device=device, dtype=torch.float32)
 X_recv0 = torch.zeros(X.shape, dtype=torch.float32).to(device)
@@ -156,9 +154,9 @@ loss_ref.backward()
 
 weights_grad = model_truth.weight.grad
 
-print(f'truth {y}, parallel output {values}')
+print(f"truth {y}, parallel output {values}")
 # if rank == 0:
-    # print(f"model weights {model_truth.bias.grad}") #, weight_grad_shape {weights_grad.shape}, sum {weights_grad.sum(dim=(0,2,3))}")
-    # print(f"weights {X_total.grad}")
+# print(f"model weights {model_truth.bias.grad}") #, weight_grad_shape {weights_grad.shape}, sum {weights_grad.sum(dim=(0,2,3))}")
+# print(f"weights {X_total.grad}")
 
 torch.distributed.destroy_process_group()

@@ -1,13 +1,12 @@
-
+import csv
 import os
 from datetime import datetime
-import yaml
-import csv
 
 import numpy as np
 import pandas as pd
 import torch
 import xarray as xr
+import yaml
 from torch.utils.data import Dataset
 
 
@@ -116,7 +115,6 @@ class ERA5Dataset(Dataset):
 
     def _get_files_stats(self, mode="train"):
         """Filter desired time points based on parameters and return file statistics."""
-
         self.zarr_data = xr.open_dataset(self.file_path, engine="zarr")
         times = pd.to_datetime(self.zarr_data["time"].values)
         if mode == "train":  # training case, lite
@@ -642,9 +640,7 @@ class ERA5DatasetDistributed(Dataset):
                 temp = (temp - self.p_mean[32:]) / self.p_std[32:]
 
                 target.append(
-                    torch.nn.functional.pad(
-                        torch.tensor(temp), (0, 0, 0, 0, 0, 3)
-                    )
+                    torch.nn.functional.pad(torch.tensor(temp), (0, 0, 0, 0, 0, 3))
                 )
 
         input = torch.tensor(input)
@@ -667,7 +663,7 @@ class ERA5Preprocessed(Dataset):
         dt=None,
     ):
         """
-        initialize.
+        Initialize.
 
         params: Dict
             configuration file
@@ -745,7 +741,6 @@ class ERA5Preprocessed(Dataset):
 
     def _get_files_stats(self, mode="train"):
         """Filter desired time points based on parameters and return file statistics."""
-
         self.zarr_data = xr.open_dataset(self.file_path, engine="zarr")
         times = pd.to_datetime(self.zarr_data["time"].values)
         if mode == "train":  # training case, lite
@@ -813,7 +808,6 @@ class ERA5Preprocessed(Dataset):
         global_idx: int
                 global index of item
         """
-        target_surface = []
         step = self.dt
         # if forecast_length = 3, target_file_idx = global_idx + range(1, forecast_length+1)*step // 6
         target_file_idxs = global_idx + torch.div(
@@ -871,7 +865,7 @@ class ERA5PreprocessedDistributed(Dataset):
         dt=None,
     ):
         """
-        initialize.
+        Initialize.
 
         params: Dict
             configuration file
@@ -966,7 +960,6 @@ class ERA5PreprocessedDistributed(Dataset):
 
     def _get_files_stats(self, mode="train"):
         """Filter desired time points based on parameters and return file statistics."""
-
         self.zarr_data = xr.open_dataset(self.file_path, engine="zarr")
         times = pd.to_datetime(self.zarr_data["time"].values)
         if mode == "train":  # training case, lite
@@ -1034,7 +1027,6 @@ class ERA5PreprocessedDistributed(Dataset):
         global_idx: int
                 global index of item
         """
-        target_surface = []
         step = self.dt
         # if forecast_length = 3, target_file_idx = global_idx + range(1, forecast_length+1)*step // 6
         target_file_idxs = global_idx + torch.div(
@@ -1240,10 +1232,10 @@ class ERAJigsaw(Dataset):
         self.uses_constant_masks = len(self.config["data"]["constant_masks"]) > 0
 
         self._get_spatial_ranges()
-        
+
         if self.uses_constant_masks:
             self._load_constant_masks()
-            
+
         self._get_data_files_stats()
         self._get_normalization_constants()
 
@@ -1267,7 +1259,6 @@ class ERAJigsaw(Dataset):
                     self.start, self.end = self.xlon * 3 // 4, self.xlon
         return
 
-        
     def _translate_variable_names(self, varname_list):
         if self.translation_dict is None:
             self._load_translation_dict()
@@ -1292,7 +1283,6 @@ class ERAJigsaw(Dataset):
 
     def _get_data_files_stats(self):
         """Filter desired time points based on parameters and return file statistics."""
-
         dataset = xr.open_dataset(self.file_path, engine="zarr")
         times = pd.to_datetime(dataset["time"].values)
 
@@ -1445,28 +1435,36 @@ class ERAJigsaw(Dataset):
         self.in_stds = np.array(in_s_std_data + in_p_std_data)
         self.out_means = np.array(out_s_mean_data + out_p_mean_data)
         self.out_stds = np.array(out_s_std_data + out_p_std_data)
-        
-        self.total_variables_in  = self._get_num_variables_in()
+
+        self.total_variables_in = self._get_num_variables_in()
         self.total_variables_out = self._get_num_variables_out()
-        
+
         match self.rank % 2:
-            case 0: # first half of variables
-                self.in_means = self.in_means[:self.total_variables_in//2]
-                self.in_stds = self.in_stds[:self.total_variables_in//2]
-                self.out_means = self.out_means[:self.total_variables_out//2]
-                self.out_stds = self.out_stds[:self.total_variables_out//2]
+            case 0:  # first half of variables
+                self.in_means = self.in_means[: self.total_variables_in // 2]
+                self.in_stds = self.in_stds[: self.total_variables_in // 2]
+                self.out_means = self.out_means[: self.total_variables_out // 2]
+                self.out_stds = self.out_stds[: self.total_variables_out // 2]
             case 1:
-                self.in_means = self.in_means[self.total_variables_in//2:]
-                self.in_stds = self.in_stds[self.total_variables_in//2:]
-                self.out_means = self.out_means[self.total_variables_out//2:]
-                self.out_stds = self.out_stds[self.total_variables_out//2:]
+                self.in_means = self.in_means[self.total_variables_in // 2 :]
+                self.in_stds = self.in_stds[self.total_variables_in // 2 :]
+                self.out_means = self.out_means[self.total_variables_out // 2 :]
+                self.out_stds = self.out_stds[self.total_variables_out // 2 :]
 
         # unsqueeze to correct shapes
-        self.in_means = self.in_means.reshape(1,1,-1)   # self.in_means.reshape((self.in_means.shape[0], 1, 1))
-        self.in_stds = self.in_stds.reshape(1,1,-1)     # self.in_stds.reshape((self.in_stds.shape[0], 1, 1))
-        self.out_means = self.out_means.reshape(1,1,-1) # self.out_means.reshape((self.out_means.shape[0], 1, 1))
-        self.out_stds = self.out_stds.reshape(1,1,-1)   # self.out_stds.reshape((self.out_stds.shape[0], 1, 1))
-        
+        self.in_means = self.in_means.reshape(
+            1, 1, -1
+        )  # self.in_means.reshape((self.in_means.shape[0], 1, 1))
+        self.in_stds = self.in_stds.reshape(
+            1, 1, -1
+        )  # self.in_stds.reshape((self.in_stds.shape[0], 1, 1))
+        self.out_means = self.out_means.reshape(
+            1, 1, -1
+        )  # self.out_means.reshape((self.out_means.shape[0], 1, 1))
+        self.out_stds = self.out_stds.reshape(
+            1, 1, -1
+        )  # self.out_stds.reshape((self.out_stds.shape[0], 1, 1))
+
     def _load_constant_masks(self):
         mask_file_paths = {}
         with open(f"{self.config['data']['constant_mask_dir']}/file_paths.yaml") as f:
@@ -1537,47 +1535,69 @@ class ERAJigsaw(Dataset):
         n_masks = self.constant_mask_data.shape[-1]
         return n_surface + n_pressure + n_masks
 
-    def _getitem_distributed(self, input_surface_ds, input_pressure_ds, target_surface_ds, target_pressure_ds):
-        
+    def _getitem_distributed(
+        self, input_surface_ds, input_pressure_ds, target_surface_ds, target_pressure_ds
+    ):
+
         if self.rank % 2 == 0:  # first half of data
             # Input data
             input_surface = input_surface_ds.values
-            input_pressure = input_pressure_ds.isel(vl=slice(0, self.total_variables_in//2 - len(self.in_surface_variables))).values
-            
+            input_pressure = input_pressure_ds.isel(
+                vl=slice(
+                    0, self.total_variables_in // 2 - len(self.in_surface_variables)
+                )
+            ).values
+
             # TODO: manage the normalization properly
             input = np.concatenate([input_surface, input_pressure], axis=-1)
             input = (input - self.in_means) / self.in_stds
-            
+
             # Target data
             target_surface = target_surface_ds.values
-            target_pressure = target_pressure_ds.isel(vl=slice(0, self.total_variables_out//2 - len(self.out_surface_variables))).values
+            target_pressure = target_pressure_ds.isel(
+                vl=slice(
+                    0, self.total_variables_out // 2 - len(self.out_surface_variables)
+                )
+            ).values
 
             target = np.concatenate([target_surface, target_pressure], axis=-1)
             target = (target - self.out_means) / self.out_stds
             target = torch.tensor(target)
         else:
-            input_pressure = input_pressure_ds.isel(vl=slice(self.total_variables_in//2 - len(self.in_surface_variables), None)).values
+            input_pressure = input_pressure_ds.isel(
+                vl=slice(
+                    self.total_variables_in // 2 - len(self.in_surface_variables), None
+                )
+            ).values
             # Normalization
             input = (input_pressure - self.in_means) / self.in_stds
             input = np.concatenate((input_pressure, self.constant_mask_data), axis=-1)
-            
-            target = target_pressure_ds.isel(vl=slice(self.total_variables_out//2 - len(self.in_surface_variables), None)).values
+
+            target = target_pressure_ds.isel(
+                vl=slice(
+                    self.total_variables_out // 2 - len(self.in_surface_variables), None
+                )
+            ).values
             target = (target - self.out_means) / self.out_stds
-            target = torch.nn.functional.pad(torch.tensor(target), (0, self.constant_mask_data.shape[-1]))
-            
+            target = torch.nn.functional.pad(
+                torch.tensor(target), (0, self.constant_mask_data.shape[-1])
+            )
+
         input = torch.tensor(input)
         return input, target
-    
-    def _getitem_nondistributed(self, input_surface_ds, input_pressure_ds, target_surface_ds, target_pressure_ds):
+
+    def _getitem_nondistributed(
+        self, input_surface_ds, input_pressure_ds, target_surface_ds, target_pressure_ds
+    ):
         target = []
 
         # Input data
         input_surface = input_surface_ds.values
         input_pressure = input_pressure_ds.values
-            
+
         input = np.concatenate([input_surface, input_pressure], axis=-1)
         input = (input - self.in_means) / self.in_stds
-        
+
         # Target data
         target_surface = target_surface_ds.values
         target_pressure = target_pressure_ds.values
@@ -1585,10 +1605,10 @@ class ERAJigsaw(Dataset):
         target = np.concatenate([target_surface, target_pressure], axis=-1)
         target = (target - self.out_means) / self.out_stds
         target = torch.tensor(target)
-        
+
         input = torch.tensor(input)
         return input, target
-    
+
     def __getitem__(self, global_idx):
         """
         Return single input, target.
@@ -1611,7 +1631,7 @@ class ERAJigsaw(Dataset):
             .to_array("surface_variables")
             .transpose("latitude", "longitude", "surface_variables")
         )
-        
+
         input_pressure_ds = (
             self.zarr_in.isel(time=global_idx)
             .sel(level=self.config["data"]["in_pressure_levels"])
@@ -1627,7 +1647,7 @@ class ERAJigsaw(Dataset):
             .to_array("surface_variables")
             .transpose("time", "latitude", "longitude", "surface_variables")
         )
-        
+
         target_pressure_ds = (
             self.zarr_out.isel(time=target_file_idxs)
             .sel(level=self.config["data"]["out_pressure_levels"])
@@ -1638,47 +1658,25 @@ class ERAJigsaw(Dataset):
         )
 
         if self.parallelism > 1:
-            input, target = self._getitem_distributed(input_surface_ds, input_pressure_ds, target_surface_ds, target_pressure_ds)
-        else: # non distributed
-            input, target = self._getitem_nondistributed(input_surface_ds, input_pressure_ds, target_surface_ds, target_pressure_ds)
+            input, target = self._getitem_distributed(
+                input_surface_ds,
+                input_pressure_ds,
+                target_surface_ds,
+                target_pressure_ds,
+            )
+        else:  # non distributed
+            input, target = self._getitem_nondistributed(
+                input_surface_ds,
+                input_pressure_ds,
+                target_surface_ds,
+                target_pressure_ds,
+            )
         return input.to(torch.float32), target.to(torch.float32)
-
-class DummyHighResDataset(Dataset):
-    def __init__(self, config, nvars=72, nsamples=100):
-        self.x = config["data"]["xlat"]
-        self.y = config["data"]["xlon"]
-        self.nvars = nvars
-        self.seed = 1  # random seed for now
-        self.config = config
-        self.nsamples = nsamples
-
-    def __len__(self):
-        if self.config["data"]["train_subset"] == -1:
-            return self.nsamples
-        else:
-            return self.config["data"]["train_subset"]
-
-    def __getitem__(self, global_idx):
-        return torch.rand(
-            (self.nvars, self.x, self.y), dtype=torch.float32
-        ), torch.rand((self.nvars, self.x, self.y), dtype=torch.float32)
-
-
-class DistributedDummyHighResDataset(DummyHighResDataset):
-    def __init__(self, config, nvars=72):
-        super().__init__(config)
-        self.parallelism = config["model_parallel"]["parallelism"]
-        self.y = -(-self.y // (self.parallelism // 2))
-        self.nvars = -(-nvars // 2)  # ceiling function
-        self.seed = 1  # random seed for now
-
-    def __getitem__(self, global_idx):
-        return torch.rand(
-            (self.x, self.y, self.nvars), dtype=torch.float32
-        ), torch.rand((self.x, self.y, self.nvars), dtype=torch.float32)
 
 
 class DistributedHighResDataset(ERA5PreprocessedDistributed):
+    """Dataset for distributed high resolution data."""
+
     def __init__(
         self,
         config,
@@ -1690,6 +1688,7 @@ class DistributedHighResDataset(ERA5PreprocessedDistributed):
         normalize=True,
         dt=None,
     ):
+        """Initialize dataset for distributed high resolution data."""
         super().__init__(
             config,
             file_path,
@@ -1702,6 +1701,7 @@ class DistributedHighResDataset(ERA5PreprocessedDistributed):
         )
 
     def __getitem__(self, global_idx):
+        """Return dataset item based on global index."""
         input, target = super().__getitem__(global_idx)
         input = input.permute(2, 0, 1).unsqueeze(0)
 
@@ -1720,6 +1720,8 @@ class DistributedHighResDataset(ERA5PreprocessedDistributed):
 
 
 class HighResDataset(ERA5Preprocessed):
+    """Dataset where ERA5 data is artificially upsampled to 0.125 degree data."""
+
     def __init__(
         self,
         config,
@@ -1743,6 +1745,7 @@ class HighResDataset(ERA5Preprocessed):
         )
 
     def __getitem__(self, global_idx):
+        """Return data item based on global index."""
         input, target = super().__getitem__(global_idx)
         input = input.unsqueeze(0)
         input_up = torch.nn.functional.interpolate(

@@ -19,6 +19,8 @@ class MixerBlock(torch.nn.Module):
         model_group,
     ):
         """
+        Initialize Mixer block.
+
         Parameters
         ----------
         tokens_mlp_dim : int
@@ -43,7 +45,7 @@ class MixerBlock(torch.nn.Module):
             device,
             n_parallel=n_parallel,
             model_group=model_group,
-            bias=True
+            bias=True,
         )
         self.channel_mixing = MLP.DistributedMLP(
             channels_mlp_dim,
@@ -53,7 +55,7 @@ class MixerBlock(torch.nn.Module):
             device,
             n_parallel=n_parallel,
             model_group=model_group,
-            bias=True
+            bias=True,
         )
         self.transpose = Linear.DistributedXTranpose(
             rank, device, n_parallel, model_group
@@ -99,7 +101,7 @@ class MixerBlock(torch.nn.Module):
         x = x_res + y
         y = self.layer_norm2(x)
         x = x + self.channel_mixing(y)
-        
+
         return x
 
 
@@ -202,10 +204,10 @@ class MixerBlockMegatron(torch.nn.Module):
         n_parallel,
         model_group,
         dropout=1e-3,
-        bias=True
+        bias=True,
     ):
         super(MixerBlockMegatron, self).__init__()
-        self.token_mixing = MLP.DistributedMLP_Megatron(
+        self.token_mixing = MLP.DistributedMLPMegatron(
             tokens_mlp_dim,
             int(tokens_mlp_dim * spatial_hidden_dim_fraction),
             tokens_mlp_dim,
@@ -216,7 +218,7 @@ class MixerBlockMegatron(torch.nn.Module):
             bias,
             dropout,
         )
-        self.channel_mixing = MLP.DistributedMLP_Megatron(
+        self.channel_mixing = MLP.DistributedMLPMegatron(
             channels_mlp_dim,
             int(channels_mlp_dim * channels_hidden_dim_fraction),
             channels_mlp_dim,
