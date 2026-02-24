@@ -149,8 +149,8 @@ def main():
     model.eval()
     with torch.no_grad():
         batch = next(iter(train_loader))
-        img = batch['image'].to(device)
-        mask = batch['mask'].to(device)
+        img = batch[0].to(device)
+        mask = batch[1].to(device)
         
         out = model(img)
         print(f"Output shape:    {out.shape}")
