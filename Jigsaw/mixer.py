@@ -1,11 +1,11 @@
 import torch
 
-from . import MLP, Linear
+from . import linear, mlp
 from . import normalization as norm
 
 
 class MixerBlock(torch.nn.Module):
-    """Mixing block that performs token and channel mixing using four-way distributed MLPs and layer normalization."""
+    """Mixing block that performs token and channel mixing using four-way distributed mlps and layer normalization."""
 
     def __init__(
         self,
@@ -24,9 +24,9 @@ class MixerBlock(torch.nn.Module):
         Parameters
         ----------
         tokens_mlp_dim : int
-            Global dimension of the tokens MLP.
+            Global dimension of the tokens mlp.
         channels_mlp_dim : int
-            Global dimension of the channels MLP.
+            Global dimension of the channels mlp.
         spatial_hidden_dim_fraction : float
             Fraction of the hidden dimension for spatial mixing.
         channels_hidden_dim_fraction : float
@@ -37,7 +37,7 @@ class MixerBlock(torch.nn.Module):
             Global rank.
         """
         super(MixerBlock, self).__init__()
-        self.token_mixing = MLP.DistributedXTWMLP(
+        self.token_mixing = mlp.DistributedXTWmlp(
             tokens_mlp_dim,
             int(tokens_mlp_dim * spatial_hidden_dim_fraction),
             tokens_mlp_dim,
@@ -47,7 +47,7 @@ class MixerBlock(torch.nn.Module):
             model_group=model_group,
             bias=True,
         )
-        self.channel_mixing = MLP.DistributedMLP(
+        self.channel_mixing = mlp.Distributedmlp(
             channels_mlp_dim,
             int(channels_mlp_dim * channels_hidden_dim_fraction),
             channels_mlp_dim,
@@ -57,7 +57,7 @@ class MixerBlock(torch.nn.Module):
             model_group=model_group,
             bias=True,
         )
-        self.transpose = Linear.DistributedXTranpose(
+        self.transpose = linear.DistributedXTranpose(
             rank, device, n_parallel, model_group
         )
         self.rank = rank
@@ -112,13 +112,13 @@ class MixerBlockSequential(torch.nn.Module):
     Parameters.
     ----------
     tokens_mlp_dim : int
-        Dimension of the token MLP.
+        Dimension of the token mlp.
     channels_mlp_dim : int
-        Dimension of the channel MLP.
+        Dimension of the channel mlp.
     spatial_hidden_dim_fraction : float
-        Fraction to determine the hidden dimension size for the token MLP.
+        Fraction to determine the hidden dimension size for the token mlp.
     channels_hidden_dim_fraction : float
-        Fraction to determine the hidden dimension size for the channel MLP.
+        Fraction to determine the hidden dimension size for the channel mlp.
     dropout : float, optional
         Dropout probability, by default 1e-3.
     """
@@ -133,13 +133,13 @@ class MixerBlockSequential(torch.nn.Module):
     ):
         super(MixerBlockSequential, self).__init__()
 
-        self.token_mixing = MLP.SequentialMLP(
+        self.token_mixing = mlp.Sequentialmlp(
             tokens_mlp_dim,
             int(tokens_mlp_dim * spatial_hidden_dim_fraction),
             tokens_mlp_dim,
             dropout=dropout,
         )
-        self.channel_mixing = MLP.SequentialMLP(
+        self.channel_mixing = mlp.Sequentialmlp(
             channels_mlp_dim,
             int(channels_mlp_dim * channels_hidden_dim_fraction),
             channels_mlp_dim,
@@ -182,13 +182,13 @@ class MixerBlockMegatron(torch.nn.Module):
     Parameters.
     ----------
     tokens_mlp_dim : int
-        Dimension of the token MLP.
+        Dimension of the token mlp.
     channels_mlp_dim : int
-        Dimension of the channel MLP.
+        Dimension of the channel mlp.
     spatial_hidden_dim_fraction : float
-        Fraction to determine the hidden dimension size for the token MLP.
+        Fraction to determine the hidden dimension size for the token mlp.
     channels_hidden_dim_fraction : float
-        Fraction to determine the hidden dimension size for the channel MLP.
+        Fraction to determine the hidden dimension size for the channel mlp.
     dropout : float, optional
         Dropout probability, by default 1e-3.
     """
@@ -207,7 +207,7 @@ class MixerBlockMegatron(torch.nn.Module):
         bias=True,
     ):
         super(MixerBlockMegatron, self).__init__()
-        self.token_mixing = MLP.DistributedMLPMegatron(
+        self.token_mixing = mlp.DistributedmlpMegatron(
             tokens_mlp_dim,
             int(tokens_mlp_dim * spatial_hidden_dim_fraction),
             tokens_mlp_dim,
@@ -218,7 +218,7 @@ class MixerBlockMegatron(torch.nn.Module):
             bias,
             dropout,
         )
-        self.channel_mixing = MLP.DistributedMLPMegatron(
+        self.channel_mixing = mlp.DistributedmlpMegatron(
             channels_mlp_dim,
             int(channels_mlp_dim * channels_hidden_dim_fraction),
             channels_mlp_dim,

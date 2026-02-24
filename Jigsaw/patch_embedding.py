@@ -2,8 +2,8 @@ import torch
 from torch import permute, reshape
 from torch.nn import Conv2d, ConvTranspose2d, Softmax
 
-from . import Linear
-from .Dataset import load_constant_mask_2d
+from . import linear
+from .dataset import load_constant_mask_2d
 
 
 class PatchEmbedding2D(torch.nn.Module):
@@ -406,7 +406,7 @@ class PatchEmbeddingTest(torch.nn.Module):
         #  padding = (0,0)
         self.stride = stride
 
-        self.conv_surface = torch.nn.Linear(self.dim, dim)
+        self.conv_surface = torch.nn.linear(self.dim, dim)
 
         # Load constant masks from the disc
 
@@ -561,7 +561,7 @@ class DistributedPatchEmbedding(torch.nn.Module):
         self.patch_size = patch_size
         self.var_in = var_in
         self.embed_dim = embed_dim
-        self.patch_embed = Linear.DistributedXWT_fourway(
+        self.patch_embed = linear.DistributedXWT_fourway(
             patch_size[0] * patch_size[1] * var_in // 2,
             embed_dim // 2,
             comm,
@@ -663,7 +663,7 @@ class DistributedPatchRecovery(torch.nn.Module):
         """
         super().__init__()
         # Here we use two transposed convolutions to recover data
-        self.conv = Linear.DistributedXWT(
+        self.conv = linear.DistributedXWT(
             embed_dim // 2,
             patch_size[0] * patch_size[1] * out_channels,
             comm,
@@ -762,7 +762,7 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
         self.var_in = var_in
         self.embed_dim = embed_dim
         if parallelism == 2:
-            self.patch_embed = Linear.DistributedXWT(
+            self.patch_embed = linear.DistributedXWT(
                 patch_size * var_in // 2,
                 embed_dim,
                 rank,
@@ -772,7 +772,7 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
                 bias=bias,
             )
         elif parallelism == 4:
-            self.patch_embed = Linear.DistributedXWT(
+            self.patch_embed = linear.DistributedXWT(
                 patch_size * var_in // 2,
                 embed_dim // 2,
                 rank,
@@ -782,7 +782,7 @@ class Distributed1DPatchEmbedding(torch.nn.Module):
                 bias=bias,
             )
         elif parallelism == 8:
-            self.patch_embed = Linear.DistributedXWT(
+            self.patch_embed = linear.DistributedXWT(
                 patch_size * var_in // 2,
                 embed_dim // 4,
                 rank,
@@ -853,7 +853,7 @@ class Distributed1DPatchRecovery(torch.nn.Module):
 
         if self.concat:
             if self.n_parallel == 8:  # why
-                self.conv = Linear.DistributedXWT(
+                self.conv = linear.DistributedXWT(
                     embed_dim,
                     patch_size * out_channels // 2,
                     self.rank,
@@ -863,7 +863,7 @@ class Distributed1DPatchRecovery(torch.nn.Module):
                     bias=bias,
                 )
             else:
-                self.conv = Linear.DistributedXWT(
+                self.conv = linear.DistributedXWT(
                     embed_dim,
                     patch_size * out_channels,
                     self.rank,
@@ -873,7 +873,7 @@ class Distributed1DPatchRecovery(torch.nn.Module):
                     bias=bias,
                 )
         else:
-            self.conv = Linear.DistributedXWT(
+            self.conv = linear.DistributedXWT(
                 embed_dim // 2,
                 patch_size * out_channels,
                 self.rank,
@@ -952,7 +952,7 @@ class DistributedAttentionTwoway(torch.nn.Module):
         else:
             self.stride = stride
 
-        self.q = Linear.DistributedXWT_twoway(
+        self.q = linear.DistributedXWT_twoway(
             patch_size * var_in // 2,
             embed_dim,
             rank,
@@ -962,7 +962,7 @@ class DistributedAttentionTwoway(torch.nn.Module):
             n_channels=var_in,
             init_method="linear",
         )
-        self.k = Linear.DistributedXWT_twoway(
+        self.k = linear.DistributedXWT_twoway(
             patch_size * var_in // 2,
             embed_dim,
             rank,
@@ -972,7 +972,7 @@ class DistributedAttentionTwoway(torch.nn.Module):
             n_channels=var_in,
             init_method="linear",
         )
-        self.v = Linear.DistributedXWT_twoway(
+        self.v = linear.DistributedXWT_twoway(
             patch_size * var_in // 2,
             embed_dim,
             rank,
@@ -983,8 +983,8 @@ class DistributedAttentionTwoway(torch.nn.Module):
             init_method="linear",
         )
 
-        self.softmax = Linear.DistributedSoftMax(dim=-1, group=self.model_group)
-        self.xwt = Linear.DistributedXWT_attention_twoway(
+        self.softmax = linear.DistributedSoftMax(dim=-1, group=self.model_group)
+        self.xwt = linear.DistributedXWT_attention_twoway(
             rank, device, n_parallel, model_group
         )  # model group TODO
 

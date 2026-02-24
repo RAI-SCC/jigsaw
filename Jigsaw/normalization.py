@@ -3,7 +3,7 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 
-from Jigsaw import Linear
+from Jigsaw import linear
 
 
 class DistributedLayerNorm(torch.nn.Module):
@@ -396,7 +396,7 @@ class DistributedNICENorm(torch.nn.Module):
         )
         self.gelu = torch.nn.GELU()
 
-        self.scale_linear1 = Linear.DistributedXWTNice(
+        self.scale_linear1 = linear.DistributedXWTNice(
             in_dim=self.noise_dim,
             out_dim=self.global_dim // 2,
             bias=True,  # TODO: do we default to true in bias?
@@ -404,7 +404,7 @@ class DistributedNICENorm(torch.nn.Module):
             spatial_group=self.spatial_group,
             channel_group=self.channel_group,
         )
-        self.scale_linear2 = Linear.DistributedXWTSync(
+        self.scale_linear2 = linear.DistributedXWTSync(
             in_dim=self.global_dim // 2,
             out_dim=self.global_dim,
             bias=True,
@@ -415,7 +415,7 @@ class DistributedNICENorm(torch.nn.Module):
             model_group=self.channel_group,
         )
 
-        self.shift_linear1 = Linear.DistributedXWTNice(
+        self.shift_linear1 = linear.DistributedXWTNice(
             in_dim=self.noise_dim,
             out_dim=self.global_dim // 2,
             bias=True,
@@ -423,7 +423,7 @@ class DistributedNICENorm(torch.nn.Module):
             spatial_group=self.spatial_group,
             channel_group=self.channel_group,
         )
-        self.shift_linear2 = Linear.DistributedXWTSync(
+        self.shift_linear2 = linear.DistributedXWTSync(
             in_dim=self.global_dim // 2,
             out_dim=self.global_dim,
             bias=True,

@@ -1,8 +1,8 @@
 import torch
 
-from . import Dataset, Linear, PatchEmbedding, flop_comm_estimation
+from . import dataset, flop_comm_estimation, linear, patch_embedding
 from . import normalization as norm
-from .Mixer import MixerBlock, MixerBlockMegatron, MixerBlockSequential
+from .mixer import MixerBlock, MixerBlockMegatron, MixerBlockSequential
 
 
 class WeatherMixer(torch.nn.Module):
@@ -28,7 +28,7 @@ class WeatherMixer(torch.nn.Module):
             self.patch_size = config_dict["model"]["patch_size"]
             self.stride = config_dict["model"]["stride"]
             self.n_lat, self.n_lon = self.xlat, self.xlon // self.patch_size
-            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding(
+            self.embedding = patch_embedding.Distributed1DPatchEmbedding(
                 self.xlat,
                 self.xlon,
                 self.patch_size,
@@ -48,7 +48,7 @@ class WeatherMixer(torch.nn.Module):
                 self.xlat // self.patch_size[0],
                 self.xlon // self.patch_size[1],
             )
-            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding(
+            self.embedding = patch_embedding.Distributed1DPatchEmbedding(
                 self.xlat,
                 self.xlon,
                 self.patch_size,
@@ -82,7 +82,7 @@ class WeatherMixer(torch.nn.Module):
         # Define layer norms
         match parallelism:
             case 2:
-                self.layer_norm = Linear.torch.nn.LayerNorm(hidden_dimension // 2)
+                self.layer_norm = linear.torch.nn.LayerNorm(hidden_dimension // 2)
                 self.num_variables = 72
             case 4 | 8:
                 self.layer_norm = norm.DistributedLayerNorm(
@@ -96,7 +96,7 @@ class WeatherMixer(torch.nn.Module):
         self.add = config_dict["model"]["add"]
 
         if config_dict["model"]["patch_embed"] == 1:
-            self.recovery = PatchEmbedding.Distributed1DPatchRecovery(
+            self.recovery = patch_embedding.Distributed1DPatchRecovery(
                 self.patch_size,
                 hidden_dimension,
                 self.num_variables,
@@ -109,7 +109,7 @@ class WeatherMixer(torch.nn.Module):
                 bias=False,
             )
         else:  # 2-dimensional convolutional patch recovery
-            self.recovery = PatchEmbedding.Distributed1DPatchRecovery(
+            self.recovery = patch_embedding.Distributed1DPatchRecovery(
                 self.patch_size,
                 hidden_dimension,
                 self.num_variables,
@@ -120,7 +120,7 @@ class WeatherMixer(torch.nn.Module):
             )
 
         if config_dict["model"]["linear_residual"]:
-            self.linearlayer = Linear.DistributedXWT(
+            self.linearlayer = linear.DistributedXWT(
                 self.num_variables * 2 if parallelism > 2 else self.num_variables,
                 self.num_variables // 2 if parallelism == 8 else self.num_variables,
                 rank,
@@ -192,7 +192,7 @@ class WeatherMixer(torch.nn.Module):
                     case 6 | 7:
                         self.start, self.end = self.xlon * 3 // 4, self.xlon
 
-        self.land_mask, self.soil_type, self.topography = Dataset.load_constant_mask_2d(
+        self.land_mask, self.soil_type, self.topography = dataset.load_constant_mask_2d(
             config_dict["data"]["constant_masks_path"], xlat=self.xlat
         )
         self.land_mask = torch.unsqueeze(self.land_mask[:, self.start : self.end], 0)
@@ -344,7 +344,7 @@ class ModelEightway(torch.nn.Module):
             self.patch_size = config_dict["model"]["patch_size"]
             self.stride = config_dict["model"]["stride"]
             self.n_lat, self.n_lon = self.xlat, self.xlon // self.patch_size
-            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding(
+            self.embedding = patch_embedding.Distributed1DPatchEmbedding(
                 self.xlat,
                 self.xlon,
                 self.patch_size,
@@ -364,7 +364,7 @@ class ModelEightway(torch.nn.Module):
                 self.xlat // self.patch_size[0],
                 self.xlon // self.patch_size[1],
             )
-            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding(
+            self.embedding = patch_embedding.Distributed1DPatchEmbedding(
                 self.xlat,
                 self.xlon,
                 self.patch_size,
@@ -412,7 +412,7 @@ class ModelEightway(torch.nn.Module):
         self.add = config_dict["model"]["add"]
         if config_dict["model"]["patch_embed"] == 1:
             if self.concat:
-                self.recovery = PatchEmbedding.Distributed1DPatchRecovery(
+                self.recovery = patch_embedding.Distributed1DPatchRecovery(
                     self.patch_size,
                     hidden_dimension,
                     self.num_variables,
@@ -424,7 +424,7 @@ class ModelEightway(torch.nn.Module):
                     stride=self.stride,
                 )
             else:
-                self.recovery = PatchEmbedding.Distributed1DPatchRecovery(
+                self.recovery = patch_embedding.Distributed1DPatchRecovery(
                     self.patch_size,
                     hidden_dimension,
                     self.num_variables,
@@ -436,7 +436,7 @@ class ModelEightway(torch.nn.Module):
                     stride=self.stride,
                 )
         else:
-            self.recovery = PatchEmbedding.Distributed1DPatchRecovery(
+            self.recovery = patch_embedding.Distributed1DPatchRecovery(
                 self.patch_size,
                 hidden_dimension,
                 self.num_variables,
@@ -446,7 +446,7 @@ class ModelEightway(torch.nn.Module):
                 model_group,
             )
 
-        self.linearlayer = Linear.DistributedXWT(
+        self.linearlayer = linear.DistributedXWT(
             self.num_variables * 2,
             self.num_variables // 2,
             rank,
@@ -482,7 +482,7 @@ class ModelEightway(torch.nn.Module):
                     "common": torch.nn.ModuleList([self.blocks, self.layer_norm]),
                 }
             )
-        self.land_mask, self.soil_type, self.topography = Dataset.load_constant_mask_2d(
+        self.land_mask, self.soil_type, self.topography = dataset.load_constant_mask_2d(
             config_dict["data"]["constant_masks_path"], xlat=self.xlat
         )
         if self.rank % 8 in [0, 1]:
@@ -566,7 +566,7 @@ class Model(torch.nn.Module):
             self.patch_size = config_dict["model"]["patch_size"]
             self.stride = config_dict["model"]["stride"]
             self.n_lat, self.n_lon = self.xlat, self.xlon // self.patch_size
-            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding(
+            self.embedding = patch_embedding.Distributed1DPatchEmbedding(
                 self.xlat,
                 self.xlon,
                 self.patch_size,
@@ -587,7 +587,7 @@ class Model(torch.nn.Module):
                 self.xlat // self.patch_size[0],
                 self.xlon // self.patch_size[1],
             )
-            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding(
+            self.embedding = patch_embedding.Distributed1DPatchEmbedding(
                 self.xlat,
                 self.xlon,
                 self.patch_size,
@@ -631,7 +631,7 @@ class Model(torch.nn.Module):
         self.add = config_dict["model"]["add"]
         if config_dict["model"]["patch_embed"] == 1:
             if self.concat:
-                self.recovery = PatchEmbedding.Distributed1DPatchRecovery(
+                self.recovery = patch_embedding.Distributed1DPatchRecovery(
                     self.patch_size,
                     hidden_dimension,
                     self.num_variables,
@@ -644,7 +644,7 @@ class Model(torch.nn.Module):
                     bias=False,
                 )
             else:
-                self.recovery = PatchEmbedding.Distributed1DPatchRecovery(
+                self.recovery = patch_embedding.Distributed1DPatchRecovery(
                     self.patch_size,
                     hidden_dimension,
                     self.num_variables,
@@ -656,7 +656,7 @@ class Model(torch.nn.Module):
                     stride=self.stride,
                 )
         else:
-            self.recovery = PatchEmbedding.Distributed1DPatchRecovery(
+            self.recovery = patch_embedding.Distributed1DPatchRecovery(
                 self.patch_size,
                 hidden_dimension,
                 self.num_variables,
@@ -667,7 +667,7 @@ class Model(torch.nn.Module):
             )
 
         if config_dict["model"]["linear_residual"]:
-            self.linearlayer = Linear.DistributedXWT(
+            self.linearlayer = linear.DistributedXWT(
                 self.num_variables * 2,
                 self.num_variables,
                 rank,
@@ -710,7 +710,7 @@ class Model(torch.nn.Module):
                     "common": torch.nn.ModuleList([self.blocks, self.layer_norm]),
                 }
             )
-        self.land_mask, self.soil_type, self.topography = Dataset.load_constant_mask_2d(
+        self.land_mask, self.soil_type, self.topography = dataset.load_constant_mask_2d(
             config_dict["data"]["constant_masks_path"], xlat=self.xlat
         )
         if self.rank % 4 in [0, 1]:
@@ -862,7 +862,7 @@ class ModelTwoway(torch.nn.Module):
             self.patch_size = config_dict["model"]["patch_size"]
             self.stride = config_dict["model"]["stride"]
             self.n_lat, self.n_lon = self.xlat, self.xlon // self.patch_size
-            self.embedding = PatchEmbedding.Distributed1DPatchEmbedding(
+            self.embedding = patch_embedding.Distributed1DPatchEmbedding(
                 self.xlat,
                 self.xlon,
                 self.patch_size,
@@ -891,7 +891,7 @@ class ModelTwoway(torch.nn.Module):
                 for i in range(self.n_blocks)
             ]
         )
-        self.layer_norm = Linear.torch.nn.LayerNorm(hidden_dimension // 2)
+        self.layer_norm = linear.torch.nn.LayerNorm(hidden_dimension // 2)
 
         self.num_variables = 72  # TODO: generalize via config file
 
@@ -902,7 +902,7 @@ class ModelTwoway(torch.nn.Module):
         self.add = config_dict["model"]["add"]
         if config_dict["model"]["patch_embed"] == 1:
             if self.concat:
-                self.recovery = PatchEmbedding.Distributed1DPatchRecovery(
+                self.recovery = patch_embedding.Distributed1DPatchRecovery(
                     self.patch_size,
                     hidden_dimension,
                     self.num_variables,
@@ -915,7 +915,7 @@ class ModelTwoway(torch.nn.Module):
                     bias=False,
                 )
             else:
-                self.recovery = PatchEmbedding.Distributed1DPatchRecovery(
+                self.recovery = patch_embedding.Distributed1DPatchRecovery(
                     self.patch_size,
                     hidden_dimension,
                     self.num_variables,
@@ -929,7 +929,7 @@ class ModelTwoway(torch.nn.Module):
                 )
 
         if config_dict["model"]["linear_residual"]:
-            self.linearlayer = Linear.DistributedXWT(
+            self.linearlayer = linear.DistributedXWT(
                 self.num_variables,
                 self.num_variables,
                 rank,
@@ -1028,7 +1028,7 @@ class ModelSequential(torch.nn.Module):
             ) // self.stride + 1
 
             self.dropout = config_dict["model"]["dropout"]
-            self.embedding = PatchEmbedding.PatchEmbedding1D(
+            self.embedding = patch_embedding.PatchEmbedding1D(
                 config_dict,
                 self.patch_size,
                 hidden_dimension,
@@ -1056,7 +1056,7 @@ class ModelSequential(torch.nn.Module):
                 config_dict["model"]["patch_size"],
                 config_dict["model"]["patch_size"],
             )
-            self.embedding = PatchEmbedding.PatchEmbedding2D(
+            self.embedding = patch_embedding.PatchEmbedding2D(
                 self.patch_size,
                 hidden_dimension,
                 device=device,
@@ -1090,7 +1090,7 @@ class ModelSequential(torch.nn.Module):
             # (self.xlon+2*padding[1]-1*(self.patch_size[1]-1)-1)//self.stride+1
             self.n_lon = 1440 // self.patch_size
             self.dropout = config_dict["model"]["dropout"]
-            self.embedding = PatchEmbedding.PatchEmbeddingTest(
+            self.embedding = patch_embedding.PatchEmbeddingTest(
                 self.patch_size,
                 hidden_dimension,
                 device=device,
@@ -1130,13 +1130,13 @@ class ModelSequential(torch.nn.Module):
         if self.linear_residual:
             self.layer_norm2 = torch.nn.LayerNorm(self.num_variables)
             self.layer_norm3 = torch.nn.LayerNorm(69 * 2)
-            self.linearlayer = torch.nn.Linear(
+            self.linearlayer = torch.nn.linear(
                 self.num_variables * 2, self.num_variables
             )
 
         if self.patch_embed == 1:
             if self.concat:
-                self.recovery = PatchEmbedding.PatchRecovery1D(
+                self.recovery = patch_embedding.PatchRecovery1D(
                     self.patch_size,
                     hidden_dimension,
                     padding=padding,
@@ -1147,7 +1147,7 @@ class ModelSequential(torch.nn.Module):
                     xlon=self.xlon,
                 )
             else:
-                self.recovery = PatchEmbedding.PatchRecovery1D(
+                self.recovery = patch_embedding.PatchRecovery1D(
                     self.patch_size,
                     hidden_dimension,
                     padding=padding,
@@ -1159,7 +1159,7 @@ class ModelSequential(torch.nn.Module):
                 )
         elif self.patch_embed == 2:
             if self.concat:
-                self.recovery = PatchEmbedding.PatchRecovery2D(
+                self.recovery = patch_embedding.PatchRecovery2D(
                     self.patch_size,
                     hidden_dimension,
                     padding=padding,
@@ -1168,7 +1168,7 @@ class ModelSequential(torch.nn.Module):
                     concat=True,
                 )
             else:
-                self.recovery = PatchEmbedding.PatchRecovery2D(
+                self.recovery = patch_embedding.PatchRecovery2D(
                     self.patch_size,
                     hidden_dimension,
                     padding=padding,
@@ -1283,7 +1283,7 @@ class ModelMegatron(torch.nn.Module):
         self.n_lat, self.n_lon = self.xlat, self.xlon // self.patch_size
 
         self.dropout = config_dict["model"]["dropout"]
-        self.embedding = PatchEmbedding.PatchEmbedding1D(
+        self.embedding = patch_embedding.PatchEmbedding1D(
             config_dict,
             self.patch_size,
             hidden_dimension,
@@ -1324,12 +1324,12 @@ class ModelMegatron(torch.nn.Module):
         if self.linear_residual:
             self.layer_norm2 = torch.nn.LayerNorm(self.num_variables)
             self.layer_norm3 = torch.nn.LayerNorm(self.num_variables * 2)
-            self.linearlayer = torch.nn.Linear(
+            self.linearlayer = torch.nn.linear(
                 self.num_variables * 2, self.num_variables, bias=False
             )
 
         if self.concat:
-            self.recovery = PatchEmbedding.PatchRecovery1D(
+            self.recovery = patch_embedding.PatchRecovery1D(
                 self.patch_size,
                 hidden_dimension,
                 padding=padding,
@@ -1341,7 +1341,7 @@ class ModelMegatron(torch.nn.Module):
                 bias=False,
             )
         else:
-            self.recovery = PatchEmbedding.PatchRecovery1D(
+            self.recovery = patch_embedding.PatchRecovery1D(
                 self.patch_size,
                 hidden_dimension,
                 padding=padding,

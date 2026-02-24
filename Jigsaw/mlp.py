@@ -5,7 +5,7 @@ import torch.distributed as dist
 import torch.nn.init as init
 from torch.nn import GELU, Dropout
 
-from . import Linear, Linear_Megatron
+from . import linear, linear_megatron
 
 
 class DistributedMLP(torch.nn.Module):
@@ -82,7 +82,7 @@ class DistributedMLP(torch.nn.Module):
                     out_dim // 4,
                 )
 
-        self.linear1 = Linear.DistributedXWT(
+        self.linear1 = linear.DistributedXWT(
             in_dim,
             hidden_dim1,
             bias,
@@ -92,7 +92,7 @@ class DistributedMLP(torch.nn.Module):
             model_group,
             spatial_group,
         )
-        self.linear2 = Linear.DistributedXWT(
+        self.linear2 = linear.DistributedXWT(
             hidden_dim2,
             out_dim,
             bias,
@@ -161,7 +161,7 @@ class DistributedSynchronizedMLP(torch.nn.Module):
             # required to maintain partitioning across final dimension
 
             # local X has shape [seq_length, in_dim//2]
-            self.linear1 = Linear.DistributedXWTSync(
+            self.linear1 = linear.DistributedXWTSync(
                 in_dim // 2,
                 hidden_dim,
                 bias,
@@ -173,7 +173,7 @@ class DistributedSynchronizedMLP(torch.nn.Module):
                 bayesian=bayesian,
             ).to(device)
 
-            self.linear2 = Linear.DistributedXWTSync(
+            self.linear2 = linear.DistributedXWTSync(
                 hidden_dim // 2,
                 out_dim,
                 bias,
@@ -261,10 +261,10 @@ class DistributedXTWMLP(torch.nn.Module):
             case 8:
                 in_dim, hidden_dim, out_dim = in_dim // 4, hidden_dim // 2, out_dim // 4
 
-        self.linear1 = Linear.DistributedXTW(
+        self.linear1 = linear.DistributedXTW(
             in_dim, hidden_dim, bias, local_rank, device, parallelism, model_group
         )
-        self.linear2 = Linear.DistributedXWT(
+        self.linear2 = linear.DistributedXWT(
             hidden_dim, out_dim, bias, local_rank, device, parallelism, model_group
         )
 
@@ -384,7 +384,7 @@ class DistributedMLPMegatron(torch.nn.Module):
         self.parallelism = parallelism
         self.model_group = model_group
 
-        self.linear1 = Linear_Megatron.FirstLinearLayer(
+        self.linear1 = linear_megatron.FirstLinearLayer(
             in_dim,
             hidden_dim,
             parallelism,
@@ -392,7 +392,7 @@ class DistributedMLPMegatron(torch.nn.Module):
             device=device,
             model_group=self.model_group,
         )
-        self.linear2 = Linear_Megatron.SecondLinearLayer(
+        self.linear2 = linear_megatron.SecondLinearLayer(
             hidden_dim,
             out_dim,
             parallelism,

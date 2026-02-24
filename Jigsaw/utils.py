@@ -14,7 +14,7 @@ from torch.nn.utils import parameters_to_vector
 from . import eval, model, transformer_models
 
 # from Jigsaw import Dataloaders, Model, TransformerModels, eval
-from .Dataloaders import get_dataloader
+from .dataloaders import get_dataloader
 
 
 def get_ddp_groups(rank: int, parallelism: int) -> dist.ProcessGroup:

@@ -5,8 +5,8 @@ import numpy as np
 import pandas as pd
 import torch
 
-from . import Dataset
 from . import plotting_functions as plot_fns
+from . import dataset
 
 
 def calc_weight(n_lat: int, cossum: float = 458.36551167) -> torch.Tensor:
@@ -339,7 +339,7 @@ def validate(
         )
 
     xlat, xlon = config_dict["data"]["xlat"], config_dict["data"]["xlon"]
-    land_mask, soil_type, topography = Dataset.load_constant_mask_2d(
+    land_mask, soil_type, topography = dataset.load_constant_mask_2d(
         config_dict["data"]["constant_masks_path"], xlat=xlat
     )
     if rank % 4 in [0, 1]:
