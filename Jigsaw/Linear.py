@@ -1489,8 +1489,8 @@ class Roll(torch.autograd.Function):
             The device on which the computation is performed.
         empty: torch.Tensor 
             Empty torch tensor used as buffer
-        parallelism: int
-            Number of processes the model is distributed over
+        selector: RollSelectionStrategy
+            Member of class RollSelectionStrategy that defines function pointer
         spatial_group : dist.ProcessGroup, optional
             Process group for an individual model-parallel instance.
 
@@ -1506,22 +1506,22 @@ class Roll(torch.autograd.Function):
 
     @staticmethod
     def setup_context(ctx, inputs, output):
-        x, shifts, dims, local_rank, device, empty, parallelism, spatial_group = inputs
+        x, shifts, dims, local_rank, device, empty, selector, spatial_group = inputs
 
         ctx.shifts = shifts
         ctx.local_rank = local_rank
-        ctx.parallelism = parallelism
         ctx.dims = dims
         ctx.device = device
         ctx.empty = empty
+        ctx.selector = selector
         ctx.spatial_group = spatial_group
 
     @staticmethod
     def vmap(
-        info, in_dims, x, shifts, dims, local_rank, device, empty, parallelism, spatial_group
+        info, in_dims, x, shifts, dims, local_rank, device, empty, selector, spatial_group
     ):
         out = Roll.apply(
-            x, shifts, dims, local_rank, device, empty, parallelism, spatial_group
+            x, shifts, dims, local_rank, device, empty, selector, spatial_group
         )
         return out, 0
 
