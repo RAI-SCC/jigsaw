@@ -1,7 +1,7 @@
 import torch
 
 from . import Dataset, Linear, PatchEmbedding, flop_comm_estimation
-from . import Normalization as Norm
+from . import normalization as norm
 from .Mixer import MixerBlock, MixerBlockMegatron, MixerBlockSequential
 
 
@@ -85,7 +85,7 @@ class WeatherMixer(torch.nn.Module):
                 self.layer_norm = Linear.torch.nn.LayerNorm(hidden_dimension // 2)
                 self.num_variables = 72
             case 4 | 8:
-                self.layer_norm = Norm.DistributedLayerNorm(
+                self.layer_norm = norm.DistributedLayerNorm(
                     hidden_dimension // 2, self.rank, self.device, self.column_subgroup
                 )
                 self.num_variables = 36  # TODO: generalize via config file
@@ -132,10 +132,10 @@ class WeatherMixer(torch.nn.Module):
                 self.layer_norm2 = torch.nn.LayerNorm(self.num_variables // 2)
                 self.layer_norm3 = torch.nn.LayerNorm(self.num_variables)
             else:
-                self.layer_norm2 = Norm.DistributedLayerNorm(
+                self.layer_norm2 = norm.DistributedLayerNorm(
                     self.num_variables, self.rank, self.device, self.column_subgroup
                 )
-                self.layer_norm3 = Norm.DistributedLayerNorm(
+                self.layer_norm3 = norm.DistributedLayerNorm(
                     self.num_variables * 2, self.rank, self.device, self.column_subgroup
                 )
 
@@ -393,16 +393,16 @@ class ModelEightway(torch.nn.Module):
                 for i in range(self.n_blocks)
             ]
         )
-        self.layer_norm = Norm.DistributedLayerNorm(
+        self.layer_norm = norm.DistributedLayerNorm(
             hidden_dimension // 2, self.rank, self.device, self.column_subgroup
         )
 
         self.num_variables = 36  # TODO: generalize via config file
 
-        self.layer_norm2 = Norm.DistributedLayerNorm(
+        self.layer_norm2 = norm.DistributedLayerNorm(
             self.num_variables, self.rank, self.device, self.column_subgroup
         )
-        self.layer_norm3 = Norm.DistributedLayerNorm(
+        self.layer_norm3 = norm.DistributedLayerNorm(
             self.num_variables * 2, self.rank, self.device, self.column_subgroup
         )
         self.concat = config_dict["model"]["concat"]
@@ -618,7 +618,7 @@ class Model(torch.nn.Module):
             ]
         )
 
-        self.layer_norm = Norm.DistributedLayerNorm(
+        self.layer_norm = norm.DistributedLayerNorm(
             hidden_dimension // 2, self.rank, self.device, self.column_subgroup
         )
 
@@ -676,10 +676,10 @@ class Model(torch.nn.Module):
                 model_group,
                 bias=True,
             )
-            self.layer_norm2 = Norm.DistributedLayerNorm(
+            self.layer_norm2 = norm.DistributedLayerNorm(
                 self.num_variables, self.rank, self.device, self.column_subgroup
             )
-            self.layer_norm3 = Norm.DistributedLayerNorm(
+            self.layer_norm3 = norm.DistributedLayerNorm(
                 self.num_variables * 2, self.rank, self.device, self.column_subgroup
             )
 

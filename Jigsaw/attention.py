@@ -2,8 +2,8 @@ import torch
 import torch.distributed as dist
 from einops import rearrange
 
-from . import MLP, Linear
-from . import Normalization as Norm
+from . import linear, mlp
+from . import normalization as norm
 
 
 class DistributedWindowedAttention(torch.nn.Module):
@@ -49,7 +49,7 @@ class DistributedWindowedAttention(torch.nn.Module):
             "windowed attention is only designed for parallelism = 2"
         )
 
-        self.qkv = Linear.DistributedXWTSync(
+        self.qkv = linear.DistributedXWTSync(
             x_features // 2,
             embed_dim * 3,
             bias=False,
@@ -61,8 +61,8 @@ class DistributedWindowedAttention(torch.nn.Module):
             bayesian=bayesian,
         )
 
-        self.softmax = Norm.DistributedSoftMax(dim=-1, group=self.channel_group)
-        self.xwt = Linear.DistributedMatMulXWTranspose(
+        self.softmax = norm.DistributedSoftMax(dim=-1, group=self.channel_group)
+        self.xwt = linear.DistributedMatMulXWTranspose(
             self.local_rank,
             self.device,
             2,
@@ -70,11 +70,11 @@ class DistributedWindowedAttention(torch.nn.Module):
             spatial_group=self.spatial_group,
             bayesian=bayesian,
         )
-        self.xw = Linear.DistributedMatMulXW(
+        self.xw = linear.DistributedMatMulXW(
             local_rank, device, 2, model_group=self.channel_group, bayesian=bayesian
         )
 
-        self.concatenator = MLP.DistributedSynchronizedMLP(
+        self.concatenator = mlp.DistributedSynchronizedMLP(
             embed_dim,
             embed_dim,  # hidden dimension
             output_dim,
@@ -172,13 +172,13 @@ class DistributedWindowedTransformer(torch.nn.Module):
             channel_group,
             bayesian,
         ).to(device)
-        self.layer_norm1 = Norm.DistributedLayerNorm(
+        self.layer_norm1 = norm.DistributedLayerNorm(
             output_dim // 2, local_rank, device, spatial_group, channel_group
         ).to(device)
-        self.layer_norm2 = Norm.DistributedLayerNorm(
+        self.layer_norm2 = norm.DistributedLayerNorm(
             output_dim // 2, local_rank, device, spatial_group, channel_group
         ).to(device)
-        self.MLP = MLP.DistributedSynchronizedMLP(
+        self.mlp = mlp.DistributedSynchronizedMLP(
             output_dim,
             output_dim,
             output_dim,
@@ -197,7 +197,7 @@ class DistributedWindowedTransformer(torch.nn.Module):
     def forward(self, x: torch.tensor, mask=None):
         """Forward pass of distributed windowed transformer."""
         x = self.attention_block(self.layer_norm1(x), mask) + x
-        x = self.MLP(self.layer_norm2(x)) + x
+        x = self.mlp(self.layer_norm2(x)) + x
         return x
 
 
@@ -243,7 +243,7 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
             bayesian,
         ).to(device)
 
-        self.layer_norm1 = Norm.DistributedNICENorm(
+        self.layer_norm1 = norm.DistributedNICENorm(
             output_dim,
             self.noise_dim,
             local_rank,
@@ -252,7 +252,7 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
             spatial_group,
             channel_group,
         ).to(device)
-        self.layer_norm2 = Norm.DistributedNICENorm(
+        self.layer_norm2 = norm.DistributedNICENorm(
             output_dim,
             self.noise_dim,
             local_rank,
@@ -262,7 +262,7 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
             channel_group,
         ).to(device)
 
-        self.MLP = MLP.DistributedSynchronizedMLP(
+        self.mlp = mlp.DistributedSynchronizedMLP(
             output_dim,
             output_dim,
             output_dim,
@@ -289,6 +289,6 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
         mask: Union[None, torch.Tensor]
         """
         x = self.attention_block(self.layer_norm1(x, noise), mask) + x
-        x = self.MLP(self.layer_norm2(x, noise)) + x
+        x = self.mlp(self.layer_norm2(x, noise)) + x
 
         return x

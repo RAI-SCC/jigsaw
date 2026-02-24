@@ -1,7 +1,7 @@
 import torch
 
 from . import MLP, Linear
-from . import Normalization as Norm
+from . import normalization as norm
 
 
 class MixerBlock(torch.nn.Module):
@@ -69,10 +69,10 @@ class MixerBlock(torch.nn.Module):
             self.layer_norm1 = torch.nn.LayerNorm(channels_mlp_dim // 2)
             self.layer_norm2 = torch.nn.LayerNorm(channels_mlp_dim // 2)
         elif n_parallel == 4 or n_parallel == 8:
-            self.layer_norm1 = Norm.DistributedLayerNorm(
+            self.layer_norm1 = norm.DistributedLayerNorm(
                 channels_mlp_dim // 2, self.rank, self.device, self.model_group
             )
-            self.layer_norm2 = Norm.DistributedLayerNorm(
+            self.layer_norm2 = norm.DistributedLayerNorm(
                 channels_mlp_dim // 2, self.rank, self.device, self.model_group
             )
 

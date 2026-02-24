@@ -11,7 +11,7 @@ from timm.scheduler.step_lr import StepLRScheduler
 from torch.nn.parallel import DistributedDataParallel
 from torch.nn.utils import parameters_to_vector
 
-from . import Model, TransformerModels, eval
+from . import eval, model, transformer_models
 
 # from Jigsaw import Dataloaders, Model, TransformerModels, eval
 from .Dataloaders import get_dataloader
@@ -262,9 +262,9 @@ def build_megatron_model(
     """Build Megatron model from config file."""
     match parallelism:
         case 1:
-            model = Model.ModelSequential(config_dict, rank, device).to(device)
+            model = model.ModelSequential(config_dict, rank, device).to(device)
         case _:
-            model = Model.ModelMegatron(
+            model = model.ModelMegatron(
                 config_dict, rank, device, parallelism, model_group
             ).to(device)
     # need to match parameters for non-transformer, non-mlp layers
@@ -297,13 +297,13 @@ def build_model(
     """Instantiate model and wrap with DDP."""
     match parallelism:
         case 1:
-            model = Model.ModelSequential(config_dict, rank, device).to(device)
+            model = model.ModelSequential(config_dict, rank, device).to(device)
         case 2:
-            model = Model.ModelTwoway(
+            model = model.ModelTwoway(
                 config_dict, rank, device, parallelism, model_group
             ).to(device)
         case 4:
-            model = Model.Model(
+            model = model.Model(
                 config_dict, rank, device, parallelism, model_group, col_group
             ).to(device)
             for name, param in model.named_parameters():
@@ -313,7 +313,7 @@ def build_model(
                             param.data, op=dist.ReduceOp.AVG, group=col_group
                         )
         case 8:
-            model = Model.ModelEightway(
+            model = model.ModelEightway(
                 config_dict, rank, device, parallelism, model_group, col_group
             ).to(device)
             for name, param in model.named_parameters():
@@ -350,7 +350,7 @@ def build_transformer_model(
     if config_dict["model_parallel"]["type"] == "megatron":
         match parallelism:
             case 1:
-                model = TransformerModels.TransformerSequential(
+                model = transformer_models.TransformerSequential(
                     config_dict,
                     rank,
                     device,
@@ -360,7 +360,7 @@ def build_transformer_model(
                     col_group,
                 ).to(device)
             case _:
-                model = TransformerModels.MegatronTransformer(
+                model = transformer_models.MegatronTransformer(
                     config_dict,
                     rank,
                     device,
@@ -375,7 +375,7 @@ def build_transformer_model(
     else:
         match parallelism:
             case 1:
-                model = TransformerModels.TransformerSequential(
+                model = transformer_models.TransformerSequential(
                     config_dict,
                     rank,
                     device,
@@ -385,7 +385,7 @@ def build_transformer_model(
                     col_group,
                 ).to(device)
             case 2:
-                model = TransformerModels.TransformerTwoway(
+                model = transformer_models.TransformerTwoway(
                     config_dict,
                     rank,
                     device,
@@ -395,7 +395,7 @@ def build_transformer_model(
                     col_group,
                 ).to(device)
             case 4:
-                model = TransformerModels.TransformerFourway(
+                model = transformer_models.TransformerFourway(
                     config_dict,
                     rank,
                     device,

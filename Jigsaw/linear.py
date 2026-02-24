@@ -5,8 +5,8 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F  # noqa
 
-from Jigsaw import distributed_matmul as dist_mm
-from Jigsaw import distributed_roll as dist_roll
+from . import distributed_matmul as dist_mm
+from . import distributed_roll as dist_roll
 
 
 class RollSelectionStrategy:
