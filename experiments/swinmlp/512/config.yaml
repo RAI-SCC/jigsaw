@@ -3,6 +3,7 @@ data:
   train_data_path: "data_processed/512/train" 
   valid_data_path: "data_processed/512/val"
   base_dir: "data_processed"
+  #base_dir: "data_processed_seed44"
   image_dir: "data/images/images/"
   mask_dir: "data/masks/masks/"
   image_height: 512
