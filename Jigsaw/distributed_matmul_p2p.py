@@ -1,5 +1,65 @@
 import torch
+import torch.distributed as dist
+
 from .distributed_matmul import _get_preallocated_buffer
+
+def xw_transpose_twoway(
+    xij: torch.tensor,
+    wij: torch.tensor,
+    global_rank: int,
+    device: torch.device,
+    model_group: dist.ProcessGroup,
+) -> torch.tensor:
+    """
+    Batched matrix-matrix (XWT) multiplication distributed across two processes.
+
+    Parameters
+    ----------
+    xij : torch.tensor
+        Local input matrix.
+    wij : torch.tensor
+        Local weight matrix.
+    device : torch.device
+        Device to perform computation on.
+    local_rank : int
+        Local local_rank.
+    model_group : dist.ProcessGroup, optional
+        Process group for an individual model-parallel instance.
+
+    Returns
+    -------
+    cij : torch.tensor
+        Local result.
+    """
+    mod = global_rank % 2
+
+    w0, w1 = torch.split(wij, wij.shape[-2] // 2, dim=-2)
+    # print(_prealloc_buffers.keys())
+    buffer_xw = _get_preallocated_buffer(
+        (*xij.shape[:-1], w0.shape[-2]), torch.float32, global_rank, device
+    )
+    
+    match mod:
+        case 0:
+            xw = torch.matmul(xij, w1.mT)
+            dist.isend(xw, dst=global_rank+1, group=model_group)
+            recv = dist.irecv(buffer_xw, src=global_rank+1, group=model_group)
+        case 1:
+            xw = torch.matmul(xij, w0.mT)
+            dist.isend(xw, dst=global_rank-1, group=model_group)
+            recv = dist.irecv(buffer_xw, src=global_rank-1, group=model_group)
+            
+    match mod:
+        case 0:
+            cij = torch.matmul(xij, w0.mT)
+            recv.wait()
+            cij = cij + buffer_xw
+        case 1:
+            cij = torch.matmul(xij, w1.mT)
+            recv.wait()
+            cij = cij + buffer_xw
+    
+    return cij
 
 def XTW_twoway_(Xij, Wij, rank, device, model_group):
     """
