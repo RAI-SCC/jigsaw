@@ -331,54 +331,29 @@ class DistributedNICENorm(torch.nn.Module):
         self.ln = DistributedNoParamLayerNorm(self.rank, self.device, channel_group=self.channel_group)
         self.gelu = torch.nn.GELU()
 
-        self.scale_linear1 = Linear.DistributedXWT_Nice(
+        self.scale = Linear.DistributedMLPNICE(
             in_dim=self.noise_dim,
             out_dim=self.global_dim // 2,
-            bias=True, # TODO: do we default to true in bias?
+            bias=True,
             device=self.device,
             spatial_group=self.spatial_group,
             channel_group=self.channel_group
-        )
-        self.scale_linear2 = Linear.DistributedXWTSync(
-            in_dim=self.global_dim // 2,
-            out_dim=self.global_dim,
-            bias=True,
-            local_rank=self.rank,
-            device=self.device,
-            parallelism=self.parallelism,
-            sync_group=self.spatial_group,
-            model_group=self.channel_group
         )
 
-        self.shift_linear1 = Linear.DistributedXWT_Nice(
+        self.shift = Linear.DistributedMLPNice(
             in_dim=self.noise_dim,
             out_dim=self.global_dim // 2,
             bias=True,
             device=self.device,
             spatial_group=self.spatial_group,
             channel_group=self.channel_group
-        )
-        self.shift_linear2 = Linear.DistributedXWTSync(
-            in_dim=self.global_dim // 2,
-            out_dim=self.global_dim,
-            bias=True,
-            local_rank=self.rank,
-            device=self.device,
-            parallelism=self.parallelism,
-            sync_group=self.spatial_group,
-            model_group=self.channel_group
         )
 
 
     def forward(self, x, noise):
         x = self.ln(x)
-        scale = self.scale_linear1(noise)
-        scale = self.gelu(scale)
-        scale = self.scale_linear2(scale)
-
-        shift = self.shift_linear1(noise)
-        shift = self.gelu(shift)
-        shift = self.shift_linear2(shift)
+        scale = self.scale(noise)
+        shift = self.shift(noise)
         
         scale = scale.unsqueeze(1)
         shift = shift.unsqueeze(1)
