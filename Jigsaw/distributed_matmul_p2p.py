@@ -35,31 +35,32 @@ def xw_transpose_twoway(
 
     w0, w1 = torch.split(wij, wij.shape[-2] // 2, dim=-2)
     # print(_prealloc_buffers.keys())
-    buffer_xw = _get_preallocated_buffer(
-        (*xij.shape[:-1], w0.shape[-2]), torch.float32, global_rank, device
-    )
+    buffer_xw = torch.zeros((*xij.shape[:-1], w0.shape[-2])).to(torch.float32).to(device)
+    # buffer_x = torch.zeros(*xij.shape).to(torch.float32).to(device)    
     
     match mod:
         case 0:
-            xw = torch.matmul(xij, w1.mT)
-            dist.isend(xw, dst=global_rank+1, group=model_group)
-            recv = dist.irecv(buffer_xw, src=global_rank+1, group=model_group)
+            xw = torch.matmul(xij, w1.mT).contiguous()
+            send = dist.isend(xw, dst=global_rank+1, group=None)
+            recv = dist.irecv(buffer_xw, src=global_rank+1, group=None)
         case 1:
-            xw = torch.matmul(xij, w0.mT)
-            dist.isend(xw, dst=global_rank-1, group=model_group)
-            recv = dist.irecv(buffer_xw, src=global_rank-1, group=model_group)
+            xw = torch.matmul(xij, w0.mT).contiguous()
+            recv = dist.irecv(buffer_xw, src=global_rank-1, group=None)
+            send = dist.isend(xw, dst=global_rank-1, group=None)
             
     match mod:
         case 0:
             cij = torch.matmul(xij, w0.mT)
+            send.wait()
             recv.wait()
             cij = cij + buffer_xw
         case 1:
             cij = torch.matmul(xij, w1.mT)
             recv.wait()
+            send.wait()
             cij = cij + buffer_xw
     
-    return cij
+    return buffer_xw
 
 def XTW_twoway_(Xij, Wij, rank, device, model_group):
     """
