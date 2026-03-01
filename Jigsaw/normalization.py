@@ -5,6 +5,7 @@ import torch.distributed as dist
 
 from Jigsaw import MLP
 
+
 class DistributedLayerNorm(torch.nn.Module):
     """LayerNorm with synchronized gradients across a process group."""
 
@@ -404,7 +405,7 @@ class DistributedNICENorm(torch.nn.Module):
             device=self.device,
             parallelism=self.parallelism,
             sync_group=self.spatial_group,
-            model_group=self.channel_group
+            model_group=self.channel_group,
         )
         self.shift = MLP.DistributedMLPNICE(
             in_dim=self.noise_dim,
@@ -415,16 +416,15 @@ class DistributedNICENorm(torch.nn.Module):
             device=self.device,
             parallelism=self.parallelism,
             sync_group=self.spatial_group,
-            model_group=self.channel_group
+            model_group=self.channel_group,
         )
-
 
     def forward(self, x, noise):
         """Forward pass of distributed NICE norm."""
         x = self.ln(x)
         scale = self.scale(noise)
         shift = self.shift(noise)
-        
+
         scale = scale.unsqueeze(1)
         shift = shift.unsqueeze(1)
 

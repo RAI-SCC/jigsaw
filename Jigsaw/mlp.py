@@ -131,6 +131,7 @@ def _average_weights(model: torch.nn.Module, spatial_group: dist.ProcessGroup):
     for _, param in model.named_parameters():
         dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
 
+
 class DistributedMLPNICE(torch.nn.Module):
     """Distributed MLP across n processes."""
 
@@ -144,7 +145,7 @@ class DistributedMLPNICE(torch.nn.Module):
         device: torch.device,
         parallelism: int,
         spatial_group: dist.ProcessGroup = None,
-        channel_group: dist.ProcessGroup = None
+        channel_group: dist.ProcessGroup = None,
     ):
         """
         Initialize the MLP module for NICE Norm.
@@ -171,16 +172,16 @@ class DistributedMLPNICE(torch.nn.Module):
         self.device = device
         self.spatial_group = spatial_group
         self.channel_group = channel_group
-        
-        self.linear1 = Linear.DistributedXWT_Nice(
+
+        self.linear1 = linear.DistributedXWTNice(
             in_dim,
             hidden_dim // 2,
             bias,
             device,
             spatial_group=spatial_group,
-            channel_group=channel_group
+            channel_group=channel_group,
         )
-        self.linear2 = Linear.DistributedXWTSync(
+        self.linear2 = linear.DistributedXWTSync(
             hidden_dim // 2,
             out_dim,
             bias,
@@ -188,7 +189,7 @@ class DistributedMLPNICE(torch.nn.Module):
             device,
             parallelism=parallelism,
             sync_group=spatial_group,
-            model_group = channel_group
+            model_group=channel_group,
         )
 
         self.activation = GELU()
@@ -207,6 +208,7 @@ class DistributedMLPNICE(torch.nn.Module):
         x = self.linear2(x)
 
         return x
+
 
 class DistributedSynchronizedMLP(torch.nn.Module):
     """Distributed MLP across n processes."""
