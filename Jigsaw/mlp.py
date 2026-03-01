@@ -106,7 +106,6 @@ class DistributedMLP(torch.nn.Module):
         self.activation = GELU()
         self.drop = Dropout(p=dropout)
         self.drop2 = Dropout(p=dropout)
-        self.local_rank = local_rank
 
     def forward(self, x):
         """
@@ -132,6 +131,82 @@ def _average_weights(model: torch.nn.Module, spatial_group: dist.ProcessGroup):
     for _, param in model.named_parameters():
         dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
 
+class DistributedMLPNICE(torch.nn.Module):
+    """Distributed MLP across n processes."""
+
+    def __init__(
+        self,
+        in_dim: int,
+        hidden_dim: int,
+        out_dim: int,
+        bias: bool,
+        local_rank: int,
+        device: torch.device,
+        parallelism: int,
+        spatial_group: dist.ProcessGroup = None,
+        channel_group: dist.ProcessGroup = None
+    ):
+        """
+        Initialize the MLP module for NICE Norm.
+
+        Parameters
+        ----------
+        in_dim : int
+            Global input dimension of noise.
+        hidden_dim : int
+            Global hidden dimension of MLP.
+        out_dim : int
+            Global output dimension of MLP.
+        bias : bool, optional
+            If True, adds a learnable bias to the output (default is True).
+        device : torch.device
+            Device to perform computation on.
+        parallelism: int
+            Number of processes that model is distributed over.
+        local_rank : int
+            Model local_rank.
+        """
+        super().__init__()
+        self.local_rank = local_rank
+        self.device = device
+        self.spatial_group = spatial_group
+        self.channel_group = channel_group
+        
+        self.linear1 = Linear.DistributedXWT_Nice(
+            in_dim,
+            hidden_dim // 2,
+            bias,
+            device,
+            spatial_group=spatial_group,
+            channel_group=channel_group
+        )
+        self.linear2 = Linear.DistributedXWTSync(
+            hidden_dim // 2,
+            out_dim,
+            bias,
+            local_rank,
+            device,
+            parallelism=parallelism,
+            sync_group=spatial_group,
+            model_group = channel_group
+        )
+
+        self.activation = GELU()
+
+    def forward(self, x):
+        """
+        Forward pass of MLP distributed across two or four processes.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input tensor of shape (B, x_in, in_dim).
+        """
+        x = self.linear1(x)
+        x = self.activation(x)
+        x = self.linear2(x)
+
+        return x
 
 class DistributedSynchronizedMLP(torch.nn.Module):
     """Distributed MLP across n processes."""

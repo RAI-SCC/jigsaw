@@ -3,8 +3,7 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 
-from Jigsaw import linear
-
+from Jigsaw import MLP
 
 class DistributedLayerNorm(torch.nn.Module):
     """LayerNorm with synchronized gradients across a process group."""
@@ -396,55 +395,36 @@ class DistributedNICENorm(torch.nn.Module):
         )
         self.gelu = torch.nn.GELU()
 
-        self.scale_linear1 = linear.DistributedXWTNice(
+        self.scale = MLP.DistributedMLPNICE(
             in_dim=self.noise_dim,
-            out_dim=self.global_dim // 2,
-            bias=True,  # TODO: do we default to true in bias?
-            device=self.device,
-            spatial_group=self.spatial_group,
-            channel_group=self.channel_group,
-        )
-        self.scale_linear2 = linear.DistributedXWTSync(
-            in_dim=self.global_dim // 2,
+            hidden_dim=self.global_dim,
             out_dim=self.global_dim,
             bias=True,
             local_rank=self.rank,
             device=self.device,
             parallelism=self.parallelism,
             sync_group=self.spatial_group,
-            model_group=self.channel_group,
+            model_group=self.channel_group
+        )
+        self.shift = MLP.DistributedMLPNICE(
+            in_dim=self.noise_dim,
+            hidden_dim=self.global_dim,
+            out_dim=self.global_dim,
+            bias=True,
+            local_rank=self.rank,
+            device=self.device,
+            parallelism=self.parallelism,
+            sync_group=self.spatial_group,
+            model_group=self.channel_group
         )
 
-        self.shift_linear1 = linear.DistributedXWTNice(
-            in_dim=self.noise_dim,
-            out_dim=self.global_dim // 2,
-            bias=True,
-            device=self.device,
-            spatial_group=self.spatial_group,
-            channel_group=self.channel_group,
-        )
-        self.shift_linear2 = linear.DistributedXWTSync(
-            in_dim=self.global_dim // 2,
-            out_dim=self.global_dim,
-            bias=True,
-            local_rank=self.rank,
-            device=self.device,
-            parallelism=self.parallelism,
-            sync_group=self.spatial_group,
-            model_group=self.channel_group,
-        )
 
     def forward(self, x, noise):
         """Forward pass of distributed NICE norm."""
         x = self.ln(x)
-        scale = self.scale_linear1(noise)
-        scale = self.gelu(scale)
-        scale = self.scale_linear2(scale)
-
-        shift = self.shift_linear1(noise)
-        shift = self.gelu(shift)
-        shift = self.shift_linear2(shift)
-
+        scale = self.scale(noise)
+        shift = self.shift(noise)
+        
         scale = scale.unsqueeze(1)
         shift = shift.unsqueeze(1)
 
