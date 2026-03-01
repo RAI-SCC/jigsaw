@@ -3,7 +3,7 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 
-from Jigsaw import MLP
+from Jigsaw import mlp
 
 
 class DistributedLayerNorm(torch.nn.Module):
@@ -396,7 +396,7 @@ class DistributedNICENorm(torch.nn.Module):
         )
         self.gelu = torch.nn.GELU()
 
-        self.scale = MLP.DistributedMLPNICE(
+        self.scale = mlp.DistributedMLPNICE(
             in_dim=self.noise_dim,
             hidden_dim=self.global_dim,
             out_dim=self.global_dim,
@@ -404,10 +404,10 @@ class DistributedNICENorm(torch.nn.Module):
             local_rank=self.rank,
             device=self.device,
             parallelism=self.parallelism,
-            sync_group=self.spatial_group,
-            model_group=self.channel_group,
+            spatial_group=self.spatial_group,
+            channel_group=self.channel_group,
         )
-        self.shift = MLP.DistributedMLPNICE(
+        self.shift = mlp.DistributedMLPNICE(
             in_dim=self.noise_dim,
             hidden_dim=self.global_dim,
             out_dim=self.global_dim,
@@ -415,8 +415,8 @@ class DistributedNICENorm(torch.nn.Module):
             local_rank=self.rank,
             device=self.device,
             parallelism=self.parallelism,
-            sync_group=self.spatial_group,
-            model_group=self.channel_group,
+            spatial_group=self.spatial_group,
+            channel_group=self.channel_group,
         )
 
     def forward(self, x, noise):
