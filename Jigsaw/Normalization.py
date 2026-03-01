@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 
-from Jigsaw import Linear
+from Jigsaw import MLP
 
 class DistributedLayerNorm(torch.nn.Module):
     """LayerNorm with synchronized gradients across a process group."""
@@ -331,20 +331,26 @@ class DistributedNICENorm(torch.nn.Module):
         self.ln = DistributedNoParamLayerNorm(self.rank, self.device, channel_group=self.channel_group)
         self.gelu = torch.nn.GELU()
 
-        self.scale = Linear.DistributedMLPNICE(
+        self.scale = MLP.DistributedMLPNICE(
             in_dim=self.noise_dim,
-            out_dim=self.global_dim // 2,
+            hidden_dim=self.global_dim,
+            out_dim=self.global_dim,
             bias=True,
+            local_rank=self.rank,
             device=self.device,
+            parallelism=self.parallelism,
             spatial_group=self.spatial_group,
             channel_group=self.channel_group
         )
 
-        self.shift = Linear.DistributedMLPNice(
+        self.shift = MLP.DistributedMLPNICE(
             in_dim=self.noise_dim,
-            out_dim=self.global_dim // 2,
+            hidden_dim=self.global_dim,
+            out_dim=self.global_dim,
             bias=True,
+            local_rank=self.rank,
             device=self.device,
+            parallelism=self.parallelism,
             spatial_group=self.spatial_group,
             channel_group=self.channel_group
         )
