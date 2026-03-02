@@ -3,7 +3,7 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 
-from Jigsaw import mlp
+from jigsaw import mlp
 
 
 class DistributedLayerNorm(torch.nn.Module):

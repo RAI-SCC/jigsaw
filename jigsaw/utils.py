@@ -13,7 +13,7 @@ from torch.nn.utils import parameters_to_vector
 
 from . import eval, model, transformer_models
 
-# from Jigsaw import Dataloaders, Model, TransformerModels, eval
+# from jigsaw import Dataloaders, Model, TransformerModels, eval
 from .dataloaders import get_dataloader
 
 

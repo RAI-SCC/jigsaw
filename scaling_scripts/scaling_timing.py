@@ -5,7 +5,7 @@ import torch
 import torch.distributed as dist
 import yaml
 
-from Jigsaw import utils
+from jigsaw import utils
 
 
 def training_loop(

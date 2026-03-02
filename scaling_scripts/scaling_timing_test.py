@@ -7,7 +7,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import yaml
 
-from Jigsaw import utils, Model
+from jigsaw import utils, Model
 
 
 def training_loop(config_dict: dict, device: torch.device, localid: int, rank: int) -> None:
