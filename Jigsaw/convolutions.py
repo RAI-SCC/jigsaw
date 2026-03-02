@@ -506,7 +506,7 @@ class ConvTransposeSelectionStrategy:
         dist.all_reduce(grad_b, op=dist.ReduceOp.SUM, group=spatial_group)
         return grad_b
 
-
+@torch.no_grad()
 def _average_weights(model: torch.nn.Module, spatial_group: dist.ProcessGroup):
     for name, param in model.named_parameters():
         dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
