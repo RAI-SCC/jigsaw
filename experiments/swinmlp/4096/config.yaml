@@ -2,17 +2,15 @@ data:
   dt: 6
   train_data_path: "data_processed/4096/train" 
   valid_data_path: "data_processed/4096/val"
-  #train_data_path: /hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr
-  #valid_data_path: /hkfs/work/workspace/scratch/ke4365-era5_data/era5.zarr
-  image_height: 4096
+  base_dir: "data_processed"
+  image_dir: "data/images/images/"
+  mask_dir: "data/masks/masks/"
+  image_height: 4096  
   image_width: 4096
   in_channels: 1 
   num_classes: 2
- # num_workers: 4 # Number of subprocesses for data loading
   preprocessed: false
   constant_masks_path: /hkfs/work/workspace/scratch/ke4365-jigsaw/Jigsaw/constant_masks
-  #train_subset: 1250
-  #valid_subset: 100 
   train_subset: -1
   valid_subset: -1
   prefetch_factor: 2
@@ -36,15 +34,14 @@ model:
   linear_residual: true
   dropout: 0.001
 training:
-  lr: 0.0001
+  lr: 0.001
   lr_embedding: 2.0e-05
   lr_recovery: 2.0e-05
-  # loss: L2 
   loss: TopK_Dice
   lr_constant: false
   train_batch: 8
   valid_batch: 8
-  epochs: 20
+  epochs: 30
   identity: false
   grad_clip: 1
   save_dir: results_4096
@@ -60,3 +57,8 @@ SWIN_MLP:
   window_size: 4       
   patch_size: 4        
   architecture: "swin"
+  dropout: 0.2
+  mlp_ratio: 4.0
+  shifted_windows: true
+  kernel_flex: false
+  seed: 42

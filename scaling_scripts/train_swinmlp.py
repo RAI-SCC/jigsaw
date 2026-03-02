@@ -154,7 +154,7 @@ def main():
 
     with torch.profiler.profile(
         schedule=torch.profiler.schedule(wait=wait_steps, warmup=3, active=3, repeat=3),
-        on_trace_ready=torch.profiler.tensorboard_trace_handler(save_dir),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(trace_dir),
         with_flops=True,
         record_shapes=True,
         with_modules=True,

@@ -2,8 +2,8 @@ data:
   dt: 6
   train_data_path: "data_processed/256/train" 
   valid_data_path: "data_processed/256/val"
-  #base_dir: "data_processed_seed44"
-  base_dir: "data_processed"
+  base_dir: "data_processed_seed83"
+  #base_dir: "data_processed"
   image_dir: "data/images/images/"
   mask_dir: "data/masks/masks/"
   image_height: 256
@@ -62,4 +62,4 @@ SWIN_MLP:
   mlp_ratio: 4.0
   shifted_windows: true
   kernel_flex: false
-  seed: 42
+  seed: 83

@@ -10,7 +10,7 @@ from albumentations.pytorch import ToTensorV2
 import numpy as np
 
 class BasicDataset(Dataset):
-    def __init__(self, images_dir, masks_dir, target_size=(1024, 1024), num_slices=1, is_train=True):
+    def __init__(self, images_dir, masks_dir, num_slices=1, is_train=True):
         self.images_dir = Path(images_dir)
         self.masks_dir = Path(masks_dir)
         self.num_slices = num_slices
@@ -77,7 +77,7 @@ class BasicDataset(Dataset):
 
         return image_tensor, mask_tensor
 
-def get_dataloader(config_dict, dataset, mode, batch_size, subset_size=None):
+def get_dataloader(config_dict, dataset, mode, batch_size):
     return DataLoader(
         dataset,
         batch_size=batch_size,
