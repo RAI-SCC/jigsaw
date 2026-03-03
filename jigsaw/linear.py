@@ -8,7 +8,8 @@ import torch.nn.functional as F  # noqa
 from . import distributed_matmul as dist_mm
 from . import distributed_roll as dist_roll
 from .utils_init import average_weights
-        
+
+
 class RollSelectionStrategy:
     """Selection strategy for distributed roll operation."""
 
@@ -335,7 +336,7 @@ class DistributedXWT(torch.nn.Module):
             linear_layer=True,
         )
         average_weights(self, self.spatial_group, bias_only=True)
-        
+
         self.XWT = XWT().apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1909,7 +1910,6 @@ class DistributedXWTNice(torch.nn.Module):
             torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
         ).to(device)
 
-
         if bias:
             self.bias = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim).uniform_(-stdev, stdev)
@@ -1919,9 +1919,9 @@ class DistributedXWTNice(torch.nn.Module):
 
         self.channel_group = channel_group
         self.spatial_group = spatial_group
-        
+
         average_weights(self, self.spatial_group, bias_only=False)
-        
+
         self.XWT_Nice = XWTNice().apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

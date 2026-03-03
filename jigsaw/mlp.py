@@ -8,6 +8,7 @@ from torch.nn import GELU, Dropout
 from . import linear, linear_megatron
 from .utils_init import average_weights
 
+
 class DistributedMLP(torch.nn.Module):
     """Distributed MLP across n processes."""
 

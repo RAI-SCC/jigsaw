@@ -337,7 +337,7 @@ class _DistributedSoftmax(torch.autograd.Function):
     @staticmethod
     def vmap(info, in_dims: tuple[Optional[int], ...], x, dim, group):
         out = _DistributedSoftmax.apply(x, dim, group)
-        
+
         return out, 0
 
 

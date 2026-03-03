@@ -6,6 +6,7 @@ from . import linear, mlp
 from . import normalization as norm
 from .utils_init import average_weights
 
+
 class DistributedWindowedAttention(torch.nn.Module):
     """Distributed windowed attention."""
 
@@ -126,6 +127,7 @@ class DistributedWindowedAttention(torch.nn.Module):
 
         # Output: [n_batch, seq_length, output_dim]
         return values
+
 
 class DistributedWindowedTransformer(torch.nn.Module):
     """
