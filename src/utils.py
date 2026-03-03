@@ -917,7 +917,6 @@ def build_swin_dataloaders(
     train_dataset = BasicDataset(
         images_dir=os.path.join(train_path, "image"),
         masks_dir=os.path.join(train_path, "mask"),
-        target_size=target_res,
         num_slices=1,
         is_train=True
     )
@@ -925,7 +924,6 @@ def build_swin_dataloaders(
     valid_dataset = BasicDataset(
         images_dir=os.path.join(valid_path, "image"),
         masks_dir=os.path.join(valid_path, "mask"),
-        target_size=target_res,
         num_slices=1,
         is_train=False
     )
