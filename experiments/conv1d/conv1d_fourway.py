@@ -1,6 +1,7 @@
 import torch
-from Jigsaw import Convolutions, utils
 from torch.nn.grad import conv1d_input
+
+from jigsaw import Convolutions, utils
 
 device, _, rank, _ = utils.init_cuda()
 batch = 1

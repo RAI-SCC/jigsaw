@@ -1,6 +1,7 @@
 import torch
 import torch.distributed as dist
-from Jigsaw import distributed_convolutions as dist_conv
+
+from jigsaw import distributed_convolutions as dist_conv
 
 
 def get_halo(
