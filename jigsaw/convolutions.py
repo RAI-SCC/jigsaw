@@ -1,6 +1,6 @@
 from typing import Optional
 
-import Jigsaw.distributed_convolutions as dist_conv
+import jigsaw.distributed_convolutions as dist_conv
 import numpy as np
 import torch
 import torch.distributed as dist
