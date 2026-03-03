@@ -1,12 +1,11 @@
 from typing import Optional
 
+import Jigsaw.distributed_convolutions as dist_conv
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.grad import conv2d_input, conv2d_weight
-
-import Jigsaw.distributed_convolutions as dist_conv
 
 
 class ConvSelectionStrategy:
@@ -505,6 +504,7 @@ class ConvTransposeSelectionStrategy:
         grad_b = grad_output.sum(dim=(-4, -2, -1))
         dist.all_reduce(grad_b, op=dist.ReduceOp.SUM, group=spatial_group)
         return grad_b
+
 
 @torch.no_grad()
 def _average_weights(model: torch.nn.Module, spatial_group: dist.ProcessGroup):

@@ -1,6 +1,5 @@
 import torch
 import torch.distributed as dist
-
 from Jigsaw import Convolutions, utils
 
 device, _, rank, _ = utils.init_cuda()
