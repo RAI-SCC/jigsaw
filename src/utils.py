@@ -933,7 +933,6 @@ def build_swin_dataloaders(
         dataset=train_dataset,
         mode="train",
         batch_size=train_batch,
-        subset_size=config_dict["data"]["train_subset"],
     )
 
     valid_loader = Dataloaders.get_dataloader(
@@ -941,7 +940,6 @@ def build_swin_dataloaders(
         dataset=valid_dataset,
         mode="val",
         batch_size=valid_batch,
-        subset_size=config_dict["data"]["valid_subset"],
     )
 
     return train_loader, valid_loader
