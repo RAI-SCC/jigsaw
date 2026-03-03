@@ -336,17 +336,8 @@ class _DistributedSoftmax(torch.autograd.Function):
 
     @staticmethod
     def vmap(info, in_dims: tuple[Optional[int], ...], x, dim, group):
-        y = torch.exp(x - x.amax(dim=dim, keepdim=True))
-
-        local_sum = y.sum(dim=dim, keepdim=True)
-        # global sum
-        global_sum = local_sum.clone()
-
-        dist.all_reduce(global_sum, op=dist.ReduceOp.SUM, group=group)
-        # final softmax
-        out = y / global_sum
-
-        # out has vmapped dimension at dim 0
+        out = _DistributedSoftmax.apply(x, dim, group)
+        
         return out, 0
 
 

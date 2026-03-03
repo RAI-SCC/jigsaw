@@ -1,6 +1,7 @@
 from typing import Optional
 
 import jigsaw.distributed_convolutions as dist_conv
+from .utils_init import average_weights
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -506,12 +507,6 @@ class ConvTransposeSelectionStrategy:
         return grad_b
 
 
-@torch.no_grad()
-def _average_weights(model: torch.nn.Module, spatial_group: dist.ProcessGroup):
-    for name, param in model.named_parameters():
-        dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
-
-
 class DistributedConv2D(torch.nn.Module):
     """Distributed 2D Convolution."""
 
@@ -581,7 +576,7 @@ class DistributedConv2D(torch.nn.Module):
             self.stride,
         )
 
-        _average_weights(self, self.spatial_group)
+        average_weights(self, self.spatial_group)
 
         self.conv2d_apply = Conv2d().apply
 
@@ -1002,7 +997,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
             self.stride,
         )
 
-        _average_weights(self, self.spatial_group)
+        average_weights(self, self.spatial_group)
 
         self.convTranspose2d_apply = ConvTranspose2d().apply
 

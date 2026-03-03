@@ -4,7 +4,7 @@ from einops import rearrange
 
 from . import linear, mlp
 from . import normalization as norm
-
+from .utils_init import average_weights
 
 class DistributedWindowedAttention(torch.nn.Module):
     """Distributed windowed attention."""
@@ -127,14 +127,6 @@ class DistributedWindowedAttention(torch.nn.Module):
         # Output: [n_batch, seq_length, output_dim]
         return values
 
-
-def _average_weights(
-    model: torch.nn.Module, spatial_group: dist.ProcessGroup, device: torch.device
-):
-    for _, param in model.named_parameters():
-        dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
-
-
 class DistributedWindowedTransformer(torch.nn.Module):
     """
     Windowed Transformer across multiple processes.
@@ -192,7 +184,7 @@ class DistributedWindowedTransformer(torch.nn.Module):
             bayesian=bayesian,
         ).to(device)
 
-        _average_weights(self, spatial_group, device)
+        average_weights(self, spatial_group, device)
 
     def forward(self, x: torch.tensor, mask=None):
         """Forward pass of distributed windowed transformer."""
@@ -276,7 +268,7 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
             bayesian=bayesian,
         ).to(device)
 
-        _average_weights(self, spatial_group, device)
+        average_weights(self, spatial_group, device)
 
     def forward(self, x: torch.Tensor, noise: torch.Tensor, mask=None):
         """

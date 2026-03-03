@@ -6,7 +6,7 @@ import torch.nn.init as init
 from torch.nn import GELU, Dropout
 
 from . import linear, linear_megatron
-
+from .utils_init import average_weights
 
 class DistributedMLP(torch.nn.Module):
     """Distributed MLP across n processes."""
@@ -125,11 +125,6 @@ class DistributedMLP(torch.nn.Module):
         x = self.drop2(x)
 
         return x
-
-
-def _average_weights(model: torch.nn.Module, spatial_group: dist.ProcessGroup):
-    for _, param in model.named_parameters():
-        dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
 
 
 class DistributedMLPNICE(torch.nn.Module):
@@ -267,7 +262,7 @@ class DistributedSynchronizedMLP(torch.nn.Module):
         self.drop2 = Dropout(p=dropout)
         self.local_rank = local_rank
 
-        _average_weights(self, sync_group)
+        average_weights(self, sync_group)
 
     def forward(self, x):
         """

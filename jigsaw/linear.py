@@ -7,8 +7,8 @@ import torch.nn.functional as F  # noqa
 
 from . import distributed_matmul as dist_mm
 from . import distributed_roll as dist_roll
-
-
+from .utils_init import average_weights
+        
 class RollSelectionStrategy:
     """Selection strategy for distributed roll operation."""
 
@@ -200,7 +200,7 @@ class LinearSelectionStrategy:
             process group of ranks distributed across space (share channels).
         """
         grad_b = grad_output.sum(dim=(-3, -2))
-        dist.all_reduce(grad_b, group=spatial_group, op=dist.ReduceOp.SUM)
+        # dist.all_reduce(grad_b, group=spatial_group, op=dist.ReduceOp.SUM)
         return grad_b
 
     def _no_reduce_bias(
@@ -334,6 +334,8 @@ class DistributedXWT(torch.nn.Module):
             synchronized_layer=False,
             linear_layer=True,
         )
+        average_weights(self, self.spatial_group, bias_only=True)
+        
         self.XWT = XWT().apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -919,6 +921,7 @@ class DistributedXW(torch.nn.Module):
             synchronized_layer=False,
             linear_layer=True,
         )
+        average_weights(self, self.spatial_group, bias_only=True)
         self.XW = XW().apply
 
     def get_parameter_count(self):
@@ -1183,6 +1186,7 @@ class DistributedXTW(torch.nn.Module):
             linear_layer=True,
         )
 
+        average_weights(self, self.spatial_group, bias_only=True)
         self.XTW = XTW().apply
 
     def get_parameter_count(self):
@@ -1905,19 +1909,19 @@ class DistributedXWTNice(torch.nn.Module):
             torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
         ).to(device)
 
-        dist.all_reduce(self.weights, op=dist.ReduceOp.AVG, group=spatial_group)
 
         if bias:
             self.bias = torch.nn.parameter.Parameter(
                 torch.zeros(out_dim).uniform_(-stdev, stdev)
             ).to(device)
-
-            dist.all_reduce(self.bias, op=dist.ReduceOp.AVG, group=spatial_group)
         else:
             self.bias = None
 
         self.channel_group = channel_group
         self.spatial_group = spatial_group
+        
+        average_weights(self, self.spatial_group, bias_only=False)
+        
         self.XWT_Nice = XWTNice().apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
