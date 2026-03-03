@@ -4,13 +4,8 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import yaml
-<<<<<<< HEAD
-from Jigsaw import Model, utils
-from torch.nn.parallel import DistributedDataParallel as DDP
-=======
 
 from jigsaw import utils, Model
->>>>>>> ba62ba35b18ac883f5ed51bb3c51be40d42ab721
 
 
 def training_loop(

@@ -7,11 +7,8 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.grad import conv2d_input, conv2d_weight
 
-<<<<<<< HEAD
-=======
 import jigsaw.distributed_convolutions as dist_conv
 
->>>>>>> ba62ba35b18ac883f5ed51bb3c51be40d42ab721
 
 class ConvSelectionStrategy:
     """Selection strategy for convolution kernels and halo communications."""

@@ -1557,9 +1557,6 @@ class DistributedRoll(torch.nn.Module):
 
         self.selector = RollSelectionStrategy(parallelism)
 
-        if dims is not None:
-            print(f"Alert, dims is {dims} in roll; this is not yet implemented")
-
     def get_parameter_count(self):
         """Return parameter count for distributed roll operation."""
         return 0
