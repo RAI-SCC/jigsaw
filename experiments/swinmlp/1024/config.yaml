@@ -1,7 +1,7 @@
 data:
   dt: 6
-  train_data_path: "data_processed/1024/train" 
-  valid_data_path: "data_processed/1024/val"
+  train_data_path: "data_processed_seed83/1024/train" 
+  valid_data_path: "data_processed_seed83/1024/val"
   #base_dir: "data_processed"
   base_dir: "data_processed_seed83"
   image_dir: "data/images/images/"
@@ -42,7 +42,7 @@ training:
   lr_constant: false
   train_batch: 8
   valid_batch: 8
-  epochs: 30
+  epochs: 35
   identity: false
   grad_clip: 1
   save_dir: results_1024
