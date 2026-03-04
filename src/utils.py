@@ -16,7 +16,7 @@ import TransformerModels
 import Dataloaders
 import eval
 import Model
-from dice import TopKDiceLoss
+from dice import TopKDiceLoss, CETopKDiceLoss
 
 
 def get_ddp_groups(rank: int, n_parallel: int) -> dist.ProcessGroup:
@@ -583,7 +583,7 @@ def build_loss_fn(config_dict):
     loss_type = config_dict["training"]["loss"]
     match loss_type:
         case "TopK_Dice":
-            loss_fn = TopKDiceLoss(k=50, smooth=1e-5)
+            loss_fn = CETopKDiceLoss(k=50, smooth=1e-5)
         case "L1":
             loss_fn = torch.nn.L1Loss()
         case "L2":
