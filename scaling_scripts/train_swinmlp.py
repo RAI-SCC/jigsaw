@@ -76,6 +76,8 @@ def main():
     num_samples = len(train_loader.dataset)
     num_samples_val = len(val_loader.dataset)
     kernel_flex = config['SWIN_MLP']['kernel_flex']
+    save_model = config["SWIN_MLP"]["save_model"]
+    checkpoint_path = config["SWIN_MLP"]["checkpoint_file"]
     if kernel_flex:
         kernel_str = "flex"
     else:        
@@ -152,6 +154,8 @@ def main():
     batches_per_epoch = len(train_loader)
     wait_steps = max(0, batches_per_epoch - 6)
 
+    best_val_dice = 0.0
+
     with torch.profiler.profile(
         schedule=torch.profiler.schedule(wait=wait_steps, warmup=3, active=3, repeat=3),
         on_trace_ready=torch.profiler.tensorboard_trace_handler(trace_dir),
@@ -223,7 +227,11 @@ def main():
                     round(float(val_metrics['FN']), 4),
                     round(float(val_metrics['Precision']), 4),
                     round(float(val_metrics['Recall']), 4)
-                ])            
+                ])     
+
+            if save_model and val_metrics['Dice'] > best_val_dice:
+                best_val_dice = val_metrics['Dice']
+                torch.save(model.state_dict(), checkpoint_path)       
 
 if __name__ == "__main__":
     main()

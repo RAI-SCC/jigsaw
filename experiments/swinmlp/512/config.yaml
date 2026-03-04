@@ -63,3 +63,5 @@ SWIN_MLP:
   shifted_windows: true
   kernel_flex: false
   seed: 42
+  save_model: true
+  checkpoint_file: "results_512/best_model.pth"
