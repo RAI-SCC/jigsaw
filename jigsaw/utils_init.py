@@ -3,11 +3,26 @@ import torch.distributed as dist
 
 
 @torch.no_grad()
-def average_weights(
+def average_weights(params: list[torch.Tensor], spatial_group: dist.ProcessGroup):
+    """
+    Average parameters of an entire module upon initialization.
+
+    params: list[torch.Tensor]
+        list of tensors that need to be averaged
+    spatial_group: dist.ProcessGroup
+        process group that the parameters should be averaged over.
+    """
+    for param in params:
+        if param is not None:
+            dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
+
+
+@torch.no_grad()
+def average_weights_module(
     model: torch.nn.Module, spatial_group: dist.ProcessGroup, bias_only: bool = False
 ):
     """
-    Average model weights upon initialization.
+    Average model weights of an entire module upon initialization.
 
     model: torch.nn.Module
     spatial_group: dist.ProcessGroup

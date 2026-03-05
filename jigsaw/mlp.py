@@ -6,7 +6,6 @@ import torch.nn.init as init
 from torch.nn import GELU, Dropout
 
 from . import linear, linear_megatron
-from .utils_init import average_weights
 
 
 class DistributedMLP(torch.nn.Module):
@@ -202,7 +201,6 @@ class DistributedMLPNICE(torch.nn.Module):
         x = self.linear1(x)
         x = self.activation(x)
         x = self.linear2(x)
-
         return x
 
 
@@ -244,7 +242,7 @@ class DistributedSynchronizedMLP(torch.nn.Module):
                 model_group,
                 sync_group,
                 bayesian=bayesian,
-            ).to(device)
+            )
 
             self.linear2 = linear.DistributedXWTSync(
                 hidden_dim // 2,
@@ -256,14 +254,12 @@ class DistributedSynchronizedMLP(torch.nn.Module):
                 model_group,
                 sync_group,
                 bayesian=bayesian,
-            ).to(device)
+            )
 
         self.activation = GELU()
         self.drop = Dropout(p=dropout)
         self.drop2 = Dropout(p=dropout)
         self.local_rank = local_rank
-
-        average_weights(self, sync_group)
 
     def forward(self, x):
         """

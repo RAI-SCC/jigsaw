@@ -113,13 +113,12 @@ class DistributedWindowedAttention(torch.nn.Module):
         v = rearrange(v, "... n i (h d) -> ... n h i d", h=self.heads).contiguous()
 
         q = self.scale * q
-
         attention = self.xwt(q, k, None)
-
         if mask is not None:
             attention = attention + mask
 
         attention = self.softmax(attention)
+
         values = self.xw(attention, v, None)
 
         values = rearrange(values, "... n h s d -> ... n s (h d)").contiguous()
@@ -269,8 +268,6 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
             sync_group=spatial_group,
             bayesian=bayesian,
         ).to(device)
-
-        average_weights(self, spatial_group, device)
 
     def forward(self, x: torch.Tensor, noise: torch.Tensor, mask=None):
         """

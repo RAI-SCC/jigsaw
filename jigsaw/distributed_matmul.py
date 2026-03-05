@@ -93,10 +93,11 @@ def xw_transpose_twoway(
     w0, w1 = torch.split(wij, wij.shape[-2] // 2, dim=-2)
     # print(_prealloc_buffers.keys())
     buffer_xw = _get_preallocated_buffer(
-        (*xij.shape[:-1], w0.shape[-2]), torch.float32, local_rank, device
+        (*xij.shape[:-1], w0.shape[-2]), xij.dtype, local_rank, device
     )
 
-    empty = torch.empty(0, device=device, dtype=torch.float32)
+    empty = torch.empty(0, device=device, dtype=xij.dtype)
+
     match mod:
         case 0:
             xw = torch.matmul(xij, w1.mT)
@@ -154,8 +155,8 @@ def xw_twoway(
     """
     mod = local_rank % 2
     w0, w1 = torch.split(wij, wij.shape[-2] // 2, dim=-2)
-    buffer_x = _get_preallocated_buffer(xij.shape, torch.float32, local_rank, device)
-    empty = torch.empty(0, device=device, dtype=torch.float32)
+    buffer_x = _get_preallocated_buffer(xij.shape, xij.dtype, local_rank, device)
+    empty = torch.empty(0, device=device, dtype=xij.dtype)
 
     match mod:
         case 0:
@@ -211,9 +212,9 @@ def x_transpose_w_twoway(
         Local result.
     """
     mod = local_rank % 2
-    empty = torch.empty(0, device=device, dtype=torch.float32)
+    empty = torch.empty(0, device=device, dtype=xij.dtype)
 
-    buffer_x = _get_preallocated_buffer(xij.shape, torch.float32, local_rank, device)
+    buffer_x = _get_preallocated_buffer(xij.shape, xij.dtype, local_rank, device)
 
     match mod:
         case 0:
@@ -272,7 +273,7 @@ def x_transpose_twoway(
     x0, x1 = torch.split(x, x.shape[-2] // 2, dim=-2)
     x0, x1 = x0.contiguous(), x1.contiguous()
     buffer_x = _get_preallocated_buffer(x1.shape, x1.dtype, local_rank, device)
-    empty = torch.empty(0, device=device, dtype=torch.float32)
+    empty = torch.empty(0, device=device, dtype=x.dtype)
 
     match mod:
         case 0:
@@ -352,7 +353,7 @@ def xw_transpose_fourway(
         Local result.
     """
     mod = local_rank % 4
-    empty = torch.empty(0, device=device, dtype=torch.float32)
+    empty = torch.empty(0, device=device, dtype=xij.dtype)
 
     match mod:
         case 0:
@@ -479,7 +480,7 @@ def xw_fourway(
         Local result.
     """
     mod = local_rank % 4
-    empty = torch.empty(0, device=device, dtype=torch.float32)
+    empty = torch.empty(0, device=device, dtype=xij.dtype)
 
     xdtype, wdtype = xij.dtype, wij.dtype
     xij = xij.contiguous()
@@ -608,7 +609,7 @@ def x_transpose_w_fourway(
         Local result.
     """
     mod = local_rank % 4
-    empty = torch.empty(0, device=device, dtype=torch.float32)
+    empty = torch.empty(0, device=device, dtype=xij.dtype)
 
     xdtype, wdtype = xij.dtype, wij.dtype
 
@@ -733,7 +734,7 @@ def x_transpose_fourway(
         The transposed tensor.
     """
     mod = local_rank % 4
-    empty = torch.empty(0, device=device, dtype=torch.float32)
+    empty = torch.empty(0, device=device, dtype=x.dtype)
 
     x = x.contiguous()
     match mod:
@@ -802,7 +803,7 @@ def xw_transpose_eightway_(
         Local result.
     """
     mod = local_rank % 8
-    empty = torch.empty(0, device=device, dtype=torch.float32)
+    empty = torch.empty(0, device=device, dtype=xij.dtype)
 
     match mod:
         case 0:
@@ -1127,7 +1128,7 @@ def xw_transpose_eightway(
         Local result.
     """
     mod = local_rank % 8
-    empty = torch.empty(0, device=device, dtype=torch.float32)
+    empty = torch.empty(0, device=device, dtype=xij.dtype)
 
     match mod:
         case 0:
@@ -1452,7 +1453,7 @@ def xw_eightway_(
     """
     # mod = rank % 8
     mod = local_rank
-    empty = torch.empty(0, device=device, dtype=torch.float32)
+    empty = torch.empty(0, device=device, dtype=xij.dtype)
     match mod:
         case 0:
             x_send_list = [empty, xij, empty, empty, empty, empty, empty, empty]
