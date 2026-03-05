@@ -304,9 +304,7 @@ class DistributedXWT(torch.nn.Module):
         super().__init__()
 
         stdev = 1.0 / np.sqrt(in_dim * 2)
-        self.weights = torch.nn.parameter.Parameter(
-            torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
-        )
+        self.weight = torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
 
         match parallelism:
             case 2:
@@ -317,10 +315,9 @@ class DistributedXWT(torch.nn.Module):
                 out_dim = out_dim * 2
 
         self.bias = (
-            torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev))
-            if bias
-            else None
+            torch.zeros(out_dim).uniform_(-stdev, stdev).to(device) if bias else None
         )
+
         self.device = device
         self.local_rank = local_rank
         self.parallelism = parallelism
@@ -335,7 +332,10 @@ class DistributedXWT(torch.nn.Module):
             synchronized_layer=False,
             linear_layer=True,
         )
-        average_weights(self, self.spatial_group, bias_only=True)
+
+        if bias:
+            average_weights([self.bias], self.spatial_group)
+            self.bias = torch.nn.parameter.Parameter(self.bias)
 
         self.XWT = XWT().apply
 
@@ -359,7 +359,7 @@ class DistributedXWT(torch.nn.Module):
         """
         cij = self.XWT(
             x,
-            self.weights,
+            self.weight,
             self.bias,
             self.local_rank,
             self.device,
@@ -377,7 +377,7 @@ class DistributedXWT(torch.nn.Module):
             if self.bias is None
             else self.bias.numel() // dist.get_world_size(group=self.spatial_group)
         )
-        return num_param + self.weights.numel()
+        return num_param + self.weight.numel()
 
 
 class XWT(torch.autograd.Function):
@@ -606,9 +606,7 @@ class DistributedXWTSync(torch.nn.Module):
             if parallelism > 1
             else 1.0 / np.sqrt(in_dim)  # TODO CHECK
         )
-        self.weights = torch.nn.parameter.Parameter(
-            torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
-        )
+        self.weight = torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev).to(device)
 
         match parallelism:
             case 2:
@@ -619,10 +617,9 @@ class DistributedXWTSync(torch.nn.Module):
                 out_dim = out_dim * 2
 
         self.bias = (
-            torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev))
-            if bias
-            else None
+            torch.zeros(out_dim).uniform_(-stdev, stdev).to(device) if bias else None
         )
+
         self.device = device
         self.local_rank = local_rank
         self.model_group = model_group
@@ -637,6 +634,10 @@ class DistributedXWTSync(torch.nn.Module):
             linear_layer=True,
         )
 
+        average_weights([self.weight, self.bias], self.sync_group)
+        self.weight = torch.nn.parameter.Parameter(self.weight)
+        self.bias = torch.nn.parameter.Parameter(self.bias)
+
         self.XWT_sync = XWTSync().apply
 
     def get_parameter_count(self):
@@ -646,7 +647,7 @@ class DistributedXWTSync(torch.nn.Module):
             if self.bias is None
             else self.bias.numel() // dist.get_world_size(group=self.sync_group)
         )
-        return num_param + self.weights.numel() // dist.get_world_size(
+        return num_param + self.weight.numel() // dist.get_world_size(
             group=self.sync_group
         )
 
@@ -668,7 +669,7 @@ class DistributedXWTSync(torch.nn.Module):
         """
         cij = self.XWT_sync(
             x,
-            self.weights,
+            self.weight,
             self.bias,
             self.local_rank,
             self.device,
@@ -900,13 +901,11 @@ class DistributedXW(torch.nn.Module):
 
         stdev = 1.0 / np.sqrt(in_dim * 2) if parallelism == 4 else 1.0 / np.sqrt(in_dim)
 
-        self.weights = torch.nn.parameter.Parameter(
+        self.weight = torch.nn.parameter.Parameter(
             torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev)
         )
         self.bias = (
-            torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev))
-            if bias
-            else None
+            torch.zeros(out_dim).uniform_(-stdev, stdev).to(device) if bias else None
         )
 
         self.local_rank = local_rank
@@ -922,7 +921,11 @@ class DistributedXW(torch.nn.Module):
             synchronized_layer=False,
             linear_layer=True,
         )
-        average_weights(self, self.spatial_group, bias_only=True)
+
+        if bias:
+            average_weights(self, self.spatial_group)
+            self.bias = torch.nn.parameter.Parameter(self.bias)
+
         self.XW = XW().apply
 
     def get_parameter_count(self):
@@ -932,7 +935,7 @@ class DistributedXW(torch.nn.Module):
             if self.bias is None
             else self.bias.numel() // dist.get_world_size(group=self.spatial_group)
         )
-        return num_param + self.weights.numel()
+        return num_param + self.weight.numel()
 
     def forward(self, x: torch.Tensor):
         """
@@ -952,7 +955,7 @@ class DistributedXW(torch.nn.Module):
         """
         cij = self.XW(
             x,
-            self.weights,
+            self.weight,
             self.bias,
             self.local_rank,
             self.device,
@@ -1163,14 +1166,12 @@ class DistributedXTW(torch.nn.Module):
         super().__init__()
 
         stdev = 1.0 / np.sqrt(in_dim * 2) if parallelism == 4 else 1.0 / np.sqrt(in_dim)
-        self.weights = torch.nn.parameter.Parameter(
+        self.weight = torch.nn.parameter.Parameter(
             torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev)
         )
 
         self.bias = (
-            torch.nn.parameter.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev))
-            if bias
-            else None
+            torch.zeros(out_dim).uniform_(-stdev, stdev).to(device) if bias else None
         )
 
         self.local_rank = local_rank
@@ -1187,7 +1188,10 @@ class DistributedXTW(torch.nn.Module):
             linear_layer=True,
         )
 
-        average_weights(self, self.spatial_group, bias_only=True)
+        if bias:
+            average_weights(self, self.spatial_group)
+            self.bias = torch.nn.parameter.Parameter(self.bias)
+
         self.XTW = XTW().apply
 
     def get_parameter_count(self):
@@ -1197,7 +1201,7 @@ class DistributedXTW(torch.nn.Module):
             if self.bias is None
             else self.bias.numel() // dist.get_world_size(group=self.spatial_group)
         )
-        return num_param + self.weights.numel()
+        return num_param + self.weight.numel()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -1217,7 +1221,7 @@ class DistributedXTW(torch.nn.Module):
         """
         cij = self.XTW(
             x,
-            self.weights,
+            self.weight,
             self.bias,
             self.local_rank,
             self.device,
@@ -1548,6 +1552,7 @@ class DistributedRoll(torch.nn.Module):
         device: torch.device,
         parallelism: int,
         spatial_group: dist.ProcessGroup,
+        dtype: torch.dtype = torch.float32,
     ) -> None:
         """Initialize the Roll class."""
         super().__init__()
@@ -1558,7 +1563,7 @@ class DistributedRoll(torch.nn.Module):
         self.shifts = shifts
         self.dims = dims
         self.roll = Roll().apply
-        self.empty = torch.empty(0, device=self.device, dtype=torch.float32)
+        self.empty = torch.empty(0, device=self.device, dtype=dtype)
 
         self.selector = RollSelectionStrategy(parallelism)
 
@@ -1881,6 +1886,7 @@ class DistributedXWTNice(torch.nn.Module):
         device: torch.device,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
+        dtype: torch.dtype = torch.float32,
     ) -> None:
         """
         Initialize the XWT Linear layer sharded over n processes.
@@ -1904,23 +1910,20 @@ class DistributedXWTNice(torch.nn.Module):
         """
         super().__init__()
 
-        stdev = 1.0 / np.sqrt(in_dim)
-
-        self.weights = torch.nn.parameter.Parameter(
-            torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
-        ).to(device)
-
-        if bias:
-            self.bias = torch.nn.parameter.Parameter(
-                torch.zeros(out_dim).uniform_(-stdev, stdev)
-            ).to(device)
-        else:
-            self.bias = None
-
         self.channel_group = channel_group
         self.spatial_group = spatial_group
 
-        average_weights(self, self.spatial_group, bias_only=False)
+        stdev = 1.0 / np.sqrt(in_dim)
+
+        self.weight = torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev).to(device)
+        self.bias = (
+            torch.zeros(out_dim).uniform_(-stdev, stdev).to(device) if bias else None
+        )
+
+        average_weights([self.weight, self.bias], self.spatial_group)
+
+        self.weight = torch.nn.parameter.Parameter(self.weight)
+        self.bias = torch.nn.parameter.Parameter(self.bias) if bias else None
 
         self.XWT_Nice = XWTNice().apply
 
@@ -1944,7 +1947,7 @@ class DistributedXWTNice(torch.nn.Module):
         """
         cij = self.XWT_Nice(
             x,
-            self.weights,
+            self.weight,
             self.bias,
             self.channel_group,
             self.spatial_group,
@@ -1989,8 +1992,7 @@ class XWTNice(torch.autograd.Function):
         # Handle bias term here?
         if (b is not None) and (len(b.shape) > 1):
             b = b.reshape(b.shape[0], 1, 1, -1)
-
-        xwt = F.linear(x, w, b)
+        xwt = torch.matmul(x, w.mT) + b
 
         return xwt
 

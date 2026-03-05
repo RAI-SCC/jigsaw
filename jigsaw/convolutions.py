@@ -528,6 +528,7 @@ class DistributedConv2D(torch.nn.Module):
         device=None,
         parallelism=4,
         bayesian=False,
+        dtype=torch.float32,
     ):
         """
         Distributed 2D Convolution.
@@ -555,30 +556,30 @@ class DistributedConv2D(torch.nn.Module):
         self.channel_group = channel_group
         self.device = device
         self.parallelism = parallelism
-        self.empty = torch.empty(0, device=device, dtype=torch.float32)
+        self.empty = torch.empty(0, device=device, dtype=dtype)
         self.bayesian = bayesian
-        # # TODO
-        # self.conv2d.weights = torch.nn.Parameter(self.out_channels, self.in_channels//1, kernel_size[0], kernel_size[1])
-        # self.conv2d.bias = torch.nn.Parameter(out_channels)
 
-        self.conv2d = torch.nn.Conv2d(
-            self.in_channels,
-            self.out_channels,
-            kernel_size=self.kernel_size,
-            stride=self.stride,
-            groups=groups,
-            bias=bias,
-        ).to(device)
+        k = np.sqrt(1 / (self.in_channels * 2 * kernel_size[0] * kernel_size[1]))
+        self.weight = (
+            torch.zeros(
+                self.out_channels, self.in_channels, kernel_size[0], kernel_size[1]
+            )
+            .uniform_(-k, k)
+            .to(device)
+        )
+        self.bias = torch.zeros(self.out_channels).uniform_(-k, k).to(device)
 
         self.selector = ConvSelectionStrategy(
             self.bayesian,
             self.parallelism,
-            self.conv2d.bias,
+            self.bias,
             self.kernel_size,
             self.stride,
         )
 
-        average_weights(self, self.spatial_group)
+        average_weights([self.weight, self.bias], self.spatial_group)
+        self.weight = torch.nn.parameter.Parameter(self.weight)
+        self.bias = torch.nn.parameter.Parameter(self.bias)
 
         self.conv2d_apply = Conv2d().apply
 
@@ -586,11 +587,10 @@ class DistributedConv2D(torch.nn.Module):
         """Return effective number of local parameters for Distributed Conv2D module."""
         num_param = (
             0
-            if self.conv2d.bias.data is None
-            else self.conv2d.bias.data.numel()
-            // dist.get_world_size(group=self.spatial_group)
+            if self.bias is None
+            else self.bias.numel() // dist.get_world_size(group=self.spatial_group)
         )
-        return num_param + self.conv2d.weight.data.numel() // dist.get_world_size(
+        return num_param + self.weight.numel() // dist.get_world_size(
             group=self.spatial_group
         )
 
@@ -614,8 +614,8 @@ class DistributedConv2D(torch.nn.Module):
         """
         cij = self.conv2d_apply(
             x,
-            self.conv2d.weight,
-            self.conv2d.bias,
+            self.weight,
+            self.bias,
             self.kernel_size,
             self.stride,
             self.padding,
@@ -934,6 +934,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
         device=0,
         parallelism=4,
         bayesian=False,
+        dtype=torch.float32,
     ):
         """
         Distributed ConvTranspose2D.
@@ -971,35 +972,36 @@ class DistributedConvTranspose2D(torch.nn.Module):
         self.out_channels = out_channels // 2
         self.bayesian = bayesian
 
-        self.convTranspose2d = torch.nn.ConvTranspose2d(
-            self.in_channels,
-            self.out_channels,
-            kernel_size=self.kernel_size,
-            stride=self.stride,
-            padding=self.padding,
-            bias=bias,
-        ).to(self.device)
-
         # Initialize
         k = np.sqrt(
             self.groups
             / (self.out_channels * 2 * self.kernel_size[0] * self.kernel_size[1])
         )
-        self.convTranspose2d.weight.data.uniform_(-k, k)
-        if bias:
-            self.convTranspose2d.bias.data.uniform_(-k, k)
-
-        self.empty = torch.empty(0, device=self.device, dtype=torch.float32)
+        self.weight = (
+            torch.zeros(
+                self.in_channels,
+                self.out_channels // self.groups,
+                kernel_size[0],
+                kernel_size[1],
+            )
+            .uniform_(-k, k)
+            .to(device)
+        )
+        self.bias = torch.zeros(self.out_channels).uniform_(-k, k).to(device)
+        self.empty = torch.empty(0, device=self.device, dtype=dtype)
 
         self.selector = ConvTransposeSelectionStrategy(
             self.bayesian,
             self.parallelism,
-            self.convTranspose2d.bias,
+            self.bias,
             self.kernel_size,
             self.stride,
         )
 
-        average_weights(self, self.spatial_group)
+        average_weights([self.weight, self.bias], self.spatial_group)
+
+        self.weight = torch.nn.parameter.Parameter(self.weight)
+        self.bias = torch.nn.parameter.Parameter(self.bias)
 
         self.convTranspose2d_apply = ConvTranspose2d().apply
 
@@ -1007,14 +1009,11 @@ class DistributedConvTranspose2D(torch.nn.Module):
         """Return effective number of local parameters for distributed model."""
         num_param = (
             0
-            if self.convTranspose2d.bias.data is None
-            else self.convTranspose2d.bias.data.numel()
-            // dist.get_world_size(group=self.spatial_group)
+            if self.bias is None
+            else self.bias.numel() // dist.get_world_size(group=self.spatial_group)
         )
-        return (
-            num_param
-            + self.convTranspose2d.weight.data.numel()
-            // dist.get_world_size(group=self.spatial_group)
+        return num_param + self.weight.numel() // dist.get_world_size(
+            group=self.spatial_group
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1037,8 +1036,8 @@ class DistributedConvTranspose2D(torch.nn.Module):
         """
         cij = self.convTranspose2d_apply(
             x,
-            self.convTranspose2d.weight,
-            self.convTranspose2d.bias,
+            self.weight,
+            self.bias,
             self.kernel_size,
             self.stride,
             self.padding,
