@@ -34,6 +34,4 @@ def average_weights_module(
         if bias_only and "bias" not in name:
             continue
         else:
-            param.requires_grad_(False)
             dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
-            param.requires_grad_(True)
