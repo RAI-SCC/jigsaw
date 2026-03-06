@@ -91,17 +91,21 @@ def xw_transpose_twoway(
     mod = local_rank % 2
 
     w0, w1 = torch.split(wij, wij.shape[-2] // 2, dim=-2)
-    
+
     match mod:
         case 0:
             xw = torch.matmul(xij, w1.mT)
-            buffer_xw = _get_preallocated_buffer((*xij.shape[:-1], w0.shape[-2]), xw.dtype, local_rank, device)
+            buffer_xw = _get_preallocated_buffer(
+                (*xij.shape[:-1], w0.shape[-2]), xw.dtype, local_rank, device
+            )
             empty = torch.empty(0, device=device, dtype=xw.dtype)
             xw_send_list = [empty, xw]
             xw_recv_list = [empty, buffer_xw]
         case 1:
             xw = torch.matmul(xij, w0.mT)
-            buffer_xw = _get_preallocated_buffer((*xij.shape[:-1], w0.shape[-2]), xw.dtype, local_rank, device)
+            buffer_xw = _get_preallocated_buffer(
+                (*xij.shape[:-1], w0.shape[-2]), xw.dtype, local_rank, device
+            )
             empty = torch.empty(0, device=device, dtype=xw.dtype)
 
             xw_send_list = [xw, empty]
@@ -156,7 +160,7 @@ def xw_twoway(
     w0, w1 = torch.split(wij, wij.shape[-2] // 2, dim=-2)
     buffer_x = _get_preallocated_buffer(xij.shape, xij.dtype, local_rank, device)
     empty = torch.empty(0, device=device, dtype=xij.dtype)
-    
+
     match mod:
         case 0:
             xw_send_list = [empty, xij]
@@ -226,7 +230,7 @@ def x_transpose_w_twoway(
     xtw_handle = dist.all_to_all(
         xtw_recv_list, xtw_send_list, group=model_group, async_op=True
     )
-    
+
     match mod:
         case 0:
             cij_top = torch.matmul(xij.mT, wij)

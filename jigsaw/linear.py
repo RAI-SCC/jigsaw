@@ -4,7 +4,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F  # noqa
-from torch.amp import custom_fwd, custom_bwd
 
 from . import distributed_matmul as dist_mm
 from . import distributed_roll as dist_roll
@@ -749,10 +748,10 @@ class XWTSync(torch.autograd.Function):
         ctx.model_group = model_group
         ctx.sync_group = sync_group
         ctx.bayesian = bayesian
-        
+
         # infer dtype from the input tensors rather than from autocast state
         ctx._fwd_dtype = x.dtype
-        
+
     @staticmethod
     def backward(
         ctx: torch.autograd.Function, grad_output: torch.Tensor
@@ -793,8 +792,8 @@ class XWTSync(torch.autograd.Function):
         model_group = ctx.model_group
 
         weight = ctx.selector.reshape_weights(weight)
-        
-        with torch.autocast('cuda', dtype=grad_output.dtype, enabled=True):
+
+        with torch.autocast("cuda", dtype=grad_output.dtype, enabled=True):
             grad_input = mm_kernels[1](
                 grad_output,
                 weight,
@@ -1038,7 +1037,7 @@ class XW(torch.autograd.Function):
         ctx.model_group = model_group
         ctx.b = b
         ctx.bayesian = bayesian
-        
+
         ctx._fwd_dtype = w.dtype
         ctx._fwd_used_autocast = x.is_floating_point() and w.dtype != torch.float32
 
@@ -1070,7 +1069,9 @@ class XW(torch.autograd.Function):
         model_group = ctx.model_group
 
         weight = selector.reshape_weights(weight)
-        with torch.autocast('cuda', dtype=ctx._fwd_dtype, enabled=ctx._fwd_used_autocast):
+        with torch.autocast(
+            "cuda", dtype=ctx._fwd_dtype, enabled=ctx._fwd_used_autocast
+        ):
             grad_input = selector.mm_kernels[0](
                 grad_output,
                 weight,
