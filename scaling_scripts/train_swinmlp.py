@@ -3,6 +3,7 @@ import time
 import yaml
 import torch
 from torch.profiler import ProfilerActivity
+from dice import TopKDiceLoss, CETopKDiceLoss
 import os
 import csv
 import torch.optim as optim
@@ -104,6 +105,7 @@ def main():
     )
 
     loss_fn = utils.build_loss_fn(config)
+    loss_fn_all = CETopKDiceLoss(k=100, smooth=1e-5)
 
     os.makedirs(save_dir, exist_ok=True)
     log_file = f"log_{config['data']['image_height']}_{num_epochs}_{learn_rate}_{kernel_str}_{seed}.csv"
@@ -175,8 +177,8 @@ def main():
                 model= model, loader=train_loader, optimizer=optimizer,
                 loss_fn=loss_fn, device=device, profiler=prof)
            
-            train_metrics = utils.evaluate(train_loader, model,loss_fn, device)
-            val_metrics   = utils.evaluate(val_loader, model, loss_fn, device)
+            train_metrics = utils.evaluate(train_loader, model,loss_fn, loss_fn_all, device)
+            val_metrics   = utils.evaluate(val_loader, model, loss_fn, loss_fn_all, device)
             
             scheduler.step(val_metrics["Dice"])
             

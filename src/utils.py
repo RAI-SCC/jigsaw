@@ -946,10 +946,9 @@ def build_swin_dataloaders(
 
 @monitor()
 @torch.no_grad()
-def evaluate(loader, model, loss_fn, device, threshold=0.5):
+def evaluate(loader, model, loss_fn, loss_fn_all, device, threshold=0.5):
     model.eval()
 
-    loss_fn_all = TopKDiceLoss(k=100)
     running_loss = 0.0
     running_loss_all = 0.0
     total_samples = 0
