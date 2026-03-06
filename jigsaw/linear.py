@@ -751,6 +751,7 @@ class XWTSync(torch.autograd.Function):
 
         # infer dtype from the input tensors rather than from autocast state
         ctx._fwd_dtype = x.dtype
+        ctx._fwd_used_autocast = x.is_floating_point() and x.dtype != torch.float32
 
     @staticmethod
     def backward(
