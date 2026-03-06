@@ -1,7 +1,7 @@
 data:
   dt: 6
-  train_data_path: "data_processed_seed83/512/train" 
-  valid_data_path: "data_processed_seed83/512/val"
+  train_data_path: "data_processed/512/train" 
+  valid_data_path: "data_processed/512/val"
   base_dir: "data_processed"
   #base_dir: "data_processed_seed83"
   image_dir: "data/images/images/"
@@ -61,7 +61,7 @@ SWIN_MLP:
   dropout: 0.2
   mlp_ratio: 4.0
   shifted_windows: true
-  kernel_flex: false
+  kernel_flex: true
   seed: 42
   save_model: true
-  checkpoint_file: "results_512/best_model.pth"
+  checkpoint_file: "results_512/best_model_flex.pth"

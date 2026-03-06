@@ -1,14 +1,14 @@
 data:
   dt: 6
-  train_data_path: "data_processed_seed83/256/train" 
-  valid_data_path: "data_processed_seed83/256/val"
+  train_data_path: "data_processed/256/train"
+  valid_data_path: "data_processed/256/val"
   #base_dir: "data_processed_seed83"
   base_dir: "data_processed"
   image_dir: "data/images/images/"
   mask_dir: "data/masks/masks/"
   image_height: 256
   image_width: 256
-  in_channels: 1 
+  in_channels: 1
   num_classes: 2
   preprocessed: false
   constant_masks_path: /hkfs/work/workspace/scratch/ke4365-jigsaw/Jigsaw/constant_masks
@@ -55,13 +55,13 @@ training:
 model_parallel:
   parallelism: 1
 SWIN_MLP:
-  window_size: 4       
-  patch_size: 4        
+  window_size: 4
+  patch_size: 4
   architecture: "swin"
   dropout: 0.2
   mlp_ratio: 4.0
   shifted_windows: true
-  kernel_flex: false
+  kernel_flex: true
   seed: 42
   save_model: true
-  checkpoint_file: "results_256/best_model.pth"
+  checkpoint_file: "results_256/best_model_flex.pth"
