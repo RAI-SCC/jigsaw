@@ -3,27 +3,8 @@ from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 
-def dice_coeff(input: Tensor, target: Tensor, reduce_batch_first: bool = False, epsilon: float = 1e-6):
-    # Calculates the Dice coefficient between two binary masks
-    assert input.size() == target.size()
-    assert input.dim() == 3 or not reduce_batch_first
-
-    sum_dim = (-1, -2) if input.dim() == 2 or not reduce_batch_first else (-1, -2, -3)
-
-    inter = 2 * (input * target).sum(dim=sum_dim)
-    sets_sum = input.sum(dim=sum_dim) + target.sum(dim=sum_dim)
-    sets_sum = torch.where(sets_sum == 0, inter, sets_sum)
-
-    dice = (inter + epsilon) / (sets_sum + epsilon)
-    return dice.mean()
-
-def dice_loss(input: Tensor, target: Tensor):
-    # Dice loss (objective to minimize) between 0 and 1
-    return 1 - dice_coeff(input, target, reduce_batch_first=True)
-
-
 class TopKDiceLoss(nn.Module):
-    def __init__(self, k: float = 50, smooth: float = 1e-5):
+    def __init__(self, k: float = 50, smooth: float = 1e-6):
         super(TopKDiceLoss, self).__init__()
         self.k = k
         self.smooth = smooth
@@ -87,6 +68,7 @@ class TopKDiceLoss(nn.Module):
         sum_sq_pred = (probs_k ** 2).sum(dim=1)
         sum_sq_target = (target_k ** 2).sum(dim=1)
         union = sum_sq_pred + sum_sq_target
+        union = torch.where(union == 0, intersection, union)
         
         dice = (2. * intersection + self.smooth) / (union + self.smooth)
         topk_dice_loss = 1 - dice.mean()
@@ -107,3 +89,45 @@ class CETopKDiceLoss(nn.Module):
         topk_dice_loss = self.topk_dice(logits, target)
 
         return ce_loss + topk_dice_loss
+
+class DiceLoss(nn.Module):
+    def __init__(self, smooth: float = 1e-6):
+        super(DiceLoss, self).__init__()
+        self.smooth = smooth
+
+    def forward(self, logits: Tensor, target: Tensor) -> Tensor:
+        logits = logits.float()
+        target = target.float()
+
+        probs = torch.softmax(logits, dim=1)
+        probs = probs[:, 1, ...]
+
+        if target.dim() == 4 and target.shape[1] == 1:
+            target = target.squeeze(1)
+
+        probs_flat  = probs.reshape(probs.shape[0], -1)
+        target_flat = target.reshape(target.shape[0], -1)
+
+        intersection  = (probs_flat * target_flat).sum(dim=1)
+        union         = probs_flat.sum(dim=1) + target_flat.sum(dim=1)
+        union         = torch.where(union == 0, intersection, union)
+
+        dice = (2. * intersection + self.smooth) / (union + self.smooth)
+        return 1 - dice.mean()
+
+
+class CEDiceLoss(nn.Module):
+    def __init__(self, smooth: float = 1e-6, ce_weight: float = 1.0, dice_weight: float = 1.0):
+        super(CEDiceLoss, self).__init__()
+        self.dice      = DiceLoss(smooth=smooth)
+        self.ce_weight   = ce_weight
+        self.dice_weight = dice_weight
+
+    def forward(self, logits: Tensor, target: Tensor) -> Tensor:
+        if target.dim() == 4 and target.shape[1] == 1:
+            target = target.squeeze(1)
+
+        ce_loss   = F.cross_entropy(logits, target.long())
+        dice_loss = self.dice(logits, target)
+
+        return self.ce_weight * ce_loss + self.dice_weight * dice_loss
