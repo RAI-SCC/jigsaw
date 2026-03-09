@@ -3,7 +3,7 @@ import time
 import yaml
 import torch
 from torch.profiler import ProfilerActivity
-from dice import TopKDiceLoss, CETopKDiceLoss
+from dice import TopKDiceLoss, CETopKDiceLoss, DiceLoss, CEDiceLoss, CETopKDiceLossSq
 import os
 import csv
 import torch.optim as optim
@@ -109,6 +109,10 @@ def main():
     loss_type = config["training"]["loss"]
     if  loss_type == "CE_TopK_Dice":
         loss_fn_all = CETopKDiceLoss(k=100, smooth=1e-5)
+        
+    elif loss_type == "CE_TopK_Dice_squared":
+        loss_fn_all = CETopKDiceLossSq(k=100, smooth=1e-5)
+    
 
     loss_fn_all = utils.build_loss_fn(config)
 
