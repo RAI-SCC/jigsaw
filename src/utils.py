@@ -878,7 +878,7 @@ def reduce_ddp_layernorms(model, col_groups):
 
     return handles, flat_grad, gradients
 
-from dice import dice_coeff
+
 from Model import ModelSwinMLP
 from Dataloaders import BasicDataset
 
