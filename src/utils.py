@@ -577,7 +577,7 @@ def define_subset_sizes(config_dict: dict, rank: int) -> tuple[int, int]:
 
     return train_subset, valid_subset
 
-# added new loss function: TopKDiceLoss
+
 def build_loss_fn(config_dict):
     """Return loss function."""
     loss_type = config_dict["training"]["loss"]
@@ -586,6 +586,8 @@ def build_loss_fn(config_dict):
             loss_fn = CETopKDiceLoss(k=50, smooth=1e-6)
         case "CE_Dice":
             loss_fn = CEDiceLoss(smooth=1e-6)
+        case "Dice":
+            loss_fn = DiceLoss(smooth=1e-6)
         case "L1":
             loss_fn = torch.nn.L1Loss()
         case "L2":
@@ -1012,7 +1014,7 @@ def evaluate(loader, model, loss_fn, loss_fn_all, device, threshold=0.5):
         "Loss": avg_loss,
         "Loss_All": avg_loss_all,
         "Accuracy": acc,
-        "Dice Score": avg_dice,
+        "Dice": avg_dice,
         "TP": TP,
         "FP": FP,
         "FN": FN,

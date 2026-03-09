@@ -7,8 +7,8 @@ class TopKDiceLoss(nn.Module):
     def __init__(self, k: float = 50, smooth: float = 1e-6):
         super(TopKDiceLoss, self).__init__()
         self.k = k
-        self.smooth = smooth
-        self._epsilon = None  # Buffer to hold epsilon values for tie-breaking in top K selection
+        #self.smooth = smooth
+        #self._epsilon = None  # Buffer to hold epsilon values for tie-breaking in top K selection
         
     # logits: (Batch, 2, H, W) -> From model (background and foreground class logits)
     # target: (Batch, 1, H, W) -> From DataLoader, values 0 or 1 (binary mask)   
@@ -30,11 +30,13 @@ class TopKDiceLoss(nn.Module):
 
         # init epsilon once
         # added small random noise to epsilon to prevent ties in top K selection
-        if self._epsilon is None or self._epsilon.shape != probs_flat.shape:
-             self._epsilon = torch.rand_like(probs_flat) * 1e-6
+        """ if self._epsilon is None or self._epsilon.shape != probs_flat.shape:
+             self._epsilon = torch.rand_like(probs_flat) * 1e-6 """
+        
+        epsilon  = torch.rand_like(probs_flat) * 1e-6
 
         # Compute "True Positive Map"
-        tp_map = probs_flat * (target_flat + self._epsilon.to(probs_flat.device))  # Add small noise to target to break ties
+        tp_map = probs_flat * (target_flat + epsilon)  # Add small noise to target to break ties
         
         # .detch() to seperate the "Ignore Map" from the computational graph,
         # so it doesn't affect gradients
@@ -65,12 +67,17 @@ class TopKDiceLoss(nn.Module):
         target_k = target_flat * mask
 
         intersection = (probs_k * target_k).sum(dim=1)
-        sum_sq_pred = (probs_k ** 2).sum(dim=1)
+        # squared sums for Dice denominator
+        """ sum_sq_pred = (probs_k ** 2).sum(dim=1)
         sum_sq_target = (target_k ** 2).sum(dim=1)
-        union = sum_sq_pred + sum_sq_target
-        union = torch.where(union == 0, intersection, union)
+        union = sum_sq_pred + sum_sq_target """
+
+        union        = probs_k.sum(dim=1) + target_k.sum(dim=1)
+        dice = torch.where(
+                union == 0,
+                torch.ones_like(intersection), 
+                (2. * intersection) / union)
         
-        dice = (2. * intersection + self.smooth) / (union + self.smooth)
         topk_dice_loss = 1 - dice.mean()
 
         return topk_dice_loss
@@ -110,9 +117,10 @@ class DiceLoss(nn.Module):
 
         intersection  = (probs_flat * target_flat).sum(dim=1)
         union         = probs_flat.sum(dim=1) + target_flat.sum(dim=1)
-        union         = torch.where(union == 0, intersection, union)
-
-        dice = (2. * intersection + self.smooth) / (union + self.smooth)
+        dice = torch.where(
+                union == 0,
+                torch.ones_like(intersection), 
+                (2. * intersection) / union)
         return 1 - dice.mean()
 
 

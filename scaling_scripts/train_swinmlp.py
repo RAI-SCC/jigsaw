@@ -105,11 +105,15 @@ def main():
     )
 
     loss_fn = utils.build_loss_fn(config)
-    #loss_fn_all = CETopKDiceLoss(k=100, smooth=1e-5)
+
+    loss_type = config["training"]["loss"]
+    if  loss_type == "CE_TopK_Dice":
+        loss_fn_all = CETopKDiceLoss(k=100, smooth=1e-5)
+
     loss_fn_all = utils.build_loss_fn(config)
 
     os.makedirs(save_dir, exist_ok=True)
-    log_file = f"log_{config['data']['image_height']}_{num_epochs}_{learn_rate}_{kernel_str}_{seed}.csv"
+    log_file = f"log_{config['data']['image_height']}_{num_epochs}_{learn_rate}_{kernel_str}_{seed}_{loss_type}.csv"
     log_path = os.path.join(save_dir, log_file)
 
     if not os.path.isfile(log_path):
