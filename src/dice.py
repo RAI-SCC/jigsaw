@@ -96,7 +96,7 @@ class CETopKDiceLoss(nn.Module):
 
         topk_dice_loss = self.topk_dice(logits, target)
 
-        return ce_loss + topk_dice_loss
+        return 0.2 * ce_loss + topk_dice_loss
 
 class DiceLoss(nn.Module):
     def __init__(self, smooth: float = 1e-6):
