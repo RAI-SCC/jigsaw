@@ -1101,7 +1101,7 @@ class ModelSwinMLP(torch.nn.Module):
 
         self.up3 = SwinMLPDecoderLayer(in_channels=128, out_channels=64, 
                                        input_resolution=current_res, 
-                                       window_size=window_size,
+                                       window_size=2 * window_size,
                                        dropout=0.0,
                                        mlp_ratio=mlp_ratio,
                                        shifted_windows=shifted_windows,

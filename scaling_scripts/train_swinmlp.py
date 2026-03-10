@@ -90,7 +90,7 @@ def main():
     optimizer = optim.AdamW(
         model.parameters(),
         lr= learn_rate,
-        weight_decay=1e-4,
+        weight_decay=1e-2,
         betas = (0.9, 0.999),
         eps=1e-4
     )
