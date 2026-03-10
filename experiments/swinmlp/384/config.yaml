@@ -37,7 +37,7 @@ training:
   lr: 0.0001
   lr_embedding: 2.0e-05
   lr_recovery: 2.0e-05
-  loss: CE_TopK_Dice
+  loss: TopK_Dice
   #loss: Dice
   lr_constant: false
   train_batch: 8

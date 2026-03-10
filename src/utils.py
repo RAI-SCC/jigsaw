@@ -590,6 +590,8 @@ def build_loss_fn(config_dict):
             loss_fn = DiceLoss(smooth=1e-6)
         case "CE_TopK_Dice_squared":
             loss_fn = CETopKDiceLossSq(k=50, smooth=1e-6)
+        case "TopK_Dice":
+            loss_fn = TopKDiceLoss(k=50, smooth=1e-6)
         case "L1":
             loss_fn = torch.nn.L1Loss()
         case "L2":

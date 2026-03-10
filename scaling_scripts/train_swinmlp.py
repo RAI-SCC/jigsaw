@@ -111,6 +111,8 @@ def main():
         loss_fn_all = CETopKDiceLoss(k=100)
     elif loss_type == "CE_TopK_Dice_Sq":
         loss_fn_all = CETopKDiceLossSq(k=100)
+    elif loss_type == "TopK_Dice":
+        loss_fn_all = TopKDiceLoss(k=100)
     else:
         loss_fn_all = utils.build_loss_fn(config)
         
