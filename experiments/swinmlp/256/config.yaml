@@ -65,4 +65,4 @@ SWIN_MLP:
   kernel_flex: false
   seed: 42
   save_model: true
-  checkpoint_file: "results_256/best_model_fix.pth"
+  checkpoint_file: "results_384/best_model_fix.pth"
