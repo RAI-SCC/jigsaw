@@ -45,7 +45,7 @@ training:
   epochs: 35
   identity: false
   grad_clip: 1
-  save_dir: results_768
+  save_dir: results_384
   preload: false
   file_path: .
   load_path: .
@@ -64,4 +64,4 @@ SWIN_MLP:
   kernel_flex: false
   seed: 42
   save_model: true
-  checkpoint_file: "results_768/best_model_fix.pth"
+  checkpoint_file: "results_384/best_model_fix.pth"

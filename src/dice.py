@@ -71,12 +71,12 @@ class TopKDiceLoss(nn.Module):
         """ sum_sq_pred = (probs_k ** 2).sum(dim=1)
         sum_sq_target = (target_k ** 2).sum(dim=1)
         union = sum_sq_pred + sum_sq_target """
-
+        union_safe = union.clamp(min=1e-6)
         union        = probs_k.sum(dim=1) + target_k.sum(dim=1)
         dice = torch.where(
                 union == 0,
                 torch.ones_like(intersection), 
-                (2. * intersection) / union)
+                (2. * intersection) / union_safe)
         
         topk_dice_loss = 1 - dice.mean()
 
@@ -117,10 +117,11 @@ class DiceLoss(nn.Module):
 
         intersection  = (probs_flat * target_flat).sum(dim=1)
         union         = probs_flat.sum(dim=1) + target_flat.sum(dim=1)
+        union_safe = union.clamp(min=1e-6)
         dice = torch.where(
                 union == 0,
                 torch.ones_like(intersection), 
-                (2. * intersection) / union)
+                (2. * intersection) / union_safe)
         return 1 - dice.mean()
 
 
@@ -209,12 +210,13 @@ class TopKDiceLossSq(nn.Module):
         sum_sq_pred = (probs_k ** 2).sum(dim=1)
         sum_sq_target = (target_k ** 2).sum(dim=1)
         union = sum_sq_pred + sum_sq_target
+        union_safe = union.clamp(min=1e-6)
 
         #union        = probs_k.sum(dim=1) + target_k.sum(dim=1)
         dice = torch.where(
                 union == 0,
                 torch.ones_like(intersection), 
-                (2. * intersection) / union)
+                (2. * intersection) / union_safe)
         
         topk_dice_loss = 1 - dice.mean()
 

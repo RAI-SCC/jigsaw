@@ -107,14 +107,13 @@ def main():
     loss_fn = utils.build_loss_fn(config)
 
     loss_type = config["training"]["loss"]
-    if  loss_type == "CE_TopK_Dice":
-        loss_fn_all = CETopKDiceLoss(k=100, smooth=1e-5)
+    if loss_type == "CE_TopK_Dice":
+        loss_fn_all = CETopKDiceLoss(k=100)
+    elif loss_type == "CE_TopK_Dice_Sq":
+        loss_fn_all = CETopKDiceLossSq(k=100)
+    else:
+        loss_fn_all = utils.build_loss_fn(config)
         
-    elif loss_type == "CE_TopK_Dice_squared":
-        loss_fn_all = CETopKDiceLossSq(k=100, smooth=1e-5)
-    
-
-    loss_fn_all = utils.build_loss_fn(config)
 
     os.makedirs(save_dir, exist_ok=True)
     log_file = f"log_{config['data']['image_height']}_{num_epochs}_{learn_rate}_{kernel_str}_{seed}_{loss_type}.csv"

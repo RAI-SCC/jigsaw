@@ -39,14 +39,14 @@ training:
   lr_embedding: 2.0e-05
   lr_recovery: 2.0e-05
   #loss: CE_TopK_Dice
-  loss: CE_Dice
+  loss: Dice
   lr_constant: false
   train_batch: 8
   valid_batch: 8
   epochs: 35
   identity: false
   grad_clip: 1
-  save_dir: results_512
+  save_dir: results_384
   preload: false
   file_path: .
   load_path: .
@@ -65,4 +65,4 @@ SWIN_MLP:
   kernel_flex: false
   seed: 42
   save_model: true
-  checkpoint_file: "results_512/best_model_fix.pth"
+  checkpoint_file: "results_384/best_model_fix.pth"
