@@ -71,8 +71,9 @@ class TopKDiceLoss(nn.Module):
         """ sum_sq_pred = (probs_k ** 2).sum(dim=1)
         sum_sq_target = (target_k ** 2).sum(dim=1)
         union = sum_sq_pred + sum_sq_target """
-        union_safe = union.clamp(min=1e-6)
+        
         union        = probs_k.sum(dim=1) + target_k.sum(dim=1)
+        union_safe = union.clamp(min=1e-6)
         dice = torch.where(
                 union == 0,
                 torch.ones_like(intersection), 
