@@ -16,7 +16,7 @@ import TransformerModels
 import Dataloaders
 import eval
 import Model
-from dice import TopKDiceLoss, CETopKDiceLoss, DiceLoss, CEDiceLoss, CETopKDiceLossSq
+from dice import TopKDiceLoss, CETopKDiceLoss, DiceLoss, CEDiceLoss 
 
 
 def get_ddp_groups(rank: int, n_parallel: int) -> dist.ProcessGroup:

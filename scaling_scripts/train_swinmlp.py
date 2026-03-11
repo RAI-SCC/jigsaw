@@ -3,7 +3,7 @@ import time
 import yaml
 import torch
 from torch.profiler import ProfilerActivity
-from dice import TopKDiceLoss, CETopKDiceLoss, DiceLoss, CEDiceLoss, CETopKDiceLossSq
+from dice import TopKDiceLoss, CETopKDiceLoss, DiceLoss, CEDiceLoss
 import os
 import csv
 import torch.optim as optim
