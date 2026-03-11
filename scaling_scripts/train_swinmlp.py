@@ -90,7 +90,7 @@ def main():
     optimizer = optim.AdamW(
         model.parameters(),
         lr= learn_rate,
-        weight_decay=1e-2,
+        weight_decay=1e-3,
         betas = (0.9, 0.999),
         eps=1e-4
     )
@@ -98,19 +98,16 @@ def main():
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 
         mode='max', 
-        patience=4,    
-        factor=0.8,   
+        patience=6,    
+        factor=0.5,   
         threshold=1e-3,
         min_lr=1e-6, 
     )
 
     loss_fn = utils.build_loss_fn(config)
-
     loss_type = config["training"]["loss"]
     if loss_type == "CE_TopK_Dice":
         loss_fn_all = CETopKDiceLoss(k=100)
-    elif loss_type == "CE_TopK_Dice_Sq":
-        loss_fn_all = CETopKDiceLossSq(k=100)
     elif loss_type == "TopK_Dice":
         loss_fn_all = TopKDiceLoss(k=100)
     else:

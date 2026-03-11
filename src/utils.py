@@ -583,15 +583,13 @@ def build_loss_fn(config_dict):
     loss_type = config_dict["training"]["loss"]
     match loss_type:
         case "CE_TopK_Dice":
-            loss_fn = CETopKDiceLoss(k=50, smooth=1e-6)
+            loss_fn = CETopKDiceLoss(k=50)
         case "CE_Dice":
-            loss_fn = CEDiceLoss(smooth=1e-6)
+            loss_fn = CEDiceLoss()
         case "Dice":
-            loss_fn = DiceLoss(smooth=1e-6)
-        case "CE_TopK_Dice_squared":
-            loss_fn = CETopKDiceLossSq(k=50, smooth=1e-6)
+            loss_fn = DiceLoss()
         case "TopK_Dice":
-            loss_fn = TopKDiceLoss(k=50, smooth=1e-6)
+            loss_fn = TopKDiceLoss(k=50)
         case "L1":
             loss_fn = torch.nn.L1Loss()
         case "L2":
@@ -965,7 +963,7 @@ def evaluate(loader, model, loss_fn, loss_fn_all, device, threshold=0.5):
     dice_score = 0.0
     TP = FP = FN = TN = 0
 
-    dice_lossfn = DiceLoss(smooth=1e-6)
+    dice_lossfn = DiceLoss()
 
     for batch in loader:
         images = batch[0].to(device)
