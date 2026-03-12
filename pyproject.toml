@@ -15,16 +15,15 @@ authors = [
 ]
 description = "The Jigsaw model parallelization scheme"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Development Status :: 3 - Alpha",
 ]
 dependencies = [
     "torch",
-    "h5py",
     "zarr",
-    "timm~=0.9.12",
+    "timm",
     "pyyaml",
     "xarray",
     "matplotlib",
