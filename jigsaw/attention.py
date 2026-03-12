@@ -66,21 +66,24 @@ class DistributedWindowedAttention(torch.nn.Module):
         self.xwt = linear.DistributedMatMulXWTranspose(
             self.local_rank,
             self.device,
-            2,
+            self.parallelism,
             model_group=self.channel_group,
             spatial_group=self.spatial_group,
             bayesian=bayesian,
         )
         self.xw = linear.DistributedMatMulXW(
-            local_rank, device, 2, model_group=self.channel_group, bayesian=bayesian
+            local_rank,
+            device,
+            self.parallelism,
+            model_group=self.channel_group,
+            bayesian=bayesian,
         )
 
-        self.concatenator = mlp.DistributedSynchronizedMLP(
-            embed_dim,
-            embed_dim,  # hidden dimension
+        # TODO: check working
+        self.concatenator = linear.DistributedXWTSync(
+            embed_dim // 2,
             output_dim,
             bias=True,
-            dropout=0,
             local_rank=self.local_rank,
             device=self.device,
             parallelism=self.parallelism,
@@ -91,7 +94,7 @@ class DistributedWindowedAttention(torch.nn.Module):
 
         self.heads = heads
 
-        self.scale = (embed_dim * 2 // self.heads) ** (-0.5)
+        self.scale = (embed_dim * self.parallelism // self.heads) ** (-0.5)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """
@@ -99,8 +102,6 @@ class DistributedWindowedAttention(torch.nn.Module):
 
         x: (n_batch, vars, n_lat, n_lon)
         """
-        # Load constant masks from the disc
-
         # x_local: [n_batch, n_lat, n_lon, variables]
         x_patches_local = x
         # shape: [n_batches, spatial_tokens, channel_tokens]
