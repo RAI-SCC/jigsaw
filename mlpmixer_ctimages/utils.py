@@ -1,4 +1,4 @@
-from loss import dice_coeff, CETopKDiceLoss
+from loss import TopKDiceLoss, CETopKDiceLoss, DiceLoss, CEDiceLoss 
 from Model import ModelMLPMixer
 import Dataloaders
 from Dataloaders import BasicDataset
@@ -11,14 +11,20 @@ def build_loss_fn(config_dict):
     """Return loss function."""
     loss_type = config_dict["training"]["loss"]
     match loss_type:
-        case "TopKDice":
-            loss_fn = CETopKDiceLoss(k=config_dict["training"]["top_k"])
+        case "CE_TopK_Dice":
+            loss_fn = CETopKDiceLoss(k=50)
+        case "CE_Dice":
+            loss_fn = CEDiceLoss()
+        case "Dice":
+            loss_fn = DiceLoss()
+        case "TopK_Dice":
+            loss_fn = TopKDiceLoss(k=50)
         case "L1":
             loss_fn = torch.nn.L1Loss()
         case "L2":
             loss_fn = torch.nn.MSELoss()
         case _:
-            raise ValueError("Only L1 and L2 losses are supported.")
+            raise ValueError(f"Loss type '{loss_type}' is not supported.")
     return loss_fn
 
 
@@ -86,6 +92,7 @@ def build_swin_dataloaders(
 
     return train_loader, valid_loader
 
+
 @monitor()
 @torch.no_grad()
 def evaluate(loader, model, loss_fn, loss_fn_all, device, threshold=0.5):
@@ -97,8 +104,9 @@ def evaluate(loader, model, loss_fn, loss_fn_all, device, threshold=0.5):
     num_correct = 0
     num_pixels = 0
     dice_score = 0.0
-
     TP = FP = FN = TN = 0
+
+    dice_lossfn = DiceLoss()
 
     for batch in loader:
         images = batch[0].to(device)
@@ -112,6 +120,7 @@ def evaluate(loader, model, loss_fn, loss_fn_all, device, threshold=0.5):
             logits = model(images) 
 
         logits_f32 = logits.float()
+
         loss = loss_fn(logits_f32, true_masks)
         loss_all = loss_fn_all(logits_f32, true_masks)
 
@@ -134,12 +143,8 @@ def evaluate(loader, model, loss_fn, loss_fn_all, device, threshold=0.5):
         FN += ((preds == 0) & (true_masks == 1)).sum().item()
         TN += ((preds == 0) & (true_masks == 0)).sum().item()
 
-        # Dice
-        batch_dice = dice_coeff(
-            preds.unsqueeze(1),
-            true_masks.unsqueeze(1),
-            reduce_batch_first=False
-        )
+        # Dice score
+        batch_dice    = 1 - dice_lossfn(logits_f32, true_masks)
         dice_score += batch_dice.item() * batch_size
         
     avg_loss = running_loss / total_samples

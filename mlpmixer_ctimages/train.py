@@ -3,7 +3,7 @@ import time
 import yaml
 import torch
 from torch.profiler import ProfilerActivity
-from loss import CETopKDiceLoss
+from loss import TopKDiceLoss, CETopKDiceLoss, DiceLoss, CEDiceLoss
 import os
 import csv
 import torch.optim as optim
@@ -83,7 +83,6 @@ def main():
         kernel_str = "flex"
     else:        
         kernel_str = "fixed"
-    
 
     seed = config["model"]["seed"]
 
@@ -105,7 +104,14 @@ def main():
     )
 
     loss_fn = utils.build_loss_fn(config)
-    loss_fn_all = CETopKDiceLoss(k=100, smooth=1e-5)
+    loss_type = config["training"]["loss"]
+    if loss_type == "CE_TopK_Dice":
+        loss_fn_all = CETopKDiceLoss(k=100)
+    elif loss_type == "TopK_Dice":
+        loss_fn_all = TopKDiceLoss(k=100)
+    else:
+        loss_fn_all = utils.build_loss_fn(config)
+        
 
     os.makedirs(save_dir, exist_ok=True)
     log_file = f"log_{config['data']['image_height']}_{num_epochs}_{learn_rate}_{kernel_str}_{seed}.csv"
