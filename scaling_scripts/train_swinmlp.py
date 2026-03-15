@@ -83,7 +83,6 @@ def main():
         kernel_str = "flex"
     else:        
         kernel_str = "fixed"
-    
 
     seed = config["SWIN_MLP"]["seed"]
 
