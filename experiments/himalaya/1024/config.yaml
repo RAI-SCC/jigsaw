@@ -27,7 +27,7 @@ model:
   kernel_flex: true
   seed: 42
   save_model: true
-  checkpoint_file: "results_1024/best_model_mlpmixer.pth"
+  checkpoint_file: "results_1024_mlpmixer/best_model_mlpmixer.pth"
 
 model_parallel:
   parallelism: 4 
