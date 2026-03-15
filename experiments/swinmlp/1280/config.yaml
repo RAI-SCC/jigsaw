@@ -34,7 +34,7 @@ model:
   linear_residual: true
   dropout: 0.001
 training:
-  lr: 0.001
+  lr: 0.0001
   lr_embedding: 2.0e-05
   lr_recovery: 2.0e-05
   loss: TopK_Dice
@@ -61,7 +61,7 @@ SWIN_MLP:
   dropout: 0.2
   mlp_ratio: 4.0
   shifted_windows: true
-  kernel_flex: true
+  kernel_flex: false
   seed: 42
   save_model: true
   checkpoint_file: "results_1280/best_model_fix.pth"
