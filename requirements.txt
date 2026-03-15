@@ -41,7 +41,7 @@ httpcore==1.0.9
 httpx==0.28.1
 huggingface_hub==1.5.0
 idna==3.11
--e git+https://github.com/RAI-SCC/jigsaw.git@ef7c9594bdda060d2d72b33f848752a2ff90a9fa#egg=Jigsaw
+#-e git+https://github.com/RAI-SCC/jigsaw.git@ef7c9594bdda060d2d72b33f848752a2ff90a9fa#egg=Jigsaw
 Jinja2==3.1.6
 kiwisolver==1.4.9
 markdown-it-py==4.0.0

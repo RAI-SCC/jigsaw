@@ -13,8 +13,8 @@ data:
   valid_subset: -1
 
 training:
-  lr: 0.001
-  loss: TopKDice
+  lr: 0.0001
+  loss: TopK_Dice
   top_k: 50
   train_batch: 8
   valid_batch: 8
