@@ -574,7 +574,6 @@ class DistributedConv2D(torch.nn.Module):
             self.stride,
         )
 
-        average_weights([self.weight, self.bias], self.spatial_group)
         self.weight = torch.nn.parameter.Parameter(self.weight)
         self.bias = torch.nn.parameter.Parameter(self.bias)
 
