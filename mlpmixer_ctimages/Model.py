@@ -8,16 +8,18 @@ from mlpmixer import MLPMixerEncoderLayer, MLPMixerDecoderLayer
 
 class ModelMLPMixer(torch.nn.Module):
     def __init__(self, channels_in, input_resolution = (512,512),
-                 classes=2, mlp_ratio=4.0, kernel_flex = False):
+                 classes=2, mlp_ratio=4.0, kernel_flex = False,
+                 start_channels = 16):
         super().__init__()
 
         self.input_resolution = input_resolution
         self.channels_in = channels_in
         self.classes = classes
         self.kernel_flex = kernel_flex
+        c = start_channels
 
         self.conv = nn.Conv2d(in_channels=channels_in,
-                              out_channels=32,
+                              out_channels=c,
                               kernel_size=3,
                               padding=1,
                               stride=2,
@@ -28,7 +30,7 @@ class ModelMLPMixer(torch.nn.Module):
 
         current_res = [input_resolution[0] // 2, input_resolution[1] // 2]
 
-        self.down1 = MLPMixerEncoderLayer(in_channels=32, out_channels=64, 
+        self.down1 = MLPMixerEncoderLayer(in_channels=c, out_channels=c*2, 
                                          input_resolution=current_res, 
                                          dropout=0.1,
                                          mlp_ratio=mlp_ratio,
@@ -37,7 +39,7 @@ class ModelMLPMixer(torch.nn.Module):
         
         current_res = [current_res[0] // 2, current_res[1] // 2]
 
-        self.down2 = MLPMixerEncoderLayer(in_channels=64, out_channels=128, 
+        self.down2 = MLPMixerEncoderLayer(in_channels=c*2, out_channels=c*4, 
                                          input_resolution=current_res, 
                                          dropout=0.1,
                                          mlp_ratio=mlp_ratio,
@@ -46,7 +48,7 @@ class ModelMLPMixer(torch.nn.Module):
         
         current_res = [current_res[0] // 2, current_res[1] // 2] 
 
-        self.down3 = MLPMixerEncoderLayer(in_channels=128, out_channels=256, 
+        self.down3 = MLPMixerEncoderLayer(in_channels=c*4, out_channels=c*8, 
                                          input_resolution=current_res, 
                                          dropout=0.2,
                                          mlp_ratio=mlp_ratio,
@@ -55,7 +57,7 @@ class ModelMLPMixer(torch.nn.Module):
         
         current_res = [current_res[0] // 2, current_res[1] // 2]
        
-        self.down4 = MLPMixerEncoderLayer(in_channels=256, out_channels=512, 
+        self.down4 = MLPMixerEncoderLayer(in_channels=c*8, out_channels=c*16, 
                                          input_resolution=current_res, 
                                          dropout=0.3,
                                          mlp_ratio=mlp_ratio,
@@ -64,7 +66,7 @@ class ModelMLPMixer(torch.nn.Module):
         
         bottleneck_res = [current_res[0] // 2, current_res[1] // 2]
 
-        self.up1 = MLPMixerDecoderLayer(in_channels=512, out_channels=256, 
+        self.up1 = MLPMixerDecoderLayer(in_channels=c*16, out_channels=c*8, 
                                        input_resolution=bottleneck_res, 
                                        dropout=0.0,
                                        mlp_ratio=mlp_ratio,
@@ -72,7 +74,7 @@ class ModelMLPMixer(torch.nn.Module):
                                        )
         current_res = [bottleneck_res[0] * 2, bottleneck_res[1] * 2]
 
-        self.up2 = MLPMixerDecoderLayer(in_channels=256, out_channels=128, 
+        self.up2 = MLPMixerDecoderLayer(in_channels=c*8, out_channels=c*4, 
                                        input_resolution=current_res, 
                                        dropout=0.0,
                                        mlp_ratio=mlp_ratio,
@@ -80,7 +82,7 @@ class ModelMLPMixer(torch.nn.Module):
                                     )
         current_res = [current_res[0] * 2, current_res[1] * 2]
 
-        self.up3 = MLPMixerDecoderLayer(in_channels=128, out_channels=64, 
+        self.up3 = MLPMixerDecoderLayer(in_channels=c*4, out_channels=c*2, 
                                        input_resolution=current_res, 
                                        dropout=0.0,
                                        mlp_ratio=mlp_ratio,
@@ -88,7 +90,7 @@ class ModelMLPMixer(torch.nn.Module):
                                        )
         current_res = [current_res[0] * 2, current_res[1] * 2]
 
-        self.up4 = MLPMixerDecoderLayer(in_channels=64, out_channels=32, 
+        self.up4 = MLPMixerDecoderLayer(in_channels=c*2, out_channels=c, 
                                        input_resolution=current_res, 
                                        dropout=0.0,
                                        mlp_ratio=mlp_ratio,
@@ -97,7 +99,7 @@ class ModelMLPMixer(torch.nn.Module):
         current_res = [current_res[0] * 2, current_res[1] * 2]
 
         self.final_upsample = nn.ConvTranspose2d(
-            in_channels=32,
+            in_channels=c,
             out_channels=classes,
             kernel_size=3, 
             stride=2, 
