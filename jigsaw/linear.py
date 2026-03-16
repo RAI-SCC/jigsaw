@@ -201,7 +201,6 @@ class LinearSelectionStrategy:
             process group of ranks distributed across space (share channels).
         """
         grad_b = grad_output.sum(dim=(-3, -2))
-        dist.all_reduce(grad_b, group=spatial_group, op=dist.ReduceOp.SUM)
         return grad_b
 
     def _no_reduce_bias(
@@ -606,7 +605,7 @@ class DistributedXWTSync(torch.nn.Module):
             if parallelism > 1
             else 1.0 / np.sqrt(in_dim)  # TODO CHECK
         )
-        self.weight = torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev).to(device)
+        self.weight = torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
 
         match parallelism:
             case 2:
@@ -617,7 +616,7 @@ class DistributedXWTSync(torch.nn.Module):
                 out_dim = out_dim * 2
 
         self.bias = (
-            torch.zeros(out_dim).uniform_(-stdev, stdev).to(device) if bias else None
+            torch.zeros(out_dim).uniform_(-stdev, stdev) if bias else None
         )
 
         self.device = device
@@ -634,7 +633,6 @@ class DistributedXWTSync(torch.nn.Module):
             linear_layer=True,
         )
 
-        average_weights([self.weight, self.bias], self.sync_group)
         self.weight = torch.nn.parameter.Parameter(self.weight)
         self.bias = torch.nn.parameter.Parameter(self.bias)
 
@@ -816,8 +814,6 @@ class XWTSync(torch.autograd.Function):
             # Batch dim = 0 if not bayesian, = 1 if bayesian
             grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
 
-            # Reduce weights across sync group
-            dist.all_reduce(grad_weight, group=ctx.sync_group)
 
         return grad_input, grad_weight, grad_b, None, None, None, None, None, None
 
@@ -1925,12 +1921,11 @@ class DistributedXWTNice(torch.nn.Module):
 
         stdev = 1.0 / np.sqrt(in_dim)
 
-        self.weight = torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev).to(device)
+        self.weight = torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
         self.bias = (
-            torch.zeros(out_dim).uniform_(-stdev, stdev).to(device) if bias else None
+            torch.zeros(out_dim).uniform_(-stdev, stdev) if bias else None
         )
 
-        average_weights([self.weight, self.bias], self.spatial_group)
 
         self.weight = torch.nn.parameter.Parameter(self.weight)
         self.bias = torch.nn.parameter.Parameter(self.bias) if bias else None
@@ -2061,16 +2056,7 @@ class XWTNice(torch.autograd.Function):
             else None
         )
 
-        g_w_handler = dist.all_reduce(
-            grad_weight, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True
-        )
-        if grad_bias is not None:
-            g_b_handler = dist.all_reduce(
-                grad_bias, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True
-            )
-            g_b_handler.wait()
 
-        g_w_handler.wait()
         g_i_handler.wait()
 
         return grad_input, grad_weight, grad_bias, None, None

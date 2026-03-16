@@ -236,7 +236,6 @@ class ConvSelectionStrategy:
 
     def _reduce_bias_over_spatial_group(self, grad_output, spatial_group):
         grad_b = grad_output.sum(dim=(-4, -2, -1))
-        dist.all_reduce(grad_b, op=dist.ReduceOp.SUM, group=spatial_group)
         return grad_b
 
 
@@ -505,7 +504,6 @@ class ConvTransposeSelectionStrategy:
 
     def _reduce_bias_over_spatial_group(self, grad_output, spatial_group):
         grad_b = grad_output.sum(dim=(-4, -2, -1))
-        dist.all_reduce(grad_b, op=dist.ReduceOp.SUM, group=spatial_group)
         return grad_b
 
 
@@ -565,9 +563,8 @@ class DistributedConv2D(torch.nn.Module):
                 self.out_channels, self.in_channels, kernel_size[0], kernel_size[1]
             )
             .uniform_(-k, k)
-            .to(device)
         )
-        self.bias = torch.zeros(self.out_channels).uniform_(-k, k).to(device)
+        self.bias = torch.zeros(self.out_channels).uniform_(-k, k)
 
         self.selector = ConvSelectionStrategy(
             self.bayesian,
@@ -837,9 +834,6 @@ class Conv2d(torch.autograd.Function):
             dilation=dilation,
         )
 
-        g_w_handle = dist.all_reduce(
-            g_w, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True
-        )
 
         if g_x_handle is not None:
             g_x_handle.wait()
@@ -850,7 +844,6 @@ class Conv2d(torch.autograd.Function):
             else g_x[..., ctx.in_channels_global // 2 :, :, :] + g_x_recv
         )
 
-        g_w_handle.wait()
 
         return (
             g_x,
@@ -985,9 +978,8 @@ class DistributedConvTranspose2D(torch.nn.Module):
                 kernel_size[1],
             )
             .uniform_(-k, k)
-            .to(device)
         )
-        self.bias = torch.zeros(self.out_channels).uniform_(-k, k).to(device)
+        self.bias = torch.zeros(self.out_channels).uniform_(-k, k)
         self.empty = torch.empty(0, device=self.device, dtype=dtype)
 
         self.selector = ConvTransposeSelectionStrategy(
@@ -998,7 +990,6 @@ class DistributedConvTranspose2D(torch.nn.Module):
             self.stride,
         )
 
-        average_weights([self.weight, self.bias], self.spatial_group)
 
         self.weight = torch.nn.parameter.Parameter(self.weight)
         self.bias = torch.nn.parameter.Parameter(self.bias)
