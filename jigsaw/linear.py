@@ -201,7 +201,7 @@ class LinearSelectionStrategy:
             process group of ranks distributed across space (share channels).
         """
         grad_b = grad_output.sum(dim=(-3, -2))
-        # dist.all_reduce(grad_b, group=spatial_group, op=dist.ReduceOp.SUM)
+        dist.all_reduce(grad_b, group=spatial_group, op=dist.ReduceOp.SUM)
         return grad_b
 
     def _no_reduce_bias(
