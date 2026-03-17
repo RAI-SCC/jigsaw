@@ -12,7 +12,7 @@ class MLPMixerBlock(nn.Module):
         self.mixer_block = MixerBlockSequential(
             tokens_mlp_dim=self.num_tokens,
             channels_mlp_dim=dim,
-            spatial_hidden_dim_fraction=1.0,
+            spatial_hidden_dim_fraction=0.7,
             channels_hidden_dim_fraction=mlp_ratio,
             dropout=dropout
         )
