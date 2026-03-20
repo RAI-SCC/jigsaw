@@ -22,8 +22,11 @@ TEST_CONFIGS = [
 ]
 
 def run_test(config_path, seed=42, n_visual=6, threshold=0.5):
+    script_dir = Path(__file__).parent
+    test_script = script_dir / "test_swinmlp.py"
+    
     cmd = [
-        "python", "-u", "test_swinmlp.py",
+        "python", "-u", str(test_script),
         "--config", config_path,
         "--seed", str(seed),
         "--n_visual", str(n_visual),
@@ -73,7 +76,7 @@ def main():
         "--resolutions",
         nargs="+",
         type=int,
-        default=[256, 512, 768, 1024],
+        default=[256, 384, 512, 768, 1024, 1280, 1536],
         help="Resolutions to test (default: all)"
     )
     parser.add_argument(
@@ -105,7 +108,7 @@ def main():
     failed_tests = []
     
     for res, kernel in configs_to_test:
-        config_name = f"{res}/config_test_{kernel}.yaml"
+        config_name = f"{res}_{kernel}/config.yaml"
         config_path = os.path.join(args.configs_dir, config_name)
         
         if not os.path.exists(config_path):
