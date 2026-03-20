@@ -7,8 +7,8 @@ from pathlib import Path
 TEST_CONFIGS = [
     (256, "fixed"),
     (256, "flex"),
-    (394, "fixed"),
-    (394, "flex"),
+    (384, "fixed"),
+    (384, "flex"),
     (512, "fixed"),
     (512, "flex"),
     (768, "fixed"),
