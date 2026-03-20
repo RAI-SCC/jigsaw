@@ -1,0 +1,29 @@
+data:
+  test_data_path: "data_processed/256/test"
+  image_height: 256
+  image_width: 256
+  in_channels: 1 
+  num_classes: 2
+  num_workers: 4
+  xlat: 720
+  xlon: 1440
+
+training:
+  valid_batch: 8
+
+SWIN_MLP:
+  window_size: 4       
+  patch_size: 4        
+  architecture: "swin"
+  dropout: 0.2
+  mlp_ratio: 4.0
+  shifted_windows: true
+  kernel_flex: true
+  seed: 42
+  checkpoint_file: "test_models/swinmlp/256_flex/best_model.pth"
+
+testing:
+  output_dir: "test_results/swinmlp/256_flex"
+  n_visual_samples: 6
+  threshold: 0.5
+  seed: 42

@@ -1,0 +1,303 @@
+import os
+import random
+import argparse
+import yaml
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from pathlib import Path
+from torch.utils.data import DataLoader
+
+from Dataloaders import BasicDataset
+from Model import ModelSwinMLP
+from dice import DiceLoss
+
+COLOR_TP = np.array([0,   150, 130]) / 255   
+COLOR_FP = np.array([223, 155,  27]) / 255   
+COLOR_FN = np.array([162,  34,  35]) / 255   
+
+
+def load_model(config, checkpoint_path, device):
+    data_cfg = config["data"]
+    swin_cfg = config["SWIN_MLP"]
+
+    model = ModelSwinMLP(
+        channels_in=data_cfg["in_channels"],
+        input_resolution=(data_cfg["image_height"], data_cfg["image_width"]),
+        classes=data_cfg["num_classes"],
+        window_size=swin_cfg["window_size"],
+        mlp_ratio=swin_cfg["mlp_ratio"],
+        shifted_windows=swin_cfg["shifted_windows"],
+        kernel_flex=swin_cfg["kernel_flex"],
+    ).to(device)
+
+    ckpt = torch.load(checkpoint_path, map_location=device)
+
+    # Handle both direct state_dict and wrapped format
+    if isinstance(ckpt, dict) and "model" in ckpt:
+        ckpt = ckpt["model"]
+    elif isinstance(ckpt, dict) and "model_state" in ckpt:
+        ckpt = ckpt["model_state"]
+    
+    model.load_state_dict(ckpt)
+    model.eval()
+    return model
+
+
+@torch.no_grad()
+def run_evaluation(model, loader, device, threshold=0.5):
+    dice_fn = DiceLoss()
+    TP = FP = FN = TN = 0
+    dice_sum = 0.0
+    total = 0
+
+    for images, masks in loader:
+        images = images.to(device)
+        masks  = masks.to(device)
+
+        if masks.dim() == 4 and masks.shape[1] == 1:
+            masks = masks.squeeze(1)
+        masks = (masks > 0.5).float()
+
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+            logits = model(images)
+
+        logits_f32 = logits.float()
+        probs = torch.softmax(logits_f32, dim=1)[:, 1]
+        preds = (probs > threshold).float()
+
+        TP += ((preds == 1) & (masks == 1)).sum().item()
+        FP += ((preds == 1) & (masks == 0)).sum().item()
+        FN += ((preds == 0) & (masks == 1)).sum().item()
+        TN += ((preds == 0) & (masks == 0)).sum().item()
+
+        batch_dice = 1 - dice_fn(logits_f32, masks)
+        dice_sum  += batch_dice.item() * images.size(0)
+        total     += images.size(0)
+
+    precision = TP / (TP + FP + 1e-6)
+    recall    = TP / (TP + FN + 1e-6)
+    f1        = 2 * precision * recall / (precision + recall + 1e-6)
+    dice      = dice_sum / total
+    accuracy  = (TP + TN) / (TP + FP + FN + TN + 1e-6) * 100
+
+    return {
+        "Dice":      dice,
+        "Precision": precision,
+        "Recall":    recall,
+        "F1":        f1,
+        "Accuracy":  accuracy,
+        "TP": TP, "FP": FP, "FN": FN, "TN": TN,
+    }
+
+
+def denormalize(tensor):
+    arr = tensor.squeeze().cpu().numpy()
+    arr = arr * 0.5 + 0.5
+    return np.clip(arr, 0, 1)
+
+
+def make_overlay(image_np, pred_np, mask_np):
+    h, w   = image_np.shape
+    rgb    = np.stack([image_np] * 3, axis=-1)  
+    overlay = rgb.copy()
+
+    tp_mask = (pred_np == 1) & (mask_np == 1)
+    fp_mask = (pred_np == 1) & (mask_np == 0)
+    fn_mask = (pred_np == 0) & (mask_np == 1)
+
+    alpha = 0.55
+    for color, region in [(COLOR_TP, tp_mask),
+                           (COLOR_FP, fp_mask),
+                           (COLOR_FN, fn_mask)]:
+        overlay[region] = (1 - alpha) * rgb[region] + alpha * color
+
+    return overlay
+
+
+@torch.no_grad()
+def visualize_samples(model, dataset, device, indices, threshold=0.5, 
+                      output_file="test_visual.png"):
+    n_samples = len(indices)
+    n_cols  = 4   # image | ground truth | prediction | overlay
+    n_rows  = n_samples
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(16, n_rows * 4))
+    if n_rows == 1:
+        axes = axes[np.newaxis, :]
+
+    col_titles = ["Input Image", "Ground Truth", "Prediction", "Overlay (TP/FP/FN)"]
+    for col, title in enumerate(col_titles):
+        axes[0, col].set_title(title, fontsize=12, fontweight="bold", pad=8)
+
+    for row, idx in enumerate(indices):
+        image, mask = dataset[idx]
+        image_in = image.unsqueeze(0).to(device)
+
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+            logits = model(image_in)
+
+        probs = torch.softmax(logits.float(), dim=1)[0, 1].cpu().numpy()
+        pred  = (probs > threshold).astype(np.float32)
+
+        image_np = denormalize(image)
+        mask_np  = mask.numpy()
+        if mask_np.ndim == 3:
+            mask_np = mask_np.squeeze(0)
+        mask_np  = (mask_np > 0.5).astype(np.float32)
+
+        overlay = make_overlay(image_np, pred, mask_np)
+
+        tp = int(((pred == 1) & (mask_np == 1)).sum())
+        fp = int(((pred == 1) & (mask_np == 0)).sum())
+        fn = int(((pred == 0) & (mask_np == 1)).sum())
+        img_dice = 2 * tp / (2 * tp + fp + fn + 1e-6)
+
+        axes[row, 0].imshow(image_np,  cmap="gray", vmin=0, vmax=1)
+        axes[row, 1].imshow(mask_np,   cmap="gray", vmin=0, vmax=1)
+        axes[row, 2].imshow(pred,       cmap="gray", vmin=0, vmax=1)
+        axes[row, 3].imshow(overlay)
+
+        axes[row, 0].set_ylabel(f"Sample {idx}", fontsize=9)
+        axes[row, 2].set_xlabel(f"Dice: {img_dice:.3f}", fontsize=9,
+                                 color="#404040", fontweight="bold")
+
+        for ax in axes[row]:
+            ax.axis("off")
+
+    patches = [
+        mpatches.Patch(color=COLOR_TP, label="TP"),
+        mpatches.Patch(color=COLOR_FP, label="FP"),
+        mpatches.Patch(color=COLOR_FN, label="FN"),
+    ]
+    fig.legend(handles=patches, loc="lower center", ncol=3,
+               fontsize=10, framealpha=0.9,
+               bbox_to_anchor=(0.5, -0.02))
+
+    plt.suptitle("Test Set — Segmentation Predictions vs Ground Truth",
+                 fontsize=14, fontweight="bold", y=1.01)
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"Visualization saved: {output_file}")
+
+
+def get_consistent_sample_indices(dataset_size, n_samples, seed):
+    rng = np.random.RandomState(seed)
+    indices = rng.choice(dataset_size, size=min(n_samples, dataset_size), replace=False)
+    return sorted(indices.tolist())
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Test SwinMLP segmentation model")
+    parser.add_argument("--config", required=True,
+                        help="Path to config.yaml")
+    parser.add_argument("--n_visual", type=int, default=6,
+                        help="Number of random samples to visualize")
+    parser.add_argument("--threshold", type=float, default=0.5,
+                        help="Threshold for binary segmentation")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Seed for reproducible sample selection")
+    args = parser.parse_args()
+
+    # Load config
+    with open(args.config) as f:
+        config = yaml.load(f, Loader=yaml.SafeLoader)
+
+    # Set all seeds for reproducibility
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # Get paths from config
+    checkpoint_path = config["SWIN_MLP"]["checkpoint_file"]
+    test_images_dir = config["data"]["test_data_path"]
+    output_dir = config["testing"]["output_dir"]
+    
+    # Verify checkpoint exists
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"\n\nCheckpoint not found: {checkpoint_path}\n")
+
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Load model
+    model = load_model(config, checkpoint_path, device)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"Model parameters: {n_params:,}")
+
+    # Create dataset and loader
+    test_dataset = BasicDataset(
+        images_dir=os.path.join(test_images_dir, "image"),
+        masks_dir=os.path.join(test_images_dir, "mask"),
+        num_slices=1,
+        is_train=False,
+    )
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=config["training"]["valid_batch"],
+        shuffle=False,
+        num_workers=config["data"]["num_workers"],
+        pin_memory=True,
+    )
+    
+    print(f"Test samples: {len(test_dataset)}\n")
+
+    metrics = run_evaluation(model, test_loader, device, threshold=args.threshold)
+
+    # Get resolution and kernel type from config
+    res = config["data"]["image_height"]
+    kernel = "flex" if config["SWIN_MLP"]["kernel_flex"] else "fixed"
+    
+    # Generate consistent sample indices
+    sample_indices = get_consistent_sample_indices(
+        len(test_dataset), 
+        args.n_visual, 
+        args.seed
+    )
+    print(f"Selected sample indices (seed={args.seed}): {sample_indices}\n")
+
+    # Visualize samples
+    vis_out = os.path.join(output_dir, f"test_visual_{res}_{kernel}.png")
+    visualize_samples(
+        model=model,
+        dataset=test_dataset,
+        device=device,
+        indices=sample_indices,
+        threshold=args.threshold,
+        output_file=vis_out,
+    )
+
+    # Save metrics to CSV
+    import csv
+    csv_out = os.path.join(output_dir, f"test_metrics_{res}_{kernel}.csv")
+    with open(csv_out, "w", newline="") as f:
+        writer = csv.writer(f, delimiter=";")
+        writer.writerow([
+            "Checkpoint", "Resolution", "Kernel", "Seed", "Threshold",
+            "Dice", "Precision", "Recall", "F1", "Accuracy",
+            "TP", "FP", "FN", "TN", "Sample_Indices"
+        ])
+        writer.writerow([
+            checkpoint_path, res, kernel, args.seed, args.threshold,
+            round(metrics["Dice"], 4),
+            round(metrics["Precision"], 4),
+            round(metrics["Recall"], 4),
+            round(metrics["F1"], 4),
+            round(metrics["Accuracy"], 2),
+            metrics["TP"], metrics["FP"],
+            metrics["FN"], metrics["TN"],
+            str(sample_indices)
+        ])
+    
+    print(f"Metrics saved: {csv_out}\n")
+
+if __name__ == "__main__":
+    main()
