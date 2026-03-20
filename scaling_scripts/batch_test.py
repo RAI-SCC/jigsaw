@@ -7,12 +7,18 @@ from pathlib import Path
 TEST_CONFIGS = [
     (256, "fixed"),
     (256, "flex"),
+    (394, "fixed"),
+    (394, "flex"),
     (512, "fixed"),
     (512, "flex"),
     (768, "fixed"),
     (768, "flex"),
     (1024, "fixed"),
     (1024, "flex"),
+    (1280, "fixed"),
+    (1280, "flex"),
+    (1536, "fixed"),
+    (1536, "flex"),
 ]
 
 def run_test(config_path, seed=42, n_visual=6, threshold=0.5):
