@@ -17,7 +17,7 @@ TEST_CONFIGS = [
 
 def run_test(config_path, seed=42, n_visual=6, threshold=0.5):
     cmd = [
-        "python", "-u", "scaling_scripts/test_swinmlp.py",
+        "python", "-u", "test_swinmlp.py",
         "--config", config_path,
         "--seed", str(seed),
         "--n_visual", str(n_visual),
