@@ -9,9 +9,9 @@ import matplotlib.patches as mpatches
 from pathlib import Path
 from torch.utils.data import DataLoader
 
-from Dataloaders import BasicDataset
-from Model import ModelSwinMLP
-from dice import DiceLoss
+from src.Dataloaders import BasicDataset
+from src.Model import ModelSwinMLP
+from src.dice import DiceLoss
 
 COLOR_TP = np.array([0,   150, 130]) / 255   
 COLOR_FP = np.array([223, 155,  27]) / 255   
