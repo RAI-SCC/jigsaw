@@ -55,7 +55,7 @@ class LinearSelectionStrategy:
     ):
         self.mm_kernels = self._mm_kernel_selection(parallelism)
         self.grad_bias = self._grad_bias_selection(
-            parallelism, bias, synchronized_layer
+            parallelism, bias, synchronized_layer, bayesian
         )
         self.add_bias = self._add_bias_selection(bias, bayesian)
         self.reshape_weights = self._reshape_weights_selection(bayesian, linear_layer)
@@ -163,6 +163,7 @@ class LinearSelectionStrategy:
         parallelism: int,
         bias: Union[torch.Tensor, None],
         synchronized_layer: bool,
+        bayesian: bool,
     ) -> Callable:
         """
         Selector function for calculating gradient of bias.
@@ -176,6 +177,8 @@ class LinearSelectionStrategy:
         if bias is None:
             return self._no_bias
         # all_reduce bias over space if it is a synchronized linear layer
+        elif synchronized_layer and not bayesian:
+            return self._reduce_bias_over_spatial_group_nonbayesian
         elif synchronized_layer:
             return self._reduce_bias_over_spatial_group
         # all_reduce is not required for 2-way parallel models
@@ -201,6 +204,27 @@ class LinearSelectionStrategy:
             process group of ranks distributed across space (share channels).
         """
         grad_b = grad_output.sum(dim=(-3, -2))
+        return grad_b
+
+    def _reduce_bias_over_spatial_group_nonbayesian(
+        self, grad_output: torch.Tensor, spatial_group: dist.ProcessGroup
+    ) -> torch.Tensor:
+        """
+        Calculate grad wrt bias.
+
+        grad_b is equal to the gradient output summed over space and batch dim.
+
+        Parameters
+        ----------
+        grad_output: torch.Tensor
+            gradient wrt loss
+        spatial_group: dist.ProcessGroup
+            process group of ranks distributed across space (share channels).
+        """
+        if len(grad_output.shape) == 3:
+            grad_b = grad_output.sum(dim=(-3, -2))
+        else:
+            grad_b = grad_output.sum(dim=(-2))
         return grad_b
 
     def _no_reduce_bias(
@@ -615,9 +639,7 @@ class DistributedXWTSync(torch.nn.Module):
             case 8:
                 out_dim = out_dim * 2
 
-        self.bias = (
-            torch.zeros(out_dim).uniform_(-stdev, stdev) if bias else None
-        )
+        self.bias = torch.zeros(out_dim).uniform_(-stdev, stdev) if bias else None
 
         self.device = device
         self.local_rank = local_rank
@@ -812,8 +834,9 @@ class XWTSync(torch.autograd.Function):
 
             # Sum over batch dimension.
             # Batch dim = 0 if not bayesian, = 1 if bayesian
-            grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
 
+            if len(grad_weight.shape) > len(weight.shape):
+                grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
 
         return grad_input, grad_weight, grad_b, None, None, None, None, None, None
 
@@ -1922,10 +1945,7 @@ class DistributedXWTNice(torch.nn.Module):
         stdev = 1.0 / np.sqrt(in_dim)
 
         self.weight = torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
-        self.bias = (
-            torch.zeros(out_dim).uniform_(-stdev, stdev) if bias else None
-        )
-
+        self.bias = torch.zeros(out_dim).uniform_(-stdev, stdev) if bias else None
 
         self.weight = torch.nn.parameter.Parameter(self.weight)
         self.bias = torch.nn.parameter.Parameter(self.bias) if bias else None
@@ -2043,19 +2063,20 @@ class XWTNice(torch.autograd.Function):
         spatial_group = ctx.spatial_group
         channel_group = ctx.channel_group
 
-        grad_input = grad_output @ weight
+        grad_input = torch.matmul(grad_output, weight)
         g_i_handler = dist.all_reduce(
             grad_input, op=dist.ReduceOp.SUM, group=channel_group, async_op=True
         )
 
-        grad_weight = (grad_output.mT @ x).sum(dim=tuple(range(grad_output.dim() - 2)))
+        grad_weight = torch.matmul(grad_output.mT, x)
+        if len(grad_weight.shape) > len(weight.shape):
+            grad_weight = sum(dim=tuple(range(grad_output.dim() - 2)))
 
         grad_bias = (
             grad_output.sum(dim=tuple(range(grad_output.dim() - 1)))
             if ctx.has_bias
             else None
         )
-
 
         g_i_handler.wait()
 
