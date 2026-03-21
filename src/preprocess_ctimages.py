@@ -7,6 +7,7 @@ import yaml
 import argparse
 import json
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_file", required=True, help="Path to config.yaml")
@@ -34,7 +35,20 @@ def main():
         patient_id = base_name.rsplit('_', 1)[0] 
         patient_ids.add(patient_id)
 
-    patient_ids = list(patient_ids)
+    BLACKLISTED_IDS = {
+        "ID00035637202182204917484",
+        "ID00014637202177757139317",
+        "ID00032637202181710233084",
+        "ID00161637202235731948764",
+        "ID00123637202217151272140",
+        "ID00027637202179689871102",
+        "ID00075637202198610425520",
+        "ID00139637202231703564336",
+        "ID00426637202313170790466"
+    }
+
+    patient_ids = patient_ids - BLACKLISTED_IDS
+    patient_ids = sorted(list(patient_ids))
     random.seed(SEED)
     random.shuffle(patient_ids)
 
@@ -118,8 +132,8 @@ def main():
         
         if multiclass_mask_color is None: continue
 
-        lower_blue = np.array([200, 0, 0], dtype=np.uint8)
-        upper_blue = np.array([255, 50, 50], dtype=np.uint8)
+        lower_blue = np.array([190, 0, 0], dtype=np.uint8)
+        upper_blue = np.array([255, 60, 60], dtype=np.uint8)
         binary_mask = cv2.inRange(multiclass_mask_color, lower_blue, upper_blue)
 
         if binary_mask.shape[:2] == TARGET_SIZE:
