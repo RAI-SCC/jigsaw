@@ -8,8 +8,6 @@ from torch.nn.grad import conv2d_input, conv2d_weight
 
 import jigsaw.distributed_convolutions as dist_conv
 
-from .utils_init import average_weights
-
 
 class ConvSelectionStrategy:
     """Selection strategy for convolution kernels and halo communications."""
@@ -558,12 +556,9 @@ class DistributedConv2D(torch.nn.Module):
         self.bayesian = bayesian
 
         k = np.sqrt(1 / (self.in_channels * 2 * kernel_size[0] * kernel_size[1]))
-        self.weight = (
-            torch.zeros(
-                self.out_channels, self.in_channels, kernel_size[0], kernel_size[1]
-            )
-            .uniform_(-k, k)
-        )
+        self.weight = torch.zeros(
+            self.out_channels, self.in_channels, kernel_size[0], kernel_size[1]
+        ).uniform_(-k, k)
         self.bias = torch.zeros(self.out_channels).uniform_(-k, k)
 
         self.selector = ConvSelectionStrategy(
@@ -833,7 +828,6 @@ class Conv2d(torch.autograd.Function):
             dilation=dilation,
         )
 
-
         if g_x_handle is not None:
             g_x_handle.wait()
 
@@ -842,7 +836,6 @@ class Conv2d(torch.autograd.Function):
             if local_rank % 2 == 0
             else g_x[..., ctx.in_channels_global // 2 :, :, :] + g_x_recv
         )
-
 
         return (
             g_x,
@@ -969,15 +962,12 @@ class DistributedConvTranspose2D(torch.nn.Module):
             self.groups
             / (self.out_channels * 2 * self.kernel_size[0] * self.kernel_size[1])
         )
-        self.weight = (
-            torch.zeros(
-                self.in_channels,
-                self.out_channels // self.groups,
-                kernel_size[0],
-                kernel_size[1],
-            )
-            .uniform_(-k, k)
-        )
+        self.weight = torch.zeros(
+            self.in_channels,
+            self.out_channels // self.groups,
+            kernel_size[0],
+            kernel_size[1],
+        ).uniform_(-k, k)
         self.bias = torch.zeros(self.out_channels).uniform_(-k, k)
         self.empty = torch.empty(0, device=self.device, dtype=dtype)
 
@@ -988,7 +978,6 @@ class DistributedConvTranspose2D(torch.nn.Module):
             self.kernel_size,
             self.stride,
         )
-
 
         self.weight = torch.nn.parameter.Parameter(self.weight)
         self.bias = torch.nn.parameter.Parameter(self.bias)
