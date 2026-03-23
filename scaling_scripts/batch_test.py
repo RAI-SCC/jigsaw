@@ -51,7 +51,7 @@ def main():
     )
     parser.add_argument(
         "--configs_dir",
-        default="experiments/swinmlp",
+        default="experiments/swinmlptest",
         help="Base directory containing test configs"
     )
     parser.add_argument(
@@ -107,10 +107,10 @@ def main():
     results = {}
     failed_tests = []
     
-    for res, kernel in configs_to_test:
+    for i, (res, kernel) in enumerate(configs_to_test, 1):
         config_name = f"{res}_{kernel}/config.yaml"
         config_path = os.path.join(args.configs_dir, config_name)
-        
+
         if not os.path.exists(config_path):
             print(f"Config not found: {config_path}")
             print(f"Skipping {res}_{kernel}")
@@ -133,13 +133,17 @@ def main():
             if not args.skip_on_error:
                 print(f"Stopping due to failed test: {res}_{kernel}")
                 break
-    
+
+    skipped = sum(1 for s in results.values() if s == "SKIPPED")
+
     if failed_tests:
         print(f"{len(failed_tests)} test(s) failed: {', '.join(failed_tests)}")
         sys.exit(1)
     else:
         successful = sum(1 for s in results.values() if s == "SUCCESS")
         print(f"All {successful} tests completed successfully!")
+        if skipped > 0:
+            print(f"  ({skipped} tests skipped)")
         sys.exit(0)
 
 if __name__ == "__main__":

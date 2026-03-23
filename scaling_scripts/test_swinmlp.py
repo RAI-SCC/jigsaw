@@ -3,6 +3,7 @@ import random
 import argparse
 import yaml
 import torch
+import csv
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -46,7 +47,58 @@ def load_model(config, checkpoint_path, device):
 
 
 @torch.no_grad()
-def run_evaluation(model, loader, device, threshold=0.5):
+def run_evaluation_per_image(model, dataset, device, threshold=0.5):
+    dice_fn = DiceLoss()
+    per_image_metrics = []
+    
+    for idx in range(len(dataset)):
+        image, mask = dataset[idx]
+        image = image.unsqueeze(0).to(device)
+        mask = mask.to(device)
+        
+        if mask.dim() == 3 and mask.shape[0] == 1:
+            mask = mask.squeeze(0)
+        elif mask.dim() == 2:
+            pass 
+        
+        mask = (mask > 0.5).float()
+        
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+            logits = model(image)
+        
+        logits_f32 = logits.float()
+        probs = torch.softmax(logits_f32, dim=1)[:, 1].squeeze(0) 
+        preds = (probs > threshold).float()
+        
+        TP = ((preds == 1) & (mask == 1)).sum().item()
+        FP = ((preds == 1) & (mask == 0)).sum().item()
+        FN = ((preds == 0) & (mask == 1)).sum().item()
+        TN = ((preds == 0) & (mask == 0)).sum().item()
+        
+        precision = TP / (TP + FP + 1e-6)
+        recall = TP / (TP + FN + 1e-6)
+        f1 = 2 * precision * recall / (precision + recall + 1e-6)
+        accuracy = (TP + TN) / (TP + FP + FN + TN + 1e-6) * 100
+        
+        image_dice = 1 - dice_fn(logits_f32, mask.unsqueeze(0))
+        
+        per_image_metrics.append({
+            "image_idx": idx,
+            "dice": image_dice.item(),
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "accuracy": accuracy,
+            "TP": TP,
+            "FP": FP,
+            "FN": FN,
+            "TN": TN,
+        })
+
+    return per_image_metrics
+
+@torch.no_grad()
+def run_evaluation_aggregate(model, loader, device, threshold=0.5):
     dice_fn = DiceLoss()
     TP = FP = FN = TN = 0
     dice_sum = 0.0
@@ -189,6 +241,68 @@ def get_consistent_sample_indices(dataset_size, n_samples, seed):
     return sorted(indices.tolist())
 
 
+def save_per_image_metrics(per_image_metrics, output_path, config_info):
+    
+    with open(output_path, "w", newline="") as f:
+        writer = csv.writer(f, delimiter=";")
+        
+        # Header
+        writer.writerow([
+            "Model", "Resolution", "Kernel", "Image_Idx",
+            "Dice", "Precision", "Recall", "F1", "Accuracy",
+            "TP", "FP", "FN", "TN"
+        ])
+        
+        # Data rows
+        for metrics in per_image_metrics:
+            writer.writerow([
+                "SwinMLP",
+                config_info["resolution"],
+                config_info["kernel"],
+                metrics["image_idx"],
+                round(metrics["dice"], 6),
+                round(metrics["precision"], 6),
+                round(metrics["recall"], 6),
+                round(metrics["f1"], 6),
+                round(metrics["accuracy"], 4),
+                metrics["TP"],
+                metrics["FP"],
+                metrics["FN"],
+                metrics["TN"],
+            ])
+
+
+def save_aggregate_metrics(aggregate_metrics, output_path, config_info, sample_indices, seed, threshold):
+    
+    with open(output_path, "w", newline="") as f:
+        writer = csv.writer(f, delimiter=";")
+        
+        writer.writerow([
+            "Model", "Checkpoint", "Resolution", "Kernel", "Seed", "Threshold",
+            "Dice", "Precision", "Recall", "F1", "Accuracy",
+            "TP", "FP", "FN", "TN", "Sample_Indices"
+        ])
+        
+        writer.writerow([
+            "SwinMLP",
+            config_info["checkpoint"],
+            config_info["resolution"],
+            config_info["kernel"],
+            seed,
+            threshold,
+            round(aggregate_metrics["Dice"], 4),
+            round(aggregate_metrics["Precision"], 4),
+            round(aggregate_metrics["Recall"], 4),
+            round(aggregate_metrics["F1"], 4),
+            round(aggregate_metrics["Accuracy"], 2),
+            aggregate_metrics["TP"],
+            aggregate_metrics["FP"],
+            aggregate_metrics["FN"],
+            aggregate_metrics["TN"],
+            str(sample_indices)
+        ])
+
+
 def main():
     parser = argparse.ArgumentParser(description="Test SwinMLP segmentation model")
     parser.add_argument("--config", required=True,
@@ -198,14 +312,12 @@ def main():
     parser.add_argument("--threshold", type=float, default=0.5,
                         help="Threshold for binary segmentation")
     parser.add_argument("--seed", type=int, default=42,
-                        help="Seed for reproducible sample selection")
+                        help="Seed for reproducible sample selection (for visualization only)")
     args = parser.parse_args()
 
-    # Load config
     with open(args.config) as f:
         config = yaml.load(f, Loader=yaml.SafeLoader)
 
-    # Set all seeds for reproducibility
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -220,25 +332,35 @@ def main():
     test_images_dir = config["data"]["test_data_path"]
     output_dir = config["testing"]["output_dir"]
     
-    # Verify checkpoint exists
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"\n\nCheckpoint not found: {checkpoint_path}\n")
 
-    # Create output directory
     os.makedirs(output_dir, exist_ok=True)
 
-    # Load model
     model = load_model(config, checkpoint_path, device)
-    n_params = sum(p.numel() for p in model.parameters())
-    print(f"Model parameters: {n_params:,}")
 
-    # Create dataset and loader
     test_dataset = BasicDataset(
         images_dir=os.path.join(test_images_dir, "image"),
         masks_dir=os.path.join(test_images_dir, "mask"),
         num_slices=1,
         is_train=False,
     )
+
+    res = config["data"]["image_height"]
+    kernel = "flex" if config["SWIN_MLP"]["kernel_flex"] else "fixed"
+    
+    config_info = {
+        "checkpoint": checkpoint_path,
+        "resolution": res,
+        "kernel": kernel,
+    }
+    
+    per_image_metrics = run_evaluation_per_image(
+        model, test_dataset, device, threshold=args.threshold
+    )
+    
+    per_image_csv = os.path.join(output_dir, f"per_image_metrics_{res}_{kernel}.csv")
+    save_per_image_metrics(per_image_metrics, per_image_csv, config_info)
     
     test_loader = DataLoader(
         test_dataset,
@@ -248,23 +370,16 @@ def main():
         pin_memory=True,
     )
     
-    print(f"Test samples: {len(test_dataset)}\n")
-
-    metrics = run_evaluation(model, test_loader, device, threshold=args.threshold)
-
-    # Get resolution and kernel type from config
-    res = config["data"]["image_height"]
-    kernel = "flex" if config["SWIN_MLP"]["kernel_flex"] else "fixed"
+    aggregate_metrics = run_evaluation_aggregate(
+        model, test_loader, device, threshold=args.threshold
+    )
     
-    # Generate consistent sample indices
     sample_indices = get_consistent_sample_indices(
         len(test_dataset), 
         args.n_visual, 
         args.seed
     )
-    print(f"Selected sample indices (seed={args.seed}): {sample_indices}\n")
 
-    # Visualize samples
     vis_out = os.path.join(output_dir, f"test_visual_{res}_{kernel}.png")
     visualize_samples(
         model=model,
@@ -275,29 +390,11 @@ def main():
         output_file=vis_out,
     )
 
-    # Save metrics to CSV
-    import csv
-    csv_out = os.path.join(output_dir, f"test_metrics_{res}_{kernel}.csv")
-    with open(csv_out, "w", newline="") as f:
-        writer = csv.writer(f, delimiter=";")
-        writer.writerow([
-            "Checkpoint", "Resolution", "Kernel", "Seed", "Threshold",
-            "Dice", "Precision", "Recall", "F1", "Accuracy",
-            "TP", "FP", "FN", "TN", "Sample_Indices"
-        ])
-        writer.writerow([
-            checkpoint_path, res, kernel, args.seed, args.threshold,
-            round(metrics["Dice"], 4),
-            round(metrics["Precision"], 4),
-            round(metrics["Recall"], 4),
-            round(metrics["F1"], 4),
-            round(metrics["Accuracy"], 2),
-            metrics["TP"], metrics["FP"],
-            metrics["FN"], metrics["TN"],
-            str(sample_indices)
-        ])
-    
-    print(f"Metrics saved: {csv_out}\n")
+    aggregate_csv = os.path.join(output_dir, f"aggregate_metrics_{res}_{kernel}.csv")
+    save_aggregate_metrics(
+        aggregate_metrics, aggregate_csv, config_info, 
+        sample_indices, args.seed, args.threshold
+    )
 
 if __name__ == "__main__":
     main()
