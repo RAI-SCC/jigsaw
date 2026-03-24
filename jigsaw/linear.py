@@ -835,7 +835,9 @@ class XWTSync(torch.autograd.Function):
             # Sum over batch dimension.
             # Batch dim = 0 if not bayesian, = 1 if bayesian
 
-            if len(grad_weight.shape) > len(weight.shape):
+            if ctx.bayesian:
+                grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
+            elif len(grad_weight.shape) > len(weight.shape):
                 grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
 
         return grad_input, grad_weight, grad_b, None, None, None, None, None, None
@@ -2060,7 +2062,7 @@ class XWTNice(torch.autograd.Function):
             Gradient with respect to the bias.
         """
         x, weight = ctx.saved_tensors
-        spatial_group = ctx.spatial_group
+        
         channel_group = ctx.channel_group
 
         grad_input = torch.matmul(grad_output, weight)
