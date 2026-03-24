@@ -2062,7 +2062,7 @@ class XWTNice(torch.autograd.Function):
             Gradient with respect to the bias.
         """
         x, weight = ctx.saved_tensors
-        
+
         channel_group = ctx.channel_group
 
         grad_input = torch.matmul(grad_output, weight)
