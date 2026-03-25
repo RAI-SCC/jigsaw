@@ -1,13 +1,13 @@
 data:
   dt: 6
-  train_data_path: "data_processed/1024/train" 
-  valid_data_path: "data_processed/1024/val"
+  train_data_path: "data_processed/256/train" 
+  valid_data_path: "data_processed/256/val"
   base_dir: "data_processed"
   #base_dir: "data_processed_seed83"
   image_dir: "data/images/images/"
   mask_dir: "data/masks/masks/"
-  image_height: 1024
-  image_width: 1024
+  image_height: 256
+  image_width: 256
   in_channels: 1 
   num_classes: 2
   preprocessed: false
@@ -38,15 +38,17 @@ training:
   lr: 0.0001
   lr_embedding: 2.0e-05
   lr_recovery: 2.0e-05
-  loss: TopK_Dice
+  #loss: TopK_Dice
   #loss: CE_Dice
+  #loss: Dice
+  loss: CE_TopK_Dice
   lr_constant: false
   train_batch: 8
   valid_batch: 8
   epochs: 35
   identity: false
   grad_clip: 1
-  save_dir: results_1024
+  save_dir: results_256
   preload: false
   file_path: .
   load_path: .
@@ -62,7 +64,7 @@ SWIN_MLP:
   dropout: 0.2
   mlp_ratio: 4.0
   shifted_windows: true
-  kernel_flex: true
+  kernel_flex: false
   seed: 42
   save_model: true
-  checkpoint_file: "results_1024/best_model_flex.pth"
+  checkpoint_file: "results_256/best_model_fix3.pth"

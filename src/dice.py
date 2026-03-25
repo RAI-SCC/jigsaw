@@ -85,7 +85,7 @@ class CETopKDiceLoss(nn.Module):
 
         topk_dice_loss = self.topk_dice(logits, target)
 
-        return 0.2 * ce_loss + topk_dice_loss
+        return ce_loss + topk_dice_loss
 
 class DiceLoss(nn.Module):
     def __init__(self):
@@ -118,8 +118,8 @@ class CEDiceLoss(nn.Module):
     def __init__(self, ce_weight: float = 1.0, dice_weight: float = 1.0):
         super(CEDiceLoss, self).__init__()
         self.dice      = DiceLoss()
-        self.ce_weight   = ce_weight
-        self.dice_weight = dice_weight
+        self.ce_weight   = 1.0
+        self.dice_weight = 1.0
 
     def forward(self, logits: Tensor, target: Tensor) -> Tensor:
         if target.dim() == 4 and target.shape[1] == 1:

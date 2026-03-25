@@ -38,8 +38,10 @@ training:
   lr: 0.0001
   lr_embedding: 2.0e-05
   lr_recovery: 2.0e-05
-  loss: TopK_Dice
-  #loss: CE_Dice
+  #loss: TopK_Dice
+  loss: CE_Dice
+  #loss: Dice
+  #loss: CE_TopK_Dice
   lr_constant: false
   train_batch: 8
   valid_batch: 8
@@ -62,7 +64,7 @@ SWIN_MLP:
   dropout: 0.2
   mlp_ratio: 4.0
   shifted_windows: true
-  kernel_flex: true
+  kernel_flex: false
   seed: 42
   save_model: true
-  checkpoint_file: "results_256/best_model_flex.pth"
+  checkpoint_file: "results_256/best_model_fix.pth"
