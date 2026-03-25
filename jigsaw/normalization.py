@@ -380,30 +380,13 @@ class DistributedNICENorm(torch.nn.Module):
         self.spatial_group = spatial_group
         self.channel_group = channel_group
 
-        #self.ln = DistributedNoParamLayerNorm(
-        #    self.rank, self.device, channel_group=self.channel_group
-        #)
-
         #To limit communication, we do grouped layer norm on the local shard
         self.ln = torch.nn.LayerNorm(self.global_dim//self.channel_group.size(), elementwise_affine=False)
 
-        self.gelu = torch.nn.GELU()
-
-        self.scale = mlp.DistributedMLPNICE(
+        self.scale_shift = mlp.DistributedMLPNICE(
             in_dim=self.noise_dim,
             hidden_dim=self.global_dim,
-            out_dim=self.global_dim,
-            bias=True,
-            local_rank=self.rank,
-            device=self.device,
-            parallelism=self.parallelism,
-            spatial_group=self.spatial_group,
-            channel_group=self.channel_group,
-        )
-        self.shift = mlp.DistributedMLPNICE(
-            in_dim=self.noise_dim,
-            hidden_dim=self.global_dim,
-            out_dim=self.global_dim,
+            out_dim=self.global_dim*2,
             bias=True,
             local_rank=self.rank,
             device=self.device,
@@ -412,15 +395,13 @@ class DistributedNICENorm(torch.nn.Module):
             channel_group=self.channel_group,
         )
 
+    @torch.compile
     def forward(self, x, noise):
         """Forward pass of distributed NICE norm."""
         x = self.ln(x)
-        scale = self.scale(noise)
-        shift = self.shift(noise)
-
-        scale = scale.unsqueeze(1)
-        shift = shift.unsqueeze(1)
-
+        scale_shift = self.scale_shift(noise)
+        scale_shift = scale_shift.unsqueeze(1)
+        scale, shift = torch.chunk(scale_shift, 2, dim=-1)
         x = scale * x + shift
 
         return x
