@@ -380,11 +380,13 @@ class DistributedNICENorm(torch.nn.Module):
         self.spatial_group = spatial_group
         self.channel_group = channel_group
 
-        self.global_dim = dim  # // channel_group.size()
+        #self.ln = DistributedNoParamLayerNorm(
+        #    self.rank, self.device, channel_group=self.channel_group
+        #)
 
-        self.ln = DistributedNoParamLayerNorm(
-            self.rank, self.device, channel_group=self.channel_group
-        )
+        #To limit communication, we do grouped layer norm on the local shard
+        self.ln = torch.nn.LayerNorm(self.global_dim//self.channel_group.size(), elementwise_affine=False)
+
         self.gelu = torch.nn.GELU()
 
         self.scale = mlp.DistributedMLPNICE(
