@@ -200,7 +200,6 @@ class DistributedWindowedFlashAttention(torch.nn.Module):
 
         self.heads = heads // 2
 
-        self.scale = (embed_dim * self.parallelism // self.heads) ** (-0.5)
         torch.compile(self._attention_core, mode="reduce-overhead")
 
     @torch.compile
