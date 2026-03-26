@@ -1004,12 +1004,7 @@ def conv_transpose2d_fourway_backward(
         async_op=True,
     )
 
-    # print(f'3. rank {local_rank} {g_x_recv}')
-    # make grads identical on all ranks
-    g_w_handle = dist.all_reduce(
-        g_w, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True
-    )
-
+    
     if g_x_handle is not None:
         g_x_handle.wait()
 
@@ -1019,7 +1014,6 @@ def conv_transpose2d_fourway_backward(
         else g_x[..., in_channels_global // 2 :, :, :] + g_x_recv
     )
 
-    g_w_handle.wait()
     return g_x, g_w
 
 
