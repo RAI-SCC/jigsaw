@@ -24,7 +24,8 @@ class DistributedWindowedAttention(torch.nn.Module):
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
-        bayesian: bool
+        bayesian: bool,
+        dtype
     ):
         """
 
@@ -93,10 +94,28 @@ class DistributedWindowedAttention(torch.nn.Module):
             bayesian=bayesian
         )
 
-        self.heads = heads
+        self.heads = heads // self.parallelism
 
-        self.scale = (embed_dim * self.parallelism // self.heads) ** (-0.5)
-
+    @torch.compile(mode='reduce-overhead')
+    def _attention_core(
+        self,
+        qkv,
+        mask
+    ):
+        qkv = rearrange(qkv, "... n i (three h d) -> three ... n h i d", three=3, h=self.heads)
+        q, k, v = qkv.unbind(0)
+        
+        with torch.nn.attention.sdpa_kernel(
+           torch.nn.attention.SDPBackend.MATH
+        ):
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v,
+                is_causal=False,
+                dropout_p=0.0,
+                attn_mask=mask
+            )
+        return out
+    
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """
         Forward pass for distributed multi-head attention.
@@ -108,22 +127,9 @@ class DistributedWindowedAttention(torch.nn.Module):
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.qkv(x_patches_local)
 
-        q, k, v = torch.tensor_split(qkv, 3, dim=-1)
-        q = rearrange(q, "... n i (h d) -> ... n h i d", h=self.heads).contiguous()
-        k = rearrange(k, "... n i (h d) -> ... n h i d", h=self.heads).contiguous()
-        v = rearrange(v, "... n i (h d) -> ... n h i d", h=self.heads).contiguous()
-        
-        q = self.scale * q
-        
-        attention = self.xwt(q, k, None)
-        if mask is not None:
-            attention = attention + mask
+        out = self._attention_core(qkv, mask)
 
-        attention = self.softmax(attention)
-
-        values = self.xw(attention, v, None)
-
-        values = rearrange(values, "... n h s d -> ... n s (h d)").contiguous()
+        values = rearrange(out, "... n h s d -> ... n s (h d)").contiguous()
         values = self.concatenator(values)
 
         # Output: [n_batch, seq_length, output_dim]
@@ -332,25 +338,42 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         bayesian: bool,
-        dtype
+        dtype,
+        flash_attn: bool = True
     ):
         """Initialize DistributedNICEWindowedTransformer."""
         super().__init__()
         self.noise_dim = noise_dim
-        self.attention_block = DistributedWindowedFlashAttention(
-            x_features,
-            embed_dim,
-            output_dim,
-            heads,
-            local_rank,
-            device,
-            parallelism,
-            model_group,
-            spatial_group,
-            channel_group,
-            bayesian,
-            dtype
-        ).to(device)
+        if flash_attn:
+            self.attention_block = DistributedWindowedFlashAttention(
+                x_features,
+                embed_dim,
+                output_dim,
+                heads,
+                local_rank,
+                device,
+                parallelism,
+                model_group,
+                spatial_group,
+                channel_group,
+                bayesian,
+                dtype
+            ).to(device)
+        else:
+            self.attention_block = DistributedWindowedAttention(
+                x_features,
+                embed_dim,
+                output_dim,
+                heads,
+                local_rank,
+                device,
+                parallelism,
+                model_group,
+                spatial_group,
+                channel_group,
+                bayesian,
+                dtype
+            ).to(device)
 
         self.layer_norm1 = norm.DistributedNICENorm(
             output_dim,
