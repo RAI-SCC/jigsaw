@@ -14,6 +14,12 @@ from src.Dataloaders import BasicDataset
 from src.Model import ModelSwinMLP
 from src.dice import DiceLoss
 
+FONTSIZE_TITLE = 24           # Main plot title
+FONTSIZE_COLUMN_TITLE = 20    # Column headers
+FONTSIZE_ROW_LABEL = 16       # Row labels
+FONTSIZE_LEGEND = 16          # Legend text
+FONTSIZE_SUPTITLE = 26        # Figure suptitle
+
 COLOR_TP = np.array([0,   150, 130]) / 255   
 COLOR_FP = np.array([223, 155,  27]) / 255   
 COLOR_FN = np.array([162,  34,  35]) / 255   
@@ -170,7 +176,7 @@ def make_overlay(image_np, pred_np, mask_np):
 
 @torch.no_grad()
 def visualize_samples(model, dataset, device, indices, threshold=0.5, 
-                      output_file="test_visual.png"):
+                      output_file="test_visual.png", title_suffix=""):
     n_samples = len(indices)
     n_cols  = 4   # image | ground truth | prediction | overlay
     n_rows  = n_samples
@@ -181,7 +187,7 @@ def visualize_samples(model, dataset, device, indices, threshold=0.5,
 
     col_titles = ["Input Image", "Ground Truth", "Prediction", "Overlay (TP/FP/FN)"]
     for col, title in enumerate(col_titles):
-        axes[0, col].set_title(title, fontsize=12, fontweight="bold", pad=8)
+        axes[0, col].set_title(title, fontsize=FONTSIZE_COLUMN_TITLE, fontweight="bold", pad=8)
 
     for row, idx in enumerate(indices):
         image, mask = dataset[idx]
@@ -211,8 +217,8 @@ def visualize_samples(model, dataset, device, indices, threshold=0.5,
         axes[row, 2].imshow(pred,       cmap="gray", vmin=0, vmax=1)
         axes[row, 3].imshow(overlay)
 
-        axes[row, 0].set_ylabel(f"Sample {idx}", fontsize=9)
-        axes[row, 2].set_xlabel(f"Dice: {img_dice:.3f}", fontsize=9,
+        axes[row, 0].set_ylabel(f"Sample {idx}", fontsize=FONTSIZE_ROW_LABEL)
+        axes[row, 2].set_xlabel(f"Dice: {img_dice:.3f}", fontsize=FONTSIZE_ROW_LABEL,
                                  color="#404040", fontweight="bold")
 
         for ax in axes[row]:
@@ -224,15 +230,69 @@ def visualize_samples(model, dataset, device, indices, threshold=0.5,
         mpatches.Patch(color=COLOR_FN, label="FN"),
     ]
     fig.legend(handles=patches, loc="lower center", ncol=3,
-               fontsize=10, framealpha=0.9,
+               fontsize=FONTSIZE_LEGEND, framealpha=0.9,
                bbox_to_anchor=(0.5, -0.02))
 
     plt.suptitle("Test Set — Segmentation Predictions vs Ground Truth",
                  fontsize=14, fontweight="bold", y=1.01)
+    if title_suffix:
+        title = f"{title} — {title_suffix}"
+
+    plt.suptitle(title, fontsize=FONTSIZE_SUPTITLE, fontweight="bold", y=1.005)
     plt.tight_layout()
     plt.savefig(output_file, dpi=200, bbox_inches="tight")
     plt.close()
     print(f"Visualization saved: {output_file}")
+
+def find_samples_by_dice_range(per_image_metrics, target_dice, tolerance=0.1):
+    candidates = []
+    for m in per_image_metrics:
+        diff = abs(m["dice"] - target_dice)
+        if diff <= tolerance:
+            candidates.append((m["image_idx"], m["dice"], diff))
+
+    if not candidates:
+        candidates = [(m["image_idx"], m["dice"], abs(m["dice"] - target_dice)) 
+                        for m in per_image_metrics]
+        
+    candidates.sort(key=lambda x: x[2])
+    return candidates[0][0], candidates[0][1]
+
+
+def visualize_dice_based_samples(model, dataset, device, per_image_metrics, 
+                                 threshold=0.5, output_dir="test_results"):
+    
+    target_dices = [0.4, 0.6, 0.8]
+    selected_samples = []
+    
+    for target in target_dices:
+        idx, actual_dice = find_samples_by_dice_range(per_image_metrics, target, tolerance=0.1)
+        selected_samples.append(idx)
+    
+    vis_file = os.path.join(output_dir, "test_visual_dice_ranges.png")
+    visualize_samples(
+        model=model,
+        dataset=dataset,
+        device=device,
+        indices=selected_samples,
+        threshold=threshold,
+        output_file=vis_file,
+        title_suffix="Dice Score Ranges (0.4, 0.6, 0.8)"
+    )
+
+    idx_worst, dice_worst = find_samples_by_dice_range(per_image_metrics, 0.0, tolerance=0.2)
+
+    vis_file_worst = os.path.join(output_dir, "test_visual_dice_zero.png")
+    visualize_samples(
+        model=model,
+        dataset=dataset,
+        device=device,
+        indices=[idx_worst],
+        threshold=threshold,
+        output_file=vis_file_worst,
+        title_suffix=f"Worst Case (Dice: {dice_worst:.4f})"
+    )
+
 
 
 def get_consistent_sample_indices(dataset_size, n_samples, seed):
@@ -388,6 +448,16 @@ def main():
         indices=sample_indices,
         threshold=args.threshold,
         output_file=vis_out,
+        title_suffix="Random Samples"
+    )
+
+    visualize_dice_based_samples(
+        model=model,
+        dataset=test_dataset,
+        device=device,
+        per_image_metrics=per_image_metrics,
+        threshold=args.threshold,
+        output_dir=output_dir
     )
 
     aggregate_csv = os.path.join(output_dir, f"aggregate_metrics_{res}_{kernel}.csv")
