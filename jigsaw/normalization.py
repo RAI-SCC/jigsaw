@@ -380,13 +380,15 @@ class DistributedNICENorm(torch.nn.Module):
         self.spatial_group = spatial_group
         self.channel_group = channel_group
 
-        #To limit communication, we do grouped layer norm on the local shard
-        self.ln = torch.nn.LayerNorm(self.global_dim//self.channel_group.size(), elementwise_affine=False)
+        # To limit communication, we do grouped layer norm on the local shard
+        self.ln = torch.nn.LayerNorm(
+            self.global_dim // self.channel_group.size(), elementwise_affine=False
+        )
 
         self.scale_shift = mlp.DistributedMLPNICE(
             in_dim=self.noise_dim,
             hidden_dim=self.global_dim,
-            out_dim=self.global_dim*2,
+            out_dim=self.global_dim * 2,
             bias=True,
             local_rank=self.rank,
             device=self.device,
