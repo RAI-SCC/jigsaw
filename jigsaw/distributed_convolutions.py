@@ -973,6 +973,7 @@ def conv_transpose2d_fourway_backward(
         async_op=False,
     )
 
+    # handle autocasting by matching dtype of grad_output to weight dtype
     g_x, g_w, _ = selector.convTranspose2d_grad_fn(
         grad_output,
         x_aug,
@@ -986,7 +987,6 @@ def conv_transpose2d_fourway_backward(
         1,
         [True, True, False],
     )
-    # print(f'2. rank {local_rank}')
 
     g_x_buffer = torch.zeros(
         (*g_x.shape[:-3], g_x.shape[-3] // 2, *g_x.shape[-2:]),
@@ -1004,7 +1004,6 @@ def conv_transpose2d_fourway_backward(
         async_op=True,
     )
 
-    
     if g_x_handle is not None:
         g_x_handle.wait()
 
@@ -1032,7 +1031,7 @@ def conv_transpose2d_eightway_backward(
     channel_group: dist.ProcessGroup,
     selector,
 ):
-    """Backward pass for conv_transpose2d distribtuted 8ways."""
+    """Backward pass for conv_transpose2d distributed 8ways."""
     right_to_left, left_to_right = halo_sizes[0], halo_sizes[1]
     grad_output = selector.communicate_halos_backward(
         grad_output,
@@ -1046,7 +1045,7 @@ def conv_transpose2d_eightway_backward(
     )
 
     g_x, g_w, _ = selector.convTranspose2d_grad_fn(
-        grad_output,
+        grad_output.to(weight.dtype),
         x_aug,
         weight,
         None,

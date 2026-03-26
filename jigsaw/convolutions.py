@@ -781,7 +781,7 @@ class Conv2d(torch.autograd.Function):
         g_x_aug = selector.conv2d_input_fn(
             x_shape_padded[int(ctx.bayesian) :],
             weight,
-            grad_output,
+            grad_output.to(weight.dtype),  # handles autocast
             stride=stride,
             padding=padding,
             dilation=dilation,
@@ -822,7 +822,7 @@ class Conv2d(torch.autograd.Function):
         g_w = selector.conv2d_weight_fn(
             x_aug,
             weight.shape[int(ctx.bayesian) :],
-            grad_output,
+            grad_output.to(weight.dtype),
             stride=stride,
             padding=padding,
             dilation=dilation,
@@ -1165,7 +1165,7 @@ class ConvTranspose2d(torch.autograd.Function):
         selector = ctx.selector
 
         g_x, g_w = selector.dist_conv_transpose2d_backward_fn(
-            grad_output,
+            grad_output.to(weight.dtype),
             x_aug,
             weight,
             halo_sizes,

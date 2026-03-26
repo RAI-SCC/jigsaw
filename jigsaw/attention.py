@@ -183,7 +183,7 @@ class DistributedWindowedFlashAttention(torch.nn.Module):
         self.heads = heads // 2
 
     @torch.compile(mode="reduce-overhead")
-    def _attention_core(self, qkv):
+    def _attention_core(self, qkv, mask):
         qkv = rearrange(
             qkv, "... n i (three h d) -> three ... n h i d", three=3, h=self.heads
         )
@@ -192,7 +192,7 @@ class DistributedWindowedFlashAttention(torch.nn.Module):
             torch.nn.attention.SDPBackend.FLASH_ATTENTION
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, is_causal=False, dropout_p=0.0
+                q, k, v, is_causal=False, dropout_p=0.0, attn_mask=mask
             )
         return out
 
@@ -207,8 +207,8 @@ class DistributedWindowedFlashAttention(torch.nn.Module):
         x_patches_local = x
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.qkv(x_patches_local).to(torch.bfloat16)
-
-        out = self._attention_core(qkv)
+        mask = mask.to(torch.bfloat16) if mask is not None else None
+        out = self._attention_core(qkv, mask)
 
         # out has shape [batch, local_heads, local_sequence length, head_dim]
         out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous().to(self.dtype)
