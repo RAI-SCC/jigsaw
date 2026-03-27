@@ -2072,7 +2072,7 @@ class XWTNice(torch.autograd.Function):
 
         grad_weight = torch.matmul(grad_output.mT, x)
         if len(grad_weight.shape) > len(weight.shape):
-            grad_weight = grad_weight.sum(dim=int(ctx.bayesian))
+            grad_weight = grad_weight.sum(dim=tuple(range(grad_weight.dim() - 2)))
 
         grad_bias = (
             grad_output.sum(dim=tuple(range(grad_output.dim() - 1)))
