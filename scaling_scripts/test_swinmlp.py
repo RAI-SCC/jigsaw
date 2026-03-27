@@ -187,7 +187,7 @@ def visualize_samples(model, dataset, device, indices, threshold=0.5,
 
     col_titles = ["Input Image", "Ground Truth", "Prediction", "Overlay (TP/FP/FN)"]
     for col, title in enumerate(col_titles):
-        axes[0, col].set_title(title, fontsize=FONTSIZE_COLUMN_TITLE, fontweight="bold", pad=8)
+        axes[0, col].set_title(title, fontsize=FONTSIZE_COLUMN_TITLE, fontweight="bold", pad=12)
 
     for row, idx in enumerate(indices):
         image, mask = dataset[idx]
@@ -229,12 +229,13 @@ def visualize_samples(model, dataset, device, indices, threshold=0.5,
         mpatches.Patch(color=COLOR_FP, label="FP"),
         mpatches.Patch(color=COLOR_FN, label="FN"),
     ]
-    fig.legend(handles=patches, loc="lower center", ncol=3,
-               fontsize=FONTSIZE_LEGEND, framealpha=0.9,
-               bbox_to_anchor=(0.5, -0.02))
-
-    plt.suptitle("Test Set — Segmentation Predictions vs Ground Truth",
-                 fontsize=14, fontweight="bold", y=1.01)
+    fig.legend(handles=patches, 
+               loc="upper center",           
+               bbox_to_anchor=(0.5, -0.01),  
+               ncol=3,                        
+               fontsize=FONTSIZE_LEGEND, 
+               framealpha=0.9)
+    title = "Segmentation Predictions vs Ground Truth"
     if title_suffix:
         title = f"{title} — {title_suffix}"
 
