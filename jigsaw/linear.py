@@ -251,8 +251,9 @@ class LinearSelectionStrategy:
         xw_t_kernel = self._select_xw_transpose_kernel(parallelism)
         xw_kernel = self._select_xw_kernel(parallelism)
         x_t_w_kernel = self._select_x_transpose_w_kernel(parallelism)
+        xw_xtw_fused_kernel = self._select_xw_xtw_fused_kernel(parallelism)
 
-        return [xw_t_kernel, xw_kernel, x_t_w_kernel]
+        return [xw_t_kernel, xw_kernel, x_t_w_kernel, xw_xtw_fused_kernel]
 
     def _select_xw_transpose_kernel(self, parallelism: int) -> Callable:
         """Return xw_t kernel based on parallelism."""
@@ -283,6 +284,11 @@ class LinearSelectionStrategy:
                 return dist_mm.x_transpose_w_fourway
             case 8:
                 return dist_mm.x_transpose_w_eightway
+
+    def _select_xw_xtw_fused_kernel(self, parallelism: int) -> Callable:
+        match parallelism:
+            case 2:
+                return dist_mm.fused_xw_xtw_twoway
 
 
 class DistributedXWT(torch.nn.Module):
@@ -513,15 +519,9 @@ class XWT(torch.autograd.Function):
 
         weight = selector.reshape_weights(weight)
 
-        grad_input = selector.mm_kernels[1](
+        grad_input, grad_weight = selector.mm_kernels[3](
             grad_output,
             weight,
-            local_rank=local_rank,
-            device=device,
-            model_group=model_group,
-        )
-        grad_weight = selector.mm_kernels[2](
-            grad_output,
             input,
             local_rank=local_rank,
             device=device,
@@ -815,15 +815,9 @@ class XWTSync(torch.autograd.Function):
         weight = ctx.selector.reshape_weights(weight)
 
         with torch.autocast("cuda", dtype=grad_output.dtype, enabled=True):
-            grad_input = mm_kernels[1](
+            grad_input, grad_weight = mm_kernels[3](
                 grad_output,
                 weight,
-                local_rank=local_rank,
-                device=device,
-                model_group=model_group,
-            )
-            grad_weight = mm_kernels[2](
-                grad_output,
                 input,
                 local_rank=local_rank,
                 device=device,
@@ -2066,7 +2060,7 @@ class XWTNice(torch.autograd.Function):
         channel_group = ctx.channel_group
 
         grad_input = torch.matmul(grad_output, weight)
-        g_i_handler = dist.all_reduce(
+        g_i_handle = dist.all_reduce(
             grad_input, op=dist.ReduceOp.SUM, group=channel_group, async_op=True
         )
 
@@ -2080,7 +2074,7 @@ class XWTNice(torch.autograd.Function):
             else None
         )
 
-        g_i_handler.wait()
+        g_i_handle.wait()
 
         return grad_input, grad_weight, grad_bias, None, None
 

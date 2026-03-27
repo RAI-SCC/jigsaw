@@ -60,6 +60,53 @@ def _get_preallocated_buffer(
     #     return out
 
 
+@torch.compile
+def fused_xw_xtw_twoway(
+    grad_output: torch.tensor,
+    weight: torch.tensor,
+    input: torch.tensor,
+    local_rank: int,
+    device: torch.device,
+    model_group: dist.ProcessGroup,
+):
+    mod = local_rank % 2
+    w0, w1 = torch.split(weight, weight.shape[-2] // 2, dim=-2)
+    buffer_x = _get_preallocated_buffer(
+        grad_output.shape, grad_output.dtype, local_rank, device
+    )
+    empty = torch.empty(0, device=device, dtype=grad_output.dtype)
+
+    match mod:
+        case 0:
+            xw_send_list = [empty, grad_output]
+            xw_recv_list = [empty, buffer_x]
+        case 1:
+            xw_send_list = [grad_output, empty]
+            xw_recv_list = [buffer_x, empty]
+
+    xw_handle = dist.all_to_all(
+        xw_recv_list, xw_send_list, group=model_group, async_op=True
+    )
+
+    match mod:
+        case 0:
+            grad_input = torch.matmul(grad_output, w0)
+            grad_weight_top = torch.matmul(grad_output.mT, input)
+            xw_handle.wait()
+            grad_input.add_(torch.matmul(buffer_x, w1))
+            grad_weight_bottom = torch.matmul(buffer_x.mT, input)
+        case 1:
+            grad_input = torch.matmul(grad_output, w1)
+            grad_weight_bottom = torch.matmul(grad_output.mT, input)
+            xw_handle.wait()
+            grad_input.add_(torch.matmul(buffer_x, w0))
+            grad_weight_top = torch.matmul(buffer_x.mT, input)
+
+    grad_weight = torch.concat([grad_weight_top, grad_weight_bottom], dim=-2)
+    return grad_input, grad_weight
+
+
+@torch.compile
 def xw_transpose_twoway(
     xij: torch.tensor,
     wij: torch.tensor,
@@ -98,7 +145,6 @@ def xw_transpose_twoway(
             buffer_xw = _get_preallocated_buffer(
                 (*xij.shape[:-1], w0.shape[-2]), xw.dtype, local_rank, device
             )
-
             empty = torch.empty(0, device=device, dtype=xw.dtype)
             xw_send_list = [empty, xw]
             xw_recv_list = [empty, buffer_xw]
@@ -119,15 +165,16 @@ def xw_transpose_twoway(
         case 0:
             cij = torch.matmul(xij, w0.mT)
             xw_handle.wait()
-            cij = cij + xw_recv_list[1]
+            cij.add_(xw_recv_list[1])
         case 1:
             cij = torch.matmul(xij, w1.mT)
             xw_handle.wait()
-            cij = cij + xw_recv_list[0]
+            cij.add_(xw_recv_list[0])
 
     return cij
 
 
+@torch.compile
 def xw_twoway(
     xij: torch.tensor,
     wij: torch.tensor,
@@ -186,6 +233,7 @@ def xw_twoway(
     return cij
 
 
+@torch.compile
 def x_transpose_w_twoway(
     xij: torch.tensor,
     wij: torch.tensor,
