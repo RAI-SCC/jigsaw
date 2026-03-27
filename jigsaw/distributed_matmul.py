@@ -69,6 +69,7 @@ def fused_xw_xtw_twoway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ):
+    """Fused calculation to calculate grad_input and grad_weight in backward pass of a linear layer."""
     mod = local_rank % 2
     w0, w1 = torch.split(weight, weight.shape[-2] // 2, dim=-2)
     buffer_x = _get_preallocated_buffer(

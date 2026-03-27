@@ -677,8 +677,11 @@ def distributed_conv_transpose2d_over_channels(
     x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
     x = x.contiguous()
 
-    match local_rank:
-        case 0 | 2 | 4 | 6:
+    match local_rank % 2:
+        case 0:
+            x_handle = dist.all_to_all(
+                [empty, x_buffer], [empty, x], group=channel_group, async_op=True
+            )
             y = conv_transpose2d_fn(
                 x,
                 w[..., : in_channels // 2, :, :, :],
@@ -686,9 +689,7 @@ def distributed_conv_transpose2d_over_channels(
                 padding=padding,
                 dilation=dilation,
             )
-            dist.all_to_all(
-                [empty, x_buffer], [empty, x], group=channel_group, async_op=False
-            )
+            x_handle.wait()
             if b is not None:
                 y = y + conv_transpose2d_fn(
                     x_buffer,
@@ -707,7 +708,10 @@ def distributed_conv_transpose2d_over_channels(
                     dilation=dilation,
                 )
             return y, x, x_buffer
-        case 1 | 3 | 5 | 7:
+        case 1:
+            x_handle = dist.all_to_all(
+                [x_buffer, empty], [x, empty], group=channel_group, async_op=True
+            )
             y = conv_transpose2d_fn(
                 x,
                 w[..., in_channels // 2 :, :, :, :],
@@ -715,9 +719,7 @@ def distributed_conv_transpose2d_over_channels(
                 padding=padding,
                 dilation=dilation,
             )
-            dist.all_to_all(
-                [x_buffer, empty], [x, empty], group=channel_group, async_op=False
-            )
+            x_handle.wait()
             if b is not None:
                 y = y + conv_transpose2d_fn(
                     x_buffer,
