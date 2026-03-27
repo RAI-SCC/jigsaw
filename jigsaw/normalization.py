@@ -398,12 +398,16 @@ class DistributedNICENorm(torch.nn.Module):
         )
 
     @torch.compile
-    def forward(self, x, noise):
-        """Forward pass of distributed NICE norm."""
+    def _calc_shift_scale(self, x, scale_shift):
         x = self.ln(x)
-        scale_shift = self.scale_shift(noise)
         scale_shift = scale_shift.unsqueeze(1)
         scale, shift = torch.chunk(scale_shift, 2, dim=-1)
         x = scale * x + shift
+        return x
+
+    def forward(self, x, noise):
+        """Forward pass of distributed NICE norm."""
+        scale_shift = self.scale_shift(noise)
+        x = self._calc_shift_scale(x, scale_shift)
 
         return x

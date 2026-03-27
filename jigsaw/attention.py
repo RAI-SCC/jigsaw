@@ -79,6 +79,10 @@ class DistributedWindowedAttention(torch.nn.Module):
 
     @torch.compile(mode="reduce-overhead")
     def _attention_core(self, qkv, mask):
+        # [qkv: [batch, seq, embed]]
+        # [3, batch, seq, emb//3]
+        # [3, batch, heads, seq, emb//3/heads]
+        
         qkv = rearrange(
             qkv, "... n i (three h d) -> three ... n h i d", three=3, h=self.heads
         )

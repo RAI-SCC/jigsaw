@@ -2017,9 +2017,13 @@ class XWTNice(torch.autograd.Function):
             in_dim is local value.
         """
         # Handle bias term here?
-        if (b is not None) and (len(b.shape) > 1):
-            b = b.reshape(b.shape[0], 1, 1, -1)
-        xwt = torch.matmul(x, w.mT) + b
+        def local_forward(x, w, b):
+            if (b is not None) and (len(b.shape) > 1):
+                b = b.reshape(b.shape[0], 1, 1, -1)
+            xwt = torch.matmul(x, w.mT) + b
+            return xwt
+        torch.compile(local_forward)
+        xwt = local_forward(x, w, b)
 
         return xwt
 
