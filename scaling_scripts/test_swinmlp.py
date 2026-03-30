@@ -243,7 +243,6 @@ def visualize_samples(model, dataset, device, indices, threshold=0.5,
     plt.tight_layout()
     plt.savefig(output_file, dpi=200, bbox_inches="tight")
     plt.close()
-    print(f"Visualization saved: {output_file}")
 
 def find_samples_by_dice_range(per_image_metrics, target_dice, tolerance=0.1):
     candidates = []
@@ -255,20 +254,22 @@ def find_samples_by_dice_range(per_image_metrics, target_dice, tolerance=0.1):
     if not candidates:
         candidates = [(m["image_idx"], m["dice"], abs(m["dice"] - target_dice)) 
                         for m in per_image_metrics]
-        
-    candidates.sort(key=lambda x: x[2])
+    
+    candidates.sort(key=lambda x: (x[2], x[0]))
     return candidates[0][0], candidates[0][1]
 
 
 def visualize_dice_based_samples(model, dataset, device, per_image_metrics, 
                                  threshold=0.5, output_dir="test_results"):
-    
     target_dices = [0.4, 0.6, 0.8]
     selected_samples = []
+    selected_dices = []
     
-    for target in target_dices:
+    for i, target in enumerate(target_dices, 1):
         idx, actual_dice = find_samples_by_dice_range(per_image_metrics, target, tolerance=0.1)
         selected_samples.append(idx)
+        selected_dices.append(actual_dice)
+        print(f"  Sample {i} (Target Dice ~{target:.1f}): Image {idx:4d}, Dice = {actual_dice:.4f}")
     
     vis_file = os.path.join(output_dir, "test_visual_dice_ranges.png")
     visualize_samples(
@@ -281,7 +282,9 @@ def visualize_dice_based_samples(model, dataset, device, per_image_metrics,
         title_suffix="Dice Score Ranges (0.4, 0.6, 0.8)"
     )
 
+    print("Worst-case visualization:")
     idx_worst, dice_worst = find_samples_by_dice_range(per_image_metrics, 0.0, tolerance=0.2)
+    print(f"  Worst Case: Image {idx_worst:4d}, Dice = {dice_worst:.4f}")
 
     vis_file_worst = os.path.join(output_dir, "test_visual_dice_zero.png")
     visualize_samples(
@@ -441,6 +444,10 @@ def main():
         args.seed
     )
 
+    for i, idx in enumerate(sample_indices, 1):
+        dice = per_image_metrics[idx]["dice"]
+        print(f"  Sample {i} (Image {idx:4d}): Dice = {dice:.4f}")
+    
     vis_out = os.path.join(output_dir, f"test_visual_{res}_{kernel}.png")
     visualize_samples(
         model=model,
