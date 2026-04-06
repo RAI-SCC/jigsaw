@@ -516,8 +516,8 @@ def distributed_conv2d_over_channels(
     """Distributed Conv2d over channels."""
     x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
 
-    match local_rank:
-        case 0 | 2 | 4 | 6:
+    match local_rank % 2:
+        case 0:
             x_handle = dist.all_to_all(
                 [empty, x_buffer],
                 [empty, x],
@@ -556,7 +556,7 @@ def distributed_conv2d_over_channels(
                     )
                 )
             return y, x, x_buffer
-        case 1 | 3 | 5 | 7:
+        case 1 :
             x_handle = dist.all_to_all(
                 [x_buffer, empty],
                 [x, empty],

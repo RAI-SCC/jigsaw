@@ -124,6 +124,7 @@ class DistributedWindowedFlashAttention(torch.nn.Module):
         embed_dim: int,
         output_dim: int,
         heads: int,
+        dropout: float,
         local_rank: int,
         device: torch.device,
         parallelism: int,
@@ -155,6 +156,7 @@ class DistributedWindowedFlashAttention(torch.nn.Module):
         self.embed_dim = embed_dim
         self.x_features = x_features
         self.dtype = dtype
+        self.dropout = dropout
 
         assert self.parallelism == 2, (
             "windowed attention is only designed for parallelism = 2"
@@ -183,20 +185,19 @@ class DistributedWindowedFlashAttention(torch.nn.Module):
             sync_group=self.spatial_group,
             bayesian=bayesian,
         )
+        
+        # self.q_norm, self.k_norm = torch.nn.LayerNorm(embed_dim // heads), torch.nn.LayerNorm(embed_dim // heads)
 
         self.heads = heads // 2
 
     @torch.compile(mode="reduce-overhead")
-    def _attention_core(self, qkv, mask):
-        qkv = rearrange(
-            qkv, "... n i (three h d) -> three ... n h i d", three=3, h=self.heads
-        )
-        q, k, v = qkv.unbind(0)
+    def _attention_core(self, q, k, v, mask, dropout):
+        
         with torch.nn.attention.sdpa_kernel(
             torch.nn.attention.SDPBackend.FLASH_ATTENTION
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, is_causal=False, dropout_p=0.0, attn_mask=mask
+                q, k, v, is_causal=False, dropout_p=dropout, attn_mask=mask
             )
         return out
 
@@ -211,8 +212,15 @@ class DistributedWindowedFlashAttention(torch.nn.Module):
         x_patches_local = x
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.qkv(x_patches_local).to(torch.bfloat16)
+        qkv = rearrange(
+            qkv, "... n i (three h d) -> three ... n h i d", three=3, h=self.heads
+        )
+        q, k, v = qkv.unbind(0)
+        # q = self.q_norm(q).to(torch.bfloat16)
+        # k = self.k_norm(k).to(torch.bfloat16)
+        # v = v.to(torch.bfloat16)
         mask = mask.to(torch.bfloat16) if mask is not None else None
-        out = self._attention_core(qkv, mask)
+        out = self._attention_core(q, k, v, mask, self.dropout)
 
         # out has shape [batch, local_heads, local_sequence length, head_dim]
         out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous().to(self.dtype)
@@ -244,27 +252,45 @@ class DistributedWindowedTransformer(torch.nn.Module):
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         bayesian: bool,
+        dtype,
+        flash_attn: bool = True,
     ):
         super().__init__()
-        self.attention_block = DistributedWindowedAttention(
-            x_features,
-            embed_dim,
-            output_dim,
-            heads,
-            local_rank,
-            device,
-            parallelism,
-            model_group,
-            spatial_group,
-            channel_group,
-            bayesian,
-        ).to(device)
-        self.layer_norm1 = norm.DistributedLayerNorm(
-            output_dim // 2, local_rank, device, spatial_group, channel_group
-        ).to(device)
-        self.layer_norm2 = norm.DistributedLayerNorm(
-            output_dim // 2, local_rank, device, spatial_group, channel_group
-        ).to(device)
+        if flash_attn:
+            self.attention_block = DistributedWindowedFlashAttention(
+                x_features,
+                embed_dim,
+                output_dim,
+                heads,
+                dropout,
+                local_rank,
+                device,
+                parallelism,
+                model_group,
+                spatial_group,
+                channel_group,
+                bayesian,
+                dtype,
+            ).to(device)
+        else:
+            self.attention_block = DistributedWindowedAttention(
+                x_features,
+                embed_dim,
+                output_dim,
+                heads,
+                dropout,
+                local_rank,
+                device,
+                parallelism,
+                model_group,
+                spatial_group,
+                channel_group,
+                bayesian,
+                dtype,
+            ).to(device)
+        self.layer_norm1 = torch.nn.LayerNorm(output_dim//2)
+        self.layer_norm2 = torch.nn.LayerNorm(output_dim//2)
+        
         self.mlp = mlp.DistributedSynchronizedMLP(
             output_dim,
             output_dim,
@@ -278,8 +304,7 @@ class DistributedWindowedTransformer(torch.nn.Module):
             sync_group=spatial_group,
             bayesian=bayesian,
         ).to(device)
-
-        average_weights(self, spatial_group, device)
+        # average_weights(self, spatial_group, device)
 
     def forward(self, x: torch.tensor, mask=None):
         """Forward pass of distributed windowed transformer."""
@@ -324,6 +349,7 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
                 embed_dim,
                 output_dim,
                 heads,
+                dropout,
                 local_rank,
                 device,
                 parallelism,
