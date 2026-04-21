@@ -20,9 +20,11 @@ FONTSIZE_ROW_LABEL = 16       # Row labels
 FONTSIZE_LEGEND = 16          # Legend text
 FONTSIZE_SUPTITLE = 26        # Figure suptitle
 
-COLOR_TP = np.array([0,   150, 130]) / 255   
-COLOR_FP = np.array([223, 155,  27]) / 255   
-COLOR_FN = np.array([162,  34,  35]) / 255   
+COLOR_TP = np.array([0, 100, 255]) / 255   
+
+COLOR_FP = np.array([255, 150, 0]) / 255   
+
+COLOR_FN = np.array([255, 20, 20]) / 255   
 
 
 def load_model(config, checkpoint_path, device):
