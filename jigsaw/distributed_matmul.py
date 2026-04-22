@@ -60,7 +60,6 @@ def _get_preallocated_buffer(
     #     return out
 
 
-@torch.compile
 def fused_xw_xtw_twoway(
     grad_output: torch.tensor,
     weight: torch.tensor,
@@ -107,7 +106,6 @@ def fused_xw_xtw_twoway(
     return grad_input, grad_weight
 
 
-@torch.compile
 def xw_transpose_twoway(
     xij: torch.tensor,
     wij: torch.tensor,
@@ -137,9 +135,9 @@ def xw_transpose_twoway(
         Local result.
     """
     mod = local_rank % 2
-
+    wij = wij.to(xij.device)
     w0, w1 = torch.split(wij, wij.shape[-2] // 2, dim=-2)
-    # print(_prealloc_buffers.keys())
+
     match mod:
         case 0:
             xw = torch.matmul(xij, w1.mT)
@@ -234,7 +232,6 @@ def xw_twoway(
     return cij
 
 
-@torch.compile
 def x_transpose_w_twoway(
     xij: torch.tensor,
     wij: torch.tensor,

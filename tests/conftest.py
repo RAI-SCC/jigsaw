@@ -73,6 +73,18 @@ def make_model_group(mesh):
     return my_group
 
 
+def make_process_mesh():
+    mesh = dist.device_mesh.init_device_mesh(
+        device_type="nccl", mesh_shape=(2, 2), mesh_dim_names=("row", "col")
+    )
+    # global_mesh = dist.device_mesh.init_device_mesh(
+    #     device_type="nccl",
+    #     mesh_shape=(4,),
+    #     mesh_dim_names=("tp",)
+    # )
+    return mesh
+
+
 def gather_results_twoway(x: torch.Tensor, group: dist.ProcessGroup = None):
     """Gather tensors split across two processes."""
     result = torch.zeros(
@@ -97,9 +109,21 @@ def gather_results_fourway(x: torch.Tensor, group: dist.ProcessGroup = None):
     tensor_list = [
         torch.zeros(x.shape, dtype=x.dtype, device=x.device) for _ in range(4)
     ]
+    print(f"x! {x}")
     torch.distributed.all_gather(tensor_list, x, group=group)
+    print("ok i never made it here")
     result[..., : x.shape[-2], : x.shape[-1]] = tensor_list[0]
     result[..., : x.shape[-2], x.shape[-1] :] = tensor_list[1]
     result[..., x.shape[-2] :, : x.shape[-1]] = tensor_list[2]
     result[..., x.shape[-2] :, x.shape[-1] :] = tensor_list[3]
     return result
+
+
+def gather_results_fourway_list(x: torch.Tensor, group: dist.ProcessGroup = None):
+
+    tensor_list = [
+        torch.zeros(x.shape, dtype=x.dtype, device=x.device) for _ in range(4)
+    ]
+    print(f"what is x {x.device}")
+    torch.distributed.all_gather(tensor_list, x, group=group)
+    return tensor_list

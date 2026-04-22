@@ -3,6 +3,7 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.distributed_matmul as dist_mm
+import jigsaw.linear as linear
 from tests import conftest
 from tests.conftest import make_model_group
 
@@ -84,3 +85,17 @@ def test_fused_xw_xtw_twoway(device, model_group):
 
     assert torch.allclose((x_all) @ (w1_all), result_xw)
     assert torch.allclose((x_all.mT) @ (w2_all), result_xtw)
+
+
+def test_linear_forward(device, model_group):
+    rank = dist.get_rank()
+    torch.manual_seed(42 + (rank % 2))  # for now, force the two to have the same
+    in_dim, out_dim = 5, 10
+    linlayer = linear.DistributedXWT(
+        in_dim, out_dim, False, rank, device, 2, model_group, None, False
+    ).to(device)
+    # print(linlayer.weight)
+    x_in = torch.randn(1, 20, 5, dtype=linlayer.weight.dtype, device=device)
+    x_in = x_in.contiguous()
+    y = linlayer(x_in)
+    assert True

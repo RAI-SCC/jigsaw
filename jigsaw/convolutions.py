@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch.nn.grad import conv2d_input, conv2d_weight
 
 import jigsaw.distributed_convolutions as dist_conv
+import jigsaw.hooks as hooks
 
 
 class ConvSelectionStrategy:
@@ -571,6 +572,12 @@ class DistributedConv2D(torch.nn.Module):
 
         self.weight = torch.nn.parameter.Parameter(self.weight)
         self.bias = torch.nn.parameter.Parameter(self.bias)
+        self.weight.register_post_accumulate_grad_hook(
+            hooks.make_grad_sync_hook(self.sync_group)
+        )
+        self.bias.register_post_accumulate_grad_hook(
+            hooks.make_grad_sync_hook(self.sync_group)
+        )
 
         self.conv2d_apply = Conv2d().apply
 

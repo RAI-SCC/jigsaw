@@ -7,6 +7,7 @@ import torch.nn.functional as F  # noqa
 
 from . import distributed_matmul as dist_mm
 from . import distributed_roll as dist_roll
+from . import hooks
 from .utils_init import average_weights
 
 
@@ -289,6 +290,8 @@ class LinearSelectionStrategy:
         match parallelism:
             case 2:
                 return dist_mm.fused_xw_xtw_twoway
+            case 4:
+                return dist_mm.fused_xw_xtw_fourway
 
 
 class DistributedXWT(torch.nn.Module):
@@ -333,7 +336,9 @@ class DistributedXWT(torch.nn.Module):
         super().__init__()
 
         stdev = 1.0 / np.sqrt(in_dim * 2)
-        self.weight = torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
+        self.weight = torch.nn.Parameter(
+            torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev).to(device)
+        )
 
         match parallelism:
             case 2:
@@ -365,6 +370,13 @@ class DistributedXWT(torch.nn.Module):
         if bias:
             average_weights([self.bias], self.spatial_group)
             self.bias = torch.nn.parameter.Parameter(self.bias)
+
+        self.weight.register_post_accumulate_grad_hook(
+            hooks.make_grad_sync_hook(self.spatial_group)
+        )
+        self.bias.register_post_accumulate_grad_hook(
+            hooks.make_grad_sync_hook(self.spatial_group)
+        )
 
         self.XWT = XWT().apply
 
@@ -657,6 +669,12 @@ class DistributedXWTSync(torch.nn.Module):
 
         self.weight = torch.nn.parameter.Parameter(self.weight)
         self.bias = torch.nn.parameter.Parameter(self.bias)
+        self.weight.register_post_accumulate_grad_hook(
+            hooks.make_grad_sync_hook(self.sync_group)
+        )
+        self.bias.register_post_accumulate_grad_hook(
+            hooks.make_grad_sync_hook(self.sync_group)
+        )
 
         self.XWT_sync = XWTSync().apply
 
@@ -922,7 +940,7 @@ class DistributedXW(torch.nn.Module):
         stdev = 1.0 / np.sqrt(in_dim * 2) if parallelism == 4 else 1.0 / np.sqrt(in_dim)
 
         self.weight = torch.nn.parameter.Parameter(
-            torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev)
+            torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev).to(device)
         )
         self.bias = (
             torch.zeros(out_dim).uniform_(-stdev, stdev).to(device) if bias else None
@@ -945,6 +963,8 @@ class DistributedXW(torch.nn.Module):
         if bias:
             average_weights(self, self.spatial_group)
             self.bias = torch.nn.parameter.Parameter(self.bias)
+
+        # TODO: post-grad_acumulate hook
 
         self.XW = XW().apply
 
@@ -1192,7 +1212,7 @@ class DistributedXTW(torch.nn.Module):
 
         stdev = 1.0 / np.sqrt(in_dim * 2) if parallelism == 4 else 1.0 / np.sqrt(in_dim)
         self.weight = torch.nn.parameter.Parameter(
-            torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev)
+            torch.zeros(in_dim, out_dim).uniform_(-stdev, stdev).to(device)
         )
 
         self.bias = (
@@ -1217,6 +1237,8 @@ class DistributedXTW(torch.nn.Module):
             average_weights(self, self.spatial_group)
             self.bias = torch.nn.parameter.Parameter(self.bias)
 
+        # TODO: hooks for bias sync
+        # self.bias.register_post_accumulate_grad_hook(hooks.make_grad_sync_hook(self.spatial_group))
         self.XTW = XTW().apply
 
     def get_parameter_count(self):
@@ -1945,6 +1967,9 @@ class DistributedXWTNice(torch.nn.Module):
 
         self.weight = torch.nn.parameter.Parameter(self.weight)
         self.bias = torch.nn.parameter.Parameter(self.bias) if bias else None
+
+        # TODO: Distributed NICE hook?
+        # self.weight.register_post_accumulate_grad_hook(hooks.make_grad_sync_hook(self.spatial_group))
 
         self.XWT_Nice = XWTNice().apply
 
