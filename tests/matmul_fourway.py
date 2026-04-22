@@ -64,21 +64,23 @@ def test_xtw_fourway(device, model_group):
     assert torch.allclose((x_all.mT) @ (w_all), result)
 
 
-# def test_fused_xw_xtw_twoway(device, model_group):
-#     """Test for fused XW XTW multiplication across two processes."""
-#     rank = dist.get_rank()
-#     torch.manual_seed(42 + rank)
+def test_fused_xw_xtw_fourway(device, model_group):
+    """Test for fused XW XTW multiplication across four processes."""
+    rank = dist.get_rank()
+    torch.manual_seed(42 + rank)
 
-#     rank = dist.get_rank()
-#     x = torch.randn(1, 4, 16//2, device=device)
-#     w1 = torch.randn(1, 16, 8//2, device=device)
-#     w2 = torch.randn(1, 4, 8//2, device=device)
-#     x_all = conftest.gather_results_twoway(x, group=model_group)
-#     w1_all = conftest.gather_results_twoway(w1, group=model_group)
-#     w2_all = conftest.gather_results_twoway(w2, group=model_group)
-#     result_xw, result_xtw = dist_mm.fused_xw_xtw_twoway(x, w1, w2, rank, device, model_group=model_group)
-#     result_xw = conftest.gather_results_twoway(result_xw, group=model_group)
-#     result_xtw = conftest.gather_results_twoway(result_xtw, group=model_group)
+    rank = dist.get_rank()
+    x = torch.randn(1, 4, 16, device=device)
+    w1 = torch.randn(1, 16, 8, device=device)
+    w2 = torch.randn(1, 4, 8, device=device)
+    x_all = conftest.gather_results_fourway(x, group=model_group)
+    w1_all = conftest.gather_results_fourway(w1, group=model_group)
+    w2_all = conftest.gather_results_fourway(w2, group=model_group)
+    result_xw, result_xtw = dist_mm.fused_xw_xtw_fourway(
+        x, w1, w2, rank, device, model_group=model_group
+    )
+    result_xw = conftest.gather_results_fourway(result_xw, group=model_group)
+    result_xtw = conftest.gather_results_fourway(result_xtw, group=model_group)
 
-#     assert(torch.allclose((x_all)@(w1_all), result_xw))
-#     assert(torch.allclose((x_all.mT)@(w2_all), result_xtw))
+    assert torch.allclose((x_all) @ (w1_all), result_xw)
+    assert torch.allclose((x_all.mT) @ (w2_all), result_xtw)
