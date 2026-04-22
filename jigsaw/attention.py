@@ -4,7 +4,6 @@ from einops import rearrange
 
 from . import linear, mlp
 from . import normalization as norm
-from .utils_init import average_weights
 
 
 class DistributedWindowedAttention(torch.nn.Module):
@@ -185,14 +184,14 @@ class DistributedWindowedFlashAttention(torch.nn.Module):
             sync_group=self.spatial_group,
             bayesian=bayesian,
         )
-        
+
         # self.q_norm, self.k_norm = torch.nn.LayerNorm(embed_dim // heads), torch.nn.LayerNorm(embed_dim // heads)
 
         self.heads = heads // 2
 
     @torch.compile(mode="reduce-overhead")
     def _attention_core(self, q, k, v, mask, dropout):
-        
+
         with torch.nn.attention.sdpa_kernel(
             torch.nn.attention.SDPBackend.FLASH_ATTENTION
         ):
@@ -288,9 +287,9 @@ class DistributedWindowedTransformer(torch.nn.Module):
                 bayesian,
                 dtype,
             ).to(device)
-        self.layer_norm1 = torch.nn.LayerNorm(output_dim//2)
-        self.layer_norm2 = torch.nn.LayerNorm(output_dim//2)
-        
+        self.layer_norm1 = torch.nn.LayerNorm(output_dim // 2)
+        self.layer_norm2 = torch.nn.LayerNorm(output_dim // 2)
+
         self.mlp = mlp.DistributedSynchronizedMLP(
             output_dim,
             output_dim,
