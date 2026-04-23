@@ -1,5 +1,6 @@
 import math
 import os
+import subprocess
 import sys
 import warnings
 
@@ -31,6 +32,19 @@ def dist_env():
     device = torch.device("cuda", device_id)
     torch.cuda.set_device(device)
 
+    os.environ["MASTER_PORT"] = "12342"
+
+    master_addr = (
+        subprocess.check_output(
+            ["scontrol", "show", "hostnames", os.environ["SLURM_JOB_NODELIST"]]
+        )
+        .decode()
+        .split("\n")[0]
+        .strip()
+    )
+
+    os.environ["MASTER_ADDR"] = master_addr
+
     dist.init_process_group(
         backend="nccl",
         rank=rank,
@@ -50,80 +64,76 @@ def device():
     return torch.device("cuda", device_id)
 
 
-def make_model_group(mesh):
-    """Build the comm group from the last mesh dimension."""
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
+def make_process_mesh(
+    device_type="nccl", mesh_shape=[2, 2], mesh_dim_names=["row", "col"]
+):
+    """Return process mesh with rows, columns, and model group."""
+    assert len(mesh_shape) == len(mesh_dim_names)
 
-    if world_size < math.prod(mesh):
-        pytest.skip(f"Need {math.prod(mesh)} ranks, have {world_size}")
+    world_size = dist.get_world_size(group=None)
+    if -1 in mesh_shape:
+        index = mesh_shape.index(-1)
+        mesh_shape[index] = world_size // -torch.prod(torch.tensor(mesh_shape)).item()
 
-    if len(mesh) == 1:
-        return dist.group.WORLD
-
-    last_dim = mesh[-1]
-    group_id = rank // last_dim
-    num_groups = math.prod(mesh[:-1])
-    my_group = None
-    for g in range(num_groups):
-        ranks_in_group = list(range(g * last_dim, (g + 1) * last_dim))
-        pg = dist.new_group(ranks_in_group)
-        if g == group_id:
-            my_group = pg
-    return my_group
-
-
-def make_process_mesh():
-    mesh = dist.device_mesh.init_device_mesh(
-        device_type="nccl", mesh_shape=(2, 2), mesh_dim_names=("row", "col")
+    row_col_mesh = dist.device_mesh.init_device_mesh(
+        device_type=device_type,
+        mesh_shape=tuple(mesh_shape),
+        mesh_dim_names=tuple(mesh_dim_names),
     )
-    # global_mesh = dist.device_mesh.init_device_mesh(
-    #     device_type="nccl",
-    #     mesh_shape=(4,),
-    #     mesh_dim_names=("tp",)
-    # )
+    if len(mesh_shape) == 2:
+        model_mesh = dist.device_mesh.init_device_mesh(
+            device_type=device_type,
+            mesh_shape=tuple([mesh_shape[-1] * mesh_shape[-2]]),
+            mesh_dim_names=tuple(["model"]),
+        )
+    else:  #
+        print(f"mesh shape! {mesh_shape[:-2]}")
+        model_mesh = dist.device_mesh.init_device_mesh(
+            device_type=device_type,
+            mesh_shape=tuple(
+                [math.prod(mesh_shape[:-2]), mesh_shape[-2] * mesh_shape[-1]]
+            ),
+            mesh_dim_names=tuple(["x", "model"]),
+        )
+
+    mesh = {
+        "row": row_col_mesh.get_group("row"),
+        "col": row_col_mesh.get_group("col"),
+        "model": model_mesh.get_group("model"),
+    }
+
     return mesh
 
 
-def gather_results_twoway(x: torch.Tensor, group: dist.ProcessGroup = None):
-    """Gather tensors split across two processes."""
-    result = torch.zeros(
-        (*x.shape[:-1], 2 * x.shape[-1]), dtype=x.dtype, device=x.device
-    )
+def gather_results_as_list(x: torch.Tensor, process_mesh: dist.device_mesh = None):
+    """Gather tensors split across arbitrary processes."""
+    row_group, col_group = process_mesh["row"], process_mesh["col"]
+    n_rows = row_group.size()
+    n_cols = col_group.size()
     tensor_list = [
-        torch.zeros(x.shape, dtype=x.dtype, device=x.device) for _ in range(2)
+        torch.zeros(x.shape, dtype=x.dtype, device=x.device)
+        for _ in range(n_rows * n_cols)
     ]
-    torch.distributed.all_gather(tensor_list, x, group=group)
-    result[..., : x.shape[-1]] = tensor_list[0]
-    result[..., x.shape[-1] :] = tensor_list[1]
-    return result
-
-
-def gather_results_fourway(x: torch.Tensor, group: dist.ProcessGroup = None):
-    """Gather tensors split across four processes."""
-    result = torch.zeros(
-        (*x.shape[:-2], 2 * x.shape[-2], 2 * x.shape[-1]),
-        dtype=x.dtype,
-        device=x.device,
-    )
-    tensor_list = [
-        torch.zeros(x.shape, dtype=x.dtype, device=x.device) for _ in range(4)
-    ]
-    print(f"x! {x}")
-    torch.distributed.all_gather(tensor_list, x, group=group)
-    print("ok i never made it here")
-    result[..., : x.shape[-2], : x.shape[-1]] = tensor_list[0]
-    result[..., : x.shape[-2], x.shape[-1] :] = tensor_list[1]
-    result[..., x.shape[-2] :, : x.shape[-1]] = tensor_list[2]
-    result[..., x.shape[-2] :, x.shape[-1] :] = tensor_list[3]
-    return result
-
-
-def gather_results_fourway_list(x: torch.Tensor, group: dist.ProcessGroup = None):
-
-    tensor_list = [
-        torch.zeros(x.shape, dtype=x.dtype, device=x.device) for _ in range(4)
-    ]
-    print(f"what is x {x.device}")
-    torch.distributed.all_gather(tensor_list, x, group=group)
     return tensor_list
+
+
+def gather_results(x: torch.Tensor, process_mesh: dist.device_mesh = None):
+    """Gather tensors split across arbitrary processes."""
+    row_group, col_group = process_mesh["row"], process_mesh["col"]
+    n_rows = row_group.size()
+    n_cols = col_group.size()
+    tensor_list = [
+        torch.zeros(x.shape, dtype=x.dtype, device=x.device)
+        for _ in range(n_rows * n_cols)
+    ]
+    torch.distributed.all_gather(tensor_list, x, group=process_mesh["model"])
+    batch_dims, h, w = x.shape[:-2], x.shape[-2], x.shape[-1]
+    ndim = len(batch_dims)
+    perm = list(range(2, 2 + ndim)) + [0, 2 + ndim, 1, 2 + ndim + 1]
+    result = torch.stack(tensor_list)
+    result = (
+        result.reshape(n_rows, n_cols, *x.shape)
+        .permute(*perm)
+        .reshape(*batch_dims, n_rows * h, n_cols * w)
+    )
+    return result

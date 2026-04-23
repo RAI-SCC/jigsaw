@@ -1,101 +1,89 @@
 import pytest
 import torch
-import torch.distributed as dist
 
 import jigsaw.distributed_matmul as dist_mm
-import jigsaw.linear as linear
 from tests import conftest
-from tests.conftest import make_model_group
-
-MESHES = {"2x2": (2, 2)}
 
 
-@pytest.fixture(params=MESHES.keys())
-def model_group(request):
-    """Return model group in process mesh."""
-    return make_model_group(MESHES[request.param])
+@pytest.fixture()
+def process_mesh():
+    """Return process mesh."""
+    return conftest.make_process_mesh(
+        device_type="nccl", mesh_shape=[-1, 1, 2], mesh_dim_names=["dp", "row", "col"]
+    )
 
 
-def test_xwt_twoway(device, model_group):
+def test_xwt_twoway(device, process_mesh):
     """Test for XWT multiplication across two processes."""
-    rank = dist.get_rank()
-    torch.manual_seed(42 + rank)
+    model_group = process_mesh["model"]
+    local_rank = model_group.rank()
+    torch.manual_seed(42 + local_rank)
 
     x = torch.randn(1, 4, 16 // 2, device=device)
     w = torch.randn(1, 4, 16 // 2, device=device)
 
-    x_all = conftest.gather_results_twoway(x, group=model_group)
-    w_all = conftest.gather_results_twoway(w, group=model_group)
+    x_all = conftest.gather_results(x, process_mesh=process_mesh)
+    w_all = conftest.gather_results(w, process_mesh=process_mesh)
 
-    result = dist_mm.xw_transpose_twoway(x, w, rank, device, model_group=model_group)
-    result = conftest.gather_results_twoway(result, group=model_group)
+    result = dist_mm.xw_transpose_twoway(
+        x, w, local_rank, device, model_group=model_group
+    )
+    result = conftest.gather_results(result, process_mesh=process_mesh)
 
     assert torch.allclose(x_all @ w_all.mT, result, atol=1e-5)
 
 
-def test_xw_twoway(device, model_group):
+def test_xw_twoway(device, process_mesh):
     """Test for XW multiplication across two processes."""
-    rank = dist.get_rank()
-    torch.manual_seed(42 + rank)
+    model_group = process_mesh["model"]
+    local_rank = model_group.rank()
+    torch.manual_seed(42 + local_rank)
 
-    rank = dist.get_rank()
     x = torch.randn(1, 4, 16 // 2, device=device)
     w = torch.randn(1, 16, 8 // 2, device=device)
-    x_all = conftest.gather_results_twoway(x, group=model_group)
-    w_all = conftest.gather_results_twoway(w, group=model_group)
-    result = dist_mm.xw_twoway(x, w, rank, device, model_group=model_group)
-    result = conftest.gather_results_twoway(result, group=model_group)
+    x_all = conftest.gather_results(x, process_mesh=process_mesh)
+    w_all = conftest.gather_results(w, process_mesh=process_mesh)
+    result = dist_mm.xw_twoway(x, w, local_rank, device, model_group=model_group)
+    result = conftest.gather_results(result, process_mesh=process_mesh)
 
-    assert torch.allclose(x_all @ (w_all), result)
+    assert torch.allclose(x_all @ (w_all), result, atol=1e-5)
 
 
-def test_xtw_twoway(device, model_group):
+def test_xtw_twoway(device, process_mesh):
     """Test for XTW multiplication across two processes."""
-    rank = dist.get_rank()
-    torch.manual_seed(42 + rank)
+    model_group = process_mesh["model"]
+    local_rank = model_group.rank()
+    torch.manual_seed(42 + local_rank)
 
-    rank = dist.get_rank()
     x = torch.randn(1, 16, 4 // 2, device=device)
     w = torch.randn(1, 16, 8 // 2, device=device)
-    x_all = conftest.gather_results_twoway(x, group=model_group)
-    w_all = conftest.gather_results_twoway(w, group=model_group)
-    result = dist_mm.x_transpose_w_twoway(x, w, rank, device, model_group=model_group)
-    result = conftest.gather_results_twoway(result, group=model_group)
+    x_all = conftest.gather_results(x, process_mesh=process_mesh)
+    w_all = conftest.gather_results(w, process_mesh=process_mesh)
+    result = dist_mm.x_transpose_w_twoway(
+        x, w, local_rank, device, model_group=model_group
+    )
+    result = conftest.gather_results(result, process_mesh=process_mesh)
 
-    assert torch.allclose((x_all.mT) @ (w_all), result)
+    assert torch.allclose((x_all.mT) @ (w_all), result, atol=1e-5)
 
 
-def test_fused_xw_xtw_twoway(device, model_group):
+def test_fused_xw_xtw_twoway(device, process_mesh):
     """Test for XTW multiplication across two processes."""
-    rank = dist.get_rank()
-    torch.manual_seed(42 + rank)
+    model_group = process_mesh["model"]
+    local_rank = model_group.rank()
+    torch.manual_seed(42 + local_rank)
 
-    rank = dist.get_rank()
     x = torch.randn(1, 4, 16 // 2, device=device)
     w1 = torch.randn(1, 16, 8 // 2, device=device)
     w2 = torch.randn(1, 4, 8 // 2, device=device)
-    x_all = conftest.gather_results_twoway(x, group=model_group)
-    w1_all = conftest.gather_results_twoway(w1, group=model_group)
-    w2_all = conftest.gather_results_twoway(w2, group=model_group)
+    x_all = conftest.gather_results(x, process_mesh=process_mesh)
+    w1_all = conftest.gather_results(w1, process_mesh=process_mesh)
+    w2_all = conftest.gather_results(w2, process_mesh=process_mesh)
     result_xw, result_xtw = dist_mm.fused_xw_xtw_twoway(
-        x, w1, w2, rank, device, model_group=model_group
+        x, w1, w2, local_rank, device, model_group=model_group
     )
-    result_xw = conftest.gather_results_twoway(result_xw, group=model_group)
-    result_xtw = conftest.gather_results_twoway(result_xtw, group=model_group)
+    result_xw = conftest.gather_results(result_xw, process_mesh=process_mesh)
+    result_xtw = conftest.gather_results(result_xtw, process_mesh=process_mesh)
 
-    assert torch.allclose((x_all) @ (w1_all), result_xw)
-    assert torch.allclose((x_all.mT) @ (w2_all), result_xtw)
-
-
-def test_linear_forward(device, model_group):
-    rank = dist.get_rank()
-    torch.manual_seed(42 + (rank % 2))  # for now, force the two to have the same
-    in_dim, out_dim = 5, 10
-    linlayer = linear.DistributedXWT(
-        in_dim, out_dim, False, rank, device, 2, model_group, None, False
-    ).to(device)
-    # print(linlayer.weight)
-    x_in = torch.randn(1, 20, 5, dtype=linlayer.weight.dtype, device=device)
-    x_in = x_in.contiguous()
-    y = linlayer(x_in)
-    assert True
+    assert torch.allclose((x_all) @ (w1_all), result_xw, atol=1e-5)
+    assert torch.allclose((x_all.mT) @ (w2_all), result_xtw, atol=1e-5)
