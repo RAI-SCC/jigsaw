@@ -114,6 +114,7 @@ def gather_results_as_list(x: torch.Tensor, process_mesh: dist.device_mesh = Non
         torch.zeros(x.shape, dtype=x.dtype, device=x.device)
         for _ in range(n_rows * n_cols)
     ]
+    torch.distributed.all_gather(tensor_list, x, group=process_mesh["model"])
     return tensor_list
 
 

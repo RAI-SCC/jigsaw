@@ -5,8 +5,6 @@ import torch.distributed as dist
 import jigsaw.linear as linear
 from tests import conftest
 
-MESHES = {"2x2": (2, 2), "4": (4,)}
-
 
 @pytest.fixture()
 def process_mesh():
@@ -16,18 +14,16 @@ def process_mesh():
     )
 
 
-def test_sync_linear(device, process_mesh):
+def test_sync_xwt(device, process_mesh):
     """Verify weights for XWT_Sync are synchronized after a few iterations."""
-    rank = dist.get_rank(group=None)
-    torch.manual_seed(
-        42 + (rank % 2)
-    )  # for now, force the two "pairs" to have the same
+    local_rank = dist.get_rank(group=None)
+    torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
     in_dim, out_dim = 5, 10
     linlayer = linear.DistributedXWTSync(
         in_dim,
         out_dim,
         True,
-        rank,
+        local_rank,
         device,
         2,
         process_mesh["col"],
@@ -39,7 +35,7 @@ def test_sync_linear(device, process_mesh):
         x_in = torch.randn(1, 20, 5, dtype=linlayer.weight.dtype, device=device)
         y = linlayer(x_in)
         target = (
-            torch.ones(y.shape, dtype=x_in.dtype, device=device) * rank
+            torch.ones(y.shape, dtype=x_in.dtype, device=device) * local_rank
         )  # different target per rank
         optimizer = torch.optim.Adam(linlayer.parameters())
 
@@ -63,3 +59,63 @@ def test_sync_linear(device, process_mesh):
     assert torch.allclose(
         weight_grad_gathered_as_list[1], weight_grad_gathered_as_list[3]
     )
+
+
+def test_param_init_xwt(device, process_mesh):
+    """Verify initial weights for XWT_Sync are correctly synchronized."""
+    rank = dist.get_rank(group=None)
+    torch.manual_seed(rank)  # each process gets a different initial seed
+    row_comm_size, col_comm_size = (
+        process_mesh["row"].size(),
+        process_mesh["col"].size(),
+    )
+    in_dim, out_dim = 5, 10
+    linlayer = linear.DistributedXWTSync(
+        in_dim,
+        out_dim,
+        True,
+        rank,
+        device,
+        2,
+        process_mesh["col"],
+        process_mesh["row"],
+        False,
+    ).to(device)
+
+    weights_gathered_as_list = conftest.gather_results_as_list(
+        linlayer.weight, process_mesh
+    )
+
+    for i in range(process_mesh["model"].size() // row_comm_size):
+        assert torch.allclose(
+            weights_gathered_as_list[i], weights_gathered_as_list[i + col_comm_size]
+        )
+
+    # same, with no bias
+    in_dim, out_dim = 5, 10
+    linlayer = linear.DistributedXWTSync(
+        in_dim,
+        out_dim,
+        False,
+        rank,
+        device,
+        2,
+        process_mesh["col"],
+        process_mesh["row"],
+        False,
+    ).to(device)
+
+    weights_gathered_as_list = conftest.gather_results_as_list(
+        linlayer.weight, process_mesh
+    )
+
+    for i in range(process_mesh["model"].size() // row_comm_size):
+        assert torch.allclose(
+            weights_gathered_as_list[i], weights_gathered_as_list[i + col_comm_size]
+        )
+
+
+# parameter counts accurate
+
+# forward pass of linear layer accurate
+# backward pass of linear layer accurate?
