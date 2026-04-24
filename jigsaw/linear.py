@@ -8,7 +8,6 @@ import torch.nn.functional as F  # noqa
 from . import distributed_matmul as dist_mm
 from . import distributed_roll as dist_roll
 from . import hooks
-from .utils_init import average_weights
 
 
 class RollSelectionStrategy:
@@ -349,7 +348,9 @@ class DistributedXWT(torch.nn.Module):
                 out_dim = out_dim * 2
 
         self.bias = (
-            torch.zeros(out_dim).uniform_(-stdev, stdev).to(device) if bias else None
+            torch.nn.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev).to(device))
+            if bias
+            else None
         )
 
         self.device = device
@@ -367,16 +368,12 @@ class DistributedXWT(torch.nn.Module):
             linear_layer=True,
         )
 
-        if bias:
-            average_weights([self.bias], self.spatial_group)
-            self.bias = torch.nn.parameter.Parameter(self.bias)
-
-        self.weight.register_post_accumulate_grad_hook(
-            hooks.make_grad_sync_hook(self.spatial_group)
-        )
-        self.bias.register_post_accumulate_grad_hook(
-            hooks.make_grad_sync_hook(self.spatial_group)
-        )
+        if self.bias is not None:
+            self.bias.register_post_accumulate_grad_hook(
+                hooks.make_grad_sync_hook(self.spatial_group)
+            )
+            for p in self.parameters():
+                dist.broadcast(p.data, group_src=0, group=self.spatial_group)
 
         self.XWT = XWT().apply
 

@@ -138,3 +138,30 @@ def gather_results(x: torch.Tensor, process_mesh: dist.device_mesh = None):
         .reshape(*batch_dims, n_rows * h, n_cols * w)
     )
     return result
+
+
+def gather_1d_results_list(x: torch.Tensor, process_mesh: dist.device_mesh = None):
+    """Gather 1d tensor distributed across process mesh rows."""
+    n_rows, n_cols = process_mesh["row"].size(), process_mesh["col"].size()
+    tensor_list = [
+        torch.zeros(x.shape, dtype=x.dtype, device=x.device)
+        for _ in range(n_rows * n_cols)
+    ]
+    torch.distributed.all_gather(tensor_list, x, group=process_mesh["model"])
+    return tensor_list
+
+
+def gather_1d_results(x: torch.Tensor, process_mesh: dist.device_mesh = None):
+    """Gather 1d tensor distributed across process mesh rows."""
+    n_rows = process_mesh["row"].size()
+    tensor_list = [
+        torch.zeros(x.shape, dtype=x.dtype, device=x.device) for _ in range(n_rows)
+    ]
+    torch.distributed.all_gather(tensor_list, x, group=process_mesh["model"])
+
+    batch_dims = x.shape[:-1]
+    ndim = len(batch_dims)
+    perm = list(range(1, 1 + ndim)) + [0, 1 + ndim]
+    result = torch.stack(tensor_list)
+    result = result.reshape(n_rows, *x.shape).permute(*perm).reshape(*batch_dims, -1)
+    return result

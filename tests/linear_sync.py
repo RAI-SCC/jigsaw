@@ -30,6 +30,7 @@ def test_sync_xwt(device, process_mesh):
         process_mesh["row"],
         False,
     ).to(device)
+    optimizer = torch.optim.Adam(linlayer.parameters())
 
     for _ in range(10):
         x_in = torch.randn(1, 20, 5, dtype=linlayer.weight.dtype, device=device)
@@ -37,19 +38,17 @@ def test_sync_xwt(device, process_mesh):
         target = (
             torch.ones(y.shape, dtype=x_in.dtype, device=device) * local_rank
         )  # different target per rank
-        optimizer = torch.optim.Adam(linlayer.parameters())
 
         loss = torch.nn.functional.mse_loss(y, target)
         loss.backward()
 
-        weight_grad = linlayer.weight.grad
         optimizer.step()
 
     weights_gathered_as_list = conftest.gather_results_as_list(
         linlayer.weight, process_mesh
     )
     weight_grad_gathered_as_list = conftest.gather_results_as_list(
-        weight_grad, process_mesh
+        linlayer.weight.grad, process_mesh
     )
     assert torch.allclose(weights_gathered_as_list[0], weights_gathered_as_list[2])
     assert torch.allclose(weights_gathered_as_list[1], weights_gathered_as_list[3])
@@ -116,6 +115,3 @@ def test_param_init_xwt(device, process_mesh):
 
 
 # parameter counts accurate
-
-# forward pass of linear layer accurate
-# backward pass of linear layer accurate?

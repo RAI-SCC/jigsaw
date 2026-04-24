@@ -53,7 +53,7 @@ def test_param_init_conv2d(device, process_mesh):
         )
 
 
-def test_param_init_conv2dTranspose(device, process_mesh):
+def test_param_init_conv2d_transpose(device, process_mesh):
     """Verify initial weights for Conv2d are correctly synchronized."""
     local_rank = dist.get_rank(group=process_mesh["model"])
     torch.manual_seed(local_rank)  # each process gets a different initial seed
