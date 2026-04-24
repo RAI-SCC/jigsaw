@@ -586,7 +586,7 @@ class DistributedConv2D(torch.nn.Module):
         for p in self.parameters():
             dist.broadcast(p.data, group_src=0, group=self.spatial_group)
 
-        self.conv2d_apply = Conv2d().apply
+        self.conv2d_apply = Conv2d.apply
 
     def get_parameter_count(self):
         """Return effective number of local parameters for Distributed Conv2D module."""
@@ -1006,7 +1006,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
         for p in self.parameters():
             dist.broadcast(p.data, group_src=0, group=self.spatial_group)
 
-        self.convTranspose2d_apply = ConvTranspose2d().apply
+        self.convTranspose2d_apply = ConvTranspose2d.apply
 
     def get_parameter_count(self):
         """Return effective number of local parameters for distributed model."""

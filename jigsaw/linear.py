@@ -375,7 +375,7 @@ class DistributedXWT(torch.nn.Module):
             for p in self.parameters():
                 dist.broadcast(p.data, group_src=0, group=self.spatial_group)
 
-        self.XWT = XWT().apply
+        self.XWT = XWT.apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -683,7 +683,7 @@ class DistributedXWTSync(torch.nn.Module):
         for p in self.parameters():
             dist.broadcast(p.data, group_src=0, group=self.sync_group)
 
-        self.XWT_sync = XWTSync().apply
+        self.XWT_sync = XWTSync.apply
 
     def get_parameter_count(self):
         """Return parameter count for distributed XWT Sync layer."""
@@ -973,7 +973,7 @@ class DistributedXW(torch.nn.Module):
 
         # TODO: post-grad_acumulate hook
 
-        self.XW = XW().apply
+        self.XW = XW.apply
 
     def get_parameter_count(self):
         """Return parameter count for distributed XW layer."""
@@ -1246,7 +1246,7 @@ class DistributedXTW(torch.nn.Module):
 
         # TODO: hooks for bias sync
         # self.bias.register_post_accumulate_grad_hook(hooks.make_grad_sync_hook(self.spatial_group))
-        self.XTW = XTW().apply
+        self.XTW = XTW.apply
 
     def get_parameter_count(self):
         """Return parameter count for distributed XTW linear layer."""
@@ -1472,7 +1472,7 @@ class DistributedXTranspose(torch.nn.Module):
         self.model_group = model_group
         self.selector = TransposeSelectionStrategy(self.parallelism)
 
-        self.transpose = XT().apply
+        self.transpose = XT.apply
 
     def get_parameter_count(self):
         """Return 0 parameter count for transpose operation."""
@@ -1616,7 +1616,7 @@ class DistributedRoll(torch.nn.Module):
         self.spatial_group = spatial_group
         self.shifts = shifts
         self.dims = dims
-        self.roll = Roll().apply
+        self.roll = Roll.apply
         self.empty = torch.empty(0, device=self.device, dtype=dtype)
 
         self.selector = RollSelectionStrategy(parallelism)
@@ -1808,7 +1808,7 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
             linear_layer=False,
         )
 
-        self.XWT = XWT().apply
+        self.XWT = XWT.apply
 
     def get_parameter_count(self):
         """Return parameter count for disdtributed MatMulXWT operation."""
@@ -1893,7 +1893,7 @@ class DistributedMatMulXW(torch.nn.Module):
             synchronized_layer=False,
             linear_layer=False,
         )
-        self.XW = XW().apply
+        self.XW = XW.apply
 
     def get_parameter_count(self):
         """Return parameter count for matrix multiplication."""
@@ -1978,7 +1978,7 @@ class DistributedXWTNice(torch.nn.Module):
         # TODO: Distributed NICE hook?
         # self.weight.register_post_accumulate_grad_hook(hooks.make_grad_sync_hook(self.spatial_group))
 
-        self.XWT_Nice = XWTNice().apply
+        self.XWT_Nice = XWTNice.apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
