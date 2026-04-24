@@ -557,10 +557,16 @@ class DistributedConv2D(torch.nn.Module):
         self.bayesian = bayesian
 
         k = np.sqrt(1 / (self.in_channels * 2 * kernel_size[0] * kernel_size[1]))
-        self.weight = torch.zeros(
-            self.out_channels, self.in_channels, kernel_size[0], kernel_size[1]
-        ).uniform_(-k, k)
-        self.bias = torch.zeros(self.out_channels).uniform_(-k, k)
+        self.weight = torch.nn.parameter.Parameter(
+            torch.zeros(
+                self.out_channels, self.in_channels, kernel_size[0], kernel_size[1]
+            )
+            .uniform_(-k, k)
+            .to(device)
+        )
+        self.bias = torch.nn.parameter.Parameter(
+            torch.zeros(self.out_channels).uniform_(-k, k).to(device)
+        )
 
         self.selector = ConvSelectionStrategy(
             self.bayesian,
@@ -570,14 +576,15 @@ class DistributedConv2D(torch.nn.Module):
             self.stride,
         )
 
-        self.weight = torch.nn.parameter.Parameter(self.weight)
-        self.bias = torch.nn.parameter.Parameter(self.bias)
         self.weight.register_post_accumulate_grad_hook(
-            hooks.make_grad_sync_hook(self.sync_group)
+            hooks.make_grad_sync_hook(self.spatial_group)
         )
-        self.bias.register_post_accumulate_grad_hook(
-            hooks.make_grad_sync_hook(self.sync_group)
-        )
+        if self.bias is not None:
+            self.bias.register_post_accumulate_grad_hook(
+                hooks.make_grad_sync_hook(self.spatial_group)
+            )
+        for p in self.parameters():
+            dist.broadcast(p.data, group_src=0, group=self.spatial_group)
 
         self.conv2d_apply = Conv2d().apply
 
@@ -969,13 +976,23 @@ class DistributedConvTranspose2D(torch.nn.Module):
             self.groups
             / (self.out_channels * 2 * self.kernel_size[0] * self.kernel_size[1])
         )
-        self.weight = torch.zeros(
-            self.in_channels,
-            self.out_channels // self.groups,
-            kernel_size[0],
-            kernel_size[1],
-        ).uniform_(-k, k)
-        self.bias = torch.zeros(self.out_channels).uniform_(-k, k)
+        self.weight = torch.nn.Parameter(
+            torch.zeros(
+                self.in_channels,
+                self.out_channels // self.groups,
+                kernel_size[0],
+                kernel_size[1],
+            )
+            .uniform_(-k, k)
+            .to(device)
+        )
+        self.bias = (
+            torch.nn.Parameter(
+                torch.zeros(self.out_channels).uniform_(-k, k).to(device)
+            )
+            if bias
+            else None
+        )
         self.empty = torch.empty(0, device=self.device, dtype=dtype)
 
         self.selector = ConvTransposeSelectionStrategy(
@@ -986,8 +1003,8 @@ class DistributedConvTranspose2D(torch.nn.Module):
             self.stride,
         )
 
-        self.weight = torch.nn.parameter.Parameter(self.weight)
-        self.bias = torch.nn.parameter.Parameter(self.bias)
+        for p in self.parameters():
+            dist.broadcast(p.data, group_src=0, group=self.spatial_group)
 
         self.convTranspose2d_apply = ConvTranspose2d().apply
 

@@ -641,7 +641,9 @@ class DistributedXWTSync(torch.nn.Module):
             if parallelism > 1
             else 1.0 / np.sqrt(in_dim)  # TODO CHECK
         )
-        self.weight = torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
+        self.weight = torch.nn.parameter.Parameter(
+            torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev).to(device)
+        )
 
         match parallelism:
             case 2:
@@ -651,7 +653,13 @@ class DistributedXWTSync(torch.nn.Module):
             case 8:
                 out_dim = out_dim * 2
 
-        self.bias = torch.zeros(out_dim).uniform_(-stdev, stdev) if bias else None
+        self.bias = (
+            torch.nn.parameter.Parameter(
+                torch.zeros(out_dim).uniform_(-stdev, stdev).to(device)
+            )
+            if bias
+            else None
+        )
 
         self.device = device
         self.local_rank = local_rank
@@ -667,14 +675,16 @@ class DistributedXWTSync(torch.nn.Module):
             linear_layer=True,
         )
 
-        self.weight = torch.nn.parameter.Parameter(self.weight)
-        self.bias = torch.nn.parameter.Parameter(self.bias)
         self.weight.register_post_accumulate_grad_hook(
             hooks.make_grad_sync_hook(self.sync_group)
         )
-        self.bias.register_post_accumulate_grad_hook(
-            hooks.make_grad_sync_hook(self.sync_group)
-        )
+        if self.bias is not None:
+            self.bias.register_post_accumulate_grad_hook(
+                hooks.make_grad_sync_hook(self.sync_group)
+            )
+
+        for p in self.parameters():
+            dist.broadcast(p.data, group_src=0, group=self.sync_group)
 
         self.XWT_sync = XWTSync().apply
 
