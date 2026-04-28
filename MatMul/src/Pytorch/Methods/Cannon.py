@@ -1,8 +1,8 @@
 import torch
 import torch.distributed as dist
 
-import Pytorch.Utility.MatrixManager as MatrixManager
-import Pytorch.Utility.ProcManager as ProcManager
+import MatMul.src.Pytorch.Utility.MatrixManager as MatrixManager
+import MatMul.src.Pytorch.Utility.ProcManager as ProcManager
 
 def X_W(X, W, grid_shape, device):
     rank = dist.get_rank()
@@ -27,13 +27,22 @@ def X_W(X, W, grid_shape, device):
     down_rank  = ProcManager.GetRank(((r + 1) % num_r, c), grid_shape)
 
     def shift_inplace(send_tensor, recv_buffer, dest_rank, src_rank):
-        """Reuses recv_buffer to avoid re-allocation."""
-        send_req = dist.isend(send_tensor, dst=dest_rank)
-        recv_req = dist.irecv(recv_buffer, src=src_rank)
-        send_req.wait()
-        recv_req.wait()
-        # Swap content: we return the buffer that now holds new data
-        # and the old tensor becomes the available buffer for the next hop.
+        """
+        Uses batch_isend_irecv to safely swap data. 
+        This prevents the 'NoneType' error and avoids deadlocks.
+        """
+        # Create a list of P2P operations
+        send_op = dist.P2POp(dist.isend, send_tensor, dest_rank)
+        recv_op = dist.P2POp(dist.irecv, recv_buffer, src_rank)
+        
+        # batch_isend_irecv returns a list of handles
+        reqs = dist.batch_isend_irecv([send_op, recv_op])
+        
+        # Now we wait on the handles
+        for req in reqs:
+            if req is not None:
+                req.wait()
+                
         return recv_buffer, send_tensor
 
     # 3b. Initial Alignment
@@ -84,10 +93,22 @@ def XT_W(X, W, grid_shape, device):
     down_rank  = ProcManager.GetRank(((r + 1) % num_r, c), grid_shape)
 
     def shift_inplace(send_tensor, recv_buffer, dest_rank, src_rank):
-        send_req = dist.isend(send_tensor, dst=dest_rank)
-        recv_req = dist.irecv(recv_buffer, src=src_rank)
-        send_req.wait()
-        recv_req.wait()
+        """
+        Uses batch_isend_irecv to safely swap data. 
+        This prevents the 'NoneType' error and avoids deadlocks.
+        """
+        # Create a list of P2P operations
+        send_op = dist.P2POp(dist.isend, send_tensor, dest_rank)
+        recv_op = dist.P2POp(dist.irecv, recv_buffer, src_rank)
+        
+        # batch_isend_irecv returns a list of handles
+        reqs = dist.batch_isend_irecv([send_op, recv_op])
+        
+        # Now we wait on the handles
+        for req in reqs:
+            if req is not None:
+                req.wait()
+                
         return recv_buffer, send_tensor
 
     # --- 1. Initial Alignment ---
@@ -138,10 +159,22 @@ def X_WT(X, W, grid_shape, device):
     down_rank  = ProcManager.GetRank(((r + 1) % num_r, c), grid_shape)
 
     def shift_inplace(send_tensor, recv_buffer, dest_rank, src_rank):
-        send_req = dist.isend(send_tensor, dst=dest_rank)
-        recv_req = dist.irecv(recv_buffer, src=src_rank)
-        send_req.wait()
-        recv_req.wait()
+        """
+        Uses batch_isend_irecv to safely swap data. 
+        This prevents the 'NoneType' error and avoids deadlocks.
+        """
+        # Create a list of P2P operations
+        send_op = dist.P2POp(dist.isend, send_tensor, dest_rank)
+        recv_op = dist.P2POp(dist.irecv, recv_buffer, src_rank)
+        
+        # batch_isend_irecv returns a list of handles
+        reqs = dist.batch_isend_irecv([send_op, recv_op])
+        
+        # Now we wait on the handles
+        for req in reqs:
+            if req is not None:
+                req.wait()
+                
         return recv_buffer, send_tensor
 
     # --- 1. Initial Alignment ---
