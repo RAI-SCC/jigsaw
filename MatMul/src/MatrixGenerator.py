@@ -1,7 +1,7 @@
 import torch
 import os
 
-def generate_matrices(paths="matrix", low=-1, high=1, n=800, k=2000, m=1600, seed=0):
+def generate_matrices(paths=r"MatMul/matrix", low=-1, high=1, n=800, k=2000, m=1600, seed=0):
     torch.manual_seed(seed)
     os.makedirs(paths, exist_ok=True)
 
@@ -18,3 +18,6 @@ def generate_matrices(paths="matrix", low=-1, high=1, n=800, k=2000, m=1600, see
     for filename, tensor in data_map.items():
         with open(os.path.join(paths, filename), "wb") as f:
             f.write(tensor.numpy().tobytes())
+
+if __name__ == "__main__":
+        generate_matrices()
