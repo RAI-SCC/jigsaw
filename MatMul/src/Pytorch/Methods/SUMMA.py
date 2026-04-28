@@ -1,8 +1,7 @@
 import torch
 import torch.distributed as dist
 
-import Pytorch.Utility.MatrixManager as MatrixManager
-import Pytorch.Utility.ProcManager as ProcManager
+import MatMul.src.Pytorch.Utility.ProcManager as ProcManager
 
 # ProcessMesh pytorch
 def ComputeGroups(grid_shape):
