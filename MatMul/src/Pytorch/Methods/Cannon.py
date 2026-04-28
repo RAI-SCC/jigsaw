@@ -1,0 +1,167 @@
+import torch
+import torch.distributed as dist
+
+import Pytorch.Utility.MatrixManager as MatrixManager
+import Pytorch.Utility.ProcManager as ProcManager
+
+def X_W(X, W, grid_shape, device):
+    rank = dist.get_rank()
+    num_r, num_c = grid_shape
+    coords = ProcManager.GetCoords(rank, grid_shape)
+    r, c = coords
+
+    sub_n = X.shape[0]
+    sub_m = W.shape[1]
+    
+    result_local = torch.zeros((sub_n, sub_m), dtype=torch.float32, device=device)
+    
+    # Pre-allocate static buffers to avoid CUDA malloc/free overhead
+    # We need two buffers: one for the incoming X data and one for W
+    X_buffer = torch.empty_like(X)
+    W_buffer = torch.empty_like(W)
+
+    # Identify Neighbors
+    left_rank  = ProcManager.GetRank((r, (c - 1) % num_c), grid_shape)
+    right_rank = ProcManager.GetRank((r, (c + 1) % num_c), grid_shape)
+    up_rank    = ProcManager.GetRank(((r - 1) % num_r, c), grid_shape)
+    down_rank  = ProcManager.GetRank(((r + 1) % num_r, c), grid_shape)
+
+    def shift_inplace(send_tensor, recv_buffer, dest_rank, src_rank):
+        """Reuses recv_buffer to avoid re-allocation."""
+        send_req = dist.isend(send_tensor, dst=dest_rank)
+        recv_req = dist.irecv(recv_buffer, src=src_rank)
+        send_req.wait()
+        recv_req.wait()
+        # Swap content: we return the buffer that now holds new data
+        # and the old tensor becomes the available buffer for the next hop.
+        return recv_buffer, send_tensor
+
+    # 3b. Initial Alignment
+    # X: Shift left by 'r' positions
+    for _ in range(r):
+        X, X_buffer = shift_inplace(X, X_buffer, left_rank, right_rank)
+    
+    # W: Shift up by 'c' positions
+    for _ in range(c):
+        W, W_buffer = shift_inplace(W, W_buffer, up_rank, down_rank)
+
+    # 3c. Shift-and-Multiply Loop
+    for i in range(num_c):
+        # Perform compute (GEMM)
+        # Using addmm or @ with +=
+        result_local.addmm_(X, W)
+
+        # Skip the final shift on the last iteration to save time
+        if i < num_c - 1:
+            X, X_buffer = shift_inplace(X, X_buffer, left_rank, right_rank)
+            W, W_buffer = shift_inplace(W, W_buffer, up_rank, down_rank)
+
+    return result_local
+
+def XT_W(X, W, grid_shape, device):
+    rank = dist.get_rank()
+    num_r, num_c = grid_shape
+    coords = ProcManager.GetCoords(rank, grid_shape)
+    r, c = coords
+
+    # IMPORTANT: Since X is "X^T positionally", X.shape[0] is the 
+    # original number of columns. After X.t(), it matches W's rows.
+    # result_local shape: (Rows of X^T, Cols of W)
+    sub_n = X.shape[1] # This is rows of X^T
+    sub_m = W.shape[1] # This is cols of W
+    
+    result_local = torch.zeros((sub_n, sub_m), dtype=torch.float32, device=device)
+    
+    # Pre-allocate static buffers
+    # X_buffer matches X (the non-transposed block shape)
+    X_buffer = torch.empty_like(X)
+    W_buffer = torch.empty_like(W)
+
+    # Identify Neighbors (Standard Cannon grid)
+    left_rank  = ProcManager.GetRank((r, (c - 1) % num_c), grid_shape)
+    right_rank = ProcManager.GetRank((r, (c + 1) % num_c), grid_shape)
+    up_rank    = ProcManager.GetRank(((r - 1) % num_r, c), grid_shape)
+    down_rank  = ProcManager.GetRank(((r + 1) % num_r, c), grid_shape)
+
+    def shift_inplace(send_tensor, recv_buffer, dest_rank, src_rank):
+        send_req = dist.isend(send_tensor, dst=dest_rank)
+        recv_req = dist.irecv(recv_buffer, src=src_rank)
+        send_req.wait()
+        recv_req.wait()
+        return recv_buffer, send_tensor
+
+    # --- 1. Initial Alignment ---
+    # Standard Cannon: X shifts left by r, W shifts up by c
+    # This works because X is already in its "transposed" row/col position
+    for _ in range(r):
+        X, X_buffer = shift_inplace(X, X_buffer, left_rank, right_rank)
+    
+    for _ in range(c):
+        W, W_buffer = shift_inplace(W, W_buffer, up_rank, down_rank)
+
+    # --- 2. Shift-and-Multiply Loop ---
+    for i in range(num_c):
+        # Local GEMM: We transpose X locally here to align the math
+        # X.t() is a view, so this is efficient.
+        result_local.addmm_(X.t(), W)
+
+        if i < num_c - 1:
+            # Shift X left, W up
+            X, X_buffer = shift_inplace(X, X_buffer, left_rank, right_rank)
+            # Use W_buffer to shift W up
+            W, W_buffer = shift_inplace(W, W_buffer, up_rank, down_rank)
+
+    return result_local
+
+def X_WT(X, W, grid_shape, device):
+    rank = dist.get_rank()
+    num_r, num_c = grid_shape
+    coords = ProcManager.GetCoords(rank, grid_shape)
+    r, c = coords
+
+    # If W is "positionally transposed" to represent W^T:
+    # W.shape[1] is actually the original number of rows of W.
+    # W.t().shape[1] will be the original number of columns of W.
+    sub_n = X.shape[0]     # Rows of X
+    sub_m = W.shape[0]     # Columns of W^T (which were Rows of W)
+    
+    result_local = torch.zeros((sub_n, sub_m), dtype=torch.float32, device=device)
+    
+    # Pre-allocate static buffers
+    X_buffer = torch.empty_like(X)
+    W_buffer = torch.empty_like(W)
+
+    # Identify Neighbors (Standard Cannon grid)
+    left_rank  = ProcManager.GetRank((r, (c - 1) % num_c), grid_shape)
+    right_rank = ProcManager.GetRank((r, (c + 1) % num_c), grid_shape)
+    up_rank    = ProcManager.GetRank(((r - 1) % num_r, c), grid_shape)
+    down_rank  = ProcManager.GetRank(((r + 1) % num_r, c), grid_shape)
+
+    def shift_inplace(send_tensor, recv_buffer, dest_rank, src_rank):
+        send_req = dist.isend(send_tensor, dst=dest_rank)
+        recv_req = dist.irecv(recv_buffer, src=src_rank)
+        send_req.wait()
+        recv_req.wait()
+        return recv_buffer, send_tensor
+
+    # --- 1. Initial Alignment ---
+    # X: Shift left by r positions
+    for _ in range(r):
+        X, X_buffer = shift_inplace(X, X_buffer, left_rank, right_rank)
+    
+    # W: Shift up by c positions (W here is the positionally transposed W^T)
+    for _ in range(c):
+        W, W_buffer = shift_inplace(W, W_buffer, up_rank, down_rank)
+
+    # --- 2. Shift-and-Multiply Loop ---
+    for i in range(num_c):
+        # Local GEMM: X @ W^T
+        # We use W.t() because the blocks are in the right place, 
+        # but the data inside them needs transposing.
+        result_local.addmm_(X, W.t())
+
+        if i < num_c - 1:
+            X, X_buffer = shift_inplace(X, X_buffer, left_rank, right_rank)
+            W, W_buffer = shift_inplace(W, W_buffer, up_rank, down_rank)
+
+    return result_local
