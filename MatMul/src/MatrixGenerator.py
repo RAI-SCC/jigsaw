@@ -20,4 +20,4 @@ def generate_matrices(paths=r"MatMul/matrix", low=-1, high=1, n=800, k=2000, m=1
             f.write(tensor.numpy().tobytes())
 
 if __name__ == "__main__":
-        generate_matrices()
+        generate_matrices(n=80, k=200, m=32)
