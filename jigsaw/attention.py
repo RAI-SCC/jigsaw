@@ -189,7 +189,7 @@ class DistributedWindowedFlashAttention(torch.nn.Module):
 
         self.heads = heads // 2
 
-    @torch.compile(mode="reduce-overhead")
+    @torch.compile(backend='eager')
     def _attention_core(self, q, k, v, mask, dropout):
 
         with torch.nn.attention.sdpa_kernel(
@@ -200,7 +200,7 @@ class DistributedWindowedFlashAttention(torch.nn.Module):
             )
         return out
 
-    @torch.compile(mode="reduce-overhead")
+    @torch.compile(backend='eager')
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """
         Forward pass for distributed multi-head attention.
