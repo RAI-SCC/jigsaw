@@ -13,8 +13,8 @@ dK/dV rotate counter-clockwise (opposite to forward) back to their home rank.
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
-from torch.autograd import Function
 
+from . import ring_attention_helpers as ring_attn
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -29,20 +29,6 @@ def _ring_send_recv(tensor, world_size, rank, group, empty, recv_buf):
     handle = dist.all_to_all(output_list, input_list, group=group, async_op=True)
     return recv_buf, handle
 
-
-# def _online_softmax_merge(O1, m1, l1, O2, m2, l2):
-#     """Merge two partial (O, m, l) online-softmax accumulators."""
-#     m_new = torch.maximum(m1, m2)
-#     e1 = torch.exp(m1 - m_new)
-#     e2 = torch.exp(m2 - m_new)
-#     l_new = e1 * l1 + e2 * l2
-#     O_new = (
-#         e1.unsqueeze(-1) * l1.unsqueeze(-1) * O1
-#         + e2.unsqueeze(-1) * l2.unsqueeze(-1) * O2
-#     ) / l_new.unsqueeze(-1)
-#     return O_new, m_new, l_new
-
-
 def _online_softmax_merge(O1, L1, O2, L2):
     L_new = torch.logaddexp(L1, L2)
     e1 = torch.exp(L1 - L_new)
@@ -53,23 +39,32 @@ def _online_softmax_merge(O1, L1, O2, L2):
 
 # notes on things that partially worked
 
-# vanilla attention
-# with torch.no_grad():
-#     S_j = scale * torch.einsum("bhid,bhjd->bhij", Q, K)
-#     m_j = S_j.amax(dim=-1)
-#     exp_S = torch.exp(S_j - m_j.unsqueeze(-1))
-#     l_j = exp_S.sum(dim=-1)
-#     O_j = torch.einsum("bhij,bhjd->bhid", exp_S / l_j.unsqueeze(-1), V)
-# O, m, l = _online_softmax_merge(O, m, l, O_j, m_j, l_j)
-
 # native flash attention
 # with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.FLASH_ATTENTION):
 #     O_jflash = torch.nn.functional.scaled_dot_product_attention(
 #         Q, Kj, Vj, is_causal=False, dropout_p=0, scale=scale
 #     )
 
-
-class RingAttentionFunction(Function):
+class DistributedRingAttention(torch.nn.Module):
+    """Ring attention."""
+    
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        device: torch.device,
+        spatial_group: dist.ProcessGroup = None
+    ):
+        super().__init__()
+        
+        self.world_size = spatial_group.get_size()
+        self.ring_attention = RingAttention.apply
+        
+    def forward(self):
+        attn = self.RingAttention()
+        
+        
+class RingAttention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, Q, K, V, X, W_qkv, scale, group, empty, zeros, rank, world_size):
         B, N_local, H, d = Q.shape
