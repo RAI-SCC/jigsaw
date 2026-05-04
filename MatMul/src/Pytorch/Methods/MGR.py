@@ -1,7 +1,7 @@
 import torch
 import torch.distributed as dist
 
-import Pytorch.Utility.MatrixManager as MatrixManager
+import MatMul.src.Pytorch.Utility.MatrixManager as MatrixManager
 
 def X_W(X, W, device):
     rank = dist.get_rank()
@@ -33,6 +33,7 @@ def X_W(X, W, device):
     right_neighbor = (rank + 1) % world_size
 
     # 3. CICLO RING
+    W_next = torch.empty_like(W)
     for step in range(world_size):
         # Calcolo dell'indice del blocco di colonne di W che abbiamo attualmente
         # Step 0: W_rank, Step 1: W_{rank-1}, etc.
@@ -48,16 +49,17 @@ def X_W(X, W, device):
 
         # TRASMISSIONE DI W (Anello)
         if step < world_size - 1:
-            W_next = torch.empty_like(W)
+            # Use batch operations to match Cannon's method and prevent NoneType errors
+            send_op = dist.P2POp(dist.isend, W, right_neighbor)
+            recv_op = dist.P2POp(dist.irecv, W_next, left_neighbor)
             
-            # Invio a destra (o sinistra, purché coerente) e ricezione
-            send_req = dist.isend(W, dst=right_neighbor)
-            recv_req = dist.irecv(W_next, src=left_neighbor)
+            reqs = dist.batch_isend_irecv([send_op, recv_op])
             
-            send_req.wait()
-            recv_req.wait()
+            for req in reqs:
+                if req is not None:
+                    req.wait()
             
-            W = W_next
+            W.copy_(W_next)
         
     return result_local
 
