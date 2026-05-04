@@ -76,11 +76,29 @@ def X_W(X, W, grid_shape, device, comm):
 
 def XT_W(X, W, grid_shape, device, comm):
     rank = dist.get_rank()
+    world_size = dist.get_world_size()
     num_r, num_c = grid_shape
     coords = ProcManager.GetCoords(rank, grid_shape)
     r, c = coords
 
     comm_row, comm_col = comm
+
+    # All_to_all for transposition
+    # Compute target
+    t_rank = ProcManager.GetRank((c, r), grid_shape)
+
+    # Each rank creates a list of 4 tensors (assuming world_size=4)
+    input_list = [torch.empty(0, device=device) for _ in range(world_size)]
+
+    input_list[t_rank] = X
+
+    # The output list must also be initialized
+    output_list = [torch.empty(0, device=device) for _ in range(world_size)]
+    # IMPORTANT: The rank receiving from Rank 1 must have an appropriately sized tensor here
+    output_list[t_rank] = torch.empty_like(X) 
+
+    dist.all_to_all(output_list, input_list, group=dist.group.WORLD)
+    X = output_list[t_rank]
 
     sub_n = X.shape[1]
     sub_k = X.shape[0]
@@ -122,11 +140,29 @@ def XT_W(X, W, grid_shape, device, comm):
 
 def X_WT(X, W, grid_shape, device, comm):
     rank = dist.get_rank()
+    world_size = dist.get_world_size()
     num_r, num_c = grid_shape
     coords = ProcManager.GetCoords(rank, grid_shape)
     r, c = coords
 
     comm_row, comm_col = comm
+
+    # All_to_all for transposition
+    # Compute target
+    t_rank = ProcManager.GetRank((c, r), grid_shape)
+
+    # Each rank creates a list of 4 tensors (assuming world_size=4)
+    input_list = [torch.empty(0, device=device) for _ in range(world_size)]
+
+    input_list[t_rank] = W
+
+    # The output list must also be initialized
+    output_list = [torch.empty(0, device=device) for _ in range(world_size)]
+    # IMPORTANT: The rank receiving from Rank 1 must have an appropriately sized tensor here
+    output_list[t_rank] = torch.empty_like(W) 
+
+    dist.all_to_all(output_list, input_list, group=dist.group.WORLD)
+    W = output_list[t_rank]
 
     sub_n = X.shape[0]
     sub_k = X.shape[1]
