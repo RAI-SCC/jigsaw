@@ -14,7 +14,9 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 
-from . import ring_attention_helpers as ring_attn
+from torch.autograd import Function
+from . import linear, ring_attention_helpers as ring_attn
+from einops import rearrange
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -45,152 +47,378 @@ def _online_softmax_merge(O1, L1, O2, L2):
 #         Q, Kj, Vj, is_causal=False, dropout_p=0, scale=scale
 #     )
 
-class DistributedRingAttention(torch.nn.Module):
-    """Ring attention."""
-    
+
+class RingAttention(torch.nn.Module):
+    """Distributed windowed attention."""
+
     def __init__(
         self,
-        in_dim: int,
-        out_dim: int,
+        x_features: int,
+        embed_dim: int,
+        output_dim: int,
+        heads: int,
+        dropout: float,
+        local_rank: int,
         device: torch.device,
-        spatial_group: dist.ProcessGroup = None
+        parallelism: int,
+        model_group: dist.ProcessGroup,
+        spatial_group: dist.ProcessGroup,
+        channel_group: dist.ProcessGroup,
+        bayesian: bool,
+        dtype,
     ):
+        """
+
+        Torch Module to perform distributed multi-headed attention.
+
+        x_features: int
+            global number of x features
+        embed_dim: int
+            global embedding dimension
+        output_dim: int
+            global
+        """
         super().__init__()
-        
-        self.world_size = spatial_group.get_size()
-        self.ring_attention = RingAttention.apply
-        
-    def forward(self):
-        attn = self.RingAttention()
-        
-        
-class RingAttention(torch.autograd.Function):
+        self.local_rank = local_rank
+        self.device = device
+        self.parallelism = parallelism
+        self.model_group = model_group
+        self.spatial_group = spatial_group
+        self.channel_group = channel_group
+
+        self.embed_dim = embed_dim
+        self.x_features = x_features
+        self.dtype = dtype
+        self.dropout = dropout
+
+        assert self.parallelism == 2, (
+            "windowed attention is only designed for parallelism = 2"
+        )
+
+        self.qkv = linear.DistributedXWTSync(
+            x_features // 2,
+            embed_dim * 3,
+            bias=False,
+            local_rank=self.local_rank,
+            device=self.device,
+            parallelism=self.parallelism,
+            model_group=self.channel_group,
+            sync_group=self.spatial_group,
+            bayesian=bayesian,
+        )
+
+        self.concatenator = linear.DistributedXWTSync(
+            embed_dim // 2,
+            output_dim,
+            bias=True,
+            local_rank=self.local_rank,
+            device=self.device,
+            parallelism=self.parallelism,
+            model_group=self.channel_group,
+            sync_group=self.spatial_group,
+            bayesian=bayesian,
+        )
+
+        # self.q_norm, self.k_norm = torch.nn.LayerNorm(embed_dim // heads), torch.nn.LayerNorm(embed_dim // heads)
+
+        self.heads = heads // 2
+
+    def _attention_core(
+        self, q, k, v, x, w, scale, group, empty, zeros, rank, world_size
+    ):
+
+        out = RingAttentionFunction.apply(
+            q, k, v, x, w, scale, group, empty, zeros, rank, world_size
+        )
+        return out
+
+    @torch.compile(backend="eager")
+    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for distributed multi-head attention.
+
+        x: (n_batch, vars, n_lat, n_lon)
+        """
+        # x_local: [n_batch, n_lat, n_lon, variables]
+        x_patches_local = x
+        # shape: [n_batches, spatial_tokens, channel_tokens]
+        qkv = self.qkv(x_patches_local).to(torch.bfloat16)
+        qkv = rearrange(
+            qkv, "... n i (three h d) -> three ... n h i d", three=3, h=self.heads
+        )
+        q, k, v = qkv.unbind(0)
+        # q = self.q_norm(q).to(torch.bfloat16)
+        # k = self.k_norm(k).to(torch.bfloat16)
+        # v = v.to(torch.bfloat16)
+        mask = mask.to(torch.bfloat16) if mask is not None else None
+        out = self._attention_core(
+            q,
+            k,
+            v,
+        )
+
+        # out has shape [batch, local_heads, local_sequence length, head_dim]
+        out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous().to(self.dtype)
+        values = self.concatenator(out)
+
+        # Output: [n_batch, seq_length, output_dim]
+        return values
+
+
+class RingAttentionFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, Q, K, V, X, W_qkv, scale, group, empty, zeros, rank, world_size):
+    def forward(
+        ctx,
+        Q,
+        K,
+        V,
+        X,
+        W_qkv,
+        scale,
+        group,
+        empty,
+        zeros,
+        rank,
+        world_size,
+        send_X_or_KV=0,
+        save_X_or_KV=0,
+        save_local_or_global=0,
+        offload=False,
+    ):
         B, N_local, H, d = Q.shape
+
         world_size = dist.get_world_size(group)
         O = torch.zeros_like(Q)
         l = torch.full((B, Nlocal, H), float("-inf"), device=Q.device, dtype=Q.dtype)
+        empty = torch.empty(0, device=X.device, dtype=X.dtype)
+        zeros = torch.zeros_like(X, device=X.device, dtype=X.dtype)
 
         Xj = X.clone()
 
-        KV_chunks = []
-        Xj = X.clone()
-        recv_buf = torch.zeros_like(X)
+        O, l, chunks_to_save = ring_attn.ring_forward_sendX(
+            Q,
+            X,
+            W_qkv,
+            scale,
+            group,
+            empty,
+            zeros,
+            rank,
+            world_size,
+            send_X_or_KV=0,
+            save_X_or_KV=0,
+            save_local_or_global=0,
+            offload=False,
+        )
 
-        # Kick off first send before any compute
-        recv_buf, handle = _ring_send_recv(Xj, world_size, rank, group, empty, recv_buf)
-        for step in range(4):
-            QKVj = (
-                (Xj @ W_qkv[d * h :, :].mT)
-                .reshape(B, Nlocal, 2, H, d)
-                .permute(2, 0, 1, 3, 4)
-            )
-            Kj = QKVj[0, :].contiguous()
-            Vj = QKVj[1, :].contiguous()
-            # Recompute KV from current Xj while communication is in flight
-
-            KV_chunks.append([Kj, Vj])
-
-            # private flash attention?
-            O_j, l_j, *_ = torch.ops.aten._flash_attention_forward(
-                Q,
-                Kj,
-                Vj,
-                cum_seq_q=None,
-                cum_seq_k=None,
-                max_q=Nlocal,
-                max_k=Nlocal,
-                dropout_p=0.0,
-                is_causal=False,
-                scale=scale,
-                return_debug_mask=False,
-            )
-
-            O, l = _online_softmax_merge(O, l, O_j, l_j.mT)
-
-            if step < world_size - 1:
-                handle.wait()
-                Xj = recv_buf.clone()
-                recv_buf2 = torch.zeros_like(X)  # fresh buffer for next recv
-                recv_buf2, handle = _ring_send_recv(
-                    Xj, world_size, rank, group, empty, recv_buf2
-                )
-                recv_buf = recv_buf2
-
-        # L = m + torch.log(l)  # global log-sum-exp, shape (B, H, Nlocal)
         O = O.to(torch.bfloat16)
-        ctx.save_for_backward(Q, O, l.mT, *[t for pair in KV_chunks for t in pair])
+
+        return O, l, chunks_to_save
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        """
+        Set up context.
+
+        ctx: FunctionCtx
+        inputs: tuple(x, w, b, local_rank, device, selector, spatial_group, bayesian)
+        output: xwt
+        """
+        (
+            Q,
+            K,
+            V,
+            X,
+            W_qkv,
+            scale,
+            group,
+            empty,
+            zeros,
+            rank,
+            world_size,
+            send_X_or_KV,
+            save_X_or_KV,
+            save_local_or_global,
+            offload,
+        ) = inputs
+        
+        O, l, chunks_to_save = output
+        ctx.mark_non_differentiable(l)
+        ctx.mark_non_differentiable(chunks_to_save)
+
+        ctx.save_for_backward(Q, O, l.mT, W_qkv, *[t for pair in chunks_to_save for t in pair])
+
         ctx.W_qkv = W_qkv
         ctx.empty = empty
         ctx.scale = scale
         ctx.group = group
         ctx.world_size = world_size
-
-        return O
+        ctx.send_X_or_KV = send_X_or_KV
+        ctx.save_X_or_KV = save_X_or_KV
+        ctx.save_local_or_global = save_local_or_global
+        ctx.offload = offload
 
     @staticmethod
-    def backward(ctx, dO):
+    def backward(ctx, dO, grad_l, grad_KV_chunks):
         scale = ctx.scale
         group = ctx.group
         world_size = ctx.world_size
         rank = dist.get_rank(group)
-
-        Q, O, L = ctx.saved_tensors[:3]
-        kv_flat = ctx.saved_tensors[3:]
-        KV_chunks = [(kv_flat[2 * i], kv_flat[2 * i + 1]) for i in range(world_size)]
+        
+        Q, O, L, W_qkv = ctx.saved_tensors[:4]
+        kv_flat = ctx.saved_tensors[4:]
+        chunks_to_save = [
+            (kv_flat[2 * i], kv_flat[2 * i + 1]) for i in range(world_size)
+        ]
 
         B, Nlocal, H, d = Q.shape
 
-        dQ = torch.zeros_like(Q, dtype=Q.dtype)
-
-        # We need to rotate dK, dV counter-clockwise back to home ranks
-        # At step s in forward, KV came from rank (rank - s) % world_size
-        # So dKj/dVj must go to rank (rank - s) % world_size
-        # We do this by rotating dKj/dVj one step counter-clockwise per step
-
-        dK = torch.zeros_like(Q, dtype=Q.dtype)
-        dV = torch.zeros_like(Q, dtype=Q.dtype)
-
-        for step in range(world_size):
-            # Xj = KV[step]
-            # QKVj = (
-            #     (Xj @ W_qkv[d * h :, :].mT)
-            #     .reshape(B, Nlocal, 2, H, d)
-            #     .permute(2, 0, 1, 3, 4)
-            # )
-            home_rank = (rank - step) % world_size
-            Kj, Vj = KV_chunks[step]
-            Kj = Kj.contiguous()
-            Vj = Vj.contiguous()
-            # L for this rank was saved as (B*H, Nlocal) — need full L not per-step
-            # Use saved global L
-            dQ_j, dKj, dVj = (
-                torch.ops.aten._scaled_dot_product_flash_attention_backward(
-                    dO,
-                    Q,
-                    Kj,
-                    Vj,
-                    O,
-                    L,
-                    dropout_p=0.0,
-                    is_causal=False,
-                    scale=scale,
-                    cum_seq_q=None,
-                    cum_seq_k=None,
-                    max_q=Nlocal,
-                    max_k=Nlocal,
-                    philox_seed=torch.zeros(1, dtype=torch.long, device=Q.device),
-                    philox_offset=torch.zeros(1, dtype=torch.long, device=Q.device),
-                )
-            )
-            dQ += dQ_j
-
-            if home_rank == rank:
-                dK += dKj
-                dV += dVj
-
+        dQ, dK, dV = ring_attn.ring_backward(
+            dO,
+            Q,
+            O,
+            L,
+            W_qkv,
+            scale,
+            group,
+            world_size,
+            chunks_to_save,
+            send_X_or_KV=ctx.send_X_or_KV,
+            save_X_or_KV=ctx.save_X_or_KV,
+            save_local_or_global=ctx.save_local_or_global,
+            offload=ctx.offload,
+            empty=empty
+        )
+        
         return dQ, dK, dV, None, None, None, None, None, None, None, None
+
+
+# class RingAttentionFunction(Function):
+#     @staticmethod
+#     def forward(ctx, Q, K, V, X, W_qkv, scale, group, empty, zeros, rank, world_size):
+#         B, N_local, H, d = Q.shape
+#         world_size = dist.get_world_size(group)
+#         O = torch.zeros_like(Q)
+#         l = torch.full((B, Nlocal, H), float("-inf"), device=Q.device, dtype=Q.dtype)
+
+#         Xj = X.clone()
+
+#         KV_chunks = []
+#         Xj = X.clone()
+#         recv_buf = torch.zeros_like(X)
+
+#         # Kick off first send before any compute
+#         recv_buf, handle = _ring_send_recv(Xj, world_size, rank, group, empty, recv_buf)
+#         for step in range(4):
+#             QKVj = (
+#                 (Xj @ W_qkv[d * h :, :].mT)
+#                 .reshape(B, Nlocal, 2, H, d)
+#                 .permute(2, 0, 1, 3, 4)
+#             )
+#             Kj = QKVj[0, :].contiguous()
+#             Vj = QKVj[1, :].contiguous()
+#             # Recompute KV from current Xj while communication is in flight
+
+#             KV_chunks.append([Kj, Vj])
+
+#             # private flash attention?
+#             O_j, l_j, *_ = torch.ops.aten._flash_attention_forward(
+#                 Q,
+#                 Kj,
+#                 Vj,
+#                 cum_seq_q=None,
+#                 cum_seq_k=None,
+#                 max_q=Nlocal,
+#                 max_k=Nlocal,
+#                 dropout_p=0.0,
+#                 is_causal=False,
+#                 scale=scale,
+#                 return_debug_mask=False,
+#             )
+
+#             O, l = _online_softmax_merge(O, l, O_j, l_j.mT)
+
+#             if step < world_size - 1:
+#                 handle.wait()
+#                 Xj = recv_buf.clone()
+#                 recv_buf2 = torch.zeros_like(X)  # fresh buffer for next recv
+#                 recv_buf2, handle = _ring_send_recv(
+#                     Xj, world_size, rank, group, empty, recv_buf2
+#                 )
+#                 recv_buf = recv_buf2
+
+#         O = O.to(torch.bfloat16)
+#         ctx.save_for_backward(Q, O, l.mT, *[t for pair in KV_chunks for t in pair])
+#         ctx.W_qkv = W_qkv
+#         ctx.empty = empty
+#         ctx.scale = scale
+#         ctx.group = group
+#         ctx.world_size = world_size
+
+#         return O
+
+#     @staticmethod
+#     def backward(ctx, dO):
+#         scale = ctx.scale
+#         group = ctx.group
+#         world_size = ctx.world_size
+#         rank = dist.get_rank(group)
+
+#         Q, O, L = ctx.saved_tensors[:3]
+#         kv_flat = ctx.saved_tensors[3:]
+#         KV_chunks = [(kv_flat[2 * i], kv_flat[2 * i + 1]) for i in range(world_size)]
+
+#         B, Nlocal, H, d = Q.shape
+
+#         dQ = torch.zeros_like(Q, dtype=Q.dtype)
+
+#         # We need to rotate dK, dV counter-clockwise back to home ranks
+#         # At step s in forward, KV came from rank (rank - s) % world_size
+#         # So dKj/dVj must go to rank (rank - s) % world_size
+#         # We do this by rotating dKj/dVj one step counter-clockwise per step
+
+#         dK = torch.zeros_like(Q, dtype=Q.dtype)
+#         dV = torch.zeros_like(Q, dtype=Q.dtype)
+
+#         for step in range(world_size):
+#             # Xj = KV[step]
+#             # QKVj = (
+#             #     (Xj @ W_qkv[d * h :, :].mT)
+#             #     .reshape(B, Nlocal, 2, H, d)
+#             #     .permute(2, 0, 1, 3, 4)
+#             # )
+#             home_rank = (rank - step) % world_size
+#             Kj, Vj = KV_chunks[step]
+#             Kj = Kj.contiguous()
+#             Vj = Vj.contiguous()
+#             # L for this rank was saved as (B*H, Nlocal) — need full L not per-step
+#             # Use saved global L
+#             dQ_j, dKj, dVj = (
+#                 torch.ops.aten._scaled_dot_product_flash_attention_backward(
+#                     dO,
+#                     Q,
+#                     Kj,
+#                     Vj,
+#                     O,
+#                     L,
+#                     dropout_p=0.0,
+#                     is_causal=False,
+#                     scale=scale,
+#                     cum_seq_q=None,
+#                     cum_seq_k=None,
+#                     max_q=Nlocal,
+#                     max_k=Nlocal,
+#                     philox_seed=torch.zeros(1, dtype=torch.long, device=Q.device),
+#                     philox_offset=torch.zeros(1, dtype=torch.long, device=Q.device),
+#                 )
+#             )
+#             dQ += dQ_j
+
+#             if home_rank == rank:
+#                 dK += dKj
+#                 dV += dVj
+
+#         return dQ, dK, dV, None, None, None, None, None, None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -239,8 +467,8 @@ if __name__ == "__main__":
     )
 
     torch.manual_seed(rank)  # different data per rank
-    B, h, N, d = 1, 16, world_size * 16382, 256
-    print(f'total produce: {B*h*N*d}')
+    B, h, N, d = 1, 16, world_size * 16382, 128
+    print(f"total product: {B * h * N * d}")
     Nlocal = N // world_size
     scale = d**-0.5
 
@@ -249,7 +477,7 @@ if __name__ == "__main__":
     W_qkv = torch.randn(
         3 * d * h, d, device=device, requires_grad=True, dtype=torch.bfloat16
     ) / (d**0.5)
-    torch.manual_seed(rank)
+    torch.manual_seed(2)
     X = torch.randn(
         B, Nlocal, d, device=device, requires_grad=True, dtype=torch.bfloat16
     ) / (d**0.5)
@@ -286,7 +514,7 @@ if __name__ == "__main__":
 
     dO = torch.ones([B, h, Nlocal, d], dtype=torch.bfloat16, device=device)
     dO_full = all_gather_seq(dO).transpose(1, 2)
-    
+
     dO = dO.transpose(1, 2).contiguous()
 
     # warmup
@@ -309,7 +537,7 @@ if __name__ == "__main__":
     torch.cuda.synchronize()
     ref_start_time = time.perf_counter()
 
-    n_reps = 1
+    n_reps = 20
     for _ in range(n_reps):
         O_ref_full, logsumexp, *_ = torch.ops.aten._flash_attention_forward(
             Q_ref,
@@ -326,7 +554,9 @@ if __name__ == "__main__":
         )
 
         dQ, dK, dV = torch.ops.aten._scaled_dot_product_flash_attention_backward(
-            torch.ones(dO_full.shape, device=device, dtype=dO_full.dtype),  # grad_output: (B, N, H, d)
+            torch.ones(
+                dO_full.shape, device=device, dtype=dO_full.dtype
+            ),  # grad_output: (B, N, H, d)
             Q_ref,  # query:       (B, N, H, d)
             K_ref,  # key:         (B, N, H, d)
             V_ref,  # value:       (B, N, H, d)
@@ -383,9 +613,22 @@ if __name__ == "__main__":
     dist.barrier()
     torch.cuda.synchronize()
     ring_start_time = time.perf_counter()
-    
+
     for _ in range(n_reps):
-        O_ring = ring_attention(
+        # O_ring = ring_attention(
+        #     Q_local,
+        #     K_local,
+        #     V_local,
+        #     X,
+        #     W_qkv,
+        #     scale,
+        #     None,
+        #     empty,
+        #     zeros,
+        #     rank,
+        #     world_size,
+        # )
+        RingAttentionFunction.apply(
             Q_local,
             K_local,
             V_local,
@@ -401,8 +644,8 @@ if __name__ == "__main__":
         Q_local.retain_grad()
         K_local.retain_grad()
         V_local.retain_grad()
-        # O_ring.retain_grad()
-        O_ring.sum().backward()
+        O_ring.sum().backward(retain_graph=True)
+        # O_ring = O_ring.detach()
 
     torch.cuda.synchronize()
     dist.barrier()
