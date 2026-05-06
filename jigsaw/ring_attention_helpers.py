@@ -38,10 +38,10 @@ def ring_forward_sendX(
     offload=False,
 ):
 
-    B, N_local, H, d = Q.shape
+    B, H, N_local, d = Q.shape
     world_size = dist.get_world_size(group)
     O = torch.zeros_like(Q)
-    l = torch.full((B, N_local, H), float("-inf"), device=Q.device, dtype=Q.dtype)
+    l = torch.full((B, H, N_local), float("-inf"), device=Q.device, dtype=Q.dtype)
 
     Xj = X.clone()
     chunks_to_save = []  # either X or KV
@@ -49,11 +49,11 @@ def ring_forward_sendX(
     Xj = X.clone()
     # Calculate local QKV
     KV = (
-        (Xj @ W_qkv[d * H :, :].mT).reshape(B, N_local, 2, H, d).permute(2, 0, 1, 3, 4)
+        (Xj @ W_qkv[d * H :, :].mT).reshape(B, N_local, 2, H, d).permute(2, 0, 3, 1, 4)
     ).contiguous()
     
-    Kj, Vj = KV[0].contiguous(), KV[1].contiguous()
     
+    Kj, Vj = KV[0].contiguous(), KV[1].contiguous()
     # Kick off first send before any compute
     match send_X_or_KV:
         case 0:
@@ -74,7 +74,7 @@ def ring_forward_sendX(
                 QKVj = (
                     (Xj @ W_qkv[d * H :, :].mT)
                     .reshape(B, N_local, 2, H, d)
-                    .permute(2, 0, 1, 3, 4)
+                    .permute(2, 0, 3, 1, 4)
                 )
                 Kj = QKVj[0, :].contiguous()
                 Vj = QKVj[1, :].contiguous()
@@ -87,12 +87,11 @@ def ring_forward_sendX(
                 if save_X_or_KV == 0:
                     chunks_to_save.append(Xj)
                 elif save_X_or_KV == 1:
-                    chunks_to_save.append(torch.concat([Kj, Vj], dim=0))
+                    chunks_to_save.append([Kj, Vj])
         else:
             if save_X_or_KV == 0:
                 chunks_to_save.append(Xj)
             else:
-                print(f'forward step {step} K sum {Kj.sum()}')
                 chunks_to_save.append([Kj, Vj])
 
         # compute flash attention on local chunk of data
@@ -100,18 +99,13 @@ def ring_forward_sendX(
             Q,
             Kj,
             Vj,
-            cum_seq_q=None,
-            cum_seq_k=None,
-            max_q=N_local,
-            max_k=N_local,
             dropout_p=0.0,
             is_causal=False,
             scale=scale,
             return_debug_mask=False,
         )
 
-        print(f'l shape {l.shape} l_j mt shape {(l_j.mT).shape}')
-        O, l = _online_softmax_merge(O, l, O_j, l_j.mT)
+        O, l = _online_softmax_merge(O, l, O_j, l_j)
 
         # for all but the last step, send stuff
         if step < world_size - 1:
@@ -152,7 +146,7 @@ def ring_backward(
     save_X_or_KV=0,
     save_local_or_global=0,
     offload=False,
-    empty=None
+    empty=None,
 ):
     rank = dist.get_rank(group)
 
@@ -161,7 +155,7 @@ def ring_backward(
     elif save_X_or_KV == 1:
         KV_chunks = chunks_to_save
 
-    B, Nlocal, H, d = Q.shape
+    B, H, Nlocal, d = Q.shape
     dQ = torch.zeros_like(Q, dtype=torch.float32)
     
     # We need to rotate dK, dV counter-clockwise back to home ranks
@@ -169,22 +163,22 @@ def ring_backward(
     # So dKj/dVj must go to rank (rank - s) % world_size
     # We do this by rotating dKj/dVj one step counter-clockwise per step
 
-    dK_buf = torch.zeros([Q.shape[0], world_size*Q.shape[1], *Q.shape[2:]], device=Q.device, dtype=Q.dtype)
-    dV_buf = torch.zeros([Q.shape[0], world_size*Q.shape[1], *Q.shape[2:]], device=Q.device, dtype=Q.dtype)
+    dK_buf = torch.zeros([*Q.shape[0:2], world_size*Q.shape[2], *Q.shape[3:]], device=Q.device, dtype=Q.dtype)
+    dV_buf = torch.zeros([*Q.shape[0:2], world_size*Q.shape[2], *Q.shape[3:]], device=Q.device, dtype=Q.dtype)
     
     for step in range(world_size):
-        peer = (step) % world_size  # which chunk of global K this is
+        peer = step  # which chunk of global K this is
 
-        KV = KV_chunks[peer]
+        KV = KV_chunks[step]
         Kj, Vj = KV[0].contiguous(), KV[1].contiguous()
-
+        
         dQ_j, dKj, dVj = torch.ops.aten._scaled_dot_product_flash_attention_backward(
-            dO.contiguous(),
-            Q.contiguous(),
-            Kj.contiguous(),
-            Vj.contiguous(),
-            O.contiguous(),
-            L.contiguous(),
+            dO,
+            Q,
+            Kj,
+            Vj,
+            O,
+            L,
             dropout_p=0.0,
             is_causal=False,
             scale=scale,
@@ -196,26 +190,88 @@ def ring_backward(
             philox_offset=torch.zeros(1, dtype=torch.long, device=Q.device),
         )
         
-        dQ += dQ_j
+        dQ = dQ + dQ_j
         
         # accumulate into the slice corresponding to peer's K chunk
         global_chunk_idx = (rank - step) % world_size
-        dK_buf[:, global_chunk_idx*Nlocal:(global_chunk_idx+1)*Nlocal] += dKj
-        dV_buf[:, global_chunk_idx*Nlocal:(global_chunk_idx+1)*Nlocal] += dVj
-        if rank == 0:
-            print(f'R {rank} step {step} dQ {dQ_j}')
-        # print(f'R {rank} dK, dV sum {dKj.sum()}, {dVj.sum()}')
+        dK_buf[:, :, global_chunk_idx*Nlocal:(global_chunk_idx+1)*Nlocal] += dKj
+        dV_buf[:, :, global_chunk_idx*Nlocal:(global_chunk_idx+1)*Nlocal] += dVj
+    
 
     # after loop: all-reduce across ranks to sum Q contributions
     dist.all_reduce(dK_buf, op=dist.ReduceOp.SUM, group=group)
     dist.all_reduce(dV_buf, op=dist.ReduceOp.SUM, group=group)
     
     # then slice out local portion if needed
-    dK_local = dK_buf[:, rank*Nlocal:(rank+1)*Nlocal]
-    dV_local = dV_buf[:, rank*Nlocal:(rank+1)*Nlocal]
+    dK_local = dK_buf[:, :, rank*Nlocal:(rank+1)*Nlocal]
+    dV_local = dV_buf[:, :, rank*Nlocal:(rank+1)*Nlocal]
 
     return dQ, dK_local, dV_local
 
+# def ring_backward(
+#     dO,
+#     Q,
+#     K,
+#     V,
+#     O,
+#     L,
+#     N,
+#     scale,
+#     group,
+#     world_size
+# ):
+#     rank = dist.get_rank(group)
+
+#     dQ = torch.zeros_like(Q, dtype=torch.float32)
+    
+#     # We need to rotate dK, dV counter-clockwise back to home ranks
+#     # At step s in forward, KV came from rank (rank - s) % world_size
+#     # So dKj/dVj must go to rank (rank - s) % world_size
+#     # We do this by rotating dKj/dVj one step counter-clockwise per step
+
+#     dK_buf = torch.zeros([*K.shape[0:2], world_size*K.shape[2], *K.shape[3:]], device=K.device, dtype=K.dtype)
+#     dV_buf = torch.zeros([*V.shape[0:2], world_size*V.shape[2], *V.shape[3:]], device=V.device, dtype=V.dtype)
+    
+#     for step in range(world_size):
+#         peer = (step) % world_size  # which chunk of global K this is
+        
+#         dQ_j, dKj, dVj = torch.ops.aten._scaled_dot_product_flash_attention_backward(
+#             dO.contiguous(),
+#             Q.contiguous(),
+#             K.contiguous(),
+#             V.contiguous(),
+#             O.contiguous(),
+#             L.contiguous(),
+#             dropout_p=0.0,
+#             is_causal=False,
+#             scale=scale,
+#             cum_seq_q=None,
+#             cum_seq_k=None,
+#             max_q=N,
+#             max_k=N,
+#             philox_seed=torch.zeros(1, dtype=torch.long, device=Q.device),
+#             philox_offset=torch.zeros(1, dtype=torch.long, device=Q.device),
+#         )
+        
+#         dQ += dQ_j
+        
+#         # accumulate into the slice corresponding to peer's K chunk
+#         global_chunk_idx = (rank - step) % world_size
+#         # dK_buf[:, global_chunk_idx*Nlocal:(global_chunk_idx+1)*Nlocal] += dKj
+#         # dV_buf[:, global_chunk_idx*Nlocal:(global_chunk_idx+1)*Nlocal] += dVj
+#         if rank == 0:
+#             print(f'R {rank} step {step} dQ {dQ_j}')
+#         # print(f'R {rank} dK, dV sum {dKj.sum()}, {dVj.sum()}')
+
+#     # after loop: all-reduce across ranks to sum Q contributions
+#     dist.all_reduce(dK_buf, op=dist.ReduceOp.SUM, group=group)
+#     dist.all_reduce(dV_buf, op=dist.ReduceOp.SUM, group=group)
+    
+#     # then slice out local portion if needed
+#     dK_local = dK_buf#[:, rank*Nlocal:(rank+1)*Nlocal]
+#     dV_local = dV_buf#[:, rank*Nlocal:(rank+1)*Nlocal]
+
+#     return dQ, dK_local, dV_local
 
 # code saved
 # recv_dK = torch.empty_like(Q)
