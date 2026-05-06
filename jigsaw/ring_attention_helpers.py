@@ -88,7 +88,7 @@ def ring_forward_sendX(
             if step == 0:
                 if save_X_or_KV == 0:
                     chunks_to_save.append(Xj)
-                elif send_X_or_KV == 1:
+                elif save_X_or_KV == 1:
                     chunks_to_save.append([Kj, Vj])
         else:
             if save_X_or_KV == 0:
@@ -157,6 +157,7 @@ def ring_backward(
         X_chunks = chunks_to_save
     elif save_X_or_KV == 1:
         KV_chunks = chunks_to_save
+        print(f'KV chunks? {KV_chunks[0][0].sum()}')
 
     B, H, Nlocal, d = Q.shape
     dQ = torch.zeros_like(Q, dtype=torch.float32)
@@ -182,18 +183,87 @@ def ring_backward(
         dV_buf = torch.zeros(Q.shape, device=Q.device, dtype=Q.dtype)
 
     for step in range(world_size):
-        if save_X_or_KV == 1:
-            KV = KV_chunks[step]
-            Kj, Vj = KV[0].contiguous(), KV[1].contiguous()
-        else: # save X or KV = 0
-            Xj = X_chunks[step]
-            KV = (
-                (Xj @ W_qkv[d * H :, :].mT)
-                .reshape(B, Nlocal, 2, H, d)
-                .permute(2, 0, 3, 1, 4)
-            )
-            Kj, Vj = KV[0].contiguous(), KV[1].contiguous()
-
+        if save_local_or_global == 1:
+            if save_X_or_KV == 1:
+                KV = KV_chunks[step]
+                Kj, Vj = KV[0].contiguous(), KV[1].contiguous()
+            else: # save X or KV = 0
+                Xj = X_chunks[step]
+                KV = (
+                    (Xj @ W_qkv[d * H :, :].mT)
+                    .reshape(B, Nlocal, 2, H, d)
+                    .permute(2, 0, 3, 1, 4)
+                )
+                Kj, Vj = KV[0].contiguous(), KV[1].contiguous()
+        if save_local_or_global == 0:
+            if step == 0:
+                if save_X_or_KV == 1:
+                    KV = KV_chunks[step]
+                    Kj, Vj = KV[0].contiguous(), KV[1].contiguous()
+                    # send KV to the next
+                else: # save X or KV = 0
+                    Xj = X_chunks[step]
+                    # then send X ot the next rank
+                    
+                    KV = (
+                        (Xj @ W_qkv[d * H :, :].mT)
+                        .reshape(B, Nlocal, 2, H, d)
+                        .permute(2, 0, 3, 1, 4)
+                    )
+                    Kj, Vj = KV[0].contiguous(), KV[1].contiguous()
+                    
+                # and send to the next rank
+                if send_X_or_KV == 1:
+                    # start here
+                    KV_to_send = torch.concat(KV, dim=0)
+                    recv_buf = torch.zeros_like(KV_to_send)  # fresh buffer for next recv
+                    recv_buf, KV_handle = _ring_send_recv(
+                        KV_to_send, world_size, rank, group, empty, recv_buf
+                    )
+                else:
+                    recv_buf = torch.zeros_like(Xj)
+                    recv_buf, X_handle = _ring_send_recv(
+                        Xj, world_size, rank, group, empty, recv_buf
+                    )
+            elif step < world_size - 1:
+                if send_X_or_KV == 0:
+                    X_handle.wait()
+                    Xj = recv_buf.clone()
+                    KV = (
+                        (Xj @ W_qkv[d * H :, :].mT)
+                        .reshape(B, Nlocal, 2, H, d)
+                        .permute(2, 0, 3, 1, 4)
+                    )
+                    Kj, Vj = KV[0].contiguous(), KV[1].contiguous()
+                    recv_buf2 = torch.zeros_like(Xj)  # fresh buffer for next recv
+                    recv_buf, handle = _ring_send_recv(
+                        Xj, world_size, rank, group, empty, recv_buf2
+                    )
+                else:
+                    KV_handle.wait()
+                    Kj, Vj = torch.chunk(recv_buf, 2, dim=0)
+                    KV = recv_buf.clone()
+                    recv_buf = torch.zeros_like(KV)  # fresh buffer for next recv
+                    
+                    recv_buf, handle = _ring_send_recv(
+                        KV, world_size, rank, group, empty, recv_buf
+                    )
+            else: # on the last step
+                if send_X_or_KV == 0:
+                    X_handle.wait()
+                    Xj = recv_buf
+                    KV = (
+                        (Xj @ W_qkv[d * H :, :].mT)
+                        .reshape(B, Nlocal, 2, H, d)
+                        .permute(2, 0, 3, 1, 4)
+                    )
+                    Kj, Vj = KV[0].contiguous(), KV[1].contiguous()
+                else:
+                    KV_handle.wait()
+                    KV = recv_buf
+                    Kj, Vj = torch.chunk(KV, 2, dim=0)
+            print(f'Step {step} Kj {Kj.sum()}')
+                
         dQ_j, dKj, dVj = torch.ops.aten._scaled_dot_product_flash_attention_backward(
             dO,
             Q,
