@@ -157,11 +157,10 @@ def gather_1d_results(x: torch.Tensor, process_mesh: dist.device_mesh = None, di
     tensor_list = [
         torch.zeros(x.shape, dtype=x.dtype, device=x.device) for _ in range(n_rows)
     ]
-    torch.distributed.all_gather(tensor_list, x, group=process_mesh["model"])
+    torch.distributed.all_gather(tensor_list, x.contiguous(), group=process_mesh["model"])
 
     ndim = x.dim()
     if dim < 0:
         dim = ndim + dim
-
     result = torch.cat(tensor_list, dim=dim)
     return result
