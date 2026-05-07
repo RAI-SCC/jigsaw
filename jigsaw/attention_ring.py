@@ -155,6 +155,11 @@ class RingAttention(torch.nn.Module):
             q,
             k,
             v,
+            x,
+            self.qkv.weight,
+            scale,
+            empty,
+            
         )
 
         # out has shape [batch, local_heads, local_sequence length, head_dim]
@@ -270,8 +275,6 @@ class RingAttentionFunction(torch.autograd.Function):
         chunks_to_save = [
             (kv_flat[2 * i], kv_flat[2 * i + 1]) for i in range(world_size)
         ]
-
-        B, Nlocal, H, d = Q.shape
 
         dQ, dK, dV = ring_attn.ring_backward(
             dO,

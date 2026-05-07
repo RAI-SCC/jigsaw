@@ -341,7 +341,7 @@ def process_mesh():
 #     assert torch.allclose(flash_V.grad, dV_ref.float().transpose(1, 2), atol=1e-2)
 
 # @pytest.mark.parametrize(
-#     "send_X_or_KV,save_X_or_KV,save_local_or_global,send_dKV_or_not,offload",
+#     "send_X_or_KV,save_X_or_KV,save_local_or_global,send_dKV_or_not,offloader",
 #     [
 #         (s, sv, sl, sd, offloader)
 #         for s in [0, 1]
@@ -364,8 +364,6 @@ def process_mesh():
 #     if send_X_or_KV == 1 and save_X_or_KV == 0:
 #         pytest.xfail("not yet supported")
     
-#     offload = False
-
 #     local_rank = dist.get_rank(group=None)
 #     world_size = dist.get_world_size(group=None)
 
@@ -403,7 +401,6 @@ def process_mesh():
 #         scale,
 #         group=process_mesh["row"],
 #         empty=empty,
-#         zeros=zeros,
 #         rank=local_rank,
 #         world_size=world_size,
 #         send_X_or_KV=send_X_or_KV,
@@ -521,10 +518,11 @@ def offloader(device):
     # return None
     return offload.NVLinkActivationOffloader(device)
 
+
 def test_offload(device, process_mesh, offloader):
     """Verify weights for XWT_Sync are synchronized after a few iterations."""
     send_X_or_KV = 0
-    save_X_or_KV = 0
+    save_X_or_KV = 1
     save_local_or_global = 1
     send_dKV_or_not = 0
     
@@ -532,7 +530,7 @@ def test_offload(device, process_mesh, offloader):
     world_size = dist.get_world_size(group=None)
 
     torch.manual_seed(2)  # same seed for weight initialization
-    B, h, N, d = 50, 3, world_size * 16384, 256
+    B, h, N, d = 1, 1, world_size * 65536*16, 256
     Nlocal = N // world_size
     W_qkv = torch.randn(
         3 * d * h, d, device=device, requires_grad=True, dtype=torch.bfloat16
@@ -565,7 +563,6 @@ def test_offload(device, process_mesh, offloader):
         scale,
         group=process_mesh["row"],
         empty=empty,
-        zeros=zeros,
         rank=local_rank,
         world_size=world_size,
         send_X_or_KV=send_X_or_KV,
