@@ -18,35 +18,6 @@ from torch.autograd import Function
 from . import linear, ring_attention_helpers as ring_attn
 from einops import rearrange
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _ring_send_recv(tensor, world_size, rank, group, empty, recv_buf):
-    send_to = (rank + 1) % world_size
-    recv_from = (rank - 1) % world_size
-    output_list = [recv_buf if i == recv_from else empty for i in range(world_size)]
-    input_list = [tensor if i == send_to else empty for i in range(world_size)]
-    handle = dist.all_to_all(output_list, input_list, group=group, async_op=True)
-    return recv_buf, handle
-
-def _online_softmax_merge(O1, L1, O2, L2):
-    L_new = torch.logaddexp(L1, L2)
-    e1 = torch.exp(L1 - L_new)
-    e2 = torch.exp(L2 - L_new)
-    O_new = e1.unsqueeze(-1) * O1 + e2.unsqueeze(-1) * O2
-    return O_new, L_new
-
-
-# notes on things that partially worked
-
-# native flash attention
-# with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.FLASH_ATTENTION):
-#     O_jflash = torch.nn.functional.scaled_dot_product_attention(
-#         Q, Kj, Vj, is_causal=False, dropout_p=0, scale=scale
-#     )
-
 
 class RingAttention(torch.nn.Module):
     """Distributed windowed attention."""
@@ -121,18 +92,28 @@ class RingAttention(torch.nn.Module):
 
         # self.q_norm, self.k_norm = torch.nn.LayerNorm(embed_dim // heads), torch.nn.LayerNorm(embed_dim // heads)
 
-        self.heads = heads // 2
+        self.heads = heads // parallelism
+        self.scale = embed_dim**-0.5
+        self.empty = torch.empty(0, device=self.device, dtype=self.dtype)
 
-    def _attention_core(
-        self, q, k, v, x, w, scale, group, empty, zeros, rank, world_size
-    ):
+    def _attention_core(self, q, k, v, x):
 
         out = RingAttentionFunction.apply(
-            q, k, v, x, w, scale, group, empty, zeros, rank, world_size
+            q,
+            k,
+            v,
+            x,
+            self.qkv.weight,
+            self.scale,
+            self.spatial_group,
+            self.empty,
+            None,
+            self.local_rank,
+            self.spatial_group.size(),
         )
         return out
 
-    @torch.compile(backend="eager")
+    # @torch.compile(backend="eager")
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """
         Forward pass for distributed multi-head attention.
@@ -151,16 +132,7 @@ class RingAttention(torch.nn.Module):
         # k = self.k_norm(k).to(torch.bfloat16)
         # v = v.to(torch.bfloat16)
         mask = mask.to(torch.bfloat16) if mask is not None else None
-        out = self._attention_core(
-            q,
-            k,
-            v,
-            x,
-            self.qkv.weight,
-            scale,
-            empty,
-            
-        )
+        out = self._attention_core(q, k, v, x)
 
         # out has shape [batch, local_heads, local_sequence length, head_dim]
         out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous().to(self.dtype)
@@ -173,7 +145,6 @@ class RingAttention(torch.nn.Module):
 class RingAttentionFunction(torch.autograd.Function):
     @staticmethod
     def forward(
-        ctx,
         Q,
         K,
         V,
@@ -188,13 +159,13 @@ class RingAttentionFunction(torch.autograd.Function):
         send_X_or_KV=0,
         save_X_or_KV=0,
         save_local_or_global=0,
-        offload=False,
+        offloader=None,
     ):
-        B, N_local, H, d = Q.shape
+        B, H, N_local, d = Q.shape
 
         world_size = dist.get_world_size(group)
         O = torch.zeros_like(Q)
-        l = torch.full((B, Nlocal, H), float("-inf"), device=Q.device, dtype=Q.dtype)
+        l = torch.full((B, N_local, H), float("-inf"), device=Q.device, dtype=Q.dtype)
         empty = torch.empty(0, device=X.device, dtype=X.dtype)
         zeros = torch.zeros_like(X, device=X.device, dtype=X.dtype)
 
@@ -207,13 +178,12 @@ class RingAttentionFunction(torch.autograd.Function):
             scale,
             group,
             empty,
-            zeros,
             rank,
             world_size,
             send_X_or_KV=0,
             save_X_or_KV=0,
             save_local_or_global=0,
-            offload=False,
+            offloader=None,
         )
 
         O = O.to(torch.bfloat16)
@@ -238,20 +208,21 @@ class RingAttentionFunction(torch.autograd.Function):
             scale,
             group,
             empty,
-            zeros,
             rank,
             world_size,
             send_X_or_KV,
             save_X_or_KV,
             save_local_or_global,
-            offload,
+            offloader,
         ) = inputs
-        
+
         O, l, chunks_to_save = output
         ctx.mark_non_differentiable(l)
         ctx.mark_non_differentiable(chunks_to_save)
 
-        ctx.save_for_backward(Q, O, l.mT, W_qkv, *[t for pair in chunks_to_save for t in pair])
+        ctx.save_for_backward(
+            Q, O, l.mT, W_qkv, *[t for pair in chunks_to_save for t in pair]
+        )
 
         ctx.W_qkv = W_qkv
         ctx.empty = empty
@@ -261,7 +232,7 @@ class RingAttentionFunction(torch.autograd.Function):
         ctx.send_X_or_KV = send_X_or_KV
         ctx.save_X_or_KV = save_X_or_KV
         ctx.save_local_or_global = save_local_or_global
-        ctx.offload = offload
+        ctx.offloader = offloader
 
     @staticmethod
     def backward(ctx, dO, grad_l, grad_KV_chunks):
@@ -269,7 +240,7 @@ class RingAttentionFunction(torch.autograd.Function):
         group = ctx.group
         world_size = ctx.world_size
         rank = dist.get_rank(group)
-        
+
         Q, O, L, W_qkv = ctx.saved_tensors[:4]
         kv_flat = ctx.saved_tensors[4:]
         chunks_to_save = [
@@ -289,10 +260,11 @@ class RingAttentionFunction(torch.autograd.Function):
             send_X_or_KV=ctx.send_X_or_KV,
             save_X_or_KV=ctx.save_X_or_KV,
             save_local_or_global=ctx.save_local_or_global,
-            offload=ctx.offload,
-            empty=empty
+            send_dKV_or_not=False,
+            offloader=ctx.offloader,
+            empty=empty,
         )
-        
+
         return dQ, dK, dV, None, None, None, None, None, None, None, None
 
 
