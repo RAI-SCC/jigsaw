@@ -1,6 +1,7 @@
 import torch
 import torch.distributed as dist
-
+import sys
+import gc
 
 def _online_softmax_merge(O1, L1, O2, L2):
     L_new = torch.logaddexp(L1, L2)
@@ -25,6 +26,7 @@ def _ring_send_recv(
     return recv_buf, handle
 
 
+@torch.no_grad()
 def ring_forward_sendX(
     Q,
     X,
@@ -38,7 +40,7 @@ def ring_forward_sendX(
     send_X_or_KV=0,
     save_X_or_KV=0,
     save_local_or_global=0,
-    offload=False,
+    offloader=None,
 ):
     # if send_X_or_KV == 1:
     #     assert save_X_or_KV == 0, "Cannot save X if we are sending KV"
@@ -47,7 +49,7 @@ def ring_forward_sendX(
     O = torch.zeros_like(Q)
     l = torch.full((B, H, N_local), float("-inf"), device=Q.device, dtype=Q.dtype)
 
-    Xj = X.clone()
+    Xj = X
     chunks_to_save = []  # either X or KV
 
     # Calculate local QKV
@@ -57,6 +59,7 @@ def ring_forward_sendX(
 
     Kj, Vj = KV[0].contiguous(), KV[1].contiguous()
     # Kick off first send before any compute
+    
     match send_X_or_KV:
         case 0:
             recv_buf = torch.zeros_like(X)  # x or KV
@@ -86,16 +89,45 @@ def ring_forward_sendX(
             # only save on the first pass
             if step == 0:
                 if save_X_or_KV == 0:
-                    chunks_to_save.append(Xj)
+                    Xj_cpu = offloader.offload(Xj)
+                    chunks_to_save.append(Xj_cpu)
+                    torch.cuda.synchronize()
+                    print(torch.cuda.memory_allocated() / 1e9, "GB before")
+                    del Xj
+                    torch.cuda.empty_cache()
+                    print(torch.cuda.memory_allocated() / 1e9, "GB after")
                 elif save_X_or_KV == 1:
                     KV = torch.concat([Kj, Vj], dim=0)
-                    chunks_to_save.append(KV)
+                    KV_cpu = offloader.offload(KV)
+                    chunks_to_save.append(KV_cpu)
+                    print(torch.cuda.memory_allocated() / 1e9, "GB before")
+                    torch.cuda.synchronize()
+                    del KV
+                    torch.cuda.empty_cache()
+                    print(torch.cuda.memory_allocated() / 1e9, "GB before")
         else:
             if save_X_or_KV == 0:
-                chunks_to_save.append(Xj) # save X 
+                if offloader is not None:
+                    print(torch.cuda.memory_allocated() / 1e9, "GB before")
+                    Xj_cpu = offloader.offload(Xj)
+                    chunks_to_save.append(Xj_cpu)
+                    torch.cuda.synchronize()
+                    del Xj
+                    torch.cuda.empty_cache()
+                    print(torch.cuda.memory_allocated() / 1e9, "GB after")
+                else:
+                    chunks_to_save.append(Xj) # save X 
             else:
                 KV = torch.concat([Kj, Vj], dim=0)
-                chunks_to_save.append(KV)
+                if offloader is not None:
+                    KV_cpu = offloader.offload(KV).contiguous()
+                    chunks_to_save.append(KV_cpu)
+                    print(torch.cuda.memory_allocated() / 1e9, "GB before")
+                    del KV
+                    torch.cuda.empty_cache()
+                    print(torch.cuda.memory_allocated() / 1e9, "GB after")
+                else:
+                    chunks_to_save.append(KV)
         
         # compute flash attention on local chunk of data
         O_j, l_j, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
@@ -109,7 +141,9 @@ def ring_forward_sendX(
         )
 
         O, l = _online_softmax_merge(O, l, O_j, l_j)
-
+        print(torch.cuda.memory_allocated() / 1e9, "GB before lj")
+        del l_j, O_j
+        print(torch.cuda.memory_allocated() / 1e9, "GB after lj")
         # for all but the last step, send stuff
         if step < world_size - 1:
             handle.wait()
@@ -133,7 +167,7 @@ def ring_forward_sendX(
 
     return O, l, chunks_to_save  # and all the other things that need to be saved
 
-
+@torch.no_grad()
 def ring_backward(
     dO,
     Q,
@@ -149,7 +183,7 @@ def ring_backward(
     save_X_or_KV=0,
     save_local_or_global=0,
     send_dKV_or_not=1,
-    offload=False,
+    offloader=None,
     empty=None,
 ):
     rank = dist.get_rank(group)
@@ -183,20 +217,30 @@ def ring_backward(
         dV_buf = torch.zeros(Q.shape, device=Q.device, dtype=Q.dtype)
 
     for step in range(world_size):
+        print(f'step {step}')
         if save_local_or_global == 1:
             if save_X_or_KV == 1:
-                KV = KV_chunks[step]
+                if offloader is not None:
+                    KV_gpu = offloader.prefetch(KV_chunks[step])
+                    offloader.sync()
+                    KV = KV_gpu
+                else:
+                    KV = KV_chunks[step]
                 Kj, Vj = torch.chunk(KV, 2, dim=0)
                 Kj, Vj = Kj.contiguous(), Vj.contiguous()
             else: # save X or KV = 0
-                Xj = X_chunks[step]
+                if offloader is not None:
+                    Xj = offloader.prefetch(X_chunks[step])
+                    offloader.sync()
+                else:
+                    Xj = X_chunks[step]
                 KV = (
                     (Xj @ W_qkv[d * H :, :].mT)
                     .reshape(B, Nlocal, 2, H, d)
                     .permute(2, 0, 3, 1, 4)
                 ).contiguous()
                 Kj, Vj = KV[0].contiguous(), KV[1].contiguous()
-        if save_local_or_global == 0:
+        elif save_local_or_global == 0:
             if step == 0:
                 if save_X_or_KV == 1:
                     KV = KV_chunks[step]
@@ -226,7 +270,7 @@ def ring_backward(
             elif step < world_size - 1:
                 if send_X_or_KV == 0:
                     X_handle.wait()
-                    Xj = recv_buf.clone()
+                    Xj = recv_buf
                     KV = (
                         (Xj @ W_qkv[d * H :, :].mT)
                         .reshape(B, Nlocal, 2, H, d)
@@ -262,7 +306,7 @@ def ring_backward(
                     KV = recv_buf
                     Kj, Vj = torch.chunk(KV, 2, dim=0)
         
-
+        print(f"step {step}", torch.cuda.memory_allocated() / 1e9, "GB")
         dQ_j, dKj, dVj = torch.ops.aten._scaled_dot_product_flash_attention_backward(
             dO,
             Q,
@@ -280,8 +324,9 @@ def ring_backward(
             philox_seed=torch.zeros(1, dtype=torch.long, device=Q.device),
             philox_offset=torch.zeros(1, dtype=torch.long, device=Q.device),
         )
-
-        dQ = dQ + dQ_j
+        print(f'step backward flashd {step}')
+        
+        dQ += dQ_j
 
         # accumulate into the slice corresponding to peer's K chunk
         if send_dKV_or_not == 1:
@@ -292,14 +337,14 @@ def ring_backward(
             dV_buf[
                 :, :, global_chunk_idx * Nlocal : (global_chunk_idx + 1) * Nlocal
             ] += dVj
-
+            del dKj, dVj
         else:
             if step > 0:
                 dkvj_to_send = torch.concat([dKj, dVj], dim=0).contiguous()
                 recv_buffer = torch.empty_like(
                     dkvj_to_send, device=dkvj_to_send.device, dtype=dkvj_to_send.dtype
                 )
-                recv_buffer2, handle = _ring_send_recv(
+                recv_buffer, handle = _ring_send_recv(
                     dkvj_to_send,
                     world_size=world_size,
                     rank=rank,
@@ -310,9 +355,15 @@ def ring_backward(
                     forward_or_backward=1
                 )
                 handle.wait()
-                dkj, dvj = torch.chunk(recv_buffer2, 2, dim=0)
-                dK_buf += dkj
-                dV_buf += dvj
+                dkj, dvj = torch.chunk(recv_buffer, 2, dim=0)
+                dK_buf += dkj.clone()
+                dV_buf += dvj.clone()
+                print(torch.cuda.memory_allocated() / 1e9, "GB before dkvj")
+                torch.cuda.synchronize()
+                del dkj, dvj, recv_buffer
+                torch.cuda.empty_cache()
+                print(torch.cuda.memory_allocated() / 1e9, "GB after dkvj")
+                
             else:
                 dK_buf += dKj # accumulate locally
                 dV_buf += dVj # accumulate locally
