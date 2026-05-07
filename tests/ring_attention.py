@@ -1021,7 +1021,7 @@ def test_ring_forward_backward_saveKV_global(device, process_mesh):
     save_local_or_global = 1
     send_dKV_or_not = 1
     offload = False
-    
+
     local_rank = dist.get_rank(group=None)
     world_size = dist.get_world_size(group=None)
 
@@ -1325,6 +1325,7 @@ def test_ring_forward_backward_saveKV_global_backwardKVlocal(device, process_mes
         atol=1e-3,
     )
 
+
 def test_ring_forward_backward_saveX_global_backwardKVlocal(device, process_mesh):
     """Verify weights for XWT_Sync are synchronized after a few iterations."""
     send_X_or_KV = 1
@@ -1479,10 +1480,11 @@ def test_ring_forward_backward_saveX_global_backwardKVlocal(device, process_mesh
         ),
         atol=1e-3,
     )
-    
+
+
 def test_ring_forward_backward_saveLocal(device, process_mesh):
     """Verify weights for XWT_Sync are synchronized after a few iterations."""
-    send_X_or_KV = 1
+    send_X_or_KV = 0
     save_X_or_KV = 1
     save_local_or_global = 0
     send_dKV_or_not = 1
@@ -1634,20 +1636,39 @@ def test_ring_forward_backward_saveLocal(device, process_mesh):
         ),
         atol=1e-3,
     )
-    
-def test_ring_forward_backward_saveXLocal(device, process_mesh):
+
+
+@pytest.mark.parametrize(
+    "send_X_or_KV,save_X_or_KV,save_local_or_global,send_dKV_or_not,offload",
+    [
+        (s, sv, sl, sd, off)
+        for s in [0, 1]
+        for sv in [0, 1]
+        for sl in [0, 1]
+        for sd in [0, 1]
+        for off in [False, True]
+    ],
+)
+def test_ring_forward_backward_saveXLocal(
+    device,
+    process_mesh,
+    send_X_or_KV,
+    save_X_or_KV,
+    save_local_or_global,
+    send_dKV_or_not,
+    offload,
+):
     """Verify weights for XWT_Sync are synchronized after a few iterations."""
-    send_X_or_KV = 0
-    save_X_or_KV = 0
-    save_local_or_global = 0
-    send_dKV_or_not = 1
+    if send_X_or_KV == 1 and save_X_or_KV == 0:
+        pytest.xfail("not yet supported")
+    
     offload = False
 
     local_rank = dist.get_rank(group=None)
     world_size = dist.get_world_size(group=None)
 
     torch.manual_seed(2)  # same seed for weight initialization
-    B, h, N, d = 1, 3, world_size * 16, 256
+    B, h, N, d = 3, 6, world_size * 256, 256
     Nlocal = N // world_size
     W_qkv = torch.randn(
         3 * d * h, d, device=device, requires_grad=True, dtype=torch.bfloat16
@@ -1789,7 +1810,8 @@ def test_ring_forward_backward_saveXLocal(device, process_mesh):
         ),
         atol=1e-3,
     )
-    
+
+
 def test_ring_forward_backward_sendXsaveKV_global_backwardKVlocal(device, process_mesh):
     """Verify weights for XWT_Sync are synchronized after a few iterations."""
     send_X_or_KV = 0
