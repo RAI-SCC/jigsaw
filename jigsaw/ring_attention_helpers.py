@@ -202,11 +202,8 @@ def ring_backward(
                     KV = KV_chunks[step]
                     Kj, Vj = torch.chunk(KV, 2, dim=0)
                     Kj, Vj = Kj.contiguous(), Vj.contiguous()
-                    # send KV to the next
                 else: # save X or KV = 0
                     Xj = X_chunks[step]
-                    # then send X ot the next rank
-                    
                     KV = (
                         (Xj @ W_qkv[d * H :, :].mT)
                         .reshape(B, Nlocal, 2, H, d)
@@ -244,7 +241,7 @@ def ring_backward(
                     KV_handle.wait()
                     
                     Kj, Vj = torch.chunk(recv_buf, 2, dim=0)
-                    KV = recv_buf.clone() # TODO: can I delete this?
+                    KV = recv_buf # TODO: can I delete this?
                     recv_buf = torch.zeros_like(KV)  # fresh buffer for next recv
                     
                     recv_buf, KV_handle = _ring_send_recv(
