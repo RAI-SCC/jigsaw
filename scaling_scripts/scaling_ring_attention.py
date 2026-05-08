@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 
 from jigsaw import attention_ring, utils
+from jigsaw import ring_attention_helpers as ring_attn_fns
 
 
 def make_process_mesh(
@@ -55,7 +56,7 @@ def training_loop(device: torch.device, local_rank: int) -> None:
 
     x_features = 256
     output_dim = embed_dim = 256
-    b, heads, n_global, d = 1, 32, 131072, 256
+    b, heads, n_global, d = 1, 32, 65536, 256
 
     torch.manual_seed(2)
 
@@ -64,8 +65,18 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         3 * d * heads, d, device=device, requires_grad=True, dtype=torch.bfloat16
     )
 
-    # randomize input data per rank
+    # define configs for the ring attention
     torch.manual_seed(local_rank)
+    ring_config = ring_attn_fns.RingAttentionConfig(
+        send_in_forward=ring_attn_fns.SendForward.X,
+        save_for_backward=ring_attn_fns.SaveBackward.X,
+        save_scope=ring_attn_fns.SaveScope.GLOBAL,
+        send_backward=ring_attn_fns.SendBackward.DISABLED,
+        offload=ring_attn_fns.Offload.DISABLED,
+        device=device,
+    )
+
+    # define parallel model
     model = attention_ring.Ring(
         x_features=x_features,
         embed_dim=embed_dim,
@@ -78,7 +89,10 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         spatial_group=mesh_dict["model"],
         bayesian=False,
         dtype=torch.bfloat16,
+        ring_config=ring_config,
     )
+
+    # define baseline model
     model_baseline = attention_ring.RingBaseline(
         x_features=x_features,
         embed_dim=embed_dim,
@@ -93,10 +107,11 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         dtype=torch.bfloat16,
     )
 
-    n_epochs = 4
+    n_epochs = 10
     epoch_times = np.zeros(n_epochs)
     torch.cuda.synchronize()
 
+    # parallel experiment
     for epoch in range(n_epochs):
         model.train()
 
@@ -124,11 +139,6 @@ def training_loop(device: torch.device, local_rank: int) -> None:
             k,
             v,
             w_qkv,
-            b,
-            n_global // mesh_dict["model"].size(),
-            heads,
-            d,
-            device,
         )
         end.record()
         torch.cuda.synchronize()
@@ -138,9 +148,10 @@ def training_loop(device: torch.device, local_rank: int) -> None:
             print(f"Epoch {epoch} time [min]: {(epoch_times[epoch])}")
 
     if local_rank == 0:
-        print(f"Average speedup epoch time is {np.average(epoch_times[1:])}")
-        print(f"Std epoch time is {np.std(epoch_times[1:])}")
+        parallel_time = np.average(epoch_times[1:])
+        print(f"Average parallel epoch time is {parallel_time}")
 
+    # non-parallel baseline
     for epoch in range(n_epochs):
         model_baseline.train()
         x = torch.randn(
@@ -155,9 +166,7 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        train_one_epoch(
-            model_baseline, x, q, k, v, w_qkv, b, n_global, heads, d, device
-        )
+        train_one_epoch(model_baseline, x, q, k, v, w_qkv)
         end.record()
         torch.cuda.synchronize()
 
@@ -165,8 +174,9 @@ def training_loop(device: torch.device, local_rank: int) -> None:
             epoch_times[epoch] = start.elapsed_time(end) / 1000 / 60
             print(f"Epoch {epoch} time [min]: {(epoch_times[epoch])}")
     if local_rank == 0:
-        print(f"Average epoch time is {np.average(epoch_times[1:])}")
-        print(f"Std epoch time is {np.std(epoch_times[1:])}")
+        ref_time = np.average(epoch_times[1:])
+        print(f"Average ref time is {ref_time}")
+        print(f"Speedup is {ref_time / parallel_time}")
 
 
 def train_one_epoch(model: torch.nn.Module, x, q, k, v, w_qkv):

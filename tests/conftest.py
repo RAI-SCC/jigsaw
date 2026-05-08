@@ -151,13 +151,17 @@ def gather_1d_results_list(x: torch.Tensor, process_mesh: dist.device_mesh = Non
     return tensor_list
 
 
-def gather_1d_results(x: torch.Tensor, process_mesh: dist.device_mesh = None, dim: int = -1):
+def gather_1d_results(
+    x: torch.Tensor, process_mesh: dist.device_mesh = None, dim: int = -1
+):
     """Gather tensor distributed across process mesh rows along any dimension."""
     n_rows = process_mesh["row"].size()
     tensor_list = [
         torch.zeros(x.shape, dtype=x.dtype, device=x.device) for _ in range(n_rows)
     ]
-    torch.distributed.all_gather(tensor_list, x.contiguous(), group=process_mesh["model"])
+    torch.distributed.all_gather(
+        tensor_list, x.contiguous(), group=process_mesh["model"]
+    )
 
     ndim = x.dim()
     if dim < 0:
