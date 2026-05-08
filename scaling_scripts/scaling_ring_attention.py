@@ -3,7 +3,7 @@ import argparse
 import numpy as np
 import torch
 import torch.distributed as dist
-import yaml
+import math
 
 from jigsaw import utils
 from jigsaw import attention_ring
@@ -50,45 +50,65 @@ def make_process_mesh(
     return mesh
 
 
-def training_loop(
-    device: torch.device, localid: int, rank: int
-) -> None:
+def training_loop(device: torch.device, local_rank: int) -> None:
     """Training loop for scaling experiments."""
     mesh_dict = make_process_mesh("nccl")
-    
+
     x_features = 256
     output_dim = embed_dim = 256
-    B, heads, N, d = 1, 8, mesh_dict["row"].size() * 256*64, 256
-    Nlocal = N // mesh_dict["row"].size()
+    B, heads, N_global, d = 1, 32, 131072, 256
 
-    
+    torch.manual_seed(2)
 
-    model = attention_ring.RingAttention(
+    # pass in the QKV mapping alone
+    W_qkv = torch.randn(
+        3 * d * heads, d, device=device, requires_grad=True, dtype=torch.bfloat16
+    )
+
+    # randomize input data per rank
+    torch.manual_seed(local_rank)
+    model = attention_ring.Ring(
         x_features=x_features,
         embed_dim=embed_dim,
         output_dim=output_dim,
         heads=heads,
         dropout=0.0,
-        local_rank=rank,
+        local_rank=local_rank,
         device=device,
-        parallelism=2,
-        model_group=mesh_dict["model"],
-        spatial_group=mesh_dict["row"],
-        channel_group=mesh_dict["col"],
+        parallelism=mesh_dict["model"].size(),
+        spatial_group=mesh_dict["model"],
         bayesian=False,
-        dtype=torch.float32,
+        dtype=torch.bfloat16,
     )
-     
-    
-    epoch_times = np.zeros(11)
+    model_baseline = attention_ring.RingBaseline(
+        x_features=x_features,
+        embed_dim=embed_dim,
+        output_dim=output_dim,
+        heads=heads,
+        dropout=0.0,
+        local_rank=local_rank,
+        device=device,
+        parallelism=mesh_dict["model"].size(),
+        spatial_group=mesh_dict["model"],
+        bayesian=False,
+        dtype=torch.bfloat16,
+    )
+
+    n_epochs = 4
+    epoch_times = np.zeros(n_epochs)
     torch.cuda.synchronize()
 
-    for epoch in range(11):
+    for epoch in range(n_epochs):
         model.train()
+        
+        X = torch.randn((B, N_global//mesh_dict["model"].size(), d), device=device, requires_grad=True, dtype=torch.bfloat16) / (d**0.5)
+        QKV = torch.matmul(X, W_qkv.mT)
+        Q, K, V = [t.detach().requires_grad_(True) for t in QKV.reshape(B, N_global//mesh_dict["model"].size(), 3, heads, d).permute(2, 0, 3, 1, 4)]
+        
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        train_one_epoch(model, (B, Nlocal, d//2), d, device)
+        train_one_epoch(model, X, Q, K, V, W_qkv, B, N_global//mesh_dict["model"].size(), heads, d, device)
         end.record()
         torch.cuda.synchronize()
 
@@ -97,29 +117,35 @@ def training_loop(
             print(f"Epoch {epoch} time [min]: {(epoch_times[epoch])}")
 
     if rank == 0:
+        print(f"Average speedup epoch time is {np.average(epoch_times[1:])}")
+        print(f"Std epoch time is {np.std(epoch_times[1:])}")
+        
+    for epoch in range(n_epochs):
+        model_baseline.train()
+        X = torch.randn((B, N_global, d), device=device, requires_grad=True, dtype=torch.bfloat16) / (d**0.5)
+        QKV = torch.matmul(X, W_qkv.mT)
+        Q, K, V = [t.detach().requires_grad_(True) for t in QKV.reshape(B, N_global, 3, heads, d).permute(2, 0, 3, 1, 4)]
+        
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        train_one_epoch(model_baseline, X, Q, K, V, W_qkv, B, N_global, heads, d, device)
+        end.record()
+        torch.cuda.synchronize()
+
+        if rank == 0:
+            epoch_times[epoch] = start.elapsed_time(end) / 1000 / 60
+            print(f"Epoch {epoch} time [min]: {(epoch_times[epoch])}")
+    if rank == 0:
         print(f"Average epoch time is {np.average(epoch_times[1:])}")
         print(f"Std epoch time is {np.std(epoch_times[1:])}")
 
 
-def train_one_epoch(
-    model: torch.nn.Module, 
-    X_shape,
-    d,
-    device
-):
+def train_one_epoch(model: torch.nn.Module, X, Q, K, V, W_qkv, B, N, h, d, device):
     """Time and train one epoch."""
-    
-    for _ in range(100):
-        # Loading data: Always with async ops and handles
-        X = torch.randn(
-            *X_shape, device=device, requires_grad=True, dtype=torch.float32
-        ) / (d**0.5)
-        
-        # output shape [n_batch, 720, 720, 36]
-        output = model(X, None)
-
-        # Reshape output
-        
+    # X has shape [B, Nlocal, d//2]
+    for _ in range(10):
+        output = model(X.detach(), Q, K, V, W_qkv, None)
         output.sum().backward()
 
 
@@ -130,5 +156,5 @@ if __name__ == "__main__":
 
     device, localid, rank, world_size = utils.init_cuda()
 
-    training_loop(device, localid, rank)
+    training_loop(device, rank)
     dist.destroy_process_group()
