@@ -51,6 +51,7 @@ def _ring_send_recv(
     else:
         send_to = (rank - offset) % world_size
         recv_from = (rank + offset) % world_size
+        
     output_list = [recv_buf if i == recv_from else empty for i in range(world_size)]
     input_list = [tensor if i == send_to else empty for i in range(world_size)]
     handle = dist.all_to_all(output_list, input_list, group=group, async_op=True)
@@ -126,11 +127,9 @@ def ring_forward_sendX(
             else:
                 # offload KV (note: KV is already a contiguous tensor of shape [2,B,H,N,d])
                 if offloader is not None:
-                    print(f"Memory before KV", torch.cuda.memory_allocated() / 1e9)
                     KV_cpu = offloader.offload(KV)
                     chunks_to_save.append(KV_cpu)
                     del KV
-                    print(f"Memory after KV", torch.cuda.memory_allocated() / 1e9)
                 else:
                     chunks_to_save.append(
                         KV.clone() if save_local_or_global == 1 else KV
@@ -150,9 +149,7 @@ def ring_forward_sendX(
             return_debug_mask=False,
         )
         O, l = _online_softmax_merge(O, l, O_j, l_j)
-        print(f"Memory before", torch.cuda.memory_allocated() / 1e9)
         del O_j, l_j, Kj_c, Vj_c
-        print(f"Memory after", torch.cuda.memory_allocated() / 1e9)
 
         # ---- ring rotate ----
         if step < world_size - 1:
@@ -193,6 +190,7 @@ def ring_backward(
     W_qkv,
     scale,
     group,
+    local_rank,
     world_size,
     chunks_to_save=[],
     send_X_or_KV=0,
@@ -202,8 +200,6 @@ def ring_backward(
     offloader=None,
     empty=None,
 ):
-    rank = dist.get_rank(group)
-
     if save_X_or_KV == 0:
         X_chunks = chunks_to_save
     else:
@@ -302,12 +298,12 @@ def ring_backward(
                     to_send = Xj if save_X_or_KV == 0 else X
                     recv_buf = torch.empty_like(to_send)
                     recv_buf, X_handle = _ring_send_recv(
-                        to_send, world_size, rank, group, empty, recv_buf
+                        to_send, world_size, local_rank, group, empty, recv_buf
                     )
                 else:
                     recv_buf = torch.empty_like(KV)
                     recv_buf, KV_handle = _ring_send_recv(
-                        KV, world_size, rank, group, empty, recv_buf
+                        KV, world_size, local_rank, group, empty, recv_buf
                     )
 
             else:
@@ -320,7 +316,7 @@ def ring_backward(
                     if step < world_size - 1:
                         next_recv = torch.empty_like(Xj)
                         recv_buf, X_handle = _ring_send_recv(
-                            Xj, world_size, rank, group, empty, next_recv
+                            Xj, world_size, local_rank, group, empty, next_recv
                         )
                 else:
                     KV_handle.wait()
@@ -329,7 +325,7 @@ def ring_backward(
                     if step < world_size - 1:
                         next_recv = torch.empty_like(KV)
                         recv_buf, KV_handle = _ring_send_recv(
-                            KV, world_size, rank, group, empty, next_recv
+                            KV, world_size, local_rank, group, empty, next_recv
                         )
 
         # ---- flash attention backward ----
@@ -351,16 +347,10 @@ def ring_backward(
             philox_offset=torch.zeros(1, dtype=torch.long, device=Q.device),
         )
         dQ += dQ_j
-        print(f"step {step} backwards before", torch.cuda.memory_allocated() / 1e9)
         del dQ_j, Kj, Vj, KV
-
-        if save_local_or_global == 1 and save_X_or_KV == 0:
-            del Xj  # was loaded from CPU; can drop now
-        print(f"step {step} backwards after", torch.cuda.memory_allocated() / 1e9)
-
         # ---- accumulate dK, dV ----
         if send_dKV_or_not == 1:
-            global_chunk_idx = (rank - step) % world_size
+            global_chunk_idx = (local_rank - step) % world_size
             dK_buf[
                 :, :, global_chunk_idx * Nlocal : (global_chunk_idx + 1) * Nlocal
             ] += dKj
@@ -380,7 +370,7 @@ def ring_backward(
                 recv_buffer, h = _ring_send_recv(
                     dkv,
                     world_size=world_size,
-                    rank=rank,
+                    rank=local_rank,
                     group=group,
                     empty=empty,
                     recv_buf=recv_buffer,
@@ -397,8 +387,8 @@ def ring_backward(
     if send_dKV_or_not == 1:
         dist.all_reduce(dK_buf, op=dist.ReduceOp.SUM, group=group)
         dist.all_reduce(dV_buf, op=dist.ReduceOp.SUM, group=group)
-        dK_local = dK_buf[:, :, rank * Nlocal : (rank + 1) * Nlocal]
-        dV_local = dV_buf[:, :, rank * Nlocal : (rank + 1) * Nlocal]
+        dK_local = dK_buf[:, :, local_rank * Nlocal : (local_rank + 1) * Nlocal]
+        dV_local = dV_buf[:, :, local_rank * Nlocal : (local_rank + 1) * Nlocal]
     else:
         dK_local = dK_buf
         dV_local = dV_buf
