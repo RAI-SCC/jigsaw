@@ -968,7 +968,6 @@ class DistributedXW(torch.nn.Module):
         )
 
         if bias:
-            average_weights(self, self.spatial_group)
             self.bias = torch.nn.parameter.Parameter(self.bias)
 
         # TODO: post-grad_acumulate hook
@@ -1241,7 +1240,6 @@ class DistributedXTW(torch.nn.Module):
         )
 
         if bias:
-            average_weights(self, self.spatial_group)
             self.bias = torch.nn.parameter.Parameter(self.bias)
 
         # TODO: hooks for bias sync

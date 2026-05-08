@@ -3,7 +3,6 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.attention_ring as ring_attention
-import jigsaw.offload as offload
 import jigsaw.ring_attention_helpers as ring_attn_fns
 from tests import conftest
 
@@ -251,7 +250,10 @@ def test_backward_sdpa(device, process_mesh, flash_kernel):
         for s in [ring_attn_fns.SendForward.X, ring_attn_fns.SendForward.KV]
         for sv in [ring_attn_fns.SaveBackward.X, ring_attn_fns.SaveBackward.KV]
         for sl in [ring_attn_fns.SaveScope.LOCAL, ring_attn_fns.SaveScope.GLOBAL]
-        for sd in [ring_attn_fns.SendBackward.SEND_DKV, ring_attn_fns.SendBackward.DISABLED]
+        for sd in [
+            ring_attn_fns.SendBackward.SEND_DKV,
+            ring_attn_fns.SendBackward.DISABLED,
+        ]
         for offloader in [ring_attn_fns.Offload.DISABLED, ring_attn_fns.Offload.CPU]
     ],
 )
@@ -265,7 +267,10 @@ def test_ring_forward_backward(
     offloader,
 ):
     """Verify weights for XWT_Sync are synchronized after a few iterations."""
-    if send_x_or_kv == ring_attn_fns.SendForward.KV and save_x_or_kv == ring_attn_fns.SaveBackward.X:
+    if (
+        send_x_or_kv == ring_attn_fns.SendForward.KV
+        and save_x_or_kv == ring_attn_fns.SaveBackward.X
+    ):
         pytest.xfail("not yet supported")
 
     ring_config = ring_attn_fns.RingAttentionConfig(
@@ -306,7 +311,7 @@ def test_ring_forward_backward(
     scale = q_local.shape[-1] ** -0.5
 
     # just test helper function forward
-    out, lse, chunks_to_save = ring_attn_fns.ring_forward_sendX(
+    out, lse, chunks_to_save = ring_attn_fns.ring_forward(
         q_local,
         x,
         w_qkv,
@@ -411,6 +416,7 @@ def test_ring_forward_backward(
         atol=1e-3,
     )
 
+
 def test_ring(device, process_mesh):
     """Test forward-backward pass of ring attention wrapped by nn.Module."""
     group = process_mesh["model"]
@@ -468,14 +474,14 @@ def test_ring(device, process_mesh):
         spatial_group=group,
         bayesian=False,
         dtype=torch.bfloat16,
-        ring_config = ring_attn_fns.RingAttentionConfig(
+        ring_config=ring_attn_fns.RingAttentionConfig(
             send_in_forward=ring_attn_fns.SendForward.X,
             save_for_backward=ring_attn_fns.SaveBackward.X,
             save_scope=ring_attn_fns.SaveScope.GLOBAL,
             send_backward=ring_attn_fns.SendBackward.DISABLED,
             offload=ring_attn_fns.Offload.DISABLED,
             device=device,
-        )
+        ),
     )
     model_baseline = ring_attention.RingBaseline(
         x_features=x_features,

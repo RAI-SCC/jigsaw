@@ -1,15 +1,17 @@
+from enum import Enum
+
 import torch
 import torch.distributed as dist
-from enum import Enum
+
 from jigsaw.offload import NVLinkActivationOffloader
 
 
-def _online_softmax_merge(O1, L1, O2, L2):
-    L_new = torch.logaddexp(L1, L2)
-    e1 = torch.exp(L1 - L_new)
-    e2 = torch.exp(L2 - L_new)
-    O_new = e1.unsqueeze(-1) * O1 + e2.unsqueeze(-1) * O2
-    return O_new, L_new
+def _online_softmax_merge(o1, l1, o2, l2):
+    l_new = torch.logaddexp(l1, l2)
+    e1 = torch.exp(l1 - l_new)
+    e2 = torch.exp(l2 - l_new)
+    o_new = e1.unsqueeze(-1) * o1 + e2.unsqueeze(-1) * o2
+    return o_new, l_new
 
 
 def _ring_send_recv(
@@ -27,43 +29,55 @@ def _ring_send_recv(
     return recv_buf, handle
 
 
-def _compute_KV(Xj, W_qkv, B, N_local, H, d):
+def _compute_kv(xj, w_qkv, b, n_local, h, d):
     """Compute (K, V) from X. Returns (KV, Kj, Vj). KV is the underlying buffer."""
-    KV = (
-        (Xj @ W_qkv[d * H :, :].mT).reshape(B, N_local, 2, H, d).permute(2, 0, 3, 1, 4)
+    kv = (
+        (xj @ w_qkv[d * h :, :].mT).reshape(b, n_local, 2, h, d).permute(2, 0, 3, 1, 4)
     ).contiguous()
-    Kj = KV[0]
-    Vj = KV[1]
-    return KV, Kj, Vj
+    kj = kv[0]
+    vj = kv[1]
+    return kv, kj, vj
 
 
 # Module-level enum definitions
 class SendForward(Enum):
+    """Enum for sending X or KV."""
+
     X = 0
     KV = 1
 
 
 class SaveBackward(Enum):
+    """Enum for saving X or KV."""
+
     X = 0
     KV = 1
 
 
 class SaveScope(Enum):
+    """Enum for saving X or KV locally or globally."""
+
     LOCAL = 0
     GLOBAL = 1
 
 
 class Offload(Enum):
+    """Enum for offloading to CPU."""
+
     DISABLED = 0
     CPU = 1
 
 
 class SendBackward(Enum):
+    """Enum for backward communication."""
+
     SEND_DKV = 0
     DISABLED = 1
 
 
 class RingAttentionConfig:
+    """Config class for ring attention."""
+
     def __init__(
         self,
         send_in_forward: SendForward = SendForward.KV,
@@ -80,12 +94,14 @@ class RingAttentionConfig:
         self.offloader = self.init_offloader(offload, device)
 
     def init_offloader(self, offload, device):
+        """Initialize offloader based on config."""
         if offload == Offload.DISABLED:
             return None
         elif offload == Offload.CPU:
             return NVLinkActivationOffloader(device)
 
     def __repr__(self):
+        """Print statement of RingAttentionConfig class."""
         return (
             f"RingAttentionConfig("
             f"send_in_forward={self.send_in_forward.name}, "
@@ -96,9 +112,10 @@ class RingAttentionConfig:
 
 
 @torch.no_grad()
-def ring_forward_sendX(
+def ring_forward(
     q, x, w_qkv, scale, group, empty, rank, world_size, ring_config: RingAttentionConfig
 ):
+    """Forward pass for ring attention."""
     b, heads, n_local, d = q.shape
     world_size = dist.get_world_size(group)
 
@@ -109,7 +126,7 @@ def ring_forward_sendX(
     chunks_to_save = []
 
     # Local KV
-    kv, kj, vj = _compute_KV(x_j, w_qkv, b, n_local, heads, d)
+    kv, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
 
     # Kick off first send
     match ring_config.send_in_forward:
@@ -120,12 +137,14 @@ def ring_forward_sendX(
             )
         case SendForward.KV:
             recv_buf = torch.empty_like(kv)
-            recv_buf, handle = _ring_send_recv(kv, world_size, rank, group, empty, recv_buf)
-            
+            recv_buf, handle = _ring_send_recv(
+                kv, world_size, rank, group, empty, recv_buf
+            )
+
     for step in range(world_size):
         if (step > 0) and (ring_config.send_in_forward == SendForward.X):
             # Recompute KV from current Xj (received in previous iter)
-            kv, kj, vj = _compute_KV(x_j, w_qkv, b, n_local, heads, d)
+            kv, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
 
         # ---- save for backward ----
         # save_local_or_global == 0: only save own (step 0) chunk; backward re-rings
@@ -137,8 +156,8 @@ def ring_forward_sendX(
                 case SaveBackward.X:
                     # offload X
                     if ring_config.offloader is not None:
-                        Xj_cpu = ring_config.offloader.offload(x_j)
-                        chunks_to_save.append(Xj_cpu)
+                        xj_cpu = ring_config.offloader.offload(x_j)
+                        chunks_to_save.append(xj_cpu)
                     else:
                         # keep on GPU — must clone if Xj will be overwritten by recv next iter
                         chunks_to_save.append(
@@ -149,8 +168,8 @@ def ring_forward_sendX(
                 case SaveBackward.KV:
                     # offload KV (note: KV is already a contiguous tensor of shape [2,B,H,N,d])
                     if ring_config.offloader is not None:
-                        KV_cpu = ring_config.offloader.offload(kv)
-                        chunks_to_save.append(KV_cpu)
+                        kv_cpu = ring_config.offloader.offload(kv)
+                        chunks_to_save.append(kv_cpu)
                         del kv
                     else:
                         chunks_to_save.append(
@@ -161,19 +180,19 @@ def ring_forward_sendX(
 
         # ---- compute flash attention on local Q vs current Kj, Vj ----
         # Kj, Vj are views into KV; flash attention requires contiguous, so materialize.
-        Kj_c = kj.contiguous()
-        Vj_c = vj.contiguous()
-        O_j, l_j, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
+        kj_c = kj.contiguous()
+        vj_c = vj.contiguous()
+        out_j, l_j, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
             q,
-            Kj_c,
-            Vj_c,
+            kj_c,
+            vj_c,
             dropout_p=0.0,
             is_causal=False,
             scale=scale,
             return_debug_mask=False,
         )
-        out, lse = _online_softmax_merge(out, lse, O_j, l_j)
-        del O_j, l_j, Kj_c, Vj_c
+        out, lse = _online_softmax_merge(out, lse, out_j, l_j)
+        del out_j, l_j, kj_c, vj_c
 
         # ---- ring rotate ----
         if step < world_size - 1:
@@ -207,12 +226,12 @@ def ring_forward_sendX(
 
 @torch.no_grad()
 def ring_backward(
-    dO,
-    Q,
-    O,
-    X,
-    L,
-    W_qkv,
+    dout,
+    q,
+    o,
+    x,
+    lse,
+    w_qkv,
     scale,
     group,
     local_rank,
@@ -221,29 +240,31 @@ def ring_backward(
     ring_config: RingAttentionConfig,
     empty=None,
 ):
-    if ring_config.save_for_backward == SaveBackward.X:
-        X_chunks = chunks_to_save
-    elif ring_config.save_for_backward == SaveBackward.KV:
-        KV_chunks = chunks_to_save
+    """Implement backward pass for ring attention."""
+    match ring_config.save_for_backward:
+        case SaveBackward.X:
+            x_chunks = chunks_to_save
+        case SaveBackward.KV:
+            kv_chunks = chunks_to_save
 
-    B, H, Nlocal, d = Q.shape
-    dQ = torch.zeros_like(Q, dtype=torch.float32)
+    b, h, n_local, d = q.shape
+    dq = torch.zeros_like(q, dtype=torch.float32)
 
     match ring_config.send_backward:
         case SendBackward.DISABLED:  # send dK = 1
-            dK_buf = torch.zeros(
-                [*Q.shape[0:2], world_size * Q.shape[2], *Q.shape[3:]],
-                device=Q.device,
-                dtype=Q.dtype,
+            dk_buf = torch.zeros(
+                [*q.shape[0:2], world_size * q.shape[2], *q.shape[3:]],
+                device=q.device,
+                dtype=q.dtype,
             )
-            dV_buf = torch.zeros(
-                [*Q.shape[0:2], world_size * Q.shape[2], *Q.shape[3:]],
-                device=Q.device,
-                dtype=Q.dtype,
+            dv_buf = torch.zeros(
+                [*q.shape[0:2], world_size * q.shape[2], *q.shape[3:]],
+                device=q.device,
+                dtype=q.dtype,
             )
         case SendBackward.SEND_DKV:
-            dK_buf = torch.zeros(Q.shape, device=Q.device, dtype=Q.dtype)
-            dV_buf = torch.zeros(Q.shape, device=Q.device, dtype=Q.dtype)
+            dk_buf = torch.zeros(q.shape, device=q.device, dtype=q.dtype)
+            dv_buf = torch.zeros(q.shape, device=q.device, dtype=q.dtype)
 
     # Pre-issue first prefetch (for save_local_or_global == 1) so H2D overlaps
     # with the compute of step 0.
@@ -268,8 +289,8 @@ def ring_backward(
 
     # State for ring rotation
     recv_buf = None
-    X_handle = None
-    KV_handle = None
+    x_handle = None
+    kv_handle = None
 
     for step in range(world_size):
         # ---- obtain Kj, Vj for this step ----
@@ -286,33 +307,33 @@ def ring_backward(
                     chunk = chunks_to_save[step]
 
                 if ring_config.save_for_backward == SaveBackward.KV:
-                    KV = chunk
-                    Kj, Vj = KV[0].contiguous(), KV[1].contiguous()
+                    kv = chunk
+                    kj, vj = kv[0].contiguous(), kv[1].contiguous()
                 elif ring_config.save_for_backward == SaveBackward.X:
-                    Xj = chunk
-                    KV, Kj, Vj = _compute_KV(Xj, W_qkv, B, Nlocal, H, d)
-                    Kj, Vj = Kj.contiguous(), Vj.contiguous()
+                    xj = chunk
+                    kv, kj, vj = _compute_kv(xj, w_qkv, b, n_local, h, d)
+                    kj, vj = kj.contiguous(), vj.contiguous()
             case SaveScope.LOCAL:
                 # save_local_or_global == 0: only own chunk saved; ring around
                 if step == 0:
                     match ring_config.save_for_backward:
                         case SaveBackward.KV:
                             if ring_config.offloader is not None:
-                                gpu, ev = ring_config.offloader.prefetch(KV_chunks[0])
+                                gpu, ev = ring_config.offloader.prefetch(kv_chunks[0])
                                 ring_config.offloader.wait_prefetch(ev)
-                                KV = gpu
+                                kv = gpu
                             else:
-                                KV = KV_chunks[0]
-                            Kj, Vj = KV[0].contiguous(), KV[1].contiguous()
+                                kv = kv_chunks[0]
+                            kj, vj = kv[0].contiguous(), kv[1].contiguous()
                         case SaveBackward.X:
                             if ring_config.offloader is not None:
-                                gpu, ev = ring_config.offloader.prefetch(X_chunks[0])
+                                gpu, ev = ring_config.offloader.prefetch(x_chunks[0])
                                 ring_config.offloader.wait_prefetch(ev)
-                                Xj = gpu
+                                xj = gpu
                             else:
-                                Xj = X_chunks[0]
-                            KV, Kj, Vj = _compute_KV(Xj, W_qkv, B, Nlocal, H, d)
-                            Kj, Vj = Kj.contiguous(), Vj.contiguous()
+                                xj = x_chunks[0]
+                            kv, kj, vj = _compute_kv(xj, w_qkv, b, n_local, h, d)
+                            kj, vj = kj.contiguous(), vj.contiguous()
 
                     # Kick off first ring send
                     match ring_config.send_in_forward:
@@ -320,80 +341,82 @@ def ring_backward(
                             # we need an Xj to send. If we saved KV instead of X, we don't have it.
                             # In that case caller must have passed X.
                             to_send = (
-                                Xj if (ring_config.save_for_backward == SaveBackward.X) else X
+                                xj
+                                if (ring_config.save_for_backward == SaveBackward.X)
+                                else x
                             )
                             recv_buf = torch.empty_like(to_send)
-                            recv_buf, X_handle = _ring_send_recv(
+                            recv_buf, x_handle = _ring_send_recv(
                                 to_send, world_size, local_rank, group, empty, recv_buf
                             )
                         case SendForward.KV:
-                            recv_buf = torch.empty_like(KV)
-                            recv_buf, KV_handle = _ring_send_recv(
-                                KV, world_size, local_rank, group, empty, recv_buf
+                            recv_buf = torch.empty_like(kv)
+                            recv_buf, kv_handle = _ring_send_recv(
+                                kv, world_size, local_rank, group, empty, recv_buf
                             )
 
                 else:
                     # step > 0: receive next chunk
                     match ring_config.send_in_forward:
                         case SendForward.X:
-                            X_handle.wait()
-                            Xj = recv_buf
-                            KV, Kj, Vj = _compute_KV(Xj, W_qkv, B, Nlocal, H, d)
-                            Kj, Vj = Kj.contiguous(), Vj.contiguous()
+                            x_handle.wait()
+                            xj = recv_buf
+                            kv, kj, vj = _compute_kv(xj, w_qkv, b, n_local, h, d)
+                            kj, vj = kj.contiguous(), vj.contiguous()
                             if step < world_size - 1:
-                                next_recv = torch.empty_like(Xj)
-                                recv_buf, X_handle = _ring_send_recv(
-                                    Xj, world_size, local_rank, group, empty, next_recv
+                                next_recv = torch.empty_like(xj)
+                                recv_buf, x_handle = _ring_send_recv(
+                                    xj, world_size, local_rank, group, empty, next_recv
                                 )
                         case SendForward.KV:
-                            KV_handle.wait()
-                            KV = recv_buf
-                            Kj, Vj = KV[0].contiguous(), KV[1].contiguous()
+                            kv_handle.wait()
+                            kv = recv_buf
+                            kj, vj = kv[0].contiguous(), kv[1].contiguous()
                             if step < world_size - 1:
-                                next_recv = torch.empty_like(KV)
-                                recv_buf, KV_handle = _ring_send_recv(
-                                    KV, world_size, local_rank, group, empty, next_recv
+                                next_recv = torch.empty_like(kv)
+                                recv_buf, kv_handle = _ring_send_recv(
+                                    kv, world_size, local_rank, group, empty, next_recv
                                 )
 
         # ---- flash attention backward ----
-        dQ_j, dKj, dVj = torch.ops.aten._scaled_dot_product_flash_attention_backward(
-            dO,
-            Q,
-            Kj,
-            Vj,
-            O,
-            L,
+        dq_j, dk_j, dv_j = torch.ops.aten._scaled_dot_product_flash_attention_backward(
+            dout,
+            q,
+            kj,
+            vj,
+            o,
+            lse,
             dropout_p=0.0,
             is_causal=False,
             scale=scale,
             cum_seq_q=None,
             cum_seq_k=None,
-            max_q=Nlocal,
-            max_k=Nlocal,
-            philox_seed=torch.zeros(1, dtype=torch.long, device=Q.device),
-            philox_offset=torch.zeros(1, dtype=torch.long, device=Q.device),
+            max_q=n_local,
+            max_k=n_local,
+            philox_seed=torch.zeros(1, dtype=torch.long, device=q.device),
+            philox_offset=torch.zeros(1, dtype=torch.long, device=q.device),
         )
-        dQ += dQ_j
-        del dQ_j, Kj, Vj, KV
+        dq += dq_j
+        del dq_j, kj, vj, kv
         # ---- accumulate dK, dV ----
         match ring_config.send_backward:
             case SendBackward.DISABLED:
                 global_chunk_idx = (local_rank - step) % world_size
-                dK_buf[
-                    :, :, global_chunk_idx * Nlocal : (global_chunk_idx + 1) * Nlocal
-                ] += dKj
-                dV_buf[
-                    :, :, global_chunk_idx * Nlocal : (global_chunk_idx + 1) * Nlocal
-                ] += dVj
-                del dKj, dVj
+                dk_buf[
+                    :, :, global_chunk_idx * n_local : (global_chunk_idx + 1) * n_local
+                ] += dk_j
+                dv_buf[
+                    :, :, global_chunk_idx * n_local : (global_chunk_idx + 1) * n_local
+                ] += dv_j
+                del dk_j, dv_j
             case SendBackward.SEND_DKV:
                 if step == 0:
-                    dK_buf += dKj
-                    dV_buf += dVj
-                    del dKj, dVj
+                    dk_buf += dk_j
+                    dv_buf += dv_j
+                    del dk_j, dv_j
                 else:
-                    dkv = torch.cat([dKj, dVj], dim=0).contiguous()
-                    del dKj, dVj
+                    dkv = torch.cat([dk_j, dv_j], dim=0).contiguous()
+                    del dk_j, dv_j
                     recv_buffer = torch.empty_like(dkv)
                     recv_buffer, h = _ring_send_recv(
                         dkv,
@@ -408,18 +431,18 @@ def ring_backward(
                     h.wait()
                     del dkv
                     dkj_r, dvj_r = torch.chunk(recv_buffer, 2, dim=0)
-                    dK_buf += dkj_r
-                    dV_buf += dvj_r
+                    dk_buf += dkj_r
+                    dv_buf += dvj_r
                     del dkj_r, dvj_r, recv_buffer
 
     match ring_config.send_backward:
         case SendBackward.DISABLED:
-            dist.all_reduce(dK_buf, op=dist.ReduceOp.SUM, group=group)
-            dist.all_reduce(dV_buf, op=dist.ReduceOp.SUM, group=group)
-            dK_local = dK_buf[:, :, local_rank * Nlocal : (local_rank + 1) * Nlocal]
-            dV_local = dV_buf[:, :, local_rank * Nlocal : (local_rank + 1) * Nlocal]
+            dist.all_reduce(dk_buf, op=dist.ReduceOp.SUM, group=group)
+            dist.all_reduce(dv_buf, op=dist.ReduceOp.SUM, group=group)
+            dk_local = dk_buf[:, :, local_rank * n_local : (local_rank + 1) * n_local]
+            dv_local = dv_buf[:, :, local_rank * n_local : (local_rank + 1) * n_local]
         case SendBackward.SEND_DKV:
-            dK_local = dK_buf
-            dV_local = dV_buf
+            dk_local = dk_buf
+            dv_local = dv_buf
 
-    return dQ, dK_local, dV_local
+    return dq, dk_local, dv_local
