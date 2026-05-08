@@ -87,7 +87,7 @@ class DistributedWindowedAttention(torch.nn.Module):
         )
         q, k, v = qkv.unbind(0)
 
-        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
+        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.FLASH_ATTENTION):
             out = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, is_causal=False, dropout_p=0.0, attn_mask=mask
             )

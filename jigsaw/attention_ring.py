@@ -19,6 +19,153 @@ from . import linear, ring_attention_helpers as ring_attn
 from einops import rearrange
 
 
+class Ring(torch.nn.Module):
+    """Distributed windowed attention."""
+
+    def __init__(
+        self,
+        x_features: int,
+        embed_dim: int,
+        output_dim: int,
+        heads: int,
+        dropout: float,
+        local_rank: int,
+        device: torch.device,
+        parallelism: int,
+        spatial_group: dist.ProcessGroup,
+        bayesian: bool,
+        dtype,
+    ):
+        """
+
+        Torch Module to perform distributed multi-headed attention.
+
+        x_features: int
+            global number of x features
+        embed_dim: int
+            global embedding dimension
+        output_dim: int
+            global
+        """
+        super().__init__()
+        self.local_rank = local_rank
+        self.device = device
+        self.parallelism = parallelism
+        self.spatial_group = spatial_group
+
+        self.embed_dim = embed_dim
+        self.x_features = x_features
+        self.dtype = dtype
+        self.dropout = dropout
+
+        self.heads = heads
+        self.scale = embed_dim**-0.5
+        self.empty = torch.empty(0, device=self.device, dtype=self.dtype)
+
+    # @torch.compile(backend="eager")
+    def forward(
+        self,
+        x: torch.Tensor,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        W_qkv: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Forward pass for distributed multi-head attention.
+
+        x: (n_batch, vars, n_lat, n_lon)
+        """
+
+        mask = mask.to(torch.bfloat16) if mask is not None else None
+        O, *_ = RingAttentionFunction.apply(
+            q,
+            k,
+            v,
+            x,
+            W_qkv,
+            q.shape[-1] ** -0.5,
+            self.spatial_group,
+            self.empty,
+            self.local_rank,
+            self.spatial_group.size(),
+        )
+
+        # Output: [n_batch, seq_length, output_dim]
+        return O
+
+
+class RingBaseline(torch.nn.Module):
+    """Distributed windowed attention."""
+
+    def __init__(
+        self,
+        x_features: int,
+        embed_dim: int,
+        output_dim: int,
+        heads: int,
+        dropout: float,
+        local_rank: int,
+        device: torch.device,
+        parallelism: int,
+        spatial_group: dist.ProcessGroup,
+        bayesian: bool,
+        dtype,
+    ):
+        """
+
+        Torch Module to perform distributed multi-headed attention.
+
+        x_features: int
+            global number of x features
+        embed_dim: int
+            global embedding dimension
+        output_dim: int
+            global
+        """
+        super().__init__()
+        self.local_rank = local_rank
+        self.device = device
+        self.parallelism = parallelism
+        self.spatial_group = spatial_group
+
+        self.embed_dim = embed_dim
+        self.x_features = x_features
+        self.dtype = dtype
+        self.dropout = dropout
+
+        self.heads = heads
+        self.scale = embed_dim**-0.5
+        self.empty = torch.empty(0, device=self.device, dtype=self.dtype)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        W_qkv: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Forward pass for distributed multi-head attention.
+
+        x: (n_batch, vars, n_lat, n_lon)
+        """
+
+        mask = mask.to(torch.bfloat16) if mask is not None else None
+        with torch.nn.attention.sdpa_kernel(
+            torch.nn.attention.SDPBackend.FLASH_ATTENTION
+        ):
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, is_causal=False, dropout_p=0.0, attn_mask=mask
+            )
+
+        # Output: [n_batch, seq_length, output_dim]
+        return out
+
+
 class RingAttention(torch.nn.Module):
     """Distributed windowed attention."""
 
@@ -153,7 +300,6 @@ class RingAttentionFunction(torch.autograd.Function):
         scale,
         group,
         empty,
-        zeros,
         rank,
         world_size,
         send_X_or_KV=0,
@@ -167,9 +313,6 @@ class RingAttentionFunction(torch.autograd.Function):
         O = torch.zeros_like(Q)
         l = torch.full((B, N_local, H), float("-inf"), device=Q.device, dtype=Q.dtype)
         empty = torch.empty(0, device=X.device, dtype=X.dtype)
-        zeros = torch.zeros_like(X, device=X.device, dtype=X.dtype)
-
-        Xj = X.clone()
 
         O, l, chunks_to_save = ring_attn.ring_forward_sendX(
             Q,
@@ -208,7 +351,7 @@ class RingAttentionFunction(torch.autograd.Function):
             scale,
             group,
             empty,
-            rank,
+            local_rank,
             world_size,
             send_X_or_KV,
             save_X_or_KV,
@@ -218,15 +361,16 @@ class RingAttentionFunction(torch.autograd.Function):
 
         O, l, chunks_to_save = output
         ctx.mark_non_differentiable(l)
-        ctx.mark_non_differentiable(chunks_to_save)
+        ctx.mark_non_differentiable(*chunks_to_save)
 
         ctx.save_for_backward(
-            Q, O, l.mT, W_qkv, *[t for pair in chunks_to_save for t in pair]
+            Q, O, X, l.mT, W_qkv, *[t for pair in chunks_to_save for t in pair]
         )
 
         ctx.W_qkv = W_qkv
         ctx.empty = empty
         ctx.scale = scale
+        ctx.local_rank = local_rank
         ctx.group = group
         ctx.world_size = world_size
         ctx.send_X_or_KV = send_X_or_KV
@@ -239,22 +383,26 @@ class RingAttentionFunction(torch.autograd.Function):
         scale = ctx.scale
         group = ctx.group
         world_size = ctx.world_size
-        rank = dist.get_rank(group)
+        empty = ctx.empty
+        local_rank = ctx.local_rank
 
-        Q, O, L, W_qkv = ctx.saved_tensors[:4]
-        kv_flat = ctx.saved_tensors[4:]
-        chunks_to_save = [
-            (kv_flat[2 * i], kv_flat[2 * i + 1]) for i in range(world_size)
-        ]
+        Q, O, X, L, W_qkv = ctx.saved_tensors[:5]
+        chunks_to_save = ctx.saved_tensors[5:]
+
+        # chunks_to_save = [
+        #     (kv_flat[2 * i], kv_flat[2 * i + 1]) for i in range(world_size)
+        # ]
 
         dQ, dK, dV = ring_attn.ring_backward(
             dO,
             Q,
             O,
+            X,
             L,
             W_qkv,
             scale,
             group,
+            local_rank,
             world_size,
             chunks_to_save,
             send_X_or_KV=ctx.send_X_or_KV,
@@ -265,7 +413,22 @@ class RingAttentionFunction(torch.autograd.Function):
             empty=empty,
         )
 
-        return dQ, dK, dV, None, None, None, None, None, None, None, None
+        return (
+            dQ,
+            dK,
+            dV,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 # class RingAttentionFunction(Function):
