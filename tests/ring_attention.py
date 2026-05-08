@@ -3,8 +3,8 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.attention_ring as ring_attention
-import jigsaw.ring_attention_helpers as ring_attn_fns
 import jigsaw.offload as offload
+import jigsaw.ring_attention_helpers as ring_attn_fns
 from tests import conftest
 
 
@@ -130,216 +130,118 @@ def process_mesh():
 #     assert torch.allclose(flash_V.grad, dV_ref.float(), atol=1e-2)
 
 
-# def test_backward_sdpa(device, process_mesh):
-#     local_rank = dist.get_rank(group=process_mesh["row"])
-#     world_size = dist.get_world_size(group=process_mesh["row"])
+@pytest.mark.parametrize(
+    "flash_kernel",
+    [
+        (flash_kernel)
+        for flash_kernel in [
+            torch.nn.attention.SDPBackend.MATH,
+            torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+        ]
+    ],
+)
+def test_backward_sdpa(device, process_mesh, flash_kernel):
+    """Test flash kernel with direct call to aten function."""
+    world_size = dist.get_world_size(group=process_mesh["row"])
 
-#     torch.manual_seed(2)  # same seed for weight initialization
-#     B, h, N, d = 1, 3, world_size * 16, 8
-#     Nlocal = N // world_size
-#     W_qkv = torch.randn(
-#         3 * d * h, d, device=device, requires_grad=True, dtype=torch.bfloat16
-#     ) / (d**0.5)
-#     X = torch.randn(
-#         B, Nlocal, d, device=device, requires_grad=True, dtype=torch.bfloat16
-#     ) / (d**0.5)
-#     X = X.contiguous()
+    torch.manual_seed(2)  # same seed for weight initialization
+    b, h, n_global, d = 1, 6, world_size * 32, 256
+    n_local = n_global // world_size
+    w_qkv = torch.randn(
+        3 * d * h, d, device=device, requires_grad=True, dtype=torch.bfloat16
+    ) / (d**0.5)
+    x = torch.randn(
+        b, n_local, d, device=device, requires_grad=True, dtype=torch.bfloat16
+    ) / (d**0.5)
 
-#     QKV = X @ W_qkv.mT
+    qkv = x @ w_qkv.mT
 
-#     Q_local, K_local, V_local = QKV.reshape(B, Nlocal, 3, h, d).permute(2, 0, 3, 1, 4)
-#     # QKV has shape [B, N, h, d]
-#     Q_local, K_local, V_local = (
-#         Q_local.contiguous(),
-#         K_local.contiguous(),
-#         V_local.contiguous(),
-#     )
-#     scale = Q_local.shape[-1] ** -0.5
+    q_local, k_local, v_local = qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
+    # QKV has shape [B, N, h, d]
+    q_local, k_local, v_local = (
+        q_local.contiguous(),
+        k_local.contiguous(),
+        v_local.contiguous(),
+    )
+    scale = q_local.shape[-1] ** -0.5
 
-#     # O ref full
-#     O_ref_full, logsumexp, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
-#         Q_local,
-#         K_local,
-#         V_local,
-#         dropout_p=0.0,
-#         is_causal=False,
-#         scale=scale,
-#         return_debug_mask=False,
-#     )
-#     dQ_ref, dK_ref, dV_ref = (
-#         torch.ops.aten._scaled_dot_product_flash_attention_backward(
-#             torch.ones(
-#                 O_ref_full.shape, device=device, dtype=O_ref_full.dtype
-#             ),  # grad_output: (B, N, H, d)
-#             Q_local,  # query:       (B, N, H, d)
-#             K_local,  # key:         (B, N, H, d)
-#             V_local,  # value:       (B, N, H, d)
-#             O_ref_full,  # out:         (B, N, H d)
-#             logsumexp,  # logsumexp:   (B*H, N) — from forward, reshape(B*H, N) before passing
-#             dropout_p=0.0,
-#             is_causal=False,
-#             scale=scale,
-#             cum_seq_q=None,
-#             cum_seq_k=None,
-#             max_q=Nlocal,
-#             max_k=Nlocal,
-#             philox_seed=torch.zeros(1, dtype=torch.long, device=Q_local.device),
-#             philox_offset=torch.zeros(1, dtype=torch.long, device=Q_local.device),
-#         )
-#     )
+    # O ref full
+    out_ref, logsumexp, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
+        q_local,
+        k_local,
+        v_local,
+        dropout_p=0.0,
+        is_causal=False,
+        scale=scale,
+        return_debug_mask=False,
+    )
+    dq_ref, dk_ref, dv_ref = (
+        torch.ops.aten._scaled_dot_product_flash_attention_backward(
+            torch.ones(
+                out_ref.shape, device=device, dtype=out_ref.dtype
+            ),  # grad_output: (B, N, H, d)
+            q_local,  # query:       (B, N, H, d)
+            k_local,  # key:         (B, N, H, d)
+            v_local,  # value:       (B, N, H, d)
+            out_ref,  # out:         (B, N, H d)
+            logsumexp,  # logsumexp:   (B*H, N) — from forward, reshape(B*H, N) before passing
+            dropout_p=0.0,
+            is_causal=False,
+            scale=scale,
+            cum_seq_q=None,
+            cum_seq_k=None,
+            max_q=n_local,
+            max_k=n_local,
+            philox_seed=torch.zeros(1, dtype=torch.long, device=q_local.device),
+            philox_offset=torch.zeros(1, dtype=torch.long, device=q_local.device),
+        )
+    )
 
-#     # QKV_torchflash
-#     flash_Q = Q_local.detach().float().requires_grad_(True)
-#     flash_K = K_local.detach().float().requires_grad_(True)
-#     flash_V = V_local.detach().float().requires_grad_(True)
+    # QKV_torchflash
+    torch_ref_q = q_local.detach().requires_grad_(True)
+    torch_ref_k = k_local.detach().requires_grad_(True)
+    torch_ref_v = v_local.detach().requires_grad_(True)
 
-#     with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
-#         flash_out = torch.nn.functional.scaled_dot_product_attention(
-#             flash_Q, flash_K, flash_V, is_causal=False, dropout_p=0, attn_mask=None
-#         )
-#         # Qg grad
-#         flash_Q.retain_grad()
-#         flash_K.retain_grad()
-#         flash_V.retain_grad()
-#         flash_out.sum().backward()
+    with torch.nn.attention.sdpa_kernel(flash_kernel):
+        torch_ref_out = torch.nn.functional.scaled_dot_product_attention(
+            torch_ref_q,
+            torch_ref_k,
+            torch_ref_v,
+            is_causal=False,
+            dropout_p=0,
+            attn_mask=None,
+        )
+        # Qg grad
+        torch_ref_q.retain_grad()
+        torch_ref_k.retain_grad()
+        torch_ref_v.retain_grad()
+        torch_ref_out.sum().backward()
 
-#     Qg = Q_local.detach().float().requires_grad_(True)
-#     Kg = K_local.detach().float().requires_grad_(True)
-#     Vg = V_local.detach().float().requires_grad_(True)
+    q_naive = q_local.detach().requires_grad_(True)
+    k_naive = k_local.detach().requires_grad_(True)
+    v_naive = v_local.detach().requires_grad_(True)
 
-#     # Autograd ground truth — definitionally correct
-#     q, k, v = Qg, Kg, Vg
-#     S_au = (q @ k.transpose(-1, -2)) * scale  # (B, H, N, N)
-#     LSE_au = torch.logsumexp(S_au, dim=-1)  # (B, H, N)
-#     O_au = torch.softmax(S_au, dim=-1) @ v  # (B, N, H, d)
-#     q.retain_grad()
-#     k.retain_grad()
-#     v.retain_grad()
-#     O_au.sum().backward()
+    # Autograd ground truth — definitionally correct
+    s_naive = (q_naive @ k_naive.transpose(-1, -2)) * scale  # (B, H, N, N)
+    lse_naive = torch.logsumexp(s_naive, dim=-1)  # (B, H, N)
+    out_naive = torch.softmax(s_naive, dim=-1) @ v_naive  # (B, N, H, d)
+    q_naive.retain_grad()
+    k_naive.retain_grad()
+    v_naive.retain_grad()
+    out_naive.sum().backward()
 
-#     # q has shape [B, h, N, d]
-#     # O_ref_full has shape [B, N, h, d]
-#     # O_au has shape [B, h, d, N]
-#     # dQ_ref: [B, N, h, d]
-#     # dQ_au: [B, N, h, d]
+    # check flash attention implementation against local implementation
+    assert torch.allclose(torch_ref_out, out_naive, atol=1e-3)
+    assert torch.allclose(torch_ref_q.grad, q_naive.grad, atol=1e-3)
+    assert torch.allclose(torch_ref_k.grad, k_naive.grad, atol=1e-3)
+    assert torch.allclose(torch_ref_v.grad, v_naive.grad, atol=1e-3)
 
-#     # check flash attention implementation against local implementation
-#     assert torch.allclose(flash_out, O_au, atol=1e-3)
-#     assert torch.allclose(flash_Q.grad, q.grad, atol=1e-3)
-#     assert torch.allclose(flash_K.grad, k.grad, atol=1e-3)
-#     assert torch.allclose(flash_V.grad, v.grad, atol=1e-3)
-
-#     # check flash attention against torch kernel
-#     assert torch.allclose(flash_out, O_ref_full.float(), atol=1e-3)
-#     assert torch.allclose(LSE_au, logsumexp.float(), atol=1e-3)
-#     assert torch.allclose(flash_Q.grad, dQ_ref.float(), atol=1e-2)
-#     assert torch.allclose(flash_K.grad, dK_ref.float(), atol=1e-2)
-#     assert torch.allclose(flash_V.grad, dV_ref.float(), atol=1e-2)
-
-
-# def test_backward_flash(device, process_mesh):
-#     local_rank = dist.get_rank(group=process_mesh["row"])
-#     world_size = dist.get_world_size(group=process_mesh["row"])
-
-#     torch.manual_seed(2)  # same seed for weight initialization
-#     B, h, N, d = 1, 3, world_size * 16, 256
-#     Nlocal = N // world_size
-#     W_qkv = torch.randn(
-#         3 * d * h, d, device=device, requires_grad=True, dtype=torch.bfloat16
-#     ) / (d**0.5)
-#     X = torch.randn(
-#         B, Nlocal, d, device=device, requires_grad=True, dtype=torch.bfloat16
-#     ) / (d**0.5)
-#     X = X.contiguous()
-
-#     QKV = X @ W_qkv.mT
-
-#     Q_local, K_local, V_local = QKV.reshape(B, Nlocal, 3, h, d).permute(2, 0, 1, 3, 4)
-#     # QKV has shape [B, N, h, d]
-#     Q_local, K_local, V_local = (
-#         Q_local.contiguous(),
-#         K_local.contiguous(),
-#         V_local.contiguous(),
-#     )
-#     scale = Q_local.shape[-1] ** -0.5
-
-#     # O ref full
-#     # flash_attention_forward takes [B, N, H, d]
-#     O_ref_full, logsumexp, *_ = torch.ops.aten._flash_attention_forward(
-#         Q_local,
-#         K_local,
-#         V_local,
-#         cum_seq_q=None,
-#         cum_seq_k=None,
-#         max_q=Nlocal,
-#         max_k=Nlocal,
-#         dropout_p=0.0,
-#         is_causal=False,
-#         scale=scale,
-#         return_debug_mask=False,
-#     )
-
-#     dQ_ref, dK_ref, dV_ref = torch.ops.aten._flash_attention_backward(
-#         torch.ones(
-#             O_ref_full.shape, device=device, dtype=O_ref_full.dtype
-#         ),  # grad_output: (B, N, H, d)
-#         Q_local,  # query:       (B, N, H, d)
-#         K_local,  # key:         (B, N, H, d)
-#         V_local,  # value:       (B, N, H, d)
-#         O_ref_full,  # out:         (B, N, H d)
-#         logsumexp,  # logsumexp:   (B*H, N) — from forward, reshape(B*H, N) before passing
-#         dropout_p=0.0,
-#         is_causal=False,
-#         scale=scale,
-#         cum_seq_q=None,
-#         cum_seq_k=None,
-#         max_q=Nlocal,
-#         max_k=Nlocal,
-#         rng_state=None,
-#         unused=None,
-#     )
-
-#     # QKV_torchflash
-#     flash_Q = Q_local.detach().float().requires_grad_(True).transpose(1, 2)
-#     flash_K = K_local.detach().float().requires_grad_(True).transpose(1, 2)
-#     flash_V = V_local.detach().float().requires_grad_(True).transpose(1, 2)
-
-#     with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
-#         flash_out = torch.nn.functional.scaled_dot_product_attention(
-#             flash_Q, flash_K, flash_V, is_causal=False, dropout_p=0, attn_mask=None
-#         )
-#         # Qg grad
-#         flash_Q.retain_grad()
-#         flash_K.retain_grad()
-#         flash_V.retain_grad()
-#         flash_out.sum().backward()
-
-#     Qg = Q_local.detach().float().requires_grad_(True).transpose(1, 2)
-#     Kg = K_local.detach().float().requires_grad_(True).transpose(1, 2)
-#     Vg = V_local.detach().float().requires_grad_(True).transpose(1, 2)
-
-#     # Autograd ground truth — definitionally correct
-#     q, k, v = Qg, Kg, Vg
-#     S_au = (q @ k.transpose(-1, -2)) * scale  # (B, H, N, N)
-#     LSE_au = torch.logsumexp(S_au, dim=-1)  # (B, H, N)
-#     O_au = torch.softmax(S_au, dim=-1) @ v  # (B, H, N, d)
-#     q.retain_grad()
-#     k.retain_grad()
-#     v.retain_grad()
-#     O_au.sum().backward()
-
-#     # check flash attention implementation against local implementation
-#     assert torch.allclose(flash_out, O_au, atol=1e-3)
-#     assert torch.allclose(flash_Q.grad, q.grad, atol=1e-3)
-#     assert torch.allclose(flash_K.grad, k.grad, atol=1e-3)
-#     assert torch.allclose(flash_V.grad, v.grad, atol=1e-3)
-
-#     # check flash attention against torch kernel
-#     assert torch.allclose(flash_out, O_ref_full.transpose(1, 2).float(), atol=1e-3)
-#     assert torch.allclose(LSE_au, logsumexp.float(), atol=1e-3)
-#     assert torch.allclose(flash_Q.grad, dQ_ref.float().transpose(1, 2), atol=1e-2)
-#     assert torch.allclose(flash_K.grad, dK_ref.float().transpose(1, 2), atol=1e-2)
-#     assert torch.allclose(flash_V.grad, dV_ref.float().transpose(1, 2), atol=1e-2)
+    # check flash attention against torch kernel
+    assert torch.allclose(torch_ref_out, out_ref, atol=1e-3)
+    assert torch.allclose(lse_naive.float(), logsumexp, atol=1e-1)
+    assert torch.allclose(torch_ref_q.grad, dq_ref, atol=1e-2)
+    assert torch.allclose(torch_ref_k.grad, dk_ref, atol=1e-2)
+    assert torch.allclose(torch_ref_v.grad, dv_ref, atol=1e-2)
 
 
 @pytest.mark.parametrize(
@@ -356,160 +258,153 @@ def process_mesh():
 def test_ring_forward_backward(
     device,
     process_mesh,
-    send_X_or_KV,
-    save_X_or_KV,
+    send_x_or_kv,
+    save_x_or_kv,
     save_local_or_global,
-    send_dKV_or_not,
+    send_dkv_or_not,
     offloader,
 ):
     """Verify weights for XWT_Sync are synchronized after a few iterations."""
-    if send_X_or_KV == 1 and save_X_or_KV == 0:
+    if send_x_or_kv == 1 and save_x_or_kv == 0:
         pytest.xfail("not yet supported")
 
     local_rank = dist.get_rank(group=None)
     world_size = dist.get_world_size(group=None)
 
     torch.manual_seed(2)  # same seed for weight initialization
-    B, h, N, d = 3, 6, world_size * 256, 256
-    Nlocal = N // world_size
-    W_qkv = torch.randn(
+    b, h, n_global, d = 3, 6, world_size * 256, 256
+    n_local = n_global // world_size
+    w_qkv = torch.randn(
         3 * d * h, d, device=device, requires_grad=True, dtype=torch.bfloat16
     ) / (d**0.5)
     torch.manual_seed(local_rank)  # different seed for input data generation
-    X = torch.randn(
-        B, Nlocal, d, device=device, requires_grad=True, dtype=torch.bfloat16
+    x = torch.randn(
+        b, n_local, d, device=device, requires_grad=True, dtype=torch.bfloat16
     ) / (d**0.5)
-    X = X.contiguous()
-    empty = torch.empty(0, device=X.device, dtype=X.dtype)
-    zeros = torch.zeros_like(X, device=X.device, dtype=X.dtype)
-
-    QKV = X @ W_qkv.mT
+    x = x.contiguous()
+    empty = torch.empty(0, device=x.device, dtype=x.dtype)
+    
+    qkv = x @ w_qkv.mT
     # QKV shape: [B, Nlocal, 3*d*h]
     # We need QKV to have shape: []
-    Q_local, K_local, V_local = QKV.reshape(B, Nlocal, 3, h, d).permute(2, 0, 3, 1, 4)
+    q_local, k_local, v_local = qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
 
-    Q_local, K_local, V_local = (
-        Q_local.contiguous(),
-        K_local.contiguous(),
-        V_local.contiguous(),
+    q_local, k_local, v_local = (
+        q_local.contiguous(),
+        k_local.contiguous(),
+        v_local.contiguous(),
     )
-    scale = Q_local.shape[-1] ** -0.5
+    scale = q_local.shape[-1] ** -0.5
 
     # just test helper function forward
-    O, l, chunks_to_save = ring_attn_fns.ring_forward_sendX(
-        Q_local,
-        X,
-        W_qkv,
+    out, lse, chunks_to_save = ring_attn_fns.ring_forward_sendX(
+        q_local,
+        x,
+        w_qkv,
         scale,
         group=process_mesh["row"],
         empty=empty,
         rank=local_rank,
         world_size=world_size,
-        send_X_or_KV=send_X_or_KV,
-        save_X_or_KV=save_X_or_KV,
+        send_X_or_KV=send_x_or_kv,
+        save_X_or_KV=save_x_or_kv,
         save_local_or_global=save_local_or_global,
         offloader=offloader,
     )
 
-    O_full = conftest.gather_1d_results(O, process_mesh, dim=2)
-    X_full = conftest.gather_1d_results(X, process_mesh, dim=1)
-    QKV = X_full @ W_qkv.mT
+    out_full = conftest.gather_1d_results(out, process_mesh, dim=2)
+    x_full = conftest.gather_1d_results(x, process_mesh, dim=1)
+    qkv = x_full @ w_qkv.mT
 
-    Q_ref1, K_ref1, V_ref1 = QKV.reshape(B, N, 3, h, d).permute(2, 0, 3, 1, 4)
+    q_ref = conftest.gather_1d_results(q_local, process_mesh, dim=2)
+    k_ref = conftest.gather_1d_results(k_local, process_mesh, dim=2)
+    v_ref = conftest.gather_1d_results(v_local, process_mesh, dim=2)
 
-    Q_ref = conftest.gather_1d_results(Q_local, process_mesh, dim=2)
-    K_ref = conftest.gather_1d_results(K_local, process_mesh, dim=2)
-    V_ref = conftest.gather_1d_results(V_local, process_mesh, dim=2)
-
-    assert torch.allclose(Q_ref1, Q_ref, atol=1e-3)
-    assert torch.allclose(K_ref1, K_ref, atol=1e-3)
-    assert torch.allclose(V_ref1, V_ref, atol=1e-3)
     # Reference calculation
-    O_ref_full, logsumexp, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
-        Q_ref,
-        K_ref,
-        V_ref,
+    out_ref, logsumexp, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
+        q_ref,
+        k_ref,
+        v_ref,
         dropout_p=0.0,
         is_causal=False,
         scale=scale,
         return_debug_mask=False,
     )
 
-    dO_local = torch.ones_like(O, device=device, dtype=O.dtype)
+    dout_local = torch.ones_like(out, device=device, dtype=out.dtype)
 
-    dQ_local, dK_local, dV_local = ring_attn_fns.ring_backward(
-        dO_local,
-        Q_local,
-        O,
-        X,
-        l,
-        W_qkv,
+    dq_local, dk_local, dv_local = ring_attn_fns.ring_backward(
+        dout_local,
+        q_local,
+        out,
+        x,
+        lse,
+        w_qkv,
         scale,
         None,
         local_rank,
         world_size,
         chunks_to_save,
-        send_X_or_KV=send_X_or_KV,
-        save_X_or_KV=save_X_or_KV,
+        send_X_or_KV=send_x_or_kv,
+        save_X_or_KV=save_x_or_kv,
         save_local_or_global=save_local_or_global,
-        send_dKV_or_not=send_dKV_or_not,
+        send_dKV_or_not=send_dkv_or_not,
         offloader=offloader,
         empty=empty,
     )
 
     # Backward pass
-    dQ_ref, dK_ref, dV_ref = (
+    dq_ref, dk_ref, dv_ref = (
         torch.ops.aten._scaled_dot_product_flash_attention_backward(
             torch.ones(
-                O_ref_full.shape, device=device, dtype=O_ref_full.dtype
+                out_ref.shape, device=device, dtype=out_ref.dtype
             ),  # grad_output: (B, N, H, d)
-            Q_ref,  # query:       (B, N, H, d)
-            K_ref,  # key:         (B, N, H, d)
-            V_ref,  # value:       (B, N, H, d)
-            O_ref_full,  # out:         (B, H, N, d)
+            q_ref,  # query:       (B, N, H, d)
+            k_ref,  # key:         (B, N, H, d)
+            v_ref,  # value:       (B, N, H, d)
+            out_ref,  # out:         (B, H, N, d)
             logsumexp,  # logsumexp:   (B*H, N) — from forward, reshape(B*H, N) before passing
             dropout_p=0.0,
             is_causal=False,
             scale=scale,
             cum_seq_q=None,
             cum_seq_k=None,
-            max_q=N,
-            max_k=N,
-            philox_seed=torch.zeros(1, dtype=torch.long, device=Q_ref.device),
-            philox_offset=torch.zeros(1, dtype=torch.long, device=Q_ref.device),
+            max_q=n_global,
+            max_k=n_global,
+            philox_seed=torch.zeros(1, dtype=torch.long, device=q_ref.device),
+            philox_offset=torch.zeros(1, dtype=torch.long, device=q_ref.device),
         )
     )
 
     # gather
-    # print(f'[R{local_rank}/{world_size}] dK local {dK_local.shape} dV {dV_local.shape}')
-    dQ_full = conftest.gather_1d_results(dQ_local, process_mesh, dim=2)
-    dK_full = conftest.gather_1d_results(dK_local, process_mesh, dim=2)
-    dV_full = conftest.gather_1d_results(dV_local, process_mesh, dim=2)
+    dq_full = conftest.gather_1d_results(dq_local, process_mesh, dim=2)
+    dk_full = conftest.gather_1d_results(dk_local, process_mesh, dim=2)
+    dv_full = conftest.gather_1d_results(dv_local, process_mesh, dim=2)
 
     # print(f'Rank {local_rank} is gathered dQ full {dQ_full.sum()}')
-    assert torch.allclose(O_full, O_ref_full, atol=1e-3)
-    assert torch.allclose(dQ_full, dQ_ref.to(dQ_full.dtype), atol=1e-3)
-    assert torch.allclose(dK_full, dK_ref.to(dK_full.dtype), atol=1e-3)
-    assert torch.allclose(dV_full, dV_ref.to(dV_full.dtype), atol=1e-3)
+    assert torch.allclose(out_full, out_ref, atol=1e-3)
+    assert torch.allclose(dq_full, dq_ref.to(dq_full.dtype), atol=1e-3)
+    assert torch.allclose(dk_full, dk_ref.to(dk_full.dtype), atol=1e-3)
+    assert torch.allclose(dv_full, dv_ref.to(dv_full.dtype), atol=1e-3)
 
     assert torch.allclose(
-        dQ_local,
-        dQ_ref[:, :, (local_rank * Nlocal) : (local_rank + 1) * Nlocal].to(
-            dQ_local.dtype
+        dq_local,
+        dq_ref[:, :, (local_rank * n_local) : (local_rank + 1) * n_local].to(
+            dq_local.dtype
         ),
         atol=1e-3,
     )
     assert torch.allclose(
-        dK_local,
-        dK_ref[:, :, (local_rank * Nlocal) : (local_rank + 1) * Nlocal].to(
-            dK_local.dtype
+        dk_local,
+        dk_ref[:, :, (local_rank * n_local) : (local_rank + 1) * n_local].to(
+            dk_local.dtype
         ),
         atol=1e-3,
     )
     assert torch.allclose(
-        dV_local,
-        dV_ref[:, :, (local_rank * Nlocal) : (local_rank + 1) * Nlocal].to(
-            dV_local.dtype
+        dv_local,
+        dv_ref[:, :, (local_rank * n_local) : (local_rank + 1) * n_local].to(
+            dv_local.dtype
         ),
         atol=1e-3,
     )
@@ -517,80 +412,79 @@ def test_ring_forward_backward(
 
 @pytest.fixture
 def offloader(device):
-    # return None
+    """Return instance of offloader class."""
     return offload.NVLinkActivationOffloader(device)
 
 
 def test_offload(device, process_mesh, offloader):
     """Verify weights for XWT_Sync are synchronized after a few iterations."""
-    send_X_or_KV = 0
-    save_X_or_KV = 0
+    send_x_or_kv = 0
+    save_x_or_kv = 0
     save_local_or_global = 0
-    send_dKV_or_not = 0
+    send_dkv_or_not = 0
 
     local_rank = dist.get_rank(group=None)
     world_size = dist.get_world_size(group=None)
 
     torch.manual_seed(2)  # same seed for weight initialization
-    B, h, N, d = 1, 1, world_size * 256, 256
-    Nlocal = N // world_size
-    W_qkv = torch.randn(
+    b, h, n_global, d = 1, 1, world_size * 256, 256
+    n_local = n_global // world_size
+    w_qkv = torch.randn(
         3 * d * h, d, device=device, requires_grad=True, dtype=torch.bfloat16
     ) / (d**0.5)
     torch.manual_seed(local_rank)  # different seed for input data generation
-    X = torch.randn(
-        B, Nlocal, d, device=device, requires_grad=True, dtype=torch.bfloat16
+    x = torch.randn(
+        b, n_local, d, device=device, requires_grad=True, dtype=torch.bfloat16
     ) / (d**0.5)
-    X = X.contiguous()
-    empty = torch.empty(0, device=X.device, dtype=X.dtype)
-    zeros = torch.zeros_like(X, device=X.device, dtype=X.dtype)
+    x = x.contiguous()
+    empty = torch.empty(0, device=x.device, dtype=x.dtype)
 
-    QKV = X @ W_qkv.mT
+    qkv = x @ w_qkv.mT
     # QKV shape: [B, Nlocal, 3*d*h]
     # We need QKV to have shape: []
-    Q_local, K_local, V_local = QKV.reshape(B, Nlocal, 3, h, d).permute(2, 0, 3, 1, 4)
+    q_local, k_local, v_local = qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
 
-    Q_local, K_local, V_local = (
-        Q_local.contiguous(),
-        K_local.contiguous(),
-        V_local.contiguous(),
+    q_local, k_local, v_local = (
+        q_local.contiguous(),
+        k_local.contiguous(),
+        v_local.contiguous(),
     )
-    scale = Q_local.shape[-1] ** -0.5
+    scale = q_local.shape[-1] ** -0.5
 
     # just test helper function forward
-    O, l, chunks_to_save = ring_attn_fns.ring_forward_sendX(
-        Q_local,
-        X,
-        W_qkv,
+    out, lse, chunks_to_save = ring_attn_fns.ring_forward_sendX(
+        q_local,
+        x,
+        w_qkv,
         scale,
         group=process_mesh["row"],
         empty=empty,
         rank=local_rank,
         world_size=world_size,
-        send_X_or_KV=send_X_or_KV,
-        save_X_or_KV=save_X_or_KV,
+        send_X_or_KV=send_x_or_kv,
+        save_X_or_KV=save_x_or_kv,
         save_local_or_global=save_local_or_global,
         offloader=offloader,
     )
 
-    dO_local = torch.ones_like(O, device=device, dtype=O.dtype)
+    dout_local = torch.ones_like(out, device=device, dtype=out.dtype)
 
-    dQ_local, dK_local, dV_local = ring_attn_fns.ring_backward(
-        dO_local,
-        Q_local,
-        O,
-        X,
-        l,
-        W_qkv,
+    dq_local, dk_local, dv_local = ring_attn_fns.ring_backward(
+        dout_local,
+        q_local,
+        out,
+        x,
+        lse,
+        w_qkv,
         scale,
         None,
         local_rank,
         world_size,
         chunks_to_save,
-        send_X_or_KV=send_X_or_KV,
-        save_X_or_KV=save_X_or_KV,
+        send_X_or_KV=send_x_or_kv,
+        save_X_or_KV=save_x_or_kv,
         save_local_or_global=save_local_or_global,
-        send_dKV_or_not=send_dKV_or_not,
+        send_dKV_or_not=send_dkv_or_not,
         offloader=offloader,
         empty=empty,
     )
@@ -599,48 +493,49 @@ def test_offload(device, process_mesh, offloader):
 
 
 def test_ring(device, process_mesh):
+    """Test forward-backward pass of ring attention wrapped by nn.Module."""
     group = process_mesh["model"]
     local_rank = dist.get_rank(group=group)
     world_size = dist.get_world_size(group=group)
 
     x_features = 256
     output_dim = embed_dim = 256
-    B, heads, N_global, d = 1, 6, 256*4, 256
-    
-    N_local = N_global // world_size
+    b, heads, n_global, d = 1, 6, 256 * 4, 256
+
+    n_local = n_global // world_size
 
     torch.manual_seed(2)
 
     # pass in the QKV mapping alone
-    W_qkv = torch.randn(
+    w_qkv = torch.randn(
         3 * d * heads, d, device=device, requires_grad=True, dtype=torch.bfloat16
-    )/ (d**0.5)
+    ) / (d**0.5)
 
     # randomize input data per rank
     torch.manual_seed(local_rank)  # different seed for input data generation
-    X = torch.randn(
-        B, N_local, d, device=device, requires_grad=True, dtype=torch.bfloat16
+    x = torch.randn(
+        b, n_local, d, device=device, requires_grad=True, dtype=torch.bfloat16
     ) / (d**0.5)
-    X = X.contiguous()
+    x = x.contiguous()
 
-    QKV = X @ W_qkv.mT
+    qkv = x @ w_qkv.mT
     # QKV shape: [B, Nlocal, 3*d*h]
     # We need QKV to have shape: []
-    Q_local, K_local, V_local = QKV.reshape(B, N_local, 3, heads, d).permute(
+    q_local, k_local, v_local = qkv.reshape(b, n_local, 3, heads, d).permute(
         2, 0, 3, 1, 4
     )
 
-    Q_local, K_local, V_local = (
-        Q_local.contiguous(),
-        K_local.contiguous(),
-        V_local.contiguous(),
+    q_local, k_local, v_local = (
+        q_local.contiguous(),
+        k_local.contiguous(),
+        v_local.contiguous(),
     )
 
     # Gather full values
-    X_full = conftest.gather_1d_results(X, process_mesh, dim=1)
-    Q_ref = conftest.gather_1d_results(Q_local, process_mesh, dim=2)
-    K_ref = conftest.gather_1d_results(K_local, process_mesh, dim=2)
-    V_ref = conftest.gather_1d_results(V_local, process_mesh, dim=2)
+    x_full = conftest.gather_1d_results(x, process_mesh, dim=1)
+    q_ref = conftest.gather_1d_results(q_local, process_mesh, dim=2)
+    k_ref = conftest.gather_1d_results(k_local, process_mesh, dim=2)
+    v_ref = conftest.gather_1d_results(v_local, process_mesh, dim=2)
 
     model = ring_attention.Ring(
         x_features=x_features,
@@ -670,47 +565,47 @@ def test_ring(device, process_mesh):
     )
 
     # sped up call
-    
-    Q_local = Q_local.detach().requires_grad_(True)
-    K_local = K_local.detach().requires_grad_(True)
-    V_local = V_local.detach().requires_grad_(True)
-    
-    output = model(X.detach(), Q_local, K_local, V_local, W_qkv, None)
+
+    q_local = q_local.detach().requires_grad_(True)
+    k_local = k_local.detach().requires_grad_(True)
+    v_local = v_local.detach().requires_grad_(True)
+
+    output = model(x.detach(), q_local, k_local, v_local, w_qkv, None)
     output.sum().backward()
 
     # baseline
     # unbind
-    Q_ref = Q_ref.detach().requires_grad_(True)
-    K_ref = K_ref.detach().requires_grad_(True)
-    V_ref = V_ref.detach().requires_grad_(True)
-    
-    output_global = model_baseline(X_full.detach(), Q_ref, K_ref, V_ref, W_qkv, None)
+    q_ref = q_ref.detach().requires_grad_(True)
+    k_ref = k_ref.detach().requires_grad_(True)
+    v_ref = v_ref.detach().requires_grad_(True)
+
+    output_global = model_baseline(x_full.detach(), q_ref, k_ref, v_ref, w_qkv, None)
     output_global.sum().backward()
 
     assert torch.allclose(
         output,
-        output_global[:, :, (local_rank * N_local) : (local_rank + 1) * N_local].to(
+        output_global[:, :, (local_rank * n_local) : (local_rank + 1) * n_local].to(
             output.dtype
         ),
         atol=1e-3,
     )
     assert torch.allclose(
-        Q_local.grad,
-        Q_ref.grad[:, :, (local_rank * N_local) : (local_rank + 1) * N_local].to(
+        q_local.grad,
+        q_ref.grad[:, :, (local_rank * n_local) : (local_rank + 1) * n_local].to(
             output.dtype
         ),
         atol=1e-3,
     )
     assert torch.allclose(
-        K_local.grad,
-        K_ref.grad[:, :, (local_rank * N_local) : (local_rank + 1) * N_local].to(
+        k_local.grad,
+        k_ref.grad[:, :, (local_rank * n_local) : (local_rank + 1) * n_local].to(
             output.dtype
         ),
         atol=1e-3,
     )
     assert torch.allclose(
-        V_local.grad,
-        V_ref.grad[:, :, (local_rank * N_local) : (local_rank + 1) * N_local].to(
+        v_local.grad,
+        v_ref.grad[:, :, (local_rank * n_local) : (local_rank + 1) * n_local].to(
             output.dtype
         ),
         atol=1e-3,
