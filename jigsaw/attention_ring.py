@@ -11,12 +11,11 @@ dK/dV rotate counter-clockwise (opposite to forward) back to their home rank.
 """
 
 import torch
-import torch.nn.functional as F
 import torch.distributed as dist
-
-from torch.autograd import Function
-from . import linear, ring_attention_helpers as ring_attn
 from einops import rearrange
+
+from . import linear
+from . import ring_attention_helpers as ring_attn
 
 
 class Ring(torch.nn.Module):
@@ -35,6 +34,7 @@ class Ring(torch.nn.Module):
         spatial_group: dist.ProcessGroup,
         bayesian: bool,
         dtype,
+        ring_config: ring_attn.RingAttentionConfig
     ):
         """
 
@@ -61,6 +61,7 @@ class Ring(torch.nn.Module):
         self.heads = heads
         self.scale = embed_dim**-0.5
         self.empty = torch.empty(0, device=self.device, dtype=self.dtype)
+        self.config = ring_config
 
     # @torch.compile(backend="eager")
     def forward(
@@ -77,7 +78,6 @@ class Ring(torch.nn.Module):
 
         x: (n_batch, vars, n_lat, n_lon)
         """
-
         mask = mask.to(torch.bfloat16) if mask is not None else None
         O, *_ = RingAttentionFunction.apply(
             q,
@@ -90,6 +90,7 @@ class Ring(torch.nn.Module):
             self.empty,
             self.local_rank,
             self.spatial_group.size(),
+            self.config
         )
 
         # Output: [n_batch, seq_length, output_dim]
@@ -153,7 +154,6 @@ class RingBaseline(torch.nn.Module):
 
         x: (n_batch, vars, n_lat, n_lon)
         """
-
         mask = mask.to(torch.bfloat16) if mask is not None else None
         with torch.nn.attention.sdpa_kernel(
             torch.nn.attention.SDPBackend.FLASH_ATTENTION
@@ -302,10 +302,7 @@ class RingAttentionFunction(torch.autograd.Function):
         empty,
         rank,
         world_size,
-        send_X_or_KV=0,
-        save_X_or_KV=0,
-        save_local_or_global=0,
-        offloader=None,
+        config
     ):
         B, H, N_local, d = Q.shape
 
@@ -313,7 +310,7 @@ class RingAttentionFunction(torch.autograd.Function):
         O = torch.zeros_like(Q)
         l = torch.full((B, N_local, H), float("-inf"), device=Q.device, dtype=Q.dtype)
         empty = torch.empty(0, device=X.device, dtype=X.dtype)
-
+        
         O, l, chunks_to_save = ring_attn.ring_forward_sendX(
             Q,
             X,
@@ -323,10 +320,7 @@ class RingAttentionFunction(torch.autograd.Function):
             empty,
             rank,
             world_size,
-            send_X_or_KV=0,
-            save_X_or_KV=0,
-            save_local_or_global=0,
-            offloader=None,
+            config
         )
 
         O = O.to(torch.bfloat16)
@@ -353,10 +347,7 @@ class RingAttentionFunction(torch.autograd.Function):
             empty,
             local_rank,
             world_size,
-            send_X_or_KV,
-            save_X_or_KV,
-            save_local_or_global,
-            offloader,
+            config
         ) = inputs
 
         O, l, chunks_to_save = output
@@ -373,10 +364,7 @@ class RingAttentionFunction(torch.autograd.Function):
         ctx.local_rank = local_rank
         ctx.group = group
         ctx.world_size = world_size
-        ctx.send_X_or_KV = send_X_or_KV
-        ctx.save_X_or_KV = save_X_or_KV
-        ctx.save_local_or_global = save_local_or_global
-        ctx.offloader = offloader
+        ctx.config = config
 
     @staticmethod
     def backward(ctx, dO, grad_l, grad_KV_chunks):
@@ -385,6 +373,7 @@ class RingAttentionFunction(torch.autograd.Function):
         world_size = ctx.world_size
         empty = ctx.empty
         local_rank = ctx.local_rank
+        config = ctx.config
 
         Q, O, X, L, W_qkv = ctx.saved_tensors[:5]
         chunks_to_save = ctx.saved_tensors[5:]
@@ -405,11 +394,7 @@ class RingAttentionFunction(torch.autograd.Function):
             local_rank,
             world_size,
             chunks_to_save,
-            send_X_or_KV=ctx.send_X_or_KV,
-            save_X_or_KV=ctx.save_X_or_KV,
-            save_local_or_global=ctx.save_local_or_global,
-            send_dKV_or_not=False,
-            offloader=ctx.offloader,
+            ring_config=config,
             empty=empty,
         )
 
@@ -417,9 +402,6 @@ class RingAttentionFunction(torch.autograd.Function):
             dQ,
             dK,
             dV,
-            None,
-            None,
-            None,
             None,
             None,
             None,

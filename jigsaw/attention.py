@@ -87,7 +87,9 @@ class DistributedWindowedAttention(torch.nn.Module):
         )
         q, k, v = qkv.unbind(0)
 
-        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.FLASH_ATTENTION):
+        with torch.nn.attention.sdpa_kernel(
+            torch.nn.attention.SDPBackend.FLASH_ATTENTION
+        ):
             out = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, is_causal=False, dropout_p=0.0, attn_mask=mask
             )
@@ -189,7 +191,7 @@ class DistributedWindowedFlashAttention(torch.nn.Module):
 
         self.heads = heads // 2
 
-    @torch.compile(backend='eager')
+    @torch.compile(backend="eager")
     def _attention_core(self, q, k, v, mask, dropout):
 
         with torch.nn.attention.sdpa_kernel(
@@ -200,7 +202,7 @@ class DistributedWindowedFlashAttention(torch.nn.Module):
             )
         return out
 
-    @torch.compile(backend='eager')
+    @torch.compile(backend="eager")
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """
         Forward pass for distributed multi-head attention.

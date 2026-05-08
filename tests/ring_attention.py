@@ -245,14 +245,14 @@ def test_backward_sdpa(device, process_mesh, flash_kernel):
 
 
 @pytest.mark.parametrize(
-    "send_X_or_KV,save_X_or_KV,save_local_or_global,send_dKV_or_not,offloader",
+    "send_x_or_kv,save_x_or_kv,save_local_or_global,send_dkv_or_not,offloader",
     [
         (s, sv, sl, sd, offloader)
-        for s in [0, 1]
-        for sv in [0, 1]
-        for sl in [0, 1]
-        for sd in [0, 1]
-        for offloader in [None]
+        for s in [ring_attn_fns.SendForward.X, ring_attn_fns.SendForward.KV]
+        for sv in [ring_attn_fns.SaveBackward.X, ring_attn_fns.SaveBackward.KV]
+        for sl in [ring_attn_fns.SaveScope.LOCAL, ring_attn_fns.SaveScope.GLOBAL]
+        for sd in [ring_attn_fns.SendBackward.SEND_DKV, ring_attn_fns.SendBackward.DISABLED]
+        for offloader in [ring_attn_fns.Offload.DISABLED, ring_attn_fns.Offload.CPU]
     ],
 )
 def test_ring_forward_backward(
@@ -265,8 +265,17 @@ def test_ring_forward_backward(
     offloader,
 ):
     """Verify weights for XWT_Sync are synchronized after a few iterations."""
-    if send_x_or_kv == 1 and save_x_or_kv == 0:
+    if send_x_or_kv == ring_attn_fns.SendForward.KV and save_x_or_kv == ring_attn_fns.SaveBackward.X:
         pytest.xfail("not yet supported")
+
+    ring_config = ring_attn_fns.RingAttentionConfig(
+        send_in_forward=send_x_or_kv,
+        save_for_backward=save_x_or_kv,
+        save_scope=save_local_or_global,
+        send_backward=send_dkv_or_not,
+        offload=offloader,
+        device=device,
+    )
 
     local_rank = dist.get_rank(group=None)
     world_size = dist.get_world_size(group=None)
@@ -283,7 +292,7 @@ def test_ring_forward_backward(
     ) / (d**0.5)
     x = x.contiguous()
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
-    
+
     qkv = x @ w_qkv.mT
     # QKV shape: [B, Nlocal, 3*d*h]
     # We need QKV to have shape: []
@@ -306,10 +315,7 @@ def test_ring_forward_backward(
         empty=empty,
         rank=local_rank,
         world_size=world_size,
-        send_X_or_KV=send_x_or_kv,
-        save_X_or_KV=save_x_or_kv,
-        save_local_or_global=save_local_or_global,
-        offloader=offloader,
+        ring_config=ring_config,
     )
 
     out_full = conftest.gather_1d_results(out, process_mesh, dim=2)
@@ -345,11 +351,7 @@ def test_ring_forward_backward(
         local_rank,
         world_size,
         chunks_to_save,
-        send_X_or_KV=send_x_or_kv,
-        save_X_or_KV=save_x_or_kv,
-        save_local_or_global=save_local_or_global,
-        send_dKV_or_not=send_dkv_or_not,
-        offloader=offloader,
+        ring_config=ring_config,
         empty=empty,
     )
 
@@ -409,89 +411,6 @@ def test_ring_forward_backward(
         atol=1e-3,
     )
 
-
-@pytest.fixture
-def offloader(device):
-    """Return instance of offloader class."""
-    return offload.NVLinkActivationOffloader(device)
-
-
-def test_offload(device, process_mesh, offloader):
-    """Verify weights for XWT_Sync are synchronized after a few iterations."""
-    send_x_or_kv = 0
-    save_x_or_kv = 0
-    save_local_or_global = 0
-    send_dkv_or_not = 0
-
-    local_rank = dist.get_rank(group=None)
-    world_size = dist.get_world_size(group=None)
-
-    torch.manual_seed(2)  # same seed for weight initialization
-    b, h, n_global, d = 1, 1, world_size * 256, 256
-    n_local = n_global // world_size
-    w_qkv = torch.randn(
-        3 * d * h, d, device=device, requires_grad=True, dtype=torch.bfloat16
-    ) / (d**0.5)
-    torch.manual_seed(local_rank)  # different seed for input data generation
-    x = torch.randn(
-        b, n_local, d, device=device, requires_grad=True, dtype=torch.bfloat16
-    ) / (d**0.5)
-    x = x.contiguous()
-    empty = torch.empty(0, device=x.device, dtype=x.dtype)
-
-    qkv = x @ w_qkv.mT
-    # QKV shape: [B, Nlocal, 3*d*h]
-    # We need QKV to have shape: []
-    q_local, k_local, v_local = qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
-
-    q_local, k_local, v_local = (
-        q_local.contiguous(),
-        k_local.contiguous(),
-        v_local.contiguous(),
-    )
-    scale = q_local.shape[-1] ** -0.5
-
-    # just test helper function forward
-    out, lse, chunks_to_save = ring_attn_fns.ring_forward_sendX(
-        q_local,
-        x,
-        w_qkv,
-        scale,
-        group=process_mesh["row"],
-        empty=empty,
-        rank=local_rank,
-        world_size=world_size,
-        send_X_or_KV=send_x_or_kv,
-        save_X_or_KV=save_x_or_kv,
-        save_local_or_global=save_local_or_global,
-        offloader=offloader,
-    )
-
-    dout_local = torch.ones_like(out, device=device, dtype=out.dtype)
-
-    dq_local, dk_local, dv_local = ring_attn_fns.ring_backward(
-        dout_local,
-        q_local,
-        out,
-        x,
-        lse,
-        w_qkv,
-        scale,
-        None,
-        local_rank,
-        world_size,
-        chunks_to_save,
-        send_X_or_KV=send_x_or_kv,
-        save_X_or_KV=save_x_or_kv,
-        save_local_or_global=save_local_or_global,
-        send_dKV_or_not=send_dkv_or_not,
-        offloader=offloader,
-        empty=empty,
-    )
-
-    assert True
-
-
 def test_ring(device, process_mesh):
     """Test forward-backward pass of ring attention wrapped by nn.Module."""
     group = process_mesh["model"]
@@ -549,6 +468,14 @@ def test_ring(device, process_mesh):
         spatial_group=group,
         bayesian=False,
         dtype=torch.bfloat16,
+        ring_config = ring_attn_fns.RingAttentionConfig(
+            send_in_forward=ring_attn_fns.SendForward.X,
+            save_for_backward=ring_attn_fns.SaveBackward.X,
+            save_scope=ring_attn_fns.SaveScope.GLOBAL,
+            send_backward=ring_attn_fns.SendBackward.DISABLED,
+            offload=ring_attn_fns.Offload.DISABLED,
+            device=device,
+        )
     )
     model_baseline = ring_attention.RingBaseline(
         x_features=x_features,
