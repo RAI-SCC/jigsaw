@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch.nn.grad import conv2d_input, conv2d_weight
 
 import jigsaw.distributed_convolutions as dist_conv
+from .utils_init import gather_1d_results
 
 
 class ConvSelectionStrategy:
@@ -536,7 +537,7 @@ class DistributedConv2D(torch.nn.Module):
         """
         super().__init__()
         self.in_channels = in_channels
-        self.out_channels = out_channels // 2
+        self.out_channels = out_channels // 2  # TODO: //2 should be channel group size
 
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
@@ -555,6 +556,7 @@ class DistributedConv2D(torch.nn.Module):
         self.empty = torch.empty(0, device=device, dtype=dtype)
         self.bayesian = bayesian
 
+        # * 2 should be channel group size
         k = np.sqrt(1 / (self.in_channels * 2 * kernel_size[0] * kernel_size[1]))
         self.weight = torch.zeros(
             self.out_channels, self.in_channels, kernel_size[0], kernel_size[1]
@@ -584,6 +586,98 @@ class DistributedConv2D(torch.nn.Module):
         return num_param + self.weight.numel() // dist.get_world_size(
             group=self.spatial_group
         )
+
+    def reshard_parameters(
+        self,
+        from_process_mesh: dist.ProcessMesh,
+        to_process_mesh: dist.ProcessMesh,
+        pm_row_key="row",
+        pm_col_key="col",
+    ):
+        """from_process_mesh has process mesh with 'row' and 'col' flags."""
+
+        from_weight_shape_local = self.weight.shape
+        weight_shape_global = (
+            from_weight_shape_local[0] * from_process_mesh[pm_col_key].size(),
+            *from_weight_shape_local.shape[1:],
+        )
+        to_weight_shape_local = (
+            weight_shape_global // to_process_mesh[pm_col_key].size(),
+            *weight_shape_global[1:],
+        )
+
+        assert (
+            weight_shape_global[0] % to_process_mesh["col"].size() == 0
+        ), f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh['col'].size()}"
+        # gather
+        global_weights = gather_1d_results(self.weight, to_process_mesh, dim=0)
+
+        if self.bias is not None:
+            from_bias_shape_local = self.bias.shape
+            bias_shape_global = (
+                from_bias_shape_local[0] * from_process_mesh["col"].size()
+            )
+            to_bias_shape_local = bias_shape_global // to_process_mesh["col"].size()
+
+            assert (
+                bias_shape_global % to_process_mesh["col"] == 0
+            ), f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh['col'].size()}"
+
+            global_bias = gather_1d_results(
+                self.bias, from_process_mesh
+            )  # keep it simple, gather all around
+
+        col_rank, col_shard_size = (
+            to_process_mesh["col"].size(),
+            to_weight_shape_local[0],
+        )
+
+        self.weight = torch.nn.Parameter(
+            global_weights[
+                col_rank * col_shard_size : (col_rank + 1) * col_shard_size, ...
+            ].contiguous()
+        )
+        del global_weights
+
+        col_rank, col_shard_size = to_process_mesh["col"].size(), to_bias_shape_local[1]
+
+        if self.bias is not None:
+            torch.nn.Parameter(
+                global_bias[
+                    col_rank * col_shard_size : (col_rank + 1) * col_shard_size
+                ].contiguous()
+            )
+            del global_bias
+
+    def merge_weights(
+        self, process_mesh: dist.ProcessMesh, pm_row_key="row", pm_col_key="col"
+    ):
+        from_weight_shape_local = self.weight.shape
+        weight_shape_global = (
+            from_weight_shape_local[0] * process_mesh[pm_col_key].size(),
+            *from_weight_shape_local.shape[1:],
+        )
+
+        assert (
+            weight_shape_global[0] % process_mesh[pm_col_key].size() == 0
+        ), f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {process_mesh[pm_col_key].size()}"
+        # gather
+        global_weights = gather_1d_results(self.weight, process_mesh, dim=0)
+
+        if self.bias is not None:
+            from_bias_shape_local = self.bias.shape
+            bias_shape_global = (
+                from_bias_shape_local[0] * process_mesh[pm_col_key].size()
+            )
+
+            assert (
+                bias_shape_global % process_mesh[pm_col_key] == 0
+            ), f"global bias shape is {bias_shape_global} which is not divisible by {process_mesh[pm_col_key].size()}"
+
+            global_bias = gather_1d_results(
+                self.bias, process_mesh, dim=0
+            )  # keep it simple, gather all around
+        return global_weights, global_bias
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
