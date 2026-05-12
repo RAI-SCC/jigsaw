@@ -60,7 +60,6 @@ def _get_preallocated_buffer(
     #     return out
 
 
-@torch.compile
 def fused_xw_xtw_twoway(
     grad_output: torch.tensor,
     weight: torch.tensor,
@@ -107,7 +106,6 @@ def fused_xw_xtw_twoway(
     return grad_input, grad_weight
 
 
-@torch.compile
 def xw_transpose_twoway(
     xij: torch.tensor,
     wij: torch.tensor,
@@ -137,9 +135,9 @@ def xw_transpose_twoway(
         Local result.
     """
     mod = local_rank % 2
-
+    wij = wij.to(xij.device)
     w0, w1 = torch.split(wij, wij.shape[-2] // 2, dim=-2)
-    # print(_prealloc_buffers.keys())
+
     match mod:
         case 0:
             xw = torch.matmul(xij, w1.mT)
@@ -234,7 +232,6 @@ def xw_twoway(
     return cij
 
 
-@torch.compile
 def x_transpose_w_twoway(
     xij: torch.tensor,
     wij: torch.tensor,
@@ -630,6 +627,178 @@ def xw_fourway(
             cij = cij + torch.matmul(x_recv_list[2], w_recv_list[1])
 
     return cij
+
+
+def fused_xw_xtw_fourway(
+    grad_output: torch.tensor,
+    weight: torch.tensor,
+    input: torch.tensor,
+    local_rank: int,
+    device: torch.device,
+    model_group: dist.ProcessGroup,
+):
+    """Fused calculation to calculate grad_input and grad_weight in backward pass of a linear layer."""
+    mod = local_rank % 4
+    empty = torch.empty(0, device=device, dtype=grad_output.dtype)
+
+    grad_output = grad_output.contiguous()
+    xdtype, wdtype, idtype = grad_output.dtype, weight.dtype, input.dtype
+
+    match mod:
+        case 0:
+            x_send_list = [empty, grad_output, empty, empty]
+            x_recv_list = [
+                empty,
+                _get_preallocated_buffer(
+                    grad_output.shape, xdtype, local_rank, device, 0
+                ),
+                _get_preallocated_buffer(
+                    grad_output.shape, xdtype, local_rank, device, 0
+                ),
+                empty,
+            ]
+            w_send_list = [empty, empty, weight, empty]
+            w_recv_list = [
+                empty,
+                empty,
+                _get_preallocated_buffer(weight.shape, wdtype, local_rank, device, 1),
+                empty,
+            ]
+            i_send_list = [empty, empty, input, empty]
+            i_recv_list = [
+                empty,
+                empty,
+                _get_preallocated_buffer(input.shape, idtype, local_rank, device, 1),
+                empty,
+            ]
+        case 1:
+            x_send_list = [grad_output, empty, grad_output, grad_output]
+            x_recv_list = [
+                _get_preallocated_buffer(
+                    grad_output.shape, xdtype, local_rank, device, 0
+                ),
+                empty,
+                _get_preallocated_buffer(
+                    grad_output.shape, xdtype, local_rank, device, 0
+                ),
+                empty,
+            ]
+            w_send_list = [empty, empty, empty, weight]
+            w_recv_list = [
+                empty,
+                empty,
+                empty,
+                _get_preallocated_buffer(weight.shape, wdtype, local_rank, device, 1),
+            ]
+            i_send_list = [empty, empty, empty, input]
+            i_recv_list = [
+                empty,
+                empty,
+                empty,
+                _get_preallocated_buffer(input.shape, idtype, local_rank, device, 1),
+            ]
+        case 2:
+            x_send_list = [grad_output, grad_output, empty, grad_output]
+            x_recv_list = [
+                empty,
+                _get_preallocated_buffer(
+                    grad_output.shape, xdtype, local_rank, device, 0
+                ),
+                empty,
+                _get_preallocated_buffer(
+                    grad_output.shape, xdtype, local_rank, device, 0
+                ),
+            ]
+            w_send_list = [weight, empty, empty, empty]
+            w_recv_list = [
+                _get_preallocated_buffer(weight.shape, wdtype, local_rank, device, 1),
+                empty,
+                empty,
+                empty,
+            ]
+            i_send_list = [input, empty, empty, empty]
+            i_recv_list = [
+                _get_preallocated_buffer(input.shape, idtype, local_rank, device, 1),
+                empty,
+                empty,
+                empty,
+            ]
+        case 3:
+            x_send_list = [empty, empty, grad_output, empty]
+            x_recv_list = [
+                empty,
+                _get_preallocated_buffer(
+                    grad_output.shape, xdtype, local_rank, device, 0
+                ),
+                _get_preallocated_buffer(
+                    grad_output.shape, xdtype, local_rank, device, 0
+                ),
+                empty,
+            ]
+            w_send_list = [empty, weight, empty, empty]
+            w_recv_list = [
+                empty,
+                _get_preallocated_buffer(weight.shape, wdtype, local_rank, device, 1),
+                empty,
+                empty,
+            ]
+            i_send_list = [empty, input, empty, empty]
+            i_recv_list = [
+                empty,
+                _get_preallocated_buffer(input.shape, idtype, local_rank, device, 1),
+                empty,
+                empty,
+            ]
+
+    x_handle = dist.all_to_all(
+        x_recv_list, x_send_list, group=model_group, async_op=True
+    )
+    w_handle = dist.all_to_all(
+        w_recv_list, w_send_list, group=model_group, async_op=True
+    )
+    i_handle = dist.all_to_all(
+        i_recv_list, i_send_list, group=model_group, async_op=True
+    )
+
+    x_handle.wait()
+
+    match mod:
+        case 0:
+            grad_input = torch.matmul(grad_output, weight)
+            grad_weight = torch.matmul(grad_output.mT, input)
+        case 1:
+            grad_input = torch.matmul(x_recv_list[0], weight)
+            grad_weight = torch.matmul(x_recv_list[0].mT, input)
+        case 2:
+            grad_input = torch.matmul(x_recv_list[3], weight)
+            grad_weight = torch.matmul(x_recv_list[3].mT, input)
+        case 3:
+            grad_input = torch.matmul(grad_output, weight)
+            grad_weight = torch.matmul(grad_output.mT, input)
+
+    w_handle.wait()
+    match mod:
+        case 0:
+            grad_input = grad_input + torch.matmul(x_recv_list[1], w_recv_list[2])
+        case 1:
+            grad_input = grad_input + torch.matmul(grad_output, w_recv_list[3])
+        case 2:
+            grad_input = grad_input + torch.matmul(grad_output, w_recv_list[0])
+        case 3:
+            grad_input = grad_input + torch.matmul(x_recv_list[2], w_recv_list[1])
+
+    i_handle.wait()
+    match mod:
+        case 0:
+            grad_weight = grad_weight + torch.matmul(x_recv_list[2].mT, i_recv_list[2])
+        case 1:
+            grad_weight = grad_weight + torch.matmul(x_recv_list[2].mT, i_recv_list[3])
+        case 2:
+            grad_weight = grad_weight + torch.matmul(x_recv_list[1].mT, i_recv_list[0])
+        case 3:
+            grad_weight = grad_weight + torch.matmul(x_recv_list[1].mT, i_recv_list[1])
+
+    return grad_input, grad_weight
 
 
 def x_transpose_w_fourway(

@@ -556,7 +556,7 @@ def distributed_conv2d_over_channels(
                     )
                 )
             return y, x, x_buffer
-        case 1 :
+        case 1:
             x_handle = dist.all_to_all(
                 [x_buffer, empty],
                 [x, empty],
