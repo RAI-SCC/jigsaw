@@ -418,7 +418,7 @@ def ring_backward(
                     dkv = torch.cat([dk_j, dv_j], dim=0).contiguous()
                     del dk_j, dv_j
                     recv_buffer = torch.empty_like(dkv)
-                    recv_buffer, h = _ring_send_recv(
+                    recv_buffer, dkv_handle = _ring_send_recv(
                         dkv,
                         world_size=world_size,
                         rank=local_rank,
@@ -428,7 +428,7 @@ def ring_backward(
                         offset=step,
                         forward_or_backward=1,
                     )
-                    h.wait()
+                    dkv_handle.wait()
                     del dkv
                     dkj_r, dvj_r = torch.chunk(recv_buffer, 2, dim=0)
                     dk_buf += dkj_r

@@ -56,7 +56,7 @@ def training_loop(device: torch.device, local_rank: int) -> None:
 
     x_features = 256
     output_dim = embed_dim = 256
-    b, heads, n_global, d = 1, 32, 65536, 256
+    b, heads, n_global, d = 1, 32, 524288, 256
 
     torch.manual_seed(2)
 
@@ -107,7 +107,7 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         dtype=torch.bfloat16,
     )
 
-    n_epochs = 10
+    n_epochs = 4
     epoch_times = np.zeros(n_epochs)
     torch.cuda.synchronize()
 
@@ -182,7 +182,7 @@ def training_loop(device: torch.device, local_rank: int) -> None:
 def train_one_epoch(model: torch.nn.Module, x, q, k, v, w_qkv):
     """Time and train one epoch."""
     # X has shape [B, Nlocal, d//2]
-    for _ in range(10):
+    for _ in range(5):
         output = model(x.detach(), q, k, v, w_qkv, None)
         output.sum().backward()
 

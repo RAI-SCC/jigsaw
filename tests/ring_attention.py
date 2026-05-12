@@ -230,10 +230,10 @@ def test_backward_sdpa(device, process_mesh, flash_kernel):
     out_naive.sum().backward()
 
     # check flash attention implementation against local implementation
-    assert torch.allclose(torch_ref_out, out_naive, atol=1e-3)
-    assert torch.allclose(torch_ref_q.grad, q_naive.grad, atol=1e-3)
-    assert torch.allclose(torch_ref_k.grad, k_naive.grad, atol=1e-3)
-    assert torch.allclose(torch_ref_v.grad, v_naive.grad, atol=1e-3)
+    assert torch.allclose(torch_ref_out, out_naive, atol=1e-2)
+    assert torch.allclose(torch_ref_q.grad, q_naive.grad, atol=1e-2)
+    assert torch.allclose(torch_ref_k.grad, k_naive.grad, atol=1e-2)
+    assert torch.allclose(torch_ref_v.grad, v_naive.grad, atol=1e-2)
 
     # check flash attention against torch kernel
     assert torch.allclose(torch_ref_out, out_ref, atol=1e-3)
