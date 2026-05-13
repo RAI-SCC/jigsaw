@@ -57,11 +57,33 @@ def gather_results(x: torch.Tensor, process_mesh: dist.device_mesh = None):
     )
     return result
 
+def gather_results_transpose(x: torch.Tensor, process_mesh: dist.device_mesh = None):
+    """Gather tensors split across arbitrary processes."""
+    row_group, col_group = process_mesh["row"], process_mesh["col"]
+    n_rows = row_group.size()
+    n_cols = col_group.size()
+    tensor_list = [
+        torch.zeros(x.shape, dtype=x.dtype, device=x.device)
+        for _ in range(n_rows * n_cols)
+    ]
+    torch.distributed.all_gather(tensor_list, x, group=process_mesh["model"])
+    batch_dims, h, w = x.shape[:-2], x.shape[-2], x.shape[-1]
+    ndim = len(batch_dims)
+    perm = list(range(2, 2 + ndim)) + [0, 2 + ndim, 1, 2 + ndim + 1]
+    result = torch.stack(tensor_list)
+    result = (
+        result.reshape(n_rows, n_cols, *x.shape)
+        .permute(*perm)
+        .reshape(*batch_dims, n_rows * h, n_cols * w)
+    )
+    return result
+
+
 def gather_1d_results(
-    x: torch.Tensor, process_mesh: dist.device_mesh = None, dim: int = -1
+    x: torch.Tensor, process_mesh: dist.device_mesh = None, dim: int = -1, pm_key="row"
 ):
     """Gather tensor distributed across process mesh rows along any dimension."""
-    n_rows = process_mesh["row"].size()
+    n_rows = process_mesh[pm_key].size()
     tensor_list = [
         torch.zeros(x.shape, dtype=x.dtype, device=x.device) for _ in range(n_rows)
     ]
