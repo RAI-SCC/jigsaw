@@ -1,6 +1,7 @@
 import pytest
 import torch
 import torch.distributed as dist
+import random
 
 from tests import conftest
 from jigsaw import linear
@@ -36,7 +37,7 @@ def process_mesh_2x1x2():
     return conftest.make_process_mesh(
         device_type="nccl", mesh_shape=[2, 1, 2], mesh_dim_names=["dp", "row", "col"]
     )
-    
+
 
 @pytest.fixture()
 def process_mesh_2x2x1():
@@ -51,26 +52,29 @@ def process_mesh_2x2x1():
     [
         (from_pm, to_pm)
         for from_pm in [
-            'process_mesh_2x2',
-            'process_mesh_2x1x2',
-            'process_mesh_1x4',
-            'process_mesh_4x1',
+            "process_mesh_2x2",
+            "process_mesh_2x1x2",
+            "process_mesh_1x4",
+            "process_mesh_4x1",
+            "process_mesh_2x2x1",
         ]
         for to_pm in [
-            'process_mesh_2x2',
-            'process_mesh_2x1x2',
-            'process_mesh_1x4',
-            'process_mesh_4x1',
+            "process_mesh_2x2",
+            "process_mesh_2x1x2",
+            "process_mesh_1x4",
+            "process_mesh_4x1",
+            "process_mesh_2x2x1",
         ]
     ],
 )
 def test_weight_merging(request, from_pm, to_pm, device):
     # initialize a linear layer
-    local_in_dim, local_out_dim = 8, 12  # local
+    local_in_dim, local_out_dim = random.randint(100), random.randint(100)  # local
     from_pm = request.getfixturevalue(from_pm)
     to_pm = request.getfixturevalue(to_pm)
-    torch.manual_seed(0)
     
+    torch.manual_seed(0)
+
     linear_layer = linear.DistributedXWT(
         in_dim=local_in_dim,
         out_dim=local_out_dim,
@@ -83,23 +87,18 @@ def test_weight_merging(request, from_pm, to_pm, device):
         bayesian=False,
     )
     local_weights_before, local_bias_before = linear_layer.weight, linear_layer.bias
-    
-    gathered_weights_before = conftest.gather_results(
-        local_weights_before, from_pm
-    )
+
+    gathered_weights_before = conftest.gather_results(local_weights_before, from_pm)
     gathered_bias_before = conftest.gather_1d_results(
         local_bias_before, from_pm, dim=0, pm_key="col"
     )
     linear_layer.reshard_parameters(from_pm, to_pm)
     local_weights_after = linear_layer.weight
     local_bias_after = linear_layer.bias
-    gathered_weights_after = conftest.gather_results(
-        local_weights_after, to_pm
-    )
+    gathered_weights_after = conftest.gather_results(local_weights_after, to_pm)
     gathered_bias_after = conftest.gather_1d_results(
         local_bias_after, to_pm, dim=0, pm_key="col"
     )
     assert torch.allclose(gathered_weights_before, gathered_weights_after)
     assert linear_layer.parallelism == to_pm["model"].size()
     assert torch.allclose(gathered_bias_before, gathered_bias_after)
-

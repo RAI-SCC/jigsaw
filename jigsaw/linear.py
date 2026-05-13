@@ -421,7 +421,7 @@ class DistributedXWT(torch.nn.Module):
         return num_param + self.weight.numel()
 
     def reshard_parameters(
-        self, from_process_mesh: dist.ProcessGroup, to_process_mesh: dist.ProcessGroup
+        self, from_process_mesh: dist.ProcessGroup, to_process_mesh: dist.ProcessGroup, pm_row_key="row", pm_col_key="col"
     ):
         """from_process_mesh has process mesh with 'row' and 'col' flags."""
 
