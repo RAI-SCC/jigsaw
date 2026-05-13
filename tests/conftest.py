@@ -12,10 +12,10 @@ import torch.distributed as dist
 def pytest_configure(config):
     """Configure rank 0 to be the only printing rank."""
     rank = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", 0)))
-    if rank != 0:
-        config.option.verbose = -1
-        sys.stdout = open(os.devnull, "w")
-        sys.stderr = open(os.devnull, "w")
+    # if rank != 0:
+    #     config.option.verbose = -1
+    #     sys.stdout = open(os.devnull, "w")
+    #     sys.stderr = open(os.devnull, "w")
 
     warnings.filterwarnings("ignore", category=DeprecationWarning, module="torch")
     warnings.filterwarnings("ignore", category=UserWarning, module="torch")
@@ -159,7 +159,6 @@ def gather_1d_results(
     tensor_list = [
         torch.zeros(x.shape, dtype=x.dtype, device=x.device) for _ in range(n_rows)
     ]
-    print(f'gather 1d results {n_rows}')
     torch.distributed.all_gather(
         tensor_list, x.contiguous(), group=process_mesh["model"]
     )
