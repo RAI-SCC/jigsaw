@@ -76,8 +76,8 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         device=device,
     )
 
-    # define parallel model
-    model = attention_ring.Ring(
+    # define stripped down 
+    ring_attention = attention_ring.Ring(
         x_features=x_features,
         embed_dim=embed_dim,
         output_dim=output_dim,
@@ -91,7 +91,7 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         dtype=torch.bfloat16,
         ring_config=ring_config,
     )
-
+   
     # define baseline model
     model_baseline = attention_ring.RingBaseline(
         x_features=x_features,
@@ -107,13 +107,13 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         dtype=torch.bfloat16,
     )
 
-    n_epochs = 10
+    n_epochs = 3
     epoch_times = np.zeros(n_epochs)
     torch.cuda.synchronize()
 
     # parallel experiment
     for epoch in range(n_epochs):
-        model.train()
+        ring_attention.train()
 
         x = torch.randn(
             (b, n_global // mesh_dict["model"].size(), d),
@@ -133,7 +133,7 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         train_one_epoch(
-            model,
+            ring_attention,
             x,
             q,
             k,
@@ -178,6 +178,11 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         print(f"Average ref time is {ref_time}")
         print(f"Speedup is {ref_time / parallel_time}")
 
+    
+    if local_rank == 0:
+        ref_time = np.average(epoch_times[1:])
+        print(f"Average ref time is {ref_time}")
+        print(f"Speedup is {ref_time / parallel_time}")
 
 def train_one_epoch(model: torch.nn.Module, x, q, k, v, w_qkv):
     """Time and train one epoch."""

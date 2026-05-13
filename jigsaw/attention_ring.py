@@ -178,12 +178,12 @@ class RingAttention(torch.nn.Module):
         dropout: float,
         local_rank: int,
         device: torch.device,
-        parallelism: int,
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         bayesian: bool,
         dtype,
+        ring_config
     ):
         """
 
@@ -199,7 +199,6 @@ class RingAttention(torch.nn.Module):
         super().__init__()
         self.local_rank = local_rank
         self.device = device
-        self.parallelism = parallelism
         self.model_group = model_group
         self.spatial_group = spatial_group
         self.channel_group = channel_group
@@ -209,17 +208,13 @@ class RingAttention(torch.nn.Module):
         self.dtype = dtype
         self.dropout = dropout
 
-        assert self.parallelism == 2, (
-            "windowed attention is only designed for parallelism = 2"
-        )
-
         self.qkv = linear.DistributedXWTSync(
             x_features // 2,
             embed_dim * 3,
             bias=False,
             local_rank=self.local_rank,
             device=self.device,
-            parallelism=self.parallelism,
+            parallelism=channel_group.size(),
             model_group=self.channel_group,
             sync_group=self.spatial_group,
             bayesian=bayesian,
@@ -231,7 +226,7 @@ class RingAttention(torch.nn.Module):
             bias=True,
             local_rank=self.local_rank,
             device=self.device,
-            parallelism=self.parallelism,
+            parallelism=channel_group.size(),
             model_group=self.channel_group,
             sync_group=self.spatial_group,
             bayesian=bayesian,
@@ -239,9 +234,10 @@ class RingAttention(torch.nn.Module):
 
         # self.q_norm, self.k_norm = torch.nn.LayerNorm(embed_dim // heads), torch.nn.LayerNorm(embed_dim // heads)
 
-        self.heads = heads // parallelism
+        self.heads = heads // channel_group.size()
         self.scale = embed_dim**-0.5
         self.empty = torch.empty(0, device=self.device, dtype=self.dtype)
+        self.ring_config = ring_config
 
     def _attention_core(self, q, k, v, x):
 
@@ -257,6 +253,7 @@ class RingAttention(torch.nn.Module):
             None,
             self.local_rank,
             self.spatial_group.size(),
+            self.ring_config
         )
         return out
 
