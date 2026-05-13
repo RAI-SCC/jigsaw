@@ -12,10 +12,10 @@ import torch.distributed as dist
 def pytest_configure(config):
     """Configure rank 0 to be the only printing rank."""
     rank = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", 0)))
-    # if rank != 0:
-    #     config.option.verbose = -1
-    #     sys.stdout = open(os.devnull, "w")
-    #     sys.stderr = open(os.devnull, "w")
+    if rank != 0:
+        config.option.verbose = -1
+        sys.stdout = open(os.devnull, "w")
+        sys.stderr = open(os.devnull, "w")
 
     warnings.filterwarnings("ignore", category=DeprecationWarning, module="torch")
     warnings.filterwarnings("ignore", category=UserWarning, module="torch")
