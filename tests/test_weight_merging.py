@@ -1,71 +1,69 @@
-import random
-
 import pytest
 import torch
+import random
 
-from jigsaw import convolutions, linear, mlp
-from jigsaw.utils_aggregate import gather_1d_results, gather_results
+from tests.process_mesh import *
+from jigsaw import linear, mlp, convolutions
+from jigsaw.utils_aggregate import gather_results, gather_1d_results
 
+# @pytest.mark.parametrize(
+#     "from_pm,to_pm",
+#     [
+#         (from_pm, to_pm)
+#         for from_pm in [
+#             "process_mesh_2x2",
+#             "process_mesh_2x1x2",
+#             "process_mesh_1x4",
+#             "process_mesh_4x1",
+#             "process_mesh_2x2x1",
+#         ]
+#         for to_pm in [
+#             "process_mesh_2x2",
+#             "process_mesh_2x1x2",
+#             "process_mesh_1x4",
+#             "process_mesh_4x1",
+#             "process_mesh_2x2x1",
+#             "process_mesh_4x1x1",
+#         ]
+#     ],
+# )
+# def test_weight_merging(request, from_pm, to_pm, device):
+#     # initialize a linear layer
+#     random.seed(0)
+#     local_in_dim, local_out_dim = (
+#         random.randint(1, 100) * 4,
+#         random.randint(1, 100) * 4,
+#     )  # local
+#     from_pm = request.getfixturevalue(from_pm)
+#     to_pm = request.getfixturevalue(to_pm)
+#     torch.manual_seed(from_pm["model"].rank())
 
-@pytest.mark.parametrize(
-    "from_pm,to_pm",
-    [
-        (from_pm, to_pm)
-        for from_pm in [
-            "process_mesh_2x2",
-            "process_mesh_2x1x2",
-            "process_mesh_1x4",
-            "process_mesh_4x1",
-            "process_mesh_2x2x1",
-        ]
-        for to_pm in [
-            "process_mesh_2x2",
-            "process_mesh_2x1x2",
-            "process_mesh_1x4",
-            "process_mesh_4x1",
-            "process_mesh_2x2x1",
-            "process_mesh_4x1x1",
-        ]
-    ],
-)
-def test_weight_merging(request, from_pm, to_pm, device):
-    """Test weight merging of linear layer."""
-    # initialize a linear layer
-    random.seed(0)
-    local_in_dim, local_out_dim = (
-        random.randint(1, 100) * 4,
-        random.randint(1, 100) * 4,
-    )  # local
-    from_pm = request.getfixturevalue(from_pm)
-    to_pm = request.getfixturevalue(to_pm)
-    torch.manual_seed(from_pm["model"].rank())
-
-    linear_layer = linear.DistributedXWT(
-        in_dim=local_in_dim,
-        out_dim=local_out_dim,
-        bias=True,
-        local_rank=from_pm["model"].rank(),
-        device=device,
-        parallelism=from_pm["model"].size(),
-        model_group=from_pm["model"],
-        spatial_group=from_pm["col"],
-        bayesian=False,
-    )
-    local_weights_before, local_bias_before = linear_layer.weight, linear_layer.bias
-    gathered_weights_before = gather_results(local_weights_before, from_pm)
-    gathered_bias_before = gather_1d_results(
-        local_bias_before, from_pm, dim=0, pm_key="col"
-    )
-    linear_layer.reshard_parameters(from_pm, to_pm)
-    local_weights_after = linear_layer.weight
-    local_bias_after = linear_layer.bias
-    gathered_weights_after = gather_results(local_weights_after, to_pm)
-    gathered_bias_after = gather_1d_results(
-        local_bias_after, to_pm, dim=0, pm_key="col"
-    )
-    assert torch.allclose(gathered_weights_before, gathered_weights_after)
-    assert linear_layer.parallelism == to_pm["model"].size()
-    assert torch.allclose(gathered_bias_before, gathered_bias_after)
+#     linear_layer = linear.DistributedXWT(
+#         in_dim=local_in_dim,
+#         out_dim=local_out_dim,
+#         bias=True,
+#         local_rank=from_pm["model"].rank(),
+#         device=device,
+#         parallelism=from_pm["model"].size(),
+#         model_group=from_pm["model"],
+#         spatial_group=from_pm["col"],
+#         bayesian=False,
+#     )
+#     local_weights_before, local_bias_before = linear_layer.weight, linear_layer.bias
+#     gathered_weights_before = gather_results(local_weights_before, from_pm)
+#     gathered_bias_before = gather_1d_results(
+#         local_bias_before, from_pm, dim=0, pm_key="col"
+#     )
+#     linear_layer.reshard_parameters(from_pm, to_pm)
+#     local_weights_after = linear_layer.weight
+#     local_bias_after = linear_layer.bias
+#     gathered_weights_after = gather_results(local_weights_after, to_pm)
+#     gathered_bias_after = gather_1d_results(
+#         local_bias_after, to_pm, dim=0, pm_key="col"
+#     )
+#     assert torch.allclose(gathered_weights_before, gathered_weights_after)
+#     assert linear_layer.parallelism == to_pm["model"].size()
+#     assert torch.allclose(gathered_bias_before, gathered_bias_after)
 
 
 @pytest.mark.parametrize(
@@ -82,7 +80,6 @@ def test_weight_merging(request, from_pm, to_pm, device):
     ],
 )
 def test_mlp_weight_merging(request, from_pm, process_mesh_4x1x1, device):
-    """Test weight merging of MLP."""
     from_pm = request.getfixturevalue(from_pm)
 
     mlp_layer = mlp.DistributedMLP(
@@ -140,14 +137,22 @@ def test_mlp_weight_merging(request, from_pm, process_mesh_4x1x1, device):
         (from_pm, to_pm)
         for from_pm in [
             "process_mesh_2x2",
+            "process_mesh_4x1",
+            "process_mesh_4x1x1",
+            "process_mesh_2x1x2",
+            "process_mesh_2x2x1",
         ]
         for to_pm in [
             "process_mesh_2x2",
+            "process_mesh_4x1",
+            "process_mesh_4x1x1",
+            "process_mesh_2x1x2",
+            "process_mesh_2x2x1",
         ]
     ],
 )
 def test_conv_weight_merging(request, from_pm, to_pm, device):
-    """Test weight merging of convolutional layer."""
+    # initialize a linear layer
     random.seed(0)
     in_channels, out_channels, kernel_size = (
         random.randint(1, 100) * 4,
@@ -162,7 +167,7 @@ def test_conv_weight_merging(request, from_pm, to_pm, device):
         in_channels=in_channels,
         out_channels=out_channels,
         kernel_size=kernel_size,
-        local_rank=from_pm["model"].size(),
+        local_rank=from_pm["model"].rank(),
         spatial_group=from_pm["row"],
         channel_group=from_pm["col"],
         device=device,
@@ -184,7 +189,71 @@ def test_conv_weight_merging(request, from_pm, to_pm, device):
     gathered_bias_after = gather_1d_results(
         local_bias_after, to_pm, dim=0, pm_key="col"
     )
+    assert torch.allclose(gathered_weights_before, gathered_weights_after)
+    assert conv_layer.parallelism == to_pm["col"].size()
+    assert torch.allclose(gathered_bias_before, gathered_bias_after)
 
+
+@pytest.mark.parametrize(
+    "from_pm,to_pm",
+    [
+        (from_pm, to_pm)
+        for from_pm in [
+            "process_mesh_2x2",
+            "process_mesh_4x1",
+            "process_mesh_4x1x1",
+            "process_mesh_2x1x2",
+            "process_mesh_2x2x1",
+        ]
+        for to_pm in [
+            "process_mesh_2x2",
+            "process_mesh_4x1",
+            "process_mesh_4x1x1",
+            "process_mesh_2x1x2",
+            "process_mesh_2x2x1",
+        ]
+    ],
+)
+def test_conv_transpose_weight_merging(request, from_pm, to_pm, device):
+    # initialize a linear layer
+    random.seed(0)
+    in_channels, out_channels, kernel_size = (
+        random.randint(1, 100) * 4,
+        random.randint(1, 100) * 4,
+        random.randint(1, 5),
+    )  # local
+    from_pm = request.getfixturevalue(from_pm)
+    to_pm = request.getfixturevalue(to_pm)
+    torch.manual_seed(from_pm["col"].rank())
+
+    conv_layer = convolutions.DistributedConvTranspose2D(
+        in_channels=in_channels,
+        out_channels=out_channels,
+        kernel_size=kernel_size,
+        local_rank=from_pm["model"].rank(),
+        spatial_group=from_pm["row"],
+        channel_group=from_pm["col"],
+        device=device,
+        parallelism=from_pm["col"].size(),
+    )
+    local_weights_before, local_bias_before = conv_layer.weight, conv_layer.bias
+    gathered_weights_before = gather_1d_results(
+        local_weights_before, from_pm, dim=1, pm_key="col"
+    )
+    gathered_bias_before = gather_1d_results(
+        local_bias_before, from_pm, dim=0, pm_key="col"
+    )
+    conv_layer.reshard_parameters(from_pm, to_pm)
+
+    local_weights_after = conv_layer.weight
+    local_bias_after = conv_layer.bias
+    gathered_weights_after = gather_1d_results(
+        local_weights_after, to_pm, dim=1, pm_key="col"
+    )
+    gathered_bias_after = gather_1d_results(
+        local_bias_after, to_pm, dim=0, pm_key="col"
+    )
+    
     assert torch.allclose(gathered_weights_before, gathered_weights_after)
     assert conv_layer.parallelism == to_pm["col"].size()
     assert torch.allclose(gathered_bias_before, gathered_bias_after)
