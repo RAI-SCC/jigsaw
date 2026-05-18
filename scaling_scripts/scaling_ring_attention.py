@@ -4,6 +4,7 @@ import math
 import numpy as np
 import torch
 import torch.distributed as dist
+from torch.cuda import nvtx
 
 from jigsaw import attention_ring, utils
 from jigsaw import ring_attention_helpers as ring_attn_fns
@@ -68,7 +69,7 @@ def training_loop(device: torch.device, local_rank: int) -> None:
     # define configs for the ring attention
     torch.manual_seed(local_rank)
     ring_config = ring_attn_fns.RingAttentionConfig(
-        send_in_forward=ring_attn_fns.SendForward.X,
+        send_in_forward=ring_attn_fns.SendForward.KV,
         save_for_backward=ring_attn_fns.SaveBackward.X,
         save_scope=ring_attn_fns.SaveScope.GLOBAL,
         send_backward=ring_attn_fns.SendBackward.GATHER_DKV,
@@ -76,7 +77,7 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         device=device,
     )
 
-    # define stripped down 
+    # define stripped down
     ring_attention = attention_ring.Ring(
         x_features=x_features,
         embed_dim=embed_dim,
@@ -91,7 +92,7 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         dtype=torch.bfloat16,
         ring_config=ring_config,
     )
-   
+
     # define baseline model
     model_baseline = attention_ring.RingBaseline(
         x_features=x_features,
@@ -113,21 +114,28 @@ def training_loop(device: torch.device, local_rank: int) -> None:
 
     # parallel experiment
     for epoch in range(n_epochs):
+        nvtx.range_push("Parallel Experiment")
         ring_attention.train()
 
+        nvtx.range_push("Data Generation")
         x = torch.randn(
             (b, n_global // mesh_dict["model"].size(), d),
             device=device,
             requires_grad=True,
             dtype=torch.bfloat16,
         ) / (d**0.5)
+        nvtx.range_pop()
+        nvtx.range_push("QKV")
         qkv = torch.matmul(x, w_qkv.mT)
+        nvtx.range_pop()
+        nvtx.range_push("Reshape and Permute")
         q, k, v = [
             t.detach().requires_grad_(True)
             for t in qkv.reshape(
                 b, n_global // mesh_dict["model"].size(), 3, heads, d
             ).permute(2, 0, 3, 1, 4)
         ]
+        nvtx.range_pop()
 
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
@@ -142,6 +150,7 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         )
         end.record()
         torch.cuda.synchronize()
+        nvtx.range_pop()
 
         if local_rank == 0:
             epoch_times[epoch] = start.elapsed_time(end) / 1000 / 60
@@ -153,15 +162,22 @@ def training_loop(device: torch.device, local_rank: int) -> None:
 
     # non-parallel baseline
     for epoch in range(n_epochs):
+        nvtx.range_push("Baseline Experiment")
         model_baseline.train()
+        nvtx.range_push("Data Generation")
         x = torch.randn(
             (b, n_global, d), device=device, requires_grad=True, dtype=torch.bfloat16
         ) / (d**0.5)
+        nvtx.range_pop()
+        nvtx.range_push("QKV")
         qkv = torch.matmul(x, w_qkv.mT)
+        nvtx.range_pop()
+        nvtx.range_push("Reshape and Permute")
         q, k, v = [
             t.detach().requires_grad_(True)
             for t in qkv.reshape(b, n_global, 3, heads, d).permute(2, 0, 3, 1, 4)
         ]
+        nvtx.range_pop()
 
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
@@ -169,6 +185,7 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         train_one_epoch(model_baseline, x, q, k, v, w_qkv)
         end.record()
         torch.cuda.synchronize()
+        nvtx.range_pop()
 
         if local_rank == 0:
             epoch_times[epoch] = start.elapsed_time(end) / 1000 / 60
@@ -178,18 +195,22 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         print(f"Average ref time is {ref_time}")
         print(f"Speedup is {ref_time / parallel_time}")
 
-    
     if local_rank == 0:
         ref_time = np.average(epoch_times[1:])
         print(f"Average ref time is {ref_time}")
         print(f"Speedup is {ref_time / parallel_time}")
 
+
 def train_one_epoch(model: torch.nn.Module, x, q, k, v, w_qkv):
     """Time and train one epoch."""
     # X has shape [B, Nlocal, d//2]
-    for _ in range(5):
+    for _ in range(10):
+        nvtx.range_push("Forward")
         output = model(x.detach(), q, k, v, w_qkv, None)
+        nvtx.range_pop()
+        nvtx.range_push("Backward")
         output.sum().backward()
+        nvtx.range_pop()
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ dK/dV rotate counter-clockwise (opposite to forward) back to their home rank.
 import torch
 import torch.distributed as dist
 from einops import rearrange
+from torch.cuda import nvtx
 
 from . import linear
 from . import ring_attention_helpers as ring_attn
@@ -158,9 +159,11 @@ class RingBaseline(torch.nn.Module):
         with torch.nn.attention.sdpa_kernel(
             torch.nn.attention.SDPBackend.FLASH_ATTENTION
         ):
+            nvtx.range_push("Baseline SDPA")
             out = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, is_causal=False, dropout_p=0.0, attn_mask=mask
             )
+            nvtx.range_pop()
 
         # Output: [n_batch, seq_length, output_dim]
         return out
@@ -183,7 +186,7 @@ class RingAttention(torch.nn.Module):
         channel_group: dist.ProcessGroup,
         bayesian: bool,
         dtype,
-        ring_config
+        ring_config,
     ):
         """
 
@@ -253,7 +256,7 @@ class RingAttention(torch.nn.Module):
             None,
             self.local_rank,
             self.spatial_group.size(),
-            self.ring_config
+            self.ring_config,
         )
         return out
 

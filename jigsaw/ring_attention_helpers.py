@@ -2,6 +2,7 @@ from enum import Enum
 
 import torch
 import torch.distributed as dist
+from torch.cuda import nvtx
 
 from jigsaw.offload import NVLinkActivationOffloader
 
@@ -126,9 +127,12 @@ def ring_forward(
     chunks_to_save = []
 
     # Local KV
+    nvtx.range_push("Local KV")
     kv, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
+    nvtx.range_pop()
 
     # Kick off first send
+    nvtx.range_push("First Ring Send")
     match ring_config.send_in_forward:
         case SendForward.X:
             recv_buf = torch.empty_like(x)
@@ -140,11 +144,14 @@ def ring_forward(
             recv_buf, handle = _ring_send_recv(
                 kv, world_size, rank, group, empty, recv_buf
             )
+    nvtx.range_pop()
 
     for step in range(world_size):
         if (step > 0) and (ring_config.send_in_forward == SendForward.X):
             # Recompute KV from current Xj (received in previous iter)
+            nvtx.range_push("Compute KV")
             kv, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
+            nvtx.range_pop()
 
         # ---- save for backward ----
         # save_local_or_global == 0: only save own (step 0) chunk; backward re-rings
@@ -152,6 +159,7 @@ def ring_forward(
         should_save = (ring_config.save_scope == SaveScope.GLOBAL) or (step == 0)
 
         if should_save:
+            nvtx.range_push("Save for Backward")
             match ring_config.save_for_backward:
                 case SaveBackward.X:
                     # offload X
@@ -177,11 +185,15 @@ def ring_forward(
                             if (ring_config.save_scope == SaveScope.GLOBAL)
                             else kv
                         )
+            nvtx.range_pop()
 
         # ---- compute flash attention on local Q vs current Kj, Vj ----
         # Kj, Vj are views into KV; flash attention requires contiguous, so materialize.
+        nvtx.range_push("Contiguous KV")
         kj_c = kj.contiguous()
         vj_c = vj.contiguous()
+        nvtx.range_pop()
+        nvtx.range_push("SDPFA")
         out_j, l_j, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
             q,
             kj_c,
@@ -191,12 +203,16 @@ def ring_forward(
             scale=scale,
             return_debug_mask=False,
         )
+        nvtx.range_pop()
+        nvtx.range_push("Online Softmax")
         out, lse = _online_softmax_merge(out, lse, out_j, l_j)
+        nvtx.range_pop()
         del out_j, l_j, kj_c, vj_c
 
         # ---- ring rotate ----
         if step < world_size - 1:
             handle.wait()
+            nvtx.range_push("Ring Rotate")
             match ring_config.send_in_forward:
                 case SendForward.X:
                     # Drop Xj ref before reassigning. Note: at this point any pending
@@ -215,6 +231,7 @@ def ring_forward(
                     recv_buf, handle = _ring_send_recv(
                         kv, world_size, rank, group, empty, next_recv
                     )
+            nvtx.range_pop()
 
     # Make sure all offloads complete and GPU refs to offloaded tensors are dropped
     if ring_config.offloader is not None:
@@ -269,11 +286,13 @@ def ring_backward(
         return gpu, ev
 
     # Step 0 chunk: prefetch if applicable
+    nvtx.range_push("Prefetch Step 0 Chunk")
     if ring_config.save_scope == SaveScope.GLOBAL and ring_config.offloader is not None:
         cur_chunk_gpu, cur_chunk_event = _start_prefetch(0)
         next_prefetch, next_prefetch_event = _start_prefetch(1)
     else:
         cur_chunk_gpu, cur_chunk_event = None, None
+    nvtx.range_pop()
 
     # State for ring rotation
     recv_buf = None
@@ -284,6 +303,7 @@ def ring_backward(
         # ---- obtain Kj, Vj for this step ----
         match ring_config.save_scope:
             case SaveScope.GLOBAL:
+                nvtx.range_push("Global Save Backward")
                 # we have all chunks saved; use the prefetched one
                 if ring_config.offloader is not None:
                     ring_config.offloader.wait_prefetch(cur_chunk_event)
@@ -301,8 +321,10 @@ def ring_backward(
                     xj = chunk
                     kv, kj, vj = _compute_kv(xj, w_qkv, b, n_local, h, d)
                     kj, vj = kj.contiguous(), vj.contiguous()
+                nvtx.range_pop()
             case SaveScope.LOCAL:
                 # save_local_or_global == 0: only own chunk saved; ring around
+                nvtx.range_push("Local Save Backward")
                 if step == 0:
                     match ring_config.save_for_backward:
                         case SaveBackward.KV:
@@ -365,8 +387,10 @@ def ring_backward(
                                 recv_buf, kv_handle = _ring_send_recv(
                                     kv, world_size, local_rank, group, empty, next_recv
                                 )
+                nvtx.range_pop()
 
         # ---- flash attention backward ----
+        nvtx.range_push("Flash Attention Backward")
         dq_j, dk_j, dv_j = torch.ops.aten._scaled_dot_product_flash_attention_backward(
             dout,
             q,
@@ -385,8 +409,10 @@ def ring_backward(
             philox_offset=torch.zeros(1, dtype=torch.long, device=q.device),
         )
         dq += dq_j
+        nvtx.range_pop()
         del dq_j, kj, vj, kv
         # ---- accumulate dK, dV ----
+        nvtx.range_push("Accumulate dK, dV")
         match ring_config.send_backward:
             case SendBackward.GATHER_DKV:
                 global_chunk_idx = (local_rank - step) % world_size
@@ -422,7 +448,9 @@ def ring_backward(
                     dk_buf += dkj_r
                     dv_buf += dvj_r
                     del dkj_r, dvj_r, recv_buffer
+        nvtx.range_pop()
 
+    nvtx.range_push("Finalize Backward")
     match ring_config.send_backward:
         case SendBackward.GATHER_DKV:
             dist.all_reduce(dk_buf, op=dist.ReduceOp.SUM, group=group)
@@ -432,6 +460,7 @@ def ring_backward(
         case SendBackward.SEND_DKV:
             dk_local = dk_buf
             dv_local = dv_buf
+    nvtx.range_pop()
 
     return dq, dk_local, dv_local
 
