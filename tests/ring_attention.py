@@ -5,14 +5,7 @@ import torch.distributed as dist
 import jigsaw.attention_ring as ring_attention
 import jigsaw.ring_attention_helpers as ring_attn_fns
 from tests import conftest
-
-
-@pytest.fixture()
-def process_mesh():
-    """Return process mesh."""
-    return conftest.make_process_mesh(
-        device_type="nccl", mesh_shape=[4, 1], mesh_dim_names=["row", "col"]
-    )
+from tests.process_mesh import process_mesh_4x1
 
 
 # def test_backward(device, process_mesh):
@@ -139,9 +132,9 @@ def process_mesh():
         ]
     ],
 )
-def test_backward_sdpa(device, process_mesh, flash_kernel):
+def test_backward_sdpa(device, process_mesh_4x1, flash_kernel):
     """Test flash kernel with direct call to aten function."""
-    world_size = dist.get_world_size(group=process_mesh["row"])
+    world_size = dist.get_world_size(group=process_mesh_4x1["row"])
 
     torch.manual_seed(2)  # same seed for weight initialization
     b, h, n_global, d = 1, 6, world_size * 32, 256
@@ -259,7 +252,7 @@ def test_backward_sdpa(device, process_mesh, flash_kernel):
 )
 def test_ring_forward_backward(
     device,
-    process_mesh,
+    process_mesh_4x1,
     send_x_or_kv,
     save_x_or_kv,
     save_local_or_global,
@@ -316,20 +309,20 @@ def test_ring_forward_backward(
         x,
         w_qkv,
         scale,
-        group=process_mesh["row"],
+        group=process_mesh_4x1["row"],
         empty=empty,
         rank=local_rank,
         world_size=world_size,
         ring_config=ring_config,
     )
 
-    out_full = conftest.gather_1d_results(out, process_mesh, dim=2)
-    x_full = conftest.gather_1d_results(x, process_mesh, dim=1)
+    out_full = conftest.gather_1d_results(out, process_mesh_4x1, dim=2)
+    x_full = conftest.gather_1d_results(x, process_mesh_4x1, dim=1)
     qkv = x_full @ w_qkv.mT
 
-    q_ref = conftest.gather_1d_results(q_local, process_mesh, dim=2)
-    k_ref = conftest.gather_1d_results(k_local, process_mesh, dim=2)
-    v_ref = conftest.gather_1d_results(v_local, process_mesh, dim=2)
+    q_ref = conftest.gather_1d_results(q_local, process_mesh_4x1, dim=2)
+    k_ref = conftest.gather_1d_results(k_local, process_mesh_4x1, dim=2)
+    v_ref = conftest.gather_1d_results(v_local, process_mesh_4x1, dim=2)
 
     # Reference calculation
     out_ref, logsumexp, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
@@ -384,9 +377,9 @@ def test_ring_forward_backward(
     )
 
     # gather
-    dq_full = conftest.gather_1d_results(dq_local, process_mesh, dim=2)
-    dk_full = conftest.gather_1d_results(dk_local, process_mesh, dim=2)
-    dv_full = conftest.gather_1d_results(dv_local, process_mesh, dim=2)
+    dq_full = conftest.gather_1d_results(dq_local, process_mesh_4x1, dim=2)
+    dk_full = conftest.gather_1d_results(dk_local, process_mesh_4x1, dim=2)
+    dv_full = conftest.gather_1d_results(dv_local, process_mesh_4x1, dim=2)
 
     # print(f'Rank {local_rank} is gathered dQ full {dQ_full.sum()}')
     assert torch.allclose(out_full, out_ref, atol=1e-3)
@@ -417,9 +410,9 @@ def test_ring_forward_backward(
     )
 
 
-def test_ring(device, process_mesh):
+def test_ring(device, process_mesh_4x1):
     """Test forward-backward pass of ring attention wrapped by nn.Module."""
-    group = process_mesh["model"]
+    group = process_mesh_4x1["model"]
     local_rank = dist.get_rank(group=group)
     world_size = dist.get_world_size(group=group)
 
@@ -457,10 +450,10 @@ def test_ring(device, process_mesh):
     )
 
     # Gather full values
-    x_full = conftest.gather_1d_results(x, process_mesh, dim=1)
-    q_ref = conftest.gather_1d_results(q_local, process_mesh, dim=2)
-    k_ref = conftest.gather_1d_results(k_local, process_mesh, dim=2)
-    v_ref = conftest.gather_1d_results(v_local, process_mesh, dim=2)
+    x_full = conftest.gather_1d_results(x, process_mesh_4x1, dim=1)
+    q_ref = conftest.gather_1d_results(q_local, process_mesh_4x1, dim=2)
+    k_ref = conftest.gather_1d_results(k_local, process_mesh_4x1, dim=2)
+    v_ref = conftest.gather_1d_results(v_local, process_mesh_4x1, dim=2)
 
     model = ring_attention.Ring(
         x_features=x_features,

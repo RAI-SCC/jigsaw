@@ -1,22 +1,15 @@
-import pytest
 import torch
 import torch.distributed as dist
 
 import jigsaw.linear as linear
-from tests import conftest
+from tests.process_mesh import process_mesh_2x2
+from conftest import device
+from jigsaw.utils_aggregate import gather_results, gather_1d_results, gather_1d_results_list
 
 
-@pytest.fixture()
-def process_mesh2x2():
-    """Return process mesh."""
-    return conftest.make_process_mesh(
-        device_type="nccl", mesh_shape=[2, 2], mesh_dim_names=["row", "col"]
-    )
-
-
-def test_xwt_forward(device, process_mesh2x2):
+def test_xwt_forward(device, process_mesh_2x2):
     """Verify weights for XWT_Sync are synchronized after a few iterations."""
-    local_rank = dist.get_rank(group=process_mesh2x2["model"])
+    local_rank = dist.get_rank(group=process_mesh_2x2["model"])
     torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
 
     in_dim, out_dim = 5, 10
@@ -29,14 +22,14 @@ def test_xwt_forward(device, process_mesh2x2):
         local_rank,
         device,
         4,
-        process_mesh2x2["model"],
-        process_mesh2x2["row"],
+        process_mesh_2x2["model"],
+        process_mesh_2x2["row"],
         False,
     ).to(device)
     x_in = torch.randn(1, seq_local, in_dim, dtype=linlayer.weight.dtype, device=device)
-    x_gathered = conftest.gather_results(x_in, process_mesh=process_mesh2x2)
-    w_gathered = conftest.gather_results(
-        linlayer.weight.data, process_mesh=process_mesh2x2
+    x_gathered = gather_results(x_in, process_mesh=process_mesh_2x2)
+    w_gathered = gather_results(
+        linlayer.weight.data, process_mesh=process_mesh_2x2
     )
 
     ref_linlayer = torch.nn.Linear(in_dim * 2, out_dim * 2, bias=False).to(device)
@@ -45,13 +38,13 @@ def test_xwt_forward(device, process_mesh2x2):
     y = linlayer(x_in)
     y_ref = ref_linlayer(x_gathered)
 
-    y_gathered = conftest.gather_results(y, process_mesh=process_mesh2x2)
+    y_gathered = gather_results(y, process_mesh=process_mesh_2x2)
     assert torch.allclose(y_gathered, y_ref, atol=1e-5)
 
 
-def test_xwt_backward(device, process_mesh2x2):
+def test_xwt_backward(device, process_mesh_2x2):
     """Verify weights for XWT_Sync are synchronized after a few iterations."""
-    local_rank = dist.get_rank(group=process_mesh2x2["model"])
+    local_rank = dist.get_rank(group=process_mesh_2x2["model"])
     torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
 
     in_dim, out_dim = 3, 2
@@ -66,12 +59,12 @@ def test_xwt_backward(device, process_mesh2x2):
         local_rank,
         device,
         4,
-        process_mesh2x2["model"],
-        process_mesh2x2["row"],
+        process_mesh_2x2["model"],
+        process_mesh_2x2["row"],
         False,
     ).to(device)
-    w_gathered = conftest.gather_results(
-        linlayer.weight.data, process_mesh=process_mesh2x2
+    w_gathered = gather_results(
+        linlayer.weight.data, process_mesh=process_mesh_2x2
     )
 
     ref_linlayer = torch.nn.Linear(in_dim * 2, out_dim * 2, bias=False).to(device)
@@ -92,14 +85,14 @@ def test_xwt_backward(device, process_mesh2x2):
         )  # different target per rank
 
         # gather x and target
-        x_gathered = conftest.gather_results(
-            x_in.detach(), process_mesh=process_mesh2x2
+        x_gathered = gather_results(
+            x_in.detach(), process_mesh=process_mesh_2x2
         )
         x_gathered.requires_grad_(True)
-        ref_target = conftest.gather_results(target, process_mesh=process_mesh2x2)
+        ref_target = gather_results(target, process_mesh=process_mesh_2x2)
         ref_y = ref_linlayer(x_gathered)
-        y_gathered = conftest.gather_results(y, process_mesh=process_mesh2x2)
-        loss = loss_fn(y, target) / process_mesh2x2["model"].size()
+        y_gathered = gather_results(y, process_mesh=process_mesh_2x2)
+        loss = loss_fn(y, target) / process_mesh_2x2["model"].size()
         loss_ref = loss_fn(ref_y, ref_target)
         loss.backward()
         loss_ref.backward()
@@ -107,11 +100,11 @@ def test_xwt_backward(device, process_mesh2x2):
         optimizer.step()
         ref_optimizer.step()
 
-    w_gathered = conftest.gather_results(linlayer.weight, process_mesh=process_mesh2x2)
-    w_grad_gathered = conftest.gather_results(
-        linlayer.weight.grad, process_mesh=process_mesh2x2
+    w_gathered = gather_results(linlayer.weight, process_mesh=process_mesh_2x2)
+    w_grad_gathered = gather_results(
+        linlayer.weight.grad, process_mesh=process_mesh_2x2
     )
-    x_grad_gathered = conftest.gather_results(x_in.grad, process_mesh=process_mesh2x2)
+    x_grad_gathered = gather_results(x_in.grad, process_mesh=process_mesh_2x2)
 
     assert torch.allclose(y_gathered, ref_y, atol=1e-5)
     assert torch.allclose(w_gathered, ref_linlayer.weight, atol=1e-5)
@@ -119,9 +112,9 @@ def test_xwt_backward(device, process_mesh2x2):
     assert torch.allclose(x_grad_gathered, x_gathered.grad, atol=1e-5)
 
 
-def test_xwt_backward_sum(device, process_mesh2x2):
+def test_xwt_backward_sum(device, process_mesh_2x2):
     """Verify weights for XWT_Sync are synchronized after a few iterations."""
-    local_rank = dist.get_rank(group=process_mesh2x2["model"])
+    local_rank = dist.get_rank(group=process_mesh_2x2["model"])
     torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
 
     in_dim, out_dim = 3, 2
@@ -136,12 +129,12 @@ def test_xwt_backward_sum(device, process_mesh2x2):
         local_rank,
         device,
         4,
-        process_mesh2x2["model"],
-        process_mesh2x2["row"],
+        process_mesh_2x2["model"],
+        process_mesh_2x2["row"],
         False,
     ).to(device)
-    w_gathered = conftest.gather_results(
-        linlayer.weight.data, process_mesh=process_mesh2x2
+    w_gathered = gather_results(
+        linlayer.weight.data, process_mesh=process_mesh_2x2
     )
 
     ref_linlayer = torch.nn.Linear(in_dim * 2, out_dim * 2, bias=False).to(device)
@@ -160,13 +153,13 @@ def test_xwt_backward_sum(device, process_mesh2x2):
         )  # different target per rank
 
         # gather x and target
-        x_gathered = conftest.gather_results(
-            x_in.detach(), process_mesh=process_mesh2x2
+        x_gathered = gather_results(
+            x_in.detach(), process_mesh=process_mesh_2x2
         )
         x_gathered.requires_grad_(True)
-        ref_target = conftest.gather_results(target, process_mesh=process_mesh2x2)
+        ref_target = gather_results(target, process_mesh=process_mesh_2x2)
         ref_y = ref_linlayer(x_gathered)
-        y_gathered = conftest.gather_results(y, process_mesh=process_mesh2x2)
+        y_gathered = gather_results(y, process_mesh=process_mesh_2x2)
         loss = loss_fn(y, target)
         loss_ref = loss_fn(ref_y, ref_target)
         loss.backward()
@@ -175,19 +168,19 @@ def test_xwt_backward_sum(device, process_mesh2x2):
         optimizer.step()
         ref_optimizer.step()
 
-    w_grad_gathered = conftest.gather_results(
-        linlayer.weight.grad, process_mesh=process_mesh2x2
+    w_grad_gathered = gather_results(
+        linlayer.weight.grad, process_mesh=process_mesh_2x2
     )
-    x_grad_gathered = conftest.gather_results(x_in.grad, process_mesh=process_mesh2x2)
+    x_grad_gathered = gather_results(x_in.grad, process_mesh=process_mesh_2x2)
 
     assert torch.allclose(y_gathered, ref_y, atol=1e-5)
     assert torch.allclose(w_grad_gathered, ref_linlayer.weight.grad, atol=1e-5)
     assert torch.allclose(x_grad_gathered, x_gathered.grad, atol=1e-5)
 
 
-def test_xwt_bias_init(device, process_mesh2x2):
+def test_xwt_bias_init(device, process_mesh_2x2):
     """Bias should be initialized across process mesh rows in 2x2 parallel."""
-    local_rank = dist.get_rank(group=process_mesh2x2["model"])
+    local_rank = dist.get_rank(group=process_mesh_2x2["model"])
     torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
 
     in_dim, out_dim = 5, 10
@@ -199,13 +192,13 @@ def test_xwt_bias_init(device, process_mesh2x2):
         local_rank,
         device,
         4,
-        process_mesh2x2["model"],
-        process_mesh2x2["row"],
+        process_mesh_2x2["model"],
+        process_mesh_2x2["row"],
         False,
     ).to(device)
 
-    b_gathered = conftest.gather_1d_results_list(
-        linlayer.bias.data, process_mesh=process_mesh2x2
+    b_gathered = gather_1d_results_list(
+        linlayer.bias.data, process_mesh=process_mesh_2x2
     )
     assert torch.allclose(b_gathered[0], b_gathered[2], atol=1e-5)
     assert torch.allclose(b_gathered[1], b_gathered[3], atol=1e-5)
@@ -214,9 +207,9 @@ def test_xwt_bias_init(device, process_mesh2x2):
     )  # ranks that are part of the same model group should have different biases.
 
 
-def test_xwt_forward_bias(device, process_mesh2x2):
+def test_xwt_forward_bias(device, process_mesh_2x2):
     """Verify weights for XWT_Sync are synchronized after a few iterations."""
-    local_rank = dist.get_rank(group=process_mesh2x2["model"])
+    local_rank = dist.get_rank(group=process_mesh_2x2["model"])
     torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
 
     in_dim, out_dim = 5, 10
@@ -229,17 +222,17 @@ def test_xwt_forward_bias(device, process_mesh2x2):
         local_rank,
         device,
         4,
-        process_mesh2x2["model"],
-        process_mesh2x2["row"],
+        process_mesh_2x2["model"],
+        process_mesh_2x2["row"],
         False,
     ).to(device)
     x_in = torch.randn(1, seq_local, in_dim, dtype=linlayer.weight.dtype, device=device)
-    x_gathered = conftest.gather_results(x_in, process_mesh=process_mesh2x2)
-    w_gathered = conftest.gather_results(
-        linlayer.weight.data, process_mesh=process_mesh2x2
+    x_gathered = gather_results(x_in, process_mesh=process_mesh_2x2)
+    w_gathered = gather_results(
+        linlayer.weight.data, process_mesh=process_mesh_2x2
     )
-    b_gathered = conftest.gather_1d_results(
-        linlayer.bias.data, process_mesh=process_mesh2x2
+    b_gathered = gather_1d_results(
+        linlayer.bias.data, process_mesh=process_mesh_2x2
     )
 
     ref_linlayer = torch.nn.Linear(in_dim * 2, out_dim * 2, bias=True).to(device)
@@ -249,13 +242,13 @@ def test_xwt_forward_bias(device, process_mesh2x2):
     y = linlayer(x_in)
     y_ref = ref_linlayer(x_gathered)
 
-    y_gathered = conftest.gather_results(y, process_mesh=process_mesh2x2)
+    y_gathered = gather_results(y, process_mesh=process_mesh_2x2)
     assert torch.allclose(y_gathered, y_ref, atol=1e-5)
 
 
-def test_xwt_backward_bias(device, process_mesh2x2):
+def test_xwt_backward_bias(device, process_mesh_2x2):
     """Verify weights for XWT_Sync are synchronized after a few iterations."""
-    local_rank = dist.get_rank(group=process_mesh2x2["model"])
+    local_rank = dist.get_rank(group=process_mesh_2x2["model"])
     torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
 
     in_dim, out_dim = 3, 2
@@ -270,15 +263,15 @@ def test_xwt_backward_bias(device, process_mesh2x2):
         local_rank,
         device,
         4,
-        process_mesh2x2["model"],
-        process_mesh2x2["row"],
+        process_mesh_2x2["model"],
+        process_mesh_2x2["row"],
         False,
     ).to(device)
-    w_gathered = conftest.gather_results(
-        linlayer.weight.data, process_mesh=process_mesh2x2
+    w_gathered = gather_results(
+        linlayer.weight.data, process_mesh=process_mesh_2x2
     )
-    b_gathered = conftest.gather_1d_results(
-        linlayer.bias.data, process_mesh=process_mesh2x2
+    b_gathered = gather_1d_results(
+        linlayer.bias.data, process_mesh=process_mesh_2x2
     )
 
     ref_linlayer = torch.nn.Linear(in_dim * 2, out_dim * 2, bias=True).to(device)
@@ -300,14 +293,14 @@ def test_xwt_backward_bias(device, process_mesh2x2):
         )  # different target per rank
 
         # gather x and target
-        x_gathered = conftest.gather_results(
-            x_in.detach(), process_mesh=process_mesh2x2
+        x_gathered = gather_results(
+            x_in.detach(), process_mesh=process_mesh_2x2
         )
         x_gathered.requires_grad_(True)
-        ref_target = conftest.gather_results(target, process_mesh=process_mesh2x2)
+        ref_target = gather_results(target, process_mesh=process_mesh_2x2)
         ref_y = ref_linlayer(x_gathered)
-        y_gathered = conftest.gather_results(y, process_mesh=process_mesh2x2)
-        loss = loss_fn(y, target) / process_mesh2x2["model"].size()
+        y_gathered = gather_results(y, process_mesh=process_mesh_2x2)
+        loss = loss_fn(y, target) / process_mesh_2x2["model"].size()
         loss_ref = loss_fn(ref_y, ref_target)
         loss.backward()
         loss_ref.backward()
@@ -315,15 +308,15 @@ def test_xwt_backward_bias(device, process_mesh2x2):
         optimizer.step()
         ref_optimizer.step()
 
-    w_gathered = conftest.gather_results(linlayer.weight, process_mesh=process_mesh2x2)
-    w_grad_gathered = conftest.gather_results(
-        linlayer.weight.grad, process_mesh=process_mesh2x2
+    w_gathered = gather_results(linlayer.weight, process_mesh=process_mesh_2x2)
+    w_grad_gathered = gather_results(
+        linlayer.weight.grad, process_mesh=process_mesh_2x2
     )
-    b_gathered = conftest.gather_1d_results(linlayer.bias, process_mesh=process_mesh2x2)
-    b_grad_gathered = conftest.gather_1d_results(
-        linlayer.bias.grad, process_mesh=process_mesh2x2
+    b_gathered = gather_1d_results(linlayer.bias, process_mesh=process_mesh_2x2)
+    b_grad_gathered = gather_1d_results(
+        linlayer.bias.grad, process_mesh=process_mesh_2x2
     )
-    x_grad_gathered = conftest.gather_results(x_in.grad, process_mesh=process_mesh2x2)
+    x_grad_gathered = gather_results(x_in.grad, process_mesh=process_mesh_2x2)
 
     assert torch.allclose(y_gathered, ref_y, atol=1e-5)
     assert torch.allclose(w_gathered, ref_linlayer.weight, atol=1e-5)
