@@ -2,6 +2,7 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.linear as linear
+from tests.process_mesh import process_mesh_2x2
 from jigsaw.utils_aggregate import gather_results_as_list
 
 

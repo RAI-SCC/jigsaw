@@ -4,6 +4,7 @@ import torch.distributed as dist
 
 import jigsaw.attention_ring as ring_attention
 import jigsaw.ring_attention_helpers as ring_attn_fns
+from jigsaw.utils_aggregate import gather_results, gather_1d_results, gather_1d_results_list
 from tests import conftest
 
 # def test_backward(device, process_mesh):
@@ -314,13 +315,13 @@ def test_ring_forward_backward(
         ring_config=ring_config,
     )
 
-    out_full = conftest.gather_1d_results(out, process_mesh_4x1, dim=2)
-    x_full = conftest.gather_1d_results(x, process_mesh_4x1, dim=1)
+    out_full = gather_1d_results(out, process_mesh_4x1, dim=2)
+    x_full = gather_1d_results(x, process_mesh_4x1, dim=1)
     qkv = x_full @ w_qkv.mT
 
-    q_ref = conftest.gather_1d_results(q_local, process_mesh_4x1, dim=2)
-    k_ref = conftest.gather_1d_results(k_local, process_mesh_4x1, dim=2)
-    v_ref = conftest.gather_1d_results(v_local, process_mesh_4x1, dim=2)
+    q_ref = gather_1d_results(q_local, process_mesh_4x1, dim=2)
+    k_ref = gather_1d_results(k_local, process_mesh_4x1, dim=2)
+    v_ref = gather_1d_results(v_local, process_mesh_4x1, dim=2)
 
     # Reference calculation
     out_ref, logsumexp, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
@@ -375,9 +376,9 @@ def test_ring_forward_backward(
     )
 
     # gather
-    dq_full = conftest.gather_1d_results(dq_local, process_mesh_4x1, dim=2)
-    dk_full = conftest.gather_1d_results(dk_local, process_mesh_4x1, dim=2)
-    dv_full = conftest.gather_1d_results(dv_local, process_mesh_4x1, dim=2)
+    dq_full = gather_1d_results(dq_local, process_mesh_4x1, dim=2)
+    dk_full = gather_1d_results(dk_local, process_mesh_4x1, dim=2)
+    dv_full = gather_1d_results(dv_local, process_mesh_4x1, dim=2)
 
     # print(f'Rank {local_rank} is gathered dQ full {dQ_full.sum()}')
     assert torch.allclose(out_full, out_ref, atol=1e-3)
@@ -448,10 +449,10 @@ def test_ring(device, process_mesh_4x1):
     )
 
     # Gather full values
-    x_full = conftest.gather_1d_results(x, process_mesh_4x1, dim=1)
-    q_ref = conftest.gather_1d_results(q_local, process_mesh_4x1, dim=2)
-    k_ref = conftest.gather_1d_results(k_local, process_mesh_4x1, dim=2)
-    v_ref = conftest.gather_1d_results(v_local, process_mesh_4x1, dim=2)
+    x_full = gather_1d_results(x, process_mesh_4x1, dim=1)
+    q_ref = gather_1d_results(q_local, process_mesh_4x1, dim=2)
+    k_ref = gather_1d_results(k_local, process_mesh_4x1, dim=2)
+    v_ref = gather_1d_results(v_local, process_mesh_4x1, dim=2)
 
     model = ring_attention.Ring(
         x_features=x_features,
