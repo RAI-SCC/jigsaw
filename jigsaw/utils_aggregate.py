@@ -97,10 +97,11 @@ def gather_1d_results(
 @torch.no_grad()
 def gather_1d_results_list(x: torch.Tensor, process_mesh: dist.device_mesh = None, pm_key="model"):
     """Gather 1d tensor distributed across process mesh rows."""
-    n_rows, n_cols = process_mesh["row"].size(), process_mesh["col"].size()
+    n_rows = process_mesh[pm_key].size()
     tensor_list = [
-        torch.zeros(x.shape, dtype=x.dtype, device=x.device)
-        for _ in range(n_rows * n_cols)
+        torch.zeros(x.shape, dtype=x.dtype, device=x.device) for _ in range(n_rows)
     ]
-    torch.distributed.all_gather(tensor_list, x, group=process_mesh[pm_key])
+    torch.distributed.all_gather(
+        tensor_list, x.contiguous(), group=process_mesh[pm_key]
+    )
     return tensor_list
