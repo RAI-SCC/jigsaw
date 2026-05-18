@@ -476,6 +476,7 @@ class DistributedXWT(torch.nn.Module):
             to_bias_shape_local = (
                 bias_shape_global // to_process_mesh[pm_col_key].size()
             )
+            
             assert bias_shape_global % to_process_mesh[pm_col_key].size() == 0, (
                 f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
             )
