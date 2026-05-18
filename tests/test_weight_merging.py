@@ -4,7 +4,7 @@ import torch.distributed as dist
 import random
 
 from tests import conftest
-from jigsaw import linear, mlp
+from jigsaw import linear, mlp, convolutions
 
 
 @pytest.fixture()
@@ -182,3 +182,63 @@ def test_mlp_weight_merging(request, from_pm, process_mesh_4x1x1, device):
     assert torch.allclose(
         layer2_bias_global, layer2_bias_gathered
     ), "Layer 2 gathered bias is not the same as the original"
+
+@pytest.mark.parametrize(
+    "from_pm,to_pm",
+    [
+        (from_pm, to_pm)
+        for from_pm in [
+            "process_mesh_2x2",
+            "process_mesh_2x1x2",
+            "process_mesh_1x4",
+            "process_mesh_4x1",
+            "process_mesh_2x2x1",
+        ]
+        for to_pm in [
+            "process_mesh_2x2",
+            "process_mesh_2x1x2",
+            "process_mesh_1x4",
+            "process_mesh_4x1",
+            "process_mesh_2x2x1",
+            "process_mesh_4x1x1",
+        ]
+    ],
+)
+def test_conv_weight_merging(request, from_pm, to_pm, device):
+    # initialize a linear layer
+    random.seed(0)
+    in_channels, out_channels, kernel_size = (
+        random.randint(1, 100) * 4,
+        random.randint(1, 100) * 4,
+        random.randint(1, 5)
+    )  # local
+    from_pm = request.getfixturevalue(from_pm)
+    to_pm = request.getfixturevalue(to_pm)
+    torch.manual_seed(from_pm["col"].rank())
+
+    conv_layer = convolutions.DistributedConv2D(
+        in_channels=in_channels,
+        out_channels=out_channels,
+        kernel_size=kernel_size,
+        local_rank=from_pm["model"].size(),
+        spatial_group=from_pm["row"],
+        channel_group=from_pm["col"],
+        device=device,
+        parallelism=from_pm["col"].size(),
+    )
+    local_weights_before, local_bias_before = conv_layer.weight, conv_layer.bias
+    gathered_weights_before = conftest.gather_1d_results(local_weights_before, from_pm, dim=0, pm_key='col')
+    gathered_bias_before = conftest.gather_1d_results(
+        local_bias_before, from_pm, dim=0, pm_key="col"
+    )
+    conv_layer.reshard_parameters(from_pm, to_pm)
+    local_weights_after = conv_layer.weight
+    local_bias_after = conv_layer.bias
+    gathered_weights_after = conftest.gather_1d_results(local_weights_after, to_pm, dim=0, pm_key='col')
+    gathered_bias_after = conftest.gather_1d_results(
+        local_bias_after, to_pm, dim=0, pm_key="col"
+    )
+    print(f'local weights before {local_weights_before.shape} gathered weights before shape {gathered_weights_before.shape} local weights {local_weights_before.shape}')
+    assert torch.allclose(gathered_weights_before, gathered_weights_after)
+    assert conv_layer.parallelism == to_pm["col"].size()
+    assert torch.allclose(gathered_bias_before, gathered_bias_after)

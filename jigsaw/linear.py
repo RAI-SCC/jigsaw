@@ -422,7 +422,7 @@ class DistributedXWT(torch.nn.Module):
 
     def merge_weights(self, from_process_mesh: dist.ProcessGroup):
         """Gathers and returns global weights (and bias) without modifying self."""
-        global_weights = gather_results_transpose(self.weight, from_process_mesh)
+        global_weights = gather_results(self.weight, from_process_mesh)
         
         global_bias = None
         if self.bias is not None:
