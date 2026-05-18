@@ -630,9 +630,9 @@ class DistributedConv2D(torch.nn.Module):
             *weight_shape_global[1:],
         )
 
-        assert weight_shape_global[0] % to_process_mesh[pm_col_key].size() == 0, (
-            f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh[pm_col_key].size()}"
-        )
+        assert (
+            weight_shape_global[0] % to_process_mesh[pm_col_key].size() == 0
+        ), f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh[pm_col_key].size()}"
         # gather
         global_weights = gather_1d_results(
             self.weight, to_process_mesh, dim=0, pm_key=pm_col_key
@@ -647,9 +647,9 @@ class DistributedConv2D(torch.nn.Module):
                 bias_shape_global // to_process_mesh[pm_col_key].size()
             )
 
-            assert bias_shape_global % to_process_mesh[pm_col_key].size() == 0, (
-                f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
-            )
+            assert (
+                bias_shape_global % to_process_mesh[pm_col_key].size() == 0
+            ), f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
 
             global_bias = gather_1d_results(
                 self.bias, from_process_mesh, pm_key=pm_col_key
@@ -1099,6 +1099,83 @@ class DistributedConvTranspose2D(torch.nn.Module):
         return num_param + self.weight.numel() // dist.get_world_size(
             group=self.spatial_group
         )
+
+    def reshard_parameters(
+        self,
+        from_process_mesh: dist.ProcessGroup,
+        to_process_mesh: dist.ProcessGroup,
+        pm_row_key="row",
+        pm_col_key="col",
+    ):
+        """Reshard parameters of weights according to a new process group."""
+        self.parallelism = to_process_mesh[pm_col_key].size()
+        self.selector = ConvTransposeSelectionStrategy(
+            self.bayesian,
+            self.parallelism,
+            self.bias,
+            self.kernel_size,
+            self.stride,
+        )
+
+        from_weight_shape_local = self.weight.shape
+        weight_shape_global = (
+            from_weight_shape_local[0] * from_process_mesh[pm_col_key].size(),
+            *from_weight_shape_local[1:],
+        )
+        to_weight_shape_local = (
+            weight_shape_global[0] // to_process_mesh[pm_col_key].size(),
+            *weight_shape_global[1:],
+        )
+
+        assert (
+            weight_shape_global[0] % to_process_mesh[pm_col_key].size() == 0
+        ), f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+        # gather
+        global_weights = gather_1d_results(
+            self.weight, to_process_mesh, dim=1, pm_key=pm_col_key
+        )
+
+        if self.bias is not None:
+            from_bias_shape_local = self.bias.shape
+            bias_shape_global = (
+                from_bias_shape_local[0] * from_process_mesh[pm_col_key].size()
+            )
+            to_bias_shape_local = (
+                bias_shape_global // to_process_mesh[pm_col_key].size()
+            )
+            assert (
+                bias_shape_global % to_process_mesh[pm_col_key].size() == 0
+            ), f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+            
+            global_bias = gather_1d_results(
+                self.bias, from_process_mesh, dim=0, pm_key=pm_col_key
+            )
+            
+        col_rank, col_shard_size = (
+            to_process_mesh[pm_col_key].rank(),
+            to_weight_shape_local[1],
+        )
+
+        self.weight = torch.nn.Parameter(
+            global_weights[
+                :, col_rank * col_shard_size : (col_rank + 1) * col_shard_size, ...
+            ].contiguous()
+        )
+        del global_weights
+
+        col_rank, col_shard_size = (
+            to_process_mesh[pm_col_key].rank(),
+            to_bias_shape_local,
+        )
+
+        if self.bias is not None:
+            self.bias = torch.nn.Parameter(
+                global_bias[
+                    col_rank * col_shard_size : (col_rank + 1) * col_shard_size
+                ].contiguous()
+            )
+            del global_bias
+            print(f"{self.local_rank} self bias {self.bias.sum()}. slice {col_rank * col_shard_size } :{(col_rank + 1) * col_shard_size}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
