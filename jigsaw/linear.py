@@ -8,7 +8,7 @@ import torch.nn.functional as F  # noqa
 from . import distributed_matmul as dist_mm
 from . import distributed_roll as dist_roll
 from . import hooks
-from .utils_aggregate import gather_results, gather_1d_results
+from .utils_aggregate import gather_1d_results, gather_results
 
 
 class RollSelectionStrategy:
@@ -423,15 +423,14 @@ class DistributedXWT(torch.nn.Module):
     def merge_weights(self, from_process_mesh: dist.ProcessGroup):
         """Gathers and returns global weights (and bias) without modifying self."""
         global_weights = gather_results(self.weight, from_process_mesh)
-        
+
         global_bias = None
         if self.bias is not None:
             global_bias = gather_1d_results(
                 self.bias, from_process_mesh, dim=0, pm_key="col"
             )
-        
-        return global_weights, global_bias
 
+        return global_weights, global_bias
 
     def reshard_parameters(
         self,
@@ -462,26 +461,36 @@ class DistributedXWT(torch.nn.Module):
             weight_shape_global[0] // to_process_mesh[pm_row_key].size(),
             weight_shape_global[1] // to_process_mesh[pm_col_key].size(),
         )
-        assert (
-            weight_shape_global[0] % to_process_mesh[pm_row_key].size() == 0
-        ), f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh[pm_row_key].size()}"
-        assert (
-            weight_shape_global[1] % to_process_mesh[pm_col_key].size() == 0
-        ), f"global weight shape[1] is {weight_shape_global[1]} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+        assert weight_shape_global[0] % to_process_mesh[pm_row_key].size() == 0, (
+            f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh[pm_row_key].size()}"
+        )
+        assert weight_shape_global[1] % to_process_mesh[pm_col_key].size() == 0, (
+            f"global weight shape[1] is {weight_shape_global[1]} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+        )
 
         if self.bias is not None:
             from_bias_shape_local = self.bias.shape
-            bias_shape_global = from_bias_shape_local[0] * from_process_mesh[pm_col_key].size()
-            to_bias_shape_local = bias_shape_global // to_process_mesh[pm_col_key].size()
-            assert (
-                bias_shape_global % to_process_mesh[pm_col_key].size() == 0
-            ), f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+            bias_shape_global = (
+                from_bias_shape_local[0] * from_process_mesh[pm_col_key].size()
+            )
+            to_bias_shape_local = (
+                bias_shape_global // to_process_mesh[pm_col_key].size()
+            )
+            assert bias_shape_global % to_process_mesh[pm_col_key].size() == 0, (
+                f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+            )
 
         # Gather
         global_weights, global_bias = self.merge_weights(from_process_mesh)
 
-        row_rank, row_shard_size = to_process_mesh[pm_row_key].rank(), to_weight_shape_local[0]
-        col_rank, col_shard_size = to_process_mesh[pm_col_key].rank(), to_weight_shape_local[1]
+        row_rank, row_shard_size = (
+            to_process_mesh[pm_row_key].rank(),
+            to_weight_shape_local[0],
+        )
+        col_rank, col_shard_size = (
+            to_process_mesh[pm_col_key].rank(),
+            to_weight_shape_local[1],
+        )
 
         self.weight = torch.nn.Parameter(
             global_weights[
@@ -570,7 +579,9 @@ class XWT(torch.autograd.Function):
         ctx.bayesian = bayesian
 
     @staticmethod
-    def backward(ctx: torch.autograd.Function, grad_output: torch.Tensor) -> tuple[
+    def backward(
+        ctx: torch.autograd.Function, grad_output: torch.Tensor
+    ) -> tuple[
         torch.Tensor,
         torch.Tensor,
         Optional[torch.Tensor],
@@ -785,7 +796,6 @@ class DistributedXWTSync(torch.nn.Module):
         pm_col_key="col",
     ):
         """from_process_mesh has process mesh with 'row' and 'col' flags."""
-
         # re-define self selector
         self.parallelism = to_process_mesh["model"].size()
         self.selector = LinearSelectionStrategy(
@@ -808,15 +818,15 @@ class DistributedXWTSync(torch.nn.Module):
             weight_shape_global[1] // to_process_mesh["col"].size(),
         )
 
-        assert (
-            weight_shape_global[0] % to_process_mesh["row"].size() == 0
-        ), f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh['row'].size()}"
-        assert (
-            weight_shape_global[1] % to_process_mesh["col"].size() == 0
-        ), f"global weight shape[1] is {weight_shape_global[1]} which is not divisible by {to_process_mesh['col'].size()}"
+        assert weight_shape_global[0] % to_process_mesh["row"].size() == 0, (
+            f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh['row'].size()}"
+        )
+        assert weight_shape_global[1] % to_process_mesh["col"].size() == 0, (
+            f"global weight shape[1] is {weight_shape_global[1]} which is not divisible by {to_process_mesh['col'].size()}"
+        )
 
         # gather
-        global_weights = gather_results_transpose(self.weight, from_process_mesh)
+        global_weights = gather_results(self.weight, from_process_mesh)
 
         if self.bias is not None:
             from_bias_shape_local = self.bias.shape
@@ -824,9 +834,9 @@ class DistributedXWTSync(torch.nn.Module):
                 from_bias_shape_local[0] * from_process_mesh["col"].size()
             )
             to_bias_shape_local = bias_shape_global // to_process_mesh["col"].size()
-            assert (
-                bias_shape_global % to_process_mesh["col"].size() == 0
-            ), f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh['col'].size()}"
+            assert bias_shape_global % to_process_mesh["col"].size() == 0, (
+                f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh['col'].size()}"
+            )
 
             global_bias = gather_1d_results(
                 self.bias, from_process_mesh, dim=0, pm_key="col"
@@ -963,7 +973,9 @@ class XWTSync(torch.autograd.Function):
         ctx._fwd_used_autocast = x.is_floating_point() and x.dtype != torch.float32
 
     @staticmethod
-    def backward(ctx: torch.autograd.Function, grad_output: torch.Tensor) -> tuple[
+    def backward(
+        ctx: torch.autograd.Function, grad_output: torch.Tensor
+    ) -> tuple[
         torch.Tensor,
         torch.Tensor,
         Union[torch.Tensor, None],
@@ -1156,7 +1168,6 @@ class DistributedXW(torch.nn.Module):
         pm_col_key="col",
     ):
         """from_process_mesh has process mesh with 'row' and 'col' flags."""
-
         # re-define self selector
         self.parallelism = to_process_mesh["model"].size()
         self.selector = LinearSelectionStrategy(
@@ -1179,15 +1190,15 @@ class DistributedXW(torch.nn.Module):
             weight_shape_global[1] // to_process_mesh["col"].size(),
         )
 
-        assert (
-            weight_shape_global[0] % to_process_mesh["row"].size() == 0
-        ), f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh['row'].size()}"
-        assert (
-            weight_shape_global[1] % to_process_mesh["col"].size() == 0
-        ), f"global weight shape[1] is {weight_shape_global[1]} which is not divisible by {to_process_mesh['col'].size()}"
+        assert weight_shape_global[0] % to_process_mesh["row"].size() == 0, (
+            f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh['row'].size()}"
+        )
+        assert weight_shape_global[1] % to_process_mesh["col"].size() == 0, (
+            f"global weight shape[1] is {weight_shape_global[1]} which is not divisible by {to_process_mesh['col'].size()}"
+        )
 
         # gather
-        global_weights = gather_results_transpose(self.weight, from_process_mesh)
+        global_weights = gather_results(self.weight, from_process_mesh)
 
         if self.bias is not None:
             from_bias_shape_local = self.bias.shape
@@ -1195,9 +1206,9 @@ class DistributedXW(torch.nn.Module):
                 from_bias_shape_local[0] * from_process_mesh["col"].size()
             )
             to_bias_shape_local = bias_shape_global // to_process_mesh["col"].size()
-            assert (
-                bias_shape_global % to_process_mesh["col"].size() == 0
-            ), f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh['col'].size()}"
+            assert bias_shape_global % to_process_mesh["col"].size() == 0, (
+                f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh['col'].size()}"
+            )
 
             global_bias = gather_1d_results(
                 self.bias, from_process_mesh, dim=0, pm_key="col"
@@ -1510,7 +1521,6 @@ class DistributedXTW(torch.nn.Module):
         self, from_process_mesh: dist.ProcessGroup, to_process_mesh: dist.ProcessGroup
     ):
         """from_process_mesh has process mesh with 'row' and 'col' flags."""
-
         # re-define self selector
         self.parallelism = to_process_mesh["model"].size()
         self.selector = LinearSelectionStrategy(
@@ -1533,12 +1543,12 @@ class DistributedXTW(torch.nn.Module):
             weight_shape_global // to_process_mesh["col"].size(),
         )
 
-        assert (
-            weight_shape_global[0] % to_process_mesh["row"].size() == 0
-        ), f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh['row'].size()}"
-        assert (
-            weight_shape_global[1] % to_process_mesh["col"].size() == 0
-        ), f"global weight shape[1] is {weight_shape_global[1]} which is not divisible by {to_process_mesh['col'].size()}"
+        assert weight_shape_global[0] % to_process_mesh["row"].size() == 0, (
+            f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh['row'].size()}"
+        )
+        assert weight_shape_global[1] % to_process_mesh["col"].size() == 0, (
+            f"global weight shape[1] is {weight_shape_global[1]} which is not divisible by {to_process_mesh['col'].size()}"
+        )
 
         # gather
         global_weights = gather_results(self.weight, from_process_mesh)
@@ -1550,9 +1560,9 @@ class DistributedXTW(torch.nn.Module):
             )
             to_bias_shape_local = bias_shape_global // to_process_mesh["row"].size()
 
-            assert (
-                bias_shape_global % to_process_mesh["row"] == 0
-            ), f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh['row'].size()}"
+            assert bias_shape_global % to_process_mesh["row"] == 0, (
+                f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh['row'].size()}"
+            )
 
             global_bias = gather_results(
                 self.bias, from_process_mesh

@@ -36,6 +36,7 @@ def average_weights_module(
         else:
             dist.all_reduce(param, group=spatial_group, op=dist.ReduceOp.AVG)
 
+
 @torch.no_grad()
 def gather_results(x: torch.Tensor, process_mesh: dist.device_mesh = None):
     """Gather tensors split across arbitrary processes."""
@@ -57,6 +58,7 @@ def gather_results(x: torch.Tensor, process_mesh: dist.device_mesh = None):
         .reshape(*batch_dims, n_rows * h, n_cols * w)
     )
     return result
+
 
 @torch.no_grad()
 def gather_results_as_list(x: torch.Tensor, process_mesh: dist.device_mesh = None):
@@ -90,6 +92,7 @@ def gather_1d_results(
         dim = ndim + dim
     result = torch.cat(tensor_list, dim=dim)
     return result
+
 
 @torch.no_grad()
 def gather_1d_results_list(x: torch.Tensor, process_mesh: dist.device_mesh = None):

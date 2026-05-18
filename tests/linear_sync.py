@@ -1,4 +1,3 @@
-import pytest
 import torch
 import torch.distributed as dist
 
@@ -36,9 +35,7 @@ def test_sync_xwt(device, process_mesh_2x2):
 
         optimizer.step()
 
-    weights_gathered_as_list = gather_results_as_list(
-        linlayer.weight, process_mesh_2x2
-    )
+    weights_gathered_as_list = gather_results_as_list(linlayer.weight, process_mesh_2x2)
     weight_grad_gathered_as_list = gather_results_as_list(
         linlayer.weight.grad, process_mesh_2x2
     )
@@ -73,9 +70,7 @@ def test_param_init_xwt(device, process_mesh_2x2):
         False,
     ).to(device)
 
-    weights_gathered_as_list = gather_results_as_list(
-        linlayer.weight, process_mesh_2x2
-    )
+    weights_gathered_as_list = gather_results_as_list(linlayer.weight, process_mesh_2x2)
 
     for i in range(process_mesh_2x2["model"].size() // row_comm_size):
         assert torch.allclose(
@@ -96,9 +91,7 @@ def test_param_init_xwt(device, process_mesh_2x2):
         False,
     ).to(device)
 
-    weights_gathered_as_list = gather_results_as_list(
-        linlayer.weight, process_mesh_2x2
-    )
+    weights_gathered_as_list = gather_results_as_list(linlayer.weight, process_mesh_2x2)
 
     for i in range(process_mesh_2x2["model"].size() // row_comm_size):
         assert torch.allclose(

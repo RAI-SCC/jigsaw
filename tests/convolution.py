@@ -1,11 +1,8 @@
-import pytest
 import torch
 import torch.distributed as dist
 
-from jigsaw.utils_aggregate import gather_results_as_list
 import jigsaw.convolutions as conv
-from tests import conftest
-from tests.process_mesh import process_mesh_2x2
+from jigsaw.utils_aggregate import gather_results_as_list
 
 
 def test_param_init_conv2d(device, process_mesh_2x2):

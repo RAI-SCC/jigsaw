@@ -1,5 +1,6 @@
 import conftest
-import pytest 
+import pytest
+
 
 @pytest.fixture(scope="session")
 def process_mesh_2x2():
@@ -7,7 +8,8 @@ def process_mesh_2x2():
     return conftest.make_process_mesh(
         device_type="nccl", mesh_shape=[2, 2], mesh_dim_names=["row", "col"]
     )
-    
+
+
 @pytest.fixture(scope="session")
 def process_mesh_4x1():
     """Return process mesh."""
@@ -46,4 +48,3 @@ def process_mesh_2x2x1():
     return conftest.make_process_mesh(
         device_type="nccl", mesh_shape=[2, 2, 1], mesh_dim_names=["dp", "row", "col"]
     )
-

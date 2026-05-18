@@ -3,7 +3,6 @@ import torch.distributed as dist
 
 import jigsaw.distributed_matmul as dist_mm
 from jigsaw.utils_aggregate import gather_results
-from tests.process_mesh import process_mesh_2x2
 
 
 def test_xwt_fourway(device, process_mesh_2x2):

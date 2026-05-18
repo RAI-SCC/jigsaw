@@ -1,10 +1,7 @@
-import pytest
 import torch
 
 import jigsaw.distributed_matmul as dist_mm
-from tests import conftest
 from jigsaw.utils_aggregate import gather_results
-from tests.process_mesh import process_mesh_2x1x2
 
 
 def test_xwt_twoway(device, process_mesh_2x1x2):
