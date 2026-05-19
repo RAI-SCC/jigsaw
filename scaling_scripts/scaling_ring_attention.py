@@ -55,15 +55,21 @@ def training_loop(device: torch.device, local_rank: int) -> None:
     """Training loop for scaling experiments."""
     mesh_dict = make_process_mesh("nccl")
 
-    x_features = 256
-    output_dim = embed_dim = 256
-    b, heads, n_global, d = 1, 32, 524288, 256
+    x_features = 4096
+    batch_size = 1
+    heads = 16
+    n_global = 512
+    embed_dim = x_features // heads
 
     torch.manual_seed(2)
 
     # pass in the QKV mapping alone
     w_qkv = torch.randn(
-        3 * d * heads, d, device=device, requires_grad=True, dtype=torch.bfloat16
+        3 * embed_dim * heads,
+        x_features,
+        device=device,
+        requires_grad=True,
+        dtype=torch.bfloat16,
     )
 
     # define configs for the ring attention
@@ -81,7 +87,7 @@ def training_loop(device: torch.device, local_rank: int) -> None:
     ring_attention = attention_ring.Ring(
         x_features=x_features,
         embed_dim=embed_dim,
-        output_dim=output_dim,
+        output_dim=embed_dim,
         heads=heads,
         dropout=0.0,
         local_rank=local_rank,
@@ -97,7 +103,7 @@ def training_loop(device: torch.device, local_rank: int) -> None:
     model_baseline = attention_ring.RingBaseline(
         x_features=x_features,
         embed_dim=embed_dim,
-        output_dim=output_dim,
+        output_dim=embed_dim,
         heads=heads,
         dropout=0.0,
         local_rank=local_rank,
@@ -119,11 +125,11 @@ def training_loop(device: torch.device, local_rank: int) -> None:
 
         nvtx.range_push("Data Generation")
         x = torch.randn(
-            (b, n_global // mesh_dict["model"].size(), d),
+            (batch_size, n_global // mesh_dict["model"].size(), x_features),
             device=device,
             requires_grad=True,
             dtype=torch.bfloat16,
-        ) / (d**0.5)
+        ) / (x_features**0.5)
         nvtx.range_pop()
         nvtx.range_push("QKV")
         qkv = torch.matmul(x, w_qkv.mT)
@@ -132,7 +138,7 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         q, k, v = [
             t.detach().requires_grad_(True)
             for t in qkv.reshape(
-                b, n_global // mesh_dict["model"].size(), 3, heads, d
+                batch_size, n_global // mesh_dict["model"].size(), 3, heads, embed_dim
             ).permute(2, 0, 3, 1, 4)
         ]
         nvtx.range_pop()
@@ -166,8 +172,11 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         model_baseline.train()
         nvtx.range_push("Data Generation")
         x = torch.randn(
-            (b, n_global, d), device=device, requires_grad=True, dtype=torch.bfloat16
-        ) / (d**0.5)
+            (batch_size, n_global, x_features),
+            device=device,
+            requires_grad=True,
+            dtype=torch.bfloat16,
+        ) / (x_features**0.5)
         nvtx.range_pop()
         nvtx.range_push("QKV")
         qkv = torch.matmul(x, w_qkv.mT)
@@ -175,7 +184,9 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         nvtx.range_push("Reshape and Permute")
         q, k, v = [
             t.detach().requires_grad_(True)
-            for t in qkv.reshape(b, n_global, 3, heads, d).permute(2, 0, 3, 1, 4)
+            for t in qkv.reshape(batch_size, n_global, 3, heads, embed_dim).permute(
+                2, 0, 3, 1, 4
+            )
         ]
         nvtx.range_pop()
 
