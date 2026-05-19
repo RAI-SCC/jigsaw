@@ -142,6 +142,51 @@ class DistributedLNFunction(torch.autograd.Function):
         return grad_x, grad_weight, grad_bias, None, None, None
 
 
+class DistributedGroupNorm(torch.nn.Module):
+    """Distributed Group Norm with functionality to merge"""
+
+    def __init__(
+        self,
+        num_local_groups,
+        num_channels,
+        eps=1e-5,
+        affine=True,
+        device=None,
+        dtype=None,
+        bias=True,
+        channel_group: dist.ProcessGroup = None,
+    ):
+        super().__init__()
+
+        self.num_local_groups = num_local_groups
+        self.num_channels = num_channels
+        self.num_global_groups = num_local_groups * channel_group.size()
+        self.eps = eps
+        self.affine = affine
+        self.device = device
+        self.dtype = dtype
+        self.bias = bias
+        self.group_norm = torch.nn.GroupNorm(
+            self.num_local_groups,
+            self.num_channels,
+            eps=self.eps,
+            affine=self.affine,
+            device=self.device,
+            dtype=self.dtype,
+            bias=self.bias,
+        )
+    
+    def reshard_parameters(
+        self,
+        from_process_mesh: dist.ProcessGroup,
+        to_process_mesh: dist.ProcessGroup,
+        pm_row_key="row",
+        pm_col_key="col",
+    ):
+        assert self.num_global_groups % to_process_mesh[pm_col_key] == 0, "number of global LN groups must be divisible by to_process_mesh channel group size."
+        to_local_groups = self.num_global_groups // to_process_mesh[pm_col_key]
+        
+
 class DistributedNoParamLayerNorm(torch.nn.Module):
     """LayerNorm with synchronized gradients across a process group."""
 

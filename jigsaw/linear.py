@@ -398,6 +398,7 @@ class DistributedXWT(torch.nn.Module):
             B, out_dim are global values.
             in_dim is local value.
         """
+        print(f'I am here! local rank {self.local_rank} and x shape {x.shape}')
         cij = self.XWT(
             x,
             self.weight,
@@ -420,6 +421,39 @@ class DistributedXWT(torch.nn.Module):
         )
         return num_param + self.weight.numel()
 
+    @classmethod
+    def convert_to_jigsaw(cls, linear: torch.nn.Linear, process_mesh: dist.ProcessGroup, device: torch.device, spatial_kw: str="row", channel_kw: str="col", model_kw: str="model") -> "DistributedXWT":
+        assert linear.in_features % process_mesh[spatial_kw].size() == 0, "in_features is not divisible by process mesh rows"
+        assert linear.out_features % process_mesh[channel_kw].size() == 0, "out_features is not divisible by process mesh columns"
+        
+        instance = cls(
+            in_dim=linear.in_features//process_mesh[spatial_kw].size(),
+            out_dim=linear.out_features//process_mesh[channel_kw].size(),
+            bias=linear.bias is not None,
+            local_rank=process_mesh[model_kw].rank(), 
+            device=device,
+            parallelism=process_mesh[model_kw].size(),
+            model_group=process_mesh[model_kw],
+            spatial_group=process_mesh[spatial_kw],
+            bayesian=False # TODO
+        )
+        # Map weights — clone so the original graph is detached
+        out_rank = process_mesh[spatial_kw].rank()
+        out_shard = linear.out_features // process_mesh[spatial_kw].size()
+        in_rank = process_mesh[channel_kw].rank()
+        in_shard = linear.in_features // process_mesh[channel_kw].size()
+        instance.weight.data = linear.weight.data[
+            out_rank * out_shard : (out_rank + 1) * out_shard,
+            in_rank * in_shard : (in_rank + 1) * in_shard,
+        ].clone().to(device)
+        # instance.weight.data = linear.weight.data[row_rank * row_shard_size : (row_rank + 1) * row_shard_size,
+        #         col_rank * col_shard_size : (col_rank + 1) * col_shard_size].clone()
+        if linear.bias is not None:
+            bias_size = linear.out_features // process_mesh[channel_kw].size()
+            instance.bias.data = linear.bias.data[col_rank * bias_size : (col_rank + 1) * bias_size].clone()
+        return instance
+        
+    
     def merge_weights(self, from_process_mesh: dist.ProcessGroup):
         """Gathers and returns global weights (and bias) without modifying self."""
         global_weights = gather_results(self.weight, from_process_mesh)

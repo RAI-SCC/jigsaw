@@ -53,22 +53,6 @@ def test_distributed_layer_norm(request, device, process_mesh):
     b_gathered = gather_1d_results(
         layer_norm.bias.data, process_mesh, dim=0, pm_key="col"
     )
-    w_as_list = gather_1d_results_list(
-        layer_norm.weight.data,
-        process_mesh=process_mesh,
-        pm_key="model"
-    )
-    b_as_list = gather_1d_results_list(
-        layer_norm.bias.data,
-        process_mesh=process_mesh,
-        pm_key="model"
-    )
-    
-    x_as_list = gather_1d_results_list(
-        x,
-        process_mesh=process_mesh,
-        pm_key="model"
-    )
     
     ref_layer_norm = torch.nn.LayerNorm(
         local_dim * process_mesh["col"].size(), device=device
