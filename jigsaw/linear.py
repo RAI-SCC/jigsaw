@@ -663,6 +663,7 @@ class XWT(torch.autograd.Function):
             device=device,
             model_group=model_group,
         )
+        print(f'Grad weight shape {grad_weight.shape}, ctx bayesian {ctx.bayesian}')
 
         grad_weight = selector.grad_sum(
             grad_weight, ctx.bayesian
