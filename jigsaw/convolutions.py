@@ -558,8 +558,7 @@ class DistributedConv2D(torch.nn.Module):
         self.empty = torch.empty(0, device=device, dtype=dtype)
         self.bayesian = bayesian
 
-        # * 2 should be channel group size
-        k = np.sqrt(1 / (self.in_channels * 2 * kernel_size[0] * kernel_size[1]))
+        k = np.sqrt(1 / (self.in_channels * channel_group.size() * kernel_size[0] * kernel_size[1]))
         self.weight = torch.nn.parameter.Parameter(
             torch.zeros(
                 self.out_channels, self.in_channels, kernel_size[0], kernel_size[1]
@@ -1097,7 +1096,42 @@ class DistributedConvTranspose2D(torch.nn.Module):
         return num_param + self.weight.numel() // dist.get_world_size(
             group=self.spatial_group
         )
-
+        
+    @classmethod
+    def convert_to_jigsaw(cls, conv: torch.nn.Conv2d, process_mesh: dist.ProcessGroup, device: torch.device, spatial_kw: str="row", channel_kw: str="col", model_kw: str="model") -> "DistributedConv2d":
+        assert conv.in_channels % process_mesh[channel_kw].size() == 0, "in_features is not divisible by process mesh cols"
+        
+        instance = cls(
+            in_channels=conv.in_channels//process_mesh[spatial_kw].size(),
+            out_channels=conv.out_channels,
+            kernel_size=conv.kernel_size,
+            stride=conv.stride,
+            padding=conv.padding,
+            dilation=conv.dilation,
+            groups=conv.groups,
+            bias=conv.bias is not None,
+            local_rank=process_mesh[model_kw].rank(), 
+            spatial_group=process_mesh[spatial_kw],
+            channel_group=process_mesh[channel_kw]
+            device=device,
+            parallelism=process_mesh[model_kw].size(),
+            bayesian=False, # TODO
+            dtype=conv.dtype
+        )
+        # Map weights — clone so the original graph is detached
+        in_rank = process_mesh[channel_kw].rank()
+        in_shard = conv.in_channels // process_mesh[channel_kw].size()
+        
+        instance.weight.data = conv.weight.data[
+            in_rank * in_shard : (in_rank + 1) * in_shard
+        ].clone().to(device)
+        
+        if conv.bias is not None:
+            bias_size = conv.out_features // process_mesh[channel_kw].size()
+            instance.bias.data = conv.bias.data[in_rank * bias_size : (in_rank + 1) * bias_size].clone()
+        return instance
+        
+        
     def reshard_parameters(
         self,
         from_process_mesh: dist.ProcessGroup,
