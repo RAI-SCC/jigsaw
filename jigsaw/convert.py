@@ -8,28 +8,6 @@ mapped_modules = {
     torch.nn.ConvTranspose2d: convolutions.DistributedConvTranspose2D
 }
 
-_blacklist = {
-    torch.nn.Identity,
-    # in-place activations
-    torch.nn.Threshold,
-    torch.nn.ReLU,
-    torch.nn.RReLU,
-    torch.nn.Hardtanh,
-    torch.nn.ReLU6,
-    torch.nn.Sigmoid,
-    torch.nn.Hardsigmoid,
-    torch.nn.Tanh,
-    torch.nn.SiLU,
-    torch.nn.Mish,
-    torch.nn.Hardswish,
-    torch.nn.ELU,
-    torch.nn.CELU,
-    torch.nn.SELU,
-    torch.nn.GLU,
-    torch.nn.GELU,
-    torch.nn.LeakyReLU,
-}
-
 container_converters = {
     attention.Transformer: attention.Transformer.convert_transformer_to_jigsaw
 }

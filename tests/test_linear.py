@@ -75,8 +75,6 @@ def test_xwt_forward(device, process_mesh_2x1x2):
     ref_linlayer = torch.nn.Linear(in_dim * 2, out_dim, bias=False).to(device)
     ref_linlayer.weight.data = w_gathered
     
-    print(f"\n\n\n w global {ref_linlayer.weight.shape}, w local {linlayer.weight.shape}")
-
     y = linlayer(x_in)
     y_ref = ref_linlayer(x_gathered)
 

@@ -470,14 +470,34 @@ class DistributedXWT(torch.nn.Module):
             ].clone()
         return instance
 
-    def merge_weights(self, from_process_mesh: dist.ProcessGroup):
+    def convert_to_vanilla(
+        self,
+        process_mesh: dist.ProcessGroup,
+        row_kw: str = "row",
+        col_kw: str = "col",
+        model_kw: str = "model",
+    ) -> torch.nn.Linear:
+        weights, bias = self.merge_weights(process_mesh, row_kw, col_kw, model_kw)
+        linear = torch.nn.Linear(
+            in_features = weights.shape[1],
+            out_features = weights.shape[0],
+            bias=True if bias is not None else False,
+            device=self.device,
+            dtype=self.dtype
+        )
+        linear.weights.data = weights
+        linear.bias.data = bias
+        
+        return linear
+    
+    def merge_weights(self, from_process_mesh: dist.ProcessGroup, row_kw="row", col_kw="col", model_kw="model"):
         """Gathers and returns global weights (and bias) without modifying self."""
-        global_weights = gather_results(self.weight, from_process_mesh)
+        global_weights = gather_results(self.weight, from_process_mesh, row_kw, col_kw, model_kw)
 
         global_bias = None
         if self.bias is not None:
             global_bias = gather_1d_results(
-                self.bias, from_process_mesh, dim=0, pm_key="col"
+                self.bias, from_process_mesh, dim=0, pm_key=col_kw
             )
 
         return global_weights, global_bias

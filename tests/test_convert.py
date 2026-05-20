@@ -313,7 +313,7 @@ def test_jigsaw_transformer(device, process_mesh_2x1x2):
     transformer = Transformer(embed_dim, heads, device, dropout_p=0.0)
 
     # copy weights
-    qkv_weight = transformer.qkv.weight.clone()
+    ref_qkv_w = transformer.qkv.weight.clone()
     ref_head_cat_w = transformer.head_concat.weight.clone()
     x_global = torch.randn(1, x_seq, embed_dim, device=device)
     x_global.requires_grad_(True)
@@ -321,6 +321,7 @@ def test_jigsaw_transformer(device, process_mesh_2x1x2):
     ref_forward = transformer(x_global)
     ref_forward.backward(torch.ones_like(x_global, device=device))
     ref_qkv_grad = transformer.qkv.weight.grad
+    ref_cat_grad = transformer.head_concat.weight.grad
     ref_x_grad = x_global.grad
 
     row_rank, col_rank = (
@@ -349,18 +350,22 @@ def test_jigsaw_transformer(device, process_mesh_2x1x2):
     dist_forward = jigsaw_transformer(x_local)
     dist_forward.backward(torch.ones_like(x_local, device=device))
     dist_head_cat_w = jigsaw_transformer.head_concat.weight
+    dist_cat_grad = jigsaw_transformer.head_concat.weight.grad
     
     dist_x_grad = x_local.grad
 
-    # dist_qkv_w = jigsaw_transformer.qkv.weight
+    dist_qkv_w = jigsaw_transformer.qkv.weight
 
     dist_forward = gather_1d_results(
         dist_forward, process_mesh_2x1x2, dim=-1, pm_key="col"
     )
     dist_head_cat_w = gather_1d_results(dist_head_cat_w, process_mesh_2x1x2, pm_key="col", dim=-1)
+    dist_qkv_w = gather_1d_results(dist_qkv_w, process_mesh_2x1x2, pm_key="col", dim=-1)    
     dist_x_grad = gather_1d_results(dist_x_grad, process_mesh_2x1x2, pm_key="col", dim=-1)
-    # print(f'sums {ref_forward.sum()} dist forward {dist_forward.sum()}')
+    dist_cat_grad = gather_1d_results(dist_cat_grad, process_mesh_2x1x2, pm_key="col", dim=-1)
     
-    assert torch.allclose(ref_head_cat_w, dist_head_cat_w), "forward does not match"
     assert torch.allclose(ref_forward, dist_forward, atol=1e-5), "forward does not match"
+    assert torch.allclose(ref_qkv_w.sum(), dist_qkv_w.sum(), atol=1e-5), "sum of weights do not match"
+    assert torch.allclose(ref_head_cat_w, dist_head_cat_w), "forward does not match"
+    assert torch.allclose(ref_cat_grad, dist_cat_grad), "grad of head concat does not match"
     assert torch.allclose(ref_x_grad, dist_x_grad, atol=1e-4), "grad of x does not match"

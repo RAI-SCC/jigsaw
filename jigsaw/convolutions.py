@@ -1199,7 +1199,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
         row_kw: str = "row",
         col_kw: str = "col",
         model_kw: str = "model",
-    ) -> torch.nn.Conv2D:
+    ) -> torch.nn.ConvTranspose2d:
         weights, bias = self.merge_weights(process_mesh, col_kw)
         convtranspose2d = torch.nn.ConvTranspose2d(
             in_channels=weights.shape[0],

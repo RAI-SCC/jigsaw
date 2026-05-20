@@ -461,8 +461,8 @@ class Transformer(torch.nn.Module):
         # out has shape [B, h, N, d]
         out = rearrange(out, "... n h s d -> ... n s (h d)").to(x.dtype)
         
-        values = self.head_concat(out)
-        return values
+        out = self.head_concat(out)
+        return out
 
     def convert_transformer_to_jigsaw(
         transformer,
@@ -508,9 +508,7 @@ class Transformer(torch.nn.Module):
             channel_kw,
             model_kw,
         )
-        print(f'after!! jigsaw shape {transformer.qkv.weight.shape}')
-        # W has shape: [768, 256]
-        
+        # W has shape: [768, 256]       
         # [3, 2, 128, 256]
         first_head = W[:, :heads_per_shard]
         second_head = W[:, heads_per_shard:heads_per_shard*2]
