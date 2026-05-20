@@ -6,6 +6,7 @@ from . import linear, mlp
 from . import normalization as norm
 
 
+
 class DistributedWindowedAttention(torch.nn.Module):
     """Distributed windowed attention."""
 
@@ -46,9 +47,9 @@ class DistributedWindowedAttention(torch.nn.Module):
         self.embed_dim = embed_dim
         self.x_features = x_features
 
-        assert self.parallelism == 2, (
-            "windowed attention is only designed for parallelism = 2"
-        )
+        assert (
+            self.parallelism == 2
+        ), "windowed attention is only designed for parallelism = 2"
 
         self.qkv = linear.DistributedXWTSync(
             x_features // 2,
@@ -159,9 +160,9 @@ class DistributedWindowedFlashAttention(torch.nn.Module):
         self.dtype = dtype
         self.dropout = dropout
 
-        assert self.parallelism == 2, (
-            "windowed attention is only designed for parallelism = 2"
-        )
+        assert (
+            self.parallelism == 2
+        ), "windowed attention is only designed for parallelism = 2"
 
         self.qkv = linear.DistributedXWTSync(
             x_features // 2,
@@ -424,3 +425,124 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
         x = self.mlp(self.layer_norm2(x, noise)) + x
 
         return x
+
+
+class Transformer(torch.nn.Module):
+    def __init__(self, embed_dim, heads, device, dropout_p=0.0):
+        super().__init__()
+        self.qkv = torch.nn.Linear(
+            in_features=embed_dim,
+            out_features=3 * embed_dim,
+            bias=False,
+            device=device,
+        )
+        self.head_concat = torch.nn.Linear(
+            in_features=embed_dim, out_features=embed_dim, bias=False, device=device
+        )
+        self.heads = heads
+        self.embed_dim = embed_dim
+        self.dropout_p = dropout_p
+
+    def forward(self, x):
+        qkv = self.qkv(x)
+        qkv = qkv.reshape(
+            qkv.shape[0], qkv.shape[1], 3, self.heads, qkv.shape[2] // 3 // self.heads
+        )
+
+        q, k, v = qkv.permute(2, 0, 3, 1, 4).to(torch.bfloat16)
+
+        with torch.nn.attention.sdpa_kernel(
+            torch.nn.attention.SDPBackend.FLASH_ATTENTION
+        ):
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, is_causal=False, dropout_p=self.dropout_p
+            )
+
+        # out has shape [B, h, N, d]
+        out = rearrange(out, "... n h s d -> ... n s (h d)").to(x.dtype)
+
+        # values = self.head_concat(out)
+        return out
+
+    def convert_transformer_to_jigsaw(
+        transformer,
+        synchronize,
+        process_mesh,
+        device,
+        spatial_kw="row",
+        channel_kw="col",
+        model_kw="model",
+    ):
+        channel_size = process_mesh[channel_kw].size()
+        channel_rank = process_mesh[channel_kw].rank()
+        spatial_size = process_mesh[spatial_kw].size()
+        spatial_rank = process_mesh[spatial_kw].rank()
+
+        assert (
+            transformer.heads % channel_size == 0
+        ), f"num_heads={transformer.heads} not divisible by channel size {channel_size}"
+        assert (
+            transformer.embed_dim % spatial_size == 0
+        ), f"embed_dim={transformer.embed_dim} not divisible by spatial size {spatial_size}"
+
+        heads_per_shard = transformer.heads // channel_size
+        
+        # --- shard the fused QKV ---
+        # qkv.weight has shape (3 * embed_dim, embed_dim) = (3 * heads * head_dim, embed_dim)
+        # Shard: heads across channel group, in_features across spatial group
+        # Critically: shard *within* the (3, heads, head_dim) structure so each rank
+        # gets a contiguous set of heads for q, k, v separately — NOT a flat slice
+        # of the output dim, which would tear q/k/v apart.
+        print(f'before!! w_qkv shape {transformer.qkv.weight.shape}')
+        W = transformer.qkv.weight.data.view(
+            3, transformer.heads, transformer.embed_dim//transformer.heads, transformer.embed_dim
+        ).clone()
+        # slice heads on channel group, in_features on spatial group
+        
+        # Build the Distributed Linear and overwrite its weight
+        transformer.qkv = linear.DistributedXWT.convert_to_jigsaw(
+            transformer.qkv,
+            process_mesh,
+            device,
+            spatial_kw,
+            channel_kw,
+            model_kw,
+        )
+        print(f'after!! jigsaw shape {transformer.qkv.weight.shape}')
+        # W has shape: [768, 256]
+        
+        # [3, 2, 128, 256]
+        first_head = W[:, :heads_per_shard]
+        second_head = W[:, heads_per_shard:heads_per_shard*2]
+        # [3, 1, 128, 256]
+        first_head = first_head.reshape(-1, 256)
+        second_head = second_head.reshape(-1, 256)
+        # each has shape 384, 256
+        
+        # global W has shape {768, 256}
+        W_local = torch.ones(768, 128, device=device)
+        
+        if process_mesh["model"].rank() % 2 ==  0:
+            W_local[:384, :128] = first_head[...,:128] # 
+            W_local[384:, :128] = second_head[...,:128]# 
+        else:
+            W_local[:384] = first_head[...,128:]
+            W_local[384:] = second_head[...,128:]
+        
+        transformer.qkv.weight.data = W_local.contiguous()
+        
+        # transformer.head_concat = linear.DistributedXWT.convert_to_jigsaw(
+        #     transformer.head_concat,
+        #     process_mesh,
+        #     device,
+        #     spatial_kw,
+        #     channel_kw,
+        #     model_kw,
+        # )
+
+        # Update head count to reflect local shard
+        transformer.heads = heads_per_shard
+        # embed_dim attribute: keep global value, since forward uses embed_dim // heads
+        # which still gives head_dim correctly
+
+        return transformer

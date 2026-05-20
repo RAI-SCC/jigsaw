@@ -7,6 +7,7 @@ from jigsaw.utils_aggregate import (
     gather_1d_results_list,
     gather_results,
 )
+from process_mesh import process_mesh_2x2, process_mesh_2x1x2
 
 
 def test_xwt_forward(device, process_mesh_2x2):
@@ -14,7 +15,8 @@ def test_xwt_forward(device, process_mesh_2x2):
     local_rank = dist.get_rank(group=process_mesh_2x2["model"])
     torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
 
-    in_dim, out_dim = 5, 10
+    # local
+    in_dim, out_dim = 2, 1
     seq_local = 20
 
     linlayer = linear.DistributedXWT(
@@ -29,16 +31,56 @@ def test_xwt_forward(device, process_mesh_2x2):
         False,
     ).to(device)
     x_in = torch.randn(1, seq_local, in_dim, dtype=linlayer.weight.dtype, device=device)
+
     x_gathered = gather_results(x_in, process_mesh=process_mesh_2x2)
     w_gathered = gather_results(linlayer.weight.data, process_mesh=process_mesh_2x2)
 
     ref_linlayer = torch.nn.Linear(in_dim * 2, out_dim * 2, bias=False).to(device)
     ref_linlayer.weight.data = w_gathered
+    print(f"w global {ref_linlayer.weight.shape}, w local {linlayer.weight.shape}")
 
     y = linlayer(x_in)
     y_ref = ref_linlayer(x_gathered)
 
     y_gathered = gather_results(y, process_mesh=process_mesh_2x2)
+    assert torch.allclose(y_gathered, y_ref, atol=1e-5)
+
+
+def test_xwt_forward(device, process_mesh_2x1x2):
+    """Test single forward pass of a linear layer."""
+    local_rank = dist.get_rank(group=process_mesh_2x1x2["model"])
+    torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
+
+    # local
+    in_dim, out_dim = 2, 2
+    seq_local = 5
+
+    linlayer = linear.DistributedXWT(
+        in_dim,
+        out_dim,
+        False,
+        local_rank,
+        device,
+        process_mesh_2x1x2["model"].size(),
+        process_mesh_2x1x2["model"],
+        process_mesh_2x1x2["row"],
+        False,
+    ).to(device)
+
+    x_in = torch.randn(1, seq_local, in_dim, dtype=linlayer.weight.dtype, device=device)
+
+    x_gathered = gather_results(x_in, process_mesh=process_mesh_2x1x2)
+    w_gathered = gather_results(linlayer.weight.data, process_mesh=process_mesh_2x1x2)
+
+    ref_linlayer = torch.nn.Linear(in_dim * 2, out_dim, bias=False).to(device)
+    ref_linlayer.weight.data = w_gathered
+    
+    print(f"\n\n\n w global {ref_linlayer.weight.shape}, w local {linlayer.weight.shape}")
+
+    y = linlayer(x_in)
+    y_ref = ref_linlayer(x_gathered)
+
+    y_gathered = gather_results(y, process_mesh=process_mesh_2x1x2)
     assert torch.allclose(y_gathered, y_ref, atol=1e-5)
 
 
@@ -221,7 +263,7 @@ def test_xwt_forward_bias(device, process_mesh_2x2):
     x_in = torch.randn(1, seq_local, in_dim, dtype=linlayer.weight.dtype, device=device)
     x_gathered = gather_results(x_in, process_mesh=process_mesh_2x2)
     w_gathered = gather_results(linlayer.weight.data, process_mesh=process_mesh_2x2)
-    b_gathered = gather_1d_results(linlayer.bias.data, process_mesh=process_mesh_2x2)
+    b_gathered = gather_1d_results(linlayer.bias.data, process_mesh=process_mesh_2x2, pm_key="col")
 
     ref_linlayer = torch.nn.Linear(in_dim * 2, out_dim * 2, bias=True).to(device)
     ref_linlayer.weight.data = w_gathered
@@ -256,7 +298,7 @@ def test_xwt_backward_bias(device, process_mesh_2x2):
         False,
     ).to(device)
     w_gathered = gather_results(linlayer.weight.data, process_mesh=process_mesh_2x2)
-    b_gathered = gather_1d_results(linlayer.bias.data, process_mesh=process_mesh_2x2)
+    b_gathered = gather_1d_results(linlayer.bias.data, process_mesh=process_mesh_2x2, pm_key="col")
 
     ref_linlayer = torch.nn.Linear(in_dim * 2, out_dim * 2, bias=True).to(device)
     ref_linlayer.weight.data = w_gathered
@@ -294,9 +336,9 @@ def test_xwt_backward_bias(device, process_mesh_2x2):
     w_grad_gathered = gather_results(
         linlayer.weight.grad, process_mesh=process_mesh_2x2
     )
-    b_gathered = gather_1d_results(linlayer.bias, process_mesh=process_mesh_2x2)
+    b_gathered = gather_1d_results(linlayer.bias, process_mesh=process_mesh_2x2, pm_key="col")
     b_grad_gathered = gather_1d_results(
-        linlayer.bias.grad, process_mesh=process_mesh_2x2
+        linlayer.bias.grad, process_mesh=process_mesh_2x2, pm_key="col"
     )
     x_grad_gathered = gather_results(x_in.grad, process_mesh=process_mesh_2x2)
 
