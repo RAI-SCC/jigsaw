@@ -1,10 +1,12 @@
-import pytest
-import torch
 import random
 
+import pytest
+import torch
+
+from jigsaw import convolutions, linear, mlp
+from jigsaw.utils_aggregate import gather_1d_results, gather_results
 from tests.process_mesh import *
-from jigsaw import linear, mlp, convolutions
-from jigsaw.utils_aggregate import gather_results, gather_1d_results
+
 
 @pytest.mark.parametrize(
     "from_pm,to_pm",
@@ -28,7 +30,7 @@ from jigsaw.utils_aggregate import gather_results, gather_1d_results
     ],
 )
 def test_weight_merging(request, from_pm, to_pm, device):
-    # initialize a linear layer
+    """Test weight merging for linear layer."""
     random.seed(0)
     local_in_dim, local_out_dim = (
         random.randint(1, 100) * 4,
@@ -80,6 +82,7 @@ def test_weight_merging(request, from_pm, to_pm, device):
     ],
 )
 def test_mlp_weight_merging(request, from_pm, process_mesh_4x1x1, device):
+    """Test weight merging for MLP."""
     from_pm = request.getfixturevalue(from_pm)
 
     mlp_layer = mlp.DistributedMLP(
@@ -152,7 +155,7 @@ def test_mlp_weight_merging(request, from_pm, process_mesh_4x1x1, device):
     ],
 )
 def test_conv_weight_merging(request, from_pm, to_pm, device):
-    # initialize a linear layer
+    """Test weight merging of Conv2d."""
     random.seed(0)
     in_channels, out_channels, kernel_size = (
         random.randint(1, 100) * 4,
@@ -215,7 +218,7 @@ def test_conv_weight_merging(request, from_pm, to_pm, device):
     ],
 )
 def test_conv_transpose_weight_merging(request, from_pm, to_pm, device):
-    # initialize a linear layer
+    """Test weight merging for ConvTranspose2d."""
     random.seed(0)
     in_channels, out_channels, kernel_size = (
         random.randint(1, 100) * 4,
@@ -253,7 +256,7 @@ def test_conv_transpose_weight_merging(request, from_pm, to_pm, device):
     gathered_bias_after = gather_1d_results(
         local_bias_after, to_pm, dim=0, pm_key="col"
     )
-    
+
     assert torch.allclose(gathered_weights_before, gathered_weights_after)
     assert conv_layer.parallelism == to_pm["col"].size()
     assert torch.allclose(gathered_bias_before, gathered_bias_after)

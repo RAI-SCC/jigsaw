@@ -1,14 +1,11 @@
-import torch
 import pytest
-import jigsaw.normalization as norm
+import torch
 
+import jigsaw.normalization as norm
 from jigsaw.utils_aggregate import (
     gather_1d_results,
-    gather_1d_results_list,
     gather_results,
 )
-
-from process_mesh import process_mesh_2x2, process_mesh_1x4, process_mesh_2x1x2, process_mesh_4x1, process_mesh_2x2x1
 
 
 @pytest.mark.parametrize(
@@ -25,6 +22,7 @@ from process_mesh import process_mesh_2x2, process_mesh_1x4, process_mesh_2x1x2,
     ],
 )
 def test_distributed_layer_norm(request, device, process_mesh):
+    """Test for forward--backward pass of layer norm."""
     process_mesh = request.getfixturevalue(process_mesh)
     local_dim = 12
     layer_norm = norm.DistributedLayerNorm(
@@ -53,19 +51,16 @@ def test_distributed_layer_norm(request, device, process_mesh):
     b_gathered = gather_1d_results(
         layer_norm.bias.data, process_mesh, dim=0, pm_key="col"
     )
-    
+
     ref_layer_norm = torch.nn.LayerNorm(
         local_dim * process_mesh["col"].size(), device=device
     )
     ref_layer_norm.weight.data = w_gathered
     ref_layer_norm.bias.data = b_gathered
 
-
     forward_dist = layer_norm(x)
     forward_ref = ref_layer_norm(x_gathered)
-    forward_dist = gather_results(
-        forward_dist, process_mesh
-    )
+    forward_dist = gather_results(forward_dist, process_mesh)
 
     assert torch.allclose(forward_dist, forward_ref, atol=1e-3)
 
@@ -91,8 +86,12 @@ def test_distributed_layer_norm(request, device, process_mesh):
 
     # Gather distributed grads
     grad_x_gathered = gather_results(x_dist.grad, process_mesh)
-    grad_w_gathered = gather_1d_results(layer_norm.weight.grad, process_mesh, dim=-1, pm_key="col")
-    grad_b_gathered = gather_1d_results(layer_norm.bias.grad, process_mesh, dim=-1, pm_key="col")
+    grad_w_gathered = gather_1d_results(
+        layer_norm.weight.grad, process_mesh, dim=-1, pm_key="col"
+    )
+    grad_b_gathered = gather_1d_results(
+        layer_norm.bias.grad, process_mesh, dim=-1, pm_key="col"
+    )
 
     assert torch.allclose(grad_x_gathered, x_ref.grad, atol=1e-3)
     assert torch.allclose(grad_w_gathered, ref_ln.weight.grad, atol=1e-3)

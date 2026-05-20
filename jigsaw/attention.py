@@ -6,7 +6,6 @@ from . import linear, mlp
 from . import normalization as norm
 
 
-
 class DistributedWindowedAttention(torch.nn.Module):
     """Distributed windowed attention."""
 
@@ -47,9 +46,9 @@ class DistributedWindowedAttention(torch.nn.Module):
         self.embed_dim = embed_dim
         self.x_features = x_features
 
-        assert (
-            self.parallelism == 2
-        ), "windowed attention is only designed for parallelism = 2"
+        assert self.parallelism == 2, (
+            "windowed attention is only designed for parallelism = 2"
+        )
 
         self.qkv = linear.DistributedXWTSync(
             x_features // 2,
@@ -160,9 +159,9 @@ class DistributedWindowedFlashAttention(torch.nn.Module):
         self.dtype = dtype
         self.dropout = dropout
 
-        assert (
-            self.parallelism == 2
-        ), "windowed attention is only designed for parallelism = 2"
+        assert self.parallelism == 2, (
+            "windowed attention is only designed for parallelism = 2"
+        )
 
         self.qkv = linear.DistributedXWTSync(
             x_features // 2,
@@ -428,11 +427,13 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
 
 
 class Transformer(torch.nn.Module):
-    def __init__(self, in_features, embed_dim, out_features, heads, device, dropout_p=0.0):
+    def __init__(
+        self, in_features, embed_dim, out_features, heads, device, dropout_p=0.0
+    ):
         super().__init__()
         self.qkv = torch.nn.Linear(
             in_features=in_features,
-            out_features=3*embed_dim,
+            out_features=3 * embed_dim,
             bias=False,
             device=device,
         )
@@ -448,9 +449,7 @@ class Transformer(torch.nn.Module):
 
     def forward(self, x):
         qkv = self.qkv(x)
-        qkv = qkv.reshape(
-            qkv.shape[0], qkv.shape[1], 3, self.heads, self.head_dim
-        )
+        qkv = qkv.reshape(qkv.shape[0], qkv.shape[1], 3, self.heads, self.head_dim)
 
         q, k, v = qkv.permute(2, 0, 3, 1, 4).to(torch.bfloat16)
 
@@ -463,7 +462,7 @@ class Transformer(torch.nn.Module):
 
         # out has shape [B, h, N, d]
         out = rearrange(out, "... h s d -> ... s (h d)").to(x.dtype)
-        
+
         out = self.head_concat(out)
         return out
 
@@ -481,23 +480,26 @@ class Transformer(torch.nn.Module):
         spatial_size = process_mesh[spatial_kw].size()
         spatial_rank = process_mesh[spatial_kw].rank()
 
-        assert (
-            transformer.heads % channel_size == 0
-        ), f"num_heads={transformer.heads} not divisible by channel size {channel_size}"
-        assert (
-            transformer.embed_dim % spatial_size == 0
-        ), f"embed_dim={transformer.embed_dim} not divisible by spatial size {spatial_size}"
+        assert transformer.heads % channel_size == 0, (
+            f"num_heads={transformer.heads} not divisible by channel size {channel_size}"
+        )
+        assert transformer.embed_dim % spatial_size == 0, (
+            f"embed_dim={transformer.embed_dim} not divisible by spatial size {spatial_size}"
+        )
 
         heads_per_shard = transformer.heads // channel_size
-        
+
         # --- shard the fused QKV ---
-        print(f'before!! w_qkv shape {transformer.qkv.weight.shape}')
+        print(f"before!! w_qkv shape {transformer.qkv.weight.shape}")
         # W has shape [3*embed_dim, in_dim]
         # Now, W has shape [3, heads, head_dim, input_dim]
         W = transformer.qkv.weight.data.view(
-            3, transformer.heads, transformer.embed_dim//transformer.heads, transformer.in_features
+            3,
+            transformer.heads,
+            transformer.embed_dim // transformer.heads,
+            transformer.in_features,
         ).clone()
-        
+
         # Build the Distributed Linear and overwrite its weight
         transformer.qkv = linear.DistributedXWT.convert_to_jigsaw(
             transformer.qkv,
@@ -511,17 +513,22 @@ class Transformer(torch.nn.Module):
         # Now, local W has shape [3*embed_dim, embed_dim//channel size]
         w_as_list = torch.tensor_split(W, channel_size, dim=1)
         # now a list of tensors: [3, :local_heads, head_dim, in_features]
-        
+
         w_as_list = [w.reshape(-1, transformer.in_features) for w in w_as_list]
         # global W has shape {768, 256}
-        
-        W_local_col_shard = 3*transformer.embed_dim // channel_size
+
+        W_local_col_shard = 3 * transformer.embed_dim // channel_size
         head_shard_size = w_as_list[0].shape[1] // channel_size
-        
+
         # need to remap the data by swapping around head and final dimension
         for i in range(channel_size):
-            transformer.qkv.weight.data[i * W_local_col_shard:(i+1)*W_local_col_shard] = w_as_list[i][...,channel_rank * head_shard_size : (channel_rank+1)*head_shard_size]
-        
+            transformer.qkv.weight.data[
+                i * W_local_col_shard : (i + 1) * W_local_col_shard
+            ] = w_as_list[i][
+                ...,
+                channel_rank * head_shard_size : (channel_rank + 1) * head_shard_size,
+            ]
+
         transformer.head_concat = linear.DistributedXWT.convert_to_jigsaw(
             transformer.head_concat,
             process_mesh,

@@ -619,13 +619,13 @@ class DistributedConv2D(torch.nn.Module):
         weights, bias = self.merge_weights(process_mesh, col_kw)
         conv2d = torch.nn.Conv2d(
             in_channels=weights.shape[0],
-            out_channels=weights.shape[1]*self.groups,
+            out_channels=weights.shape[1] * self.groups,
             kernel_size=self.kernel_size,
-            padding=self.padding,   # not supported
-            dilation=self.dilation, # not supported
-            groups=self.groups,     # not supported
+            padding=self.padding,  # not supported
+            dilation=self.dilation,  # not supported
+            groups=self.groups,  # not supported
             bias=True if bias is not None else False,
-            padding_mode='zeros' # hard-coded
+            padding_mode="zeros",  # hard-coded
         )
         conv2d.weights.data = weights
         conv2d.bias.data = bias
@@ -676,12 +676,12 @@ class DistributedConv2D(torch.nn.Module):
             *weight_shape_global[1:],
         )
 
-        assert (
-            weight_shape_global[0] % to_process_mesh[pm_col_key].size() == 0
-        ), f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+        assert weight_shape_global[0] % to_process_mesh[pm_col_key].size() == 0, (
+            f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+        )
         # gather
         global_weights, global_bias = self.merge_weights(from_process_mesh, pm_col_key)
-        
+
         if self.bias is not None:
             from_bias_shape_local = self.bias.shape
             bias_shape_global = (
@@ -691,9 +691,9 @@ class DistributedConv2D(torch.nn.Module):
                 bias_shape_global // to_process_mesh[pm_col_key].size()
             )
 
-            assert (
-                bias_shape_global % to_process_mesh[pm_col_key].size() == 0
-            ), f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+            assert bias_shape_global % to_process_mesh[pm_col_key].size() == 0, (
+                f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+            )
 
             global_bias = gather_1d_results(
                 self.bias, from_process_mesh, dim=0, pm_key=pm_col_key
@@ -1144,7 +1144,6 @@ class DistributedConvTranspose2D(torch.nn.Module):
             group=self.spatial_group
         )
 
-
     @classmethod
     def convert_to_jigsaw(
         cls,
@@ -1155,9 +1154,9 @@ class DistributedConvTranspose2D(torch.nn.Module):
         channel_kw: str = "col",
         model_kw: str = "model",
     ) -> "DistributedConv2d":
-        assert (
-            conv.in_channels % process_mesh[channel_kw].size() == 0
-        ), "in_features is not divisible by process mesh cols"
+        assert conv.in_channels % process_mesh[channel_kw].size() == 0, (
+            "in_features is not divisible by process mesh cols"
+        )
 
         instance = cls(
             in_channels=conv.in_channels // process_mesh[spatial_kw].size(),
@@ -1192,7 +1191,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
                 in_rank * bias_size : (in_rank + 1) * bias_size
             ].clone()
         return instance
-    
+
     def convert_to_vanilla(
         self,
         process_mesh: dist.ProcessGroup,
@@ -1203,19 +1202,19 @@ class DistributedConvTranspose2D(torch.nn.Module):
         weights, bias = self.merge_weights(process_mesh, col_kw)
         convtranspose2d = torch.nn.ConvTranspose2d(
             in_channels=weights.shape[0],
-            out_channels=weights.shape[1]*self.groups,
+            out_channels=weights.shape[1] * self.groups,
             kernel_size=self.kernel_size,
-            padding=self.padding,   # not supported
-            dilation=self.dilation, # not supported
-            groups=self.groups,     # not supported
+            padding=self.padding,  # not supported
+            dilation=self.dilation,  # not supported
+            groups=self.groups,  # not supported
             bias=True if bias is not None else False,
-            padding_mode='zeros' # hard-coded
+            padding_mode="zeros",  # hard-coded
         )
         convtranspose2d.weights.data = weights
         convtranspose2d.bias.data = bias
 
         return convtranspose2d
-    
+
     def merge_weights(
         self,
         from_process_mesh: dist.ProcessGroup,
@@ -1261,9 +1260,9 @@ class DistributedConvTranspose2D(torch.nn.Module):
             *weight_shape_global[2:],
         )
 
-        assert (
-            weight_shape_global[0] % to_process_mesh[pm_col_key].size() == 0
-        ), f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+        assert weight_shape_global[0] % to_process_mesh[pm_col_key].size() == 0, (
+            f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+        )
 
         # gather
         global_bias, global_weights = self.merge_weights(from_process_mesh, pm_col_key)
@@ -1276,9 +1275,9 @@ class DistributedConvTranspose2D(torch.nn.Module):
             to_bias_shape_local = (
                 bias_shape_global // to_process_mesh[pm_col_key].size()
             )
-            assert (
-                bias_shape_global % to_process_mesh[pm_col_key].size() == 0
-            ), f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+            assert bias_shape_global % to_process_mesh[pm_col_key].size() == 0, (
+                f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+            )
 
             global_bias = gather_1d_results(
                 self.bias, from_process_mesh, dim=0, pm_key=pm_col_key

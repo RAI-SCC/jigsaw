@@ -38,7 +38,13 @@ def average_weights_module(
 
 
 @torch.no_grad()
-def gather_results(x: torch.Tensor, process_mesh: dist.device_mesh = None, pm_key_row = "row", pm_key_col="col", pm_key_model="model"):
+def gather_results(
+    x: torch.Tensor,
+    process_mesh: dist.device_mesh = None,
+    pm_key_row="row",
+    pm_key_col="col",
+    pm_key_model="model",
+):
     """Gather tensors split across arbitrary processes."""
     row_group, col_group = process_mesh[pm_key_row], process_mesh[pm_key_col]
     n_rows = row_group.size()
@@ -61,7 +67,13 @@ def gather_results(x: torch.Tensor, process_mesh: dist.device_mesh = None, pm_ke
 
 
 @torch.no_grad()
-def gather_results_as_list(x: torch.Tensor, process_mesh: dist.device_mesh = None, pm_key_row = "row", pm_key_col = "col", pm_key_model="model"):
+def gather_results_as_list(
+    x: torch.Tensor,
+    process_mesh: dist.device_mesh = None,
+    pm_key_row="row",
+    pm_key_col="col",
+    pm_key_model="model",
+):
     """Gather tensors split across arbitrary processes."""
     row_group, col_group = process_mesh[pm_key_row], process_mesh[pm_key_col]
     n_rows = row_group.size()
@@ -76,7 +88,10 @@ def gather_results_as_list(x: torch.Tensor, process_mesh: dist.device_mesh = Non
 
 @torch.no_grad()
 def gather_1d_results(
-    x: torch.Tensor, process_mesh: dist.device_mesh = None, dim: int = -1, pm_key="model"
+    x: torch.Tensor,
+    process_mesh: dist.device_mesh = None,
+    dim: int = -1,
+    pm_key="model",
 ):
     """Gather tensor distributed across process mesh rows along any dimension."""
     n_rows = process_mesh[pm_key].size()
@@ -95,7 +110,9 @@ def gather_1d_results(
 
 
 @torch.no_grad()
-def gather_1d_results_list(x: torch.Tensor, process_mesh: dist.device_mesh = None, pm_key="model"):
+def gather_1d_results_list(
+    x: torch.Tensor, process_mesh: dist.device_mesh = None, pm_key="model"
+):
     """Gather 1d tensor distributed across process mesh rows."""
     n_rows = process_mesh[pm_key].size()
     tensor_list = [

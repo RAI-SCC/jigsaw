@@ -1,11 +1,11 @@
 import torch
-import torch.distributed as dist
-from jigsaw import linear, convolutions, attention
+
+from jigsaw import attention, convolutions, linear
 
 mapped_modules = {
     torch.nn.Linear: linear.DistributedXWT,
     torch.nn.Conv2d: convolutions.DistributedConv2D,
-    torch.nn.ConvTranspose2d: convolutions.DistributedConvTranspose2D
+    torch.nn.ConvTranspose2d: convolutions.DistributedConvTranspose2D,
 }
 
 container_converters = {
@@ -22,7 +22,9 @@ def convert_to_jigsaw(model, synchronize, process_mesh, device):
     # 2. Leaf match: swap with Distributed equivalent
     replacement_cls = mapped_modules.get(type(model))
     if replacement_cls is not None:
-        return replacement_cls.convert_to_jigsaw(model, process_mesh=process_mesh, device=device)
+        return replacement_cls.convert_to_jigsaw(
+            model, process_mesh=process_mesh, device=device
+        )
 
     # 3. Generic container: recurse into children
     for name, child in model.named_children():

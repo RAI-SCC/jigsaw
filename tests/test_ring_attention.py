@@ -4,8 +4,9 @@ import torch.distributed as dist
 
 import jigsaw.attention_ring as ring_attention
 import jigsaw.ring_attention_helpers as ring_attn_fns
-from jigsaw.utils_aggregate import gather_results, gather_1d_results, gather_1d_results_list
-from tests import conftest
+from jigsaw.utils_aggregate import (
+    gather_1d_results,
+)
 
 # def test_backward(device, process_mesh):
 #     local_rank = dist.get_rank(group=process_mesh["row"])
