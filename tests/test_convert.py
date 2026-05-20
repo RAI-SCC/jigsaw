@@ -306,20 +306,22 @@ from process_mesh import process_mesh_2x2, process_mesh_2x1x2
 def test_jigsaw_transformer(device, process_mesh_2x1x2):
     # need to make sure that all ranks have the same initialization!
     torch.manual_seed(1)
-    embed_dim = 256
-    heads = 2
+    in_features = 256
+    embed_dim = 512
+    out_features = 256
+    heads = 4
     x_seq = 10
 
-    transformer = Transformer(embed_dim, heads, device, dropout_p=0.0)
+    transformer = Transformer(in_features, embed_dim, out_features, heads, device, dropout_p=0.0)
 
     # copy weights
     ref_qkv_w = transformer.qkv.weight.clone()
     ref_head_cat_w = transformer.head_concat.weight.clone()
-    x_global = torch.randn(1, x_seq, embed_dim, device=device)
+    x_global = torch.randn(1, x_seq, in_features, device=device)
     x_global.requires_grad_(True)
 
     ref_forward = transformer(x_global)
-    ref_forward.backward(torch.ones_like(x_global, device=device))
+    ref_forward.backward(torch.ones_like(ref_forward, device=device))
     ref_qkv_grad = transformer.qkv.weight.grad
     ref_cat_grad = transformer.head_concat.weight.grad
     ref_x_grad = x_global.grad
@@ -348,7 +350,7 @@ def test_jigsaw_transformer(device, process_mesh_2x1x2):
         transformer, False, process_mesh_2x1x2, device
     )
     dist_forward = jigsaw_transformer(x_local)
-    dist_forward.backward(torch.ones_like(x_local, device=device))
+    dist_forward.backward(torch.ones_like(dist_forward, device=device))
     dist_head_cat_w = jigsaw_transformer.head_concat.weight
     dist_cat_grad = jigsaw_transformer.head_concat.weight.grad
     
