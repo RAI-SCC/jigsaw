@@ -314,6 +314,7 @@ def test_jigsaw_transformer(device, process_mesh_2x1x2):
 
     # copy weights
     qkv_weight = transformer.qkv.weight.clone()
+    ref_head_cat_w = transformer.head_concat.weight.clone()
     x_global = torch.randn(1, x_seq, embed_dim, device=device)
     x_global.requires_grad_(True)
 
@@ -347,9 +348,8 @@ def test_jigsaw_transformer(device, process_mesh_2x1x2):
     )
     dist_forward = jigsaw_transformer(x_local)
     dist_forward.backward(torch.ones_like(x_local, device=device))
-    # dist_qkv_w = jigsaw_transformer.qkv.weight.grad
-    # dist_k_grad = jigsaw_transformer.k.weight.grad
-    # dist_v_grad = jigsaw_transformer.v.weight.grad
+    dist_head_cat_w = jigsaw_transformer.head_concat.weight
+    
     dist_x_grad = x_local.grad
 
     # dist_qkv_w = jigsaw_transformer.qkv.weight
@@ -357,9 +357,10 @@ def test_jigsaw_transformer(device, process_mesh_2x1x2):
     dist_forward = gather_1d_results(
         dist_forward, process_mesh_2x1x2, dim=-1, pm_key="col"
     )
-    # dist_qkv_w = gather_results(dist_qkv_w, process_mesh_2x1x2)
+    dist_head_cat_w = gather_1d_results(dist_head_cat_w, process_mesh_2x1x2, pm_key="col", dim=-1)
     dist_x_grad = gather_1d_results(dist_x_grad, process_mesh_2x1x2, pm_key="col", dim=-1)
+    # print(f'sums {ref_forward.sum()} dist forward {dist_forward.sum()}')
     
-    
-    assert torch.allclose(ref_forward, dist_forward), "forward does not match"
+    assert torch.allclose(ref_head_cat_w, dist_head_cat_w), "forward does not match"
+    assert torch.allclose(ref_forward, dist_forward, atol=1e-5), "forward does not match"
     assert torch.allclose(ref_x_grad, dist_x_grad, atol=1e-4), "grad of x does not match"

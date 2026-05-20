@@ -460,9 +460,9 @@ class Transformer(torch.nn.Module):
 
         # out has shape [B, h, N, d]
         out = rearrange(out, "... n h s d -> ... n s (h d)").to(x.dtype)
-
-        # values = self.head_concat(out)
-        return out
+        
+        values = self.head_concat(out)
+        return values
 
     def convert_transformer_to_jigsaw(
         transformer,
@@ -531,14 +531,16 @@ class Transformer(torch.nn.Module):
         
         transformer.qkv.weight.data = W_local.contiguous()
         
-        # transformer.head_concat = linear.DistributedXWT.convert_to_jigsaw(
-        #     transformer.head_concat,
-        #     process_mesh,
-        #     device,
-        #     spatial_kw,
-        #     channel_kw,
-        #     model_kw,
-        # )
+        # global transformer head concat shape... 
+        # [embed_dim, embed_dim]
+        transformer.head_concat = linear.DistributedXWT.convert_to_jigsaw(
+            transformer.head_concat,
+            process_mesh,
+            device,
+            spatial_kw,
+            channel_kw,
+            model_kw,
+        )
 
         # Update head count to reflect local shard
         transformer.heads = heads_per_shard
