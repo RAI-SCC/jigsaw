@@ -659,7 +659,7 @@ class DistributedConv2D(torch.nn.Module):
             ].clone()
         return instance
     
-    def convert_to_vanilla(
+    def convert_to_torch(
         self,
         process_mesh: dist.ProcessGroup,
         row_kw: str = "row",
@@ -1244,7 +1244,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
             ].clone()
         return instance
 
-    def convert_to_vanilla(
+    def convert_to_torch(
         self,
         process_mesh: dist.ProcessGroup,
         row_kw: str = "row",

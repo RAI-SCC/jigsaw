@@ -83,7 +83,7 @@ class DistributedRoll(torch.nn.Module):
         
         return instance
     
-    def convert_to_vanilla(
+    def convert_to_torch(
         self,
         process_mesh: dist.ProcessGroup,
         row_kw: str = "row",
