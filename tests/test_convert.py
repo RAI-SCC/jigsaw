@@ -548,3 +548,66 @@ def test_jigsaw_conv2dtranspose(device, process_mesh_2x2):
     assert torch.allclose(ref_conv_weights, dist_w, atol=1e-5), "weights do not match"
     assert torch.allclose(ref_d_w, dist_d_w, atol=1e-4), "weight grad does not match"
     assert torch.allclose(ref_d_x, dist_d_x, atol=1e-4), "weight grad does not match"
+
+
+def test_jigsaw_roll(device, process_mesh_2x2):
+    torch.manual_seed(1)
+    in_channels = 32
+    out_channels = 32
+    kernel_size = 4
+    H, W = 100, 100
+
+    roll = lambda x: torch.roll(x, shifts=(3, 2), dims=(-3, -2))
+
+    x_global = torch.randn(1, H, W, in_channels, device=device)
+    x_global.requires_grad_(True)
+
+    ref_forward = roll(x_global)
+
+    col_rank, col_size = process_mesh_2x2["col"].rank(), process_mesh_2x2["col"].size()
+    row_rank, row_size = process_mesh_2x2["row"].rank(), process_mesh_2x2["row"].size()
+
+    local_w = W // process_mesh_2x2["row"].size()
+    x_local = (
+        x_global[
+            :,
+            row_rank * local_w : (row_rank + 1) * local_w,
+            :,
+            col_rank
+            * in_channels
+            // col_size : (col_rank + 1)
+            * in_channels
+            // col_size,
+        ]
+        .detach()
+        .contiguous()
+        .requires_grad_(True)
+    )
+
+    jigsaw_roll = convert.convert_to_jigsaw(roll, False, process_mesh_2x2, device)
+
+    dist_forward.backward(torch.ones_like(dist_forward, device=device))
+    dist_d_x = x_local.grad
+
+    # weights
+    dist_w = jigsaw_conv2d.weight
+    dist_d_w = jigsaw_conv2d.weight.grad
+    # gather the results in two steps due to convolution
+    dist_forward = gather_1d_results(
+        dist_forward, process_mesh_2x2, dim=1, pm_key="col"
+    )
+    dist_forward = gather_1d_results(
+        dist_forward, process_mesh_2x2, dim=-1, pm_key="row"
+    )
+    dist_w = gather_1d_results(dist_w, process_mesh_2x2, dim=1, pm_key="col")
+    dist_d_w = gather_1d_results(dist_d_w, process_mesh_2x2, dim=1, pm_key="col")
+    # two-step gather for dx
+    dist_d_x = gather_1d_results(dist_d_x, process_mesh_2x2, dim=1, pm_key="col")
+    dist_d_x = gather_1d_results(dist_d_x, process_mesh_2x2, dim=-1, pm_key="row")
+
+    assert torch.allclose(
+        ref_forward, dist_forward, atol=1e-3
+    ), "forward does not match"
+    assert torch.allclose(ref_conv_weights, dist_w, atol=1e-5), "weights do not match"
+    assert torch.allclose(ref_d_w, dist_d_w, atol=1e-4), "weight grad does not match"
+    assert torch.allclose(ref_d_x, dist_d_x, atol=1e-4), "weight grad does not match"

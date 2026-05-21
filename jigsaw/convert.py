@@ -1,11 +1,12 @@
 import torch
 
-from jigsaw import attention, convolutions, linear
+from jigsaw import attention, convolutions, linear, roll
 
 mapped_modules = {
     torch.nn.Linear: linear.DistributedXWT,
     torch.nn.Conv2d: convolutions.DistributedConv2D,
     torch.nn.ConvTranspose2d: convolutions.DistributedConvTranspose2D,
+    roll.Roll: roll.DistributedRoll
 }
 
 container_converters = {

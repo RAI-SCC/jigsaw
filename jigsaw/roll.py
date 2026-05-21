@@ -4,14 +4,17 @@ from typing import Callable, Tuple
 
 from . import distributed_roll as dist_roll
 
+
 class Roll(torch.nn.Module):
-    def __init__(self, shifts, dims):
+    def __init__(self, shifts, dims, dtype=torch.float32):
         super().__init__()
         self.shifts = shifts
         self.dims = dims
+        self.dtype=dtype
+
     def forward(self, x):
         return torch.roll(x, shifts=self.shifts, dims=self.dims)
-    
+
 
 class RollSelectionStrategy:
     """Selection strategy for distributed roll operation."""
@@ -26,6 +29,7 @@ class RollSelectionStrategy:
             return dist_roll.roll2d
         elif parallelism == 8:
             return dist_roll.roll2d_8way
+
 
 class DistributedRoll(torch.nn.Module):
     """Batched transpose (XT) operation distributed across n processes."""
@@ -56,6 +60,29 @@ class DistributedRoll(torch.nn.Module):
     def get_parameter_count(self):
         """Return parameter count for distributed roll operation."""
         return 0
+
+    @classmethod
+    def convert_to_jigsaw(
+        cls,
+        roll: Roll,
+        process_mesh: dist.ProcessGroup,
+        device: torch.device,
+        spatial_kw: str = "row",
+        channel_kw: str = "col",
+        model_kw: str = "model",
+    ):
+        instance = cls(
+            shifts=roll.shifts,
+            dims=roll.dims,
+            local_rank=process_mesh["model"].rank(),
+            device=device,
+            parallelism=process_mesh["model"].size(),
+            spatial_group=process_mesh[spatial_kw],
+            dtype=roll.dtype
+        )
+        
+        
+        return instance
 
     def reshard_parameters(
         self, from_process_mesh: dist.ProcessGroup, to_process_mesh: dist.ProcessGroup
@@ -203,4 +230,3 @@ class Roll(torch.autograd.Function):
         )
 
         return grad_output, None, None, None, None, None, None, None
-
