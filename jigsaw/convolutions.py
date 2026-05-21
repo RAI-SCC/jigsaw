@@ -1211,28 +1211,28 @@ class DistributedConvTranspose2D(torch.nn.Module):
         )
 
         instance = cls(
-            in_channels=conv.in_channels // process_mesh[spatial_kw].size(),
+            in_channels=conv.in_channels,
             out_channels=conv.out_channels,
             kernel_size=conv.kernel_size,
             stride=conv.stride,
             padding=conv.padding,
             dilation=conv.dilation,
             groups=conv.groups,
-            bias=conv.bias is not None,
+            bias=True if conv.bias is not None else False,
             local_rank=process_mesh[model_kw].rank(),
             spatial_group=process_mesh[spatial_kw],
             channel_group=process_mesh[channel_kw],
             device=device,
             parallelism=process_mesh[model_kw].size(),
             bayesian=False,  # TODO
-            dtype=conv.dtype,
+            dtype=conv.weight.dtype,
         )
         # Map weights — clone so the original graph is detached
         in_rank = process_mesh[channel_kw].rank()
         in_shard = conv.in_channels // process_mesh[channel_kw].size()
 
         instance.weight.data = (
-            conv.weight.data[in_rank * in_shard : (in_rank + 1) * in_shard]
+            conv.weight.data[:, in_rank * in_shard : (in_rank + 1) * in_shard]
             .clone()
             .to(device)
         )

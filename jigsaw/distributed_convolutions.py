@@ -51,15 +51,21 @@ def calc_halo_sizes_8way(
     ]
 
     left_to_right = [
-        global_steps[mid_indices[0] + 1] - x_shape[-1]
-        if global_steps[mid_indices[0] + 1] < x_shape[-1]
-        else 0,
-        global_steps[mid_indices[1] + 1] - 2 * x_shape[-1]
-        if global_steps[mid_indices[1] + 1] < 2 * x_shape[-1]
-        else 0,
-        global_steps[mid_indices[2] + 1] - 3 * x_shape[-1]
-        if global_steps[mid_indices[2] + 1] < 3 * x_shape[-1]
-        else 0,
+        (
+            global_steps[mid_indices[0] + 1] - x_shape[-1]
+            if global_steps[mid_indices[0] + 1] < x_shape[-1]
+            else 0
+        ),
+        (
+            global_steps[mid_indices[1] + 1] - 2 * x_shape[-1]
+            if global_steps[mid_indices[1] + 1] < 2 * x_shape[-1]
+            else 0
+        ),
+        (
+            global_steps[mid_indices[2] + 1] - 3 * x_shape[-1]
+            if global_steps[mid_indices[2] + 1] < 3 * x_shape[-1]
+            else 0
+        ),
     ]
 
     left_to_right = [left * -1 for left in left_to_right]
@@ -515,17 +521,14 @@ def distributed_conv2d_over_channels(
 ):
     """Distributed Conv2d over channels."""
     x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
-    print(f'rank {local_rank} entered function')
     match local_rank % 2:
         case 0:
-            print(f'rank {local_rank} sending')
             x_handle = dist.all_to_all(
                 [empty, x_buffer],
                 [empty, x],
                 group=channel_group,
                 async_op=True,
             )
-            print(f'2 sending')
             y = conv_func(
                 x,
                 w[..., : in_channels_global // 2, :, :],
@@ -533,36 +536,26 @@ def distributed_conv2d_over_channels(
                 padding=padding,
                 dilation=dilation,
             )
-            print(f'3 sending')
             x_handle.wait()
-            print(f'4 waited{y.sum()}')
             if b is not None:
-                y = (
-                    y
-                    + conv_func(
-                        x_buffer,  # (sampling, batch, in_channels, x, y)
-                        w[..., in_channels_global // 2 :, :, :],
-                        b,
-                        stride=stride,
-                        padding=padding,
-                        dilation=dilation,
-                    )
+                y = y + conv_func(
+                    x_buffer,  # (sampling, batch, in_channels, x, y)
+                    w[..., in_channels_global // 2 :, :, :],
+                    b,
+                    stride=stride,
+                    padding=padding,
+                    dilation=dilation,
                 )
             else:
-                y = (
-                    y
-                    + conv_func(
-                        x_buffer,  # (sampling, batch, in_channels, x, y)
-                        w[..., in_channels_global // 2 :, :, :],
-                        stride=stride,
-                        padding=padding,
-                        dilation=dilation,
-                    )
+                y = y + conv_func(
+                    x_buffer,  # (sampling, batch, in_channels, x, y)
+                    w[..., in_channels_global // 2 :, :, :],
+                    stride=stride,
+                    padding=padding,
+                    dilation=dilation,
                 )
-                print(f'or here {y.sum()}')
             return y, x, x_buffer
         case 1:
-            print(f'rank {local_rank} sending. w shape {w.shape}. sending [{in_channels_global//2}]')
             x_handle = dist.all_to_all(
                 [x_buffer, empty],
                 [x, empty],
@@ -577,7 +570,6 @@ def distributed_conv2d_over_channels(
                 dilation=dilation,
             )
             x_handle.wait()
-            print(f'1 rank {local_rank} here {y.sum()}')
             if b is not None:
                 y = y + conv_func(
                     x_buffer,
@@ -595,7 +587,6 @@ def distributed_conv2d_over_channels(
                     padding=padding,
                     dilation=dilation,
                 )
-            print(f'2 rank {local_rank} here {y.sum()}')
             return y, x_buffer, x
 
 
@@ -768,7 +759,7 @@ def conv2d_fourway(
 
     # communicate x1, x0
     right_to_left, left_to_right = calc_halo_sizes(x.shape, kernel_size[1], stride[1])
-    print(f'Rank {local_rank} enter func w shape {w.shape}')
+
     # Spatial split
     x_with_halos = selector.communicate_halos_forward(
         x,
@@ -781,7 +772,7 @@ def conv2d_fourway(
         channel_group,
         async_op=False,
     )
-    print(f'Rank {local_rank} w shape {w.shape}')
+    print(f"Rank {local_rank} w shape {w.shape}")
     (
         y,
         x_left,
@@ -1017,11 +1008,16 @@ def conv_transpose2d_fourway_backward(
     if g_x_handle is not None:
         g_x_handle.wait()
 
+    g_w_handle = dist.all_reduce(
+        g_w, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True
+    )
+
     g_x = (
         g_x[..., : in_channels_global // 2, :, :] + g_x_recv
         if channel_group.rank() == 0  # TODO: left/right definitions [0, 2]
         else g_x[..., in_channels_global // 2 :, :, :] + g_x_recv
     )
+    g_w_handle.wait()
 
     return g_x, g_w
 

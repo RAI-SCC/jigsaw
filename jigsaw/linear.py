@@ -454,9 +454,7 @@ class DistributedXWT(torch.nn.Module):
         row_shard = linear.out_features // process_mesh[spatial_kw].size()
         col_rank = process_mesh[channel_kw].rank()
         col_shard = linear.in_features // process_mesh[channel_kw].size()
-        print(
-            f"I am rank {process_mesh[model_kw].rank()} with row rank {row_rank} and col rank {col_rank}"
-        )
+        
         instance.weight.data = (
             linear.weight.data[
                 row_rank * row_shard : (row_rank + 1) * row_shard,

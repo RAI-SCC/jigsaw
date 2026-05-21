@@ -46,9 +46,9 @@ class DistributedWindowedAttention(torch.nn.Module):
         self.embed_dim = embed_dim
         self.x_features = x_features
 
-        assert self.parallelism == 2, (
-            "windowed attention is only designed for parallelism = 2"
-        )
+        assert (
+            self.parallelism == 2
+        ), "windowed attention is only designed for parallelism = 2"
 
         self.qkv = linear.DistributedXWTSync(
             x_features // 2,
@@ -159,9 +159,9 @@ class DistributedWindowedFlashAttention(torch.nn.Module):
         self.dtype = dtype
         self.dropout = dropout
 
-        assert self.parallelism == 2, (
-            "windowed attention is only designed for parallelism = 2"
-        )
+        assert (
+            self.parallelism == 2
+        ), "windowed attention is only designed for parallelism = 2"
 
         self.qkv = linear.DistributedXWTSync(
             x_features // 2,
@@ -478,19 +478,17 @@ class Transformer(torch.nn.Module):
         channel_size = process_mesh[channel_kw].size()
         channel_rank = process_mesh[channel_kw].rank()
         spatial_size = process_mesh[spatial_kw].size()
-        spatial_rank = process_mesh[spatial_kw].rank()
-
-        assert transformer.heads % channel_size == 0, (
-            f"num_heads={transformer.heads} not divisible by channel size {channel_size}"
-        )
-        assert transformer.embed_dim % spatial_size == 0, (
-            f"embed_dim={transformer.embed_dim} not divisible by spatial size {spatial_size}"
-        )
+        
+        assert (
+            transformer.heads % channel_size == 0
+        ), f"num_heads={transformer.heads} not divisible by channel size {channel_size}"
+        assert (
+            transformer.embed_dim % spatial_size == 0
+        ), f"embed_dim={transformer.embed_dim} not divisible by spatial size {spatial_size}"
 
         heads_per_shard = transformer.heads // channel_size
 
         # --- shard the fused QKV ---
-        print(f"before!! w_qkv shape {transformer.qkv.weight.shape}")
         # W has shape [3*embed_dim, in_dim]
         # Now, W has shape [3, heads, head_dim, input_dim]
         W = transformer.qkv.weight.data.view(
