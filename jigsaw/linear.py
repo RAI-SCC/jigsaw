@@ -308,6 +308,8 @@ class DistributedXWT(torch.nn.Module):
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup = None,
         bayesian: bool = False,
+        synchronized_layer: bool = False,
+        sync_group: dist.ProcessGroup = None
     ) -> None:
         """
         Initialize the XWT Linear layer sharded over n processes.
@@ -367,7 +369,7 @@ class DistributedXWT(torch.nn.Module):
             self.bias,
             self.spatial_group,
             self.bayesian,
-            synchronized_layer=False,
+            synchronized_layer=synchronized_layer,
             linear_layer=True,
         )
 
@@ -377,7 +379,15 @@ class DistributedXWT(torch.nn.Module):
             )
             for p in self.parameters():
                 dist.broadcast(p.data, group_src=0, group=self.spatial_group)
-
+                
+        if synchronized_layer:
+            self.sync_group = self.spatial_group if sync_group is None else sync_group
+            self.weight.register_post_accumulate_grad_hook(
+                hooks.make_grad_sync_hook(self.sync_group)
+            )
+            for p in self.parameters():
+                dist.broadcast(p.data, group_src=0, group=self.sync_group)
+        
         self.XWT = XWT.apply
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
