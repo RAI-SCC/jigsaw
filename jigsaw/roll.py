@@ -81,8 +81,21 @@ class DistributedRoll(torch.nn.Module):
             dtype=roll.dtype
         )
         
-        
         return instance
+    
+    def convert_to_vanilla(
+        self,
+        process_mesh: dist.ProcessGroup,
+        row_kw: str = "row",
+        col_kw: str = "col",
+        model_kw: str = "model",
+    ) -> Roll:
+        roll = Roll(
+            shifts=self.shifts,
+            dims=self.dims,
+            dtype=self.dtype
+        )
+        return roll
 
     def reshard_parameters(
         self, from_process_mesh: dist.ProcessGroup, to_process_mesh: dist.ProcessGroup
