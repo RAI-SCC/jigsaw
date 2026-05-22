@@ -1,6 +1,6 @@
 import torch
 import torch.distributed as dist
-from typing import Callable, Tuple
+from typing import Callable, Tuple, List
 
 from . import distributed_roll as dist_roll
 
@@ -61,7 +61,7 @@ class DistributedRoll(torch.nn.Module):
         return 0
 
     @classmethod
-    def from_mesh(
+    def convert_to_jigsaw(
         cls,
         roll,  # original Roll module with .shifts, .dims, .dtype
         process_mesh,
@@ -82,7 +82,7 @@ class DistributedRoll(torch.nn.Module):
             dtype=roll.dtype,
         )
 
-    def to_torch_roll(self):
+    def convert_to_torch(self):
         """Return an equivalent non-distributed torch.roll-style spec."""
         return {"shifts": self.shifts, "dims": self.dims, "dtype": self.dtype}
 

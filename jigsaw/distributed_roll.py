@@ -1,7 +1,7 @@
 import torch
 import torch.distributed as dist
 
-from typing import Tuple
+from typing import Tuple, List
 
 from jigsaw import distributed_convolutions as dist_conv
 
