@@ -1,158 +1,73 @@
 import torch
 import torch.distributed as dist
 
+from typing import Tuple
+
 from jigsaw import distributed_convolutions as dist_conv
 
 
-def get_halo(
+def exchange_halo_1d(
     x: torch.Tensor,
+    dim: int,
     window_size: int,
-    rank: int,
+    group: dist.ProcessGroup,
     device: torch.device,
-    parallelism: int,
     empty: torch.Tensor,
-    spatial_group: dist.ProcessGroup,
-):
-    """Get halo for roll, 4way."""
-    left_right_local_ranks = dist_conv.get_left_right_local_ranks(parallelism)
-    if window_size > 0:
-        halo_to_send = x[..., :window_size, :].contiguous()
-    else:
-        halo_to_send = x[..., window_size:, :].contiguous()
-    recv = torch.zeros(*halo_to_send.shape, device=device, dtype=x.dtype)
+) -> torch.Tensor:
+    """Exchange a halo of `window_size` along tensor `dim` over a 1D process group.
 
-    if rank in left_right_local_ranks[0]:  # I am holding the left spatial dimensions
-        dist.all_to_all(
-            [empty, recv], [empty, halo_to_send], group=spatial_group, async_op=False
+    Positive window_size: send leading slice to rank-1, receive into leading slice from rank+1.
+    Negative window_size: send trailing slice to rank+1, receive into trailing slice from rank-1.
+    """
+    if window_size == 0:
+        return x
+
+    rank = group.rank()
+    world = group.size()
+
+    sl = [slice(None)] * x.ndim
+    sl[dim] = slice(0, window_size) if window_size > 0 else slice(window_size, None)
+    sl = tuple(sl)
+
+    halo_to_send = x[sl].contiguous()
+    recv = torch.zeros_like(halo_to_send)
+
+    if window_size > 0:
+        send_to = (rank - 1) % world
+        recv_from = (rank + 1) % world
+    else:
+        send_to = (rank + 1) % world
+        recv_from = (rank - 1) % world
+
+    send_list = [empty] * world
+    recv_list = [empty] * world
+    send_list[send_to] = halo_to_send
+    recv_list[recv_from] = recv
+
+    dist.all_to_all(recv_list, send_list, group=group, async_op=False)
+
+    x[sl] = recv
+    return x
+
+
+def distributed_roll(
+    x: torch.Tensor,
+    shifts: Tuple[int, ...],
+    dims: Tuple[int, ...],
+    distributed_dims: List[int],
+    spatial_process_groups: List[dist.ProcessGroup],
+    device: torch.device,
+    empty: torch.Tensor,
+) -> torch.Tensor:
+    """Roll `x` by `shifts` along `dims`; for each dim in `distributed_dims`,
+    exchange a halo on the corresponding process group."""
+    x = torch.roll(x, shifts=shifts, dims=dims)
+
+    dim_to_shift = dict(zip(dims, shifts))
+    for d, pg in zip(distributed_dims, spatial_process_groups):
+        if d not in dim_to_shift:
+            raise ValueError(f"distributed dim {d} not in dims {dims}")
+        x = exchange_halo_1d(
+            x, dim=d, window_size=dim_to_shift[d], group=pg, device=device, empty=empty
         )
-
-    else:
-        dist.all_to_all(
-            [recv, empty], [halo_to_send, empty], group=spatial_group, async_op=False
-        )
-
-    if window_size > 0:
-        x[..., :window_size, :] = recv
-    else:
-        x[..., window_size:, :] = recv
-
-    return x
-
-
-def get_halo_8way(
-    x: torch.Tensor,
-    window_size: int,
-    local_rank: int,
-    device: torch.device,
-    empty: torch.Tensor,
-    spatial_group: dist.ProcessGroup,
-):
-    """Get halo for roll, 8way."""
-    local_rank = spatial_group.rank()
-    if window_size > 0:
-        halo_to_send = x[..., :window_size, :].contiguous()
-        recv = torch.zeros(*halo_to_send.shape, device=device, dtype=x.dtype)
-        match local_rank:
-            case 0:
-                # recv, send
-                dist.all_to_all(
-                    [empty, empty, empty, recv],
-                    [empty, halo_to_send, empty, empty],
-                    group=spatial_group,
-                    async_op=False,
-                )
-            case 1:
-                dist.all_to_all(
-                    [recv, empty, empty, empty],
-                    [empty, empty, halo_to_send, empty],
-                    group=spatial_group,
-                    async_op=False,
-                )
-            case 2:
-                dist.all_to_all(
-                    [empty, recv, empty, empty],
-                    [empty, empty, empty, halo_to_send],
-                    group=spatial_group,
-                    async_op=False,
-                )
-            case 3:
-                dist.all_to_all(
-                    [empty, empty, recv, empty],
-                    [halo_to_send, empty, empty, empty],
-                    group=spatial_group,
-                    async_op=False,
-                )
-    else:
-        halo_to_send = x[..., window_size:, :].contiguous()
-        recv = torch.zeros(*halo_to_send.shape, device=device, dtype=x.dtype)
-        match local_rank:
-            case 0:
-                # recv, send
-                dist.all_to_all(
-                    [empty, recv, empty, empty],
-                    [empty, empty, empty, halo_to_send],
-                    group=spatial_group,
-                    async_op=False,
-                )
-            case 1:
-                dist.all_to_all(
-                    [empty, empty, recv, empty],
-                    [halo_to_send, empty, empty, empty],
-                    group=spatial_group,
-                    async_op=False,
-                )
-            case 2:
-                dist.all_to_all(
-                    [empty, empty, empty, recv],
-                    [empty, halo_to_send, empty, empty],
-                    group=spatial_group,
-                    async_op=False,
-                )
-            case 3:
-                dist.all_to_all(
-                    [recv, empty, empty, empty],
-                    [empty, empty, halo_to_send, empty],
-                    group=spatial_group,
-                    async_op=False,
-                )
-
-    if window_size > 0:
-        x[..., :window_size, :] = recv
-    else:
-        x[..., window_size:, :] = recv
-
-    return x
-
-
-def roll2d(
-    x: torch.Tensor,
-    shifts,
-    dims,
-    rank: int,
-    device: torch.device,
-    empty: torch.Tensor,
-    spatial_group: dist.ProcessGroup,
-):
-    """Perform rolling in 2d, distributed across 4 GPUs."""
-    x = torch.roll(x, shifts=shifts, dims=(-3, -2))
-
-    x = get_halo(x, shifts[1], rank, device, 4, empty, spatial_group)
-
-    return x
-
-
-def roll2d_8way(
-    x: torch.Tensor,
-    shifts,
-    dims,
-    rank,
-    device: torch.device,
-    empty: torch.Tensor,
-    spatial_group: dist.ProcessGroup,
-):
-    """Perform rolling in 2d, distributed across 8 GPUs."""
-    x = torch.roll(x, shifts=shifts, dims=(-3, -2))
-
-    x = get_halo_8way(x, shifts[1], rank, device, empty, spatial_group)
-
     return x
