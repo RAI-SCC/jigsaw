@@ -1,6 +1,6 @@
 import torch
 import torch.distributed as dist
-from typing import Callable, Tuple
+from typing import Callable, Tuple, List
 
 from . import distributed_roll as dist_roll
 
@@ -10,7 +10,7 @@ class Roll(torch.nn.Module):
         super().__init__()
         self.shifts = shifts
         self.dims = dims
-        self.dtype=dtype
+        self.dtype = dtype
 
     def forward(self, x):
         return torch.roll(x, shifts=self.shifts, dims=self.dims)
@@ -30,216 +30,128 @@ class RollSelectionStrategy:
         elif parallelism == 8:
             return dist_roll.roll2d_8way
 
-
 class DistributedRoll(torch.nn.Module):
-    """Batched transpose (XT) operation distributed across n processes."""
+    """Distributed roll across an arbitrary set of sharded tensor dims."""
 
     def __init__(
         self,
-        shifts: Tuple[int, int],
-        dims: int,
-        local_rank: int,
+        shifts: Tuple[int, ...],
+        dims: Tuple[int, ...],
+        distributed_dims: List[int],
+        spatial_process_groups: List[dist.ProcessGroup],
         device: torch.device,
-        parallelism: int,
-        spatial_group: dist.ProcessGroup,
         dtype: torch.dtype = torch.float32,
     ) -> None:
-        """Initialize the Roll class."""
         super().__init__()
+        if len(distributed_dims) != len(spatial_process_groups):
+            raise ValueError("distributed_dims and spatial_process_groups must align")
+        for d in distributed_dims:
+            if d not in dims:
+                raise ValueError(f"distributed dim {d} must appear in dims {dims}")
 
-        self.local_rank = local_rank
+        self.shifts = tuple(shifts)
+        self.dims = tuple(dims)
+        self.distributed_dims = tuple(distributed_dims)
+        self.spatial_process_groups = tuple(spatial_process_groups)
         self.device = device
-        self.spatial_group = spatial_group
-        self.shifts = shifts
-        self.dims = dims
-        self.roll = Roll.apply
-        self.empty = torch.empty(0, device=self.device, dtype=dtype)
-
-        self.selector = RollSelectionStrategy(parallelism)
+        self.dtype = dtype
+        self.empty = torch.empty(0, device=device, dtype=dtype)
 
     def get_parameter_count(self):
-        """Return parameter count for distributed roll operation."""
         return 0
 
     @classmethod
     def convert_to_jigsaw(
         cls,
-        roll: Roll,
-        process_mesh: dist.ProcessGroup,
+        roll,  # original Roll module with .shifts, .dims, .dtype
+        process_mesh,
         device: torch.device,
-        spatial_kw: str = "row",
-        channel_kw: str = "col",
-        model_kw: str = "model",
+        dim_to_mesh_axis: dict,  # e.g. {-3: "row", -2: "col"}
     ):
-        instance = cls(
+        """Build a DistributedRoll from a process mesh + mapping of tensor dim -> mesh axis."""
+        distributed_dims = list(dim_to_mesh_axis.keys())
+        spatial_groups = [process_mesh[ax].get_group() if hasattr(process_mesh[ax], "get_group")
+                          else process_mesh[ax]
+                          for ax in dim_to_mesh_axis.values()]
+        return cls(
             shifts=roll.shifts,
             dims=roll.dims,
-            local_rank=process_mesh["model"].rank(),
+            distributed_dims=distributed_dims,
+            spatial_process_groups=spatial_groups,
             device=device,
-            parallelism=process_mesh["model"].size(),
-            spatial_group=process_mesh[spatial_kw],
-            dtype=roll.dtype
+            dtype=roll.dtype,
         )
-        
-        return instance
-    
-    def convert_to_torch(
-        self,
-        process_mesh: dist.ProcessGroup,
-        row_kw: str = "row",
-        col_kw: str = "col",
-        model_kw: str = "model",
-    ) -> Roll:
-        roll = Roll(
-            shifts=self.shifts,
-            dims=self.dims,
-            dtype=self.dtype
-        )
-        return roll
 
-    def reshard_parameters(
-        self, from_process_mesh: dist.ProcessGroup, to_process_mesh: dist.ProcessGroup
+    def convert_to_torch(self):
+        """Return an equivalent non-distributed torch.roll-style spec."""
+        return {"shifts": self.shifts, "dims": self.dims, "dtype": self.dtype}
+
+    def reshard(
+        self,
+        distributed_dims: List[int],
+        spatial_process_groups: List[dist.ProcessGroup],
     ):
-        """from_process_mesh has process mesh with 'row' and 'col' flags."""
-        # re-define self selector
-        self.parallelism = to_process_mesh["model"].size()
-        self.selector = RollSelectionStrategy(
-            self.parallelism,
-        )
+        """Update sharding without rebuilding the module."""
+        if len(distributed_dims) != len(spatial_process_groups):
+            raise ValueError("mismatched lengths")
+        self.distributed_dims = tuple(distributed_dims)
+        self.spatial_process_groups = tuple(spatial_process_groups)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of distributed roll.
-
-        Function currently only works when rolled across the -2 and -3 dimensions.
-
-        Parameters.
-        ----------
-
-        x : torch.Tensor
-            The input tensor.
-
-        Returns
-        -------
-        x_roll: torch.Tensor
-            Rolled tensor
-        """
-        x_roll = self.roll(
+        return Roll.apply(
             x,
             self.shifts,
             self.dims,
-            self.local_rank,
+            self.distributed_dims,
+            self.spatial_process_groups,
             self.device,
             self.empty,
-            self.selector,
-            self.spatial_group,
         )
-        return x_roll
+
 
 
 class Roll(torch.autograd.Function):
-    """Autograd function for batched transpose (XT) operation distributed across n processes."""
+    """Autograd wrapper for distributed roll over an arbitrary process mesh."""
 
     @staticmethod
     def forward(
         x: torch.Tensor,
-        shifts: Tuple[int, int],
-        dims: Tuple[int, int],
-        local_rank: int,
+        shifts: Tuple[int, ...],
+        dims: Tuple[int, ...],
+        distributed_dims: Tuple[int, ...],
+        spatial_process_groups: Tuple[dist.ProcessGroup, ...],
         device: torch.device,
         empty: torch.Tensor,
-        selector: RollSelectionStrategy,
-        spatial_group: dist.ProcessGroup,
     ) -> torch.Tensor:
-        """
-        Forward pass of distribued roll across 4 processes.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            The input tensor.
-        shifts: Tuple[int, int]
-            Values to shift by
-        dims: Tuple[int, int]
-            Dimensions in which to perform the rolled operation
-        device : torch.device
-            The device on which the computation is performed.
-        empty: torch.Tensor
-            Empty torch tensor used as buffer
-        selector: RollSelectionStrategy
-            Member of class RollSelectionStrategy that defines function pointer
-        spatial_group : dist.ProcessGroup, optional
-            Process group for an individual model-parallel instance.
-
-        Returns
-        -------
-        x_roll: torch.Tensor
-            Local rolled tensor.
-        """
-        x = selector.roll(x, shifts, dims, local_rank, device, empty, spatial_group)
-
-        return x
+        return dist_roll.distributed_roll(
+            x, shifts, dims,
+            list(distributed_dims), list(spatial_process_groups),
+            device, empty,
+        )
 
     @staticmethod
     def setup_context(ctx, inputs, output):
-        """Set up context for distributed roll operation."""
-        x, shifts, dims, local_rank, device, empty, selector, spatial_group = inputs
-
+        x, shifts, dims, distributed_dims, spatial_process_groups, device, empty = inputs
         ctx.shifts = shifts
-        ctx.local_rank = local_rank
         ctx.dims = dims
+        ctx.distributed_dims = distributed_dims
+        ctx.spatial_process_groups = spatial_process_groups
         ctx.device = device
         ctx.empty = empty
-        ctx.selector = selector
-        ctx.spatial_group = spatial_group
 
     @staticmethod
-    def vmap(
-        info,
-        in_dims,
-        x,
-        shifts,
-        dims,
-        local_rank,
-        device,
-        empty,
-        selector,
-        spatial_group,
-    ):
-        """Perform vmap for distributed roll operation."""
-        out = Roll.apply(
-            x, shifts, dims, local_rank, device, empty, selector, spatial_group
+    def backward(ctx, grad_output):
+        neg_shifts = tuple(-s for s in ctx.shifts)
+        grad_input = dist_roll.distributed_roll(
+            grad_output, neg_shifts, ctx.dims,
+            list(ctx.distributed_dims), list(ctx.spatial_process_groups),
+            ctx.device, ctx.empty,
         )
+        return grad_input, None, None, None, None, None, None
+
+    @staticmethod
+    def vmap(info, in_dims, x, shifts, dims, distributed_dims,
+             spatial_process_groups, device, empty):
+        out = Roll.apply(x, shifts, dims, distributed_dims,
+                         spatial_process_groups, device, empty)
         return out, 0
-
-    @staticmethod
-    def backward(
-        ctx: torch.autograd.Function, grad_output: torch.Tensor
-    ) -> tuple[torch.Tensor, None, None, None, None, None, None, None]:
-        """
-        Backward pass of transpose (XT) distributed across two processes.
-
-        Parameters
-        ----------
-        ctx : torch.autograd.Function
-            Context object to save information for backward computation.
-        grad_output : tensor
-            Gradient of the loss with respect to the output of the layer.
-
-        Returns
-        -------
-        grad_output:
-            Transposed gradient of the loss with respect to the input of the layer.
-        """
-        shifts = ctx.shifts
-        selector = ctx.selector
-        local_rank, device = ctx.local_rank, ctx.device
-        spatial_group = ctx.spatial_group
-        dims = ctx.dims
-
-        shifts = [-shift for shift in shifts]
-        grad_output = selector.roll(
-            grad_output, shifts, dims, local_rank, device, ctx.empty, spatial_group
-        )
-
-        return grad_output, None, None, None, None, None, None, None
