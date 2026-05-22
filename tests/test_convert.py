@@ -5,40 +5,81 @@ import jigsaw.convert as convert
 from jigsaw.attention import Transformer
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
 from jigsaw.linear import DistributedXWT
+from jigsaw.roll import Roll, DistributedRoll
 
-
-def test_convert_linear(device, process_mesh_2x2):
+@pytest.mark.parametrize(
+    "bias",
+    [
+        (bias)
+        for bias in [True, False]
+    ]
+)
+def test_convert_linear(device, process_mesh_2x2, bias):
     # need to make sure that all ranks have the same initialization!
     torch.manual_seed(1)
     # global feature size
     in_features, out_features = 4, 2
     x_seq = 6
     linear = torch.nn.Linear(
-        in_features=in_features, out_features=out_features, bias=False, device=device
+        in_features=in_features, out_features=out_features, bias=bias, device=device
     )
+    
     linear_weight = linear.weight.clone()
+    if bias:
+        linear_bias = linear.bias.clone()
     jigsaw_linear = convert.convert_to_jigsaw(linear, False, process_mesh_2x2, device)
 
     assert isinstance(jigsaw_linear, DistributedXWT)
     assert hasattr(jigsaw_linear, "reshard_parameters")
 
-    x_global = torch.randn(x_seq, in_features, device=device)
+    x_global = torch.randn(1, x_seq, in_features, device=device).requires_grad_(True)
     row_rank, col_rank = process_mesh_2x2["row"].rank(), process_mesh_2x2["col"].rank()
     row_size, col_size = process_mesh_2x2["row"].size(), process_mesh_2x2["col"].size()
 
+    ref_forward = linear(x_global)
+    ref_forward.backward(torch.ones_like(ref_forward, device=device))
+    
     x_local = x_global[
+        :,
         row_rank * x_seq // row_size : (row_rank + 1) * x_seq // row_size,
         col_rank * in_features // col_size : (col_rank + 1) * in_features // col_size,
-    ].contiguous()
+    ].contiguous().detach().requires_grad_(True)
 
-    ref_forward = linear(x_global)
+    # gradients
+    ref_d_w = linear.weight.grad
+    ref_d_x = x_global.grad
+    
+    # distributed calls
     dist_forward = jigsaw_linear(x_local)
-    dist_forward = gather_results(dist_forward, process_mesh_2x2)
+    dist_forward.backward(torch.ones_like(dist_forward, device=device))
+    
+    # gather values
     dist_w = jigsaw_linear.weight
+    dist_d_w = jigsaw_linear.weight.grad
+    dist_d_x = x_local.grad
+    
+    dist_forward = gather_results(dist_forward, process_mesh_2x2)
     dist_w = gather_results(dist_w, process_mesh_2x2)
+    dist_d_w = gather_results(dist_d_w, process_mesh_2x2)
+    dist_d_x = gather_results(dist_d_x, process_mesh_2x2)
+    
 
     assert torch.allclose(linear_weight, dist_w), "weights do not match"
     assert torch.allclose(ref_forward, dist_forward), "forward does not match"
+    assert torch.allclose(ref_d_w, dist_d_w), "weight grad does not match"
+    assert torch.allclose(ref_d_x, dist_d_x), "dx does not match"
+    
+    # bias
+    if bias:
+        ref_d_b = linear.bias.grad
+        dist_b = jigsaw_linear.bias
+        dist_d_b = jigsaw_linear.bias.grad
+        # gather
+        dist_b = gather_1d_results(dist_b, process_mesh=process_mesh_2x2, dim=0, pm_key="col")
+        dist_d_b = gather_1d_results(dist_d_b, process_mesh=process_mesh_2x2, dim=0, pm_key="col")
+        
+        assert torch.allclose(linear_bias, dist_b), "bias does not match"
+        assert torch.allclose(ref_d_b, dist_d_b), "bias grad does not match"
 
 
 def test_convert_linear2(device, process_mesh_2x1x2):
@@ -81,6 +122,64 @@ def test_convert_linear2(device, process_mesh_2x1x2):
 
     assert torch.allclose(linear_weight, dist_w), "weights do not match"
     assert torch.allclose(ref_forward, dist_forward), "forward does not match"
+
+
+# with bias
+def test_convert_linear3(device, process_mesh_2x2):
+    # need to make sure that all ranks have the same initialization!
+    torch.manual_seed(1)
+    # global feature size
+    in_features, out_features = 4, 2
+    x_seq = 6
+    linear = torch.nn.Linear(
+        in_features=in_features, out_features=out_features, bias=True, device=device
+    )
+    linear_weight = linear.weight.clone()
+    linear_bias = linear.bias.clone()
+
+    jigsaw_linear = convert.convert_to_jigsaw(linear, False, process_mesh_2x2, device)
+
+    x_global = torch.randn(1, x_seq, in_features, device=device).requires_grad_(True)
+    row_rank, col_rank = process_mesh_2x2["row"].rank(), process_mesh_2x2["col"].rank()
+    row_size, col_size = process_mesh_2x2["row"].size(), process_mesh_2x2["col"].size()
+
+    x_local = x_global[
+        :,
+        row_rank * x_seq // row_size : (row_rank + 1) * x_seq // row_size,
+        col_rank * in_features // col_size : (col_rank + 1) * in_features // col_size,
+    ].detach().contiguous().requires_grad_(True)
+
+    ref_forward = linear(x_global)
+    ref_forward.backward(torch.ones_like(ref_forward, device=device))
+
+    ref_d_w = linear.weight.grad
+    ref_d_b = linear.bias.grad
+    ref_d_x = x_global.grad
+
+    dist_forward = jigsaw_linear(x_local)
+    dist_forward.backward(torch.ones_like(dist_forward, device=device))
+
+    dist_forward = gather_results(dist_forward, process_mesh_2x2)
+    dist_w = jigsaw_linear.weight
+    dist_b = jigsaw_linear.bias
+    
+    dist_w = gather_results(dist_w, process_mesh_2x2)
+    dist_b = gather_1d_results(dist_b, process_mesh_2x2, pm_key="col", dim=0)
+    dist_d_w = jigsaw_linear.weight.grad
+    dist_d_b = jigsaw_linear.bias.grad
+    dist_d_x = x_local.grad
+    dist_d_w = gather_results(dist_d_w, process_mesh=process_mesh_2x2)
+    dist_d_b = gather_1d_results(
+        dist_d_b, process_mesh=process_mesh_2x2, pm_key="col", dim=0
+    )
+    dist_d_x = gather_results(dist_d_x, process_mesh=process_mesh_2x2)
+    
+    assert torch.allclose(linear_weight, dist_w), "weights do not match"
+    assert torch.allclose(linear_bias, dist_b), "bias does not match"
+    assert torch.allclose(ref_forward, dist_forward), "forward does not match"
+    assert torch.allclose(ref_d_w, dist_d_w), "weight grad does not match"
+    assert torch.allclose(ref_d_x, dist_d_x), "dx does not match"
+    assert torch.allclose(ref_d_b, dist_d_b), "bias grad does not match"
 
 
 def test_convert_mlp(device, process_mesh_2x2):
@@ -557,7 +656,7 @@ def test_jigsaw_roll(device, process_mesh_2x2):
     kernel_size = 4
     H, W = 100, 100
 
-    roll = lambda x: torch.roll(x, shifts=(3, 2), dims=(-3, -2))
+    roll = Roll(shifts=(3,2), dims=(-3, -2))
 
     x_global = torch.randn(1, H, W, in_channels, device=device)
     x_global.requires_grad_(True)
@@ -585,13 +684,8 @@ def test_jigsaw_roll(device, process_mesh_2x2):
     )
 
     jigsaw_roll = convert.convert_to_jigsaw(roll, False, process_mesh_2x2, device)
-
-    dist_forward.backward(torch.ones_like(dist_forward, device=device))
-    dist_d_x = x_local.grad
-
-    # weights
-    dist_w = jigsaw_conv2d.weight
-    dist_d_w = jigsaw_conv2d.weight.grad
+    dist_forward = jigsaw_roll(x_local)
+    
     # gather the results in two steps due to convolution
     dist_forward = gather_1d_results(
         dist_forward, process_mesh_2x2, dim=1, pm_key="col"
@@ -599,15 +693,8 @@ def test_jigsaw_roll(device, process_mesh_2x2):
     dist_forward = gather_1d_results(
         dist_forward, process_mesh_2x2, dim=-1, pm_key="row"
     )
-    dist_w = gather_1d_results(dist_w, process_mesh_2x2, dim=1, pm_key="col")
-    dist_d_w = gather_1d_results(dist_d_w, process_mesh_2x2, dim=1, pm_key="col")
-    # two-step gather for dx
-    dist_d_x = gather_1d_results(dist_d_x, process_mesh_2x2, dim=1, pm_key="col")
-    dist_d_x = gather_1d_results(dist_d_x, process_mesh_2x2, dim=-1, pm_key="row")
-
+    
     assert torch.allclose(
         ref_forward, dist_forward, atol=1e-3
     ), "forward does not match"
-    assert torch.allclose(ref_conv_weights, dist_w, atol=1e-5), "weights do not match"
-    assert torch.allclose(ref_d_w, dist_d_w, atol=1e-4), "weight grad does not match"
-    assert torch.allclose(ref_d_x, dist_d_x, atol=1e-4), "weight grad does not match"
+    
