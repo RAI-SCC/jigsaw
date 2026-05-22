@@ -53,7 +53,7 @@ class DistributedWindowedAttention(torch.nn.Module):
         self.qkv = linear.DistributedXWTSync(
             x_features // 2,
             embed_dim * 3,
-            bias=False,
+            bias=True,
             local_rank=self.local_rank,
             device=self.device,
             parallelism=self.parallelism,
@@ -173,6 +173,7 @@ class DistributedWindowedFlashAttention(torch.nn.Module):
             model_group=self.channel_group,
             sync_group=self.spatial_group,
             bayesian=bayesian,
+            
         )
 
         self.concatenator = linear.DistributedXWTSync(
@@ -375,7 +376,7 @@ class DistributedNICEWindowedTransformer(torch.nn.Module):
                 bayesian,
                 dtype,
             ).to(device)
-
+        print(f'AM I EVNE HERE? {self.attention_block.qkv.bias}')
         self.layer_norm1 = norm.DistributedNICENorm(
             output_dim,
             self.noise_dim,

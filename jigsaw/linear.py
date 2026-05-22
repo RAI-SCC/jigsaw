@@ -802,9 +802,10 @@ class DistributedXWTSync(torch.nn.Module):
                 torch.zeros(out_dim).uniform_(-stdev, stdev).to(device)
             )
             if bias
-            else None
+            else 
+            None
         )
-
+        
         self.device = device
         self.local_rank = local_rank
         self.model_group = model_group
