@@ -6,24 +6,7 @@ import torch.distributed as dist
 import torch.nn.functional as F  # noqa
 
 from . import distributed_matmul as dist_mm
-from . import distributed_roll as dist_roll
 from .utils_init import average_weights
-
-
-class RollSelectionStrategy:
-    """Selection strategy for distributed roll operation."""
-
-    def __init__(self, parallelism: int):
-        """Initialize RollSelectionStrategy."""
-        self.roll = self._roll_kernel_selection(parallelism)
-
-    def _roll_kernel_selection(self, parallelism: int) -> Callable:
-        """Return roll kernel based on parallelism."""
-        if parallelism == 4:
-            return dist_roll.roll2d
-        elif parallelism == 8:
-            return dist_roll.roll2d_8way
-
 
 class TransposeSelectionStrategy:
     """Selection strategy for distributed transpose operation."""
