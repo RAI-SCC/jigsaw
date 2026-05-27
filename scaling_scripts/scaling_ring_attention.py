@@ -71,7 +71,7 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         send_in_forward=ring_attn_fns.SendForward.X,
         save_for_backward=ring_attn_fns.SaveBackward.X,
         save_scope=ring_attn_fns.SaveScope.GLOBAL,
-        send_backward=ring_attn_fns.SendBackward.DISABLED,
+        send_backward=ring_attn_fns.SendBackward.GATHER_DKV,
         offload=ring_attn_fns.Offload.DISABLED,
         device=device,
     )

@@ -72,7 +72,7 @@ class SendBackward(Enum):
     """Enum for backward communication."""
 
     SEND_DKV = 0
-    DISABLED = 1
+    GATHER_DKV = 1
 
 
 class RingAttentionConfig:
@@ -241,6 +241,7 @@ def ring_backward(
     empty=None,
 ):
     """Implement backward pass for ring attention."""
+    # helper definition for implementation
     match ring_config.save_for_backward:
         case SaveBackward.X:
             x_chunks = chunks_to_save
@@ -250,21 +251,8 @@ def ring_backward(
     b, h, n_local, d = q.shape
     dq = torch.zeros_like(q, dtype=torch.float32)
 
-    match ring_config.send_backward:
-        case SendBackward.DISABLED:  # send dK = 1
-            dk_buf = torch.zeros(
-                [*q.shape[0:2], world_size * q.shape[2], *q.shape[3:]],
-                device=q.device,
-                dtype=q.dtype,
-            )
-            dv_buf = torch.zeros(
-                [*q.shape[0:2], world_size * q.shape[2], *q.shape[3:]],
-                device=q.device,
-                dtype=q.dtype,
-            )
-        case SendBackward.SEND_DKV:
-            dk_buf = torch.zeros(q.shape, device=q.device, dtype=q.dtype)
-            dv_buf = torch.zeros(q.shape, device=q.device, dtype=q.dtype)
+    # Get buffers
+    dk_buf, dv_buf = get_dkv_buffer(ring_config, q, world_size)
 
     # Pre-issue first prefetch (for save_local_or_global == 1) so H2D overlaps
     # with the compute of step 0.
@@ -400,7 +388,7 @@ def ring_backward(
         del dq_j, kj, vj, kv
         # ---- accumulate dK, dV ----
         match ring_config.send_backward:
-            case SendBackward.DISABLED:
+            case SendBackward.GATHER_DKV:
                 global_chunk_idx = (local_rank - step) % world_size
                 dk_buf[
                     :, :, global_chunk_idx * n_local : (global_chunk_idx + 1) * n_local
@@ -436,7 +424,7 @@ def ring_backward(
                     del dkj_r, dvj_r, recv_buffer
 
     match ring_config.send_backward:
-        case SendBackward.DISABLED:
+        case SendBackward.GATHER_DKV:
             dist.all_reduce(dk_buf, op=dist.ReduceOp.SUM, group=group)
             dist.all_reduce(dv_buf, op=dist.ReduceOp.SUM, group=group)
             dk_local = dk_buf[:, :, local_rank * n_local : (local_rank + 1) * n_local]
@@ -446,3 +434,24 @@ def ring_backward(
             dv_local = dv_buf
 
     return dq, dk_local, dv_local
+
+def get_dkv_buffer(ring_config, q, world_size):
+    # If
+    
+    match ring_config.send_backward:
+        case SendBackward.GATHER_DKV:  # send dK = 1
+            dk_buf = torch.zeros(
+                [*q.shape[0:2], world_size * q.shape[2], *q.shape[3:]],
+                device=q.device,
+                dtype=q.dtype,
+            )
+            dv_buf = torch.zeros(
+                [*q.shape[0:2], world_size * q.shape[2], *q.shape[3:]],
+                device=q.device,
+                dtype=q.dtype,
+            )
+        case SendBackward.SEND_DKV:
+            dk_buf = torch.zeros(q.shape, device=q.device, dtype=q.dtype)
+            dv_buf = torch.zeros(q.shape, device=q.device, dtype=q.dtype)
+    
+    return dk_buf, dv_buf

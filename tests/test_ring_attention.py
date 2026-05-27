@@ -7,6 +7,7 @@ import jigsaw.ring_attention_helpers as ring_attn_fns
 from jigsaw.utils_aggregate import (
     gather_1d_results,
 )
+from process_mesh import *
 
 # def test_backward(device, process_mesh):
 #     local_rank = dist.get_rank(group=process_mesh["row"])
@@ -245,7 +246,7 @@ def test_backward_sdpa(device, process_mesh_4x1, flash_kernel):
         for sl in [ring_attn_fns.SaveScope.LOCAL, ring_attn_fns.SaveScope.GLOBAL]
         for sd in [
             ring_attn_fns.SendBackward.SEND_DKV,
-            ring_attn_fns.SendBackward.DISABLED,
+            ring_attn_fns.SendBackward.GATHER_DKV,
         ]
         for offloader in [ring_attn_fns.Offload.DISABLED, ring_attn_fns.Offload.CPU]
     ],
@@ -471,7 +472,7 @@ def test_ring(device, process_mesh_4x1):
             send_in_forward=ring_attn_fns.SendForward.X,
             save_for_backward=ring_attn_fns.SaveBackward.X,
             save_scope=ring_attn_fns.SaveScope.GLOBAL,
-            send_backward=ring_attn_fns.SendBackward.DISABLED,
+            send_backward=ring_attn_fns.SendBackward.GATHER_DKV,
             offload=ring_attn_fns.Offload.DISABLED,
             device=device,
         ),
