@@ -110,6 +110,65 @@ class RingAttentionConfig:
             f"save_scope={self.save_scope.name}, "
             f"offload={self.offload.name})"
         )
+    
+    def as_dict(self):
+        """Return a dictionary representation of the config."""
+        return {
+            'send_in_forward': self.send_in_forward.name,
+            'save_for_backward': self.save_for_backward.name,
+            'save_scope': self.save_scope.name,
+            'send_backward': self.send_backward.name,
+            'offload': self.offloader.__class__.__name__ if self.offloader else Offload.DISABLED.name,
+        }
+    
+    @classmethod
+    def from_dict(cls, config_dict: dict) -> 'RingAttentionConfig':
+        config = dict(config_dict)
+        
+        # Map string values to enum members
+        enum_mappings = {
+            'send_in_forward': SendForward,
+            'save_for_backward': SaveBackward,
+            'save_scope': SaveScope,
+            'send_backward': SendBackward,
+            'offload': Offload,
+        }
+        
+        for key, enum_class in enum_mappings.items():
+            if key in config:
+                value = config[key]
+                # If it's a string, convert to enum
+                if isinstance(value, str):
+                    try:
+                        config[key] = enum_class[value.upper()]
+                    except KeyError:
+                        valid_names = ', '.join([e.name for e in enum_class])
+                        raise ValueError(
+                            f"Invalid value '{value}' for {key}. "
+                            f"Valid options are: {valid_names}"
+                        )
+                # If it's already an enum member, keep it
+                elif isinstance(value, enum_class):
+                    pass
+                else:
+                    raise ValueError(
+                        f"Expected string or {enum_class.__name__} for {key}, "
+                        f"got {type(value).__name__}"
+                )
+
+        # Remove any keys not in RingAttentionConfig.__init__ signature
+        valid_keys = {
+            'send_in_forward', 'save_for_backward', 'save_scope', 
+            'send_backward', 'offload', 'device'
+        }
+        config = {k: v for k, v in config.items() if k in valid_keys}
+        
+        return cls(**config)
+
+    @classmethod
+    def default_config(cls) -> dict:
+        """Return a default config instance."""
+        return cls().as_dict()
 
 
 @torch.no_grad()

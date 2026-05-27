@@ -1,0 +1,7 @@
+ring:
+  send_in_forward: KV
+  save_for_backward: X
+  save_scope: GLOBAL
+  send_backward: GATHER_DKV
+  offload: DISABLED
+model:
