@@ -1,8 +1,9 @@
 import torch
 import torch.distributed as dist
 
-streams = [torch.cuda.Stream() for _ in range(2)]
-streamz = [torch.cuda.Stream() for _ in range(4)]
+
+streams = None
+streamz = None
 
 _prealloc_buffers = {}
 
@@ -36,6 +37,9 @@ def _get_preallocated_buffer(
         Preallocated buffer.
     """
     # TODO: re-introduce buffers
+    global streams, streamz
+    streams = [torch.cuda.Stream() for _ in range(2)]
+    streamz = [torch.cuda.Stream() for _ in range(4)]
     key = (dtype, local_rank, index)
     if key not in _prealloc_buffers:
         _prealloc_buffers[key] = (None, 0)

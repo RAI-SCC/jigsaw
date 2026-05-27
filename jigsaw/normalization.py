@@ -9,20 +9,20 @@ from jigsaw import mlp
 class DistributedLayerNorm(torch.nn.Module):
     """LayerNorm with synchronized gradients across a process group."""
 
-    def __init__(self, normalized_dim, rank, device, spatial_group, channel_group):
+    def __init__(self, local_dim, local_rank, device, spatial_group, channel_group):
         """Initialize torch module for distributed layer norm."""
         super().__init__()
-        self.rank = rank
+        self.local_rank = local_rank
         self.device = device
         self.spatial_group = spatial_group
         self.channel_group = channel_group
 
         # Learnable parameters
-        self.weight = torch.nn.Parameter(torch.ones(normalized_dim, device=device))
-        self.bias = torch.nn.Parameter(torch.zeros(normalized_dim, device=device))
-        self.normalized_dim = normalized_dim
+        self.weight = torch.nn.Parameter(torch.ones(local_dim, device=device))
+        self.bias = torch.nn.Parameter(torch.zeros(local_dim, device=device))
+        self.normalized_dim = local_dim
         self.eps = 1e-5
-        self.layernorm = DistributedLNFunction().apply
+        self.layernorm = DistributedLNFunction.apply
 
     def get_parameter_count(self):
         """Return parameter count for distributed layer norm."""
@@ -49,15 +49,13 @@ class DistributedLNFunction(torch.autograd.Function):
         n_g = n_l * channel_group.size()  # normalized dimension size (global)
 
         local_mean = x.mean(dim=-1, keepdim=True)
-        local_var = x.var(dim=-1, keepdim=True)
+        local_var = x.var(dim=-1, keepdim=True, unbiased=False)
 
         mean = local_mean.clone()
         dist.all_reduce(mean, op=dist.ReduceOp.AVG, group=channel_group)
 
-        var = ((n_l - 1) / (n_g - 1)) * local_var + (n_l / (n_g - 1)) * (
-            mean - local_mean
-        ) ** 2
-        dist.all_reduce(var, op=dist.ReduceOp.SUM, group=channel_group)
+        var = local_var + (local_mean - mean) ** 2
+        dist.all_reduce(var, op=dist.ReduceOp.AVG, group=channel_group)
 
         # Normalize
         x_norm = (x - mean) / torch.sqrt(var + eps)
@@ -135,13 +133,60 @@ class DistributedLNFunction(torch.autograd.Function):
 
         # LayerNorm backward formula
         grad_x = (1.0 / std) * (
-            grad_x_norm - grad_x_norm_mean - x_norm * x_grad_x_term / (n - 1)
+            grad_x_norm - grad_x_norm_mean - x_norm * x_grad_x_term / n
         )
 
         g_w_handle.wait()
         g_b_handle.wait()
 
         return grad_x, grad_weight, grad_bias, None, None, None
+
+
+class DistributedGroupNorm(torch.nn.Module):
+    """Distributed Group Norm with functionality to merge"""
+
+    def __init__(
+        self,
+        num_local_groups,
+        num_channels,
+        eps=1e-5,
+        affine=True,
+        device=None,
+        dtype=None,
+        bias=True,
+        channel_group: dist.ProcessGroup = None,
+    ):
+        super().__init__()
+
+        self.num_local_groups = num_local_groups
+        self.num_channels = num_channels
+        self.num_global_groups = num_local_groups * channel_group.size()
+        self.eps = eps
+        self.affine = affine
+        self.device = device
+        self.dtype = dtype
+        self.bias = bias
+        self.group_norm = torch.nn.GroupNorm(
+            self.num_local_groups,
+            self.num_channels,
+            eps=self.eps,
+            affine=self.affine,
+            device=self.device,
+            dtype=self.dtype,
+            bias=self.bias,
+        )
+
+    def reshard_parameters(
+        self,
+        from_process_mesh: dist.ProcessGroup,
+        to_process_mesh: dist.ProcessGroup,
+        pm_row_key="row",
+        pm_col_key="col",
+    ):
+        assert self.num_global_groups % to_process_mesh[pm_col_key] == 0, (
+            "number of global LN groups must be divisible by to_process_mesh channel group size."
+        )
+        to_local_groups = self.num_global_groups // to_process_mesh[pm_col_key]
 
 
 class DistributedNoParamLayerNorm(torch.nn.Module):

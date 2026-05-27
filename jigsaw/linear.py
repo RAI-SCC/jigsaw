@@ -6,39 +6,8 @@ import torch.distributed as dist
 import torch.nn.functional as F  # noqa
 
 from . import distributed_matmul as dist_mm
-from . import distributed_roll as dist_roll
 from . import hooks
-
-
-class RollSelectionStrategy:
-    """Selection strategy for distributed roll operation."""
-
-    def __init__(self, parallelism: int):
-        """Initialize RollSelectionStrategy."""
-        self.roll = self._roll_kernel_selection(parallelism)
-
-    def _roll_kernel_selection(self, parallelism: int) -> Callable:
-        """Return roll kernel based on parallelism."""
-        if parallelism == 4:
-            return dist_roll.roll2d
-        elif parallelism == 8:
-            return dist_roll.roll2d_8way
-
-
-class TransposeSelectionStrategy:
-    """Selection strategy for distributed transpose operation."""
-
-    def __init__(self, parallelism: int):
-        self.x_t = self._transpose_kernel_selection(parallelism)
-
-    def _transpose_kernel_selection(self, parallelism: int) -> Callable:
-        """Return x_t kernel."""
-        if parallelism == 2:
-            return dist_mm.x_transpose_twoway
-        elif parallelism == 4:
-            return dist_mm.x_transpose_fourway
-        elif parallelism == 8:
-            return dist_mm.x_transpose_eightway
+from .utils_aggregate import gather_1d_results, gather_results
 
 
 class LinearSelectionStrategy:
@@ -307,6 +276,8 @@ class DistributedXWT(torch.nn.Module):
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup = None,
         bayesian: bool = False,
+        synchronized_layer: bool = False,
+        sync_group: dist.ProcessGroup = None,
     ) -> None:
         """
         Initialize the XWT Linear layer sharded over n processes.
@@ -353,6 +324,8 @@ class DistributedXWT(torch.nn.Module):
             else None
         )
 
+        self.out_dim = out_dim
+        self.in_dim = in_dim
         self.device = device
         self.local_rank = local_rank
         self.parallelism = parallelism
@@ -364,7 +337,7 @@ class DistributedXWT(torch.nn.Module):
             self.bias,
             self.spatial_group,
             self.bayesian,
-            synchronized_layer=False,
+            synchronized_layer=synchronized_layer,
             linear_layer=True,
         )
 
@@ -374,6 +347,14 @@ class DistributedXWT(torch.nn.Module):
             )
             for p in self.parameters():
                 dist.broadcast(p.data, group_src=0, group=self.spatial_group)
+
+        if synchronized_layer:
+            self.sync_group = self.spatial_group if sync_group is None else sync_group
+            self.weight.register_post_accumulate_grad_hook(
+                hooks.make_grad_sync_hook(self.sync_group)
+            )
+            for p in self.parameters():
+                dist.broadcast(p.data, group_src=0, group=self.sync_group)
 
         self.XWT = XWT.apply
 
@@ -416,6 +397,174 @@ class DistributedXWT(torch.nn.Module):
             else self.bias.numel() // dist.get_world_size(group=self.spatial_group)
         )
         return num_param + self.weight.numel()
+
+    @classmethod
+    def convert_to_jigsaw(
+        cls,
+        linear: torch.nn.Linear,
+        process_mesh: dist.ProcessGroup,
+        device: torch.device,
+        spatial_kw: str = "row",
+        channel_kw: str = "col",
+        model_kw: str = "model",
+    ) -> "DistributedXWT":
+        assert (
+            linear.in_features % process_mesh[spatial_kw].size() == 0
+        ), "in_features is not divisible by process mesh rows"
+        assert (
+            linear.out_features % process_mesh[channel_kw].size() == 0
+        ), "out_features is not divisible by process mesh columns"
+
+        instance = cls(
+            in_dim=linear.in_features // process_mesh[spatial_kw].size(),
+            out_dim=linear.out_features // process_mesh[channel_kw].size(),
+            bias=linear.bias is not None,
+            local_rank=process_mesh[model_kw].rank(),
+            device=device,
+            parallelism=process_mesh[model_kw].size(),
+            model_group=process_mesh[model_kw],
+            spatial_group=process_mesh[spatial_kw],
+            bayesian=False,  # TODO
+        )
+
+        # Map weights — clone so the original graph is detached
+        row_rank = process_mesh[spatial_kw].rank()
+        row_shard = linear.out_features // process_mesh[spatial_kw].size()
+        col_rank = process_mesh[channel_kw].rank()
+        col_shard = linear.in_features // process_mesh[channel_kw].size()
+
+        instance.weight.data = (
+            linear.weight.data[
+                row_rank * row_shard : (row_rank + 1) * row_shard,
+                col_rank * col_shard : (col_rank + 1) * col_shard,
+            ]
+            .clone()
+            .to(device)
+        )
+        if linear.bias is not None:
+            bias_size = linear.out_features // process_mesh[channel_kw].size()
+            instance.bias.data = linear.bias.data[
+                col_rank * bias_size : (col_rank + 1) * bias_size
+            ].clone()
+        return instance
+
+    def convert_to_torch(
+        self,
+        process_mesh: dist.ProcessGroup,
+        row_kw: str = "row",
+        col_kw: str = "col",
+        model_kw: str = "model",
+    ) -> torch.nn.Linear:
+        weights, bias = self.merge_weights(process_mesh, row_kw, col_kw, model_kw)
+        linear = torch.nn.Linear(
+            in_features=weights.shape[1],
+            out_features=weights.shape[0],
+            bias=True if bias is not None else False,
+            device=self.device,
+            dtype=self.dtype,
+        )
+        linear.weights.data = weights
+        linear.bias.data = bias
+
+        return linear
+
+    def merge_weights(
+        self,
+        from_process_mesh: dist.ProcessGroup,
+        row_kw="row",
+        col_kw="col",
+        model_kw="model",
+    ):
+        """Gathers and returns global weights (and bias) without modifying self."""
+        global_weights = gather_results(
+            self.weight, from_process_mesh, row_kw, col_kw, model_kw
+        )
+
+        global_bias = None
+        if self.bias is not None:
+            global_bias = gather_1d_results(
+                self.bias, from_process_mesh, dim=0, pm_key=col_kw
+            )
+
+        return global_weights, global_bias
+
+    def reshard_parameters(
+        self,
+        from_process_mesh: dist.ProcessGroup,
+        to_process_mesh: dist.ProcessGroup,
+        pm_row_key="row",
+        pm_col_key="col",
+    ):
+        """from_process_mesh has process mesh with 'row' and 'col' flags."""
+        # re-define self selector
+        self.parallelism = to_process_mesh["row"].size() * to_process_mesh["col"].size()
+        self.selector = LinearSelectionStrategy(
+            self.parallelism,
+            self.bias,
+            self.spatial_group,
+            self.bayesian,
+            synchronized_layer=False,
+            linear_layer=True,
+        )
+
+        # Find the local and global shapes
+        from_weight_shape_local = self.weight.shape
+        weight_shape_global = (
+            from_weight_shape_local[0] * from_process_mesh[pm_row_key].size(),
+            from_weight_shape_local[1] * from_process_mesh[pm_col_key].size(),
+        )
+        to_weight_shape_local = (
+            weight_shape_global[0] // to_process_mesh[pm_row_key].size(),
+            weight_shape_global[1] // to_process_mesh[pm_col_key].size(),
+        )
+        assert (
+            weight_shape_global[0] % to_process_mesh[pm_row_key].size() == 0
+        ), f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh[pm_row_key].size()}"
+        assert (
+            weight_shape_global[1] % to_process_mesh[pm_col_key].size() == 0
+        ), f"global weight shape[1] is {weight_shape_global[1]} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+
+        if self.bias is not None:
+            from_bias_shape_local = self.bias.shape
+            bias_shape_global = (
+                from_bias_shape_local[0] * from_process_mesh[pm_col_key].size()
+            )
+            to_bias_shape_local = (
+                bias_shape_global // to_process_mesh[pm_col_key].size()
+            )
+
+            assert (
+                bias_shape_global % to_process_mesh[pm_col_key].size() == 0
+            ), f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+
+        # Gather
+        global_weights, global_bias = self.merge_weights(from_process_mesh)
+
+        row_rank, row_shard_size = (
+            to_process_mesh[pm_row_key].rank(),
+            to_weight_shape_local[0],
+        )
+        col_rank, col_shard_size = (
+            to_process_mesh[pm_col_key].rank(),
+            to_weight_shape_local[1],
+        )
+
+        self.weight = torch.nn.Parameter(
+            global_weights[
+                row_rank * row_shard_size : (row_rank + 1) * row_shard_size,
+                col_rank * col_shard_size : (col_rank + 1) * col_shard_size,
+            ].contiguous()
+        )
+        del global_weights
+
+        if self.bias is not None:
+            col_shard_size = to_bias_shape_local
+            self.bias = torch.nn.Parameter(
+                global_bias[
+                    col_rank * col_shard_size : (col_rank + 1) * col_shard_size
+                ].contiguous()
+            )
+            del global_bias
 
 
 class XWT(torch.autograd.Function):
@@ -487,9 +636,7 @@ class XWT(torch.autograd.Function):
         ctx.bayesian = bayesian
 
     @staticmethod
-    def backward(
-        ctx: torch.autograd.Function, grad_output: torch.Tensor
-    ) -> tuple[
+    def backward(ctx: torch.autograd.Function, grad_output: torch.Tensor) -> tuple[
         torch.Tensor,
         torch.Tensor,
         Optional[torch.Tensor],
@@ -655,9 +802,10 @@ class DistributedXWTSync(torch.nn.Module):
                 torch.zeros(out_dim).uniform_(-stdev, stdev).to(device)
             )
             if bias
-            else None
+            else 
+            None
         )
-
+        
         self.device = device
         self.local_rank = local_rank
         self.model_group = model_group
@@ -695,6 +843,88 @@ class DistributedXWTSync(torch.nn.Module):
         return num_param + self.weight.numel() // dist.get_world_size(
             group=self.sync_group
         )
+
+    def reshard_parameters(
+        self,
+        from_process_mesh: dist.ProcessGroup,
+        to_process_mesh: dist.ProcessGroup,
+        pm_row_key="row",
+        pm_col_key="col",
+    ):
+        """from_process_mesh has process mesh with 'row' and 'col' flags."""
+        # re-define self selector
+        self.parallelism = to_process_mesh["model"].size()
+        self.selector = LinearSelectionStrategy(
+            self.parallelism,
+            self.bias,
+            self.spatial_group,
+            self.bayesian,
+            synchronized_layer=False,
+            linear_layer=True,
+        )
+
+        # Find the local and global shapes
+        from_weight_shape_local = self.weight.shape
+        weight_shape_global = (
+            from_weight_shape_local[0] * from_process_mesh["row"].size(),
+            from_weight_shape_local[1] * from_process_mesh["col"].size(),
+        )
+        to_weight_shape_local = (
+            weight_shape_global[0] // to_process_mesh["row"].size(),
+            weight_shape_global[1] // to_process_mesh["col"].size(),
+        )
+
+        assert (
+            weight_shape_global[0] % to_process_mesh["row"].size() == 0
+        ), f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh['row'].size()}"
+        assert (
+            weight_shape_global[1] % to_process_mesh["col"].size() == 0
+        ), f"global weight shape[1] is {weight_shape_global[1]} which is not divisible by {to_process_mesh['col'].size()}"
+
+        # gather
+        global_weights = gather_results(self.weight, from_process_mesh)
+
+        if self.bias is not None:
+            from_bias_shape_local = self.bias.shape
+            bias_shape_global = (
+                from_bias_shape_local[0] * from_process_mesh["col"].size()
+            )
+            to_bias_shape_local = bias_shape_global // to_process_mesh["col"].size()
+            assert (
+                bias_shape_global % to_process_mesh["col"].size() == 0
+            ), f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh['col'].size()}"
+
+            global_bias = gather_1d_results(
+                self.bias, from_process_mesh, dim=0, pm_key="col"
+            )
+
+        row_rank, row_shard_size = (
+            to_process_mesh["row"].rank(),
+            to_weight_shape_local[0],
+        )
+        col_rank, col_shard_size = (
+            to_process_mesh["col"].rank(),
+            to_weight_shape_local[1],
+        )
+        parameter_shard = global_weights[
+            row_rank * row_shard_size : (row_rank + 1) * row_shard_size,
+            col_rank * col_shard_size : (col_rank + 1) * col_shard_size,
+        ].contiguous()
+
+        self.weight = torch.nn.Parameter(parameter_shard)
+        del global_weights
+
+        if self.bias is not None:
+            col_rank, col_shard_size = (
+                to_process_mesh["col"].rank(),
+                to_bias_shape_local,
+            )
+            self.bias = torch.nn.Parameter(
+                global_bias[
+                    col_rank * col_shard_size : (col_rank + 1) * col_shard_size
+                ].contiguous()
+            )
+            del global_bias
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -799,9 +1029,7 @@ class XWTSync(torch.autograd.Function):
         ctx._fwd_used_autocast = x.is_floating_point() and x.dtype != torch.float32
 
     @staticmethod
-    def backward(
-        ctx: torch.autograd.Function, grad_output: torch.Tensor
-    ) -> tuple[
+    def backward(ctx: torch.autograd.Function, grad_output: torch.Tensor) -> tuple[
         torch.Tensor,
         torch.Tensor,
         Union[torch.Tensor, None],
@@ -967,10 +1195,13 @@ class DistributedXW(torch.nn.Module):
             linear_layer=True,
         )
 
-        if bias:
+        if self.bias is not None:
             self.bias = torch.nn.parameter.Parameter(self.bias)
-
-        # TODO: post-grad_acumulate hook
+            self.bias.register_post_accumulate_grad_hook(
+                hooks.make_grad_sync_hook(self.spatial_group)
+            )
+            for p in self.parameters():
+                dist.broadcast(p.data, group_src=0, group=self.spatial_group)
 
         self.XW = XW.apply
 
@@ -982,6 +1213,88 @@ class DistributedXW(torch.nn.Module):
             else self.bias.numel() // dist.get_world_size(group=self.spatial_group)
         )
         return num_param + self.weight.numel()
+
+    def reshard_parameters(
+        self,
+        from_process_mesh: dist.ProcessGroup,
+        to_process_mesh: dist.ProcessGroup,
+        pm_row_key="row",
+        pm_col_key="col",
+    ):
+        """from_process_mesh has process mesh with 'row' and 'col' flags."""
+        # re-define self selector
+        self.parallelism = to_process_mesh["model"].size()
+        self.selector = LinearSelectionStrategy(
+            self.parallelism,
+            self.bias,
+            self.spatial_group,
+            self.bayesian,
+            synchronized_layer=False,
+            linear_layer=True,
+        )
+
+        # Find the local and global shapes
+        from_weight_shape_local = self.weight.shape
+        weight_shape_global = (
+            from_weight_shape_local[0] * from_process_mesh["row"].size(),
+            from_weight_shape_local[1] * from_process_mesh["col"].size(),
+        )
+        to_weight_shape_local = (
+            weight_shape_global[0] // to_process_mesh["row"].size(),
+            weight_shape_global[1] // to_process_mesh["col"].size(),
+        )
+
+        assert (
+            weight_shape_global[0] % to_process_mesh["row"].size() == 0
+        ), f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh['row'].size()}"
+        assert (
+            weight_shape_global[1] % to_process_mesh["col"].size() == 0
+        ), f"global weight shape[1] is {weight_shape_global[1]} which is not divisible by {to_process_mesh['col'].size()}"
+
+        # gather
+        global_weights = gather_results(self.weight, from_process_mesh)
+
+        if self.bias is not None:
+            from_bias_shape_local = self.bias.shape
+            bias_shape_global = (
+                from_bias_shape_local[0] * from_process_mesh["col"].size()
+            )
+            to_bias_shape_local = bias_shape_global // to_process_mesh["col"].size()
+            assert (
+                bias_shape_global % to_process_mesh["col"].size() == 0
+            ), f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh['col'].size()}"
+
+            global_bias = gather_1d_results(
+                self.bias, from_process_mesh, dim=0, pm_key="col"
+            )
+
+        row_rank, row_shard_size = (
+            to_process_mesh["row"].rank(),
+            to_weight_shape_local[0],
+        )
+        col_rank, col_shard_size = (
+            to_process_mesh["col"].rank(),
+            to_weight_shape_local[1],
+        )
+        parameter_shard = global_weights[
+            row_rank * row_shard_size : (row_rank + 1) * row_shard_size,
+            col_rank * col_shard_size : (col_rank + 1) * col_shard_size,
+        ].contiguous()
+
+        self.weight = torch.nn.Parameter(parameter_shard)
+        del global_weights
+
+        if self.bias is not None:
+            col_rank, col_shard_size = (
+                to_process_mesh["col"].rank(),
+                to_bias_shape_local,
+            )
+            self.bias = torch.nn.Parameter(
+                global_bias[
+                    col_rank * col_shard_size : (col_rank + 1) * col_shard_size
+                ].contiguous()
+            )
+            del global_bias
 
     def forward(self, x: torch.Tensor):
         """
@@ -1239,11 +1552,14 @@ class DistributedXTW(torch.nn.Module):
             linear_layer=True,
         )
 
-        if bias:
+        if self.bias is not None:
             self.bias = torch.nn.parameter.Parameter(self.bias)
+            self.bias.register_post_accumulate_grad_hook(
+                hooks.make_grad_sync_hook(self.spatial_group)
+            )
+            for p in self.parameters():
+                dist.broadcast(p.data, group_src=0, group=self.spatial_group)
 
-        # TODO: hooks for bias sync
-        # self.bias.register_post_accumulate_grad_hook(hooks.make_grad_sync_hook(self.spatial_group))
         self.XTW = XTW.apply
 
     def get_parameter_count(self):
@@ -1254,6 +1570,84 @@ class DistributedXTW(torch.nn.Module):
             else self.bias.numel() // dist.get_world_size(group=self.spatial_group)
         )
         return num_param + self.weight.numel()
+
+    def reshard_parameters(
+        self, from_process_mesh: dist.ProcessGroup, to_process_mesh: dist.ProcessGroup
+    ):
+        """from_process_mesh has process mesh with 'row' and 'col' flags."""
+        # re-define self selector
+        self.parallelism = to_process_mesh["model"].size()
+        self.selector = LinearSelectionStrategy(
+            self.parallelism,
+            self.bias,
+            self.spatial_group,
+            self.bayesian,
+            synchronized_layer=False,
+            linear_layer=True,
+        )
+
+        # Find the local and global shapes
+        from_weight_shape_local = self.weight.shape
+        weight_shape_global = (
+            from_weight_shape_local[0] * from_process_mesh["row"].size(),
+            from_weight_shape_local[1] * from_process_mesh["row"].size(),
+        )
+        to_weight_shape_local = (
+            weight_shape_global // to_process_mesh["row"].size(),
+            weight_shape_global // to_process_mesh["col"].size(),
+        )
+
+        assert (
+            weight_shape_global[0] % to_process_mesh["row"].size() == 0
+        ), f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh['row'].size()}"
+        assert (
+            weight_shape_global[1] % to_process_mesh["col"].size() == 0
+        ), f"global weight shape[1] is {weight_shape_global[1]} which is not divisible by {to_process_mesh['col'].size()}"
+
+        # gather
+        global_weights = gather_results(self.weight, from_process_mesh)
+
+        if self.bias is not None:
+            from_bias_shape_local = self.bias.shape
+            bias_shape_global = (
+                from_bias_shape_local[0] * from_process_mesh["row"].size()
+            )
+            to_bias_shape_local = bias_shape_global // to_process_mesh["row"].size()
+
+            assert (
+                bias_shape_global % to_process_mesh["row"] == 0
+            ), f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh['row'].size()}"
+
+            global_bias = gather_results(
+                self.bias, from_process_mesh
+            )  # keep it simple, gather all around
+
+        row_rank, row_shard_size = (
+            to_process_mesh["row"].size(),
+            to_weight_shape_local[0],
+        )
+        col_rank, col_shard_size = (
+            to_process_mesh["col"].size(),
+            to_weight_shape_local[1],
+        )
+
+        self.weight = torch.nn.Parameter(
+            global_weights[
+                row_rank * row_shard_size : (row_rank + 1) * row_shard_size,
+                col_rank * col_shard_size : (col_rank + 1) * col_shard_size,
+            ].contiguous()
+        )
+        del global_weights
+
+        col_rank, col_shard_size = to_process_mesh["col"].size(), to_bias_shape_local[1]
+
+        if self.bias is not None:
+            torch.nn.Parameter(
+                global_bias[
+                    col_rank * col_shard_size : (col_rank + 1) * col_shard_size
+                ].contiguous()
+            )
+            del global_bias
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -1437,328 +1831,6 @@ class XTW(torch.autograd.Function):
 
         # out has vmapped dimension at dim 0
         return out, 0
-
-
-class DistributedXTranspose(torch.nn.Module):
-    """Batched transpose (XT) operation distributed across n processes."""
-
-    def __init__(
-        self,
-        local_rank: int,
-        device: torch.device,
-        parallelism: int,
-        model_group: dist.ProcessGroup,
-    ) -> None:
-        """
-        Initialize the X Transpose class.
-
-        Parameters
-        ----------
-        local_rank : int
-            Local model rank.
-        device : torch.device
-            Device to perform computation on.
-        parallelism: int
-            Number of processes to distribute over
-        model_group : dist.ProcessGroup
-            Process group for an individual model-parallel instance.
-        """
-        super().__init__()
-        self.local_rank = local_rank
-        self.device = device
-        self.parallelism = parallelism
-        self.model_group = model_group
-        self.selector = TransposeSelectionStrategy(self.parallelism)
-
-        self.transpose = XT.apply
-
-    def get_parameter_count(self):
-        """Return 0 parameter count for transpose operation."""
-        return 0
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of transpose (XT) distributed across two processes.
-
-        Parameters.
-        ----------
-
-        X : torch.Tensor
-            The input tensor.
-
-        Returns
-        -------
-        XT: torch.Tensor
-            Local transposed tensor.
-        """
-        x_transpose = self.transpose(
-            x, self.local_rank, self.device, self.parallelism, self.model_group
-        )
-        return x_transpose
-
-
-class XT(torch.autograd.Function):
-    """Autograd function for batched transpose (XT) operation distributed across n processes."""
-
-    @staticmethod
-    def forward(
-        x: torch.Tensor,
-        local_rank: int,
-        device: torch.device,
-        selector: int,
-        model_group: dist.ProcessGroup,
-    ) -> torch.Tensor:
-        """
-        Forward pass of transpose (XT) distributed across n processes.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            The input tensor.
-        local_rank : int
-            Local model rank.
-        device : torch.device
-            The device on which the computation is performed.
-        selector: TransposeSelectionStrategy
-            Instance of transpose selection strategy class
-        model_group : dist.ProcessGroup, optional
-            Process group for an individual model-parallel instance.
-
-        Returns
-        -------
-        XT: torch.Tensor
-            Local transposed tensor.
-        """
-        x = selector.x_t(x, local_rank, device, model_group)
-        return x
-
-    @staticmethod
-    def setup_context(ctx, inputs, output):
-        """
-        Set up context.
-
-        ctx: FunctionCtx
-        inputs: tuple(x, local_rank, device, selector, model_group)
-        output: xwt
-        """
-        x, local_rank, device, selector, model_group = inputs
-        ctx.device = device
-        ctx.local_rank = local_rank
-        ctx.selector = selector
-        ctx.model_group = model_group
-
-    @staticmethod
-    def backward(
-        ctx: torch.autograd.Function, grad_output: torch.Tensor
-    ) -> tuple[torch.Tensor, None, None, None, None]:
-        """
-        Backward pass of transpose (XT) distributed across two processes.
-
-        Parameters
-        ----------
-        ctx : torch.autograd.Function
-            Context object to save information for backward computation.
-        grad_output : tensor
-            Gradient of the loss with respect to the output of the layer.
-
-        Returns
-        -------
-        grad_output:
-            Transposed gradient of the loss with respect to the input of the layer.
-        """
-        local_rank = ctx.local_rank
-        device = ctx.device
-        selector = ctx.selector
-        model_group = ctx.model_group
-
-        grad_output = selector.x_t(grad_output, local_rank, device, model_group)
-        return grad_output, None, None, None, None
-
-    @staticmethod
-    def vmap(
-        info,
-        in_dims: tuple[Optional[int], ...],
-        x: torch.Tensor,
-        local_rank: int,
-        device: torch.device,
-        selector: int,
-        model_group: dist.ProcessGroup,
-    ) -> tuple[torch.Tensor, Optional[int]]:
-        """Perform vmap for transpose operation."""
-        x = x.contiguous()
-        # x under vmap has shape (V, B, x_in, in_dim).
-        out = XT.apply(x, local_rank, device, selector, model_group)
-
-        # out has vmapped dimension at dim 0
-        return out, 0
-
-
-class DistributedRoll(torch.nn.Module):
-    """Batched transpose (XT) operation distributed across n processes."""
-
-    def __init__(
-        self,
-        shifts: Tuple[int, int],
-        dims: int,
-        local_rank: int,
-        device: torch.device,
-        parallelism: int,
-        spatial_group: dist.ProcessGroup,
-        dtype: torch.dtype = torch.float32,
-    ) -> None:
-        """Initialize the Roll class."""
-        super().__init__()
-
-        self.local_rank = local_rank
-        self.device = device
-        self.spatial_group = spatial_group
-        self.shifts = shifts
-        self.dims = dims
-        self.roll = Roll.apply
-        self.empty = torch.empty(0, device=self.device, dtype=dtype)
-
-        self.selector = RollSelectionStrategy(parallelism)
-
-    def get_parameter_count(self):
-        """Return parameter count for distributed roll operation."""
-        return 0
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of distributed roll.
-
-        Function currently only works when rolled across the -2 and -3 dimensions.
-
-        Parameters.
-        ----------
-
-        x : torch.Tensor
-            The input tensor.
-
-        Returns
-        -------
-        x_roll: torch.Tensor
-            Rolled tensor
-        """
-        x_roll = self.roll(
-            x,
-            self.shifts,
-            self.dims,
-            self.local_rank,
-            self.device,
-            self.empty,
-            self.selector,
-            self.spatial_group,
-        )
-        return x_roll
-
-
-class Roll(torch.autograd.Function):
-    """Autograd function for batched transpose (XT) operation distributed across n processes."""
-
-    @staticmethod
-    def forward(
-        x: torch.Tensor,
-        shifts: Tuple[int, int],
-        dims: Tuple[int, int],
-        local_rank: int,
-        device: torch.device,
-        empty: torch.Tensor,
-        selector: RollSelectionStrategy,
-        spatial_group: dist.ProcessGroup,
-    ) -> torch.Tensor:
-        """
-        Forward pass of distribued roll across 4 processes.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            The input tensor.
-        shifts: Tuple[int, int]
-            Values to shift by
-        dims: Tuple[int, int]
-            Dimensions in which to perform the rolled operation
-        device : torch.device
-            The device on which the computation is performed.
-        empty: torch.Tensor
-            Empty torch tensor used as buffer
-        selector: RollSelectionStrategy
-            Member of class RollSelectionStrategy that defines function pointer
-        spatial_group : dist.ProcessGroup, optional
-            Process group for an individual model-parallel instance.
-
-        Returns
-        -------
-        x_roll: torch.Tensor
-            Local rolled tensor.
-        """
-        x = selector.roll(x, shifts, dims, local_rank, device, empty, spatial_group)
-
-        return x
-
-    @staticmethod
-    def setup_context(ctx, inputs, output):
-        """Set up context for distributed roll operation."""
-        x, shifts, dims, local_rank, device, empty, selector, spatial_group = inputs
-
-        ctx.shifts = shifts
-        ctx.local_rank = local_rank
-        ctx.dims = dims
-        ctx.device = device
-        ctx.empty = empty
-        ctx.selector = selector
-        ctx.spatial_group = spatial_group
-
-    @staticmethod
-    def vmap(
-        info,
-        in_dims,
-        x,
-        shifts,
-        dims,
-        local_rank,
-        device,
-        empty,
-        selector,
-        spatial_group,
-    ):
-        """Perform vmap for distributed roll operation."""
-        out = Roll.apply(
-            x, shifts, dims, local_rank, device, empty, selector, spatial_group
-        )
-        return out, 0
-
-    @staticmethod
-    def backward(
-        ctx: torch.autograd.Function, grad_output: torch.Tensor
-    ) -> tuple[torch.Tensor, None, None, None, None, None, None, None]:
-        """
-        Backward pass of transpose (XT) distributed across two processes.
-
-        Parameters
-        ----------
-        ctx : torch.autograd.Function
-            Context object to save information for backward computation.
-        grad_output : tensor
-            Gradient of the loss with respect to the output of the layer.
-
-        Returns
-        -------
-        grad_output:
-            Transposed gradient of the loss with respect to the input of the layer.
-        """
-        shifts = ctx.shifts
-        selector = ctx.selector
-        local_rank, device = ctx.local_rank, ctx.device
-        spatial_group = ctx.spatial_group
-        dims = ctx.dims
-
-        shifts = [-shift for shift in shifts]
-        grad_output = selector.roll(
-            grad_output, shifts, dims, local_rank, device, ctx.empty, spatial_group
-        )
-
-        return grad_output, None, None, None, None, None, None, None
 
 
 class DistributedMatMulXWTranspose(torch.nn.Module):
