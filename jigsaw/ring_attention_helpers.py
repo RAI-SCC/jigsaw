@@ -102,13 +102,24 @@ class RingAttentionConfig:
 
     def __repr__(self):
         """Print statement of RingAttentionConfig class."""
-        return (
-            f"RingAttentionConfig("
-            f"send_in_forward={self.send_in_forward.name}, "
-            f"save_for_backward={self.save_for_backward.name}, "
-            f"save_scope={self.save_scope.name}, "
-            f"offload={self.offload.name})"
-        )
+        if self.offloader is None:
+            return (
+                f"RingAttentionConfig("
+                f"send_in_forward={self.send_in_forward.name}, "
+                f"save_for_backward={self.save_for_backward.name}, "
+                f"save_scope={self.save_scope.name}, "
+                f"send_backward={self.send_backward.name}, "
+                f"offload=None)"
+            )
+        else:
+            return (
+                f"RingAttentionConfig("
+                f"send_in_forward={self.send_in_forward.name}, "
+                f"save_for_backward={self.save_for_backward.name}, "
+                f"save_scope={self.save_scope.name}, "
+                f"send_backward={self.send_backward.name}, "
+                f"offload={self.offloader.name})"
+            )
 
 
 @torch.no_grad()
@@ -415,7 +426,7 @@ def save_for_backward(ring_config, chunks_to_save, x, kv):
                     return kv.clone()
                 else:
                     return kv
-    return chunks_to_save
+    return
 
 def get_dkv_buffer(ring_config, q, world_size):
     # Get the dkv buffer that will be needed

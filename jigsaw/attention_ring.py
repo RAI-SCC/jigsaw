@@ -325,7 +325,7 @@ class RingAttentionFunction(torch.autograd.Function):
         ctx.mark_non_differentiable(*chunks_to_save)
 
         ctx.save_for_backward(
-            q, out, x, lse.mT, w_qkv, *[t for pair in chunks_to_save for t in pair]
+            q, out, x, lse.mT, w_qkv, *[chunk for chunk in chunks_to_save]
         )
 
         ctx.W_qkv = w_qkv

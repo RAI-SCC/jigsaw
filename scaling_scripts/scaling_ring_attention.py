@@ -4,6 +4,7 @@ import math
 import numpy as np
 import torch
 import torch.distributed as dist
+import itertools
 
 from jigsaw import attention_ring, utils
 from jigsaw import ring_attention_helpers as ring_attn_fns
@@ -50,33 +51,16 @@ def make_process_mesh(
     return mesh
 
 
-def training_loop(device: torch.device, local_rank: int) -> None:
+def training_loop(
+    device: torch.device,
+    local_rank: int,
+    ring_config: ring_attn_fns.RingAttentionConfig,
+) -> None:
     """Training loop for scaling experiments."""
-    mesh_dict = make_process_mesh("nccl")
-
-    x_features = 256
-    output_dim = embed_dim = 256
-    b, heads, n_global, d = 1, 32, 524288, 256
-
-    torch.manual_seed(2)
-
-    # pass in the QKV mapping alone
-    w_qkv = torch.randn(
-        3 * d * heads, d, device=device, requires_grad=True, dtype=torch.bfloat16
-    )
-
     # define configs for the ring attention
     torch.manual_seed(local_rank)
-    ring_config = ring_attn_fns.RingAttentionConfig(
-        send_in_forward=ring_attn_fns.SendForward.X,
-        save_for_backward=ring_attn_fns.SaveBackward.X,
-        save_scope=ring_attn_fns.SaveScope.GLOBAL,
-        send_backward=ring_attn_fns.SendBackward.GATHER_DKV,
-        offload=ring_attn_fns.Offload.DISABLED,
-        device=device,
-    )
 
-    # define stripped down 
+    # define stripped down attention calculation
     ring_attention = attention_ring.Ring(
         x_features=x_features,
         embed_dim=embed_dim,
@@ -90,21 +74,6 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         bayesian=False,
         dtype=torch.bfloat16,
         ring_config=ring_config,
-    )
-   
-    # define baseline model
-    model_baseline = attention_ring.RingBaseline(
-        x_features=x_features,
-        embed_dim=embed_dim,
-        output_dim=output_dim,
-        heads=heads,
-        dropout=0.0,
-        local_rank=local_rank,
-        device=device,
-        parallelism=mesh_dict["model"].size(),
-        spatial_group=mesh_dict["model"],
-        bayesian=False,
-        dtype=torch.bfloat16,
     )
 
     n_epochs = 4
@@ -142,14 +111,34 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         )
         end.record()
         torch.cuda.synchronize()
+        epoch_times[epoch] = start.elapsed_time(end) / 1000 / 60
+        
+    return epoch_times
 
-        if local_rank == 0:
-            epoch_times[epoch] = start.elapsed_time(end) / 1000 / 60
-            print(f"Epoch {epoch} time [min]: {(epoch_times[epoch])}")
+def train_one_epoch(model: torch.nn.Module, x, q, k, v, w_qkv):
+    """Time and train one epoch."""
+    # X has shape [B, Nlocal, d//2]
+    for _ in range(5):
+        output = model(x.detach(), q, k, v, w_qkv, None)
+        output.sum().backward()
 
-    if local_rank == 0:
-        parallel_time = np.average(epoch_times[1:])
-        print(f"Average parallel epoch time is {parallel_time}")
+
+def ref_training_loop(mesh_dict, n_epochs):
+    epoch_times = np.zeros(n_epochs)
+    # define baseline model
+    model_baseline = attention_ring.RingBaseline(
+        x_features=x_features,
+        embed_dim=embed_dim,
+        output_dim=output_dim,
+        heads=heads,
+        dropout=0.0,
+        local_rank=local_rank,
+        device=device,
+        parallelism=mesh_dict["model"].size(),
+        spatial_group=mesh_dict["model"],
+        bayesian=False,
+        dtype=torch.bfloat16,
+    )
 
     # non-parallel baseline
     for epoch in range(n_epochs):
@@ -168,28 +157,13 @@ def training_loop(device: torch.device, local_rank: int) -> None:
         start.record()
         train_one_epoch(model_baseline, x, q, k, v, w_qkv)
         end.record()
-        torch.cuda.synchronize()
-
+        torch.cuda.synchronize()    
+        
+        epoch_times[epoch] = start.elapsed_time(end) / 1000 / 60
+        
         if local_rank == 0:
-            epoch_times[epoch] = start.elapsed_time(end) / 1000 / 60
             print(f"Epoch {epoch} time [min]: {(epoch_times[epoch])}")
-    if local_rank == 0:
-        ref_time = np.average(epoch_times[1:])
-        print(f"Average ref time is {ref_time}")
-        print(f"Speedup is {ref_time / parallel_time}")
-
-    
-    if local_rank == 0:
-        ref_time = np.average(epoch_times[1:])
-        print(f"Average ref time is {ref_time}")
-        print(f"Speedup is {ref_time / parallel_time}")
-
-def train_one_epoch(model: torch.nn.Module, x, q, k, v, w_qkv):
-    """Time and train one epoch."""
-    # X has shape [B, Nlocal, d//2]
-    for _ in range(5):
-        output = model(x.detach(), q, k, v, w_qkv, None)
-        output.sum().backward()
+    return epoch_times
 
 
 if __name__ == "__main__":
@@ -198,6 +172,60 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     device, localid, local_rank, world_size = utils.init_cuda()
+    mesh_dict = make_process_mesh("nccl")
 
-    training_loop(device, local_rank)
+    # define problem size
+    x_features = 2048
+    output_dim = embed_dim = 256
+    b, heads, n_global, d = 1, 128, 32768, 256
+    n_epochs = 5
+
+    torch.manual_seed(2)
+
+    # pass in the QKV mapping alone
+    w_qkv = torch.randn(
+        3 * d * heads, d, device=device, requires_grad=True, dtype=torch.bfloat16
+    )
+
+    ref_epoch_time = ref_training_loop(
+        mesh_dict,
+        n_epochs,
+    )
+
+    # Set all possible configuration options here
+    enum_fields = {
+        "send_in_forward": ring_attn_fns.SendForward,
+        "save_for_backward": ring_attn_fns.SaveBackward,
+        "save_scope": ring_attn_fns.SaveScope,
+        "send_backward": ring_attn_fns.SendBackward,
+        "offload": ring_attn_fns.Offload,
+    }
+
+    ring_config = ring_attn_fns.RingAttentionConfig(
+        send_in_forward=ring_attn_fns.SendForward.X,
+        save_for_backward=ring_attn_fns.SaveBackward.X,
+        save_scope=ring_attn_fns.SaveScope.GLOBAL,
+        send_backward=ring_attn_fns.SendBackward.GATHER_DKV,
+        offload=ring_attn_fns.Offload.DISABLED,
+        device=device,
+    )
+
+    for combo in itertools.product(*[e for e in enum_fields.values()]):
+        ring_config = ring_attn_fns.RingAttentionConfig(
+            **dict(zip(enum_fields.keys(), combo)),
+            device=device,
+        )
+
+        if local_rank == 0:
+            print(f"config is {ring_config}")
+        epoch_times = training_loop(device, local_rank, ring_config)
+        
+        if local_rank == 0:
+            parallel_time = np.average(epoch_times[1:])
+            # print(f"Average parallel epoch time is {parallel_time}")
+            ref_time = np.average(ref_epoch_time[1:])
+            # print(f"Average ref time is {ref_time}")
+            print(f"Speedup is {ref_time / parallel_time}")
+
+    
     dist.destroy_process_group()
