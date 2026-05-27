@@ -91,6 +91,7 @@ class RingAttentionConfig:
         self.save_for_backward = save_for_backward
         self.save_scope = save_scope
         self.send_backward = send_backward
+        self.offload = offload
         self.offloader = self.init_offloader(offload, device)
 
     def init_offloader(self, offload, device):
@@ -102,24 +103,14 @@ class RingAttentionConfig:
 
     def __repr__(self):
         """Print statement of RingAttentionConfig class."""
-        if self.offloader is None:
-            return (
-                f"RingAttentionConfig("
-                f"send_in_forward={self.send_in_forward.name}, "
-                f"save_for_backward={self.save_for_backward.name}, "
-                f"save_scope={self.save_scope.name}, "
-                f"send_backward={self.send_backward.name}, "
-                f"offload=None)"
-            )
-        else:
-            return (
-                f"RingAttentionConfig("
-                f"send_in_forward={self.send_in_forward.name}, "
-                f"save_for_backward={self.save_for_backward.name}, "
-                f"save_scope={self.save_scope.name}, "
-                f"send_backward={self.send_backward.name}, "
-                f"offload={self.offloader.name})"
-            )
+        return (
+            f"RingAttentionConfig("
+            f"send_in_forward={self.send_in_forward.name}, "
+            f"save_for_backward={self.save_for_backward.name}, "
+            f"save_scope={self.save_scope.name}, "
+            f"send_backward={self.send_backward.name}, "
+            f"offload={self.offload.name})"
+        )
 
 
 @torch.no_grad()
@@ -166,7 +157,7 @@ def ring_forward(
         # Kj, Vj are views into KV; flash attention requires contiguous, so materialize.
         kj_c = kj.contiguous()
         vj_c = vj.contiguous()
-        
+
         # call torch sdpa
         out_j, l_j, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
             q,
@@ -183,7 +174,7 @@ def ring_forward(
         # ---- ring rotate ----
         if step < world_size - 1:
             handle.wait()
-            
+
             # read either x or kv values from the communicated buffers
             # can put into a helper function when/if there are more complicated options involved
             match ring_config.send_in_forward:
@@ -193,7 +184,7 @@ def ring_forward(
                     kv = recv_buf
                     kj = kv[0]
                     vj = kv[1]
-            
+
             # send x or k/v to the next rank
             next_recv = torch.empty_like(recv_buf)
             recv_buf, handle = _ring_send_recv(
@@ -427,6 +418,7 @@ def save_for_backward(ring_config, chunks_to_save, x, kv):
                 else:
                     return kv
     return
+
 
 def get_dkv_buffer(ring_config, q, world_size):
     # Get the dkv buffer that will be needed
