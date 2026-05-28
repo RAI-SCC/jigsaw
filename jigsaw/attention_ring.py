@@ -183,7 +183,7 @@ class RingAttention(torch.nn.Module):
         channel_group: dist.ProcessGroup,
         bayesian: bool,
         dtype,
-        ring_config
+        ring_config,
     ):
         """
 
@@ -253,7 +253,7 @@ class RingAttention(torch.nn.Module):
             None,
             self.local_rank,
             self.spatial_group.size(),
-            self.ring_config
+            self.ring_config,
         )
         return out
 
@@ -300,7 +300,7 @@ class RingAttentionFunction(torch.autograd.Function):
         empty = torch.empty(0, device=x.device, dtype=x.dtype)
 
         out, lse, chunks_to_save = ring_attn.ring_forward(
-            q, x, w_qkv, scale, group, empty, rank, world_size, config
+            q, k, v, x, w_qkv, scale, group, empty, rank, world_size, config
         )
 
         out = out.to(torch.bfloat16)

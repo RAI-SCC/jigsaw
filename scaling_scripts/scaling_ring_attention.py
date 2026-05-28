@@ -269,7 +269,7 @@ if __name__ == "__main__":
     batch_size = layer_config.get("batch_size", _default_layer_config["batch_size"])
     heads = layer_config.get("heads", _default_layer_config["heads"])
     n_global = layer_config.get("n_global", _default_layer_config["n_global"])
-    embed_dim = x_features // heads
+    embed_dim = layer_config.get("embed_dim", x_features // heads)
 
     w_qkv = torch.randn(
         3 * embed_dim * heads,
@@ -290,6 +290,7 @@ if __name__ == "__main__":
     enum_fields = {
         "send_in_forward": ring_attn_fns.SendForward,
         "save_for_backward": ring_attn_fns.SaveBackward,
+        "send_forward_op": ring_attn_fns.SendForwardOp,
         "save_scope": ring_attn_fns.SaveScope,
         "send_backward": ring_attn_fns.SendBackward,
         "offload": ring_attn_fns.Offload,
@@ -298,6 +299,7 @@ if __name__ == "__main__":
     ring_config = ring_attn_fns.RingAttentionConfig(
         send_in_forward=ring_attn_fns.SendForward.X,
         save_for_backward=ring_attn_fns.SaveBackward.X,
+        send_forward_op=ring_attn_fns.SendForwardOp.SENDRECV,
         save_scope=ring_attn_fns.SaveScope.GLOBAL,
         send_backward=ring_attn_fns.SendBackward.GATHER_DKV,
         offload=ring_attn_fns.Offload.DISABLED,
@@ -310,6 +312,8 @@ if __name__ == "__main__":
             device=device,
         )
 
+        if local_rank == 0:
+            print(f"Testing: {ring_config}")
         epoch_times = training_loop(
             mesh_dict,
             device,
