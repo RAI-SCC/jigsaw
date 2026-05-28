@@ -176,15 +176,18 @@ class DistributedMLPNICE(torch.nn.Module):
             spatial_group=spatial_group,
             channel_group=channel_group,
         )
-        self.linear2 = linear.DistributedXWTSync(
+        self.linear2 = linear.DistributedXWT(
             hidden_dim // 2,
             out_dim,
             bias,
             local_rank,
             device,
             parallelism=parallelism,
-            sync_group=spatial_group,
             model_group=channel_group,
+            spatial_group=spatial_group,
+            bayesian=False,
+            synchronized_layer=True,
+            sync_group=spatial_group,
         )
 
         self.activation = GELU()
@@ -217,8 +220,8 @@ class DistributedSynchronizedMLP(torch.nn.Module):
         local_rank: int,
         device: torch.device,
         parallelism: int,
-        model_group: torch.distributed.ProcessGroup,
-        sync_group: torch.distributed.ProcessGroup,
+        model_group: dist.ProcessGroup = None,
+        sync_group: dist.ProcessGroup = None,
         bayesian: bool = False,
     ):
         super().__init__()
@@ -227,34 +230,36 @@ class DistributedSynchronizedMLP(torch.nn.Module):
         self.parallelism = parallelism
         self.model_group = model_group
 
-        if parallelism == 2:
-            # in, hidden, out dim are global sizes for two-way model parallelism
-            # required to maintain partitioning across final dimension
+        
+        # in, hidden, out dim are global sizes for two-way model parallelism
+        # required to maintain partitioning across final dimension
 
-            # local X has shape [seq_length, in_dim//2]
-            self.linear1 = linear.DistributedXWTSync(
-                in_dim // 2,
-                hidden_dim,
-                bias,
-                local_rank,
-                device,
-                parallelism,
-                model_group,
-                sync_group,
-                bayesian=bayesian,
-            )
+        # local X has shape [seq_length, in_dim//2]
+        self.linear1 = linear.DistributedXWT(
+            in_dim // parallelism.size(),
+            hidden_dim,
+            bias,
+            local_rank,
+            device,
+            parallelism=parallelism,
+            model_group=model_group,
+            synchronized_layer=True,
+            sync_group=sync_group,
+            bayesian=bayesian,
+        )
 
-            self.linear2 = linear.DistributedXWTSync(
-                hidden_dim // 2,
-                out_dim,
-                bias,
-                local_rank,
-                device,
-                parallelism,
-                model_group,
-                sync_group,
-                bayesian=bayesian,
-            )
+        self.linear2 = linear.DistributedXWTSync(
+            hidden_dim // 2,
+            out_dim,
+            bias,
+            local_rank,
+            device,
+            parallelism=parallelism,
+            model_group=model_group,
+            synchronzied_layer=True,
+            sync_group=sync_group,
+            bayesian=bayesian,
+        )
 
         self.activation = GELU()
         self.drop = Dropout(p=dropout)
@@ -361,7 +366,7 @@ class DistributedXTWMLP(torch.nn.Module):
         return x
 
 
-class SequentialMLP(torch.nn.Module):
+class MLP(torch.nn.Module):
     """Multi-Layer Perceptron (MLP) with one hidden layer."""
 
     def __init__(self, in_dim, hidden_dim, out_dim, bias=True, dropout=1e-3):
