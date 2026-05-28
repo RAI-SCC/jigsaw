@@ -6,17 +6,9 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.grad import conv2d_input, conv2d_weight
 
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-import jigsaw.distributed_convolutions as dist_conv
-=======
-=======
->>>>>>> Stashed changes
-import .distributed_convolutions as dist_conv
-import .hooks
-
+from . import distributed_convolutions as dist_conv
+from . import hooks
 from .utils_aggregate import gather_1d_results
->>>>>>> Stashed changes
 
 
 class ConvSelectionStrategy:
