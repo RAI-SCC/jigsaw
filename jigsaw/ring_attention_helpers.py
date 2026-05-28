@@ -146,12 +146,13 @@ def ring_forward(
     chunks_to_save = []
 
     # Local KV
-    kv_j, kj, vj = None, k, v
+    kv = torch.concat([k.unsqueeze(0), v.unsqueeze(0)])
+    kv_j, kj, vj = kv, k, v
 
     # Kick off first send
     # recv_buf either holds x or kv
     recv_buf, handle = send_in_forward(
-        ring_config, x, kv_j, world_size, rank, group, empty, step=0
+        ring_config, x_j, kv_j, world_size, rank, group, empty, step=0
     )
 
     for step in range(world_size):
@@ -205,7 +206,14 @@ def ring_forward(
 
             # send x or k/v to the next rank
             recv_buf, handle = send_in_forward(
-                ring_config, x_j, kv_j, world_size, rank, group, empty, step + 1
+                ring_config,
+                x_j,
+                kv_j,
+                world_size,
+                rank,
+                group,
+                empty,
+                (step + 1) % world_size,
             )
 
     # Make sure all offloads complete and GPU refs to offloaded tensors are dropped
@@ -406,7 +414,7 @@ def send_in_forward(ring_config, x, kv, world_size, rank, group, empty, step):
                 if step != rank:
                     recv_buf = torch.empty_like(kv)
                 else:
-                    recv_buf = x
+                    recv_buf = kv
         handle = dist.broadcast(recv_buf, src=step, group=group, async_op=True)
         return recv_buf, handle
     else:

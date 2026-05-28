@@ -290,7 +290,7 @@ if __name__ == "__main__":
     enum_fields = {
         "send_in_forward": ring_attn_fns.SendForward,
         "save_for_backward": ring_attn_fns.SaveBackward,
-        "send_forward_op": ring_attn_fns.SendForwardOp,
+        # "send_forward_op": ring_attn_fns.SendForwardOp,
         "save_scope": ring_attn_fns.SaveScope,
         "send_backward": ring_attn_fns.SendBackward,
         "offload": ring_attn_fns.Offload,

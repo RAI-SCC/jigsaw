@@ -7,7 +7,6 @@ import jigsaw.ring_attention_helpers as ring_attn_fns
 from jigsaw.utils_aggregate import (
     gather_1d_results,
 )
-from process_mesh import *
 
 # def test_backward(device, process_mesh):
 #     local_rank = dist.get_rank(group=process_mesh["row"])
@@ -238,40 +237,48 @@ def test_backward_sdpa(device, process_mesh_4x1, flash_kernel):
 
 
 @pytest.mark.parametrize(
-    "send_x_or_kv,save_x_or_kv,save_local_or_global,send_dkv_or_not,offloader",
-    [
-        (s, sv, sl, sd, offloader)
-        for s in [ring_attn_fns.SendForward.X, ring_attn_fns.SendForward.KV]
-        for sv in [ring_attn_fns.SaveBackward.X, ring_attn_fns.SaveBackward.KV]
-        for sl in [ring_attn_fns.SaveScope.LOCAL, ring_attn_fns.SaveScope.GLOBAL]
-        for sd in [
-            ring_attn_fns.SendBackward.SEND_DKV,
-            ring_attn_fns.SendBackward.GATHER_DKV,
-        ]
-        for offloader in [ring_attn_fns.Offload.DISABLED, ring_attn_fns.Offload.CPU]
-    ],
+    "send_in_forward", [ring_attn_fns.SendForward.X, ring_attn_fns.SendForward.KV]
+)
+@pytest.mark.parametrize(
+    "save_for_backward", [ring_attn_fns.SaveBackward.X, ring_attn_fns.SaveBackward.KV]
+)
+@pytest.mark.parametrize(
+    "send_forward_op",
+    [ring_attn_fns.SendForwardOp.SENDRECV, ring_attn_fns.SendForwardOp.BROADCAST],
+)
+@pytest.mark.parametrize(
+    "save_scope", [ring_attn_fns.SaveScope.LOCAL, ring_attn_fns.SaveScope.GLOBAL]
+)
+@pytest.mark.parametrize(
+    "send_backward",
+    [ring_attn_fns.SendBackward.SEND_DKV, ring_attn_fns.SendBackward.GATHER_DKV],
+)
+@pytest.mark.parametrize(
+    "offloader", [ring_attn_fns.Offload.DISABLED, ring_attn_fns.Offload.CPU]
 )
 def test_ring_forward_backward(
     device,
     process_mesh_4x1,
-    send_x_or_kv,
-    save_x_or_kv,
-    save_local_or_global,
-    send_dkv_or_not,
+    send_in_forward,
+    save_for_backward,
+    send_forward_op,
+    save_scope,
+    send_backward,
     offloader,
 ):
     """Verify weights for XWT_Sync are synchronized after a few iterations."""
     if (
-        send_x_or_kv == ring_attn_fns.SendForward.KV
-        and save_x_or_kv == ring_attn_fns.SaveBackward.X
+        send_in_forward == ring_attn_fns.SendForward.KV
+        and save_for_backward == ring_attn_fns.SaveBackward.X
     ):
         pytest.xfail("not yet supported")
 
     ring_config = ring_attn_fns.RingAttentionConfig(
-        send_in_forward=send_x_or_kv,
-        save_for_backward=save_x_or_kv,
-        save_scope=save_local_or_global,
-        send_backward=send_dkv_or_not,
+        send_in_forward=send_in_forward,
+        send_forward_op=send_forward_op,
+        save_for_backward=save_for_backward,
+        save_scope=save_scope,
+        send_backward=send_backward,
         offload=offloader,
         device=device,
     )
@@ -307,6 +314,8 @@ def test_ring_forward_backward(
     # just test helper function forward
     out, lse, chunks_to_save = ring_attn_fns.ring_forward(
         q_local,
+        k_local,
+        v_local,
         x,
         w_qkv,
         scale,
