@@ -19,11 +19,18 @@ def pytest_configure(config):
 
     warnings.filterwarnings("ignore", category=DeprecationWarning, module="torch")
     warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+        
+    config.addinivalue_line("markers", "no_dist_env: skip the dist_env autouse fixture")
+
 
 
 @pytest.fixture(autouse=True, scope="session")
-def dist_env():
+def dist_env(request):
     """Initialize the distributed process group once for the entire test session."""
+    if all(item.get_closest_marker("no_dist_env") for item in request.session.items):
+        yield
+        return
+    
     rank = int(os.getenv("SLURM_PROCID"))
     world_size = int(os.getenv("SLURM_NTASKS"))
     local_id = int(os.getenv("SLURM_LOCALID", rank))
