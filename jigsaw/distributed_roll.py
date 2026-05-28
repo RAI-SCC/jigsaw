@@ -3,7 +3,7 @@ import torch.distributed as dist
 
 from typing import Tuple, List
 
-from jigsaw import distributed_convolutions as dist_conv
+import .distributed_convolutions as dist_conv
 
 
 def exchange_halo_1d(
