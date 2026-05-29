@@ -298,9 +298,12 @@ class DistributedXWT(torch.nn.Module):
         stdev = 1.0 / np.sqrt(in_dim * 2)
         assert out_dim % channel_group.size() == 0
         assert in_dim % (model_group.size() // channel_group.size()) == 0
-        
+        if bias:
+            assert out_dim % channel_group.size() == 0
+        bias_dim = out_dim // channel_group.size()
         out_dim = out_dim // (model_group.size() // channel_group.size())
         in_dim = in_dim // (channel_group.size())
+        
         
         self.weight = torch.nn.Parameter(
             torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev).to(device)
@@ -308,7 +311,7 @@ class DistributedXWT(torch.nn.Module):
         self.parallelism = model_group.size()
         
         self.bias = (
-            torch.nn.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev).to(device))
+            torch.nn.Parameter(torch.zeros(bias_dim).uniform_(-stdev, stdev).to(device))
             if bias
             else None
         )
