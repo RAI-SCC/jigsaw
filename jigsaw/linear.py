@@ -18,12 +18,11 @@ class LinearSelectionStrategy:
         parallelism: int,
         bias: torch.Tensor,
         bayesian: bool,
-        synchronized_layer: bool,
         linear_layer=True,
     ):
         self.mm_kernels = self._mm_kernel_selection(parallelism)
         self.grad_bias = self._grad_bias_selection(
-            parallelism, bias, synchronized_layer, bayesian
+            parallelism, bias, bayesian
         )
         self.add_bias = self._add_bias_selection(bias, bayesian)
         self.reshape_weights = self._reshape_weights_selection(bayesian, linear_layer)
@@ -130,7 +129,6 @@ class LinearSelectionStrategy:
         self,
         parallelism: int,
         bias: Union[torch.Tensor, None],
-        synchronized_layer: bool,
         bayesian: bool,
     ) -> Callable:
         """
@@ -144,11 +142,6 @@ class LinearSelectionStrategy:
         # return identity if bias is None
         if bias is None:
             return self._no_bias
-        # all_reduce bias over space if it is a synchronized linear layer
-        elif synchronized_layer and not bayesian:
-            return self._reduce_bias_over_spatial_group_nonbayesian
-        elif synchronized_layer:
-            return self._reduce_bias_over_spatial_group
         # all_reduce is not required for 2-way parallel models
         elif parallelism == 2:
             return self._no_reduce_bias
@@ -271,12 +264,10 @@ class DistributedXWT(torch.nn.Module):
         bias: bool,
         local_rank: int,
         device: torch.device,
-        parallelism: int,
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup = None,
-        bayesian: bool = False,
-        synchronized_layer: bool = False,
-        sync_group: dist.ProcessGroup = None,
+        channel_group: dist.ProcessGroup = None,
+        bayesian: bool = False
     ) -> None:
         """
         Initialize the XWT Linear layer sharded over n processes.
@@ -305,18 +296,17 @@ class DistributedXWT(torch.nn.Module):
         super().__init__()
 
         stdev = 1.0 / np.sqrt(in_dim * 2)
+        assert out_dim % channel_group.size() == 0
+        assert in_dim % (model_group.size() // channel_group.size()) == 0
+        
+        out_dim = out_dim // (model_group.size() // channel_group.size())
+        in_dim = in_dim // (channel_group.size())
+        
         self.weight = torch.nn.Parameter(
             torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev).to(device)
         )
-
-        match parallelism:
-            case 2:
-                out_dim = out_dim // 2
-            case 4:
-                out_dim = out_dim
-            case 8:
-                out_dim = out_dim * 2
-
+        self.parallelism = model_group.size()
+        
         self.bias = (
             torch.nn.Parameter(torch.zeros(out_dim).uniform_(-stdev, stdev).to(device))
             if bias
@@ -327,14 +317,12 @@ class DistributedXWT(torch.nn.Module):
         self.in_dim = in_dim
         self.device = device
         self.local_rank = local_rank
-        self.parallelism = parallelism
         self.model_group = model_group
         self.spatial_group = spatial_group
         self.bayesian = bayesian
         self.selector = LinearSelectionStrategy(
-            parallelism,
+            self.parallelism,
             self.bias,
-            self.spatial_group,
             self.bayesian,
             linear_layer=True,
         )
@@ -405,14 +393,14 @@ class DistributedXWT(torch.nn.Module):
         ), "out_features is not divisible by process mesh columns"
 
         instance = cls(
-            in_dim=linear.in_features // process_mesh[spatial_kw].size(),
-            out_dim=linear.out_features // process_mesh[channel_kw].size(),
+            in_dim=linear.in_features,
+            out_dim=linear.out_features,
             bias=linear.bias is not None,
             local_rank=process_mesh[model_kw].rank(),
             device=device,
-            parallelism=process_mesh[model_kw].size(),
             model_group=process_mesh[model_kw],
             spatial_group=process_mesh[spatial_kw],
+            channel_group=process_mesh[channel_kw],
             bayesian=False,  # TODO
         )
 
@@ -490,9 +478,7 @@ class DistributedXWT(torch.nn.Module):
         self.selector = LinearSelectionStrategy(
             self.parallelism,
             self.bias,
-            self.spatial_group,
             self.bayesian,
-            synchronized_layer=False,
             linear_layer=True,
         )
 
@@ -791,10 +777,9 @@ class DistributedXWTSync(torch.nn.Module):
                 torch.zeros(out_dim).uniform_(-stdev, stdev).to(device)
             )
             if bias
-            else 
-            None
+            else None
         )
-        
+
         self.device = device
         self.local_rank = local_rank
         self.model_group = model_group
@@ -805,7 +790,6 @@ class DistributedXWTSync(torch.nn.Module):
             self.bias,
             self.model_group,
             self.bayesian,
-            synchronized_layer=True,
             linear_layer=True,
         )
 
@@ -848,7 +832,6 @@ class DistributedXWTSync(torch.nn.Module):
             self.bias,
             self.spatial_group,
             self.bayesian,
-            synchronized_layer=False,
             linear_layer=True,
         )
 
@@ -1180,7 +1163,6 @@ class DistributedXW(torch.nn.Module):
             self.bias,
             self.model_group,
             self.bayesian,
-            synchronized_layer=False,
             linear_layer=True,
         )
 

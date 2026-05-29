@@ -57,7 +57,7 @@ class DistributedAttention(torch.nn.Module):
             assert (
                 spatial_group.size() > 1
             ), "Cannot perform ring attention if spatial size is 1."
-            
+
         self.attn_core = self._ring_attn_core if self.ring_attention else self.attn_core
 
         self.qkv = linear.DistributedXWT(
@@ -170,13 +170,9 @@ class Attention(torch.nn.Module):
         self.head_dim = self.embed_dim // self.heads
         self.out_features = out_features
         self.dropout_p = dropout_p
+        self.attn_core = self._attn_core
 
-    def forward(self, x):
-        qkv = self.qkv(x)
-        qkv = qkv.reshape(qkv.shape[0], qkv.shape[1], 3, self.heads, self.head_dim)
-
-        q, k, v = qkv.permute(2, 0, 3, 1, 4).to(torch.bfloat16)
-
+    def _attn_core(self, q, k, v, dropout, **kwargs):
         with torch.nn.attention.sdpa_kernel(
             torch.nn.attention.SDPBackend.FLASH_ATTENTION
         ):
@@ -184,17 +180,26 @@ class Attention(torch.nn.Module):
                 q, k, v, is_causal=False, dropout_p=self.dropout_p
             )
 
+        return out
+
+    def forward(self, x):
+        qkv = self.qkv(x)
+        qkv = qkv.reshape(qkv.shape[0], qkv.shape[1], 3, self.heads, self.head_dim)
+
+        q, k, v = qkv.permute(2, 0, 3, 1, 4).to(torch.bfloat16)
+        out = self.attn_core(q, k, v, dropout=self.dropout_p)
+
         # out has shape [B, h, N, d]
         out = rearrange(out, "... h s d -> ... s (h d)").to(x.dtype)
 
         out = self.head_concat(out)
         return out
 
-    def convert_transformer_to_jigsaw(
+    def convert_attention_to_jigsaw(
         transformer,
-        synchronize,
         process_mesh,
         device,
+        ring=True,
         spatial_kw="row",
         channel_kw="col",
         model_kw="model",
@@ -231,6 +236,9 @@ class Attention(torch.nn.Module):
             channel_kw,
             model_kw,
         )
+        if ring:
+            transformer.attn_core = DistributedAttention._ring_attention_core
+        
         # [3*embed_dim, input_dim]
         # Now, local W has shape [3*embed_dim, embed_dim//channel size]
         w_as_list = torch.tensor_split(W, channel_size, dim=1)

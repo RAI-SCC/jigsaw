@@ -3,7 +3,7 @@ import pytest
 from tests.process_mesh import process_mesh_2x2, process_mesh_2x1x2
 
 import jigsaw.convert as convert
-from jigsaw.attention import Transformer
+from jigsaw.attention import Attention
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
 from jigsaw.linear import DistributedXWT
 from jigsaw.roll import Roll, DistributedRoll
@@ -29,7 +29,7 @@ def test_convert_linear(request, device, process_mesh, bias):
         in_features=in_features, out_features=out_features, bias=bias, device=device
     )
 
-    jigsaw_linear = convert.convert_to_jigsaw(linear, False, process_mesh, device)
+    jigsaw_linear = convert.convert_to_jigsaw(linear, process_mesh, device)
 
     assert isinstance(jigsaw_linear, DistributedXWT)
     assert hasattr(jigsaw_linear, "reshard_parameters")
@@ -181,7 +181,7 @@ def test_convert_mlp(request, device, process_mesh, bias):
         .requires_grad_(True)
     )
 
-    jigsaw_mlp = convert.convert_to_jigsaw(mlp, False, process_mesh, device)
+    jigsaw_mlp = convert.convert_to_jigsaw(mlp, process_mesh, device)
 
     dist_forward = jigsaw_mlp(x_local)
     dist_forward.backward(torch.ones_like(dist_forward, device=device))
@@ -229,14 +229,14 @@ def test_convert_mlp(request, device, process_mesh, bias):
         ), "weights of bias2 grad do not match"
 
 
-def test_transformer(device, process_mesh_2x1x2):
+def test_attention(device, process_mesh_2x1x2):
     # need to make sure that all ranks have the same initialization!
     torch.manual_seed(1)
     embed_dim = 256
     heads = 2
     x_seq = 10
 
-    class Transformer(torch.nn.Module):
+    class Attention(torch.nn.Module):
         def __init__(self, embed_dim, heads):
             super().__init__()
             self.q = torch.nn.Linear(
@@ -291,7 +291,7 @@ def test_transformer(device, process_mesh_2x1x2):
             values = self.head_concat(out)
             return values
 
-    transformer = Transformer(embed_dim, heads)
+    transformer = Attention(embed_dim, heads)
 
     # copy weights
     q_weight = transformer.q.weight.clone()
@@ -324,7 +324,7 @@ def test_transformer(device, process_mesh_2x1x2):
         .requires_grad_(True)
     )
     jigsaw_transformer = convert.convert_to_jigsaw(
-        transformer, False, process_mesh_2x1x2, device
+        transformer, process_mesh_2x1x2, device, ring=False
     )
     jigsaw_transformer.num_heads = jigsaw_transformer.num_heads // 2
 
@@ -366,7 +366,7 @@ def test_jigsaw_transformer(device, process_mesh_2x1x2):
     heads = 4
     x_seq = 10
 
-    transformer = Transformer(
+    transformer = Attention(
         in_features, embed_dim, out_features, heads, device, dropout_p=0.0
     )
 
@@ -401,7 +401,7 @@ def test_jigsaw_transformer(device, process_mesh_2x1x2):
     )
 
     jigsaw_transformer = convert.convert_to_jigsaw(
-        transformer, False, process_mesh_2x1x2, device
+        transformer, process_mesh_2x1x2, device
     )
     dist_forward = jigsaw_transformer(x_local)
     dist_forward.backward(torch.ones_like(dist_forward, device=device))
@@ -496,7 +496,7 @@ def test_jigsaw_conv2d(device, process_mesh_2x2):
         .requires_grad_(True)
     )
 
-    jigsaw_conv2d = convert.convert_to_jigsaw(conv, False, process_mesh_2x2, device)
+    jigsaw_conv2d = convert.convert_to_jigsaw(conv, process_mesh_2x2, device)
     dist_forward = jigsaw_conv2d(x_local)
 
     dist_forward.backward(torch.ones_like(dist_forward, device=device))
@@ -637,7 +637,7 @@ def test_jigsaw_roll(device, process_mesh_2x2):
         .requires_grad_(True)
     )
 
-    jigsaw_roll = convert.convert_to_jigsaw(roll, False, process_mesh_2x2, device)
+    jigsaw_roll = convert.convert_to_jigsaw(roll, process_mesh_2x2, device)
     dist_forward = jigsaw_roll(x_local)
 
     # gather the results in two steps due to rolling

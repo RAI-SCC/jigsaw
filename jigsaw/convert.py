@@ -10,15 +10,15 @@ mapped_modules = {
 }
 
 container_converters = {
-    attention.Transformer: attention.Transformer.convert_transformer_to_jigsaw
+    attention.Attention: attention.Attention.convert_attention_to_jigsaw
 }
 
 
-def convert_to_jigsaw(model, synchronize, process_mesh, device):
+def convert_to_jigsaw(model, process_mesh, device, **kwargs):
     # 1. Container match: hand off entirely, do NOT recurse afterward
     container_fn = container_converters.get(type(model))
     if container_fn is not None:
-        return container_fn(model, synchronize, process_mesh, device)
+        return container_fn(model, process_mesh, device, **kwargs)
 
     # 2. Leaf match: swap with Distributed equivalent
     replacement_cls = mapped_modules.get(type(model))
@@ -29,7 +29,7 @@ def convert_to_jigsaw(model, synchronize, process_mesh, device):
 
     # 3. Generic container: recurse into children
     for name, child in model.named_children():
-        new_child = convert_to_jigsaw(child, synchronize, process_mesh, device)
+        new_child = convert_to_jigsaw(child, process_mesh, device, **kwargs)
         if new_child is not child:
             setattr(model, name, new_child)
     return model
