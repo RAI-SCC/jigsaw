@@ -3,7 +3,7 @@ from enum import Enum
 import torch
 import torch.distributed as dist
 
-from jigsaw.offload import NVLinkActivationOffloader
+from .offload import NVLinkActivationOffloader
 
 
 def _online_softmax_merge(o1, l1, o2, l2):
