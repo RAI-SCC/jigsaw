@@ -2,7 +2,8 @@ import torch
 import torch.distributed as dist
 from einops import rearrange
 
-from . import  atten_ring as ring_attn
+from . import attention_ring as ring_attn
+from . import linear
 
 
 class DistributedAttention(torch.nn.Module):
@@ -59,7 +60,7 @@ class DistributedAttention(torch.nn.Module):
             
         self.attn_core = self._ring_attn_core if self.ring_attention else self.attn_core
 
-        self.qkv = linear.DistributedXWTSync(
+        self.qkv = linear.DistributedXWT(
             x_features // self.channel_group.size(),
             embed_dim * 3,
             bias=False,
@@ -71,7 +72,7 @@ class DistributedAttention(torch.nn.Module):
             bayesian=bayesian,
         )
 
-        self.concatenator = linear.DistributedXWTSync(
+        self.concatenator = linear.DistributedXWT(
             embed_dim // self.channel_group.size(),
             output_dim,
             bias=True,

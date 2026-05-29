@@ -17,7 +17,6 @@ class LinearSelectionStrategy:
         self,
         parallelism: int,
         bias: torch.Tensor,
-        spatial_group: dist.ProcessGroup,
         bayesian: bool,
         synchronized_layer: bool,
         linear_layer=True,
@@ -337,7 +336,6 @@ class DistributedXWT(torch.nn.Module):
             self.bias,
             self.spatial_group,
             self.bayesian,
-            synchronized_layer=synchronized_layer,
             linear_layer=True,
         )
 
@@ -345,16 +343,7 @@ class DistributedXWT(torch.nn.Module):
             self.bias.register_post_accumulate_grad_hook(
                 hooks.make_grad_sync_hook(self.spatial_group)
             )
-            for p in self.parameters():
-                dist.broadcast(p.data, group_src=0, group=self.spatial_group)
-
-        if synchronized_layer:
-            self.sync_group = self.spatial_group if sync_group is None else sync_group
-            self.weight.register_post_accumulate_grad_hook(
-                hooks.make_grad_sync_hook(self.sync_group)
-            )
-            for p in self.parameters():
-                dist.broadcast(p.data, group_src=0, group=self.sync_group)
+            dist.broadcast(self.bias.data, group_src=0, group=self.spatial_group)
 
         self.XWT = XWT.apply
 
