@@ -283,6 +283,8 @@ def test_ring_forward_backward(
         device=device,
     )
 
+    ring_attn_fns.ring_forward = ring_attn_fns.build_ring_forward(ring_config)
+
     local_rank = dist.get_rank(group=None)
     world_size = dist.get_world_size(group=None)
 
@@ -323,7 +325,6 @@ def test_ring_forward_backward(
         empty=empty,
         rank=local_rank,
         world_size=world_size,
-        ring_config=ring_config,
     )
 
     out_full = gather_1d_results(out, process_mesh_4x1, dim=2)

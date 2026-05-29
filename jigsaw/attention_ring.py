@@ -63,6 +63,8 @@ class Ring(torch.nn.Module):
         self.empty = torch.empty(0, device=self.device, dtype=self.dtype)
         self.config = ring_config
 
+        ring_attn.ring_forward = ring_attn.build_ring_forward(ring_config)
+
     # @torch.compile(backend="eager")
     def forward(
         self,
@@ -300,7 +302,7 @@ class RingAttentionFunction(torch.autograd.Function):
         empty = torch.empty(0, device=x.device, dtype=x.dtype)
 
         out, lse, chunks_to_save = ring_attn.ring_forward(
-            q, k, v, x, w_qkv, scale, group, empty, rank, world_size, config
+            q, k, v, x, w_qkv, scale, group, empty, rank, world_size
         )
 
         out = out.to(torch.bfloat16)

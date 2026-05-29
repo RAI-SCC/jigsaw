@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from enum import Enum
 
 import torch
@@ -76,6 +77,8 @@ class SendBackward(Enum):
 
 
 class SendForwardOp(Enum):
+    """Enum for forward communication operation."""
+
     SENDRECV = 0
     BROADCAST = 1
 
@@ -121,107 +124,201 @@ class RingAttentionConfig:
         )
 
 
-@torch.no_grad()
-def ring_forward(
-    q,
-    k,
-    v,
-    x,
-    w_qkv,
-    scale,
-    group,
-    empty,
-    rank,
-    world_size,
+def build_ring_forward(
     ring_config: RingAttentionConfig,
-):
-    """Forward pass for ring attention."""
-    b, heads, n_local, d = q.shape
-    world_size = dist.get_world_size(group)
+) -> Callable[
+    [
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        float,
+        dist.ProcessGroup,
+        int,
+        int,
+        int,
+    ],
+    tuple[torch.Tensor, torch.Tensor, list],
+]:
+    """Build the forward function for ring attention based on the config."""
+    send_in_forward, recv_in_forward = _build_send_in_forward(ring_config)
+    save_for_backward = _build_save_for_backward(ring_config)
+    is_forward_x = ring_config.send_in_forward == SendForward.X
+    is_save_scope_global = ring_config.save_scope == SaveScope.GLOBAL
 
-    out = torch.zeros_like(q)
-    lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype)
+    if ring_config.send_forward_op == SendForwardOp.BROADCAST:
 
-    x_j = x
-    chunks_to_save = []
+        @torch.no_grad()
+        def ring_forward(q, k, v, x, w_qkv, scale, group, empty, rank, world_size):
+            """Forward pass for ring attention."""
+            b, heads, n_local, d = q.shape
+            world_size = dist.get_world_size(group)
 
-    # Local KV
-    kv = torch.concat([k.unsqueeze(0), v.unsqueeze(0)])
-    kv_j, kj, vj = kv, k, v
-
-    # Kick off first send
-    # recv_buf either holds x or kv
-    recv_buf, handle = send_in_forward(
-        ring_config, x_j, kv_j, world_size, rank, group, empty, step=0
-    )
-
-    for step in range(world_size):
-        if (step > 0) and (ring_config.send_in_forward == SendForward.X):
-            # Recompute KV from current Xj (received in previous iter)
-            kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
-
-        # ---- save for backward ----
-        # save_local_or_global == 0: only save own (step 0) chunk; backward re-rings
-        # save_local_or_global == 1: save every step's chunk
-        should_save = (ring_config.save_scope == SaveScope.GLOBAL) or (step == 0)
-
-        if should_save:
-            # append what we need to save for backward.
-            # this can be x, kv, or the pointer to cpu offloaded copies of these
-            chunks_to_save.append(
-                save_for_backward(ring_config, chunks_to_save, x_j, kv_j)
+            out = torch.zeros_like(q)
+            lse = torch.full(
+                (b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype
             )
 
-        # ---- compute flash attention on local Q vs current Kj, Vj ----
-        # Kj, Vj are views into KV; flash attention requires contiguous, so materialize.
-        kj_c = kj.contiguous()
-        vj_c = vj.contiguous()
+            x_j = x
 
-        # call torch sdpa
-        out_j, l_j, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
-            q,
-            kj_c,
-            vj_c,
-            dropout_p=0.0,
-            is_causal=False,
-            scale=scale,
-            return_debug_mask=False,
-        )
-        out, lse = _online_softmax_merge(out, lse, out_j, l_j)
-        del out_j, l_j, kj_c, vj_c
+            # Local KV
+            kv = torch.concat([k.unsqueeze(0), v.unsqueeze(0)]).clone().contiguous()
+            kv_j, kj, vj = kv, k, v
 
-        # ---- ring rotate ----
-        if step < world_size - 1:
+            if not is_save_scope_global:
+                chunks_to_save = [save_for_backward(x, kv)]
+            else:
+                chunks_to_save = [
+                    None
+                ] * world_size  # placeholder list to insert into for each step
+
+            # Kick off first send
+            # recv_buf either holds x or kv
+            recv_buf, handle = send_in_forward(x, kv, 0, rank, group)
             handle.wait()
+            x_j, kv_j, kj, vj = recv_in_forward(recv_buf, x_j, kv_j, kj, vj)
 
-            # read either x or kv values from the communicated buffers
-            # can put into a helper function when/if there are more complicated options involved
-            match ring_config.send_in_forward:
-                case SendForward.X:
-                    x_j = recv_buf
-                case SendForward.KV:
-                    kv_j = recv_buf
-                    kj = kv_j[0]
-                    vj = kv_j[1]
+            for step in range(world_size):
+                if step + 1 < world_size:
+                    recv_buf, handle = send_in_forward(x, kv, step + 1, rank, group)
 
-            # send x or k/v to the next rank
-            recv_buf, handle = send_in_forward(
-                ring_config,
-                x_j,
-                kv_j,
-                world_size,
-                rank,
-                group,
-                empty,
-                (step + 1) % world_size,
+                if is_forward_x:
+                    if step != rank:
+                        # Recompute KV from current Xj (received in previous iter)
+                        kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
+                    else:
+                        # For the step where we broadcast our own chunk, we can reuse the local KV without recomputing
+                        kv_j, kj, vj = kv, k, v
+
+                # ---- save for backward ----
+                # save_local_or_global == 0: only save own (step 0) chunk; backward re-rings
+                # save_local_or_global == 1: save every step's chunk
+
+                if is_save_scope_global:
+                    # append what we need to save for backward.
+                    # this can be x, kv, or the pointer to cpu offloaded copies of these
+                    chunks_to_save[(rank - step) % world_size] = save_for_backward(
+                        x_j, kv_j
+                    )
+
+                # ---- compute flash attention on local Q vs current Kj, Vj ----
+                # Kj, Vj are views into KV; flash attention requires contiguous, so materialize.
+                kj_c = kj.contiguous()
+                vj_c = vj.contiguous()
+
+                # call torch sdpa
+                out_j, l_j, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
+                    q,
+                    kj_c,
+                    vj_c,
+                    dropout_p=0.0,
+                    is_causal=False,
+                    scale=scale,
+                    return_debug_mask=False,
+                )
+                out, lse = _online_softmax_merge(out, lse, out_j, l_j)
+                del out_j, l_j, kj_c, vj_c
+
+                # ---- ring rotate ----
+                if step < world_size - 1:
+                    handle.wait()
+
+                    # read either x or kv values from the communicated buffers
+                    # can put into a helper function when/if there are more complicated options involved
+                    x_j, kv_j, kj, vj = recv_in_forward(recv_buf, x_j, kv_j, kj, vj)
+
+            # Make sure all offloads complete and GPU refs to offloaded tensors are dropped
+            if ring_config.offloader is not None:
+                ring_config.offloader.wait_offloads()
+
+            out = out.to(torch.bfloat16)
+            return out, lse, chunks_to_save
+    else:
+
+        @torch.no_grad()
+        def ring_forward(q, k, v, x, w_qkv, scale, group, empty, rank, world_size):
+            """Forward pass for ring attention."""
+            b, heads, n_local, d = q.shape
+            world_size = dist.get_world_size(group)
+
+            out = torch.zeros_like(q)
+            lse = torch.full(
+                (b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype
             )
 
-    # Make sure all offloads complete and GPU refs to offloaded tensors are dropped
-    if ring_config.offloader is not None:
-        ring_config.offloader.wait_offloads()
+            x_j = x
+            chunks_to_save = []
 
-    out = out.to(torch.bfloat16)
-    return out, lse, chunks_to_save
+            # Local KV
+            kv = torch.concat([k.unsqueeze(0), v.unsqueeze(0)])
+            kv_j, kj, vj = kv, k, v
+
+            # Kick off first send
+            # recv_buf either holds x or kv
+            recv_buf, handle = send_in_forward(
+                x_j, kv_j, world_size, rank, group, empty
+            )
+
+            for step in range(world_size):
+                if (step > 0) and is_forward_x:
+                    # Recompute KV from current Xj (received in previous iter)
+                    kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
+
+                # ---- save for backward ----
+                # save_local_or_global == 0: only save own (step 0) chunk; backward re-rings
+                # save_local_or_global == 1: save every step's chunk
+                should_save = is_save_scope_global or (step == 0)
+
+                if should_save:
+                    # append what we need to save for backward.
+                    # this can be x, kv, or the pointer to cpu offloaded copies of these
+                    chunks_to_save.append(save_for_backward(x_j, kv_j))
+
+                # ---- compute flash attention on local Q vs current Kj, Vj ----
+                # Kj, Vj are views into KV; flash attention requires contiguous, so materialize.
+                kj_c = kj.contiguous()
+                vj_c = vj.contiguous()
+
+                # call torch sdpa
+                out_j, l_j, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
+                    q,
+                    kj_c,
+                    vj_c,
+                    dropout_p=0.0,
+                    is_causal=False,
+                    scale=scale,
+                    return_debug_mask=False,
+                )
+                out, lse = _online_softmax_merge(out, lse, out_j, l_j)
+                del out_j, l_j, kj_c, vj_c
+
+                # ---- ring rotate ----
+                if step < world_size - 1:
+                    handle.wait()
+
+                    # read either x or kv values from the communicated buffers
+                    # can put into a helper function when/if there are more complicated options involved
+                    x_j, kv_j, kj, vj = recv_in_forward(recv_buf, x_j, kv_j, kj, vj)
+
+                    # send x or k/v to the next rank
+                    recv_buf, handle = send_in_forward(
+                        x_j,
+                        kv_j,
+                        world_size,
+                        rank,
+                        group,
+                        empty,
+                    )
+
+            # Make sure all offloads complete and GPU refs to offloaded tensors are dropped
+            if ring_config.offloader is not None:
+                ring_config.offloader.wait_offloads()
+
+            out = out.to(torch.bfloat16)
+            return out, lse, chunks_to_save
+
+    return ring_forward
 
 
 @torch.no_grad()
@@ -401,67 +498,138 @@ def ring_backward(
     return dq, dk_local, dv_local
 
 
-def send_in_forward(ring_config, x, kv, world_size, rank, group, empty, step):
-    # Send either X or KV in the forward pass
-    if ring_config.send_forward_op == SendForwardOp.BROADCAST:
-        match ring_config.send_in_forward:
-            case SendForward.X:
-                if step != rank:
-                    recv_buf = torch.empty_like(x)
-                else:
-                    recv_buf = x
-            case SendForward.KV:
-                if step != rank:
-                    recv_buf = torch.empty_like(kv)
-                else:
-                    recv_buf = kv
-        handle = dist.broadcast(recv_buf, src=step, group=group, async_op=True)
-        return recv_buf, handle
-    else:
-        match ring_config.send_in_forward:
-            case SendForward.X:
-                recv_buf = torch.empty_like(x)
+def _build_send_in_forward(
+    ring_config: RingAttentionConfig,
+) -> tuple[
+    Callable[
+        [],
+        tuple[torch.Tensor, dist.Work],
+    ],
+    Callable[
+        [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    ],
+]:
+    """Build the send and receive functions for forward based on the config."""
+    match ring_config.send_forward_op:
+        case SendForwardOp.SENDRECV:
+            match ring_config.send_in_forward:
+                case SendForward.X:
 
-                recv_buf, handle = _ring_send_recv(
-                    x, world_size, rank, group, empty, recv_buf
-                )
-            case SendForward.KV:
-                recv_buf = torch.empty_like(kv)
-                recv_buf, handle = _ring_send_recv(
-                    kv, world_size, rank, group, empty, recv_buf
-                )
+                    def send_func(x, kv, world_size, rank, group, empty):
+                        recv_buf = torch.empty_like(x)
 
-        return recv_buf, handle
+                        recv_buf, handle = _ring_send_recv(
+                            x, world_size, rank, group, empty, recv_buf
+                        )
+                        return recv_buf, handle
+
+                case SendForward.KV:
+
+                    def send_func(x, kv, world_size, rank, group, empty):
+                        recv_buf = torch.empty_like(kv)
+                        recv_buf, handle = _ring_send_recv(
+                            kv, world_size, rank, group, empty, recv_buf
+                        )
+                        return recv_buf, handle
+
+                case _:
+                    raise NotImplementedError(
+                        f"send_in_forward option {ring_config.send_in_forward} not implemented."
+                    )
+
+        case SendForwardOp.BROADCAST:
+            match ring_config.send_in_forward:
+                case SendForward.X:
+
+                    def send_func(x, kv, step, rank, group):
+                        if step == rank:
+                            recv_buf = x
+                        else:
+                            recv_buf = torch.empty_like(x)
+                        handle = dist.broadcast(
+                            recv_buf, src=step, group=group, async_op=True
+                        )
+                        return recv_buf, handle
+
+                case SendForward.KV:
+
+                    def send_func(x, kv, step, rank, group):
+                        if step == rank:
+                            recv_buf = kv
+                        else:
+                            recv_buf = torch.empty_like(kv)
+                        handle = dist.broadcast(
+                            recv_buf, src=step, group=group, async_op=True
+                        )
+                        return recv_buf, handle
+
+                case _:
+                    raise NotImplementedError(
+                        f"send_in_forward option {ring_config.send_in_forward} not implemented."
+                    )
+        case _:
+            raise NotImplementedError(
+                f"send_forward_op option {ring_config.send_forward_op} not implemented."
+            )
+
+    match ring_config.send_in_forward:
+        case SendForward.X:
+
+            def recv_func(recv_buf, xj, kv_j, kj, vj):
+                return recv_buf, kv_j, kj, vj
+        case SendForward.KV:
+
+            def recv_func(recv_buf, xj, kv_j, kj, vj):
+                kv_j = recv_buf
+                kj = kv_j[0]
+                vj = kv_j[1]
+                return xj, kv_j, kj, vj
+        case _:
+            raise NotImplementedError(
+                f"send_in_forward option {ring_config.send_in_forward} not implemented."
+            )
+
+    return send_func, recv_func
 
 
-def save_for_backward(ring_config, chunks_to_save, x, kv):
+def _build_save_for_backward(
+    ring_config: RingAttentionConfig,
+) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
+    """Build the function for saving tensors for backward based on the config."""
     match ring_config.save_for_backward:
         case SaveBackward.X:
             # offload X
             if ring_config.offloader is not None:
-                xj_cpu = ring_config.offloader.offload(x)
-                return xj_cpu
+                return lambda x, kv: ring_config.offloader.offload(x)
             else:
                 # keep on GPU — must clone if Xj will be overwritten by recv next iter
                 if ring_config.save_scope == SaveScope.GLOBAL:
-                    return x.clone()
+                    return lambda x, kv: x.clone()
                 else:
-                    return x
+                    return lambda x, kv: x
         case SaveBackward.KV:
             # offload KV (note: KV is already a contiguous tensor of shape [2,B,H,N,d])
             if ring_config.offloader is not None:
-                kv_cpu = ring_config.offloader.offload(kv)
-                del kv
-                return kv_cpu
+
+                def offload_kv(x, kv):
+                    kv_cpu = ring_config.offloader.offload(kv)
+                    del kv
+                    return kv_cpu
+
+                return offload_kv
             else:
                 if ring_config.save_scope == SaveScope.GLOBAL:
-                    return kv.clone()
+                    return lambda x, kv: kv.clone()
                 else:
-                    return kv
-    return
+                    return lambda x, kv: kv
+
+        case _:
+            return lambda xj, kv_j: None  # default no-op
 
 
 def get_dkv_buffer(ring_config, q, world_size):
+    """Get the appropriate dK, dV buffers based on the ring config."""
     # Get the dkv buffer that will be needed
     # If all-gathering the buffer, this will be where the dK, dV are accumulated
     # else, these are the buffers used to send dK and dV from rank to rank
@@ -498,7 +666,7 @@ def accumulate_dkv(
     group,
     empty,
 ):
-    # Handles how locally computed dk_j, dv_j is accumulated into the dK and dV buffer
+    """Accumulate the locally computed dk_j, dv_j with the "true" dk, dv across the ring rotation."""
     match ring_config.send_backward:
         case SendBackward.GATHER_DKV:
             global_chunk_idx = (local_rank - step) % world_size
@@ -539,7 +707,7 @@ def accumulate_dkv(
 
 
 def postprocess_dkv(ring_config, dk_buf, dv_buf, local_rank, seq_local, group):
-
+    """Post-process the dK, dV buffers after the ring rotation is done to get the final dK, dV for the local chunk."""
     match ring_config.send_backward:
         case SendBackward.GATHER_DKV:
             dist.all_reduce(dk_buf, op=dist.ReduceOp.SUM, group=group)
@@ -555,3 +723,6 @@ def postprocess_dkv(ring_config, dk_buf, dv_buf, local_rank, seq_local, group):
             dv_local = dv_buf
 
     return dk_local, dv_local
+
+
+ring_forward = build_ring_forward(RingAttentionConfig())
