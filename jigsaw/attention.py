@@ -2,9 +2,7 @@ import torch
 import torch.distributed as dist
 from einops import rearrange
 
-from . import linear, mlp
-from . import normalization as norm
-from . import ring_attention_helpers, atten_ring as ring_attn
+from . import  atten_ring as ring_attn
 
 
 class DistributedAttention(torch.nn.Module):
