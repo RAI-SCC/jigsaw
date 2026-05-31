@@ -8,7 +8,6 @@ from torch.nn.grad import conv2d_input, conv2d_weight
 
 from . import distributed_convolutions as dist_conv
 from . import hooks
-
 from .utils_aggregate import gather_1d_results
 
 
