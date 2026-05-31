@@ -1,11 +1,16 @@
 import torch.distributed as dist
 
 
-def make_grad_sync_hook(group):
-    """All-reduce gradients over domain-parallel processes."""
+def make_grad_sync_hook(group, op=dist.ReduceOp.SUM, async_op=True):
+    """All-reduce weight gradient over domain-parallel processes."""
 
     def hook(param):
-        dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=group)
+        if async_op:
+            handle = dist.all_reduce(param.grad, op=op, group=group, async_op=True)
+            return handle
+        else:
+            dist.all_reduce(param.grad, op=op, group=group, async_op=False)
+            return
 
     return hook
 
