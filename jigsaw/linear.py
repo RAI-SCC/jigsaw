@@ -58,7 +58,7 @@ class LinearSelectionStrategy:
         w: torch.tensor
             model weights.
         """
-        w = w.unsqueeze(1)
+        # w = w.unsqueeze(1)
         return w
 
     def _no_reshape_weights(self, w: torch.Tensor) -> torch.Tensor:
@@ -327,7 +327,7 @@ class DistributedXWT(torch.nn.Module):
             linear_layer=True,
         )
 
-        if self.bias is not None:
+        .bias is not None:
             self.bias.register_post_accumulate_grad_hook(
                 hooks.make_grad_sync_hook(self.spatial_group)
             )
@@ -706,6 +706,8 @@ class XWT(torch.autograd.Function):
             Index of vmapped dimension in output (0 if batched, None if not).
         """
         x = x.contiguous()
+        b = b.unsqueeze(1)
+        w = w.unsqueeze(1)
         out = XWT.apply(
             x, w, b, local_rank, device, selector, model_group, spatial_group, bayesian
         )
@@ -878,227 +880,3 @@ class DistributedMatMulXW(torch.nn.Module):
         )
 
         return cij
-
-
-class DistributedXWTNice(torch.nn.Module):
-    """Batched matrix-matrix (XWT) multiplication distributed across n processes."""
-
-    def __init__(
-        self,
-        in_dim: int,
-        out_dim: int,
-        bias: bool,
-        device: torch.device,
-        spatial_group: dist.ProcessGroup,
-        channel_group: dist.ProcessGroup,
-        dtype: torch.dtype = torch.float32,
-    ) -> None:
-        """
-        Initialize the XWT Linear layer sharded over n processes.
-
-        Parameters
-        ----------
-        parallelism: int
-            number of processes it is distributed over
-        in_dim : int
-            input dimension of local weight matrix.
-        out_dim : int
-            output dimension of local weight matrix.
-        device : torch.device
-            Device to perform computation on.
-        rank : int
-            Global rank.
-        bias : bool, optional
-            If True, adds a learnable bias to the output (default is True).
-        stdev : float, optional
-            The standard deviation for weight initialization (default is None).
-        """
-        super().__init__()
-
-        self.channel_group = channel_group
-        self.spatial_group = spatial_group
-
-        stdev = 1.0 / np.sqrt(in_dim)
-
-        self.weight = torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev)
-        self.bias = torch.zeros(out_dim).uniform_(-stdev, stdev) if bias else None
-
-        self.weight = torch.nn.parameter.Parameter(self.weight)
-        self.bias = torch.nn.parameter.Parameter(self.bias) if bias else None
-
-        # TODO: Distributed NICE hook?
-        # self.weight.register_post_accumulate_grad_hook(hooks.make_grad_sync_hook(self.spatial_group))
-
-        self.XWT_Nice = XWTNice.apply
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of linear layer (XWT) distributed across two processes.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Local input tensor of shape (B, x_in, in_dim).
-        model_group : dist.ProcessGroup, optional
-            Process group for an individual model-parallel instance.
-
-        Returns
-        -------
-        Cij: torch.Tensor
-            Local output tensor of shape (B, out_dim, in_dim).
-            B, out_dim are global values.
-            in_dim is local value.
-        """
-        cij = self.XWT_Nice(
-            x,
-            self.weight,
-            self.bias,
-            self.channel_group,
-            self.spatial_group,
-        )
-        return cij
-
-
-class XWTNice(torch.autograd.Function):
-    """Autograd function for batched matrix-matrix (XWT) multiplication distributed across n processes."""
-
-    @staticmethod
-    def forward(
-        x: torch.Tensor,
-        w: torch.Tensor,
-        b: torch.Tensor,
-        channel_group: dist.ProcessGroup,
-        spatial_group: dist.ProcessGroup,
-    ) -> torch.Tensor:
-        """
-        Forward pass of linear layer (XWT) distributed across two processes.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Local input tensor of shape (B, x_in, in_dim).
-        W : torch.Tensor
-            Local weight tensor of shape (in_dim, out_dim).
-        b : torch.Tensor
-            Local bias tensor of shape (out_dim).
-        channel_group : dist.ProcessGroup, optional
-            Process group for an individual model-parallel instance.
-        spatial_group : dist.ProcessGroup, optional
-            Process group for an individual domain-parallel instance.
-
-        Returns
-        -------
-        Cij: torch.Tensor
-            Local output tensor of shape (B, out_dim, in_dim).
-            B, out_dim are global values.
-            in_dim is local value.
-        """
-        # Handle bias term here?
-        if (b is not None) and (len(b.shape) > 1):
-            b = b.reshape(b.shape[0], 1, 1, -1)
-        xwt = torch.matmul(x, w.mT) + b
-
-        return xwt
-
-    @staticmethod
-    def setup_context(ctx, inputs, output):
-        """
-        Set up context.
-
-        ctx: FunctionCtx
-        inputs: tuple(x, w, b, rank, device, parallelism, model_group)
-        output: xwt
-        """
-        x, w, b, channel_group, spatial_group = inputs
-        ctx.save_for_backward(x, w)
-        ctx.channel_group = channel_group
-        ctx.spatial_group = spatial_group
-        ctx.has_bias = True if b is not None else False
-
-    @staticmethod
-    def backward(
-        ctx: torch.autograd.Function, grad_output: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None]:
-        """
-        Backward pass of linear layer (XWT) distributed across two processes.
-
-        Parameters
-        ----------
-        ctx : torch.autograd.Function
-            Context object to save information for backward computation.
-        grad_output : tensor
-            The gradient of the loss with respect to the output of the layer.
-
-        Returns
-        -------
-        grad_input: torch.Tensor
-            Gradient with respect to the input.
-        grad_weight: torch.Tensor
-            Gradient with respect to the weights.
-        grad_bias: torch.Tensor
-            Gradient with respect to the bias.
-        """
-        x, weight = ctx.saved_tensors
-
-        channel_group = ctx.channel_group
-
-        grad_input = torch.matmul(grad_output, weight)
-        g_i_handle = dist.all_reduce(
-            grad_input, op=dist.ReduceOp.SUM, group=channel_group, async_op=True
-        )
-
-        grad_weight = torch.matmul(grad_output.mT, x)
-        if len(grad_weight.shape) > len(weight.shape):
-            grad_weight = grad_weight.sum(dim=tuple(range(grad_weight.dim() - 2)))
-
-        grad_bias = (
-            grad_output.sum(dim=tuple(range(grad_output.dim() - 1)))
-            if ctx.has_bias
-            else None
-        )
-
-        g_i_handle.wait()
-
-        return grad_input, grad_weight, grad_bias, None, None
-
-    @staticmethod
-    def vmap(
-        info,
-        in_dims: tuple[Optional[int], ...],
-        x: torch.Tensor,
-        w: torch.Tensor,
-        b: Optional[torch.Tensor],
-        channel_group: dist.ProcessGroup,
-        spatial_group: dist.ProcessGroup,
-    ) -> tuple[torch.Tensor, Optional[int]]:
-        """
-        Define XWT behavior under torch.vmap.
-
-        Parameters
-        ----------
-        info :
-            Metadata object with info.batch_size (size of vmapped dimension).
-        in_dims :
-            Tuple of Optional[int] describing which dimension of each input
-            is vmapped over. Structure matches (x, w, b, rank, device, parallelism, model_group).
-        x : Tensor
-            Possibly batched input.
-        w : Tensor
-            Possibly shared or batched weights.
-        b : Tensor or None
-            Possibly shared or batched bias.
-
-        Returns
-        -------
-        output : Tensor
-            Batched output with vmapped dimension in front.
-        out_dim : Optional[int]
-            Index of vmapped dimension in output (0 if batched, None if not).
-        """
-        # x under vmap has shape (V, B, x_in, in_dim).
-        x = x.contiguous()
-
-        out = XWTNice.apply(x, w, b, channel_group, spatial_group)
-
-        # out has vmapped dimension at dim 0
-        return out, 0
