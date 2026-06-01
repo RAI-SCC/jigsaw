@@ -877,7 +877,7 @@ class Conv2d(torch.autograd.Function):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
         """Forward pass of distributed Conv2d function."""
         # Compute the forward pass
-        print(f"weight here {weight.shape}")
+
         y, x0, x1, right_to_left, left_to_right = selector.dist_conv2d_fn(
             x,
             weight,

@@ -329,7 +329,7 @@ class DistributedXWT(torch.nn.Module):
 
         if self.bias is not None:
             self.bias.register_post_accumulate_grad_hook(
-                hooks.make_grad_sync_hook(self.spatial_group)
+                hooks.make_grad_sync_hook(self.spatial_group, async_op=True)
             )
             dist.broadcast(self.bias.data, group_src=0, group=self.spatial_group)
 
@@ -770,7 +770,7 @@ class XWT(torch.autograd.Function):
         b = b.unsqueeze(1)
         w = w.unsqueeze(1)
         out = XWT.apply(
-            x, w, b, local_rank, device, selector, model_group, spatial_group, bayesian
+            x, w, b, local_rank, device, selector, model_group, spatial_group, bayesian=True
         )
 
         # out has vmapped dimension at dim 0
