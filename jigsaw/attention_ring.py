@@ -243,7 +243,7 @@ class RingAttention(torch.nn.Module):
 
     def _attention_core(self, q, k, v, x):
 
-        out = RingAttentionFunction.apply(
+        out = ring_attn.RingAttentionFunction.apply(
             q,
             k,
             v,
@@ -286,97 +286,3 @@ class RingAttention(torch.nn.Module):
 
         # Output: [n_batch, seq_length, output_dim]
         return values
-
-
-class RingAttentionFunction(torch.autograd.Function):
-    """Ring Attention autograd function."""
-
-    @staticmethod
-    def forward(q, k, v, x, w_qkv, scale, group, empty, rank, world_size, config):
-        """Forward pass of ring attention."""
-        b, h, n_local, d = q.shape
-
-        world_size = dist.get_world_size(group)
-        out = torch.zeros_like(q)
-        lse = torch.full((b, n_local, h), float("-inf"), device=q.device, dtype=q.dtype)
-        empty = torch.empty(0, device=x.device, dtype=x.dtype)
-
-        out, lse, chunks_to_save = ring_attn.ring_forward(
-            q, k, v, x, w_qkv, scale, group, empty, rank, world_size
-        )
-
-        out = out.to(torch.bfloat16)
-
-        return out, lse, chunks_to_save
-
-    @staticmethod
-    def setup_context(ctx, inputs, output):
-        """
-        Set up context.
-
-        ctx: FunctionCtx
-        inputs: tuple(x, w, b, local_rank, device, selector, spatial_group, bayesian)
-        output: xwt
-        """
-        (q, k, v, x, w_qkv, scale, group, empty, local_rank, world_size, config) = (
-            inputs
-        )
-
-        out, lse, chunks_to_save = output
-        ctx.mark_non_differentiable(lse)
-        ctx.mark_non_differentiable(*chunks_to_save)
-
-        ctx.save_for_backward(
-            q, out, x, lse.mT, w_qkv, *[chunk for chunk in chunks_to_save]
-        )
-
-        ctx.W_qkv = w_qkv
-        ctx.empty = empty
-        ctx.scale = scale
-        ctx.local_rank = local_rank
-        ctx.group = group
-        ctx.world_size = world_size
-        ctx.config = config
-
-    @staticmethod
-    def backward(ctx, dout, grad_l, grad_kv_chunks):
-        """Backward pass of ring attention."""
-        scale = ctx.scale
-        group = ctx.group
-        world_size = ctx.world_size
-        empty = ctx.empty
-        local_rank = ctx.local_rank
-        config = ctx.config
-
-        q, out, x, lse, w_qkv = ctx.saved_tensors[:5]
-        chunks_to_save = ctx.saved_tensors[5:]
-
-        dq, dk, dv = ring_attn.ring_backward(
-            dout,
-            q,
-            out,
-            x,
-            lse,
-            w_qkv,
-            scale,
-            group,
-            local_rank,
-            world_size,
-            chunks_to_save,
-            ring_config=config,
-            empty=empty,
-        )
-
-        return (
-            dq,
-            dk,
-            dv,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )

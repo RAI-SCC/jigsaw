@@ -531,8 +531,6 @@ class DistributedConv2D(torch.nn.Module):
         """
         Distributed 2D Convolution.
 
-        random seed is required because of initialization/synchronization between "partner processes"
-
         input shape of forward pass: (N, Cin, Lin) or (Cin, Lin)
         output shape of forward pass: (N, Cout, Lout)
         """
@@ -621,11 +619,11 @@ class DistributedConv2D(torch.nn.Module):
         spatial_kw: str = "row",
         channel_kw: str = "col",
         model_kw: str = "model",
-    ) -> "DistributedConv2d":
+    ) -> "DistributedConv2D":
 
-        assert (
-            conv.in_channels % process_mesh[channel_kw].size() == 0
-        ), "in_features is not divisible by process mesh cols"
+        assert conv.in_channels % process_mesh[channel_kw].size() == 0, (
+            "in_features is not divisible by process mesh cols"
+        )
 
         instance = cls(
             in_channels=conv.in_channels,
@@ -671,6 +669,21 @@ class DistributedConv2D(torch.nn.Module):
         col_kw: str = "col",
         model_kw: str = "model",
     ) -> torch.nn.Conv2d:
+        """
+        Convert jigsaw conv2d layer to torch.
+
+        Parameters
+        ----------
+        process_mesh: dict
+            Process mesh dict that comtains row, column, and model process groups.
+        row_kw: str
+            Key for accessing row process groups.
+        col_kw: str
+            Key for accessing col process groups.
+        model_kw: str
+            Key for accessing model process groups.
+            Model process group should contain the Union of the row and column groups.
+        """
         weights, bias = self.merge_weights(process_mesh, col_kw)
         conv2d = torch.nn.Conv2d(
             in_channels=weights.shape[0],
@@ -689,9 +702,29 @@ class DistributedConv2D(torch.nn.Module):
 
     def merge_weights(
         self,
-        from_process_mesh: dist.ProcessGroup,
+        from_process_mesh: dict,
         col_kw="col",
     ):
+        """
+        Merge weights from jigsaw model.
+
+        Parameters will be merged in a way such that they can be transplanted into a
+        torch.nn.Conv2D layer natively.
+
+        Parameters
+        ----------
+        process_mesh: dict
+            Process mesh dict that comtains row, column, and model process groups
+        col_kw: str
+            Key for accessing col process groups
+
+        Returns
+        -------
+        global_weights: torch.Tensor
+            Merged weights.
+        global_bias: Union[torch.Tensor, None]
+            Merged bias, if it exists.
+        """
         global_weights = gather_1d_results(
             self.weight, from_process_mesh, dim=0, pm_key=col_kw
         )
@@ -731,9 +764,9 @@ class DistributedConv2D(torch.nn.Module):
             *weight_shape_global[1:],
         )
 
-        assert (
-            weight_shape_global[0] % to_process_mesh[pm_col_key].size() == 0
-        ), f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+        assert weight_shape_global[0] % to_process_mesh[pm_col_key].size() == 0, (
+            f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+        )
         # gather
         global_weights, global_bias = self.merge_weights(from_process_mesh, pm_col_key)
 
@@ -746,9 +779,9 @@ class DistributedConv2D(torch.nn.Module):
                 bias_shape_global // to_process_mesh[pm_col_key].size()
             )
 
-            assert (
-                bias_shape_global % to_process_mesh[pm_col_key].size() == 0
-            ), f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+            assert bias_shape_global % to_process_mesh[pm_col_key].size() == 0, (
+                f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+            )
 
             global_bias = gather_1d_results(
                 self.bias, from_process_mesh, dim=0, pm_key=pm_col_key
@@ -1204,16 +1237,39 @@ class DistributedConvTranspose2D(torch.nn.Module):
     @classmethod
     def convert_to_jigsaw(
         cls,
-        conv: torch.nn.Conv2d,
-        process_mesh: dist.ProcessGroup,
+        conv: torch.nn.ConvTranspose2d,
+        process_mesh: dict,
         device: torch.device,
-        spatial_kw: str = "row",
-        channel_kw: str = "col",
+        row_kw: str = "row",
+        col_kw: str = "col",
         model_kw: str = "model",
-    ) -> "DistributedConvTranspose2d":
-        assert (
-            conv.in_channels % process_mesh[channel_kw].size() == 0
-        ), "in_features is not divisible by process mesh cols"
+    ) -> "DistributedConvTranspose2D":
+        """
+        Convert torch.nn.ConvTranspose2D to jigsaw based on given process mesh.
+
+        Parameters
+        ----------
+        conv: torch.nn.ConvTranspose2d
+            Instance of convTranspose2d class that should be converted to jigsaw linear.
+        process_mesh: dict
+            Process mesh dict that comtains row, column, and model process groups.
+        row_kw: str
+            Key for accessing row process groups.
+        col_kw: str
+            Key for accessing col process groups.
+        model_kw: str
+            Key for accessing model process groups.
+            Model process group should contain the Union of the row and column groups.
+
+        Returns
+        -------
+        model: jigsaw.convolutions.DistributedConvTranspose2D
+            Instance of jigsaw distributed ConvTranspose layer.
+            Jigsaw layer contains weights and biases given from torch.nn.ConvTranspose2d layer.
+        """
+        assert conv.in_channels % process_mesh[col_kw].size() == 0, (
+            "in_features is not divisible by process mesh cols"
+        )
 
         instance = cls(
             in_channels=conv.in_channels,
@@ -1225,16 +1281,16 @@ class DistributedConvTranspose2D(torch.nn.Module):
             groups=conv.groups,
             bias=True if conv.bias is not None else False,
             local_rank=process_mesh[model_kw].rank(),
-            spatial_group=process_mesh[spatial_kw],
-            channel_group=process_mesh[channel_kw],
+            spatial_group=process_mesh[row_kw],
+            channel_group=process_mesh[col_kw],
             device=device,
             parallelism=process_mesh[model_kw].size(),
             bayesian=False,  # TODO
             dtype=conv.weight.dtype,
         )
         # Map weights — clone so the original graph is detached
-        in_rank = process_mesh[channel_kw].rank()
-        in_shard = conv.in_channels // process_mesh[channel_kw].size()
+        in_rank = process_mesh[col_kw].rank()
+        in_shard = conv.in_channels // process_mesh[col_kw].size()
 
         instance.weight.data = (
             conv.weight.data[:, in_rank * in_shard : (in_rank + 1) * in_shard]
@@ -1243,7 +1299,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
         )
 
         if conv.bias is not None:
-            bias_size = conv.out_features // process_mesh[channel_kw].size()
+            bias_size = conv.out_features // process_mesh[col_kw].size()
             instance.bias.data = conv.bias.data[
                 in_rank * bias_size : (in_rank + 1) * bias_size
             ].clone()
@@ -1256,6 +1312,21 @@ class DistributedConvTranspose2D(torch.nn.Module):
         col_kw: str = "col",
         model_kw: str = "model",
     ) -> torch.nn.ConvTranspose2d:
+        """
+        Convert jigsaw transpose convolution layer to torch.
+
+        Parameters
+        ----------
+        process_mesh: dict
+            Process mesh dict that comtains row, column, and model process groups.
+        row_kw: str
+            Key for accessing row process groups.
+        col_kw: str
+            Key for accessing col process groups.
+        model_kw: str
+            Key for accessing model process groups.
+            Model process group should contain the Union of the row and column groups.
+        """
         weights, bias = self.merge_weights(process_mesh, col_kw)
         convtranspose2d = torch.nn.ConvTranspose2d(
             in_channels=weights.shape[0],
@@ -1274,9 +1345,29 @@ class DistributedConvTranspose2D(torch.nn.Module):
 
     def merge_weights(
         self,
-        from_process_mesh: dist.ProcessGroup,
+        from_process_mesh: dict,
         col_kw="col",
     ):
+        """
+        Merge weights from jigsaw model.
+
+        Parameters will be merged in a way such that they can be transplanted into a
+        torch.nn.ConvTranspose2D layer natively.
+
+        Parameters
+        ----------
+        process_mesh: dict
+            Process mesh dict that comtains row, column, and model process groups
+        col_kw: str
+            Key for accessing col process groups
+
+        Returns
+        -------
+        global_weights: torch.Tensor
+            Merged weights.
+        global_bias: Union[torch.Tensor, None]
+            Merged bias, if it exists.
+        """
         global_weights = gather_1d_results(
             self.weight, from_process_mesh, dim=1, pm_key=col_kw
         )
@@ -1317,9 +1408,9 @@ class DistributedConvTranspose2D(torch.nn.Module):
             *weight_shape_global[2:],
         )
 
-        assert (
-            weight_shape_global[0] % to_process_mesh[pm_col_key].size() == 0
-        ), f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+        assert weight_shape_global[0] % to_process_mesh[pm_col_key].size() == 0, (
+            f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+        )
 
         # gather
         global_weights, global_bias = self.merge_weights(from_process_mesh, pm_col_key)
@@ -1332,9 +1423,9 @@ class DistributedConvTranspose2D(torch.nn.Module):
             to_bias_shape_local = (
                 bias_shape_global // to_process_mesh[pm_col_key].size()
             )
-            assert (
-                bias_shape_global % to_process_mesh[pm_col_key].size() == 0
-            ), f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+            assert bias_shape_global % to_process_mesh[pm_col_key].size() == 0, (
+                f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+            )
 
             global_bias = gather_1d_results(
                 self.bias, from_process_mesh, dim=0, pm_key=pm_col_key

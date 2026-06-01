@@ -538,21 +538,27 @@ def distributed_conv2d_over_channels(
             )
             x_handle.wait()
             if b is not None:
-                y = y + conv_func(
-                    x_buffer,  # (sampling, batch, in_channels, x, y)
-                    w[..., in_channels_global // 2 :, :, :],
-                    b,
-                    stride=stride,
-                    padding=padding,
-                    dilation=dilation,
+                y = (
+                    y
+                    + conv_func(
+                        x_buffer,  # (sampling, batch, in_channels, x, y)
+                        w[..., in_channels_global // 2 :, :, :],
+                        b,
+                        stride=stride,
+                        padding=padding,
+                        dilation=dilation,
+                    )
                 )
             else:
-                y = y + conv_func(
-                    x_buffer,  # (sampling, batch, in_channels, x, y)
-                    w[..., in_channels_global // 2 :, :, :],
-                    stride=stride,
-                    padding=padding,
-                    dilation=dilation,
+                y = (
+                    y
+                    + conv_func(
+                        x_buffer,  # (sampling, batch, in_channels, x, y)
+                        w[..., in_channels_global // 2 :, :, :],
+                        stride=stride,
+                        padding=padding,
+                        dilation=dilation,
+                    )
                 )
             return y, x, x_buffer
         case 1:

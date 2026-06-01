@@ -1,18 +1,45 @@
+from typing import Callable, List, Tuple
+
 import torch
 import torch.distributed as dist
-from typing import Callable, Tuple, List
 
 from . import distributed_roll as dist_roll
 
 
 class Roll(torch.nn.Module):
+    """Wrap torch roll function in a module."""
+
     def __init__(self, shifts, dims, dtype=torch.float32):
+        """Initialize roll function.
+
+        Parameters
+        ----------
+        shifts: tuple, list
+            number of indices to shift by
+        dims: tuple, list
+            dims to shift by
+        dtype: torch.dtype
+            data type expected of input data
+        """
         super().__init__()
         self.shifts = shifts
         self.dims = dims
         self.dtype = dtype
 
     def forward(self, x):
+        """
+        Forward pass of torch roll.
+
+        Parameters
+        ----------
+        x: torch.tensor
+            data tensor to roll
+
+        Returns
+        -------
+        x: torch.tensor
+            rolled data
+        """
         return torch.roll(x, shifts=self.shifts, dims=self.dims)
 
 
@@ -59,6 +86,7 @@ class DistributedRoll(torch.nn.Module):
         self.empty = torch.empty(0, device=device, dtype=dtype)
 
     def get_parameter_count(self):
+        """Return dummy parameter count of roll."""
         return 0
 
     @classmethod
@@ -107,6 +135,7 @@ class DistributedRoll(torch.nn.Module):
         self.spatial_process_groups = tuple(spatial_process_groups)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass of roll function."""
         return RollFunction.apply(
             x,
             self.shifts,
@@ -131,6 +160,7 @@ class RollFunction(torch.autograd.Function):
         device: torch.device,
         empty: torch.Tensor,
     ) -> torch.Tensor:
+        """Forward pass of distributed roll."""
         return dist_roll.distributed_roll(
             x,
             shifts,
@@ -143,6 +173,7 @@ class RollFunction(torch.autograd.Function):
 
     @staticmethod
     def setup_context(ctx, inputs, output):
+        """Context for roll function."""
         x, shifts, dims, distributed_dims, spatial_process_groups, device, empty = (
             inputs
         )
@@ -155,6 +186,7 @@ class RollFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        """Backward pass of distributed roll."""
         neg_shifts = tuple(-s for s in ctx.shifts)
         grad_input = dist_roll.distributed_roll(
             grad_output,
@@ -179,6 +211,7 @@ class RollFunction(torch.autograd.Function):
         device,
         empty,
     ):
+        """Vmap for dealing with roll operations."""
         out = Roll.apply(
             x, shifts, dims, distributed_dims, spatial_process_groups, device, empty
         )

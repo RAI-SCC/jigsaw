@@ -1,7 +1,6 @@
 import torch
 import torch.distributed as dist
 
-
 streams = None
 streamz = None
 
@@ -852,7 +851,6 @@ def x_transpose_w_fourway(
             cij = cij + torch.matmul(x_recv_list[1].mT, w_recv_list[1])
 
     return cij
-
 
 
 def xw_transpose_eightway_(

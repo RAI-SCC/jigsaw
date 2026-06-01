@@ -3,8 +3,6 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 
-from . import mlp
-
 
 class DistributedLayerNorm(torch.nn.Module):
     """LayerNorm with synchronized gradients across a process group."""
@@ -44,10 +42,6 @@ class DistributedLNFunction(torch.autograd.Function):
     def forward(x, weight, bias, spatial_group, channel_group, eps):
         """Perform forward pass for distributed layer norm."""
         # Compute mean and variance locally
-
-        n_l = x.shape[-1]  # normalized dimension size (local)
-        n_g = n_l * channel_group.size()  # normalized dimension size (global)
-
         local_mean = x.mean(dim=-1, keepdim=True)
         local_var = x.var(dim=-1, keepdim=True, unbiased=False)
 
@@ -143,7 +137,7 @@ class DistributedLNFunction(torch.autograd.Function):
 
 
 class DistributedGroupNorm(torch.nn.Module):
-    """Distributed Group Norm with functionality to merge"""
+    """Distributed Group Norm wrapped in module."""
 
     def __init__(
         self,
@@ -183,10 +177,10 @@ class DistributedGroupNorm(torch.nn.Module):
         pm_row_key="row",
         pm_col_key="col",
     ):
+        """Reshard parameters for a distributed group norm."""
         assert self.num_global_groups % to_process_mesh[pm_col_key] == 0, (
             "number of global LN groups must be divisible by to_process_mesh channel group size."
         )
-        to_local_groups = self.num_global_groups // to_process_mesh[pm_col_key]
 
 
 class DistributedNoParamLayerNorm(torch.nn.Module):

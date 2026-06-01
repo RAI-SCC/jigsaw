@@ -1,9 +1,9 @@
 import torch
 import torch.distributed as dist
+from process_mesh import *
 
 import jigsaw.convolutions as conv
 from jigsaw.utils_aggregate import gather_results_as_list
-from process_mesh import *
 
 
 def test_param_init_conv2d(device, process_mesh_2x2):
@@ -78,6 +78,7 @@ def test_param_init_conv2d_transpose(device, process_mesh_2x2):
             weights_gathered_as_list[i + col_comm_size],
             atol=1e-5,
         )
+
 
 def test_conv2d_forward(device, process_mesh_2x2):
     """Verify initial weights for Conv2d are correctly synchronized."""

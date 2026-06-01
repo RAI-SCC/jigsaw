@@ -1,11 +1,8 @@
-import math
-
 import torch
 import torch.distributed as dist
-import torch.nn.init as init
 from torch.nn import GELU, Dropout
 
-from . import linear, linear_megatron
+from . import linear
 
 
 class DistributedMLP(torch.nn.Module):
@@ -64,7 +61,7 @@ class DistributedMLP(torch.nn.Module):
             parallelism,
             model_group,
             spatial_group,
-            synchronized_layer=False
+            synchronized_layer=False,
         )
         self.linear2 = linear.DistributedXWT(
             hidden_dim // self.channel_group.size(),
@@ -75,7 +72,7 @@ class DistributedMLP(torch.nn.Module):
             parallelism,
             model_group,
             spatial_group,
-            synchronized_layer=False
+            synchronized_layer=False,
         )
 
         self.activation = GELU()
