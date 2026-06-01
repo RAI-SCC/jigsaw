@@ -5,7 +5,6 @@ import torch
 
 from jigsaw import convolutions, linear, mlp
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
-from tests.process_mesh import *
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,5 @@
 import torch
 import torch.distributed as dist
-from process_mesh import *
 
 import jigsaw.linear as linear
 from jigsaw.utils_aggregate import (

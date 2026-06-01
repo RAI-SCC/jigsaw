@@ -239,7 +239,9 @@ class RingAttention(torch.nn.Module):
         self.heads = heads // channel_group.size()
         self.scale = embed_dim**-0.5
         self.empty = torch.empty(0, device=self.device, dtype=self.dtype)
+
         self.ring_config = ring_config
+        ring_attn.ring_forward = ring_attn.build_ring_forward(ring_config)
 
     def _attention_core(self, q, k, v, x):
 
