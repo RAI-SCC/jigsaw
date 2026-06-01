@@ -4,6 +4,7 @@ from einops import rearrange
 
 from . import attention_ring as ring_attn
 from . import linear
+from . import hooks
 
 
 class DistributedAttention(torch.nn.Module):
@@ -18,8 +19,6 @@ class DistributedAttention(torch.nn.Module):
         dropout: float,
         local_rank: int,
         device: torch.device,
-        parallelism: int,
-        model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         bayesian: bool = False,
@@ -41,8 +40,6 @@ class DistributedAttention(torch.nn.Module):
         super().__init__()
         self.local_rank = local_rank
         self.device = device
-        self.parallelism = parallelism
-        self.model_group = model_group
         self.spatial_group = spatial_group
         self.channel_group = channel_group
 
@@ -52,45 +49,54 @@ class DistributedAttention(torch.nn.Module):
         self.dtype = dtype
         self.dropout = dropout
         self.ring_attention = ring_attention
-
+        
+        assert heads % self.channel_group.size() == 0, "heads is not divisible by channel group size"
+        
         if self.ring_attention:
             assert spatial_group.size() > 1, (
                 "Cannot perform ring attention if spatial size is 1."
             )
 
-        self.attn_core = self._ring_attn_core if self.ring_attention else self.attn_core
+        self.attn_core = self._ring_attn_core if self.ring_attention else self._attention_core
 
         self.qkv = linear.DistributedXWT(
-            in_dim // self.channel_group.size(),
+            in_dim,
             embed_dim * 3,
             bias=False,
             local_rank=self.local_rank,
             device=self.device,
-            parallelism=self.parallelism,
             model_group=self.channel_group,
-            sync_group=self.spatial_group,
+            spatial_group=self.spatial_group,
+            channel_group=self.channel_group,
             bayesian=bayesian,
         )
 
         self.concatenator = linear.DistributedXWT(
-            embed_dim // self.channel_group.size(),
+            embed_dim,
             out_dim,
             bias=True,
             local_rank=self.local_rank,
             device=self.device,
-            parallelism=self.parallelism,
             model_group=self.channel_group,
-            sync_group=self.spatial_group,
+            spatial_group=self.spatial_group,
+            channel_group=self.channel_group,
             bayesian=bayesian,
         )
 
+        # sync up up spatial stuff 
+        for p in self.parameters():
+            dist.broadcast(p.data, group_src=0, group=self.spatial_group, async_op=False)
+            p.register_post_accumulate_grad_hook(
+                hooks.make_grad_sync_hook(self.spatial_group, async_op=True)
+            )
+        
         if self.qk_norm:
             self.q_norm, self.k_norm = (
                 torch.nn.RMSNorm(embed_dim // heads),
                 torch.nn.RMSNorm(embed_dim // heads),
             )
 
-        self.heads = heads // self.channel_group
+        self.heads = heads // self.channel_group.size()
 
     def _attention_core(self, q, k, v, dropout, **kwargs):
 
