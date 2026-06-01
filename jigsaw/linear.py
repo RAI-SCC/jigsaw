@@ -770,7 +770,7 @@ class XWT(torch.autograd.Function):
         b = b.unsqueeze(1)
         w = w.unsqueeze(1)
         out = XWT.apply(
-            x, w, b, local_rank, device, selector, model_group, spatial_group, bayesian
+            x, w, b, local_rank, device, selector, model_group, spatial_group, bayesian=True
         )
 
         # out has vmapped dimension at dim 0

@@ -214,7 +214,7 @@ class Attention(torch.nn.Module):
 
     def convert_attention_to_jigsaw(
         self,
-        attention: Attention,
+        attention,
         process_mesh_dict: dict,
         device: torch.device,
         ring: bool = True,
