@@ -1,5 +1,10 @@
+from typing import Optional
+
 import torch
 import torch.distributed as dist
+
+from . import distributed_permute as dist_permute
+
 
 class DistributedXTranspose(torch.nn.Module):
     """Batched transpose (XT) operation distributed across n processes."""
@@ -30,7 +35,7 @@ class DistributedXTranspose(torch.nn.Module):
         self.device = device
         self.parallelism = parallelism
         self.model_group = model_group
-        self.selector = TransposeSelectionStrategy(self.parallelism)
+        self.selector = dist_permute.TransposeSelectionStrategy(self.parallelism)
 
         self.transpose = XT.apply
 

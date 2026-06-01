@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, Optional, Union
 
 import numpy as np
 import torch
@@ -327,7 +327,7 @@ class DistributedXWT(torch.nn.Module):
             linear_layer=True,
         )
 
-        .bias is not None:
+        if self.bias is not None:
             self.bias.register_post_accumulate_grad_hook(
                 hooks.make_grad_sync_hook(self.spatial_group)
             )
@@ -379,18 +379,41 @@ class DistributedXWT(torch.nn.Module):
     def convert_to_jigsaw(
         cls,
         linear: torch.nn.Linear,
-        process_mesh: dist.ProcessGroup,
+        process_mesh: dict,
         device: torch.device,
-        spatial_kw: str = "row",
-        channel_kw: str = "col",
+        row_kw: str = "row",
+        col_kw: str = "col",
         model_kw: str = "model",
     ) -> "DistributedXWT":
-        assert (
-            linear.in_features % process_mesh[spatial_kw].size() == 0
-        ), "in_features is not divisible by process mesh rows"
-        assert (
-            linear.out_features % process_mesh[channel_kw].size() == 0
-        ), "out_features is not divisible by process mesh columns"
+        """
+        Convert torch.nn.Linear to jigsaw based on given process mesh.
+
+        Parameters
+        ----------
+        linear: torch.nn.Linear
+            Instance of linear class that should be converted to jigsaw linear.
+        process_mesh: dict
+            Process mesh dict that comtains row, column, and model process groups
+        row_kw: str
+            Key for accessing row process groups
+        col_kw: str
+            Key for accessing col process groups
+        model_kw: str
+            Key for accessing model process groups.
+            Model process group should contain the Union of the row and column groups.
+
+        Returns
+        -------
+        model: jigsaw.linear.DistributedXWT
+            Instance of jigsaw distributed linear layer.
+            Jigsaw layer contains weights and biases given from torch.nn.Linear layer.
+        """
+        assert linear.in_features % process_mesh[row_kw].size() == 0, (
+            "in_features is not divisible by process mesh rows"
+        )
+        assert linear.out_features % process_mesh[col_kw].size() == 0, (
+            "out_features is not divisible by process mesh columns"
+        )
 
         instance = cls(
             in_dim=linear.in_features,
@@ -399,16 +422,16 @@ class DistributedXWT(torch.nn.Module):
             local_rank=process_mesh[model_kw].rank(),
             device=device,
             model_group=process_mesh[model_kw],
-            spatial_group=process_mesh[spatial_kw],
-            channel_group=process_mesh[channel_kw],
+            spatial_group=process_mesh[row_kw],
+            channel_group=process_mesh[col_kw],
             bayesian=False,  # TODO
         )
 
         # Map weights — clone so the original graph is detached
-        row_rank = process_mesh[spatial_kw].rank()
-        row_shard = linear.out_features // process_mesh[spatial_kw].size()
-        col_rank = process_mesh[channel_kw].rank()
-        col_shard = linear.in_features // process_mesh[channel_kw].size()
+        row_rank = process_mesh[row_kw].rank()
+        row_shard = linear.out_features // process_mesh[row_kw].size()
+        col_rank = process_mesh[col_kw].rank()
+        col_shard = linear.in_features // process_mesh[col_kw].size()
 
         instance.weight.data = (
             linear.weight.data[
@@ -419,7 +442,7 @@ class DistributedXWT(torch.nn.Module):
             .to(device)
         )
         if linear.bias is not None:
-            bias_size = linear.out_features // process_mesh[channel_kw].size()
+            bias_size = linear.out_features // process_mesh[col_kw].size()
             instance.bias.data = linear.bias.data[
                 col_rank * bias_size : (col_rank + 1) * bias_size
             ].clone()
@@ -432,6 +455,21 @@ class DistributedXWT(torch.nn.Module):
         col_kw: str = "col",
         model_kw: str = "model",
     ) -> torch.nn.Linear:
+        """
+        Convert jigsaw linear layer to torch.
+
+        Parameters
+        ----------
+        process_mesh: dict
+            Process mesh dict that comtains row, column, and model process groups.
+        row_kw: str
+            Key for accessing row process groups.
+        col_kw: str
+            Key for accessing col process groups.
+        model_kw: str
+            Key for accessing model process groups.
+            Model process group should contain the Union of the row and column groups.
+        """
         weights, bias = self.merge_weights(process_mesh, row_kw, col_kw, model_kw)
         linear = torch.nn.Linear(
             in_features=weights.shape[1],
@@ -447,12 +485,33 @@ class DistributedXWT(torch.nn.Module):
 
     def merge_weights(
         self,
-        from_process_mesh: dist.ProcessGroup,
-        row_kw="row",
-        col_kw="col",
-        model_kw="model",
+        from_process_mesh: dict,
+        row_kw: str = "row",
+        col_kw: str = "col",
+        model_kw: str = "model",
     ):
-        """Gathers and returns global weights (and bias) without modifying self."""
+        """
+        Gathers and returns global weights (and bias) in a manner compatible to torch.nn.Linear.
+
+        Parameters
+        ----------
+        from_process_mesh: dict
+            Process mesh dict that comtains row, column, and model process groups
+        row_kw: str
+            Key for accessing row process groups
+        col_kw: str
+            Key for accessing col process groups
+        model_kw: str
+            Key for accessing model process groups.
+            Model process group should contain the Union of the row and column groups.
+
+        Returns
+        -------
+        global_weights: torch.Tensor
+            Merged weights.
+        global_bias: Union[torch.Tensor, None]
+            Merged bias, if it exists.
+        """
         global_weights = gather_results(
             self.weight, from_process_mesh, row_kw, col_kw, model_kw
         )
@@ -467,8 +526,8 @@ class DistributedXWT(torch.nn.Module):
 
     def reshard_parameters(
         self,
-        from_process_mesh: dist.ProcessGroup,
-        to_process_mesh: dist.ProcessGroup,
+        from_process_mesh: dict,
+        to_process_mesh: dict,
         pm_row_key="row",
         pm_col_key="col",
     ):
@@ -492,12 +551,12 @@ class DistributedXWT(torch.nn.Module):
             weight_shape_global[0] // to_process_mesh[pm_row_key].size(),
             weight_shape_global[1] // to_process_mesh[pm_col_key].size(),
         )
-        assert (
-            weight_shape_global[0] % to_process_mesh[pm_row_key].size() == 0
-        ), f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh[pm_row_key].size()}"
-        assert (
-            weight_shape_global[1] % to_process_mesh[pm_col_key].size() == 0
-        ), f"global weight shape[1] is {weight_shape_global[1]} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+        assert weight_shape_global[0] % to_process_mesh[pm_row_key].size() == 0, (
+            f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh[pm_row_key].size()}"
+        )
+        assert weight_shape_global[1] % to_process_mesh[pm_col_key].size() == 0, (
+            f"global weight shape[1] is {weight_shape_global[1]} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+        )
 
         if self.bias is not None:
             from_bias_shape_local = self.bias.shape
@@ -508,9 +567,9 @@ class DistributedXWT(torch.nn.Module):
                 bias_shape_global // to_process_mesh[pm_col_key].size()
             )
 
-            assert (
-                bias_shape_global % to_process_mesh[pm_col_key].size() == 0
-            ), f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+            assert bias_shape_global % to_process_mesh[pm_col_key].size() == 0, (
+                f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
+            )
 
         # Gather
         global_weights, global_bias = self.merge_weights(from_process_mesh)
@@ -611,7 +670,9 @@ class XWT(torch.autograd.Function):
         ctx.bayesian = bayesian
 
     @staticmethod
-    def backward(ctx: torch.autograd.Function, grad_output: torch.Tensor) -> tuple[
+    def backward(
+        ctx: torch.autograd.Function, grad_output: torch.Tensor
+    ) -> tuple[
         torch.Tensor,
         torch.Tensor,
         Optional[torch.Tensor],

@@ -1,12 +1,11 @@
-import torch
 import pytest
-from tests.process_mesh import process_mesh_2x2, process_mesh_2x1x2
+import torch
 
 import jigsaw.convert as convert
 from jigsaw.attention import Attention
-from jigsaw.utils_aggregate import gather_1d_results, gather_results
 from jigsaw.linear import DistributedXWT
-from jigsaw.roll import Roll, DistributedRoll
+from jigsaw.roll import Roll
+from jigsaw.utils_aggregate import gather_1d_results, gather_results
 
 
 @pytest.mark.parametrize(
@@ -18,6 +17,7 @@ from jigsaw.roll import Roll, DistributedRoll
     ],
 )
 def test_convert_linear(request, device, process_mesh, bias):
+    """Test conversion of linear layer."""
     process_mesh = request.getfixturevalue(process_mesh)
 
     # need to make sure that all ranks have the same initialization!
@@ -55,9 +55,7 @@ def test_convert_linear(request, device, process_mesh, bias):
         x_global[
             :,
             row_rank * x_seq // row_size : (row_rank + 1) * x_seq // row_size,
-            col_rank
-            * in_features
-            // col_size : (col_rank + 1)
+            col_rank * in_features // col_size : (col_rank + 1)
             * in_features
             // col_size,
         ]
@@ -111,6 +109,7 @@ def test_convert_linear(request, device, process_mesh, bias):
     ],
 )
 def test_convert_mlp(request, device, process_mesh, bias):
+    """Test conversion of mlp."""
     process_mesh = request.getfixturevalue(process_mesh)
     # need to make sure that all ranks have the same initialization!
     torch.manual_seed(1)
@@ -170,9 +169,7 @@ def test_convert_mlp(request, device, process_mesh, bias):
         x_global[
             :,
             row_rank * x_seq // row_size : (row_rank + 1) * x_seq // row_size,
-            col_rank
-            * in_features
-            // col_size : (col_rank + 1)
+            col_rank * in_features // col_size : (col_rank + 1)
             * in_features
             // col_size,
         ]
@@ -221,15 +218,16 @@ def test_convert_mlp(request, device, process_mesh, bias):
 
         assert torch.allclose(ref_b_1, dist_b_1), "weights of bias1 do not match"
         assert torch.allclose(ref_b_2, dist_b_2), "weights of bias2 do not match"
-        assert torch.allclose(
-            ref_d_b_1, dist_d_b_1
-        ), "weights of bias1 grad do not match"
-        assert torch.allclose(
-            ref_d_b_2, dist_d_b_2
-        ), "weights of bias2 grad do not match"
+        assert torch.allclose(ref_d_b_1, dist_d_b_1), (
+            "weights of bias1 grad do not match"
+        )
+        assert torch.allclose(ref_d_b_2, dist_d_b_2), (
+            "weights of bias2 grad do not match"
+        )
 
 
 def test_attention(device, process_mesh_2x1x2):
+    """Test conversion of multiheaded attention function."""
     # need to make sure that all ranks have the same initialization!
     torch.manual_seed(1)
     embed_dim = 256
@@ -305,11 +303,11 @@ def test_attention(device, process_mesh_2x1x2):
     ref_v_grad = transformer.v.weight.grad
     ref_x_grad = x_global.grad
 
-    row_rank, col_rank = (
+    _, col_rank = (
         process_mesh_2x1x2["row"].rank(),
         process_mesh_2x1x2["col"].rank(),
     )
-    row_size, col_size = (
+    _, col_size = (
         process_mesh_2x1x2["row"].size(),
         process_mesh_2x1x2["col"].size(),
     )
@@ -352,12 +350,13 @@ def test_attention(device, process_mesh_2x1x2):
     assert torch.allclose(ref_q_grad, dist_q_grad), "grad of q.weight does not match"
     assert torch.allclose(ref_k_grad, dist_k_grad), "grad of k.weight does not match"
     assert torch.allclose(ref_v_grad, dist_v_grad), "grad of v.weight does not match"
-    assert torch.allclose(
-        ref_x_grad, dist_x_grad, atol=1e-4
-    ), "grad of x does not match"
+    assert torch.allclose(ref_x_grad, dist_x_grad, atol=1e-4), (
+        "grad of x does not match"
+    )
 
 
 def test_jigsaw_transformer(device, process_mesh_2x1x2):
+    """Test Attention on 2x1x2 mesh."""
     # need to make sure that all ranks have the same initialization!
     torch.manual_seed(1)
     in_features = 256
@@ -389,9 +388,7 @@ def test_jigsaw_transformer(device, process_mesh_2x1x2):
         x_global[
             :,
             :,
-            col_rank
-            * in_features
-            // col_size : (col_rank + 1)
+            col_rank * in_features // col_size : (col_rank + 1)
             * in_features
             // col_size,
         ]
@@ -429,30 +426,31 @@ def test_jigsaw_transformer(device, process_mesh_2x1x2):
         dist_cat_grad, process_mesh_2x1x2, pm_key="col", dim=-1
     )
 
-    assert torch.allclose(
-        ref_forward, dist_forward, atol=1e-5
-    ), "forward does not match"
-    assert torch.allclose(
-        ref_qkv_grad.sum(), dist_qkv_grad.sum(), atol=1e-5
-    ), "sum of grad weights do not match"
-    assert torch.allclose(
-        ref_qkv_w.sum(), dist_qkv_w.sum(), atol=1e-5
-    ), "sum of weights do not match"
+    assert torch.allclose(ref_forward, dist_forward, atol=1e-5), (
+        "forward does not match"
+    )
+    assert torch.allclose(ref_qkv_grad.sum(), dist_qkv_grad.sum(), atol=1e-5), (
+        "sum of grad weights do not match"
+    )
+    assert torch.allclose(ref_qkv_w.sum(), dist_qkv_w.sum(), atol=1e-5), (
+        "sum of weights do not match"
+    )
     assert torch.allclose(ref_head_cat_w, dist_head_cat_w), "forward does not match"
-    assert torch.allclose(
-        ref_cat_grad, dist_cat_grad
-    ), "grad of head concat does not match"
-    assert torch.allclose(
-        ref_x_grad, dist_x_grad, atol=1e-4
-    ), "grad of x does not match"
+    assert torch.allclose(ref_cat_grad, dist_cat_grad), (
+        "grad of head concat does not match"
+    )
+    assert torch.allclose(ref_x_grad, dist_x_grad, atol=1e-4), (
+        "grad of x does not match"
+    )
 
 
 def test_jigsaw_conv2d(device, process_mesh_2x2):
+    """Test conversion of 2d convolution."""
     torch.manual_seed(1)
     in_channels = 512
     out_channels = 1024
     kernel_size = 64
-    H, W = 512, 512
+    h, w = 512, 512
     torch.use_deterministic_algorithms(True)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
@@ -466,9 +464,8 @@ def test_jigsaw_conv2d(device, process_mesh_2x2):
     )
     # copy weights
     ref_conv_weights = conv.weight.clone()
-    conv_bias = conv.bias.clone() if conv.bias is not None else None
 
-    x_global = torch.randn(1, in_channels, H, W, device=device)
+    x_global = torch.randn(1, in_channels, h, w, device=device)
     x_global.requires_grad_(True)
 
     ref_forward = conv(x_global)
@@ -477,15 +474,13 @@ def test_jigsaw_conv2d(device, process_mesh_2x2):
     ref_d_x = x_global.grad
 
     col_rank, col_size = process_mesh_2x2["col"].rank(), process_mesh_2x2["col"].size()
-    row_rank, row_size = process_mesh_2x2["row"].rank(), process_mesh_2x2["row"].size()
+    row_rank, _ = process_mesh_2x2["row"].rank(), process_mesh_2x2["row"].size()
 
-    local_w = W // process_mesh_2x2["row"].size()
+    local_w = w // process_mesh_2x2["row"].size()
     x_local = (
         x_global[
             :,
-            col_rank
-            * in_channels
-            // col_size : (col_rank + 1)
+            col_rank * in_channels // col_size : (col_rank + 1)
             * in_channels
             // col_size,
             :,
@@ -518,20 +513,21 @@ def test_jigsaw_conv2d(device, process_mesh_2x2):
     dist_d_x = gather_1d_results(dist_d_x, process_mesh_2x2, dim=1, pm_key="col")
     dist_d_x = gather_1d_results(dist_d_x, process_mesh_2x2, dim=-1, pm_key="row")
 
-    assert torch.allclose(
-        ref_forward, dist_forward, atol=1e-3
-    ), "forward does not match"
+    assert torch.allclose(ref_forward, dist_forward, atol=1e-3), (
+        "forward does not match"
+    )
     assert torch.allclose(ref_conv_weights, dist_w, atol=1e-5), "weights do not match"
     assert torch.allclose(ref_d_w, dist_d_w, atol=1e-4), "weight grad does not match"
     assert torch.allclose(ref_d_x, dist_d_x, atol=1e-4), "weight grad does not match"
 
 
 def test_jigsaw_conv2dtranspose(device, process_mesh_2x2):
+    """Test conversion of Conv2DTranspose on a 2x2 process mesh."""
     torch.manual_seed(1)
     in_channels = 32
     out_channels = 32
     kernel_size = 4
-    H, W = 100, 100
+    h, w = 100, 100
     torch.use_deterministic_algorithms(True)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
@@ -545,9 +541,9 @@ def test_jigsaw_conv2dtranspose(device, process_mesh_2x2):
     )
     # copy weights
     ref_conv_weights = conv.weight.clone()
-    conv_bias = conv.bias.clone() if conv.bias is not None else None
+    _ = conv.bias.clone() if conv.bias is not None else None
 
-    x_global = torch.randn(1, in_channels, H, W, device=device)
+    x_global = torch.randn(1, in_channels, h, w, device=device)
     x_global.requires_grad_(True)
 
     ref_forward = conv(x_global)
@@ -556,15 +552,13 @@ def test_jigsaw_conv2dtranspose(device, process_mesh_2x2):
     ref_d_x = x_global.grad
 
     col_rank, col_size = process_mesh_2x2["col"].rank(), process_mesh_2x2["col"].size()
-    row_rank, row_size = process_mesh_2x2["row"].rank(), process_mesh_2x2["row"].size()
+    row_rank, _ = process_mesh_2x2["row"].rank(), process_mesh_2x2["row"].size()
 
-    local_w = W // process_mesh_2x2["row"].size()
+    local_w = w // process_mesh_2x2["row"].size()
     x_local = (
         x_global[
             :,
-            col_rank
-            * in_channels
-            // col_size : (col_rank + 1)
+            col_rank * in_channels // col_size : (col_rank + 1)
             * in_channels
             // col_size,
             :,
@@ -597,38 +591,37 @@ def test_jigsaw_conv2dtranspose(device, process_mesh_2x2):
     dist_d_x = gather_1d_results(dist_d_x, process_mesh_2x2, dim=1, pm_key="col")
     dist_d_x = gather_1d_results(dist_d_x, process_mesh_2x2, dim=-1, pm_key="row")
 
-    assert torch.allclose(
-        ref_forward, dist_forward, atol=1e-3
-    ), "forward does not match"
+    assert torch.allclose(ref_forward, dist_forward, atol=1e-3), (
+        "forward does not match"
+    )
     assert torch.allclose(ref_conv_weights, dist_w, atol=1e-5), "weights do not match"
     assert torch.allclose(ref_d_w, dist_d_w, atol=1e-4), "weight grad does not match"
     assert torch.allclose(ref_d_x, dist_d_x, atol=1e-4), "weight grad does not match"
 
 
 def test_jigsaw_roll(device, process_mesh_2x2):
+    """Test conversion of 2d distributed roll."""
     torch.manual_seed(1)
     in_channels = 32
-    H, W = 100, 100
+    h, w = 100, 100
 
     roll = Roll(shifts=(3, 2), dims=(-3, -2))
 
-    x_global = torch.randn(1, H, W, in_channels, device=device)
+    x_global = torch.randn(1, h, w, in_channels, device=device)
     x_global.requires_grad_(True)
 
     ref_forward = roll(x_global)
 
     col_rank, col_size = process_mesh_2x2["col"].rank(), process_mesh_2x2["col"].size()
-    row_rank, row_size = process_mesh_2x2["row"].rank(), process_mesh_2x2["row"].size()
+    row_rank, _ = process_mesh_2x2["row"].rank(), process_mesh_2x2["row"].size()
 
-    local_w = W // process_mesh_2x2["row"].size()
+    local_w = w // process_mesh_2x2["row"].size()
     x_local = (
         x_global[
             :,
             :,
             row_rank * local_w : (row_rank + 1) * local_w,
-            col_rank
-            * in_channels
-            // col_size : (col_rank + 1)
+            col_rank * in_channels // col_size : (col_rank + 1)
             * in_channels
             // col_size,
         ]
@@ -648,6 +641,6 @@ def test_jigsaw_roll(device, process_mesh_2x2):
         dist_forward, process_mesh_2x2, dim=-2, pm_key="row"
     )
 
-    assert torch.allclose(
-        ref_forward, dist_forward, atol=1e-3
-    ), "forward does not match"
+    assert torch.allclose(ref_forward, dist_forward, atol=1e-3), (
+        "forward does not match"
+    )

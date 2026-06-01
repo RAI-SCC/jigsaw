@@ -2,8 +2,8 @@ import torch
 import torch.distributed as dist
 from process_mesh import *
 
-import jigsaw.linear as linear
 import jigsaw.hooks as hooks
+import jigsaw.linear as linear
 from jigsaw.utils_aggregate import (
     gather_1d_results,
     gather_1d_results_list,
@@ -448,7 +448,9 @@ def test_xwt_backward_2(device, process_mesh_2x1x2):
 def test_xwt_backward_dtp(device, process_mesh_2x2):
     """Test forward-backward pass of a model that employs domain parallel in one axis and channel parallel in the other."""
     local_rank = dist.get_rank(group=process_mesh_2x2["col"])
-    torch.manual_seed(process_mesh_2x2["model"].rank())  # for now, force the two "pairs" to have the same
+    torch.manual_seed(
+        process_mesh_2x2["model"].rank()
+    )  # for now, force the two "pairs" to have the same
 
     in_dim, out_dim = 4, 4
     seq_global = 10
@@ -548,7 +550,6 @@ def test_xwt_backward_dtp(device, process_mesh_2x2):
         x_grad_gathered, process_mesh=process_mesh_2x2, dim=0, pm_key="row"
     )
 
-    
     assert torch.allclose(y_gathered, ref_y, atol=1e-5)
     assert torch.allclose(w_gathered, ref_linlayer.weight, atol=1e-5)
     assert torch.allclose(w_grad_gathered, ref_linlayer.weight.grad, atol=1e-5)
@@ -558,14 +559,14 @@ def test_xwt_backward_dtp(device, process_mesh_2x2):
         b_gathered = gather_1d_results(
             linlayer.bias, process_mesh=process_mesh_2x2, pm_key="col", dim=-1
         )
-        
-        # bias 
+
+        # bias
         b_grad_gathered = linlayer.bias.grad.clone().unsqueeze(dim=0)
-        
+
         b_grad_gathered = gather_1d_results(
             b_grad_gathered, process_mesh=process_mesh_2x2, pm_key="col", dim=-1
         )
         b_grad_gathered = b_grad_gathered / 2
-        
+
         assert torch.allclose(b_gathered, ref_linlayer.bias, atol=1e-5)
         assert torch.allclose(b_grad_gathered, ref_linlayer.bias.grad, atol=1e-5)

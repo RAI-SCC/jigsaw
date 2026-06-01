@@ -245,7 +245,7 @@ class RingAttention(torch.nn.Module):
 
     def _attention_core(self, q, k, v, x):
 
-        out = RingAttentionFunction.apply(
+        out = ring_attn.RingAttentionFunction.apply(
             q,
             k,
             v,
@@ -287,5 +287,3 @@ class RingAttention(torch.nn.Module):
 
         # Output: [n_batch, seq_length, output_dim]
         return values
-
-

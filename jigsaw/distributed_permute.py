@@ -1,5 +1,7 @@
 import torch
 import torch.distributed as dist
+from distributed_matmul import _get_preallocated_buffer
+
 
 def x_transpose_twoway(
     x: torch.tensor,
@@ -144,7 +146,6 @@ def x_transpose_fourway(
             return x_recv_list[1].mT
         case 3:
             return x.mT
-
 
 
 def x_transpose_eightway(

@@ -110,6 +110,7 @@ class RingAttentionConfig:
             f"offload={self.offload.name})"
         )
 
+
 class RingAttentionFunction(torch.autograd.Function):
     """Ring Attention autograd function."""
 
