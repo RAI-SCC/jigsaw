@@ -329,7 +329,7 @@ class DistributedXWT(torch.nn.Module):
 
         if self.bias is not None:
             self.bias.register_post_accumulate_grad_hook(
-                hooks.make_grad_sync_hook(self.spatial_group)
+                hooks.make_grad_sync_hook(self.spatial_group, async_op=True)
             )
             dist.broadcast(self.bias.data, group_src=0, group=self.spatial_group)
 
