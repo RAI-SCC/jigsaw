@@ -18,6 +18,7 @@ class NVLinkActivationOffloader:
         # list of (gpu_tensor_ref, event) — gpu_tensor_ref keeps tensor alive
         # until the D2H copy finishes
         self._pending_d2h = []
+        self.name = "NVLinkActivationOffloader"
 
     def offload(self, tensor: torch.Tensor) -> torch.Tensor:
         """
