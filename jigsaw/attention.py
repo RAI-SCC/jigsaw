@@ -11,9 +11,9 @@ class DistributedAttention(torch.nn.Module):
 
     def __init__(
         self,
-        x_features: int,
+        in_dim: int,
         embed_dim: int,
-        output_dim: int,
+        out_dim: int,
         heads: int,
         dropout: float,
         local_rank: int,
@@ -47,7 +47,7 @@ class DistributedAttention(torch.nn.Module):
         self.channel_group = channel_group
 
         self.embed_dim = embed_dim
-        self.x_features = x_features
+        self.in_dim = in_dim
         self.qk_norm = qk_norm
         self.dtype = dtype
         self.dropout = dropout
@@ -61,7 +61,7 @@ class DistributedAttention(torch.nn.Module):
         self.attn_core = self._ring_attn_core if self.ring_attention else self.attn_core
 
         self.qkv = linear.DistributedXWT(
-            x_features // self.channel_group.size(),
+            in_dim // self.channel_group.size(),
             embed_dim * 3,
             bias=False,
             local_rank=self.local_rank,
@@ -74,7 +74,7 @@ class DistributedAttention(torch.nn.Module):
 
         self.concatenator = linear.DistributedXWT(
             embed_dim // self.channel_group.size(),
-            output_dim,
+            out_dim,
             bias=True,
             local_rank=self.local_rank,
             device=self.device,
@@ -153,23 +153,23 @@ class DistributedAttention(torch.nn.Module):
 
 class Attention(torch.nn.Module):
     def __init__(
-        self, in_features, embed_dim, out_features, heads, device, dropout_p=0.0
+        self, in_dim, embed_dim, out_dim, heads, device, dropout_p=0.0
     ):
         super().__init__()
         self.qkv = torch.nn.Linear(
-            in_features=in_features,
+            in_features=in_dim,
             out_features=3 * embed_dim,
             bias=False,
             device=device,
         )
         self.head_concat = torch.nn.Linear(
-            in_features=embed_dim, out_features=out_features, bias=False, device=device
+            in_features=embed_dim, out_features=out_dim, bias=False, device=device
         )
         self.heads = heads
-        self.in_features = in_features
+        self.in_features = in_dim
         self.embed_dim = embed_dim
         self.head_dim = self.embed_dim // self.heads
-        self.out_features = out_features
+        self.out_features = out_dim
         self.dropout_p = dropout_p
         self.attn_core = self._attn_core
 
