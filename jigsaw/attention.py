@@ -178,8 +178,13 @@ class Attention(torch.nn.Module):
         self.out_features = out_dim
         self.dropout_p = dropout_p
         self.attn_core = self._attn_core
+        if qk_norm:
+            self.q_norm, self.k_norm = (
+                torch.nn.RMSNorm(self.head_dim),
+                torch.nn.RMSNorm(self.head_dim),
+            )
 
-    def _attn_core(self, q, k, v, dropout, **kwargs):
+    def _attn_core(self, q, k, v, **kwargs):
         with torch.nn.attention.sdpa_kernel(
             torch.nn.attention.SDPBackend.FLASH_ATTENTION
         ):
