@@ -767,8 +767,6 @@ class XWT(torch.autograd.Function):
             Index of vmapped dimension in output (0 if batched, None if not).
         """
         x = x.contiguous()
-        b = b.unsqueeze(1)
-        w = w.unsqueeze(1)
         out = XWT.apply(
             x, w, b, local_rank, device, selector, model_group, spatial_group, bayesian=True
         )
