@@ -778,7 +778,6 @@ def conv2d_fourway(
         channel_group,
         async_op=False,
     )
-    print(f"Rank {local_rank} w shape {w.shape}")
     (
         y,
         x_left,
