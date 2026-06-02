@@ -58,7 +58,7 @@ class LinearSelectionStrategy:
         w: torch.tensor
             model weights.
         """
-        # w = w.unsqueeze(1)
+        w = w.unsqueeze(1)
         return w
 
     def _no_reshape_weights(self, w: torch.Tensor) -> torch.Tensor:
