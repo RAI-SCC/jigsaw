@@ -768,7 +768,7 @@ class XWT(torch.autograd.Function):
         """
         x = x.contiguous()
         out = XWT.apply(
-            x, w, b, local_rank, device, selector, model_group, spatial_group, bayesian=True
+            x, w, b, local_rank, device, selector, model_group, spatial_group, bayesian
         )
 
         # out has vmapped dimension at dim 0
