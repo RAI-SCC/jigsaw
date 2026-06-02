@@ -51,15 +51,21 @@ def calc_halo_sizes_8way(
     ]
 
     left_to_right = [
-        global_steps[mid_indices[0] + 1] - x_shape[-1]
-        if global_steps[mid_indices[0] + 1] < x_shape[-1]
-        else 0,
-        global_steps[mid_indices[1] + 1] - 2 * x_shape[-1]
-        if global_steps[mid_indices[1] + 1] < 2 * x_shape[-1]
-        else 0,
-        global_steps[mid_indices[2] + 1] - 3 * x_shape[-1]
-        if global_steps[mid_indices[2] + 1] < 3 * x_shape[-1]
-        else 0,
+        (
+            global_steps[mid_indices[0] + 1] - x_shape[-1]
+            if global_steps[mid_indices[0] + 1] < x_shape[-1]
+            else 0
+        ),
+        (
+            global_steps[mid_indices[1] + 1] - 2 * x_shape[-1]
+            if global_steps[mid_indices[1] + 1] < 2 * x_shape[-1]
+            else 0
+        ),
+        (
+            global_steps[mid_indices[2] + 1] - 3 * x_shape[-1]
+            if global_steps[mid_indices[2] + 1] < 3 * x_shape[-1]
+            else 0
+        ),
     ]
 
     left_to_right = [left * -1 for left in left_to_right]
@@ -515,7 +521,6 @@ def distributed_conv2d_over_channels(
 ):
     """Distributed Conv2d over channels."""
     x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
-
     match local_rank % 2:
         case 0:
             x_handle = dist.all_to_all(
@@ -556,7 +561,7 @@ def distributed_conv2d_over_channels(
                     )
                 )
             return y, x, x_buffer
-        case 1 :
+        case 1:
             x_handle = dist.all_to_all(
                 [x_buffer, empty],
                 [x, empty],
@@ -588,7 +593,6 @@ def distributed_conv2d_over_channels(
                     padding=padding,
                     dilation=dilation,
                 )
-
             return y, x_buffer, x
 
 
@@ -774,6 +778,7 @@ def conv2d_fourway(
         channel_group,
         async_op=False,
     )
+    print(f"Rank {local_rank} w shape {w.shape}")
     (
         y,
         x_left,
@@ -1009,11 +1014,16 @@ def conv_transpose2d_fourway_backward(
     if g_x_handle is not None:
         g_x_handle.wait()
 
+    g_w_handle = dist.all_reduce(
+        g_w, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True
+    )
+
     g_x = (
         g_x[..., : in_channels_global // 2, :, :] + g_x_recv
         if channel_group.rank() == 0  # TODO: left/right definitions [0, 2]
         else g_x[..., in_channels_global // 2 :, :, :] + g_x_recv
     )
+    g_w_handle.wait()
 
     return g_x, g_w
 

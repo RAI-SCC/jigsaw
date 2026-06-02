@@ -1,11 +1,27 @@
 import torch.distributed as dist
+from torch.autograd import Variable
 
 
-def make_grad_sync_hook(group):
-    """All-reduce gradients over domain-parallel processes."""
+def make_grad_sync_hook(group, op=dist.ReduceOp.SUM, async_op=True):
+    handles = []
+
+    def _finalize():
+        for h in handles:
+            h.wait()
+        handles.clear()
 
     def hook(param):
-        dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=group)
+        if param.grad is None:
+            return
+        if async_op:
+            if not handles:
+                # first grad of this backward → queue the wait to run when backward finishes
+                Variable._execution_engine.queue_callback(_finalize)
+            handles.append(
+                dist.all_reduce(param.grad, op=op, group=group, async_op=True)
+            )
+        else:
+            dist.all_reduce(param.grad, op=op, group=group, async_op=False)
 
     return hook
 

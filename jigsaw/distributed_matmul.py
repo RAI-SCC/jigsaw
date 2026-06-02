@@ -1,7 +1,6 @@
 import torch
 import torch.distributed as dist
 
-
 streams = None
 streamz = None
 
@@ -64,7 +63,6 @@ def _get_preallocated_buffer(
     #     return out
 
 
-@torch.compile
 def fused_xw_xtw_twoway(
     grad_output: torch.tensor,
     weight: torch.tensor,
@@ -111,7 +109,6 @@ def fused_xw_xtw_twoway(
     return grad_input, grad_weight
 
 
-@torch.compile
 def xw_transpose_twoway(
     xij: torch.tensor,
     wij: torch.tensor,
@@ -141,9 +138,9 @@ def xw_transpose_twoway(
         Local result.
     """
     mod = local_rank % 2
-
+    wij = wij.to(xij.device)
     w0, w1 = torch.split(wij, wij.shape[-2] // 2, dim=-2)
-    # print(_prealloc_buffers.keys())
+
     match mod:
         case 0:
             xw = torch.matmul(xij, w1.mT)
@@ -238,7 +235,6 @@ def xw_twoway(
     return cij
 
 
-@torch.compile
 def x_transpose_w_twoway(
     xij: torch.tensor,
     wij: torch.tensor,
@@ -297,87 +293,6 @@ def x_transpose_w_twoway(
     cij = torch.concat([cij_top, cij_bottom], dim=-2)
 
     return cij
-
-
-def x_transpose_twoway(
-    x: torch.tensor,
-    local_rank: int,
-    device: torch.device,
-    model_group: dist.ProcessGroup,
-) -> torch.tensor:
-    """
-    Batched transpose (x_transpose) operation distributed across two processes.
-
-    Parameters.
-    ----------
-    x : torch.tensor
-        The input tensor.
-    local_rank : int
-        Local model rank.
-    device : torch.device
-        Device to perform computation on.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
-
-    Returns
-    -------
-    x_transpose: torch.tensor
-        Local transposed tensor.
-    """
-    mod = local_rank % 2
-
-    x0, x1 = torch.split(x, x.shape[-2] // 2, dim=-2)
-    x0, x1 = x0.contiguous(), x1.contiguous()
-    buffer_x = _get_preallocated_buffer(x1.shape, x1.dtype, local_rank, device)
-    empty = torch.empty(0, device=device, dtype=x.dtype)
-
-    match mod:
-        case 0:
-            x_send_list = [empty, x1]
-            x_recv_list = [empty, buffer_x]
-        case 1:
-            x_send_list = [x0, empty]
-            x_recv_list = [buffer_x, empty]
-
-    xt_handle = dist.all_to_all(
-        x_recv_list, x_send_list, group=model_group, async_op=True
-    )
-
-    match mod:
-        case 0:
-            x0 = x0.mT
-
-            x_shape = x0.shape
-            if len(x_shape) >= 3:
-                x_transpose = torch.empty(
-                    *x_shape[:-2], x0.shape[-2] * 2, x0.shape[-1], device=device
-                )
-                x_transpose[..., : x0.shape[-2], :] = x0
-            else:
-                x_transpose = torch.empty(x0.shape[0] * 2, x0.shape[1], device=device)
-                x_transpose[: x0.shape[1]] = x0
-            xt_handle.wait()
-            if len(x_shape) >= 3:
-                x_transpose[..., x0.shape[-2] :, :] = buffer_x.mT
-            else:
-                x_transpose[x0.shape[1] :, :] = buffer_x.mT
-        case 1:
-            x1 = x1.mT
-            x_shape = x1.shape
-            if len(x_shape) >= 3:
-                x_transpose = torch.empty(
-                    *x_shape[:-2], x1.shape[-2] * 2, x1.shape[-1], device=device
-                )
-                x_transpose[..., x1.shape[-2] :, :] = x1
-            else:
-                x_transpose = torch.empty(x1.shape[1] * 2, x1.shape[2], device=device)
-                x_transpose[x1.shape[1] :] = x1
-            xt_handle.wait()
-            if len(x_shape) >= 3:
-                x_transpose[..., : x1.shape[-2], :] = buffer_x.mT
-            else:
-                x_transpose[: x1.shape[1], :] = buffer_x.mT
-    return x_transpose
 
 
 def xw_transpose_fourway(
@@ -636,6 +551,178 @@ def xw_fourway(
     return cij
 
 
+def fused_xw_xtw_fourway(
+    grad_output: torch.tensor,
+    weight: torch.tensor,
+    input: torch.tensor,
+    local_rank: int,
+    device: torch.device,
+    model_group: dist.ProcessGroup,
+):
+    """Fused calculation to calculate grad_input and grad_weight in backward pass of a linear layer."""
+    mod = local_rank % 4
+    empty = torch.empty(0, device=device, dtype=grad_output.dtype)
+
+    grad_output = grad_output.contiguous()
+    xdtype, wdtype, idtype = grad_output.dtype, weight.dtype, input.dtype
+
+    match mod:
+        case 0:
+            x_send_list = [empty, grad_output, empty, empty]
+            x_recv_list = [
+                empty,
+                _get_preallocated_buffer(
+                    grad_output.shape, xdtype, local_rank, device, 0
+                ),
+                _get_preallocated_buffer(
+                    grad_output.shape, xdtype, local_rank, device, 0
+                ),
+                empty,
+            ]
+            w_send_list = [empty, empty, weight, empty]
+            w_recv_list = [
+                empty,
+                empty,
+                _get_preallocated_buffer(weight.shape, wdtype, local_rank, device, 1),
+                empty,
+            ]
+            i_send_list = [empty, empty, input, empty]
+            i_recv_list = [
+                empty,
+                empty,
+                _get_preallocated_buffer(input.shape, idtype, local_rank, device, 1),
+                empty,
+            ]
+        case 1:
+            x_send_list = [grad_output, empty, grad_output, grad_output]
+            x_recv_list = [
+                _get_preallocated_buffer(
+                    grad_output.shape, xdtype, local_rank, device, 0
+                ),
+                empty,
+                _get_preallocated_buffer(
+                    grad_output.shape, xdtype, local_rank, device, 0
+                ),
+                empty,
+            ]
+            w_send_list = [empty, empty, empty, weight]
+            w_recv_list = [
+                empty,
+                empty,
+                empty,
+                _get_preallocated_buffer(weight.shape, wdtype, local_rank, device, 1),
+            ]
+            i_send_list = [empty, empty, empty, input]
+            i_recv_list = [
+                empty,
+                empty,
+                empty,
+                _get_preallocated_buffer(input.shape, idtype, local_rank, device, 1),
+            ]
+        case 2:
+            x_send_list = [grad_output, grad_output, empty, grad_output]
+            x_recv_list = [
+                empty,
+                _get_preallocated_buffer(
+                    grad_output.shape, xdtype, local_rank, device, 0
+                ),
+                empty,
+                _get_preallocated_buffer(
+                    grad_output.shape, xdtype, local_rank, device, 0
+                ),
+            ]
+            w_send_list = [weight, empty, empty, empty]
+            w_recv_list = [
+                _get_preallocated_buffer(weight.shape, wdtype, local_rank, device, 1),
+                empty,
+                empty,
+                empty,
+            ]
+            i_send_list = [input, empty, empty, empty]
+            i_recv_list = [
+                _get_preallocated_buffer(input.shape, idtype, local_rank, device, 1),
+                empty,
+                empty,
+                empty,
+            ]
+        case 3:
+            x_send_list = [empty, empty, grad_output, empty]
+            x_recv_list = [
+                empty,
+                _get_preallocated_buffer(
+                    grad_output.shape, xdtype, local_rank, device, 0
+                ),
+                _get_preallocated_buffer(
+                    grad_output.shape, xdtype, local_rank, device, 0
+                ),
+                empty,
+            ]
+            w_send_list = [empty, weight, empty, empty]
+            w_recv_list = [
+                empty,
+                _get_preallocated_buffer(weight.shape, wdtype, local_rank, device, 1),
+                empty,
+                empty,
+            ]
+            i_send_list = [empty, input, empty, empty]
+            i_recv_list = [
+                empty,
+                _get_preallocated_buffer(input.shape, idtype, local_rank, device, 1),
+                empty,
+                empty,
+            ]
+
+    x_handle = dist.all_to_all(
+        x_recv_list, x_send_list, group=model_group, async_op=True
+    )
+    w_handle = dist.all_to_all(
+        w_recv_list, w_send_list, group=model_group, async_op=True
+    )
+    i_handle = dist.all_to_all(
+        i_recv_list, i_send_list, group=model_group, async_op=True
+    )
+
+    x_handle.wait()
+
+    match mod:
+        case 0:
+            grad_input = torch.matmul(grad_output, weight)
+            grad_weight = torch.matmul(grad_output.mT, input)
+        case 1:
+            grad_input = torch.matmul(x_recv_list[0], weight)
+            grad_weight = torch.matmul(x_recv_list[0].mT, input)
+        case 2:
+            grad_input = torch.matmul(x_recv_list[3], weight)
+            grad_weight = torch.matmul(x_recv_list[3].mT, input)
+        case 3:
+            grad_input = torch.matmul(grad_output, weight)
+            grad_weight = torch.matmul(grad_output.mT, input)
+
+    w_handle.wait()
+    match mod:
+        case 0:
+            grad_input = grad_input + torch.matmul(x_recv_list[1], w_recv_list[2])
+        case 1:
+            grad_input = grad_input + torch.matmul(grad_output, w_recv_list[3])
+        case 2:
+            grad_input = grad_input + torch.matmul(grad_output, w_recv_list[0])
+        case 3:
+            grad_input = grad_input + torch.matmul(x_recv_list[2], w_recv_list[1])
+
+    i_handle.wait()
+    match mod:
+        case 0:
+            grad_weight = grad_weight + torch.matmul(x_recv_list[2].mT, i_recv_list[2])
+        case 1:
+            grad_weight = grad_weight + torch.matmul(x_recv_list[2].mT, i_recv_list[3])
+        case 2:
+            grad_weight = grad_weight + torch.matmul(x_recv_list[1].mT, i_recv_list[0])
+        case 3:
+            grad_weight = grad_weight + torch.matmul(x_recv_list[1].mT, i_recv_list[1])
+
+    return grad_input, grad_weight
+
+
 def x_transpose_w_fourway(
     xij: torch.tensor,
     wij: torch.tensor,
@@ -764,70 +851,6 @@ def x_transpose_w_fourway(
             cij = cij + torch.matmul(x_recv_list[1].mT, w_recv_list[1])
 
     return cij
-
-
-def x_transpose_fourway(
-    x: torch.tensor,
-    local_rank: int,
-    device: torch.device,
-    model_group: dist.ProcessGroup,
-) -> torch.tensor:
-    """
-    Batched transpose (x_transpose) operation distributed across four processes.
-
-    Parameters.
-    ----------
-    X : torch.tensor
-        Local input tensor to be transposed.
-    local_rank : int
-        Local model rank.
-    device : torch.device
-        Device to perform computation on.
-
-    Returns
-    -------
-    X : torch.tensor
-        The transposed tensor.
-    """
-    mod = local_rank % 4
-    empty = torch.empty(0, device=device, dtype=x.dtype)
-
-    x = x.contiguous()
-    match mod:
-        case 0:
-            x_send_list = [empty, empty, empty, empty]
-            x_recv_list = [empty, empty, empty, empty]
-        case 1:
-            x_send_list = [empty, empty, x, empty]
-            x_recv_list = [
-                empty,
-                empty,
-                _get_preallocated_buffer(x.shape, x.dtype, local_rank, device, 0),
-                empty,
-            ]
-        case 2:
-            x_send_list = [empty, x, empty, empty]
-            x_recv_list = [
-                empty,
-                _get_preallocated_buffer(x.shape, x.dtype, local_rank, device, 0),
-                empty,
-                empty,
-            ]
-        case 3:
-            x_send_list = [empty, empty, empty, empty]
-            x_recv_list = [empty, empty, empty, empty]
-
-    dist.all_to_all(x_recv_list, x_send_list, group=model_group)
-
-    match mod:
-        case 0:
-            return x.mT
-        case 1:
-            return x_recv_list[2].mT
-        case 2:
-            return x_recv_list[1].mT
-        case 3:
-            return x.mT
 
 
 def xw_transpose_eightway_(
@@ -2844,98 +2867,4 @@ def x_transpose_w_eightway(
 
     cij = cij0 + cij1 + cij2 + cij3
 
-    return cij
-
-
-def x_transpose_eightway(
-    xij: torch.tensor,
-    local_rank: int,
-    device: torch.device,
-    model_group: dist.ProcessGroup,
-) -> torch.tensor:
-    """
-    Batched transpose (x_transpose) operation distributed across eight processes.
-
-    Parameters.
-    ----------
-    X : torch.tensor
-        Local input tensor to be transposed.
-    local_rank : int
-        Local model rank.
-    device : torch.device
-        Device to perform computation on.
-
-    Returns
-    -------
-    X : torch.tensor
-        The transposed tensor.
-    """
-    mod = local_rank % 8
-    empty = torch.empty(0, device=device, dtype=torch.float32)
-
-    # split upon last dimension
-    x0, x1 = torch.split(xij, xij.shape[-1] // 2, dim=-1)
-    x0, x1 = x0.contiguous(), x1.contiguous()
-    cij0 = _get_preallocated_buffer(x0.shape, xij.dtype, local_rank, device, index=0)
-    cij1 = _get_preallocated_buffer(x1.shape, xij.dtype, local_rank, device, index=0)
-
-    match mod:
-        case 0:
-            x_send_list = [empty, empty, x1, empty, empty, empty, empty, empty]
-            cij0.copy_(x0)
-            x_recv_list = [empty, empty, cij1, empty, empty, empty, empty, empty]
-        case 1:
-            x_send_list = [empty, empty, empty, empty, x0, empty, x1, empty]
-            x_recv_list = [empty, empty, empty, empty, cij0, empty, cij1, empty]
-        case 2:
-            cij1.copy_(x1)
-            x_send_list = [x0, empty, empty, empty, empty, empty, empty, empty]
-            x_recv_list = [cij0, empty, empty, empty, empty, empty, empty, empty]
-        case 3:
-            x_send_list = [empty, empty, empty, empty, x0, empty, x1, empty]
-            x_recv_list = [empty, empty, empty, empty, cij0, empty, cij1, empty]
-        case 4:
-            x_send_list = [empty, x0, empty, x1, empty, empty, empty, empty]
-            x_recv_list = [
-                empty,
-                cij0,
-                empty,
-                cij1,
-                empty,
-                empty,
-                empty,
-                empty,
-            ]
-        case 5:
-            x_send_list = [empty, empty, empty, empty, empty, empty, empty, x1]
-            cij0.copy_(x0)
-            x_recv_list = [
-                empty,
-                empty,
-                empty,
-                empty,
-                empty,
-                empty,
-                empty,
-                cij1,
-            ]
-        case 6:
-            x_send_list = [empty, x0, empty, x1, empty, empty, empty, empty]
-            x_recv_list = [
-                empty,
-                cij0,
-                empty,
-                cij1,
-                empty,
-                empty,
-                empty,
-                empty,
-            ]
-        case 7:
-            x_send_list = [empty, empty, empty, empty, empty, x0, empty, empty]
-            cij1.copy_(x1)
-            x_recv_list = [empty, empty, empty, empty, empty, cij0, empty, empty]
-
-    dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=False)
-    cij = torch.concat([cij0, cij1], dim=-2).mT.contiguous()
     return cij

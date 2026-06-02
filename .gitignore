@@ -165,7 +165,6 @@ experiments/*
 *.ipynb
 PoF/*
 constant_masks/*
-tests/*
 download_era5_script/*
 low-res/*
 ifs_evaluation/*

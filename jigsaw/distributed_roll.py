@@ -1,9 +1,7 @@
+from typing import List, Tuple
+
 import torch
 import torch.distributed as dist
-
-from typing import Tuple, List
-
-import .distributed_convolutions as dist_conv
 
 
 def exchange_halo_1d(
@@ -59,8 +57,10 @@ def distributed_roll(
     device: torch.device,
     empty: torch.Tensor,
 ) -> torch.Tensor:
-    """Roll `x` by `shifts` along `dims`; for each dim in `distributed_dims`,
-    exchange a halo on the corresponding process group."""
+    """
+    Roll `x` by `shifts` along `dims`; for each dim in `distributed_dims`,
+    exchange a halo on the corresponding process group.
+    """
     x = torch.roll(x, shifts=shifts, dims=dims)
 
     dim_to_shift = dict(zip(dims, shifts))

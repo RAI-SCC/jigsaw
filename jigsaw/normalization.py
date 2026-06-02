@@ -3,26 +3,24 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 
-from . import mlp
-
 
 class DistributedLayerNorm(torch.nn.Module):
     """LayerNorm with synchronized gradients across a process group."""
 
-    def __init__(self, normalized_dim, rank, device, spatial_group, channel_group):
+    def __init__(self, local_dim, local_rank, device, spatial_group, channel_group):
         """Initialize torch module for distributed layer norm."""
         super().__init__()
-        self.rank = rank
+        self.local_rank = local_rank
         self.device = device
         self.spatial_group = spatial_group
         self.channel_group = channel_group
 
         # Learnable parameters
-        self.weight = torch.nn.Parameter(torch.ones(normalized_dim, device=device))
-        self.bias = torch.nn.Parameter(torch.zeros(normalized_dim, device=device))
-        self.normalized_dim = normalized_dim
+        self.weight = torch.nn.Parameter(torch.ones(local_dim, device=device))
+        self.bias = torch.nn.Parameter(torch.zeros(local_dim, device=device))
+        self.normalized_dim = local_dim
         self.eps = 1e-5
-        self.layernorm = DistributedLNFunction().apply
+        self.layernorm = DistributedLNFunction.apply
 
     def get_parameter_count(self):
         """Return parameter count for distributed layer norm."""
@@ -44,20 +42,14 @@ class DistributedLNFunction(torch.autograd.Function):
     def forward(x, weight, bias, spatial_group, channel_group, eps):
         """Perform forward pass for distributed layer norm."""
         # Compute mean and variance locally
-
-        n_l = x.shape[-1]  # normalized dimension size (local)
-        n_g = n_l * channel_group.size()  # normalized dimension size (global)
-
         local_mean = x.mean(dim=-1, keepdim=True)
-        local_var = x.var(dim=-1, keepdim=True)
+        local_var = x.var(dim=-1, keepdim=True, unbiased=False)
 
         mean = local_mean.clone()
         dist.all_reduce(mean, op=dist.ReduceOp.AVG, group=channel_group)
 
-        var = ((n_l - 1) / (n_g - 1)) * local_var + (n_l / (n_g - 1)) * (
-            mean - local_mean
-        ) ** 2
-        dist.all_reduce(var, op=dist.ReduceOp.SUM, group=channel_group)
+        var = local_var + (local_mean - mean) ** 2
+        dist.all_reduce(var, op=dist.ReduceOp.AVG, group=channel_group)
 
         # Normalize
         x_norm = (x - mean) / torch.sqrt(var + eps)
@@ -135,13 +127,60 @@ class DistributedLNFunction(torch.autograd.Function):
 
         # LayerNorm backward formula
         grad_x = (1.0 / std) * (
-            grad_x_norm - grad_x_norm_mean - x_norm * x_grad_x_term / (n - 1)
+            grad_x_norm - grad_x_norm_mean - x_norm * x_grad_x_term / n
         )
 
         g_w_handle.wait()
         g_b_handle.wait()
 
         return grad_x, grad_weight, grad_bias, None, None, None
+
+
+class DistributedGroupNorm(torch.nn.Module):
+    """Distributed Group Norm wrapped in module."""
+
+    def __init__(
+        self,
+        num_local_groups,
+        num_channels,
+        eps=1e-5,
+        affine=True,
+        device=None,
+        dtype=None,
+        bias=True,
+        channel_group: dist.ProcessGroup = None,
+    ):
+        super().__init__()
+
+        self.num_local_groups = num_local_groups
+        self.num_channels = num_channels
+        self.num_global_groups = num_local_groups * channel_group.size()
+        self.eps = eps
+        self.affine = affine
+        self.device = device
+        self.dtype = dtype
+        self.bias = bias
+        self.group_norm = torch.nn.GroupNorm(
+            self.num_local_groups,
+            self.num_channels,
+            eps=self.eps,
+            affine=self.affine,
+            device=self.device,
+            dtype=self.dtype,
+            bias=self.bias,
+        )
+
+    def reshard_parameters(
+        self,
+        from_process_mesh: dist.ProcessGroup,
+        to_process_mesh: dist.ProcessGroup,
+        pm_row_key="row",
+        pm_col_key="col",
+    ):
+        """Reshard parameters for a distributed group norm."""
+        assert self.num_global_groups % to_process_mesh[pm_col_key] == 0, (
+            "number of global LN groups must be divisible by to_process_mesh channel group size."
+        )
 
 
 class DistributedNoParamLayerNorm(torch.nn.Module):
@@ -339,75 +378,3 @@ class _DistributedSoftmax(torch.autograd.Function):
         out = _DistributedSoftmax.apply(x, dim, group)
 
         return out, 0
-
-
-class DistributedNICENorm(torch.nn.Module):
-    """NICE Norm inspired by FGN."""
-
-    def __init__(
-        self,
-        dim,
-        noise_dim,
-        rank,
-        device,
-        parallelism: int,
-        spatial_group,
-        channel_group,
-    ):
-        """
-        Initialize Distributed NICE Norm.
-
-        Inputs
-        ------
-        dim: int
-            Dimension of channels.
-        noise_dim: int
-            Dimension of noise.
-        rank: int
-            Local rank.
-        device: torch.device
-        paralellism: int
-        spatial_group: dist.ProcessGroup
-        channel_group: dist.ProcessGroup
-        """
-        super().__init__()
-
-        self.global_dim = dim
-        self.noise_dim = noise_dim
-        self.rank = rank
-        self.device = device
-        self.parallelism = parallelism
-        self.spatial_group = spatial_group
-        self.channel_group = channel_group
-
-        # To limit communication, we do grouped layer norm on the local shard
-        self.ln = torch.nn.LayerNorm(
-            self.global_dim // self.channel_group.size(), elementwise_affine=False
-        )
-
-        self.scale_shift = mlp.DistributedMLPNICE(
-            in_dim=self.noise_dim,
-            hidden_dim=self.global_dim,
-            out_dim=self.global_dim * 2,
-            bias=True,
-            local_rank=self.rank,
-            device=self.device,
-            parallelism=self.parallelism,
-            spatial_group=self.spatial_group,
-            channel_group=self.channel_group,
-        )
-
-    @torch.compile
-    def _calc_shift_scale(self, x, scale_shift):
-        x = self.ln(x)
-        scale_shift = scale_shift.unsqueeze(1)
-        scale, shift = torch.chunk(scale_shift, 2, dim=-1)
-        x = scale * x + shift
-        return x
-
-    def forward(self, x, noise):
-        """Forward pass of distributed NICE norm."""
-        scale_shift = self.scale_shift(noise)
-        x = self._calc_shift_scale(x, scale_shift)
-
-        return x
