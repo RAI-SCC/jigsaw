@@ -58,7 +58,7 @@ class DistributedAttention(torch.nn.Module):
             )
 
         self.attn_core = self._ring_attn_core if self.ring_attention else self._attn_core
-        print(f'attn core is {self.attn_core}')
+        
         self.qkv = linear.DistributedXWT(
             in_dim,
             embed_dim * 3,

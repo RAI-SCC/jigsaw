@@ -10,7 +10,7 @@ def test_dist_roll_init(device, process_mesh_2x2):
         shifts=(3, 3),
         dims=(1, 2),
         distributed_dims=[2],
-        spatial_process_groups=[process_mesh_2x2["row"]],
+        spatial_groups=[process_mesh_2x2["row"]],
         device=device,
         dtype=torch.float32,
     )

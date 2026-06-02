@@ -66,12 +66,12 @@ class DistributedRoll(torch.nn.Module):
         shifts: Tuple[int, ...],
         dims: Tuple[int, ...],
         distributed_dims: List[int],
-        spatial_process_groups: List[dist.ProcessGroup],
+        spatial_groups: List[dist.ProcessGroup],
         device: torch.device,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
-        if len(distributed_dims) != len(spatial_process_groups):
+        if len(distributed_dims) != len(spatial_groups):
             raise ValueError("distributed_dims and spatial_process_groups must align")
         for d in distributed_dims:
             if d not in dims:
@@ -80,7 +80,7 @@ class DistributedRoll(torch.nn.Module):
         self.shifts = tuple(shifts)
         self.dims = tuple(dims)
         self.distributed_dims = tuple(distributed_dims)
-        self.spatial_process_groups = tuple(spatial_process_groups)
+        self.spatial_process_groups = tuple(spatial_groups)
         self.device = device
         self.dtype = dtype
         self.empty = torch.empty(0, device=device, dtype=dtype)
