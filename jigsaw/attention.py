@@ -57,8 +57,8 @@ class DistributedAttention(torch.nn.Module):
                 "Cannot perform ring attention if spatial size is 1."
             )
 
-        self.attn_core = self._ring_attn_core if self.ring_attention else self._attention_core
-
+        self.attn_core = self._ring_attn_core if self.ring_attention else self._attn_core
+        print(f'attn core is {self.attn_core}')
         self.qkv = linear.DistributedXWT(
             in_dim,
             embed_dim * 3,
@@ -98,7 +98,7 @@ class DistributedAttention(torch.nn.Module):
 
         self.heads = heads // self.channel_group.size()
 
-    def _attention_core(self, q, k, v, dropout, **kwargs):
+    def _attn_core(self, q, k, v, dropout, **kwargs):
 
         with torch.nn.attention.sdpa_kernel(
             torch.nn.attention.SDPBackend.FLASH_ATTENTION
