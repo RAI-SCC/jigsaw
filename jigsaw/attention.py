@@ -159,7 +159,7 @@ class DistributedAttention(torch.nn.Module):
 
 class Attention(torch.nn.Module):
     def __init__(
-        self, in_dim, embed_dim, out_dim, heads, device, dropout_p=0.0
+        self, in_dim, embed_dim, out_dim, heads, device, dropout_p=0.0, qk_norm=False
     ):
         super().__init__()
         self.qkv = torch.nn.Linear(
