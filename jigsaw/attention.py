@@ -153,7 +153,7 @@ class DistributedAttention(torch.nn.Module):
 
 class Attention(torch.nn.Module):
     def __init__(
-        self, in_features, embed_dim, out_features, heads, device, dropout_p=0.0
+        self, in_features, embed_dim, out_features, heads, device, dropout_p=0.0, qk_norm=False
     ):
         super().__init__()
         self.qkv = torch.nn.Linear(
@@ -172,8 +172,13 @@ class Attention(torch.nn.Module):
         self.out_features = out_features
         self.dropout_p = dropout_p
         self.attn_core = self._attn_core
+        if qk_norm:
+            self.q_norm, self.k_norm = (
+                torch.nn.RMSNorm(self.head_dim),
+                torch.nn.RMSNorm(self.head_dim),
+            )
 
-    def _attn_core(self, q, k, v, dropout, **kwargs):
+    def _attn_core(self, q, k, v, **kwargs):
         with torch.nn.attention.sdpa_kernel(
             torch.nn.attention.SDPBackend.FLASH_ATTENTION
         ):
