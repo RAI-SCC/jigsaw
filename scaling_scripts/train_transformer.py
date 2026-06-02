@@ -1,16 +1,14 @@
 import argparse
 import time
 
+import eval
+import timm
 import torch
 import torch.distributed as dist
 import torch.optim as optim
-import timm
-import yaml
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.nn.utils import vector_to_parameters
-
-import eval
 import utils
+import yaml
+from torch.nn.utils import vector_to_parameters
 
 
 def training_loop(
@@ -21,8 +19,6 @@ def training_loop(
     model_parallel = n_parallel > 1
     # Set all seeds in the same model group to be different
     utils.set_all_seeds(1 + rank % n_parallel)
-
-    best_val_loss = 1e5
 
     xlat, xlon = config_dict["data"]["xlat"], config_dict["data"]["xlon"]
     variable_weights, area_weights = utils.get_weights(
@@ -45,7 +41,9 @@ def training_loop(
             model_group, ddp_group, model_subgroup_row, model_subgroup_col = (
                 utils.setup_groups(rank, n_parallel, 2, 2)
             )
-            n_vars_local = 36 if config_dict["model_parallel"]["type"] == 'jigsaw' else 69
+            n_vars_local = (
+                36 if config_dict["model_parallel"]["type"] == "jigsaw" else 69
+            )
 
     # Define model and load model
     match config_dict["model"]["type"]:
@@ -72,9 +70,9 @@ def training_loop(
                 ddp_group,
                 model_subgroup_col,
             )
-        case model_type : 
+        case model_type:
             print(f"Model type {model_type} does not exist.")
-            
+
     optimizer = utils.build_optimizer(config_dict, model)
     model, optimizer, epoch = utils.load_model(
         model,
@@ -133,10 +131,10 @@ def training_loop(
         torch.cuda.synchronize()
 
         model.eval()
-        
-        if config_dict["model_parallel"]["type"] == 'megatron':
-            config_dict['model_parallel']['parallelism'] = 1
-            
+
+        if config_dict["model_parallel"]["type"] == "megatron":
+            config_dict["model_parallel"]["parallelism"] = 1
+
         val_loss = eval.validate(
             config_dict,
             model,
@@ -209,7 +207,7 @@ def train_one_epoch(
 
     start_time = time.perf_counter()
     if config_dict["model_parallel"]["parallelism"] == 4:
-        xlon = xlon // 2 if config_dict["model_parallel"]["type"] == 'jigsaw' else xlon
+        xlon = xlon // 2 if config_dict["model_parallel"]["type"] == "jigsaw" else xlon
 
     if rank == 0:
         print(f"Epoch {epoch}, learning rate {scheduler._get_lr(epoch)}")
@@ -236,13 +234,16 @@ def train_one_epoch(
         vw = variable_weights.view(1, 1, 1, n_vars_local)
         ow = output * area_weights * vw
         tw = target_data * area_weights * vw
-        loss = loss_fn(ow, tw) 
+        loss = loss_fn(ow, tw)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
             model.parameters(), config_dict["training"]["grad_clip"]
         )
 
-        if config_dict["model_parallel"]["parallelism"] == 4 and config_dict["model_parallel"]["type"] == 'jigsaw':
+        if (
+            config_dict["model_parallel"]["parallelism"] == 4
+            and config_dict["model_parallel"]["type"] == "jigsaw"
+        ):
             handles, flat_grad, gradients = utils.reduce_ddp_layernorms(
                 model, col_group
             )

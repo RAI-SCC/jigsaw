@@ -4,27 +4,26 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = [
-    "Jigsaw"
+    "jigsaw"
 ]
 
 [project]
-name = "Jigsaw"
+name = "jigsaw"
 version = "0.0.1"
 authors = [
   { name="Deifilia Kieckhefen", email="deifilia.kieckhefen@kit.edu"},
 ]
 description = "The Jigsaw model parallelization scheme"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Development Status :: 3 - Alpha",
 ]
 dependencies = [
     "torch",
-    "h5py~=3.10.0",
     "zarr",
-    "timm~=0.9.12",
+    "timm",
     "pyyaml",
     "xarray",
     "matplotlib",
@@ -124,7 +123,7 @@ docstring-code-line-length = "dynamic"
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
 
-#[tool.pytest.ini_options]
-#testpaths = [
-#    "tests",
-#]
+[tool.pytest.ini_options]
+testpaths = [
+    "tests",
+]

@@ -3,10 +3,8 @@ import argparse
 import numpy as np
 import torch
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-import yaml
-
 import utils
+import yaml
 
 
 def training_loop(

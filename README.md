@@ -5,7 +5,7 @@ Code for performing domain- and tensor-parallel training optimized for large ima
 - Jigsaw/ contains all source code for WeatherMixer and Jigsaw parallelization method
 - Jigsaw/data contains
 - cases/ contains all config files and batch submit scripts
-  
+
 ##  Data
 To train the model, approximately 60 TB of ERA5 data will need to be downloaded, specifically, the variables (Z, Q, T, U, V) at pressure levels (1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50), and surface variables (MSLP, U10, V10, T2M) The current dataloader is adapted to the following two datasets downloaded from WeatherBench2 (WB2) https://weatherbench2.readthedocs.io/en/latest/data-guide.html.
 

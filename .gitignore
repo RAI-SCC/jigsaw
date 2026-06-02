@@ -165,12 +165,11 @@ experiments/*
 *.ipynb
 PoF/*
 constant_masks/*
-tests/*
 download_era5_script/*
 low-res/*
 ifs_evaluation/*
 test.py
 pangu_evaluation/*
 lineartest.py
-pytest.sh 
+pytest.sh
 possibly_corrupt_files_in_this_workspace.txt
