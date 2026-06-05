@@ -651,10 +651,7 @@ class DistributedConv2D(torch.nn.Module):
             .clone()
             .to(device)
         )
-        print(f"global weight shape is {conv.weight.shape}")
-        print(
-            f"rank {process_mesh[model_kw].rank()} has conv weight shape {instance.weight.data.shape}"
-        )
+
         if conv.bias is not None:
             bias_size = conv.out_features // process_mesh[channel_kw].size()
             instance.bias.data = conv.bias.data[
@@ -830,7 +827,6 @@ class DistributedConv2D(torch.nn.Module):
             B, out_dim are global values.
             in_dim is local value.
         """
-        print(f"in forward. self.weight {self.weight.shape}")
         cij = self.conv2d_apply(
             x,
             self.weight,

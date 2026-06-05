@@ -212,7 +212,7 @@ class RollFunction(torch.autograd.Function):
         empty,
     ):
         """Vmap for dealing with roll operations."""
-        out = Roll.apply(
+        out = RollFunction.apply(
             x, shifts, dims, distributed_dims, spatial_process_groups, device, empty
         )
         return out, 0

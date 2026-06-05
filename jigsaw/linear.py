@@ -58,7 +58,7 @@ class LinearSelectionStrategy:
         w: torch.tensor
             model weights.
         """
-        # w = w.unsqueeze(1)
+        w = w.unsqueeze(1)
         return w
 
     def _no_reshape_weights(self, w: torch.Tensor) -> torch.Tensor:
@@ -767,10 +767,8 @@ class XWT(torch.autograd.Function):
             Index of vmapped dimension in output (0 if batched, None if not).
         """
         x = x.contiguous()
-        b = b.unsqueeze(1)
-        w = w.unsqueeze(1)
         out = XWT.apply(
-            x, w, b, local_rank, device, selector, model_group, spatial_group, bayesian=True
+            x, w, b, local_rank, device, selector, model_group, spatial_group, bayesian
         )
 
         # out has vmapped dimension at dim 0

@@ -392,7 +392,6 @@ def test_ring_forward_backward(
     dk_full = gather_1d_results(dk_local, process_mesh_4x1, dim=2)
     dv_full = gather_1d_results(dv_local, process_mesh_4x1, dim=2)
 
-    # print(f'Rank {local_rank} is gathered dQ full {dQ_full.sum()}')
     assert torch.allclose(out_full, out_ref, atol=1e-3)
     assert torch.allclose(dq_full, dq_ref.to(dq_full.dtype), atol=1e-3)
     assert torch.allclose(dk_full, dk_ref.to(dk_full.dtype), atol=1e-3)
