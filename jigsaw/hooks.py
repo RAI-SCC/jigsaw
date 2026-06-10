@@ -1,16 +1,47 @@
+"""Gradient hook definitions."""
+
+from typing import Any, Callable
+
+import torch
 import torch.distributed as dist
 from torch.autograd import Variable
+from torch.nn.parameter import Parameter
 
 
-def make_grad_sync_hook(group, op=dist.ReduceOp.SUM, async_op=True):
-    handles = []
+def make_grad_sync_hook(
+    group: dist.ProcessGroup,
+    op: Any = dist.ReduceOp.SUM,
+    async_op: bool = True,
+) -> Callable:
+    """
+    Define hook for grad_weight synchronization.
 
-    def _finalize():
+    If async_op=True, the all_reduction will overlap with the backward pass.
+    All collective operations will occur before optimizers step.
+
+    Otherwise, all_reduction is blocking.
+
+    Parameters
+    ----------
+    group: dist.ProcessGroup
+        Process group where the weights should be synchronized.
+    op: dist.ReduceOp
+        Type of reduction.
+    async_op: bool
+        Flag for whether communication is blocking or not.
+
+    Returns
+    -------
+    hook: Callable
+    """
+    handles: list[torch.distributed.Work] = []
+
+    def _finalize() -> None:
         for h in handles:
             h.wait()
         handles.clear()
 
-    def hook(param):
+    def hook(param: Parameter) -> None:
         if param.grad is None:
             return
         if async_op:
@@ -26,7 +57,7 @@ def make_grad_sync_hook(group, op=dist.ReduceOp.SUM, async_op=True):
     return hook
 
 
-def make_grad_scaling_hook(parallelism):
+def make_grad_scaling_hook(parallelism: int) -> Callable:
     """
     Scale the gradient with parallelism.
 
@@ -35,9 +66,19 @@ def make_grad_scaling_hook(parallelism):
 
     Another alternative is to use:
     loss = F.loss_function(y, y', reduction='mean') / parallelism
+
+    Parameters
+    ----------
+    parallelism: int
+        Scaling factor for grad.
+
+    Returns
+    -------
+    hook: Callable
     """
 
-    def hook(param):
-        param.grad = param.grad / parallelism
+    def hook(param: Parameter) -> None:
+        if param.grad is not None:
+            param.grad = param.grad / parallelism
 
     return hook

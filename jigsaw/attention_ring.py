@@ -10,6 +10,8 @@ Backward uses the analytic attention gradient with globally-saved L.
 dK/dV rotate counter-clockwise (opposite to forward) back to their home rank.
 """
 
+from typing import Any, cast
+
 import torch
 import torch.distributed as dist
 from einops import rearrange
@@ -19,7 +21,7 @@ from . import ring_attention_helpers as ring_attn
 
 
 class Ring(torch.nn.Module):
-    """Distributed windowed attention."""
+    """Distributed Ring attention."""
 
     def __init__(
         self,
@@ -27,13 +29,13 @@ class Ring(torch.nn.Module):
         embed_dim: int,
         output_dim: int,
         heads: int,
-        dropout: float,
+        dropout_p: float,
         local_rank: int,
         device: torch.device,
         parallelism: int,
         spatial_group: dist.ProcessGroup,
         bayesian: bool,
-        dtype,
+        dtype: torch.dtype,
         ring_config: ring_attn.RingAttentionConfig,
     ):
         """
@@ -56,16 +58,13 @@ class Ring(torch.nn.Module):
         self.embed_dim = embed_dim
         self.x_features = x_features
         self.dtype = dtype
-        self.dropout = dropout
+        self.dropout_p = dropout_p
 
         self.heads = heads
         self.scale = embed_dim**-0.5
         self.empty = torch.empty(0, device=self.device, dtype=self.dtype)
         self.config = ring_config
 
-        ring_attn.ring_forward = ring_attn.build_ring_forward(ring_config)
-
-    # @torch.compile(backend="eager")
     def forward(
         self,
         x: torch.Tensor,
@@ -73,14 +72,12 @@ class Ring(torch.nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         w_qkv: torch.Tensor,
-        mask: torch.Tensor,
     ) -> torch.Tensor:
         """
         Forward pass for distributed multi-head attention.
 
         x: (n_batch, vars, n_lat, n_lon)
         """
-        mask = mask.to(torch.bfloat16) if mask is not None else None
         out, *_ = ring_attn.RingAttentionFunction.apply(
             q,
             k,
@@ -88,14 +85,15 @@ class Ring(torch.nn.Module):
             x,
             w_qkv,
             q.shape[-1] ** -0.5,
+            self.dropout_p,
             self.spatial_group,
             self.empty,
             self.local_rank,
-            self.spatial_group.size(),
             self.config,
         )
 
         # Output: [n_batch, seq_length, output_dim]
+        out = cast(torch.Tensor, out)
         return out
 
 
@@ -114,7 +112,7 @@ class RingBaseline(torch.nn.Module):
         parallelism: int,
         spatial_group: dist.ProcessGroup,
         bayesian: bool,
-        dtype,
+        dtype: torch.dtype,
     ):
         """
 
@@ -148,20 +146,18 @@ class RingBaseline(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        w_qkv: torch.Tensor,
-        mask: torch.Tensor,
+        **kwargs: Any,
     ) -> torch.Tensor:
         """
         Forward pass for distributed multi-head attention.
 
         x: (n_batch, vars, n_lat, n_lon)
         """
-        mask = mask.to(torch.bfloat16) if mask is not None else None
         with torch.nn.attention.sdpa_kernel(
             torch.nn.attention.SDPBackend.FLASH_ATTENTION
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, is_causal=False, dropout_p=0.0, attn_mask=mask
+                q, k, v, is_causal=False, dropout_p=0.0, attn_mask=None
             )
 
         # Output: [n_batch, seq_length, output_dim]
@@ -184,8 +180,8 @@ class RingAttention(torch.nn.Module):
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         bayesian: bool,
-        dtype,
-        ring_config,
+        dtype: torch.dtype,
+        ring_config: ring_attn.RingAttentionConfig,
     ):
         """
 
@@ -210,38 +206,38 @@ class RingAttention(torch.nn.Module):
         self.dtype = dtype
         self.dropout = dropout
 
-        self.qkv = linear.DistributedXWTSync(
-            x_features // 2,
+        self.qkv = linear.DistributedXWT(
+            x_features,
             embed_dim * 3,
             bias=False,
             local_rank=self.local_rank,
             device=self.device,
-            parallelism=channel_group.size(),
             model_group=self.channel_group,
-            sync_group=self.spatial_group,
+            spatial_group=self.spatial_group,
+            channel_group=self.channel_group,
             bayesian=bayesian,
         )
 
-        self.concatenator = linear.DistributedXWTSync(
-            embed_dim // 2,
+        self.head_concat = linear.DistributedXWT(
+            embed_dim,
             output_dim,
             bias=True,
             local_rank=self.local_rank,
             device=self.device,
-            parallelism=channel_group.size(),
             model_group=self.channel_group,
-            sync_group=self.spatial_group,
+            spatial_group=self.spatial_group,
+            channel_group=self.channel_group,
             bayesian=bayesian,
         )
-
-        # self.q_norm, self.k_norm = torch.nn.LayerNorm(embed_dim // heads), torch.nn.LayerNorm(embed_dim // heads)
 
         self.heads = heads // channel_group.size()
         self.scale = embed_dim**-0.5
         self.empty = torch.empty(0, device=self.device, dtype=self.dtype)
         self.ring_config = ring_config
 
-    def _attention_core(self, q, k, v, x):
+    def _attention_core(
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, x: torch.Tensor
+    ) -> torch.Tensor:
 
         out = ring_attn.RingAttentionFunction.apply(
             q,
@@ -257,6 +253,7 @@ class RingAttention(torch.nn.Module):
             self.spatial_group.size(),
             self.ring_config,
         )
+        out = cast(torch.Tensor, out)
         return out
 
     # @torch.compile(backend="eager")
@@ -282,7 +279,8 @@ class RingAttention(torch.nn.Module):
 
         # out has shape [batch, local_heads, local_sequence length, head_dim]
         out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous().to(self.dtype)
-        values = self.concatenator(out)
+        out = cast(torch.Tensor, self.head_concat(out))
 
         # Output: [n_batch, seq_length, output_dim]
-        return values
+
+        return out

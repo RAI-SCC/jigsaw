@@ -1,3 +1,5 @@
+"""Offloading class."""
+
 import torch
 
 
@@ -11,13 +13,13 @@ class NVLinkActivationOffloader:
     before the caller drops references.
     """
 
-    def __init__(self, device: torch.device):
+    def __init__(self, device: torch.device) -> None:
         self.device = device
         self.d2h_stream = torch.cuda.Stream(device)
         self.h2d_stream = torch.cuda.Stream(device)
         # list of (gpu_tensor_ref, event) — gpu_tensor_ref keeps tensor alive
         # until the D2H copy finishes
-        self._pending_d2h = []
+        self._pending_d2h: list[tuple[torch.Tensor, torch.cuda.Event]] = []
         self.name = "NVLinkActivationOffloader"
 
     def offload(self, tensor: torch.Tensor) -> torch.Tensor:
@@ -41,7 +43,7 @@ class NVLinkActivationOffloader:
         self._pending_d2h.append((tensor, event))
         return cpu
 
-    def wait_offloads(self):
+    def wait_offloads(self) -> None:
         """
         Wait to offload.
 
@@ -67,7 +69,7 @@ class NVLinkActivationOffloader:
             event.record(self.h2d_stream)
         return gpu, event
 
-    def wait_prefetch(self, event: torch.cuda.Event):
+    def wait_prefetch(self, event: torch.cuda.Event) -> None:
         """Wait for prefetching.
 
         Make current stream wait on a prefetch to complete.

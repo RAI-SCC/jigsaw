@@ -1,20 +1,23 @@
+"""Implementation of distributed permutation functions."""
+
 import torch
 import torch.distributed as dist
-from distributed_matmul import _get_preallocated_buffer
+
+from .distributed_matmul import _get_preallocated_buffer
 
 
 def x_transpose_twoway(
-    x: torch.tensor,
+    x: torch.Tensor,
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
-) -> torch.tensor:
+) -> torch.Tensor:
     """
     Batched transpose (x_transpose) operation distributed across two processes.
 
     Parameters.
     ----------
-    x : torch.tensor
+    x : torch.Tensor
         The input tensor.
     local_rank : int
         Local model rank.
@@ -25,7 +28,7 @@ def x_transpose_twoway(
 
     Returns
     -------
-    x_transpose: torch.tensor
+    x_transpose: torch.Tensor
         Local transposed tensor.
     """
     mod = local_rank % 2
@@ -85,17 +88,17 @@ def x_transpose_twoway(
 
 
 def x_transpose_fourway(
-    x: torch.tensor,
+    x: torch.Tensor,
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
-) -> torch.tensor:
+) -> torch.Tensor:
     """
     Batched transpose (x_transpose) operation distributed across four processes.
 
     Parameters.
     ----------
-    X : torch.tensor
+    X : torch.Tensor
         Local input tensor to be transposed.
     local_rank : int
         Local model rank.
@@ -104,7 +107,7 @@ def x_transpose_fourway(
 
     Returns
     -------
-    X : torch.tensor
+    X : torch.Tensor
         The transposed tensor.
     """
     mod = local_rank % 4
@@ -146,20 +149,22 @@ def x_transpose_fourway(
             return x_recv_list[1].mT
         case 3:
             return x.mT
+        case _:
+            raise ValueError(f"Invalid mod value: {mod}")
 
 
 def x_transpose_eightway(
-    xij: torch.tensor,
+    xij: torch.Tensor,
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
-) -> torch.tensor:
+) -> torch.Tensor:
     """
     Batched transpose (x_transpose) operation distributed across eight processes.
 
     Parameters.
     ----------
-    X : torch.tensor
+    X : torch.Tensor
         Local input tensor to be transposed.
     local_rank : int
         Local model rank.
@@ -168,7 +173,7 @@ def x_transpose_eightway(
 
     Returns
     -------
-    X : torch.tensor
+    X : torch.Tensor
         The transposed tensor.
     """
     mod = local_rank % 8

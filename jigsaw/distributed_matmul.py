@@ -1,10 +1,14 @@
+"""Distributed matrix multiplication implementation."""
+
+from typing import Any, cast
+
 import torch
 import torch.distributed as dist
 
 streams = None
 streamz = None
 
-_prealloc_buffers = {}
+_prealloc_buffers: dict[tuple[torch.dtype, int, int], tuple[None, int]] = {}
 
 
 def _get_preallocated_buffer(
@@ -13,7 +17,7 @@ def _get_preallocated_buffer(
     local_rank: int,
     device: torch.device,
     index: int = 0,
-) -> torch.tensor:
+) -> torch.Tensor:
     """
     Retrieve or create a preallocated buffer.
 
@@ -32,7 +36,7 @@ def _get_preallocated_buffer(
 
     Returns
     -------
-    torch.tensor
+    torch.Tensor
         Preallocated buffer.
     """
     # TODO: re-introduce buffers
@@ -63,15 +67,64 @@ def _get_preallocated_buffer(
     #     return out
 
 
+def fused_xw_xtw_oneway(
+    grad_output: torch.Tensor, weight: torch.Tensor, input: torch.Tensor, **kwargs: Any
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Trivially fused calculation to calculate grad_input and grad_weight in backward pass of a linear layer.
+
+    Parameters
+    ----------
+    grad_output: torch.Tensor
+        Output with respect to the gradient.
+    weight: torch.Tensor
+        Model weights.
+    input: torch.Tensor
+        Model input.
+    kwargs: Any
+        Additional inputs.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+    Gradient with respect to the input and gradient of the weights.
+    """
+    grad_input = grad_output @ weight
+    grad_weight = grad_output.mT @ input
+    return grad_input, grad_weight
+
+
 def fused_xw_xtw_twoway(
-    grad_output: torch.tensor,
-    weight: torch.tensor,
-    input: torch.tensor,
+    grad_output: torch.Tensor,
+    weight: torch.Tensor,
+    input: torch.Tensor,
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
-):
-    """Fused calculation to calculate grad_input and grad_weight in backward pass of a linear layer."""
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Fused calculation to calculate grad_input and grad_weight in backward pass of a linear layer.
+
+    Parameters
+    ----------
+    grad_output: torch.Tensor
+        Output with respect to the gradient.
+    weight: torch.Tensor
+        Model weights.
+    input: torch.Tensor
+        Model input.
+    local_rank: int
+        Local model rank.
+    device: torch.device
+        Device upon which computations occur.
+    model_group: dist.ProcessGroup
+        Process group of the domain- and tensor-parallel group of this linear layer.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+    Gradient with respect to the input and gradient of the weights.
+    """
     mod = local_rank % 2
     w0, w1 = torch.split(weight, weight.shape[-2] // 2, dim=-2)
     buffer_x = _get_preallocated_buffer(
@@ -110,20 +163,20 @@ def fused_xw_xtw_twoway(
 
 
 def xw_transpose_twoway(
-    xij: torch.tensor,
-    wij: torch.tensor,
+    xij: torch.Tensor,
+    wij: torch.Tensor,
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
-) -> torch.tensor:
+) -> torch.Tensor:
     """
     Batched matrix-matrix (XWT) multiplication distributed across two processes.
 
     Parameters
     ----------
-    xij : torch.tensor
+    xij : torch.Tensor
         Local input matrix.
-    wij : torch.tensor
+    wij : torch.Tensor
         Local weight matrix.
     device : torch.device
         Device to perform computation on.
@@ -134,7 +187,7 @@ def xw_transpose_twoway(
 
     Returns
     -------
-    cij : torch.tensor
+    cij : torch.Tensor
         Local result.
     """
     mod = local_rank % 2
@@ -145,7 +198,10 @@ def xw_transpose_twoway(
         case 0:
             xw = torch.matmul(xij, w1.mT)
             buffer_xw = _get_preallocated_buffer(
-                (*xij.shape[:-1], w0.shape[-2]), xw.dtype, local_rank, device
+                cast(torch.Size, (*xij.shape[:-1], w0.shape[-2])),
+                xw.dtype,
+                local_rank,
+                device,
             )
             empty = torch.empty(0, device=device, dtype=xw.dtype)
             xw_send_list = [empty, xw]
@@ -153,7 +209,10 @@ def xw_transpose_twoway(
         case 1:
             xw = torch.matmul(xij, w0.mT)
             buffer_xw = _get_preallocated_buffer(
-                (*xij.shape[:-1], w0.shape[-2]), xw.dtype, local_rank, device
+                cast(torch.Size, (*xij.shape[:-1], w0.shape[-2])),
+                xw.dtype,
+                local_rank,
+                device,
             )
             empty = torch.empty(0, device=device, dtype=xw.dtype)
             xw_send_list = [xw, empty]
@@ -178,20 +237,20 @@ def xw_transpose_twoway(
 
 @torch.compile
 def xw_twoway(
-    xij: torch.tensor,
-    wij: torch.tensor,
+    xij: torch.Tensor,
+    wij: torch.Tensor,
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
-) -> torch.tensor:
+) -> torch.Tensor:
     """
     Batched matrix-matrix (XW) multiplication distributed across two processes.
 
     Parameters
     ----------
-    xij : torch.tensor
+    xij : torch.Tensor
         Local input matrix.
-    wij : torch.tensor
+    wij : torch.Tensor
         Local weight matrix.
     device : torch.device
         Device to perform computation on.
@@ -202,7 +261,7 @@ def xw_twoway(
 
     Returns
     -------
-    cij : torch.tensor
+    cij : torch.Tensor
         Local result.
     """
     mod = local_rank % 2
@@ -236,20 +295,20 @@ def xw_twoway(
 
 
 def x_transpose_w_twoway(
-    xij: torch.tensor,
-    wij: torch.tensor,
+    xij: torch.Tensor,
+    wij: torch.Tensor,
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
-) -> torch.tensor:
+) -> torch.Tensor:
     """
     Batched matrix-matrix (x_transposeW) multiplication distributed across two processes.
 
     Parameters
     ----------
-    xij : torch.tensor
+    xij : torch.Tensor
         Local input matrix.
-    wij : torch.tensor
+    wij : torch.Tensor
         Local weight matrix.
     device : torch.device
         The device on which to perform the operations.
@@ -260,7 +319,7 @@ def x_transpose_w_twoway(
 
     Returns
     -------
-    cij : torch.tensor
+    cij : torch.Tensor
         Local result.
     """
     mod = local_rank % 2
@@ -296,20 +355,20 @@ def x_transpose_w_twoway(
 
 
 def xw_transpose_fourway(
-    xij: torch.tensor,
-    wij: torch.tensor,
+    xij: torch.Tensor,
+    wij: torch.Tensor,
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
-) -> torch.tensor:
+) -> torch.Tensor:
     """
     Batched matrix-matrix (XWT) multiplication distributed across four processes.
 
     Parameters
     ----------
-    xij : torch.tensor
+    xij : torch.Tensor
         Local input matrix.
-    wij : torch.tensor
+    wij : torch.Tensor
         Local weight matrix.
     local_rank : int
         Local model rank.
@@ -320,7 +379,7 @@ def xw_transpose_fourway(
 
     Returns
     -------
-    cij : torch.tensor
+    cij : torch.Tensor
         Local result.
     """
     mod = local_rank % 4
@@ -423,20 +482,20 @@ def xw_transpose_fourway(
 
 
 def xw_fourway(
-    xij: torch.tensor,
-    wij: torch.tensor,
+    xij: torch.Tensor,
+    wij: torch.Tensor,
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
-) -> torch.tensor:
+) -> torch.Tensor:
     """
     Batched matrix-matrix (XW) multiplication distributed across four processes.
 
     Parameters
     ----------
-    xij : torch.tensor
+    xij : torch.Tensor
         Local input matrix.
-    wij : torch.tensor
+    wij : torch.Tensor
         Local weight matrix.
     local_rank : int
         Local model rank.
@@ -447,7 +506,7 @@ def xw_fourway(
 
     Returns
     -------
-    torch.tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 4
@@ -552,14 +611,36 @@ def xw_fourway(
 
 
 def fused_xw_xtw_fourway(
-    grad_output: torch.tensor,
-    weight: torch.tensor,
-    input: torch.tensor,
+    grad_output: torch.Tensor,
+    weight: torch.Tensor,
+    input: torch.Tensor,
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
-):
-    """Fused calculation to calculate grad_input and grad_weight in backward pass of a linear layer."""
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Fused calculation to calculate grad_input and grad_weight in backward pass of a linear layer.
+
+    Parameters
+    ----------
+    grad_output: torch.Tensor
+        Output with respect to the gradient.
+    weight: torch.Tensor
+        Model weights.
+    input: torch.Tensor
+        Model input.
+    local_rank: int
+        Local model rank.
+    device: torch.device
+        Device upon which computations occur.
+    model_group: dist.ProcessGroup
+        Process group of the domain- and tensor-parallel group of this linear layer.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+    Gradient with respect to the input and gradient of the weights.
+    """
     mod = local_rank % 4
     empty = torch.empty(0, device=device, dtype=grad_output.dtype)
 
@@ -724,20 +805,20 @@ def fused_xw_xtw_fourway(
 
 
 def x_transpose_w_fourway(
-    xij: torch.tensor,
-    wij: torch.tensor,
+    xij: torch.Tensor,
+    wij: torch.Tensor,
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
-) -> torch.tensor:
+) -> torch.Tensor:
     """
     Batched matrix-matrix (x_transposeW) multiplication distributed across four processes.
 
     Parameters
     ----------
-    xij : torch.tensor
+    xij : torch.Tensor
         Local input matrix.
-    wij : torch.tensor
+    wij : torch.Tensor
         Local weight matrix.
     local_rank : int
         Local model rank.
@@ -748,7 +829,7 @@ def x_transpose_w_fourway(
 
     Returns
     -------
-    cij : torch.tensor
+    cij : torch.Tensor
         Local result.
     """
     mod = local_rank % 4
@@ -854,20 +935,20 @@ def x_transpose_w_fourway(
 
 
 def xw_transpose_eightway_(
-    xij: torch.tensor,
-    wij: torch.tensor,
+    xij: torch.Tensor,
+    wij: torch.Tensor,
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
-) -> torch.tensor:
+) -> torch.Tensor:
     """
     Batched matrix-matrix (XWT) multiplication distributed across four processes.
 
     Parameters
     ----------
-    xij : torch.tensor
+    xij : torch.Tensor
         Local input matrix.
-    wij : torch.tensor
+    wij : torch.Tensor
         Local weight matrix.
     local_rank : int
         Local model rank.
@@ -878,7 +959,7 @@ def xw_transpose_eightway_(
 
     Returns
     -------
-    cij : torch.tensor
+    cij : torch.Tensor
         Local result.
     """
     mod = local_rank % 8
@@ -1078,7 +1159,7 @@ def xw_transpose_eightway_(
     )
 
     cij = _get_preallocated_buffer(
-        (*xij.shape[:-1], 2 * wij.shape[-2]),
+        cast(torch.Size, (*xij.shape[:-1], 2 * wij.shape[-2])),
         dtype=xij.dtype,
         local_rank=local_rank,
         device=device,
@@ -1179,20 +1260,20 @@ def xw_transpose_eightway_(
 
 
 def xw_transpose_eightway(
-    xij: torch.tensor,
-    wij: torch.tensor,
+    xij: torch.Tensor,
+    wij: torch.Tensor,
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
-) -> torch.tensor:
+) -> torch.Tensor:
     """
     Batched matrix-matrix (XWT) multiplication distributed across four processes.
 
     Parameters.
     ----------
-    xij : torch.tensor
+    xij : torch.Tensor
         Local input matrix.
-    wij : torch.tensor
+    wij : torch.Tensor
         Local weight matrix.
     local_rank : int
         Local model rank.
@@ -1203,12 +1284,12 @@ def xw_transpose_eightway(
 
     Returns
     -------
-    cij : torch.tensor
+    cij : torch.Tensor
         Local result.
     """
     mod = local_rank % 8
     empty = torch.empty(0, device=device, dtype=xij.dtype)
-
+    streams: list[torch.cuda.Stream] = [torch.cuda.Stream() for _ in range(2)]
     match mod:
         case 0:
             x_send_list = [empty, xij, empty, empty, empty, empty, empty, empty]
@@ -1503,20 +1584,20 @@ def xw_transpose_eightway(
 
 
 def xw_eightway_(
-    xij: torch.tensor,
-    wij: torch.tensor,
+    xij: torch.Tensor,
+    wij: torch.Tensor,
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
-) -> torch.tensor:
+) -> torch.Tensor:
     """
     Batched matrix-matrix (XW) multiplication distributed across eight processes.
 
     Parameters
     ----------
-    xij : torch.tensor
+    xij : torch.Tensor
         Local input matrix.
-    wij : torch.tensor
+    wij : torch.Tensor
         Local weight matrix.
     local_rank : int
         Local model rank.
@@ -1527,7 +1608,7 @@ def xw_eightway_(
 
     Returns
     -------
-    cij : torch.tensor
+    cij : torch.Tensor
         Local result.
     """
     # mod = rank % 8
@@ -1828,20 +1909,20 @@ def xw_eightway_(
 
 
 def xw_eightway(
-    xij: torch.tensor,
-    wij: torch.tensor,
+    xij: torch.Tensor,
+    wij: torch.Tensor,
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
-) -> torch.tensor:
+) -> torch.Tensor:
     """
     Batched matrix-matrix (XW) multiplication distributed across eight processes.
 
     Parameters.
     ----------
-    xij : torch.tensor
+    xij : torch.Tensor
         Local input matrix.
-    wij : torch.tensor
+    wij : torch.Tensor
         Local weight matrix.
     local_rank : int
         Local model rank.
@@ -1852,20 +1933,22 @@ def xw_eightway(
 
     Returns
     -------
-    cij : torch.tensor
+    cij : torch.Tensor
         Local result.
     """
     mod = local_rank % 8
     empty = torch.empty(0, device=device, dtype=torch.float32)
+    streams: list[torch.cuda.Stream] = [torch.cuda.Stream() for _ in range(2)]
+
     w0 = _get_preallocated_buffer(
-        (*wij.shape[:-2], wij.shape[-2] * 2, wij.shape[-1]),
+        cast(torch.Size, (*wij.shape[:-2], wij.shape[-2] * 2, wij.shape[-1])),
         dtype=wij.dtype,
         local_rank=local_rank,
         device=device,
         index=1,
     )
     w1 = _get_preallocated_buffer(
-        (*wij.shape[:-2], wij.shape[-2] * 2, wij.shape[-1]),
+        cast(torch.Size, (*wij.shape[:-2], wij.shape[-2] * 2, wij.shape[-1])),
         dtype=wij.dtype,
         local_rank=local_rank,
         device=device,
@@ -2171,20 +2254,20 @@ def xw_eightway(
 
 
 def x_transpose_w_eightway_(
-    xij: torch.tensor,
-    wij: torch.tensor,
+    xij: torch.Tensor,
+    wij: torch.Tensor,
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
-) -> torch.tensor:
+) -> torch.Tensor:
     """
     Batched matrix-matrix (XWT) multiplication distributed across four processes.
 
     Parameters.
     ----------
-    xij : torch.tensor
+    xij : torch.Tensor
         Local input matrix.
-    wij : torch.tensor
+    wij : torch.Tensor
         Local weight matrix.
     local_rank : int
         Local model rank.
@@ -2195,7 +2278,7 @@ def x_transpose_w_eightway_(
 
     Returns
     -------
-    cij : torch.tensor
+    cij : torch.Tensor
         Local result.
     """
     mod = local_rank % 8
@@ -2482,20 +2565,20 @@ def x_transpose_w_eightway_(
 
 
 def x_transpose_w_eightway(
-    xij: torch.tensor,
-    wij: torch.tensor,
+    xij: torch.Tensor,
+    wij: torch.Tensor,
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
-) -> torch.tensor:
+) -> torch.Tensor:
     """
     Batched matrix-matrix (x_transposeW) multiplication distributed across eight processes.
 
     Parameters
     ----------
-    xij : torch.tensor
+    xij : torch.Tensor
         Local input matrix.
-    wij : torch.tensor
+    wij : torch.Tensor
         Local weight matrix.
     local_rank : int
         Local model rank.
@@ -2506,7 +2589,7 @@ def x_transpose_w_eightway(
 
     Returns
     -------
-    cij : torch.tensor
+    cij : torch.Tensor
         Local result.
     """
     mod = local_rank % 8
@@ -2516,6 +2599,7 @@ def x_transpose_w_eightway(
     x0, x1 = x0.contiguous(), x1.contiguous()
 
     x_transpose_shape = x0.shape
+    streamz: list[torch.cuda.Stream] = [torch.cuda.Stream() for _ in range(2)]
 
     match mod:
         case 0:

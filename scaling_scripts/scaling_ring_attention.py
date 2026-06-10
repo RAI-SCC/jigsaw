@@ -18,7 +18,7 @@ _default_layer_config: dict[str, int] = {
 }
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Scale ring attention experiments with flexible configuration"
     )
@@ -59,8 +59,8 @@ def parse_args():
 
 
 def make_process_mesh(
-    device_type="nccl", mesh_shape=[2, 2], mesh_dim_names=["row", "col"]
-):
+    device_type="nccl", mesh_shape: list[int]=[2, 2], mesh_dim_names: list[str]=["row", "col"]
+) -> dict:
     """Return process mesh with rows, columns, and model group."""
     assert len(mesh_shape) == len(mesh_dim_names)
 
@@ -120,7 +120,7 @@ def training_loop(
         embed_dim=embed_dim,
         output_dim=embed_dim,
         heads=heads,
-        dropout=0.0,
+        dropout_p=0.0,
         local_rank=local_rank,
         device=device,
         parallelism=mesh_dict["model"].size(),
@@ -297,13 +297,13 @@ if __name__ == "__main__":
     }
 
     ring_config = ring_attn_fns.RingAttentionConfig(
+        device=device,
         send_in_forward=ring_attn_fns.SendForward.X,
         save_for_backward=ring_attn_fns.SaveBackward.X,
         send_forward_op=ring_attn_fns.SendForwardOp.SENDRECV,
         save_scope=ring_attn_fns.SaveScope.GLOBAL,
         send_backward=ring_attn_fns.SendBackward.GATHER_DKV,
         offload=ring_attn_fns.Offload.DISABLED,
-        device=device,
     )
 
     for combo in itertools.product(*[e for e in enum_fields.values()]):

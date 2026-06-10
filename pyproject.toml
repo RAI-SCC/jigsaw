@@ -11,9 +11,9 @@ packages = [
 name = "jigsaw"
 version = "0.0.1"
 authors = [
-  { name="Deifilia Kieckhefen", email="deifilia.kieckhefen@kit.edu"},
+  { name="Deifilia Kieckhefen", email="deifilia.to@gmail.com"},
 ]
-description = "The Jigsaw model parallelization scheme"
+description = "The Jigsaw domain- and tensor-parallelization scheme"
 readme = "README.md"
 requires-python = ">=3.11"
 classifiers = [
@@ -27,8 +27,7 @@ dependencies = [
     "pyyaml",
     "xarray",
     "matplotlib",
-    "einops",
-    "gcsfs"
+    "einops"
 ]
 
 [project.optional-dependencies]
@@ -50,11 +49,12 @@ scripts = []
 
 # Mypy
 [tool.mypy]
-python_version="3.12"
+python_version="3.11"
 packages=["jigsaw"]
 exclude=[
     'tests/',
-    'beast/model/test_models/',
+    '^scaling_scripts/',
+    'stash/'
 ]
 
 disallow_untyped_defs = true
@@ -70,14 +70,14 @@ follow_untyped_imports = true
 # Ruff
 [tool.ruff]
 target-version = "py312"
-exclude = ["docs", "examples""]
+exclude = ["docs", "examples", "scaling_scripts", "stash"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "D", "D417", "N"]
-ignore = ["E501", "NPY201"]
+ignore = ["E501", "NPY201", "N812"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["D"]
+"tests/*" = ["D", "F403"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"

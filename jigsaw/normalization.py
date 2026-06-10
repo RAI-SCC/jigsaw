@@ -1,4 +1,6 @@
-from typing import Optional
+"""Implementation of distributed normalization layers."""
+
+from typing import Any, Optional, Protocol, cast
 
 import torch
 import torch.distributed as dist
@@ -7,13 +9,20 @@ import torch.distributed as dist
 class DistributedLayerNorm(torch.nn.Module):
     """LayerNorm with synchronized gradients across a process group."""
 
-    def __init__(self, local_dim, local_rank, device, spatial_group, channel_group):
+    def __init__(
+        self,
+        local_dim: int,
+        local_rank: int,
+        device: torch.device,
+        row_group: dist.ProcessGroup,
+        col_group: dist.ProcessGroup,
+    ):
         """Initialize torch module for distributed layer norm."""
         super().__init__()
         self.local_rank = local_rank
         self.device = device
-        self.spatial_group = spatial_group
-        self.channel_group = channel_group
+        self.spatial_group = row_group
+        self.channel_group = col_group
 
         # Learnable parameters
         self.weight = torch.nn.Parameter(torch.ones(local_dim, device=device))
@@ -22,15 +31,15 @@ class DistributedLayerNorm(torch.nn.Module):
         self.eps = 1e-5
         self.layernorm = DistributedLNFunction.apply
 
-    def get_parameter_count(self):
+    def get_parameter_count(self) -> int:
         """Return parameter count for distributed layer norm."""
         return (self.weight.numel() + self.bias.numel()) // dist.get_world_size(
             group=self.spatial_group
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Call forward function for distributed layer norm."""
-        return self.layernorm(
+        return self.layernorm(  # type: ignore[no-any-return]
             x, self.weight, self.bias, self.spatial_group, self.channel_group, self.eps
         )[0]
 
@@ -39,7 +48,14 @@ class DistributedLNFunction(torch.autograd.Function):
     """Autograd function for distributed LayerNorm."""
 
     @staticmethod
-    def forward(x, weight, bias, spatial_group, channel_group, eps):
+    def forward(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor],
+        spatial_group: dist.ProcessGroup,
+        channel_group: dist.ProcessGroup,
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Perform forward pass for distributed layer norm."""
         # Compute mean and variance locally
         local_mean = x.mean(dim=-1, keepdim=True)
@@ -55,24 +71,37 @@ class DistributedLNFunction(torch.autograd.Function):
         x_norm = (x - mean) / torch.sqrt(var + eps)
 
         # Apply affine transformation
-        y = weight * x_norm + bias
+        y = weight * x_norm + (bias if bias is not None else 0)  # type: ignore[operator]
         return y, x_norm, weight, var + eps
 
     @staticmethod
-    def setup_context(ctx, inputs, output):
+    def setup_context(
+        ctx: torch.autograd.function.FunctionCtx,
+        inputs: tuple,
+        output: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    ) -> None:
         """Set up context for distributed layer norm."""
         x, weight, bias, spatial_group, channel_group, eps = inputs
         _, x_norm, weight, var = output
 
         ctx.mark_non_differentiable(x_norm, weight, var)
-        ctx.spatial_group = spatial_group
-        ctx.channel_group = channel_group
+        ctx.spatial_group = spatial_group  # type: ignore[attr-defined]
+        ctx.channel_group = channel_group  # type: ignore[attr-defined]
 
         # Save for backward
         ctx.save_for_backward(x_norm, weight, torch.sqrt(var))
 
     @staticmethod
-    def vmap(info, in_dims, x, weight, bias, spatial_group, channel_group, eps):
+    def vmap(
+        info: Any,  # type: ignore[no-untyped-def]
+        in_dims: Optional[tuple[int, ...]],
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor],
+        spatial_group: dist.ProcessGroup,
+        channel_group: dist.ProcessGroup,
+        eps: float,
+    ) -> tuple[torch.Tensor, int]:
         """Define vmap for distributed layer norm."""
         out = DistributedLNFunction.apply(
             x, weight, bias, spatial_group, channel_group, eps
@@ -82,13 +111,16 @@ class DistributedLNFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(
-        ctx, grad_output, x_norm_grad: None, weight_grad: None, var_grad: None
-    ):
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_output: torch.Tensor,
+        x_norm_grad: None,
+        weight_grad: None,
+        var_grad: None,
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None]:
         """Perform backward pass for distributed layer norm."""
-        x_norm, weight, std = ctx.saved_tensors
-        spatial_group = ctx.spatial_group
-        channel_group = ctx.channel_group
-
+        x_norm, weight, std = ctx.saved_tensors  # type: ignore[attr-defined]
+        spatial_group = ctx.spatial_group  # type: ignore[attr-defined]
+        channel_group = ctx.channel_group  # type: ignore[attr-defined]
         n = (
             x_norm.shape[-1] * channel_group.size()
         )  # normalized dimension size (global)
@@ -133,28 +165,30 @@ class DistributedLNFunction(torch.autograd.Function):
         g_w_handle.wait()
         g_b_handle.wait()
 
-        return grad_x, grad_weight, grad_bias, None, None, None
+        return grad_x, grad_weight, grad_bias, None, None, None  # type: ignore[return-value]
 
 
 class DistributedGroupNorm(torch.nn.Module):
     """Distributed Group Norm wrapped in module."""
 
-    def __init__(
+    def __init__(  # type: ignore[no-untyped-def]
         self,
-        num_local_groups,
-        num_channels,
+        num_local_groups,  # type: ignore[no-untyped-def]
+        num_channels,  # type: ignore[no-untyped-def]
         eps=1e-5,
         affine=True,
         device=None,
         dtype=None,
         bias=True,
-        channel_group: dist.ProcessGroup = None,
+        channel_group: Optional[dist.ProcessGroup] = None,
     ):
         super().__init__()
 
         self.num_local_groups = num_local_groups
         self.num_channels = num_channels
-        self.num_global_groups = num_local_groups * channel_group.size()
+        self.num_global_groups = num_local_groups * (
+            channel_group.size() if channel_group is not None else 1
+        )
         self.eps = eps
         self.affine = affine
         self.device = device
@@ -173,10 +207,10 @@ class DistributedGroupNorm(torch.nn.Module):
     def reshard_parameters(
         self,
         from_process_mesh: dist.ProcessGroup,
-        to_process_mesh: dist.ProcessGroup,
-        pm_row_key="row",
-        pm_col_key="col",
-    ):
+        to_process_mesh: dict[str, dist.ProcessGroup],
+        pm_row_key: str = "row",
+        pm_col_key: str = "col",
+    ) -> None:
         """Reshard parameters for a distributed group norm."""
         assert self.num_global_groups % to_process_mesh[pm_col_key] == 0, (
             "number of global LN groups must be divisible by to_process_mesh channel group size."
@@ -186,7 +220,9 @@ class DistributedGroupNorm(torch.nn.Module):
 class DistributedNoParamLayerNorm(torch.nn.Module):
     """LayerNorm with synchronized gradients across a process group."""
 
-    def __init__(self, rank, device, channel_group):
+    def __init__(
+        self, rank: int, device: torch.device, channel_group: dist.ProcessGroup
+    ) -> None:
         """
         Initialize DistributedNoParamLayerNorm.
 
@@ -204,20 +240,29 @@ class DistributedNoParamLayerNorm(torch.nn.Module):
         self.eps = 1e-5
         self.layernorm = DistributedNoParamLNFunction().apply
 
-    def get_parameter_count(self):
+    def get_parameter_count(self) -> int:
         """Return 0 parameters in this layer norm."""
         return 0
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Call forward pass for layer norm."""
-        return self.layernorm(x, self.channel_group, self.eps)[0]
+        return self.layernorm(x, self.channel_group, self.eps)[0]  # type: ignore[no-any-return]
+
+
+class NoParamLNCtx(Protocol):
+    """Context object for NoParamLN."""
+
+    x_norm: torch.Tensor
+    std: torch.Tensor
 
 
 class DistributedNoParamLNFunction(torch.autograd.Function):
     """Autograd function for distributed LayerNorm."""
 
     @staticmethod
-    def forward(x, channel_group, eps):
+    def forward(
+        x: torch.Tensor, channel_group: dist.ProcessGroup, eps: float
+    ) -> tuple[torch.Tensor, float]:
         """Perform forward pass for distributed layer norm with no parameters."""
         # Compute mean and variance locally
 
@@ -239,32 +284,44 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
         x_norm = (x - mean) / torch.sqrt(var + eps)
 
         # Apply affine transformation
-        return x_norm, var + eps
+        return x_norm, var + eps  # type: ignore[return-value]
 
     @staticmethod
-    def setup_context(ctx, inputs, output):
+    def setup_context(
+        ctx: torch.autograd.function.FunctionCtx,
+        inputs: tuple[torch.Tensor, dist.ProcessGroup, float],
+        output: tuple[torch.Tensor, torch.Tensor],
+    ) -> None:
         """Set up context for distributed layer norm with no params."""
         x, channel_group, eps = inputs
         x_norm, var = output
 
         ctx.mark_non_differentiable(var)
-        ctx.channel_group = channel_group
-
+        ctx.channel_group = channel_group  # type: ignore[attr-defined]
+        std = torch.sqrt(var)
         # Save for backward
-        ctx.save_for_backward(x_norm, torch.sqrt(var))
+        ctx.save_for_backward(x_norm, std)
 
     @staticmethod
-    def vmap(info, in_dims, x, channel_group, eps):
+    def vmap(
+        info: Any,
+        in_dims: Optional[tuple[int, ...]],
+        x: torch.Tensor,
+        channel_group: dist.ProcessGroup,
+        eps: float,
+    ) -> tuple[torch.Tensor, int]:
         """Define vmap for distributed NoParameter LN."""
         out = DistributedNoParamLNFunction.apply(x, channel_group, eps)
 
         return out, 0
 
     @staticmethod
-    def backward(ctx, grad_output, var_grad: None):
+    def backward(
+        ctx: NoParamLNCtx, grad_output: torch.Tensor, var_grad: None
+    ) -> tuple[torch.Tensor | None, ...]:
         """Define backward pass for layer norm with no parameters."""
-        x_norm, std = ctx.saved_tensors
-        channel_group = ctx.channel_group
+        x_norm, std = ctx.saved_tensors  # type: ignore[attr-defined]
+        channel_group = ctx.channel_group  # type: ignore[attr-defined]
 
         n = (
             x_norm.shape[-1] * channel_group.size()
@@ -295,27 +352,34 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
         return grad_x, None, None
 
 
+class SoftMaxCtx(Protocol):
+    """Protocol for types stored within ctx."""
+
+    dim: int
+    group: dist.ProcessGroup
+
+
 class DistributedSoftMax(torch.nn.Module):
     """Distributed Softmax operation."""
 
-    def __init__(self, dim=-1, group=None):
+    def __init__(self, group: dist.ProcessGroup, dim: int = -1):
         super().__init__()
         self.dim = dim
         self.group = group
-        self.func = _DistributedSoftmax.apply
+        self.softmax = _DistributedSoftmax.apply
 
-    def get_parameter_count(self):
+    def get_parameter_count(self) -> int:
         """Return parameter count of softmax."""
         return 0
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass of distributed softmax."""
-        return self.func(x, self.dim, self.group)
+        return self.softmax(x, self.dim, self.group)  # type: ignore[no-any-return]
 
 
 class _DistributedSoftmax(torch.autograd.Function):
     @staticmethod
-    def forward(x, dim, group):
+    def forward(x: torch.Tensor, dim: int, group: dist.ProcessGroup) -> torch.Tensor:
         """Overloaded Autograd function for distributed SoftMax."""
         # local exponentials
         local_max = x.amax(dim=-1, keepdim=True)
@@ -334,7 +398,9 @@ class _DistributedSoftmax(torch.autograd.Function):
         return out
 
     @staticmethod
-    def setup_context(ctx, inputs, output):
+    def setup_context(
+        ctx: torch.autograd.function.FunctionCtx, inputs: tuple, output: torch.Tensor
+    ) -> None:
         """
         Set up context for distributed Softmax.
 
@@ -344,12 +410,16 @@ class _DistributedSoftmax(torch.autograd.Function):
         """
         _, dim, group = inputs
         out = output
-        ctx.dim = dim
-        ctx.group = group
         ctx.save_for_backward(out)
+        c = cast(SoftMaxCtx, ctx)
+
+        c.dim = dim
+        c.group = group
 
     @staticmethod
-    def backward(ctx, grad_out):
+    def backward(
+        ctx: SoftMaxCtx, grad_out: torch.Tensor
+    ) -> tuple[torch.Tensor, None, None]:
         """
         Backward pass of distributed SoftMax.
 
@@ -358,7 +428,7 @@ class _DistributedSoftmax(torch.autograd.Function):
         ctx: Function context
         grad_out: gradient wrt output
         """
-        (out,) = ctx.saved_tensors
+        (out,) = ctx.saved_tensors  # type: ignore[attr-defined]
         dim = ctx.dim
         group = ctx.group
 
@@ -374,7 +444,14 @@ class _DistributedSoftmax(torch.autograd.Function):
         return grad_x, None, None
 
     @staticmethod
-    def vmap(info, in_dims: tuple[Optional[int], ...], x, dim, group):
+    def vmap(
+        info: Any,
+        in_dims: tuple[Optional[int], ...],
+        x: torch.Tensor,
+        dim: int,
+        group: dist.ProcessGroup,
+    ) -> tuple[torch.Tensor, int]:
+        """Vmap rule for softmax."""
         out = _DistributedSoftmax.apply(x, dim, group)
 
         return out, 0

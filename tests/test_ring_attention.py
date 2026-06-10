@@ -7,6 +7,9 @@ import jigsaw.ring_attention_helpers as ring_attn_fns
 from jigsaw.utils_aggregate import (
     gather_1d_results,
 )
+from tests.process_mesh import *
+
+pytestmark = [pytest.mark.gpu_required, pytest.mark.distributed_required]
 
 # def test_backward(device, process_mesh):
 #     local_rank = dist.get_rank(group=process_mesh["row"])
@@ -132,9 +135,13 @@ from jigsaw.utils_aggregate import (
         ]
     ],
 )
-def test_backward_sdpa(device, process_mesh_4x1, flash_kernel):
+def test_backward_sdpa(
+    device: torch.device,
+    process_mesh_dict_4x1: dict,
+    flash_kernel: torch.nn.attention.SDPBackend,
+) -> None:
     """Test flash kernel with direct call to aten function."""
-    world_size = dist.get_world_size(group=process_mesh_4x1["row"])
+    world_size = dist.get_world_size(group=process_mesh_dict_4x1["row"])
 
     torch.manual_seed(2)  # same seed for weight initialization
     b, h, n_global, d = 1, 6, world_size * 32, 256
@@ -257,15 +264,15 @@ def test_backward_sdpa(device, process_mesh_4x1, flash_kernel):
     "offloader", [ring_attn_fns.Offload.DISABLED, ring_attn_fns.Offload.CPU]
 )
 def test_ring_forward_backward(
-    device,
-    process_mesh_4x1,
-    send_in_forward,
-    save_for_backward,
-    send_forward_op,
-    save_scope,
-    send_backward,
-    offloader,
-):
+    device: torch.device,
+    process_mesh_dict_4x1: dict,
+    send_in_forward: ring_attn_fns.SendForward,
+    save_for_backward: ring_attn_fns.SaveBackward,
+    send_forward_op: ring_attn_fns.SendForwardOp,
+    save_scope: ring_attn_fns.SaveScope,
+    send_backward: ring_attn_fns.SendBackward,
+    offloader: ring_attn_fns.Offload,
+) -> None:
     """Verify weights for XWT_Sync are synchronized after a few iterations."""
     if (
         send_in_forward == ring_attn_fns.SendForward.KV
@@ -274,16 +281,16 @@ def test_ring_forward_backward(
         pytest.xfail("not yet supported")
 
     ring_config = ring_attn_fns.RingAttentionConfig(
+        device=device,
         send_in_forward=send_in_forward,
         send_forward_op=send_forward_op,
         save_for_backward=save_for_backward,
         save_scope=save_scope,
         send_backward=send_backward,
         offload=offloader,
-        device=device,
     )
 
-    ring_attn_fns.ring_forward = ring_attn_fns.build_ring_forward(ring_config)
+    ring_forward = ring_attn_fns.build_ring_forward(ring_config)
 
     local_rank = dist.get_rank(group=None)
     world_size = dist.get_world_size(group=None)
@@ -314,26 +321,28 @@ def test_ring_forward_backward(
     scale = q_local.shape[-1] ** -0.5
 
     # just test helper function forward
-    out, lse, chunks_to_save = ring_attn_fns.ring_forward(
+    ring_forward = ring_attn_fns.build_ring_forward(ring_config)
+    out, lse, chunks_to_save = ring_forward(
         q_local,
         k_local,
         v_local,
         x,
         w_qkv,
         scale,
-        group=process_mesh_4x1["row"],
-        empty=empty,
-        rank=local_rank,
-        world_size=world_size,
+        0.0,
+        process_mesh_dict_4x1["row"],
+        empty,
+        local_rank,
+        world_size,
     )
 
-    out_full = gather_1d_results(out, process_mesh_4x1, dim=2)
-    x_full = gather_1d_results(x, process_mesh_4x1, dim=1)
+    out_full = gather_1d_results(out, process_mesh_dict_4x1, dim=2)
+    x_full = gather_1d_results(x, process_mesh_dict_4x1, dim=1)
     qkv = x_full @ w_qkv.mT
 
-    q_ref = gather_1d_results(q_local, process_mesh_4x1, dim=2)
-    k_ref = gather_1d_results(k_local, process_mesh_4x1, dim=2)
-    v_ref = gather_1d_results(v_local, process_mesh_4x1, dim=2)
+    q_ref = gather_1d_results(q_local, process_mesh_dict_4x1, dim=2)
+    k_ref = gather_1d_results(k_local, process_mesh_dict_4x1, dim=2)
+    v_ref = gather_1d_results(v_local, process_mesh_dict_4x1, dim=2)
 
     # Reference calculation
     out_ref, logsumexp, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
@@ -356,7 +365,7 @@ def test_ring_forward_backward(
         lse,
         w_qkv,
         scale,
-        None,
+        process_mesh_dict_4x1["row"],
         local_rank,
         world_size,
         chunks_to_save,
@@ -388,9 +397,9 @@ def test_ring_forward_backward(
     )
 
     # gather
-    dq_full = gather_1d_results(dq_local, process_mesh_4x1, dim=2)
-    dk_full = gather_1d_results(dk_local, process_mesh_4x1, dim=2)
-    dv_full = gather_1d_results(dv_local, process_mesh_4x1, dim=2)
+    dq_full = gather_1d_results(dq_local, process_mesh_dict_4x1, dim=2)
+    dk_full = gather_1d_results(dk_local, process_mesh_dict_4x1, dim=2)
+    dv_full = gather_1d_results(dv_local, process_mesh_dict_4x1, dim=2)
 
     assert torch.allclose(out_full, out_ref, atol=1e-3)
     assert torch.allclose(dq_full, dq_ref.to(dq_full.dtype), atol=1e-3)
@@ -420,9 +429,9 @@ def test_ring_forward_backward(
     )
 
 
-def test_ring(device, process_mesh_4x1):
+def test_ring(device: torch.device, process_mesh_dict_4x1: dict) -> None:
     """Test forward-backward pass of ring attention wrapped by nn.Module."""
-    group = process_mesh_4x1["model"]
+    group = process_mesh_dict_4x1["model"]
     local_rank = dist.get_rank(group=group)
     world_size = dist.get_world_size(group=group)
 
@@ -460,17 +469,17 @@ def test_ring(device, process_mesh_4x1):
     )
 
     # Gather full values
-    x_full = gather_1d_results(x, process_mesh_4x1, dim=1)
-    q_ref = gather_1d_results(q_local, process_mesh_4x1, dim=2)
-    k_ref = gather_1d_results(k_local, process_mesh_4x1, dim=2)
-    v_ref = gather_1d_results(v_local, process_mesh_4x1, dim=2)
+    x_ref = gather_1d_results(x, process_mesh_dict_4x1, dim=1)
+    q_ref = gather_1d_results(q_local, process_mesh_dict_4x1, dim=2)
+    k_ref = gather_1d_results(k_local, process_mesh_dict_4x1, dim=2)
+    v_ref = gather_1d_results(v_local, process_mesh_dict_4x1, dim=2)
 
     model = ring_attention.Ring(
         x_features=x_features,
         embed_dim=embed_dim,
         output_dim=output_dim,
         heads=heads,
-        dropout=0.0,
+        dropout_p=0.0,
         local_rank=local_rank,
         device=device,
         parallelism=group.size(),
@@ -478,12 +487,12 @@ def test_ring(device, process_mesh_4x1):
         bayesian=False,
         dtype=torch.bfloat16,
         ring_config=ring_attn_fns.RingAttentionConfig(
+            device=device,
             send_in_forward=ring_attn_fns.SendForward.X,
             save_for_backward=ring_attn_fns.SaveBackward.X,
             save_scope=ring_attn_fns.SaveScope.GLOBAL,
             send_backward=ring_attn_fns.SendBackward.GATHER_DKV,
             offload=ring_attn_fns.Offload.DISABLED,
-            device=device,
         ),
     )
     model_baseline = ring_attention.RingBaseline(
@@ -501,12 +510,11 @@ def test_ring(device, process_mesh_4x1):
     )
 
     # sped up call
-
     q_local = q_local.detach().requires_grad_(True)
     k_local = k_local.detach().requires_grad_(True)
     v_local = v_local.detach().requires_grad_(True)
 
-    output = model(x.detach(), q_local, k_local, v_local, w_qkv, None)
+    output = model(x=x.detach(), q=q_local, k=k_local, v=v_local, w_qkv=w_qkv)
     output.sum().backward()
 
     # baseline
@@ -515,12 +523,16 @@ def test_ring(device, process_mesh_4x1):
     k_ref = k_ref.detach().requires_grad_(True)
     v_ref = v_ref.detach().requires_grad_(True)
 
-    output_global = model_baseline(x_full.detach(), q_ref, k_ref, v_ref, w_qkv, None)
-    output_global.sum().backward()
+    output_ref = model_baseline(x_ref.detach(), q_ref, k_ref, v_ref, w_qkv)
+    output_ref.sum().backward()
+
+    assert isinstance(q_ref.grad, torch.Tensor)
+    assert isinstance(k_ref.grad, torch.Tensor)
+    assert isinstance(v_ref.grad, torch.Tensor)
 
     assert torch.allclose(
         output,
-        output_global[:, :, (local_rank * n_local) : (local_rank + 1) * n_local].to(
+        output_ref[:, :, (local_rank * n_local) : (local_rank + 1) * n_local].to(
             output.dtype
         ),
         atol=1e-3,

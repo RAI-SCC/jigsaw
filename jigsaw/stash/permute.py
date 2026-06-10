@@ -1,9 +1,9 @@
-from typing import Optional
+"""Module definition of distributed Transpose."""
+
+from typing import Optional, cast
 
 import torch
 import torch.distributed as dist
-
-from . import distributed_permute as dist_permute
 
 
 class DistributedXTranspose(torch.nn.Module):
@@ -35,11 +35,11 @@ class DistributedXTranspose(torch.nn.Module):
         self.device = device
         self.parallelism = parallelism
         self.model_group = model_group
-        self.selector = dist_permute.TransposeSelectionStrategy(self.parallelism)
+        self.selector
 
         self.transpose = XT.apply
 
-    def get_parameter_count(self):
+    def get_parameter_count(self) -> float:
         """Return 0 parameter count for transpose operation."""
         return 0
 
@@ -59,8 +59,9 @@ class DistributedXTranspose(torch.nn.Module):
             Local transposed tensor.
         """
         x_transpose = self.transpose(
-            x, self.local_rank, self.device, self.parallelism, self.model_group
+            x, self.local_rank, self.device, self.selector, self.model_group
         )
+        x_transpose = cast(torch.Tensor, x_transpose)
         return x_transpose
 
 
@@ -143,7 +144,7 @@ class XT(torch.autograd.Function):
 
     @staticmethod
     def vmap(
-        info,
+        info,  # type: ignore[assignment]
         in_dims: tuple[Optional[int], ...],
         x: torch.Tensor,
         local_rank: int,
