@@ -87,6 +87,78 @@ def x_transpose_twoway(
     return x_transpose
 
 
+def matrix_transpose_twoway_(x, rank, device, model_group):
+    """
+    Batched transpose (XT) operation distributed across two processes.
+
+    Parameters
+    ----------
+    X : torch.Tensor
+        The input tensor.
+    rank : int
+        Global rank.
+    device : torch.device
+        Device to perform computation on.
+    model_group : torch.distributed.ProcessGroup, optional
+        Process group for an individual model-parallel instance.
+
+    Returns
+    -------
+    XT: torch.Tensor
+        Local transposed tensor.
+    """
+    mod = rank % 2
+
+    x_0, x_1 = torch.split(x, x.shape[-2] // 2, dim=-2)
+    buffer_x = _get_preallocated_buffer(x_1.shape, torch.float32, rank, device)
+
+    if mod == 0:
+        send_b_1 = torch.distributed.isend(x_1, dst=rank + 1, group=model_group)
+        recv_b_1 = torch.distributed.irecv(buffer_x, src=rank + 1, group=model_group)
+        x_0 = x_0.mT
+        if len(x_0.shape) == 3:
+            x_t = torch.empty(
+                x_0.shape[0], x_0.shape[1] * 2, x_0.shape[2], device=device
+            )
+            x_t[:, : x_0.shape[1]] = x_0
+        else:
+            x_t = torch.empty(x_0.shape[0] * 2, x_0.shape[1], device=device)
+            x_t[: x_0.shape[1]] = x_0
+
+        send_b_1.wait()
+        recv_b_1.wait()
+
+    elif mod == 1:
+        recv_transpose = torch.distributed.irecv(
+            buffer_x, src=rank - 1, group=model_group
+        )
+        send_transpose = torch.distributed.isend(x_0, dst=rank - 1, group=model_group)
+        x_1 = x_1.mT
+        if len(x_0.shape) == 3:
+            x_t = torch.empty(
+                x_1.shape[0], x_1.shape[1] * 2, x_1.shape[2], device=device
+            )
+            x_t[:, x_1.shape[1] :] = x_1
+        else:
+            x_t = torch.empty(x_1.shape[1] * 2, x_1.shape[2], device=device)
+            x_t[x_1.shape[1] :] = x_1
+
+        send_transpose.wait()
+        recv_transpose.wait()
+
+    if mod == 0:
+        if len(x_0.shape) == 3:
+            x_t[:, x_0.shape[1] :, :] = buffer_x.mT
+        else:
+            x_t[x_0.shape[1] :, :] = buffer_x.mT
+    elif mod == 1:
+        if len(x_1.shape) == 3:
+            x_t[:, : x_1.shape[1], :] = buffer_x.mT
+        else:
+            x_t[: x_1.shape[1], :] = buffer_x.mT
+    return x_t
+
+
 def x_transpose_fourway(
     x: torch.Tensor,
     local_rank: int,
