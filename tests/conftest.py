@@ -1,3 +1,4 @@
+import gc
 import math
 import os
 import subprocess
@@ -21,10 +22,12 @@ def pytest_configure(config):
     warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 
     config.addinivalue_line("markers", "no_dist_env: skip the dist_env autouse fixture")
+    config.addinivalue_line("markers", "gpu_required: test requires GPU")
+    config.addinivalue_line("markers", "distributed_required: test requires distributed environment")
 
 
 @pytest.fixture(autouse=True, scope="session")
-def dist_env(request):
+def dist_env(request: pytest.FixtureRequest):
     """Initialize the distributed process group once for the entire test session."""
     if all(item.get_closest_marker("no_dist_env") for item in request.session.items):
         yield
@@ -63,7 +66,7 @@ def dist_env(request):
 
 
 @pytest.fixture
-def device():
+def device() -> torch.device:
     """Return device."""
     local_id = int(os.getenv("SLURM_LOCALID", 0))
     device_id = local_id if torch.cuda.device_count() != 1 else 0
@@ -71,8 +74,10 @@ def device():
 
 
 def make_process_mesh(
-    device_type="nccl", mesh_shape=[2, 2], mesh_dim_names=["row", "col"]
-):
+    device_type: str = "nccl",
+    mesh_shape: list[int] = [2, 2],
+    mesh_dim_names: list[str] = ["row", "col"],
+) -> dict:
     """Return process mesh with rows, columns, and model group."""
     assert len(mesh_shape) == len(mesh_dim_names)
 
@@ -93,7 +98,6 @@ def make_process_mesh(
             mesh_dim_names=tuple(["model"]),
         )
     else:  #
-        print(f"mesh shape! {mesh_shape[:-2]}")
         model_mesh = dist.device_mesh.init_device_mesh(
             device_type=device_type,
             mesh_shape=tuple(
@@ -111,49 +115,21 @@ def make_process_mesh(
     return mesh
 
 
-@pytest.fixture(scope="session")
-def process_mesh_2x2():
-    """Return process mesh."""
-    return make_process_mesh(
-        device_type="nccl", mesh_shape=[2, 2], mesh_dim_names=["row", "col"]
-    )
+@pytest.fixture(autouse=True)
+def cuda_cleanup():
+    yield
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    gc.collect()
 
 
-@pytest.fixture(scope="session")
-def process_mesh_4x1():
-    """Return process mesh."""
-    return make_process_mesh(
-        device_type="nccl", mesh_shape=[4, 1], mesh_dim_names=["row", "col"]
-    )
+def pytest_collection_modifyitems(config, items):
+    """Skip GPU/distributed tests based on environment."""
+    has_gpu = torch.cuda.is_available()
+    is_distributed = os.environ.get("SLURM_PROCID") is not None or os.environ.get("RANK") is not None
 
-
-@pytest.fixture(scope="session")
-def process_mesh_1x4():
-    """Return process mesh."""
-    return make_process_mesh(
-        device_type="nccl", mesh_shape=[1, 4], mesh_dim_names=["row", "col"]
-    )
-
-
-@pytest.fixture(scope="session")
-def process_mesh_2x1x2():
-    """Return process mesh."""
-    return make_process_mesh(
-        device_type="nccl", mesh_shape=[2, 1, 2], mesh_dim_names=["dp", "row", "col"]
-    )
-
-
-@pytest.fixture(scope="session")
-def process_mesh_4x1x1():
-    """Return process mesh."""
-    return make_process_mesh(
-        device_type="nccl", mesh_shape=[4, 1, 1], mesh_dim_names=["dp", "row", "col"]
-    )
-
-
-@pytest.fixture(scope="session")
-def process_mesh_2x2x1():
-    """Return process mesh."""
-    return make_process_mesh(
-        device_type="nccl", mesh_shape=[2, 2, 1], mesh_dim_names=["dp", "row", "col"]
-    )
+    for item in items:
+        if item.get_closest_marker("gpu_required") and not has_gpu:
+            item.add_marker(pytest.mark.skip(reason="GPU not available"))
+        if item.get_closest_marker("distributed_required") and not is_distributed:
+            item.add_marker(pytest.mark.skip(reason="Not running in distributed environment"))

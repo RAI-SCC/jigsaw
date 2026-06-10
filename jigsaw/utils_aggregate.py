@@ -1,9 +1,13 @@
+"""Aggregation helper functions."""
+
 import torch
 import torch.distributed as dist
 
 
 @torch.no_grad()
-def average_weights(params: list[torch.Tensor], spatial_group: dist.ProcessGroup):
+def average_weights(
+    params: list[torch.Tensor], spatial_group: dist.ProcessGroup
+) -> None:
     """
     Average parameters of an entire module upon initialization.
 
@@ -20,7 +24,7 @@ def average_weights(params: list[torch.Tensor], spatial_group: dist.ProcessGroup
 @torch.no_grad()
 def average_weights_module(
     model: torch.nn.Module, spatial_group: dist.ProcessGroup, bias_only: bool = False
-):
+) -> None:
     """
     Average model weights of an entire module upon initialization.
 
@@ -40,20 +44,20 @@ def average_weights_module(
 @torch.no_grad()
 def gather_results(
     x: torch.Tensor,
-    process_mesh: dist.device_mesh = None,
-    pm_key_row="row",
-    pm_key_col="col",
-    pm_key_model="model",
-):
+    process_mesh_dict: dict[str, dist.ProcessGroup],
+    pm_key_row: str = "row",
+    pm_key_col: str = "col",
+    pm_key_model: str = "model",
+) -> torch.Tensor:
     """Gather tensors split across arbitrary processes."""
-    row_group, col_group = process_mesh[pm_key_row], process_mesh[pm_key_col]
+    row_group, col_group = process_mesh_dict[pm_key_row], process_mesh_dict[pm_key_col]
     n_rows = row_group.size()
     n_cols = col_group.size()
     tensor_list = [
         torch.zeros(x.shape, dtype=x.dtype, device=x.device)
         for _ in range(n_rows * n_cols)
     ]
-    torch.distributed.all_gather(tensor_list, x, group=process_mesh[pm_key_model])
+    torch.distributed.all_gather(tensor_list, x, group=process_mesh_dict[pm_key_model])
     batch_dims, h, w = x.shape[:-2], x.shape[-2], x.shape[-1]
     ndim = len(batch_dims)
     perm = list(range(2, 2 + ndim)) + [0, 2 + ndim, 1, 2 + ndim + 1]
@@ -69,12 +73,13 @@ def gather_results(
 @torch.no_grad()
 def gather_results_as_list(
     x: torch.Tensor,
-    process_mesh: dist.device_mesh = None,
-    pm_key_row="row",
-    pm_key_col="col",
-    pm_key_model="model",
-):
+    process_mesh: dict[str, dist.ProcessGroup] | None = None,
+    pm_key_row: str = "row",
+    pm_key_col: str = "col",
+    pm_key_model: str = "model",
+) -> list[torch.Tensor]:
     """Gather tensors split across arbitrary processes."""
+    assert process_mesh is not None
     row_group, col_group = process_mesh[pm_key_row], process_mesh[pm_key_col]
     n_rows = row_group.size()
     n_cols = col_group.size()
@@ -89,17 +94,17 @@ def gather_results_as_list(
 @torch.no_grad()
 def gather_1d_results(
     x: torch.Tensor,
-    process_mesh: dist.device_mesh = None,
+    process_mesh_dict: dict[str, dist.ProcessGroup],
     dim: int = -1,
-    pm_key="model",
-):
+    pm_key: str = "model",
+) -> torch.Tensor:
     """Gather tensor distributed across process mesh rows along any dimension."""
-    n_rows = process_mesh[pm_key].size()
+    n_rows = process_mesh_dict[pm_key].size()
     tensor_list = [
         torch.zeros(x.shape, dtype=x.dtype, device=x.device) for _ in range(n_rows)
     ]
     torch.distributed.all_gather(
-        tensor_list, x.contiguous(), group=process_mesh[pm_key]
+        tensor_list, x.contiguous(), group=process_mesh_dict[pm_key]
     )
 
     ndim = x.dim()
@@ -111,14 +116,16 @@ def gather_1d_results(
 
 @torch.no_grad()
 def gather_1d_results_list(
-    x: torch.Tensor, process_mesh: dist.device_mesh = None, pm_key="model"
-):
+    x: torch.Tensor,
+    process_mesh_dict: dict[str, dist.ProcessGroup],
+    pm_key: str = "model",
+) -> list[torch.Tensor]:
     """Gather 1d tensor distributed across process mesh rows."""
-    n_rows = process_mesh[pm_key].size()
+    n_rows = process_mesh_dict[pm_key].size()
     tensor_list = [
         torch.zeros(x.shape, dtype=x.dtype, device=x.device) for _ in range(n_rows)
     ]
     torch.distributed.all_gather(
-        tensor_list, x.contiguous(), group=process_mesh[pm_key]
+        tensor_list, x.contiguous(), group=process_mesh_dict[pm_key]
     )
     return tensor_list

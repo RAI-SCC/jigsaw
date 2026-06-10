@@ -1,10 +1,13 @@
-import torch
-import torch.distributed as dist
-import pytest
-
+import math
 import os
 import subprocess
-import math
+
+import pytest
+import torch
+import torch.distributed as dist
+
+pytestmark = [pytest.mark.gpu_required, pytest.mark.distributed_required]
+
 
 @pytest.fixture(scope="session")
 def dist_gloo_env():
@@ -39,7 +42,8 @@ def dist_gloo_env():
     )
     yield
     dist.destroy_process_group()
-    
+
+
 def make_process_mesh(
     device_type="nccl", mesh_shape=[4, 2], mesh_dim_names=["row", "col"]
 ):
@@ -77,22 +81,23 @@ def make_process_mesh(
         "col": row_col_mesh.get_group("col"),
         "model": model_mesh.get_group("model"),
     }
-    
+    return mesh
+
+
 @pytest.mark.no_dist_env
 def test_backend_init(dist_gloo_env):
-    process_mesh = make_process_mesh("nccl", [4,2])
+    _ = make_process_mesh("nccl", [4, 2])
     return
 
 
 @pytest.mark.no_dist_env
 def test_cpu_allreduce(dist_gloo_env, device):
-    process_mesh = make_process_mesh("nccl", [4,2])
+    _ = make_process_mesh("nccl", [4, 2])
     x = torch.randn(40, 4, device=device)
     x_cpu = x.to("cpu")
-    
+
     # all-reduce
     dist.all_reduce(x)
     dist.all_reduce(x_cpu)
     x_cpu = x_cpu.to(device)
     assert torch.allclose(x, x_cpu)
-
