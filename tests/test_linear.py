@@ -1,7 +1,6 @@
+import pytest
 import torch
 import torch.distributed as dist
-
-import pytest
 
 import jigsaw.hooks as hooks
 import jigsaw.linear as linear
@@ -11,9 +10,12 @@ from jigsaw.utils_aggregate import (
     gather_results,
 )
 
-pytestmark = [pytest.mark.gpu_required, pytest.mark.distributed_required]
+pytestmark = [pytest.mark.distributed_required]
 
-from .process_mesh import *
+from tests.process_mesh import (  # noqa: F401
+    process_mesh_dict_2x1x2,
+    process_mesh_dict_2x2,
+)
 
 
 def test_xwt_forward(device: torch.device, process_mesh_dict_2x2: dict) -> None:
@@ -24,7 +26,6 @@ def test_xwt_forward(device: torch.device, process_mesh_dict_2x2: dict) -> None:
     # global dims
     in_dim, out_dim = 4, 4
     seq_global = 20
-
     linlayer = linear.DistributedXWT(
         in_dim,
         out_dim,
@@ -52,8 +53,7 @@ def test_xwt_forward(device: torch.device, process_mesh_dict_2x2: dict) -> None:
     y = linlayer(x_in)
     y_ref = ref_linlayer(x_gathered)
 
-    y_gathered = gather_results(y, process_mesh_dict=process_mesh_dict_2x2)
-    print(f"y shape {y_ref.shape} gathered shape {y_gathered.shape}, y shape {y.shape}")
+    y_gathered = gather_results(y, process_mesh_dict=process_mesh_dict_2x2, pm_key_row="row", pm_key_col="col", pm_key_model="model")
     assert torch.allclose(y_gathered, y_ref, atol=1e-5)
 
 
@@ -479,7 +479,6 @@ def test_xwt_backward_2(device: torch.device, process_mesh_dict_2x1x2: dict) -> 
         )
         x_gathered.requires_grad_(True)
         ref_target = gather_results(target, process_mesh_dict=process_mesh_dict_2x1x2)
-        print(f"w gathered {w_gathered.shape} x gathered {x_gathered.shape}")
         ref_y = ref_linlayer(x_gathered)
         y_gathered = gather_results(y, process_mesh_dict=process_mesh_dict_2x1x2)
         loss = loss_fn(y, target) / process_mesh_dict_2x1x2["model"].size()
@@ -535,7 +534,7 @@ def test_xwt_backward_dtp(device: torch.device, process_mesh_dict_2x2: dict) -> 
     local_rank = dist.get_rank(group=process_mesh_dict_2x2["col"])
     torch.manual_seed(
         process_mesh_dict_2x2["model"].rank()
-    )  # for now, force the two "pairs" to have the same
+    ) 
 
     in_dim, out_dim = 4, 4
     seq_global = 10

@@ -448,6 +448,7 @@ class DistributedXWT(torch.nn.Module):
             B, out_dim are global values.
             in_dim is local value.
         """
+        
         cij = self.XWT(
             x,
             self.weight,
@@ -838,7 +839,7 @@ class XWT(torch.autograd.Function):
         spatial_group = ctx.spatial_group
 
         weight = selector.reshape_weights(weight)
-
+        
         grad_input, grad_weight = selector.mm_kernels[3](
             grad_output,
             weight,

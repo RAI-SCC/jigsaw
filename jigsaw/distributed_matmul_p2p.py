@@ -273,13 +273,13 @@ def xw_transpose_fourway(
     buffer_x = _get_preallocated_buffer(xij.shape, xij.dtype, local_rank, device)
     match mod:
         case 0:
-            w_buffer = _get_preallocated_buffer(
+            w_buffer_1 = _get_preallocated_buffer(
                 wij.shape, wij.dtype, local_rank, device
             )
-            send_x = dist.isend(xij, dst=local_rank + 1, group=model_group)
-            recv_x = dist.irecv(buffer_x, src=local_rank + 1, group=model_group)
-            send_w_2 = dist.isend(wij, dst=local_rank + 2, group=model_group)
-            recv_w_1 = dist.irecv(w_buffer, src=local_rank + 1, group=model_group)
+            send_x = dist.isend(xij, group_dst=1, group=model_group)
+            recv_x = dist.irecv(buffer_x, group_src=1, group=model_group)
+            send_w_2 = dist.isend(wij, group_dst=2, group=model_group)
+            recv_w_1 = dist.irecv(w_buffer_1, group_src=1, group=model_group)
             # send w to rank + 2, receive w from rank + 1
 
         case 1:
@@ -289,36 +289,46 @@ def xw_transpose_fourway(
             w_buffer_3 = _get_preallocated_buffer(
                 wij.shape, wij.dtype, local_rank, device
             )
-            recv_x = dist.irecv(buffer_x, src=local_rank - 1, group=model_group)
-            send_x = dist.isend(xij, dst=local_rank - 1, group=model_group)
-            send_w_0 = dist.isend(wij, dst=local_rank + 1, group=model_group)
-            recv_w_3 = dist.irecv(w_buffer_3, src=local_rank + 1, group=model_group)
-            send_w_2 = dist.isend(wij, dst=local_rank + 2, group=model_group)
+            recv_x = dist.irecv(buffer_x, group_src=0, group=model_group)
+            send_x = dist.isend(xij, group_dst=0, group=model_group)
+            send_w_0 = dist.isend(wij, group_dst=0, group=model_group)
+            recv_w_3 = dist.irecv(
+                w_buffer_3, group_src=3, group=model_group
+            )
+            send_w_2 = dist.isend(wij, group_dst=2, group=model_group)
             # send w to 0 & 2, receive w from 2 & 3
-            recv_w_2 = dist.irecv(w_buffer_2, src=local_rank - 1, group=model_group)
+            recv_w_2 = dist.irecv(
+                w_buffer_2, group_src=2, group=model_group
+            )
         case 2:
-            send_x = dist.isend(xij, dst=local_rank + 1, group=model_group)
-            recv_x = dist.irecv(buffer_x, src=local_rank + 1, group=model_group)
+            send_x = dist.isend(xij, group_dst=3, group=model_group)
+            recv_x = dist.irecv(buffer_x, group_src=3, group=model_group)
             w_buffer_0 = _get_preallocated_buffer(
                 wij.shape, wij.dtype, local_rank, device
             )
             w_buffer_1 = _get_preallocated_buffer(
                 wij.shape, wij.dtype, local_rank, device
             )
-            recv_w_0 = dist.irecv(w_buffer_0, src=local_rank - 2, group=model_group)
-            recv_w_1 = dist.irecv(w_buffer_1, src=local_rank - 1, group=model_group)
-            send_w_1 = dist.isend(wij, dst=local_rank - 1, group=model_group)
-            send_w_3 = dist.isend(wij, dst=local_rank + 1, group=model_group)
+            recv_w_0 = dist.irecv(
+                w_buffer_0, group_src=0, group=model_group
+            )
+            recv_w_1 = dist.irecv(
+                w_buffer_1, group_src=1, group=model_group
+            )
+            send_w_1 = dist.isend(wij, group_dst=1, group=model_group)
+            send_w_3 = dist.isend(wij, group_dst=3, group=model_group)
             # send w to 1 & 3, receive w from 0 & 1
         case 3:
-            recv_x = dist.irecv(buffer_x, src=local_rank - 1, group=model_group)
-            send_x = dist.isend(xij, dst=local_rank - 1, group=model_group)
+            recv_x = dist.irecv(buffer_x, group_src=2, group=model_group)
+            send_x = dist.isend(xij, group_dst=2, group=model_group)
             w_buffer_2 = _get_preallocated_buffer(
                 wij.shape, wij.dtype, local_rank, device
             )
             # send w to 1, receive w from 2
-            send_w_1 = dist.isend(wij, dst=local_rank - 2, group=model_group)
-            recv_w_1 = dist.irecv(w_buffer_2, src=local_rank - 2, group=model_group)
+            send_w_1 = dist.isend(wij, group_dst=1, group=model_group)
+            recv_w_2 = dist.irecv(
+                w_buffer_2, group_src=2, group=model_group
+            )
 
     match mod:
         case 0:
@@ -345,7 +355,7 @@ def xw_transpose_fourway(
             recv_x.wait()
             send_w_0.wait()
             recv_w_2.wait()
-            send_w_1.wait()
+            send_w_2.wait()
             cij = cij + torch.matmul(buffer_x, w_buffer_2.mT)
         case 2:
             recv_x.wait()
@@ -507,27 +517,27 @@ def fused_xw_xtw_fourway(
                 grad_output.shape, xdtype, local_rank, device
             )
             # send to 1, receive from 1 & 2
-            send_grad_1 = dist.isend(grad_output, dst=local_rank + 1, group=model_group)
+            send_grad_1 = dist.isend(grad_output, group_dst=1, group=model_group)
             recv_grad_1 = dist.irecv(
-                buffer_grad_1, src=local_rank + 1, group=model_group
+                buffer_grad_1, group_src=1, group=model_group
             )
             recv_grad_2 = dist.irecv(
-                buffer_grad_2, src=local_rank + 2, group=model_group
+                buffer_grad_2, group_src=2, group=model_group
             )
 
             # w: send to 2, recv from 2
             buffer_w_2 = _get_preallocated_buffer(
                 weight.shape, wdtype, local_rank, device
             )
-            send_w_2 = dist.isend(weight, dst=local_rank + 2, group=model_group)
-            recv_w_2 = dist.irecv(buffer_w_2, src=local_rank + 2, group=model_group)
+            send_w_2 = dist.isend(weight, group_dst=2, group=model_group)
+            recv_w_2 = dist.irecv(buffer_w_2, group_src=2, group=model_group)
 
             # input: send to 2, recv from 2
             buffer_in_2 = _get_preallocated_buffer(
                 input.shape, idtype, local_rank, device
             )
-            send_in_2 = dist.isend(input, dst=local_rank + 2, group=model_group)
-            recv_in_2 = dist.irecv(buffer_in_2, src=local_rank + 2, group=model_group)
+            send_in_2 = dist.isend(input, group_dst=2, group=model_group)
+            recv_in_2 = dist.irecv(buffer_in_2, group_src=2, group=model_group)
         case 1:
             # send to 0, 2, 3, recv from 0,2
             buffer_grad_0 = _get_preallocated_buffer(
@@ -537,28 +547,28 @@ def fused_xw_xtw_fourway(
                 grad_output.shape, xdtype, local_rank, device
             )
             recv_grad_0 = dist.irecv(
-                buffer_grad_0, src=local_rank - 1, group=model_group
+                buffer_grad_0, group_src=0, group=model_group
             )
-            send_grad_0 = dist.isend(grad_output, dst=local_rank - 1, group=model_group)
+            send_grad_0 = dist.isend(grad_output, group_dst=0, group=model_group)
             recv_grad_2 = dist.irecv(
-                buffer_grad_2, src=local_rank + 1, group=model_group
+                buffer_grad_2, group_src=2, group=model_group
             )
-            send_grad_2 = dist.isend(grad_output, dst=local_rank + 1, group=model_group)
-            send_grad_3 = dist.isend(grad_output, dst=local_rank + 2, group=model_group)
+            send_grad_2 = dist.isend(grad_output, group_dst=2, group=model_group)
+            send_grad_3 = dist.isend(grad_output, group_dst=3, group=model_group)
 
             # w: send to 3, recv from 3
             buffer_w_3 = _get_preallocated_buffer(
                 weight.shape, wdtype, local_rank, device
             )
-            send_w_3 = dist.isend(weight, dst=local_rank + 2, group=model_group)
-            recv_w_3 = dist.irecv(w_buffer_1, src=local_rank + 2, group=model_group)
+            send_w_3 = dist.isend(weight, group_dst=3, group=model_group)
+            recv_w_3 = dist.irecv(buffer_w_3, group_src=3, group=model_group)
 
             # input: send to 3, recv from 3
             buffer_in_3 = _get_preallocated_buffer(
                 input.shape, idtype, local_rank, device
             )
-            recv_in_3 = dist.irecv(buffer_in_3, src=local_rank + 2, group=model_group)
-            send_in_3 = dist.isend(input, dst=local_rank + 2, group=model_group)
+            recv_in_3 = dist.irecv(buffer_in_3, group_src=3, group=model_group)
+            send_in_3 = dist.isend(input, group_dst=3, group=model_group)
         case 2:
             # send to 0, 1, 3, recv from 1, 3
             buffer_grad_1 = _get_preallocated_buffer(
@@ -567,29 +577,29 @@ def fused_xw_xtw_fourway(
             buffer_grad_3 = _get_preallocated_buffer(
                 grad_output.shape, xdtype, local_rank, device
             )
-            send_grad_0 = dist.isend(grad_output, dst=local_rank - 2, group=model_group)
-            send_grad_1 = dist.isend(grad_output, dst=local_rank - 1, group=model_group)
+            send_grad_0 = dist.isend(grad_output, group_dst=0, group=model_group)
+            send_grad_1 = dist.isend(grad_output, group_dst=1, group=model_group)
             recv_grad_1 = dist.irecv(
-                buffer_grad_1, src=local_rank - 1, group=model_group
+                buffer_grad_1, group_src=1, group=model_group
             )
-            send_grad_3 = dist.isend(grad_output, dst=local_rank + 1, group=model_group)
+            send_grad_3 = dist.isend(grad_output, group_dst=3, group=model_group)
             recv_grad_3 = dist.irecv(
-                buffer_grad_3, src=local_rank + 1, group=model_group
+                buffer_grad_3, group_src=3, group=model_group
             )
 
             # w: send to 0, recv from 0
             buffer_w_0 = _get_preallocated_buffer(
                 weight.shape, wdtype, local_rank, device
             )
-            recv_w_0 = dist.irecv(buffer_w_0, src=local_rank - 2, group=model_group)
-            send_w_0 = dist.isend(weight, dst=local_rank - 2, group=model_group)
+            recv_w_0 = dist.irecv(buffer_w_0, group_src=0, group=model_group)
+            send_w_0 = dist.isend(weight, group_dst=0, group=model_group)
 
             # input: send to 0, recv from 0
             buffer_in_0 = _get_preallocated_buffer(
                 input.shape, idtype, local_rank, device
             )
-            recv_in_0 = dist.irecv(buffer_in_0, src=local_rank - 2, group=model_group)
-            send_in_0 = dist.isend(input, dst=local_rank - 2, group=model_group)
+            recv_in_0 = dist.irecv(buffer_in_0, group_src=0, group=model_group)
+            send_in_0 = dist.isend(input, group_dst=0, group=model_group)
 
         case 3:
             # send to 2, recv from 1, 2
@@ -600,26 +610,26 @@ def fused_xw_xtw_fourway(
                 grad_output.shape, xdtype, local_rank, device
             )
             recv_grad_2 = dist.irecv(
-                buffer_grad_2, src=local_rank - 1, group=model_group
+                buffer_grad_2, group_src=2, group=model_group
             )
-            send_grad_2 = dist.isend(grad_output, dst=local_rank - 1, group=model_group)
+            send_grad_2 = dist.isend(grad_output, group_dst=2, group=model_group)
             recv_grad_1 = dist.irecv(
-                buffer_grad_1, src=local_rank - 2, group=model_group
+                buffer_grad_1, group_src=1, group=model_group
             )
 
             # w: send to 1, recv from 1
             buffer_w_1 = _get_preallocated_buffer(
                 weight.shape, wdtype, local_rank, device
             )
-            recv_w_1 = dist.irecv(buffer_w_1, src=local_rank - 2, group=model_group)
-            send_w_1 = dist.isend(weight, dst=local_rank - 2, group=model_group)
+            recv_w_1 = dist.irecv(buffer_w_1, group_src=1, group=model_group)
+            send_w_1 = dist.isend(weight, group_dst=1, group=model_group)
 
             # input: send to 1, recv from 1
             buffer_in_1 = _get_preallocated_buffer(
                 input.shape, idtype, local_rank, device
             )
-            send_in_1 = dist.isend(input, dst=local_rank - 2, group=model_group)
-            recv_in_1 = dist.irecv(buffer_in_1, src=local_rank - 2, group=model_group)
+            send_in_1 = dist.isend(input, group_dst=1, group=model_group)
+            recv_in_1 = dist.irecv(buffer_in_1, group_src=1, group=model_group)
 
     match mod:
         case 0:
@@ -641,25 +651,19 @@ def fused_xw_xtw_fourway(
 
     match mod:
         case 0:
-            recv_grad_2.wait()
-            send_grad_2.wait()
-            recv_grad_1.wait()
             recv_w_2.wait()
             send_w_2.wait()
+            recv_grad_1.wait()
             grad_input = grad_input + torch.matmul(buffer_grad_1, buffer_w_2)
         case 1:
             recv_w_3.wait()
             send_w_3.wait()
             send_grad_0.wait()
-            send_w_3.wait()
-            recv_w_3.wait()
             grad_input = grad_input + torch.matmul(grad_output, buffer_w_3)
         case 2:
-            send_grad_0.wait()
-            recv_grad_0.wait()
-            send_grad_3.wait()
             send_w_0.wait()
             recv_w_0.wait()
+            send_grad_3.wait()
             grad_input = grad_input + torch.matmul(grad_output, buffer_w_0)
         case 3:
             send_w_1.wait()
@@ -667,31 +671,30 @@ def fused_xw_xtw_fourway(
             recv_grad_2.wait()
 
             grad_input = grad_input + torch.matmul(buffer_grad_2, buffer_w_1)
-
     match mod:
         case 0:
-            recv_grad_2.wait()
-            recv_in_2.wait()
-            send_in_0.wait()
+            recv_grad_2.wait() 
+            recv_in_2.wait() 
+            send_in_2.wait() 
             grad_weight = grad_weight + torch.matmul(buffer_grad_2.mT, buffer_in_2)
         case 1:
-            send_grad_2.wait()
-            send_grad_3.wait()
-            recv_grad_2.wait()
-            recv_in_3.wait()
-            send_in_3.wait()
+            send_grad_2.wait() 
+            send_grad_3.wait() 
+            recv_in_3.wait()   
+            recv_grad_2.wait() 
+            send_in_3.wait() 
             grad_weight = grad_weight + torch.matmul(buffer_grad_2.mT, buffer_in_3)
         case 2:
-            send_grad_0.wait()
-            recv_grad_1.wait()
-            send_grad_2.wait()
-            send_in_0.wait()
-            recv_in_0.wait()
+            send_grad_0.wait() 
+            recv_grad_1.wait() 
+            send_grad_1.wait() 
+            send_in_0.wait() 
+            recv_in_0.wait() 
             grad_weight = grad_weight + torch.matmul(buffer_grad_1.mT, buffer_in_0)
         case 3:
-            recv_grad_1.wait()
-            send_in_1.wait()
-            recv_in_1.wait()
+            recv_grad_1.wait() 
+            send_in_1.wait() 
+            recv_in_1.wait() 
             grad_weight = grad_weight + torch.matmul(buffer_grad_1.mT, buffer_in_1)
 
     return grad_input, grad_weight
@@ -852,173 +855,278 @@ def xw_transpose_eightway(
         case 0:
             # x: send to 1, recv from 1
             buffer_x_1 = _get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
+            send_x_1 = dist.isend(xij, group_dst=local_rank + 1, group=model_group)
+            recv_x_1 = dist.irecv(
+                buffer_x_1, group_src=local_rank + 1, group=model_group
+            )
             # w: send to 2, 4, 6, recv from 1,2,3
             buffer_w_1 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_2 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_3 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
+            send_w_2 = dist.isend(wij, group_dst=2, group=model_group)
+            send_w_4 = dist.isend(wij, group_dst=4, group=model_group)
+            send_w_6 = dist.isend(wij, group_dst=6, group=model_group)
+            recv_w_1 = dist.irecv(buffer_w_1, group_src=1, group=model_group)
+            recv_w_2 = dist.irecv(buffer_w_2, group_src=2, group=model_group)
+            recv_w_3 = dist.irecv(buffer_w_3, group_src=3, group=model_group)
 
         case 1:
             # x: send to 0, recv from 0
             buffer_x_0 = _get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
+            recv_x_0 = dist.irecv(
+                buffer_x_0, group_src=local_rank - 1, group=model_group
+            )
+            send_x_0 = dist.isend(xij, group_dst=local_rank - 1, group=model_group)
             # w: send to 0, 2, 4, 6, recv from 4, 5, 6, 7
             buffer_w_4 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_5 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_6 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_7 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
-
+            send_w_0 = dist.isend(wij, group_dst=0, group=model_group)
+            send_w_2 = dist.isend(wij, group_dst=2, group=model_group)
+            send_w_4 = dist.isend(wij, group_dst=4, group=model_group)
+            send_w_6 = dist.isend(wij, group_dst=6, group=model_group)
+            recv_w_4 = dist.irecv(buffer_w_4, group_src=4, group=model_group)
+            recv_w_5 = dist.irecv(buffer_w_5, group_src=5, group=model_group)
+            recv_w_6 = dist.irecv(buffer_w_6, group_src=6, group=model_group)
+            recv_w_7 = dist.irecv(buffer_w_7, group_src=7, group=model_group)
         case 2:
             # x: send to 3, recv from 3
             buffer_x_3 = _get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
+            send_x_3 = dist.isend(xij, group_dst=local_rank + 1, group=model_group)
+            recv_x_3 = dist.irecv(
+                buffer_x_3, group_src=local_rank + 1, group=model_group
+            )
             # w: send to 0, 4, 6, recv from 0,1,3
             buffer_w_0 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_1 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_3 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
-
+            recv_w_0 = dist.irecv(buffer_w_0, group_src=0, group=model_group)
+            recv_w_1 = dist.irecv(buffer_w_1, group_src=1, group=model_group)
+            send_w_0 = dist.isend(wij, group_dst=0, group=model_group)
+            send_w_4 = dist.isend(wij, group_dst=4, group=model_group)
+            send_w_6 = dist.isend(wij, group_dst=6, group=model_group)
+            recv_w_3 = dist.irecv(buffer_w_3, group_src=3, group=model_group)
         case 3:
             # x: send to 2, recv from 2
             buffer_x_2 = _get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
+            recv_x_2 = dist.irecv(
+                buffer_x_2, group_src=local_rank - 1, group=model_group
+            )
+            send_x_2 = dist.isend(xij, group_src=local_rank - 1, group=model_group)
             # w: send to 0, 2, 4, 6, recv from 4, 5, 6, 7
             buffer_w_4 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_5 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_6 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_7 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
-
+            send_w_0 = dist.isend(wij, group_dst=0, group=model_group)
+            send_w_2 = dist.isend(wij, group_dst=2, group=model_group)
+            send_w_4 = dist.isend(wij, group_dst=4, group=model_group)
+            send_w_6 = dist.isend(wij, group_dst=6, group=model_group)
+            recv_w_4 = dist.irecv(buffer_w_4, group_src=4, group=model_group)
+            recv_w_5 = dist.irecv(buffer_w_5, group_src=5, group=model_group)
+            recv_w_6 = dist.irecv(buffer_w_6, group_src=6, group=model_group)
+            recv_w_7 = dist.irecv(buffer_w_7, group_src=7, group=model_group)
         case 4:
             # x: send to 5, recv from 5
             buffer_x_5 = _get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
+            send_x_5 = dist.isend(xij, group_dst=local_rank + 1, group=model_group)
+            recv_x_5 = dist.irecv(
+                buffer_x_5, group_src=local_rank + 1, group=model_group
+            )
             # w: send to 1, 3, 5, 7, recv from 0,1,2,3
             buffer_w_0 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_1 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_2 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_3 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
-
+            recv_w_0 = dist.irecv(buffer_w_0, group_src=0, group=model_group)
+            recv_w_1 = dist.irecv(buffer_w_1, group_src=1, group=model_group)
+            recv_w_2 = dist.irecv(buffer_w_2, group_src=2, group=model_group)
+            recv_w_3 = dist.irecv(buffer_w_3, group_src=3, group=model_group)
+            send_w_1 = dist.isend(wij, group_dst=1, group=model_group)
+            send_w_3 = dist.isend(wij, group_dst=3, group=model_group)
+            send_w_5 = dist.isend(wij, group_dst=5, group=model_group)
+            send_w_7 = dist.isend(wij, group_dst=7, group=model_group)
         case 5:
             # x: send to 4, recv from 4
             buffer_x_4 = _get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
+            recv_x_4 = dist.irecv(
+                buffer_x_4, group_src=local_rank - 1, group=model_group
+            )
+            send_x_4 = dist.isend(xij, group_dst=local_rank - 1, group=model_group)
             # w: send to 1, 3, 7, recv from 4, 6, 7
             buffer_w_4 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_6 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_7 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
-
+            recv_w_4 = dist.irecv(buffer_w_4, group_src=4, group=model_group)
+            send_w_1 = dist.isend(wij, group_dst=1, group=model_group)
+            send_w_3 = dist.isend(wij, group_dst=1, group=model_group)
+            send_w_7 = dist.isend(wij, group_dst=1, group=model_group)
+            recv_w_6 = dist.irecv(buffer_w_6, group_src=6, group=model_group)
+            recv_w_7 = dist.irecv(buffer_w_7, group_src=7, group=model_group)
         case 6:
             # x: send to 7, recv from 7
             buffer_x_7 = _get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
+            send_x_7 = dist.isend(xij, group_dst=local_rank + 1, group=model_group)
+            recv_x_7 = dist.irecv(
+                buffer_x_7, group_src=local_rank + 1, group=model_group
+            )
             # w: send to 1, 3, 5, 7 recv from 0,1,2,3
             buffer_w_0 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_1 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_2 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_3 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
-
+            recv_w_0 = dist.irecv(buffer_w_0, group_src=0, group=model_group)
+            recv_w_1 = dist.irecv(buffer_w_1, group_src=1, group=model_group)
+            recv_w_2 = dist.irecv(buffer_w_2, group_src=2, group=model_group)
+            recv_w_3 = dist.irecv(buffer_w_3, group_src=3, group=model_group)
+            send_w_1 = dist.isend(wij, group_dst=1, group=model_group)
+            send_w_3 = dist.isend(wij, group_dst=3, group=model_group)
+            send_w_5 = dist.isend(wij, group_dst=5, group=model_group)
+            send_w_7 = dist.isend(wij, group_dst=7, group=model_group)
         case 7:
             # x: send to 6, recv from 6
             buffer_x_6 = _get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
+            recv_x_6 = dist.irecv(
+                buffer_x_6, group_src=local_rank - 1, group=model_group
+            )
+            send_x_6 = dist.isend(
+                buffer_x_6, group_dst=local_rank - 1, group=model_group
+            )
             # w: send to 1, 3, 5, recv from 4,5,6
             buffer_w_5 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_6 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_7 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
-
-    handle_w = dist.all_to_all(
-        w_recv_list, w_send_list, group=model_group, async_op=True
-    )
-    handle_x = dist.all_to_all(
-        x_recv_list, x_send_list, group=model_group, async_op=True
-    )
-
-    with torch.cuda.stream(streams[0]):
-        handle_w.wait()
-    with torch.cuda.stream(streams[1]):
-        handle_w.wait()
+            recv_w_4 = dist.irecv(buffer_w_4, group_src=4, group=model_group)
+            recv_w_5 = dist.irecv(buffer_w_5, group_src=5, group=model_group)
+            recv_w_6 = dist.irecv(buffer_w_6, group_src=6, group=model_group)
+            send_w_1 = dist.isend(wij, group_dst=1, group=model_group)
+            send_w_3 = dist.isend(wij, group_dst=3, group=model_group)
+            send_w_5 = dist.isend(wij, group_dst=5, group=model_group)
 
     match mod:
         case 0:
-            with torch.cuda.stream(streams[0]):
-                cij0 = torch.matmul(xij, wij.mT)
-            with torch.cuda.stream(streams[1]):
-                cij1 = torch.matmul(xij, w_recv_list[2].mT)
+            cij0 = torch.matmul(xij, wij.mT)
+            recv_w_2.wait()
+            send_w_0.wait()
+            send_w_4.wait()
+            send_w_6.wait()
+            cij1 = torch.matmul(xij, buffer_w_2.mT)
         case 1:
-            with torch.cuda.stream(streams[0]):
-                cij0 = torch.matmul(xij, w_recv_list[5].mT)
-            with torch.cuda.stream(streams[1]):
-                cij1 = torch.matmul(xij, w_recv_list[7].mT)
+            recv_w_5.wait()
+            recv_w_7.wait()
+            cij0 = torch.matmul(xij, buffer_w_5.mT)
+            cij1 = torch.matmul(xij, buffer_w_7.mT)
         case 2:
-            with torch.cuda.stream(streams[0]):
-                cij0 = torch.matmul(xij, w_recv_list[0].mT)
-            with torch.cuda.stream(streams[1]):
-                cij1 = torch.matmul(xij, wij.mT)
+            cij1 = torch.matmul(xij, wij.mT)
+            send_w_0.wait()
+            recv_w_0.wait()
+            send_w_4.wait()
+            send_w_6.wait()
+            cij0 = torch.matmul(xij, buffer_w_0.mT)
         case 3:
-            with torch.cuda.stream(streams[0]):
-                cij0 = torch.matmul(xij, w_recv_list[5].mT)
-            with torch.cuda.stream(streams[1]):
-                cij1 = torch.matmul(xij, w_recv_list[7].mT)
+            recv_w_5.wait()
+            recv_w_7.wait()
+            cij0 = torch.matmul(xij, buffer_w_5.mT)
+            cij1 = torch.matmul(xij, buffer_w_7.mT)
         case 4:
-            with torch.cuda.stream(streams[0]):
-                cij0 = torch.matmul(xij, w_recv_list[0].mT)
-            with torch.cuda.stream(streams[1]):
-                cij1 = torch.matmul(xij, w_recv_list[2].mT)
+            recv_w_0.wait()
+            cij0 = torch.matmul(xij, buffer_w_0.mT)
+            recv_w_2.wait()
+            cij1 = torch.matmul(xij, buffer_w_2.mT)
         case 5:
-            with torch.cuda.stream(streams[0]):
-                cij0 = torch.matmul(xij, wij.mT)
-            with torch.cuda.stream(streams[1]):
-                cij1 = torch.matmul(xij, w_recv_list[7].mT)
+            cij0 = torch.matmul(xij, wij.mT)
+            send_w_1.wait()
+            send_w_3.wait()
+            recv_w_7.wait()
+            send_w_5.wait()
+            cij1 = torch.matmul(xij, buffer_w_7.mT)
         case 6:
-            with torch.cuda.stream(streams[0]):
-                cij0 = torch.matmul(xij, w_recv_list[0].mT)
-            with torch.cuda.stream(streams[1]):
-                cij1 = torch.matmul(xij, w_recv_list[2].mT)
+            recv_w_0.wait()
+            recv_w_2.wait()
+            cij0 = torch.matmul(xij, buffer_w_0.mT)
+            cij1 = torch.matmul(xij, buffer_w_2.mT)
         case 7:
-            with torch.cuda.stream(streams[0]):
-                cij0 = torch.matmul(xij, w_recv_list[5].mT)
-            with torch.cuda.stream(streams[1]):
-                cij1 = torch.matmul(xij, wij.mT)
-
-    with torch.cuda.stream(streams[0]):
-        handle_x.wait()
-    with torch.cuda.stream(streams[1]):
-        handle_x.wait()
+            cij1 = torch.matmul(xij, wij.mT)
+            send_w_1.wait()
+            send_w_3.wait()
+            send_w_5.wait()
+            recv_w_5.wait()
+            cij0 = torch.matmul(xij, buffer_w_5.mT)
 
     match mod:
         case 0:
-            with torch.cuda.stream(streams[0]):
-                cij0 = cij0 + torch.matmul(x_recv_list[1], w_recv_list[1].mT)
-            with torch.cuda.stream(streams[1]):
-                cij1 = cij1 + torch.matmul(x_recv_list[1], w_recv_list[3].mT)
+            recv_x_1.wait()
+            send_x_1.wait()
+            recv_w_1.wait()
+            cij0 = cij0 + torch.matmul(buffer_x_1, buffer_w_1.mT)
+            recv_w_3.wait()
+            cij1 = cij1 + torch.matmul(buffer_x_1, buffer_w_3.mT)
         case 1:
-            with torch.cuda.stream(streams[0]):
-                cij0 = cij0 + torch.matmul(x_recv_list[0], w_recv_list[4].mT)
-            with torch.cuda.stream(streams[1]):
-                cij1 = cij1 + torch.matmul(x_recv_list[0], w_recv_list[6].mT)
+            send_x_0.wait()
+            recv_x_0.wait()
+            send_w_0.wait()
+            send_w_2.wait()
+            send_w_4.wait()
+            send_w_6.wait()
+            recv_w_4.wait()
+            cij0 = cij0 + torch.matmul(buffer_x_0, buffer_w_4.mT)
+            recv_w_6.wait()
+            cij1 = cij1 + torch.matmul(buffer_x_0, buffer_w_6.mT)
         case 2:
-            with torch.cuda.stream(streams[0]):
-                cij0 = cij0 + torch.matmul(x_recv_list[3], w_recv_list[1].mT)
-            with torch.cuda.stream(streams[1]):
-                cij1 = cij1 + torch.matmul(x_recv_list[3], w_recv_list[3].mT)
+            send_x_3.wait()
+            recv_x_3.wait()
+            recv_w_1.wait()
+            cij0 = cij0 + torch.matmul(buffer_x_3, buffer_w_1.mT)
+            recv_w_3.wait()
+            cij1 = cij1 + torch.matmul(buffer_x_3, buffer_w_3.mT)
         case 3:
-            with torch.cuda.stream(streams[0]):
-                cij0 = cij0 + torch.matmul(x_recv_list[2], w_recv_list[4].mT)
-            with torch.cuda.stream(streams[1]):
-                cij1 = cij1 + torch.matmul(x_recv_list[2], w_recv_list[6].mT)
+            recv_x_3.wait()
+            send_x_3.wait()
+            recv_w_4.wait()
+            cij0 = cij0 + torch.matmul(buffer_x_2, buffer_w_4.mT)
+            send_w_0.wait()
+            send_w_2.wait()
+            send_w_4.wait()
+            send_w_6.wait()
+            recv_w_6.wait()
+            cij1 = cij1 + torch.matmul(buffer_x_2, buffer_w_6.mT)
         case 4:
-            with torch.cuda.stream(streams[0]):
-                cij0 = cij0 + torch.matmul(x_recv_list[5], w_recv_list[1].mT)
-            with torch.cuda.stream(streams[1]):
-                cij1 = cij1 + torch.matmul(x_recv_list[5], w_recv_list[3].mT)
+            send_x_5.wait()
+            recv_x_5.wait()
+            recv_w_1.wait()
+            send_w_1.wait()
+            send_w_3.wait()
+            send_w_5.wait()
+            send_w_7.wait()
+            cij0 = cij0 + torch.matmul(buffer_x_5, buffer_w_1.mT)
+            recv_w_3.wait()
+            cij1 = cij1 + torch.matmul(buffer_x_5, buffer_w_3.mT)
         case 5:
-            with torch.cuda.stream(streams[0]):
-                cij0 = cij0 + torch.matmul(x_recv_list[4], w_recv_list[4].mT)
-            with torch.cuda.stream(streams[1]):
-                cij1 = cij1 + torch.matmul(x_recv_list[4], w_recv_list[6].mT)
+            recv_x_4.wait()
+            send_x_4.wait()
+            recv_w_4.wait()
+            cij0 = cij0 + torch.matmul(buffer_x_4, buffer_w_4.mT)
+            recv_w_6.wait()
+            cij1 = cij1 + torch.matmul(buffer_x_4, buffer_w_6.mT)
         case 6:
-            with torch.cuda.stream(streams[0]):
-                cij0 = cij0 + torch.matmul(x_recv_list[7], w_recv_list[1].mT)
-            with torch.cuda.stream(streams[1]):
-                cij1 = cij1 + torch.matmul(x_recv_list[7], w_recv_list[3].mT)
+            send_x_7.wait()
+            recv_x_7.wait()
+            recv_w_1.wait()
+            cij0 = cij0 + torch.matmul(buffer_x_7, buffer_w_1.mT)
+            recv_w_3.wait()
+            send_w_1.wait()
+            send_w_3.wait()
+            send_w_5.wait()
+            send_w_7.wait()
+            cij1 = cij1 + torch.matmul(buffer_x_7, buffer_w_3.mT)
         case 7:
-            with torch.cuda.stream(streams[0]):
-                cij0 = cij0 + torch.matmul(x_recv_list[6], w_recv_list[4].mT)
-            with torch.cuda.stream(streams[1]):
-                cij1 = cij1 + torch.matmul(x_recv_list[6], w_recv_list[6].mT)
+            recv_x_6.wait()
+            send_x_6.wait()
+            recv_w_4.wait()
+            cij0 = cij0 + torch.matmul(buffer_x_6, buffer_w_4.mT)
+            recv_w_6.wait()
+            cij1 = cij1 + torch.matmul(buffer_x_6, buffer_w_6.mT)
 
-    for s in streams:
-        s.synchronize()
     cij = torch.concat([cij0, cij1], dim=-1)
     return cij
