@@ -1,6 +1,5 @@
-import torch
-
 import pytest
+import torch
 
 import jigsaw.attention as attention
 from jigsaw.utils_aggregate import (
@@ -9,10 +8,11 @@ from jigsaw.utils_aggregate import (
 
 from .process_mesh import *
 
-pytestmark = [pytest.mark.gpu_required, pytest.mark.distributed_required]
+pytestmark = [pytest.mark.distributed_required]
 
 
 def test_init_attention(device: torch.device, process_mesh_dict_2x2: dict) -> None:
+    """Initialize the attention module."""
     in_dim, embed_dim, out_dim = 256, 256, 256
     heads = 4
     model = attention.DistributedAttention(

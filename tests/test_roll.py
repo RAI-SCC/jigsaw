@@ -1,6 +1,5 @@
-import torch
-
 import pytest
+import torch
 
 from jigsaw import roll
 from jigsaw.utils_aggregate import gather_1d_results

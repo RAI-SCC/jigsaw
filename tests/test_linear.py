@@ -12,10 +12,10 @@ from jigsaw.utils_aggregate import (
 
 pytestmark = [pytest.mark.distributed_required]
 
-from tests.process_mesh import (  # noqa: F401
-    process_mesh_dict_2x1x2,
-    process_mesh_dict_2x2,
-)
+# from tests.process_mesh import (
+#     process_mesh_dict_2x1x2,  # noqa: F401
+#     process_mesh_dict_2x2,  # noqa: F401
+# )
 
 
 def test_xwt_forward(device: torch.device, process_mesh_dict_2x2: dict) -> None:
@@ -53,7 +53,13 @@ def test_xwt_forward(device: torch.device, process_mesh_dict_2x2: dict) -> None:
     y = linlayer(x_in)
     y_ref = ref_linlayer(x_gathered)
 
-    y_gathered = gather_results(y, process_mesh_dict=process_mesh_dict_2x2, pm_key_row="row", pm_key_col="col", pm_key_model="model")
+    y_gathered = gather_results(
+        y,
+        process_mesh_dict=process_mesh_dict_2x2,
+        pm_key_row="row",
+        pm_key_col="col",
+        pm_key_model="model",
+    )
     assert torch.allclose(y_gathered, y_ref, atol=1e-5)
 
 
@@ -532,9 +538,7 @@ def test_xwt_backward_2(device: torch.device, process_mesh_dict_2x1x2: dict) -> 
 def test_xwt_backward_dtp(device: torch.device, process_mesh_dict_2x2: dict) -> None:
     """Test forward-backward pass of a model that employs domain parallel in one axis and channel parallel in the other."""
     local_rank = dist.get_rank(group=process_mesh_dict_2x2["col"])
-    torch.manual_seed(
-        process_mesh_dict_2x2["model"].rank()
-    ) 
+    torch.manual_seed(process_mesh_dict_2x2["model"].rank())
 
     in_dim, out_dim = 4, 4
     seq_global = 10

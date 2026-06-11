@@ -7,7 +7,6 @@ from jigsaw import convolutions, linear
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
 from tests.process_mesh import *
 
-
 pytestmark = [pytest.mark.gpu_required, pytest.mark.distributed_required]
 
 

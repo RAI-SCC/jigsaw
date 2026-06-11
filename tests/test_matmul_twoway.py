@@ -1,6 +1,5 @@
-import torch
-
 import pytest
+import torch
 
 import jigsaw.distributed_matmul as dist_mm
 from jigsaw.utils_aggregate import gather_results

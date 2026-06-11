@@ -1,7 +1,6 @@
+import pytest
 import torch
 import torch.distributed as dist
-
-import pytest
 
 import jigsaw.convolutions as conv
 from jigsaw.utils_aggregate import gather_results_as_list

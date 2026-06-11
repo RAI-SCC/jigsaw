@@ -4,7 +4,6 @@ import torch.distributed as dist
 
 import jigsaw.distributed_matmul_p2p as dist_mm_p2p
 from jigsaw.utils_aggregate import gather_results, gather_results_as_list
-from tests.process_mesh import process_mesh_dict_2x1x2
 
 pytestmark = [pytest.mark.distributed_required]
 
@@ -25,7 +24,7 @@ def test_p2p(device: torch.device, process_mesh_dict_2x1x2: dict) -> None:
         send = dist.isend(x_data, group_dst=0, group=model_group)
     send.wait()
     recv.wait()
-    
+
     # gather buffers
     # data on rank i should match buffer on rank (i + 1) % 2
     gathered = gather_results_as_list(buffer, process_mesh_dict_2x1x2)
