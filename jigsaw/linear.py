@@ -254,7 +254,8 @@ class LinearSelectionStrategy:
                     return dist_mm_p2p.xw_transpose_eightway
                 case _:
                     raise ValueError(f"Unsupported parallelism: {parallelism}")
-        return
+        else:
+            raise ValueError(f"Unsupported device {device.type}")
 
     def _select_xw_kernel(
         self, parallelism: int, device: torch.device = torch.device("cuda")
@@ -280,11 +281,10 @@ class LinearSelectionStrategy:
                     return dist_mm_p2p.xw_twoway
                 case 4:
                     return dist_mm_p2p.xw_fourway
-                case 8:
-                    return dist_mm_p2p.xw_eightway
                 case _:
                     raise ValueError(f"Unsupported parallelism: {parallelism}")
-        return
+        else:
+            raise ValueError(f"Unsupported device {device.type}")
 
     def _select_x_transpose_w_kernel(
         self, parallelism: int, device: torch.device = torch.device("cuda")
@@ -310,11 +310,10 @@ class LinearSelectionStrategy:
                     return dist_mm_p2p.x_transpose_w_twoway
                 case 4:
                     return dist_mm_p2p.x_transpose_w_fourway
-                case 8:
-                    return dist_mm_p2p.x_transpose_w_eightway
                 case _:
                     raise ValueError(f"Unsupported parallelism: {parallelism}")
-        return
+        else:
+            raise ValueError(f"Unsupported device {device.type}")
 
     def _select_xw_xtw_fused_kernel(
         self, parallelism: int, device: torch.device = torch.device("cuda")
@@ -337,10 +336,10 @@ class LinearSelectionStrategy:
                     return dist_mm_p2p.fused_xw_xtw_twoway
                 case 4:
                     return dist_mm_p2p.fused_xw_xtw_fourway
-                case 8:
-                    return dist_mm_p2p.fused_xw_xtw_eightway
-
-        return
+                case _:
+                    raise ValueError(f"Unsupported parallelism: {parallelism}")
+        else:
+            raise ValueError(f"Unsupported device {device.type}")
 
 
 class DistributedXWT(torch.nn.Module):
@@ -448,7 +447,6 @@ class DistributedXWT(torch.nn.Module):
             B, out_dim are global values.
             in_dim is local value.
         """
-        
         cij = self.XWT(
             x,
             self.weight,
@@ -839,7 +837,7 @@ class XWT(torch.autograd.Function):
         spatial_group = ctx.spatial_group
 
         weight = selector.reshape_weights(weight)
-        
+
         grad_input, grad_weight = selector.mm_kernels[3](
             grad_output,
             weight,
