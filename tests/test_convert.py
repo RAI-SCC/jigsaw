@@ -644,151 +644,151 @@ def test_jigsaw_conv2d(device: torch.device, process_mesh_dict_2x2: dict) -> Non
     assert torch.allclose(ref_d_x, dist_d_x, atol=1e-4), "weight grad does not match"
 
 
-# def test_jigsaw_conv2dtranspose(
-#     device: torch.device, process_mesh_dict_2x2: dict
-# ) -> None:
-#     """Test conversion of Conv2DTranspose on a 2x2 process mesh."""
-#     torch.manual_seed(1)
-#     in_channels = 32
-#     out_channels = 32
-#     kernel_size = 4
-#     h, w = 100, 100
-#     torch.use_deterministic_algorithms(True)
-#     torch.backends.cuda.matmul.allow_tf32 = False
-#     torch.backends.cudnn.allow_tf32 = False
-#     conv = torch.nn.ConvTranspose2d(
-#         in_channels,
-#         out_channels,
-#         kernel_size,
-#         stride=kernel_size,
-#         bias=False,
-#         device=device,
-#     )
-#     # copy weights
-#     ref_conv_weights = conv.weight.clone()
-#     _ = conv.bias.clone() if conv.bias is not None else None
+def test_jigsaw_conv2dtranspose(
+    device: torch.device, process_mesh_dict_2x2: dict
+) -> None:
+    """Test conversion of Conv2DTranspose on a 2x2 process mesh."""
+    torch.manual_seed(1)
+    in_channels = 32
+    out_channels = 32
+    kernel_size = 4
+    h, w = 100, 100
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    conv = torch.nn.ConvTranspose2d(
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride=kernel_size,
+        bias=False,
+        device=device,
+    )
+    # copy weights
+    ref_conv_weights = conv.weight.clone()
+    _ = conv.bias.clone() if conv.bias is not None else None
 
-#     x_global = torch.randn(1, in_channels, h, w, device=device)
-#     x_global.requires_grad_(True)
+    x_global = torch.randn(1, in_channels, h, w, device=device)
+    x_global.requires_grad_(True)
 
-#     ref_forward = conv(x_global)
-#     ref_forward.backward(torch.ones_like(ref_forward, device=device))
-#     ref_d_w = conv.weight.grad
-#     ref_d_x = x_global.grad
+    ref_forward = conv(x_global)
+    ref_forward.backward(torch.ones_like(ref_forward, device=device))
+    ref_d_w = conv.weight.grad
+    ref_d_x = x_global.grad
 
-#     col_rank, col_size = (
-#         process_mesh_dict_2x2["col"].rank(),
-#         process_mesh_dict_2x2["col"].size(),
-#     )
-#     row_rank, _ = (
-#         process_mesh_dict_2x2["row"].rank(),
-#         process_mesh_dict_2x2["row"].size(),
-#     )
+    col_rank, col_size = (
+        process_mesh_dict_2x2["col"].rank(),
+        process_mesh_dict_2x2["col"].size(),
+    )
+    row_rank, _ = (
+        process_mesh_dict_2x2["row"].rank(),
+        process_mesh_dict_2x2["row"].size(),
+    )
 
-#     local_w = w // process_mesh_dict_2x2["row"].size()
-#     x_local = (
-#         x_global[
-#             :,
-#             col_rank
-#             * in_channels
-#             // col_size : (col_rank + 1)
-#             * in_channels
-#             // col_size,
-#             :,
-#             row_rank * local_w : (row_rank + 1) * local_w,
-#         ]
-#         .detach()
-#         .contiguous()
-#         .requires_grad_(True)
-#     )
+    local_w = w // process_mesh_dict_2x2["row"].size()
+    x_local = (
+        x_global[
+            :,
+            col_rank
+            * in_channels
+            // col_size : (col_rank + 1)
+            * in_channels
+            // col_size,
+            :,
+            row_rank * local_w : (row_rank + 1) * local_w,
+        ]
+        .detach()
+        .contiguous()
+        .requires_grad_(True)
+    )
 
-#     jigsaw_conv2d = convert.convert_to_jigsaw(conv, process_mesh_dict_2x2, device)
-#     dist_forward = jigsaw_conv2d(x_local)
+    jigsaw_conv2d = convert.convert_to_jigsaw(conv, process_mesh_dict_2x2, device)
+    dist_forward = jigsaw_conv2d(x_local)
 
-#     dist_forward.backward(torch.ones_like(dist_forward, device=device))
-#     dist_d_x = x_local.grad
+    dist_forward.backward(torch.ones_like(dist_forward, device=device))
+    dist_d_x = x_local.grad
 
-#     # weights
-#     dist_w = jigsaw_conv2d.weight
-#     dist_d_w = jigsaw_conv2d.weight.grad
-#     # gather the results in two steps due to convolution
-#     dist_forward = gather_1d_results(
-#         dist_forward, process_mesh_dict_2x2, dim=1, pm_key="col"
-#     )
-#     dist_forward = gather_1d_results(
-#         dist_forward, process_mesh_dict_2x2, dim=-1, pm_key="row"
-#     )
-#     assert isinstance(dist_w, torch.Tensor)
-#     assert isinstance(dist_d_w, torch.Tensor)
-#     dist_w = gather_1d_results(dist_w, process_mesh_dict_2x2, dim=1, pm_key="col")
-#     dist_d_w = gather_1d_results(dist_d_w, process_mesh_dict_2x2, dim=1, pm_key="col")
-#     # two-step gather for dx
-#     assert isinstance(dist_d_x, torch.Tensor)
-#     dist_d_x = gather_1d_results(dist_d_x, process_mesh_dict_2x2, dim=1, pm_key="col")
-#     dist_d_x = gather_1d_results(dist_d_x, process_mesh_dict_2x2, dim=-1, pm_key="row")
+    # weights
+    dist_w = jigsaw_conv2d.weight
+    dist_d_w = jigsaw_conv2d.weight.grad
+    # gather the results in two steps due to convolution
+    dist_forward = gather_1d_results(
+        dist_forward, process_mesh_dict_2x2, dim=1, pm_key="col"
+    )
+    dist_forward = gather_1d_results(
+        dist_forward, process_mesh_dict_2x2, dim=-1, pm_key="row"
+    )
+    assert isinstance(dist_w, torch.Tensor)
+    assert isinstance(dist_d_w, torch.Tensor)
+    dist_w = gather_1d_results(dist_w, process_mesh_dict_2x2, dim=1, pm_key="col")
+    dist_d_w = gather_1d_results(dist_d_w, process_mesh_dict_2x2, dim=1, pm_key="col")
+    # two-step gather for dx
+    assert isinstance(dist_d_x, torch.Tensor)
+    dist_d_x = gather_1d_results(dist_d_x, process_mesh_dict_2x2, dim=1, pm_key="col")
+    dist_d_x = gather_1d_results(dist_d_x, process_mesh_dict_2x2, dim=-1, pm_key="row")
 
-#     assert ref_forward is not None
-#     assert ref_conv_weights is not None
-#     assert ref_d_w is not None
-#     assert ref_d_x is not None
-#     assert torch.allclose(
-#         ref_forward, dist_forward, atol=1e-3
-#     ), "forward does not match"
-#     assert torch.allclose(ref_conv_weights, dist_w, atol=1e-5), "weights do not match"
-#     assert torch.allclose(ref_d_w, dist_d_w, atol=1e-4), "weight grad does not match"
-#     assert torch.allclose(ref_d_x, dist_d_x, atol=1e-4), "weight grad does not match"
+    assert ref_forward is not None
+    assert ref_conv_weights is not None
+    assert ref_d_w is not None
+    assert ref_d_x is not None
+    assert torch.allclose(
+        ref_forward, dist_forward, atol=1e-3
+    ), "forward does not match"
+    assert torch.allclose(ref_conv_weights, dist_w, atol=1e-5), "weights do not match"
+    assert torch.allclose(ref_d_w, dist_d_w, atol=1e-4), "weight grad does not match"
+    assert torch.allclose(ref_d_x, dist_d_x, atol=1e-4), "weight grad does not match"
 
 
-# def test_jigsaw_roll(device: torch.device, process_mesh_dict_2x2: dict) -> None:
-#     """Test conversion of 2d distributed roll."""
-#     torch.manual_seed(1)
-#     in_channels = 32
-#     h, w = 100, 100
+def test_jigsaw_roll(device: torch.device, process_mesh_dict_2x2: dict) -> None:
+    """Test conversion of 2d distributed roll."""
+    torch.manual_seed(1)
+    in_channels = 32
+    h, w = 100, 100
 
-#     roll = Roll(shifts=(3, 2), dims=(-3, -2))
+    roll = Roll(shifts=(3, 2), dims=(-3, -2))
 
-#     x_global = torch.randn(1, h, w, in_channels, device=device)
-#     x_global.requires_grad_(True)
+    x_global = torch.randn(1, h, w, in_channels, device=device)
+    x_global.requires_grad_(True)
 
-#     ref_forward = roll(x_global)
+    ref_forward = roll(x_global)
 
-#     col_rank, col_size = (
-#         process_mesh_dict_2x2["col"].rank(),
-#         process_mesh_dict_2x2["col"].size(),
-#     )
-#     row_rank, _ = (
-#         process_mesh_dict_2x2["row"].rank(),
-#         process_mesh_dict_2x2["row"].size(),
-#     )
+    col_rank, col_size = (
+        process_mesh_dict_2x2["col"].rank(),
+        process_mesh_dict_2x2["col"].size(),
+    )
+    row_rank, _ = (
+        process_mesh_dict_2x2["row"].rank(),
+        process_mesh_dict_2x2["row"].size(),
+    )
 
-#     local_w = w // process_mesh_dict_2x2["row"].size()
-#     x_local = (
-#         x_global[
-#             :,
-#             :,
-#             row_rank * local_w : (row_rank + 1) * local_w,
-#             col_rank
-#             * in_channels
-#             // col_size : (col_rank + 1)
-#             * in_channels
-#             // col_size,
-#         ]
-#         .detach()
-#         .contiguous()
-#         .requires_grad_(True)
-#     )
+    local_w = w // process_mesh_dict_2x2["row"].size()
+    x_local = (
+        x_global[
+            :,
+            :,
+            row_rank * local_w : (row_rank + 1) * local_w,
+            col_rank
+            * in_channels
+            // col_size : (col_rank + 1)
+            * in_channels
+            // col_size,
+        ]
+        .detach()
+        .contiguous()
+        .requires_grad_(True)
+    )
 
-#     jigsaw_roll = convert.convert_to_jigsaw(roll, process_mesh_dict_2x2, device)
-#     dist_forward = jigsaw_roll(x_local)
+    jigsaw_roll = convert.convert_to_jigsaw(roll, process_mesh_dict_2x2, device)
+    dist_forward = jigsaw_roll(x_local)
 
-#     # gather the results in two steps due to rolling
-#     dist_forward = gather_1d_results(
-#         dist_forward, process_mesh_dict_2x2, dim=-1, pm_key="col"
-#     )
-#     dist_forward = gather_1d_results(
-#         dist_forward, process_mesh_dict_2x2, dim=-2, pm_key="row"
-#     )
+    # gather the results in two steps due to rolling
+    dist_forward = gather_1d_results(
+        dist_forward, process_mesh_dict_2x2, dim=-1, pm_key="col"
+    )
+    dist_forward = gather_1d_results(
+        dist_forward, process_mesh_dict_2x2, dim=-2, pm_key="row"
+    )
 
-#     assert torch.allclose(
-#         ref_forward, dist_forward, atol=1e-3
-#     ), "forward does not match"
+    assert torch.allclose(
+        ref_forward, dist_forward, atol=1e-3
+    ), "forward does not match"

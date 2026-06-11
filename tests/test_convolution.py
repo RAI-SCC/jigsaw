@@ -98,8 +98,9 @@ def test_conv2d_forward(device: torch.device, process_mesh_dict_2x2: dict) -> No
         process_mesh_dict_2x2["row"].size(),
         process_mesh_dict_2x2["col"].size(),
     )
-    in_dim, out_dim = 5, 10
+    in_dim, out_dim = 6, 10
     kernel_size = 4
+    h, w = 16, 16
     conv2d = conv.DistributedConv2D(
         in_dim,
         out_dim,
@@ -114,8 +115,8 @@ def test_conv2d_forward(device: torch.device, process_mesh_dict_2x2: dict) -> No
         channel_group=process_mesh_dict_2x2["col"],
         device=device,
         parallelism=4,
-        bayesian=False,
-    ).to(device)
+        bayesian=False
+    )
 
     weights_gathered_as_list = gather_results_as_list(
         conv2d.weight, process_mesh_dict_2x2
@@ -127,3 +128,6 @@ def test_conv2d_forward(device: torch.device, process_mesh_dict_2x2: dict) -> No
             weights_gathered_as_list[i + col_comm_size],
             atol=1e-5,
         )
+    
+    x = torch.randn(4, in_dim // 2, h, w // 2)
+    y = conv2d(x)
