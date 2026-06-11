@@ -7,7 +7,7 @@ from jigsaw.utils_aggregate import gather_results_as_list
 
 from .process_mesh import *
 
-pytestmark = [pytest.mark.gpu_required, pytest.mark.distributed_required]
+pytestmark = [pytest.mark.distributed_required]
 
 
 def test_param_init_conv2d(device: torch.device, process_mesh_dict_2x2: dict) -> None:

@@ -15,6 +15,7 @@ from .utils_aggregate import gather_1d_results
 
 
 def _pair(x: int | tuple[int, ...]) -> tuple[int, int]:
+    """Convert different types to 2-element tuple."""
     if isinstance(x, int):
         return (x, x)
     if len(x) == 1:
@@ -1180,9 +1181,9 @@ class DistributedConv2D(torch.nn.Module):
         device: torch.device
             Device upon which computation happens.
         row_kw: str
-            Key for accessing domain process groups
+            Key for accessing domain process groups.
         col_kw: str
-            Key for accessing channel process groups
+            Key for accessing channel process groups.
         model_kw: str
             Key for accessing model process groups.
             Model process group should contain the Union of the row and column groups.
@@ -1214,6 +1215,7 @@ class DistributedConv2D(torch.nn.Module):
             bayesian=False,  # TODO
             dtype=model.weight.dtype,
         )
+        print(f'initted')
         # Map weights — clone so the original graph is detached
         in_rank = process_mesh_dict[col_kw].rank()
         in_shard = model.weight.shape[0] // process_mesh_dict[col_kw].size()
