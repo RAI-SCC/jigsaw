@@ -593,17 +593,13 @@ class ConvTransposeSelectionStrategy:
             match channel_group.size():
                 case 2:
                     return dist_conv.comm_2way_alltoall
-                case 4:
-                    return dist_conv.comm_2way_alltoall
                 case _:
                     raise NotImplementedError(
                         f"comm all to all is not implemented for channel parallelism {channel_group.size()}."
                     )
         elif device.type == "cpu":
             match channel_group.size():
-                case 4:
-                    return dist_conv.comm_2way_p2p
-                case 8:
+                case 2:
                     return dist_conv.comm_2way_p2p
                 case _:
                     raise NotImplementedError(
