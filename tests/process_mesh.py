@@ -99,3 +99,13 @@ def process_mesh_dict_2x2x1(device: torch.Tensor) -> dict:
         mesh_shape=[2, 2, 1],
         mesh_dim_names=["dp", "row", "col"],
     )
+
+
+@pytest.fixture(scope="session")
+def process_mesh_dict_4x2(device: torch.Tensor) -> dict:
+    """Return process mesh."""
+    return make_process_mesh(
+        device_type=device.type,
+        mesh_shape=[4, 2],
+        mesh_dim_names=["row", "col"],
+    )

@@ -40,6 +40,28 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "distributed_required: test requires distributed environment"
     )
+    config.addinivalue_line(
+        "markers",
+        "dist(n_ranks): Mark test to run only when running parallel tests, and optionaly, only with the specified ranks",
+    )
+
+
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    # Check if the test has the 'dist' marker or the 'gpu' marker, and skip if the conditions are not met
+    gpu_marker = item.get_closest_marker("gpu")
+    if gpu_marker and (
+        not torch.cuda.is_available()
+        or item.config.getoption("--device") not in ["cuda", "gpu"]
+    ):
+        pytest.skip("Skipping GPU test since CUDA is not available or not selected.")
+
+    skip_marker = item.get_closest_marker("dist")
+    if skip_marker:
+        ranks = int(skip_marker.args[0]) if len(skip_marker.args) == 1 else None
+        if mpi_size <= 1 or (ranks is not None and ranks != mpi_size):
+            pytest.skip(
+                f"Skipping distributed test, only {mpi_size} ranks available, but {ranks if ranks else '> 1'} required"
+            )
 
 
 @pytest.fixture(autouse=True, scope="session")

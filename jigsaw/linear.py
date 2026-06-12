@@ -281,6 +281,8 @@ class LinearSelectionStrategy:
                     return dist_mm_p2p.xw_twoway
                 case 4:
                     return dist_mm_p2p.xw_fourway
+                case 8:
+                    return dist_mm_p2p.xw_eightway
                 case _:
                     raise ValueError(f"Unsupported parallelism: {parallelism}")
         else:
@@ -310,6 +312,8 @@ class LinearSelectionStrategy:
                     return dist_mm_p2p.x_transpose_w_twoway
                 case 4:
                     return dist_mm_p2p.x_transpose_w_fourway
+                case 8:
+                    return dist_mm_p2p.x_transpose_w_eightway
                 case _:
                     raise ValueError(f"Unsupported parallelism: {parallelism}")
         else:
@@ -336,6 +340,8 @@ class LinearSelectionStrategy:
                     return dist_mm_p2p.fused_xw_xtw_twoway
                 case 4:
                     return dist_mm_p2p.fused_xw_xtw_fourway
+                case 8:
+                    return dist_mm_p2p.fused_xw_xtw_eightway
                 case _:
                     raise ValueError(f"Unsupported parallelism: {parallelism}")
         else:
