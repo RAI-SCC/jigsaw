@@ -9,7 +9,7 @@ from jigsaw.utils_aggregate import (
 )
 from tests.process_mesh import *
 
-pytestmark = [pytest.mark.gpu_required, pytest.mark.distributed_required]
+pytestmark = [pytest.mark.distributed_required]
 
 # def test_backward(device, process_mesh):
 #     local_rank = dist.get_rank(group=process_mesh["row"])
@@ -124,7 +124,8 @@ pytestmark = [pytest.mark.gpu_required, pytest.mark.distributed_required]
 #     assert torch.allclose(flash_K.grad, dK_ref.float(), atol=1e-2)
 #     assert torch.allclose(flash_V.grad, dV_ref.float(), atol=1e-2)
 
-
+@pytest.mark.dist(4)
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "flash_kernel",
     [
@@ -279,7 +280,7 @@ def test_ring_forward_backward(
         and save_for_backward == ring_attn_fns.SaveBackward.X
     ):
         pytest.xfail("not yet supported")
-
+    
     ring_config = ring_attn_fns.RingAttentionConfig(
         device=device,
         send_in_forward=send_in_forward,
@@ -291,12 +292,12 @@ def test_ring_forward_backward(
     )
 
     ring_forward = ring_attn_fns.build_ring_forward(ring_config)
-
+    print(f'here')
     local_rank = dist.get_rank(group=None)
     world_size = dist.get_world_size(group=None)
 
     torch.manual_seed(2)  # same seed for weight initialization
-    b, h, n_global, d = 3, 6, world_size * 256, 256
+    b, h, n_global, d = 3, 6, world_size * 16, 64
     n_local = n_global // world_size
     w_qkv = torch.randn(
         3 * d * h, d, device=device, requires_grad=True, dtype=torch.bfloat16
@@ -345,6 +346,7 @@ def test_ring_forward_backward(
     v_ref = gather_1d_results(v_local, process_mesh_dict_4x1, dim=2)
 
     # Reference calculation
+    ring_attention.ring_attn.build_ring_forward(ring_attention)
     out_ref, logsumexp, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
         q_ref,
         k_ref,
