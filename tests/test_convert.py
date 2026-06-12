@@ -737,6 +737,7 @@ def test_jigsaw_conv2dtranspose(
     assert torch.allclose(ref_d_x, dist_d_x, atol=1e-4), "weight grad does not match"
 
 
+@pytest.mark.gpu_required
 def test_jigsaw_roll(device: torch.device, process_mesh_dict_2x2: dict) -> None:
     """Test conversion of 2d distributed roll."""
     torch.manual_seed(1)

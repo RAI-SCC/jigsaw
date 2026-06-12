@@ -1215,7 +1215,7 @@ class DistributedConv2D(torch.nn.Module):
             bayesian=False,  # TODO
             dtype=model.weight.dtype,
         )
-        print(f'initted')
+        print("initted")
         # Map weights — clone so the original graph is detached
         in_rank = process_mesh_dict[col_kw].rank()
         in_shard = model.weight.shape[0] // process_mesh_dict[col_kw].size()

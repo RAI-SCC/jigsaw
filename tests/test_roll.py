@@ -9,6 +9,7 @@ pytestmark = [pytest.mark.gpu_required, pytest.mark.distributed_required]
 
 def test_dist_roll_init(device: torch.device, process_mesh_dict_2x2: dict) -> None:
     """Test forward pass of 1d distributed roll."""
+
     roll_jigsaw = roll.DistributedRoll(
         shifts=(3, 3),
         dims=(1, 2),

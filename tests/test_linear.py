@@ -12,12 +12,8 @@ from jigsaw.utils_aggregate import (
 
 pytestmark = [pytest.mark.distributed_required]
 
-# from tests.process_mesh import (
-#     process_mesh_dict_2x1x2,  # noqa: F401
-#     process_mesh_dict_2x2,  # noqa: F401
-# )
 
-
+@pytest.mark.dist(4)
 def test_xwt_forward(device: torch.device, process_mesh_dict_2x2: dict) -> None:
     """Test single forward pass of a linear layer."""
     local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
@@ -63,6 +59,7 @@ def test_xwt_forward(device: torch.device, process_mesh_dict_2x2: dict) -> None:
     assert torch.allclose(y_gathered, y_ref, atol=1e-5)
 
 
+@pytest.mark.dist(4)
 def test_xwt_forward_2(device: torch.device, process_mesh_dict_2x1x2: dict) -> None:
     """Test single forward pass of a linear layer."""
     local_rank = dist.get_rank(group=process_mesh_dict_2x1x2["model"])
@@ -103,6 +100,7 @@ def test_xwt_forward_2(device: torch.device, process_mesh_dict_2x1x2: dict) -> N
     assert torch.allclose(y_gathered, y_ref, atol=1e-5)
 
 
+@pytest.mark.dist(4)
 def test_xwt_backward(device: torch.device, process_mesh_dict_2x2: dict) -> None:
     """Test single forward and backward pass of a linear layer."""
     local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
@@ -182,6 +180,7 @@ def test_xwt_backward(device: torch.device, process_mesh_dict_2x2: dict) -> None
     assert torch.allclose(x_grad_gathered, x_gathered.grad, atol=1e-5)
 
 
+@pytest.mark.dist(4)
 def test_xwt_backward_sum(device: torch.device, process_mesh_dict_2x2: dict) -> None:
     """Test forward and backward pass of a few iterations."""
     local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
@@ -254,6 +253,7 @@ def test_xwt_backward_sum(device: torch.device, process_mesh_dict_2x2: dict) -> 
     assert torch.allclose(x_grad_gathered, x_gathered.grad, atol=1e-5)
 
 
+@pytest.mark.dist(4)
 def test_xwt_bias_init(device: torch.device, process_mesh_dict_2x2: dict) -> None:
     """Ensure bias terms are synchronized across row groups."""
     local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
@@ -285,6 +285,7 @@ def test_xwt_bias_init(device: torch.device, process_mesh_dict_2x2: dict) -> Non
     )  # ranks that are part of the same model group should have different biases.
 
 
+@pytest.mark.dist(4)
 def test_xwt_forward_bias(device: torch.device, process_mesh_dict_2x2: dict) -> None:
     """Test forward pass including a bias."""
     local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
@@ -331,6 +332,7 @@ def test_xwt_forward_bias(device: torch.device, process_mesh_dict_2x2: dict) -> 
     assert torch.allclose(y_gathered, y_ref, atol=1e-5)
 
 
+@pytest.mark.dist(4)
 def test_xwt_backward_bias(device: torch.device, process_mesh_dict_2x2: dict) -> None:
     """Test single forward and backward pass of a linear layer including bias."""
     local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
@@ -431,6 +433,7 @@ def test_xwt_backward_bias(device: torch.device, process_mesh_dict_2x2: dict) ->
     assert torch.allclose(x_grad_gathered, x_gathered.grad, atol=1e-5)
 
 
+@pytest.mark.dist(4)
 def test_xwt_backward_2(device: torch.device, process_mesh_dict_2x1x2: dict) -> None:
     """Test forward--backward pass of a 2-way sharded model."""
     local_rank = dist.get_rank(group=process_mesh_dict_2x1x2["model"])
@@ -535,6 +538,7 @@ def test_xwt_backward_2(device: torch.device, process_mesh_dict_2x1x2: dict) -> 
     assert torch.allclose(x_grad_gathered, x_gathered.grad, atol=1e-5)
 
 
+@pytest.mark.dist(4)
 def test_xwt_backward_dtp(device: torch.device, process_mesh_dict_2x2: dict) -> None:
     """Test forward-backward pass of a model that employs domain parallel in one axis and channel parallel in the other."""
     local_rank = dist.get_rank(group=process_mesh_dict_2x2["col"])
@@ -686,3 +690,75 @@ def test_xwt_backward_dtp(device: torch.device, process_mesh_dict_2x2: dict) -> 
 
         assert torch.allclose(b_gathered, ref_linlayer.bias, atol=1e-5)
         assert torch.allclose(b_grad_gathered, ref_linlayer.bias.grad, atol=1e-5)
+
+
+@pytest.mark.dist(8)
+def test_xwt_backward_sum_8(device: torch.device, process_mesh_dict_4x2: dict) -> None:
+    """Test forward and backward pass of a few iterations."""
+    local_rank = dist.get_rank(group=process_mesh_dict_4x2["model"])
+    torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
+
+    in_dim, out_dim = 8, 4
+    seq_local = 4
+
+    loss_fn = torch.nn.MSELoss(reduction="sum")
+
+    linlayer = linear.DistributedXWT(
+        in_dim,
+        out_dim,
+        False,
+        local_rank,
+        device,
+        process_mesh_dict_4x2["model"],
+        process_mesh_dict_4x2["row"],
+        process_mesh_dict_4x2["col"],
+        False,
+    )
+    w_gathered = gather_results(
+        linlayer.weight.data, process_mesh_dict=process_mesh_dict_4x2
+    )
+    ref_linlayer = torch.nn.Linear(in_dim, out_dim, bias=False).to(device)
+    ref_linlayer.weight.data = w_gathered
+    optimizer = torch.optim.Adam(linlayer.parameters())
+    ref_optimizer = torch.optim.Adam(ref_linlayer.parameters())
+
+    for _ in range(20):
+        x_in = torch.randn(
+            1, seq_local // 4, in_dim // 2, dtype=linlayer.weight.dtype, device=device
+        )
+        x_in.requires_grad_(True)
+        y = linlayer(x_in)
+        target = (
+            torch.ones(y.shape, dtype=x_in.dtype, device=device) * local_rank
+        )  # different target per rank
+
+        # gather x and target
+        x_gathered = gather_results(
+            x_in.detach(), process_mesh_dict=process_mesh_dict_4x2
+        )
+        x_gathered.requires_grad_(True)
+        ref_target = gather_results(target, process_mesh_dict=process_mesh_dict_4x2)
+        ref_y = ref_linlayer(x_gathered)
+        y_gathered = gather_results(y, process_mesh_dict=process_mesh_dict_4x2)
+        loss = loss_fn(y, target)
+        loss_ref = loss_fn(ref_y, ref_target)
+        loss.backward()
+        loss_ref.backward()
+
+        optimizer.step()
+        ref_optimizer.step()
+
+    assert isinstance(linlayer.weight.grad, torch.Tensor)
+    assert isinstance(x_in.grad, torch.Tensor)
+
+    w_grad_gathered = gather_results(
+        linlayer.weight.grad, process_mesh_dict=process_mesh_dict_4x2
+    )
+    x_grad_gathered = gather_results(x_in.grad, process_mesh_dict=process_mesh_dict_4x2)
+
+    assert isinstance(ref_y, torch.Tensor)
+    assert isinstance(ref_linlayer.weight.grad, torch.Tensor)
+    assert isinstance(x_gathered.grad, torch.Tensor)
+    assert torch.allclose(y_gathered, ref_y, atol=1e-5)
+    assert torch.allclose(w_grad_gathered, ref_linlayer.weight.grad, atol=1e-5)
+    assert torch.allclose(x_grad_gathered, x_gathered.grad, atol=1e-5)
