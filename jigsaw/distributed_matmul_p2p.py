@@ -895,7 +895,7 @@ def xw_transpose_eightway(
             buffer_w_5 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_6 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_7 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
-            
+
             send_w_0 = dist.isend(wij, group_dst=0, group=model_group)
             send_w_2 = dist.isend(wij, group_dst=2, group=model_group)
             send_w_4 = dist.isend(wij, group_dst=4, group=model_group)
@@ -927,9 +927,7 @@ def xw_transpose_eightway(
         case 5:
             # x: send to 4, recv from 4
             buffer_x_4 = _get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
-            recv_x_4 = dist.irecv(
-                buffer_x_4, group_src=4, group=model_group
-            )
+            recv_x_4 = dist.irecv(buffer_x_4, group_src=4, group=model_group)
             send_x_4 = dist.isend(xij, group_dst=4, group=model_group)
             # w: send to 1, 3, 7, recv from 4, 6, 7
             buffer_w_4 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
@@ -945,9 +943,7 @@ def xw_transpose_eightway(
             # x: send to 7, recv from 7
             buffer_x_7 = _get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
             send_x_7 = dist.isend(xij, group_dst=7, group=model_group)
-            recv_x_7 = dist.irecv(
-                buffer_x_7, group_src=7, group=model_group
-            )
+            recv_x_7 = dist.irecv(buffer_x_7, group_src=7, group=model_group)
             # w: send to 1, 3, 5, 7 recv from 0,1,2,3
             buffer_w_0 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_1 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
@@ -964,12 +960,8 @@ def xw_transpose_eightway(
         case 7:
             # x: send to 6, recv from 6
             buffer_x_6 = _get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
-            recv_x_6 = dist.irecv(
-                buffer_x_6, group_src=6, group=model_group
-            )
-            send_x_6 = dist.isend(
-                buffer_x_6, group_dst=6, group=model_group
-            )
+            recv_x_6 = dist.irecv(buffer_x_6, group_src=6, group=model_group)
+            send_x_6 = dist.isend(buffer_x_6, group_dst=6, group=model_group)
             # w: send to 1, 3, 5, recv from 4,5,6
             buffer_w_4 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_5 = _get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
@@ -980,7 +972,7 @@ def xw_transpose_eightway(
             send_w_1 = dist.isend(wij, group_dst=1, group=model_group)
             send_w_3 = dist.isend(wij, group_dst=3, group=model_group)
             send_w_5 = dist.isend(wij, group_dst=5, group=model_group)
-    
+
     match mod:
         case 0:
             cij0 = torch.matmul(xij, wij.mT)
@@ -1103,7 +1095,7 @@ def xw_transpose_eightway(
             cij0 = cij0 + torch.matmul(buffer_x_6, buffer_w_4.mT)
             recv_w_6.wait()
             cij1 = cij1 + torch.matmul(buffer_x_6, buffer_w_6.mT)
-    
+
     cij = torch.concat([cij0, cij1], dim=-1)
     return cij
 
@@ -1546,7 +1538,6 @@ def x_transpose_w_eightway(
             buffer_x_6 = _get_preallocated_buffer(
                 x_transpose_shape, xdtype, local_rank, device
             )
-            print(f'mod 3here')
             recv_x_0 = dist.irecv(buffer_x_0, group_src=0, group=model_group)
             recv_x_2 = dist.irecv(buffer_x_2, group_src=2, group=model_group)
             send_x_4 = dist.isend(x0, group_dst=4, group=model_group)
@@ -1691,7 +1682,7 @@ def x_transpose_w_eightway(
             send_w_1 = dist.isend(wij, group_dst=1, group=model_group)
             send_w_3 = dist.isend(wij, group_dst=3, group=model_group)
             send_w_5 = dist.isend(wij, group_dst=5, group=model_group)
-    
+
     match mod:
         case 0:
             send_x_1.wait()
@@ -1717,7 +1708,7 @@ def x_transpose_w_eightway(
         case 7:
             send_x_6.wait()
             cij0 = torch.matmul(x1, wij)
-    
+
     match mod:
         case 0:
             recv_x_2.wait()
@@ -1744,7 +1735,6 @@ def x_transpose_w_eightway(
             send_w_3.wait()
             send_w_5.wait()
             send_w_7.wait()
-            print(f'rank 1')
             cij1 = torch.matmul(buffer_x_2, buffer_w_3)
             recv_x_4.wait()
             recv_w_5.wait()
@@ -1845,7 +1835,6 @@ def x_transpose_w_eightway(
             recv_x_5.wait()
             recv_w_5.wait()
             cij3 = torch.matmul(buffer_x_5, buffer_w_5)
-    print(f'mod {mod} stage 3')
     cij = cij0 + cij1 + cij2 + cij3
 
     return cij
@@ -1885,7 +1874,6 @@ def fused_xw_xtw_eightway(
     Gradient with respect to the input and gradient of the weights.
     """
     grad_input = xw_eightway(grad_output, weight, local_rank, device, model_group)
-    print(f'local rank {local_rank} gradinput sum {grad_input.sum()}')    
     grad_weight = x_transpose_w_eightway(
         grad_output, input, local_rank, device, model_group
     )
