@@ -65,7 +65,7 @@ def test_dist_roll_init_8(device: torch.device, process_mesh_dict_4x2: dict) -> 
     # let x data be: [B, x, y, C]
     ref_x = gather_1d_results(x_data, process_mesh_dict_4x2, pm_key="row", dim=-2)
     dist_forward = roll_jigsaw(x_data)
-    
+
     ref_roll = torch.roll(ref_x, shifts=(x, y), dims=(1, 2))
     y_gathered = gather_1d_results(
         dist_forward, process_mesh_dict_4x2, pm_key="row", dim=-2

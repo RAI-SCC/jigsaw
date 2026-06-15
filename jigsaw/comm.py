@@ -1,6 +1,7 @@
+from typing import Any, Optional
+
 import torch
 import torch.distributed as dist
-from typing import Optional, Any
 
 
 def comm_2way_alltoall(
@@ -108,7 +109,7 @@ def comm_2way_p2p(
             )
 
 
-def comm_1d(
+def comm_1d_alltoall(
     data: torch.Tensor,
     buffer: torch.Tensor,
     direction: int,
@@ -132,7 +133,7 @@ def comm_1d(
         Process group within which to send data.
     empty: torch.Tensor
         Empty for computational reasons.
-    
+
     Returns
     -------
     buffer: torch.Tensor
@@ -153,6 +154,7 @@ def comm_1d(
     handle = dist.all_to_all(recv_list, send_list, group=group, async_op=async_op)
     return buffer, handle
 
+
 def comm_1d_p2p(
     data: torch.Tensor,
     buffer: torch.Tensor,
@@ -160,7 +162,7 @@ def comm_1d_p2p(
     group: dist.ProcessGroup,
     async_op: bool = True,
     *args: Any,
-    **kwargs: Any
+    **kwargs: Any,
 ) -> tuple[torch.Tensor, Optional[dist.Work]]:
     """
     Send data to neighbor process using all to all communication.
@@ -178,7 +180,7 @@ def comm_1d_p2p(
         Process group within which to send data.
     *args: Any
     **kwargs: Any
-    
+
     Returns
     -------
     buffer: torch.Tensor
@@ -186,7 +188,7 @@ def comm_1d_p2p(
     """
     send_to = (group.rank() + offset) % group.size()
     recv_from = (group.rank() - offset) % group.size()
-    
+
     if group.rank() % 2 == 0:
         send = dist.isend(data, group_dst=send_to, group=group)
         recv = dist.irecv(buffer, group_src=recv_from, group=group)
@@ -199,6 +201,5 @@ def comm_1d_p2p(
         send.wait()
         if not async_op:
             recv.wait()
-            
-        
+
     return buffer, recv

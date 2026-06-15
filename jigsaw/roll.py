@@ -1,6 +1,6 @@
 """Module definitions of roll functions."""
 
-from typing import Any, Optional, Protocol, cast, Callable
+from typing import Any, Callable, Optional, Protocol, cast
 
 import torch
 import torch.distributed as dist
@@ -49,28 +49,30 @@ class Roll(torch.nn.Module):
         """
         return torch.roll(x, shifts=self.shifts, dims=self.dims)
 
+
 class RollSelectionStrategy:
     """Selection strategy for roll function."""
 
     def __init__(
         self,
-        device: torch.device= torch.device("cuda"),
+        device: torch.device = torch.device("cuda"),
     ):
         self.comm_halo_1d_fn = self._comm_halo_1d_fn_selection(device)
-    
+
     def _comm_halo_1d_fn_selection(self, device: torch.device) -> Callable:
         """
         Select comm call for halo 1d function.
-        
-        If cuda, comm will occur via all-to-all. 
+
+        If cuda, comm will occur via all-to-all.
         If cpu, comm will occur via p2p.
         """
-        if device.type == 'cuda':
+        if device.type == "cuda":
             return dist_roll.comm_halo_1d
-        elif device.type == 'cpu':
+        elif device.type == "cpu":
             return dist_roll.comm_halo_1d_p2p
         else:
             raise ValueError(f"No halo 1d function possible for device {device.type}")
+
 
 class DistributedRoll(torch.nn.Module):
     """Distributed roll across an arbitrary set of sharded tensor dims."""
@@ -98,6 +100,7 @@ class DistributedRoll(torch.nn.Module):
         self.dtype = dtype
         self.empty = torch.empty(0, device=device, dtype=dtype)
         self.selector = RollSelectionStrategy(device)
+
     def get_parameter_count(self) -> int:
         """Return dummy parameter count of roll."""
         return 0
@@ -156,7 +159,7 @@ class DistributedRoll(torch.nn.Module):
             self.distributed_dims,
             self.spatial_groups,
             self.empty,
-            self.selector
+            self.selector,
         )
         out = cast(torch.Tensor, out)
         return out
@@ -186,7 +189,7 @@ class RollFunction(torch.autograd.Function):
         distributed_dims: tuple[int, ...],
         spatial_groups: tuple[dist.ProcessGroup, ...],
         empty: torch.Tensor,
-        selector: RollSelectionStrategy
+        selector: RollSelectionStrategy,
     ) -> torch.Tensor:
         """Forward pass of distributed roll."""
         return dist_roll.distributed_roll(
@@ -196,7 +199,7 @@ class RollFunction(torch.autograd.Function):
             list(distributed_dims),
             list(spatial_groups),
             empty,
-            selector.comm_halo_1d_fn
+            selector.comm_halo_1d_fn,
         )
 
     @staticmethod
@@ -235,7 +238,7 @@ class RollFunction(torch.autograd.Function):
             list(ctx.distributed_dims),
             list(ctx.spatial_groups),
             ctx.empty,
-            ctx.selector.comm_halo_1d_fn
+            ctx.selector.comm_halo_1d_fn,
         )
         return grad_input, None, None, None, None, None, None
 
@@ -249,7 +252,7 @@ class RollFunction(torch.autograd.Function):
         distributed_dims: tuple[int, ...],
         spatial_groups: tuple[dist.ProcessGroup, ...],
         empty: torch.Tensor,
-        selector: RollSelectionStrategy
+        selector: RollSelectionStrategy,
     ) -> tuple[torch.Tensor, int]:
         """Vmap for dealing with roll operations."""
         out = RollFunction.apply(

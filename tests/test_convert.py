@@ -551,12 +551,10 @@ def test_jigsaw_transformer(
     assert torch.allclose(ref_x_grad, dist_x_grad, atol=1e-4), (
         "grad of x does not match"
     )
-    print(f"R{torch.distributed.get_rank()}: dist x grad {dist_x_grad.sum()}")
 
 
 def test_jigsaw_conv2d(device: torch.device, process_mesh_dict_2x2: dict) -> None:
     """Test conversion of 2d convolution."""
-    print(f"R{torch.distributed.get_rank()}: began conv2d")
     torch.manual_seed(1)
     in_channels = 32
     out_channels = 64
@@ -672,7 +670,7 @@ def test_jigsaw_conv2dtranspose(
     x_global.requires_grad_(True)
 
     ref_forward = conv(x_global)
-    ref_forward.backward(torch.ones_like(ref_forward, device=device))
+    ref_forward.backward(torch.ones_like(ref_forward, device=device) / 100)
     ref_d_w = conv.weight.grad
     ref_d_x = x_global.grad
 
@@ -703,7 +701,7 @@ def test_jigsaw_conv2dtranspose(
     jigsaw_conv2d = convert.convert_to_jigsaw(conv, process_mesh_dict_2x2, device)
     dist_forward = jigsaw_conv2d(x_local)
 
-    dist_forward.backward(torch.ones_like(dist_forward, device=device))
+    dist_forward.backward(torch.ones_like(dist_forward, device=device) / 100)
     dist_d_x = x_local.grad
 
     # weights

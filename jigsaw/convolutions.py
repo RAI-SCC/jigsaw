@@ -9,8 +9,8 @@ import torch.nn.functional as F
 from torch.nn.grad import conv2d_input, conv2d_weight
 from torch.nn.parameter import Parameter
 
+from . import comm, hooks
 from . import distributed_convolutions as dist_conv
-from . import hooks
 from .utils_aggregate import gather_1d_results
 
 
@@ -82,16 +82,20 @@ class ConvSelectionStrategy:
 
         if device.type == "cuda":
             match channel_group.size():
+                case 1:
+                    return lambda data, buffer, empty, group, async_op: (data, [None])
                 case 2:
-                    return dist_conv.comm_2way_alltoall
+                    return comm.comm_2way_alltoall
                 case _:
                     raise NotImplementedError(
                         f"comm all to all is not implemented for channel group size {channel_group.size()}."
                     )
         elif device.type == "cpu":
             match channel_group.size():
+                case 1:
+                    return lambda data, buffer, empty, group, async_op: (data, [None])
                 case 2:
-                    return dist_conv.comm_2way_p2p
+                    return comm.comm_2way_p2p
                 case _:
                     raise NotImplementedError(
                         f"comm all to all is not implemented for channel group size {channel_group.size()}."
@@ -472,11 +476,7 @@ class ConvSelectionStrategy:
         else:
             return self._reduce_bias_over_spatial_group
 
-    def _no_bias(
-        self,
-        grad_output: torch.Tensor,
-        spatial_group: Optional[dist.ProcessGroup] = None,
-    ) -> None:
+    def _no_bias(self, *args: Any, **kwargs: Any) -> None:
         """No-op."""
         return None
 
@@ -591,16 +591,20 @@ class ConvTransposeSelectionStrategy:
 
         if device.type == "cuda":
             match channel_group.size():
+                case 1:
+                    return lambda data, buffer, empty, group, async_op: (data, [None])
                 case 2:
-                    return dist_conv.comm_2way_alltoall
+                    return comm.comm_2way_alltoall
                 case _:
                     raise NotImplementedError(
                         f"comm all to all is not implemented for channel parallelism {channel_group.size()}."
                     )
         elif device.type == "cpu":
             match channel_group.size():
+                case 1:
+                    return lambda data, buffer, empty, group, async_op: (data, [None])
                 case 2:
-                    return dist_conv.comm_2way_p2p
+                    return comm.comm_2way_p2p
                 case _:
                     raise NotImplementedError(
                         f"comm all to all is not implemented for parallelism {channel_group.size()}."
@@ -962,7 +966,7 @@ class ConvTransposeSelectionStrategy:
         return w
 
     def _no_reshape_weights(
-        self, w: torch.Tensor, x: Optional[torch.Tensor] = None
+        self, w: torch.Tensor, *args: Any, **kwargs: Any
     ) -> torch.Tensor:
         """No-op."""
         return w
@@ -993,7 +997,7 @@ class ConvTransposeSelectionStrategy:
         else:
             return self._reduce_bias_over_spatial_group
 
-    def _no_bias(self, **kwargs: Any) -> None:
+    def _no_bias(self, *args: Any, **kwargs: Any) -> None:
         """No-op."""
         return None
 
@@ -1020,7 +1024,7 @@ class ConvTransposeSelectionStrategy:
         return grad_output.sum(dim=(-4, -2, -1))
 
     def _reduce_bias_over_spatial_group(
-        self, grad_output: torch.Tensor, spatial_group: Optional[dist.ProcessGroup]
+        self, grad_output: torch.Tensor, *args: Any, **kwargs: Any
     ) -> torch.Tensor:
         """
         Sum grad_output to get grad_bias.
@@ -1029,8 +1033,8 @@ class ConvTransposeSelectionStrategy:
         ----------
         grad_output: torch.Tensor
             Gradient wrt output.
-        spatial_group: dist.ProcessGroup
-            Process group for domain-parallel ranks.
+        *args: Any
+        **kwargs: Any
 
         Returns
         -------
@@ -1136,7 +1140,6 @@ class DistributedConv2D(torch.nn.Module):
         self.device = device
         self.parallelism = parallelism
         self.dtype = dtype
-        print(f"groups {groups} device {device}")
         self.empty = torch.empty(0, device=self.device, dtype=self.dtype)
         self.bayesian = bayesian
 
@@ -1255,7 +1258,6 @@ class DistributedConv2D(torch.nn.Module):
             bayesian=False,  # TODO
             dtype=model.weight.dtype,
         )
-        print("initted")
         # Map weights — clone so the original graph is detached
         in_rank = process_mesh_dict[col_kw].rank()
         in_shard = model.weight.shape[0] // process_mesh_dict[col_kw].size()

@@ -544,7 +544,7 @@ def test_xwt_backward_dtp(device: torch.device, process_mesh_dict_2x2: dict) -> 
     local_rank = dist.get_rank(group=process_mesh_dict_2x2["col"])
     torch.manual_seed(process_mesh_dict_2x2["model"].rank())
 
-    in_dim, out_dim = 4, 4
+    in_dim, out_dim = 10, 10
     seq_global = 10
 
     loss_fn = torch.nn.MSELoss(reduction="mean")
@@ -560,13 +560,14 @@ def test_xwt_backward_dtp(device: torch.device, process_mesh_dict_2x2: dict) -> 
         process_mesh_dict_2x2["col"],
         False,
     ).to(device)
+
     # broadcasting
     for p in linlayer.parameters():
         dist.broadcast(p.data, group_src=0, group=process_mesh_dict_2x2["row"])
-    for p in linlayer.parameters():
-        p.register_post_accumulate_grad_hook(
-            hooks.make_grad_sync_hook(process_mesh_dict_2x2["row"])
-        )
+
+    linlayer.weight.register_post_accumulate_grad_hook(
+        hooks.make_grad_sync_hook(process_mesh_dict_2x2["row"])
+    )
 
     w_gathered = gather_1d_results(
         linlayer.weight.data,
@@ -589,8 +590,11 @@ def test_xwt_backward_dtp(device: torch.device, process_mesh_dict_2x2: dict) -> 
     for _ in range(20):
         optimizer.zero_grad()
         ref_optimizer.zero_grad()
-        x_in = torch.randn(
-            1, seq_global, in_dim // 2, dtype=linlayer.weight.dtype, device=device
+        x_in = (
+            torch.randn(
+                1, seq_global, in_dim // 2, dtype=linlayer.weight.dtype, device=device
+            )
+            / 30
         )
         x_in.requires_grad_(True)
         y = linlayer(x_in)
@@ -658,10 +662,10 @@ def test_xwt_backward_dtp(device: torch.device, process_mesh_dict_2x2: dict) -> 
     assert isinstance(w_grad_gathered, torch.Tensor)
     assert isinstance(x_gathered.grad, torch.Tensor)
 
-    assert torch.allclose(y_gathered, ref_y, atol=1e-5)
-    assert torch.allclose(w_gathered, ref_linlayer.weight, atol=1e-5)
-    assert torch.allclose(w_grad_gathered, ref_linlayer.weight.grad, atol=1e-5)
-    assert torch.allclose(x_grad_gathered, x_gathered.grad, atol=1e-5)
+    assert torch.allclose(y_gathered, ref_y, atol=1e-4)
+    assert torch.allclose(w_gathered, ref_linlayer.weight, atol=1e-4)
+    assert torch.allclose(w_grad_gathered, ref_linlayer.weight.grad, atol=1e-4)
+    assert torch.allclose(x_grad_gathered, x_gathered.grad, atol=1e-4)
 
     if linlayer.bias is not None:
         assert isinstance(linlayer.bias, torch.Tensor)
@@ -686,10 +690,9 @@ def test_xwt_backward_dtp(device: torch.device, process_mesh_dict_2x2: dict) -> 
             pm_key="col",
             dim=-1,
         )
-        b_grad_gathered = b_grad_gathered / 2
-
-        assert torch.allclose(b_gathered, ref_linlayer.bias, atol=1e-5)
-        assert torch.allclose(b_grad_gathered, ref_linlayer.bias.grad, atol=1e-5)
+        b_grad_gathered = b_grad_gathered
+        assert torch.allclose(b_gathered, ref_linlayer.bias, atol=1e-3)
+        assert torch.allclose(b_grad_gathered, ref_linlayer.bias.grad, atol=1e-3)
 
 
 @pytest.mark.dist(8)

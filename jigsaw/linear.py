@@ -392,7 +392,7 @@ class DistributedXWT(torch.nn.Module):
         """
         super().__init__()
 
-        stdev = 1.0 / np.sqrt(in_dim * 2)
+        stdev = 1.0 / np.sqrt(in_dim * channel_group.size())
         assert out_dim % channel_group.size() == 0
         assert in_dim % (model_group.size() // channel_group.size()) == 0
         if bias:
