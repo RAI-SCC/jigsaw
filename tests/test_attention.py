@@ -8,7 +8,11 @@ from jigsaw.utils_aggregate import (
 
 from .process_mesh import *
 
+<<<<<<< HEAD
 pytestmark = [pytest.mark.distributed_required]
+=======
+pytestmark = [pytest.mark.gpu_required, pytest.mark.dist_required]
+>>>>>>> d1d96f3 (chore: pre-commit)
 
 
 def test_init_attention(device: torch.device, process_mesh_dict_2x2: dict) -> None:

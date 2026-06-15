@@ -7,7 +7,11 @@ from jigsaw.utils_aggregate import gather_results_as_list
 
 from .process_mesh import *
 
+<<<<<<< HEAD
 pytestmark = [pytest.mark.distributed_required]
+=======
+pytestmark = [pytest.mark.gpu_required, pytest.mark.dist_required]
+>>>>>>> d1d96f3 (chore: pre-commit)
 
 
 class TestConv2d:

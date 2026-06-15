@@ -4,8 +4,9 @@ import torch.distributed as dist
 
 import jigsaw.distributed_matmul as dist_mm
 from jigsaw.utils_aggregate import gather_results
+from tests.process_mesh import process_mesh_dict_2x2
 
-pytestmark = [pytest.mark.gpu_required, pytest.mark.distributed_required]
+pytestmark = [pytest.mark.gpu_required, pytest.mark.dist_required]
 
 
 def test_xwt_fourway(device: torch.device, process_mesh_dict_2x2: dict) -> None:

@@ -3,8 +3,13 @@ import torch
 
 from jigsaw import roll
 from jigsaw.utils_aggregate import gather_1d_results
+<<<<<<< HEAD
 
 pytestmark = [pytest.mark.distributed_required]
+=======
+from tests.process_mesh import process_mesh_dict_2x2
+pytestmark = [pytest.mark.gpu_required, pytest.mark.dist_required]
+>>>>>>> d1d96f3 (chore: pre-commit)
 
 
 @pytest.mark.dist(4)

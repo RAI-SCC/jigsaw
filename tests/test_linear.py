@@ -10,7 +10,7 @@ from jigsaw.utils_aggregate import (
     gather_results,
 )
 
-pytestmark = [pytest.mark.distributed_required]
+pytestmark = [pytest.mark.dist_required]
 
 
 @pytest.mark.dist(4)
