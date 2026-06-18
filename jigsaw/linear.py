@@ -291,8 +291,8 @@ class DistributedXWT(torch.nn.Module):
         local_rank: int,
         device: torch.device,
         model_group: dist.ProcessGroup,
-        spatial_group: dist.ProcessGroup,
-        channel_group: dist.ProcessGroup,
+        tensor_group: dist.ProcessGroup,
+        domain_group: dist.ProcessGroup,
         bayesian: bool = False,
     ) -> None:
         """
@@ -314,24 +314,22 @@ class DistributedXWT(torch.nn.Module):
             Number of processes the model is distributed over
         model_group: dist.ProcessGroup
             Process group containing all ranks within model-parallel instances.
-            Is the Union of spatial_group and channel_group.
-        spatial_group: dist.ProcessGroup
-            Process group containin domain-parallel processes.
-        channel_group: dist.ProcessGroup
-            Process group containin channel-parallel processes.
+            Is the Union of domain_group and tensor_group.
+        domain_group: dist.ProcessGroup
+            Process group containin domain-parallel processes. Splits the last dimension of X, and the last dimension of W.
+        tensor_group: dist.ProcessGroup
+            Process group containin tensor/weight-parallel processes. Splits the first dimension of the weights and bias terms.
         bayesian: bool
             Boolean flag for whether the model is bayesian
         """
         super().__init__()
 
         stdev = 1.0 / np.sqrt(in_dim * 2)
-        assert out_dim % channel_group.size() == 0
-        assert in_dim % (model_group.size() // channel_group.size()) == 0
-        if bias:
-            assert out_dim % channel_group.size() == 0
-        bias_dim = out_dim // channel_group.size()
-        out_dim = out_dim // (model_group.size() // channel_group.size())
-        in_dim = in_dim // (channel_group.size())
+        assert in_dim % domain_group.size() == 0
+        assert out_dim % (model_group.size() // domain_group.size()) == 0
+        bias_dim = out_dim // domain_group.size()
+        in_dim = in_dim // domain_group.size()
+        out_dim = out_dim // (model_group.size() // domain_group.size()) 
 
         self.weight = torch.nn.Parameter(
             torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev).to(device)
@@ -343,13 +341,15 @@ class DistributedXWT(torch.nn.Module):
             if bias
             else None
         )
+        
 
         self.out_dim = out_dim
         self.in_dim = in_dim
         self.device = device
         self.local_rank = local_rank
         self.model_group = model_group
-        self.spatial_group = spatial_group
+        self.domain_group = domain_group
+        self.tensor_group = tensor_group
         self.bayesian = bayesian
         self.selector = LinearSelectionStrategy(
             self.parallelism,
@@ -360,9 +360,9 @@ class DistributedXWT(torch.nn.Module):
 
         if self.bias is not None:
             self.bias.register_post_accumulate_grad_hook(
-                hooks.make_grad_sync_hook(self.spatial_group, async_op=True)
+                hooks.make_grad_sync_hook(self.tensor_group, async_op=True)
             )
-            dist.broadcast(self.bias.data, group_src=0, group=self.spatial_group)
+            dist.broadcast(self.bias.data, group_src=0, group=self.tensor_group)
 
         self.XWT = XWT.apply
 
@@ -392,7 +392,7 @@ class DistributedXWT(torch.nn.Module):
             self.device,
             self.selector,
             self.model_group,
-            self.spatial_group,
+            self.tensor_group,
             self.bayesian,
         )
         cij = cast(torch.Tensor, cij)
@@ -403,7 +403,7 @@ class DistributedXWT(torch.nn.Module):
         num_param = (
             0
             if self.bias is None
-            else self.bias.numel() // dist.get_world_size(group=self.spatial_group)
+            else self.bias.numel() // dist.get_world_size(group=self.tensor_group)
         )
         return num_param + self.weight.numel()
 
@@ -459,8 +459,8 @@ class DistributedXWT(torch.nn.Module):
             local_rank=process_mesh_dict[model_kw].rank(),
             device=device,
             model_group=process_mesh_dict[model_kw],
-            spatial_group=process_mesh_dict[row_kw],
-            channel_group=process_mesh_dict[col_kw],
+            tensor_group=process_mesh_dict[row_kw],
+            domain_group=process_mesh_dict[col_kw],
             bayesian=False,  # TODO
         )
 
@@ -773,7 +773,7 @@ class XWT(torch.autograd.Function):
         spatial_group = ctx.spatial_group
 
         weight = selector.reshape_weights(weight)
-
+        
         grad_input, grad_weight = selector.mm_kernels[3](
             grad_output,
             weight,

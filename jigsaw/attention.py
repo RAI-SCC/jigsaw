@@ -78,8 +78,8 @@ class DistributedAttention(torch.nn.Module):
                 local_rank=self.local_rank,
                 device=self.device,
                 model_group=self.channel_group,
-                spatial_group=self.spatial_group,
-                channel_group=self.channel_group,
+                tensor_group=self.spatial_group,
+                domain_group=self.channel_group,
                 bayesian=bayesian,
             )
 
@@ -90,8 +90,8 @@ class DistributedAttention(torch.nn.Module):
             local_rank=self.local_rank,
             device=self.device,
             model_group=self.channel_group,
-            spatial_group=self.spatial_group,
-            channel_group=self.channel_group,
+            tensor_group=self.spatial_group,
+            domain_group=self.channel_group,
             bayesian=bayesian,
         )
 
@@ -428,6 +428,7 @@ class Attention(torch.nn.Module):
             dropout_p=attention.dropout_p,
             local_rank=process_mesh_dict[model_kw].rank(),
             device=attention.device,
+            model_group=process_mesh_dict[model_kw],
             spatial_group=process_mesh_dict[row_kw],
             channel_group=process_mesh_dict[col_kw],
             bayesian=False,

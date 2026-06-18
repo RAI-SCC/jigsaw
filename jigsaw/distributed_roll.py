@@ -62,7 +62,7 @@ def exchange_halo_1d(
 
     dist.all_to_all(recv_list, send_list, group=group, async_op=False)
 
-    x[sl] = recv
+    x[sl_tuple] = recv
     return x
 
 
