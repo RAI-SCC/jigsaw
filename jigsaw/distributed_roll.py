@@ -31,6 +31,8 @@ def exchange_halo_1d(
         Process group where communication occurs.
     empty: torch.Tensor
         Empty tensor for computation reasons.
+    comm_halo_1d_fn: Callable
+        Relevant function to communicate the halo.
 
     Returns
     -------
@@ -45,8 +47,10 @@ def exchange_halo_1d(
 
     halo_to_send = x[sl_tuple].contiguous()
     recv = torch.zeros_like(halo_to_send)
-
-    recv = comm_halo_1d_fn(window_size, halo_to_send, recv, group, empty=empty)
+    offset = 1 if window_size > 0 else -1
+    recv, _ = comm_halo_1d_fn(
+        halo_to_send, recv, offset=offset, group=group, async_op=False
+    )
 
     x[sl] = recv
     return x
@@ -81,6 +85,8 @@ def distributed_roll(
         Corresponding process groups to distributed_dims.
     empty: torch.Tensor
         Empty tensor for computation purposes.
+    exchange_halo_1d_fn: Callable
+        Communication function for given backend.
 
     Returns
     -------

@@ -5,6 +5,7 @@ from typing import Any, Callable, Optional, Protocol, cast
 import torch
 import torch.distributed as dist
 
+from . import comm
 from . import distributed_roll as dist_roll
 
 
@@ -67,9 +68,9 @@ class RollSelectionStrategy:
         If cpu, comm will occur via p2p.
         """
         if device.type == "cuda":
-            return dist_roll.comm_halo_1d
+            return comm.comm_1d_alltoall
         elif device.type == "cpu":
-            return dist_roll.comm_halo_1d_p2p
+            return comm.comm_1d_p2p
         else:
             raise ValueError(f"No halo 1d function possible for device {device.type}")
 
@@ -212,6 +213,7 @@ class RollFunction(torch.autograd.Function):
             tuple[int, ...],
             tuple[dist.ProcessGroup, ...],
             torch.Tensor,
+            RollSelectionStrategy,
         ],
         output: torch.Tensor,
     ) -> None:

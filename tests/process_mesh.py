@@ -110,6 +110,7 @@ def process_mesh_dict_4x2(device: torch.Tensor) -> dict:
         mesh_dim_names=["row", "col"],
     )
 
+
 @pytest.fixture(scope="session")
 def process_mesh_dict_1x1(device: torch.Tensor) -> dict:
     """Return process mesh."""

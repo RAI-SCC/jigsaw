@@ -193,9 +193,12 @@ def _attn_core_flash(
     return out, logsumexp
 
 
-
 def _attn_core_math(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale: Optional[float]=0.0, dropout_p: float = 0.0
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    scale: Optional[float] = 0.0,
+    dropout_p: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Call vanilla attention forward pass.
@@ -278,18 +281,48 @@ def _attn_core_flash_backward(
     return dq, dk, dv
 
 
-def _attn_core_math_backward(grad_out, q, k, v, out, lse, scale, *args, **kwargs):
-    S = (q @ k.mT) * scale                      # (B, H, Sq, Sk)
-    P = torch.exp(S - lse.unsqueeze(-1))        # global norm via saved lse
+def _attn_core_math_backward(
+    grad_out: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    logsumexp: torch.Tensor,
+    scale: float,
+    *args: Any,
+    **kwargs: Any,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Backward call to flash attention.
 
-    dv = P.mT @ grad_out
+    dout: torch.Tensor
+        Gradient wrt output.
+    q: torch.Tensor
+        Queries.
+    k: torch.Tensor
+        Keys.
+    v: torch.Tensor
+        Values.
+    out: torch.Tensor
+        Output from forward pass.
+    logsumexp: torch.Tensor
+        Logsumexp from forward pass.
+    scale: float
+        Scale parameter for normalizing Attention.
+    args: Any
+    kwargs: Any
+    """
+    attn = (q @ k.mT) * scale  # (B, H, Sq, Sk)
+    p = torch.exp(attn - logsumexp.unsqueeze(-1))  # global norm via saved lse
 
-    dP = grad_out @ v.mT
-    D = (grad_out * out).sum(dim=-1, keepdim=True)   # GLOBAL row-sum, from saved out
-    dS = P * (dP - D) * scale
+    dv = p.mT @ grad_out
 
-    dq = dS @ k
-    dk = dS.mT @ q
+    dp = grad_out @ v.mT
+    d = (grad_out * out).sum(dim=-1, keepdim=True)  # GLOBAL row-sum, from saved out
+    d_attn = p * (dp - d) * scale
+
+    dq = d_attn @ k
+    dk = d_attn.mT @ q
     return dq, dk, dv
 
 
@@ -504,14 +537,20 @@ def broadcast_forward(
 
     # Kick off first send
     # recv_buf either holds x or kv
-    recv_buf, handle = ring_config.send_in_forward_fn(x, kv, local_rank, group, step=0, empty=empty)
+    recv_buf, handle = ring_config.send_in_forward_fn(
+        x, kv, local_rank, group, step=0, empty=empty
+    )
     handle.wait()
     x_j, kv_j, kj, vj = ring_config.recv_in_forward(recv_buf, x_j, kv_j, kj, vj)
 
     for step in range(world_size):
         if step + 1 < world_size:
             recv_buf, handle = ring_config.send_in_forward_fn(
-                x, kv, local_rank, group, step + 1,
+                x,
+                kv,
+                local_rank,
+                group,
+                step + 1,
             )
 
         if ring_config.send_in_forward == SendForward.X:
@@ -671,7 +710,6 @@ def build_ring_forward(
         return broadcast_forward
     else:
         return ring_forward
-    
 
 
 def ring_backward(
@@ -790,7 +828,7 @@ def ring_backward(
                                 group=group,
                                 async_op=True,
                                 empty=empty,
-                                step=step
+                                step=step,
                             )
                             _, kj, vj = _compute_kv(x, w_qkv, b, seq_local, h, d)
 
@@ -803,7 +841,7 @@ def ring_backward(
                                 group=group,
                                 async_op=True,
                                 empty=empty,
-                                step=step
+                                step=step,
                             )
                             kj, vj = kv[0].contiguous(), kv[1].contiguous()
 
@@ -829,7 +867,7 @@ def ring_backward(
                             group=group,
                             async_op=True,
                             empty=empty,
-                            step=step
+                            step=step,
                         )
 
         # ---- flash attention backward ----
@@ -865,7 +903,7 @@ def ring_backward(
 
 
 def _build_send_in_forward(
-    send_forward_op, send_in_forward, ring_comm_fn
+    send_forward_op: SendForwardOp, send_in_forward: SendForward, ring_comm_fn: Callable
 ) -> tuple[Callable, Callable]:
     """Build the send and receive functions for forward based on the config."""
     send_func: Callable[..., tuple[torch.Tensor, dist.Work]]
@@ -883,7 +921,7 @@ def _build_send_in_forward(
                         step: int,
                         empty: torch.Tensor,
                         *args: Any,
-                        **kwargs: Any
+                        **kwargs: Any,
                     ) -> tuple[torch.Tensor, dist.Work]:
                         recv_buf = torch.empty_like(x)
                         recv_buf, handle = ring_comm_fn(
@@ -908,7 +946,7 @@ def _build_send_in_forward(
                         step: int,
                         empty: torch.Tensor,
                         *args: Any,
-                        **kwargs: Any
+                        **kwargs: Any,
                     ) -> tuple[torch.Tensor, dist.Work]:
                         recv_buf = torch.empty_like(kv)
                         recv_buf, handle = ring_comm_fn(
@@ -918,7 +956,7 @@ def _build_send_in_forward(
                             group=group,
                             async_op=True,
                             empty=empty,
-                            tag=step
+                            tag=step,
                         )
 
                         return recv_buf, handle
@@ -939,7 +977,7 @@ def _build_send_in_forward(
                         group: dist.ProcessGroup,
                         step: int,
                         *args: Any,
-                        **kwargs: Any
+                        **kwargs: Any,
                     ) -> tuple[torch.Tensor, dist.Work]:
                         if step == local_rank:
                             recv_buf = x
@@ -959,7 +997,7 @@ def _build_send_in_forward(
                         group: dist.ProcessGroup,
                         step: int,
                         *args: Any,
-                        **kwargs: Any
+                        **kwargs: Any,
                     ) -> tuple[torch.Tensor, dist.Work]:
                         if step == local_rank:
                             recv_buf = kv
@@ -1119,7 +1157,7 @@ def accumulate_dkv(
                     group=group,
                     async_op=False,
                     empty=empty,
-                    step=step
+                    step=step,
                 )
 
                 del dkv

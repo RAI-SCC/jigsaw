@@ -1033,8 +1033,10 @@ class ConvTransposeSelectionStrategy:
         ----------
         grad_output: torch.Tensor
             Gradient wrt output.
-        *args: Any
-        **kwargs: Any
+        args: Any
+            Additional args.
+        kwargs: Any
+            Additional key words.
 
         Returns
         -------
