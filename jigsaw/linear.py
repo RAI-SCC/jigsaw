@@ -8,6 +8,7 @@ import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
 from . import distributed_matmul as dist_mm
+from . import distributed_matmul_p2p as dist_mm_p2p
 from . import hooks
 from .utils_aggregate import gather_1d_results, gather_results
 
@@ -21,8 +22,9 @@ class LinearSelectionStrategy:
         bias: torch.Tensor | None,
         bayesian: bool,
         linear_layer: bool = True,
+        device: torch.device = torch.device("cuda"),
     ):
-        self.mm_kernels = self._mm_kernel_selection(parallelism)
+        self.mm_kernels = self._mm_kernel_selection(parallelism, device)
         self.grad_bias = self._grad_bias_selection(parallelism, bias, bayesian)
         self.add_bias = self._add_bias_selection(bias, bayesian)
         self.reshape_weights = self._reshape_weights_selection(bayesian, linear_layer)
@@ -204,7 +206,9 @@ class LinearSelectionStrategy:
         """Return identity when bias does not exist."""
         return None
 
-    def _mm_kernel_selection(self, parallelism: int) -> list[Callable]:
+    def _mm_kernel_selection(
+        self, parallelism: int, device: torch.device
+    ) -> list[Callable]:
         """
         Select distriuted matrix multiplication kernels.
 
@@ -215,69 +219,133 @@ class LinearSelectionStrategy:
         -------
         List[Callable, Callable, Callable]: pointers to xwt, xw, and xtw kernels.
         """
-        xw_t_kernel = self._select_xw_transpose_kernel(parallelism)
-        xw_kernel = self._select_xw_kernel(parallelism)
-        x_t_w_kernel = self._select_x_transpose_w_kernel(parallelism)
-        xw_xtw_fused_kernel = self._select_xw_xtw_fused_kernel(parallelism)
+        xw_t_kernel = self._select_xw_transpose_kernel(parallelism, device)
+        xw_kernel = self._select_xw_kernel(parallelism, device)
+        x_t_w_kernel = self._select_x_transpose_w_kernel(parallelism, device)
+        xw_xtw_fused_kernel = self._select_xw_xtw_fused_kernel(parallelism, device)
 
         return [xw_t_kernel, xw_kernel, x_t_w_kernel, xw_xtw_fused_kernel]
 
-    def _select_xw_transpose_kernel(self, parallelism: int) -> Callable:
-        """Return xw_t kernel based on parallelism."""
-        match parallelism:
-            case 1:
-                return lambda x, w: x @ w.mT
-            case 2:
-                return dist_mm.xw_transpose_twoway
-            case 4:
-                return dist_mm.xw_transpose_fourway
-            case 8:
-                return dist_mm.xw_transpose_eightway
-            case _:
-                raise ValueError(f"Unsupported parallelism: {parallelism}")
-        return
+    def _select_xw_transpose_kernel(
+        self, parallelism: int, device: torch.device = torch.device("cuda")
+    ) -> Callable:
+        """Return xw_t kernel based on parallelism and device."""
+        if device.type == "cuda":
+            match parallelism:
+                case 1:
+                    return lambda x, w: x @ w.mT
+                case 2:
+                    return dist_mm.xw_transpose_twoway
+                case 4:
+                    return dist_mm.xw_transpose_fourway
+                case 8:
+                    return dist_mm.xw_transpose_eightway
+                case _:
+                    raise ValueError(f"Unsupported parallelism: {parallelism}")
+        elif device.type == "cpu":
+            match parallelism:
+                case 1:
+                    return lambda x, w: x @ w.mT
+                case 2:
+                    return dist_mm_p2p.xw_transpose_twoway
+                case 4:
+                    return dist_mm_p2p.xw_transpose_fourway
+                case 8:
+                    return dist_mm_p2p.xw_transpose_eightway
+                case _:
+                    raise ValueError(f"Unsupported parallelism: {parallelism}")
+        else:
+            raise ValueError(f"Unsupported device {device.type}")
 
-    def _select_xw_kernel(self, parallelism: int) -> Callable:
+    def _select_xw_kernel(
+        self, parallelism: int, device: torch.device = torch.device("cuda")
+    ) -> Callable:
         """Return xw kernel based on parallelism."""
-        match parallelism:
-            case 1:
-                return lambda x, w: x @ w
-            case 2:
-                return dist_mm.xw_twoway
-            case 4:
-                return dist_mm.xw_fourway
-            case 8:
-                return dist_mm.xw_eightway
-            case _:
-                raise ValueError(f"Unsupported parallelism: {parallelism}")
-        return
+        if device.type == "cuda":
+            match parallelism:
+                case 1:
+                    return lambda x, w: x @ w
+                case 2:
+                    return dist_mm.xw_twoway
+                case 4:
+                    return dist_mm.xw_fourway
+                case 8:
+                    return dist_mm.xw_eightway
+                case _:
+                    raise ValueError(f"Unsupported parallelism: {parallelism}")
+        elif device.type == "cpu":
+            match parallelism:
+                case 1:
+                    return lambda x, w: x @ w
+                case 2:
+                    return dist_mm_p2p.xw_twoway
+                case 4:
+                    return dist_mm_p2p.xw_fourway
+                case 8:
+                    return dist_mm_p2p.xw_eightway
+                case _:
+                    raise ValueError(f"Unsupported parallelism: {parallelism}")
+        else:
+            raise ValueError(f"Unsupported device {device.type}")
 
-    def _select_x_transpose_w_kernel(self, parallelism: int) -> Callable:
+    def _select_x_transpose_w_kernel(
+        self, parallelism: int, device: torch.device = torch.device("cuda")
+    ) -> Callable:
         """Return x_tw kernel based on parallelism."""
-        match parallelism:
-            case 1:
-                return lambda x, w: x.mT @ w
-            case 2:
-                return dist_mm.x_transpose_w_twoway
-            case 4:
-                return dist_mm.x_transpose_w_fourway
-            case 8:
-                return dist_mm.x_transpose_w_eightway
-            case _:
-                raise ValueError(f"Unsupported parallelism: {parallelism}")
-        return
+        if device.type == "cuda":
+            match parallelism:
+                case 1:
+                    return lambda x, w: x.mT @ w
+                case 2:
+                    return dist_mm.x_transpose_w_twoway
+                case 4:
+                    return dist_mm.x_transpose_w_fourway
+                case 8:
+                    return dist_mm.x_transpose_w_eightway
+                case _:
+                    raise ValueError(f"Unsupported parallelism: {parallelism}")
+        elif device.type == "cpu":
+            match parallelism:
+                case 1:
+                    return lambda x, w: x.mT @ w
+                case 2:
+                    return dist_mm_p2p.x_transpose_w_twoway
+                case 4:
+                    return dist_mm_p2p.x_transpose_w_fourway
+                case 8:
+                    return dist_mm_p2p.x_transpose_w_eightway
+                case _:
+                    raise ValueError(f"Unsupported parallelism: {parallelism}")
+        else:
+            raise ValueError(f"Unsupported device {device.type}")
 
-    def _select_xw_xtw_fused_kernel(self, parallelism: int) -> Callable:
-        match parallelism:
-            case 1:
-                return dist_mm.fused_xw_xtw_oneway
-            case 2:
-                return dist_mm.fused_xw_xtw_twoway
-            case 4:
-                return dist_mm.fused_xw_xtw_fourway
-            case _:
-                raise ValueError(f"Unsupported parallelism: {parallelism}")
-        return
+    def _select_xw_xtw_fused_kernel(
+        self, parallelism: int, device: torch.device = torch.device("cuda")
+    ) -> Callable:
+        if device.type == "cuda":
+            match parallelism:
+                case 1:
+                    return dist_mm.fused_xw_xtw_oneway
+                case 2:
+                    return dist_mm.fused_xw_xtw_twoway
+                case 4:
+                    return dist_mm.fused_xw_xtw_fourway
+                case _:
+                    raise ValueError(f"Unsupported parallelism: {parallelism}")
+        elif device.type == "cpu":
+            match parallelism:
+                case 1:
+                    return dist_mm.fused_xw_xtw_oneway
+                case 2:
+                    return dist_mm_p2p.fused_xw_xtw_twoway
+                case 4:
+                    return dist_mm_p2p.fused_xw_xtw_fourway
+                case 8:
+                    return dist_mm_p2p.fused_xw_xtw_eightway
+                case _:
+                    raise ValueError(f"Unsupported parallelism: {parallelism}")
+        else:
+            raise ValueError(f"Unsupported device {device.type}")
 
 
 class DistributedXWT(torch.nn.Module):
@@ -324,7 +392,7 @@ class DistributedXWT(torch.nn.Module):
         """
         super().__init__()
 
-        stdev = 1.0 / np.sqrt(in_dim * 2)
+        stdev = 1.0 / np.sqrt(in_dim * channel_group.size())
         assert out_dim % channel_group.size() == 0
         assert in_dim % (model_group.size() // channel_group.size()) == 0
         if bias:
@@ -356,6 +424,7 @@ class DistributedXWT(torch.nn.Module):
             self.bias,
             self.bayesian,
             linear_layer=True,
+            device=self.device,
         )
 
         if self.bias is not None:
@@ -579,6 +648,7 @@ class DistributedXWT(torch.nn.Module):
             self.bias,
             self.bayesian,
             linear_layer=True,
+            device=self.device,
         )
 
         # Find the local and global shapes
@@ -887,10 +957,7 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
         self.spatial_group = spatial_group
         self.bayesian = bayesian
         self.selector = LinearSelectionStrategy(
-            parallelism,
-            None,
-            self.bayesian,
-            linear_layer=False,
+            parallelism, None, self.bayesian, linear_layer=False, device=self.device
         )
 
         self.XWT = XWT.apply
@@ -972,10 +1039,7 @@ class DistributedMatMulXW(torch.nn.Module):
         self.bayesian = bayesian
 
         self.selector = LinearSelectionStrategy(
-            parallelism,
-            None,
-            self.bayesian,
-            linear_layer=False,
+            parallelism, None, self.bayesian, linear_layer=False, device=self.device
         )
 
         self.XW = XW.apply

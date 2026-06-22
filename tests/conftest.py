@@ -1,19 +1,33 @@
 import gc
-import math
 import os
-import subprocess
 import sys
 import warnings
+from collections.abc import Generator
+from typing import Any
 
+import mpi4py.MPI as MPI
 import pytest
 import torch
 import torch.distributed as dist
 
+from tests.process_mesh import *  # noqa: F401
+
+comm = MPI.COMM_WORLD
+mpi_size = comm.Get_size()
+mpi_rank = comm.Get_rank()
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--device",
+        help="Device to run tests on (cpu or cuda)",
+        default="cuda" if torch.cuda.is_available() else "cpu",
+    )
+
 
 def pytest_configure(config):
     """Configure rank 0 to be the only printing rank."""
-    rank = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", 0)))
-    if rank != 0:
+    if mpi_rank != 0:
         config.option.verbose = -1
         sys.stdout = open(os.devnull, "w")
         sys.stderr = open(os.devnull, "w")
@@ -23,99 +37,71 @@ def pytest_configure(config):
 
     config.addinivalue_line("markers", "no_dist_env: skip the dist_env autouse fixture")
     config.addinivalue_line("markers", "gpu_required: test requires GPU")
-    config.addinivalue_line("markers", "distributed_required: test requires distributed environment")
+    config.addinivalue_line(
+        "markers", "distributed_required: test requires distributed environment"
+    )
+    config.addinivalue_line(
+        "markers",
+        "dist(n_ranks): Mark test to run only when running parallel tests, and optionaly, only with the specified ranks",
+    )
+
+
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    # Check if the test has the 'dist' marker or the 'gpu' marker, and skip if the conditions are not met
+    gpu_marker = item.get_closest_marker("gpu")
+    if gpu_marker and (
+        not torch.cuda.is_available()
+        or item.config.getoption("--device") not in ["cuda", "gpu"]
+    ):
+        pytest.skip("Skipping GPU test since CUDA is not available or not selected.")
+
+    skip_marker = item.get_closest_marker("dist")
+    if skip_marker:
+        ranks = int(skip_marker.args[0]) if len(skip_marker.args) == 1 else None
+        if mpi_size <= 1 or (ranks is not None and ranks != mpi_size):
+            pytest.skip(
+                f"Skipping distributed test, only {mpi_size} ranks available, but {ranks if ranks else '> 1'} required"
+            )
 
 
 @pytest.fixture(autouse=True, scope="session")
-def dist_env(request: pytest.FixtureRequest):
+def dist_env(device: torch.device) -> Generator[None, None, None]:
     """Initialize the distributed process group once for the entire test session."""
-    if all(item.get_closest_marker("no_dist_env") for item in request.session.items):
-        yield
-        return
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+        assert dist.is_nccl_available()
+    else:
+        assert dist.is_gloo_available()
 
-    rank = int(os.getenv("SLURM_PROCID"))
-    world_size = int(os.getenv("SLURM_NTASKS"))
-    local_id = int(os.getenv("SLURM_LOCALID", rank))
-
-    device_id = local_id if torch.cuda.device_count() != 1 else 0
-    device = torch.device("cuda", device_id)
-    torch.cuda.set_device(device)
-
-    os.environ["MASTER_PORT"] = "12342"
-
-    master_addr = (
-        subprocess.check_output(
-            ["scontrol", "show", "hostnames", os.environ["SLURM_JOB_NODELIST"]]
-        )
-        .decode()
-        .split("\n")[0]
-        .strip()
-    )
-
-    os.environ["MASTER_ADDR"] = master_addr
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
 
     dist.init_process_group(
-        backend="nccl",
-        rank=rank,
-        world_size=world_size,
-        device_id=device,
-        init_method="env://",
+        backend="nccl" if device.type == "cuda" else "gloo",
+        rank=mpi_rank,
+        world_size=mpi_size,
+        device_id=device.index if device.type == "cuda" else None,
     )
-    yield
+    if not dist.is_initialized():
+        raise RuntimeError("Process group initialization failed.")
+    yield None
     dist.destroy_process_group()
 
 
-@pytest.fixture
-def device() -> torch.device:
-    """Return device."""
-    local_id = int(os.getenv("SLURM_LOCALID", 0))
-    device_id = local_id if torch.cuda.device_count() != 1 else 0
-    return torch.device("cuda", device_id)
+@pytest.fixture(scope="session")
+def device(request: Any) -> torch.device:
+    device = request.config.getoption("--device")
+    torch.set_default_device("cpu")
+    if device == "cpu" or not torch.cuda.is_available():
+        return torch.device("cpu")
+
+    else:
+        local_id = mpi_rank % torch.cuda.device_count()
+        device = torch.device("cuda", local_id)
+        return device
 
 
-def make_process_mesh(
-    device_type: str = "nccl",
-    mesh_shape: list[int] = [2, 2],
-    mesh_dim_names: list[str] = ["row", "col"],
-) -> dict:
-    """Return process mesh with rows, columns, and model group."""
-    assert len(mesh_shape) == len(mesh_dim_names)
-
-    world_size = dist.get_world_size(group=None)
-    if -1 in mesh_shape:
-        index = mesh_shape.index(-1)
-        mesh_shape[index] = world_size // -torch.prod(torch.tensor(mesh_shape)).item()
-
-    row_col_mesh = dist.device_mesh.init_device_mesh(
-        device_type=device_type,
-        mesh_shape=tuple(mesh_shape),
-        mesh_dim_names=tuple(mesh_dim_names),
-    )
-    if len(mesh_shape) == 2:
-        model_mesh = dist.device_mesh.init_device_mesh(
-            device_type=device_type,
-            mesh_shape=tuple([mesh_shape[-1] * mesh_shape[-2]]),
-            mesh_dim_names=tuple(["model"]),
-        )
-    else:  #
-        model_mesh = dist.device_mesh.init_device_mesh(
-            device_type=device_type,
-            mesh_shape=tuple(
-                [math.prod(mesh_shape[:-2]), mesh_shape[-2] * mesh_shape[-1]]
-            ),
-            mesh_dim_names=tuple(["x", "model"]),
-        )
-
-    mesh = {
-        "row": row_col_mesh.get_group("row"),
-        "col": row_col_mesh.get_group("col"),
-        "model": model_mesh.get_group("model"),
-    }
-
-    return mesh
-
-
-@pytest.fixture(autouse=True)
+@pytest.fixture(autouse=False)
 def cuda_cleanup():
     yield
     torch.cuda.synchronize()
@@ -126,10 +112,16 @@ def cuda_cleanup():
 def pytest_collection_modifyitems(config, items):
     """Skip GPU/distributed tests based on environment."""
     has_gpu = torch.cuda.is_available()
-    is_distributed = os.environ.get("SLURM_PROCID") is not None or os.environ.get("RANK") is not None
+    is_distributed = (
+        os.environ.get("SLURM_PROCID") is not None
+        or os.environ.get("RANK") is not None
+        or mpi_size > 1
+    )
 
     for item in items:
         if item.get_closest_marker("gpu_required") and not has_gpu:
             item.add_marker(pytest.mark.skip(reason="GPU not available"))
         if item.get_closest_marker("distributed_required") and not is_distributed:
-            item.add_marker(pytest.mark.skip(reason="Not running in distributed environment"))
+            item.add_marker(
+                pytest.mark.skip(reason="Not running in distributed environment")
+            )
