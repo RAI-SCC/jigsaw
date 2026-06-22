@@ -279,51 +279,18 @@ def _attn_core_flash_backward(
     return dq, dk, dv
 
 
-def _attn_core_math_backward(
-    grad_out: torch.Tensor,
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    out: torch.Tensor,
-    logsumexp: torch.Tensor,
-    scale: float,
-    *args: Any,
-    **kwargs: Any,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Backward call to flash attention.
+def _attn_core_math_backward(grad_out, q, k, v, out, lse, scale, *args, **kwargs):
+    S = (q @ k.mT) * scale                      # (B, H, Sq, Sk)
+    P = torch.exp(S - lse.unsqueeze(-1))        # global norm via saved lse
 
-    dout: torch.Tensor
-        Gradient wrt output.
-    q: torch.Tensor
-        Queries.
-    k: torch.Tensor
-        Keys.
-    v: torch.Tensor
-        Values.
-    out: torch.Tensor
-        Output from forward pass.
-    logsumexp: torch.Tensor
-        Logsumexp from forward pass.
-    scale: float
-        Scale parameter for normalizing Attention.
-    args: Any
-    kwargs: Any
-    """
-    
-    attn = q @ k.mT
-    attn = torch.nn.functional.softmax(attn) * scale
-    dv = attn.mT @ grad_out  # (B, H, Sk, D)
+    dv = P.mT @ grad_out
 
-    # backward through softmax
-    dattn = grad_out @ v.mT  # (B, H, Sq, Sk)
-    ds = attn * (dattn - (dattn * attn).sum(dim=-1, keepdim=True))
-    ds = ds * scale
+    dP = grad_out @ v.mT
+    D = (grad_out * out).sum(dim=-1, keepdim=True)   # GLOBAL row-sum, from saved out
+    dS = P * (dP - D) * scale
 
-    # backward through Q, K
-    dq = ds @ k  # (B, H, Sq, D)
-    dk = ds.mT @ q  # (B, H, Sk, D)
-
+    dq = dS @ k
+    dk = dS.mT @ q
     return dq, dk, dv
 
 

@@ -275,6 +275,7 @@ def test_ring_forward_backward_tmp(
     ):
         pytest.xfail("not yet supported")
 
+    process_mesh_dict = process_mesh_dict_4x1
     ring_config = ring_attn_fns.RingAttentionConfig(
         device=device,
         send_in_forward=send_in_forward,
@@ -286,8 +287,8 @@ def test_ring_forward_backward_tmp(
     )
 
     ring_forward = ring_attn_fns.build_ring_forward(ring_config)
-    local_rank = dist.get_rank(group=None)
-    world_size = dist.get_world_size(group=None)
+    local_rank = dist.get_rank(group=process_mesh_dict["row"])
+    world_size = dist.get_world_size(group=process_mesh_dict["row"])
 
     torch.manual_seed(2)  # same seed for weight initialization
     b, h, n_global, d = 3, 6, world_size * 16, 64
@@ -324,24 +325,24 @@ def test_ring_forward_backward_tmp(
         w_qkv,
         scale,
         0.0,
-        process_mesh_dict_4x1["row"],
+        process_mesh_dict["row"],
         empty,
         local_rank,
         world_size,
         ring_config,
     )
 
-    out_full = gather_1d_results(out, process_mesh_dict_4x1, dim=2)
-    x_full = gather_1d_results(x, process_mesh_dict_4x1, dim=1)
+    out_full = gather_1d_results(out, process_mesh_dict, dim=2)
+    x_full = gather_1d_results(x, process_mesh_dict, dim=1)
     qkv = x_full @ w_qkv.mT
 
-    q_ref = gather_1d_results(q_local, process_mesh_dict_4x1, dim=2).requires_grad_(
+    q_ref = gather_1d_results(q_local, process_mesh_dict, dim=2).requires_grad_(
         True
     )
-    k_ref = gather_1d_results(k_local, process_mesh_dict_4x1, dim=2).requires_grad_(
+    k_ref = gather_1d_results(k_local, process_mesh_dict, dim=2).requires_grad_(
         True
     )
-    v_ref = gather_1d_results(v_local, process_mesh_dict_4x1, dim=2).requires_grad_(
+    v_ref = gather_1d_results(v_local, process_mesh_dict, dim=2).requires_grad_(
         True
     )
 
@@ -378,7 +379,7 @@ def test_ring_forward_backward_tmp(
         lse,
         w_qkv,
         scale,
-        process_mesh_dict_4x1["row"],
+        process_mesh_dict["row"],
         local_rank,
         world_size,
         chunks_to_save,
@@ -396,9 +397,9 @@ def test_ring_forward_backward_tmp(
     assert torch.allclose(dv_ref, v_ref2.grad, atol=1e-4)
 
     # gather
-    dq_full = gather_1d_results(dq_local, process_mesh_dict_4x1, dim=2)
-    dk_full = gather_1d_results(dk_local, process_mesh_dict_4x1, dim=2)
-    dv_full = gather_1d_results(dv_local, process_mesh_dict_4x1, dim=2)
+    dq_full = gather_1d_results(dq_local, process_mesh_dict, dim=2)
+    dk_full = gather_1d_results(dk_local, process_mesh_dict, dim=2)
+    dv_full = gather_1d_results(dv_local, process_mesh_dict, dim=2)
 
     assert torch.allclose(out_full, out_ref, atol=1e-3)
     assert torch.allclose(dq_full, dq_ref.to(dq_full.dtype), atol=1e-3)
@@ -426,6 +427,7 @@ def test_ring_forward_backward_tmp(
         ),
         atol=1e-3,
     )
+    print(f'this pased')
 
 
 @pytest.mark.dist(4)
