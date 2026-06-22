@@ -162,6 +162,7 @@ def comm_1d_p2p(
     group: dist.ProcessGroup,
     async_op: bool = True,
     *args: Any,
+    tag: int = 0,
     **kwargs: Any,
 ) -> tuple[torch.Tensor, Optional[dist.Work]]:
     """
@@ -186,20 +187,20 @@ def comm_1d_p2p(
     buffer: torch.Tensor
         Buffer in which the data is received.
     """
-    send_to = (group.rank() + offset) % group.size()
+    send_to   = (group.rank() + offset) % group.size()
     recv_from = (group.rank() - offset) % group.size()
-
-    if group.rank() % 2 == 0:
-        send = dist.isend(data, group_dst=send_to, group=group)
-        recv = dist.irecv(buffer, group_src=recv_from, group=group)
-        send.wait()
-        if not async_op:
-            recv.wait()
-    elif group.rank() % 2 == 1:
-        recv = dist.irecv(buffer, group_src=recv_from, group=group)
-        send = dist.isend(data, group_dst=send_to, group=group)
-        send.wait()
-        if not async_op:
-            recv.wait()
-
-    return buffer, recv
+    tag = tag * 8
+    
+    send = dist.P2POp(dist.isend, data, group_peer=send_to, group=group, tag=tag)
+    recv = dist.P2POp(dist.irecv, buffer, group_peer=recv_from, group=group, tag=tag)
+    reqs = dist.batch_isend_irecv([send, recv])
+    
+    if not async_op:
+        reqs[0].wait()
+        reqs[1].wait()
+        
+        return buffer, None
+    else:
+        reqs[0].wait()
+    
+    return buffer, reqs[1]        # neither waited; caller controls it

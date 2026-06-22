@@ -218,7 +218,6 @@ def _attn_core_math(
     logsumexp: torch.Tensor
         Intermediate result for online softmax algorithm.
     """
-    print(f'shape of q here {q.shape}, scale {scale}')
     scale = scale or (q.size(-1) ** -0.5)
     scores = (q @ k.mT) * scale
     logsumexp = scores.logsumexp(dim=-1)  # (B, H, Sq)
@@ -505,14 +504,14 @@ def broadcast_forward(
 
     # Kick off first send
     # recv_buf either holds x or kv
-    recv_buf, handle = ring_config.send_in_forward_fn(x, kv, 0, local_rank, group)
+    recv_buf, handle = ring_config.send_in_forward_fn(x, kv, local_rank, group, step=0, empty=empty)
     handle.wait()
     x_j, kv_j, kj, vj = ring_config.recv_in_forward(recv_buf, x_j, kv_j, kj, vj)
 
     for step in range(world_size):
         if step + 1 < world_size:
             recv_buf, handle = ring_config.send_in_forward_fn(
-                x, kv, step + 1, local_rank, group
+                x, kv, local_rank, group, step + 1,
             )
 
         if ring_config.send_in_forward == SendForward.X:
@@ -592,7 +591,7 @@ def ring_forward(
     # Kick off first send
     # recv_buf either holds x or kv
     recv_buf, handle = ring_config.send_in_forward_fn(
-        x_j, kv_j, world_size, local_rank, group, empty
+        x_j, kv_j, local_rank, group, step=0, empty=empty
     )
 
     for step in range(world_size):
@@ -632,10 +631,10 @@ def ring_forward(
             recv_buf, handle = ring_config.send_in_forward_fn(
                 x_j,
                 kv_j,
-                world_size,
                 local_rank,
                 group,
-                empty,
+                step=step,
+                empty=empty,
             )
 
     # Make sure all offloads complete and GPU refs to offloaded tensors are dropped
@@ -791,6 +790,7 @@ def ring_backward(
                                 group=group,
                                 async_op=True,
                                 empty=empty,
+                                step=step
                             )
                             _, kj, vj = _compute_kv(x, w_qkv, b, seq_local, h, d)
 
@@ -803,6 +803,7 @@ def ring_backward(
                                 group=group,
                                 async_op=True,
                                 empty=empty,
+                                step=step
                             )
                             kj, vj = kv[0].contiguous(), kv[1].contiguous()
 
@@ -828,6 +829,7 @@ def ring_backward(
                             group=group,
                             async_op=True,
                             empty=empty,
+                            step=step
                         )
 
         # ---- flash attention backward ----
@@ -876,10 +878,12 @@ def _build_send_in_forward(
                     def send_func(  # type: ignore[assignment]
                         x: torch.Tensor,
                         kv: torch.Tensor,
-                        world_size: int,
-                        rank: int,
+                        local_rank: int,
                         group: dist.ProcessGroup,
+                        step: int,
                         empty: torch.Tensor,
+                        *args: Any,
+                        **kwargs: Any
                     ) -> tuple[torch.Tensor, dist.Work]:
                         recv_buf = torch.empty_like(x)
                         recv_buf, handle = ring_comm_fn(
@@ -888,6 +892,7 @@ def _build_send_in_forward(
                             offset=1,
                             group=group,
                             async_op=True,
+                            tag=step,
                             empty=empty,
                         )
 
@@ -898,10 +903,12 @@ def _build_send_in_forward(
                     def send_func(  # type: ignore[assignment]
                         x: torch.Tensor,
                         kv: torch.Tensor,
-                        world_size: int,
-                        rank: int,
+                        local_rank: int,
                         group: dist.ProcessGroup,
+                        step: int,
                         empty: torch.Tensor,
+                        *args: Any,
+                        **kwargs: Any
                     ) -> tuple[torch.Tensor, dist.Work]:
                         recv_buf = torch.empty_like(kv)
                         recv_buf, handle = ring_comm_fn(
@@ -911,6 +918,7 @@ def _build_send_in_forward(
                             group=group,
                             async_op=True,
                             empty=empty,
+                            tag=step
                         )
 
                         return recv_buf, handle
@@ -927,11 +935,13 @@ def _build_send_in_forward(
                     def send_func(  # type: ignore[assignment]
                         x: torch.Tensor,
                         kv: torch.Tensor,
-                        step: int,
-                        rank: int,
+                        local_rank: int,
                         group: dist.ProcessGroup,
+                        step: int,
+                        *args: Any,
+                        **kwargs: Any
                     ) -> tuple[torch.Tensor, dist.Work]:
-                        if step == rank:
+                        if step == local_rank:
                             recv_buf = x
                         else:
                             recv_buf = torch.empty_like(x)
@@ -945,11 +955,13 @@ def _build_send_in_forward(
                     def send_func(  # type: ignore[assignment]
                         x: torch.Tensor,
                         kv: torch.Tensor,
-                        step: int,
-                        rank: int,
+                        local_rank: int,
                         group: dist.ProcessGroup,
+                        step: int,
+                        *args: Any,
+                        **kwargs: Any
                     ) -> tuple[torch.Tensor, dist.Work]:
-                        if step == rank:
+                        if step == local_rank:
                             recv_buf = kv
                         else:
                             recv_buf = torch.empty_like(kv)
@@ -1107,6 +1119,7 @@ def accumulate_dkv(
                     group=group,
                     async_op=False,
                     empty=empty,
+                    step=step
                 )
 
                 del dkv
