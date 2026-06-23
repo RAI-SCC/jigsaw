@@ -363,7 +363,9 @@ def test_ring_forward_backward(
     q_ref2 = q_ref2.requires_grad_(True)
     k_ref2 = k_ref2.requires_grad_(True)
     v_ref2 = v_ref2.requires_grad_(True)
-    out_core = ring_config.attn_core_forward(q_ref2, k_ref2, v_ref2, dropout_p=0.0)[0]
+    out_core = ring_config.attn_core_forward_fn(q_ref2, k_ref2, v_ref2, dropout_p=0.0)[
+        0
+    ]
     out_core = out_core.requires_grad_(True)
 
     dout_local = torch.ones_like(out, device=device, dtype=out_ref.dtype)

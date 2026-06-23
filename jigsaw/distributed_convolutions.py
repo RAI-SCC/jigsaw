@@ -728,7 +728,7 @@ def conv2d_fourway(
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     empty: torch.Tensor,
-    selector: Any,
+    config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
     """Distributed 2d convolution."""
     # Setup
@@ -738,7 +738,7 @@ def conv2d_fourway(
     right_to_left, left_to_right = calc_halo_sizes(x.shape, kernel_size[1], stride[1])
 
     # Spatial split
-    x_with_halos = selector.communicate_halos_forward(
+    x_with_halos = config.communicate_halos_forward(
         x,
         right_to_left,
         left_to_right,
@@ -764,8 +764,8 @@ def conv2d_fourway(
         dilation,
         empty,
         channel_group,
-        selector.conv2d_fn,
-        selector.comm_fn,
+        config.conv2d_fn,
+        config.comm_fn,
     )
     return y, x_left, x_right, right_to_left, left_to_right
 
@@ -782,7 +782,7 @@ def conv2d_eightway(
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     empty: torch.Tensor,
-    selector: Any,
+    config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int], list[int]]:
     """Distributed 2d convolution."""
     # Setup
@@ -793,7 +793,7 @@ def conv2d_eightway(
         x.shape, kernel_size[1], stride[1]
     )
     # Spatial split
-    x_with_halos = selector.communicate_halos_forward(
+    x_with_halos = config.communicate_halos_forward(
         x,
         right_to_left,
         left_to_right,
@@ -818,8 +818,8 @@ def conv2d_eightway(
         dilation,
         empty,
         channel_group,
-        selector.conv2d_fn,
-        selector.comm_fn,
+        config.conv2d_fn,
+        config.comm_fn,
     )
 
     return y, x_left, x_right, right_to_left, left_to_right
@@ -837,7 +837,7 @@ def conv_transpose2d_twoway(
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     empty: torch.Tensor,
-    selector: Any,
+    config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Distributed 2d convolution."""
     # Setup
@@ -851,12 +851,12 @@ def conv_transpose2d_twoway(
         padding=padding,
         dilation=dilation,
         channel_group=channel_group,
-        conv_transpose2d_fn=selector.conv_transpose_2d_fn,
-        comm_fn=selector.comm_fn,
+        conv_transpose2d_fn=config.conv_transpose_2d_fn,
+        comm_fn=config.comm_fn,
     )
 
     # communicate x1, x0
-    y, halo_sizes = selector.communicate_halos_forward(
+    y, halo_sizes = config.communicate_halos_forward(
         x,
         y,
         kernel_size[1],
@@ -884,7 +884,7 @@ def conv_transpose2d_fourway(
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     empty: torch.Tensor,
-    selector: Any,
+    config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Distributed 2d convolution."""
     # Setup
@@ -897,11 +897,11 @@ def conv_transpose2d_fourway(
         padding=padding,
         dilation=dilation,
         channel_group=channel_group,
-        conv_transpose2d_fn=selector.conv_transpose2d_fn,
-        comm_fn=selector.comm_fn,
+        conv_transpose2d_fn=config.conv_transpose2d_fn,
+        comm_fn=config.comm_fn,
     )
 
-    y, halo_sizes = selector.communicate_halos_forward(
+    y, halo_sizes = config.communicate_halos_forward(
         x,
         y,
         kernel_size[1],
@@ -929,11 +929,11 @@ def conv_transpose2d_fourway_backward(
     empty: torch.Tensor,
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
-    selector: Any,
+    config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Backward pass for conv_transpose2d distribtuted 4ways."""
     right_to_left, left_to_right = halo_sizes[0], halo_sizes[1]
-    grad_output = selector.communicate_halos_backward(
+    grad_output = config.communicate_halos_backward(
         grad_output,
         right_to_left,
         left_to_right,
@@ -944,7 +944,7 @@ def conv_transpose2d_fourway_backward(
     )
 
     # handle autocasting by matching dtype of grad_output to weight dtype
-    g_x, g_w, _ = selector.conv_transpose2d_grad_fn(
+    g_x, g_w, _ = config.conv_transpose2d_grad_fn(
         grad_output,
         x_aug,
         weight,
@@ -971,7 +971,7 @@ def conv_transpose2d_fourway_backward(
         in_channels_global,
         channel_group,
         async_op=True,
-        comm_fn=selector.comm_fn,
+        comm_fn=config.comm_fn,
     )
 
     for g_x_handle in g_x_handles:
@@ -1004,11 +1004,11 @@ def conv_transpose2d_eightway_backward(
     empty: torch.Tensor,
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
-    selector: Any,
+    config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Backward pass for conv_transpose2d distributed 8ways."""
     right_to_left, left_to_right = halo_sizes[0], halo_sizes[1]
-    grad_output = selector.communicate_halos_backward(
+    grad_output = config.communicate_halos_backward(
         grad_output,
         right_to_left,
         left_to_right,
@@ -1018,7 +1018,7 @@ def conv_transpose2d_eightway_backward(
         async_op=False,
     )
 
-    g_x, g_w, _ = selector.conv_transpose2d_grad_fn(
+    g_x, g_w, _ = config.conv_transpose2d_grad_fn(
         grad_output.to(weight.dtype),
         x_aug,
         weight,
@@ -1045,7 +1045,7 @@ def conv_transpose2d_eightway_backward(
         in_channels_global,
         channel_group,
         async_op=True,
-        comm_fn=selector.comm_fn,
+        comm_fn=config.comm_fn,
     )
 
     # make grads identical on all ranks

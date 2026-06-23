@@ -98,12 +98,12 @@ class RingAttentionConfig:
         self.offloader = self.init_offloader(offload, device)
         self.device = device
         self.ring_comm_fn = self._select_ring_comm_fn(device)
-        self.attn_core_forward = self._select_attn_core_forward(device)
-        self.attn_core_backward = self._select_attn_core_backward(device)
-        self.send_in_forward_fn, self.recv_in_forward = _build_send_in_forward(
+        self.attn_core_forward_fn = self._select_attn_core_forward_fn(device)
+        self.attn_core_backward_fn = self._select_attn_core_backward_fn(device)
+        self.forward_send_fn, self.forward_recv_fn = _select_forward_comm_fns(
             send_forward_op, send_in_forward, self.ring_comm_fn
         )
-        self.save_for_backward_fn = _build_save_for_backward(
+        self.save_for_backward_fn = _select_save_for_backward_fn(
             save_for_backward, save_scope, self.offloader
         )
 
@@ -124,7 +124,7 @@ class RingAttentionConfig:
         else:
             raise ValueError(f"No valid ring comm functions for device {device.type}")
 
-    def _select_attn_core_forward(self, device: torch.device) -> Callable:
+    def _select_attn_core_forward_fn(self, device: torch.device) -> Callable:
         if device.type == "cuda":
             return _attn_core_flash
         elif device.type == "cpu":
@@ -134,7 +134,7 @@ class RingAttentionConfig:
                 f"No valid attention core forward for device {device.type}"
             )
 
-    def _select_attn_core_backward(self, device: torch.device) -> Callable:
+    def _select_attn_core_backward_fn(self, device: torch.device) -> Callable:
         if device.type == "cuda":
             return _attn_core_flash_backward
         elif device.type == "cpu":
@@ -393,7 +393,7 @@ class RingAttentionFunction(torch.autograd.Function):
         Set up context.
 
         ctx: FunctionCtx
-        inputs: tuple(x, w, b, local_rank, device, selector, spatial_group, bayesian)
+        inputs: tuple(x, w, b, local_rank, device, config, spatial_group, bayesian)
         output: xwt
         """
         q, k, v, x, w_qkv, scale, group, empty, local_rank, world_size, config = inputs
@@ -537,15 +537,15 @@ def broadcast_forward(
 
     # Kick off first send
     # recv_buf either holds x or kv
-    recv_buf, handle = ring_config.send_in_forward_fn(
+    recv_buf, handle = ring_config.forward_send_fn(
         x, kv, local_rank, group, step=0, empty=empty
     )
     handle.wait()
-    x_j, kv_j, kj, vj = ring_config.recv_in_forward(recv_buf, x_j, kv_j, kj, vj)
+    x_j, kv_j, kj, vj = ring_config.forward_recv_fn(recv_buf, x_j, kv_j, kj, vj)
 
     for step in range(world_size):
         if step + 1 < world_size:
-            recv_buf, handle = ring_config.send_in_forward_fn(
+            recv_buf, handle = ring_config.forward_send_fn(
                 x,
                 kv,
                 local_rank,
@@ -578,7 +578,7 @@ def broadcast_forward(
         vj_c = vj.contiguous()
 
         # call torch sdpa
-        out_j, l_j = ring_config.attn_core_forward(q, kj_c, vj_c, scale, dropout_p)
+        out_j, l_j = ring_config.attn_core_forward_fn(q, kj_c, vj_c, scale, dropout_p)
         out, lse = _online_softmax_merge(out, lse, out_j, l_j)
         del out_j, l_j, kj_c, vj_c
 
@@ -588,7 +588,7 @@ def broadcast_forward(
 
         # read either x or kv values from the communicated buffers
         # can put into a helper function when/if there are more complicated options involved
-        x_j, kv_j, kj, vj = ring_config.recv_in_forward(recv_buf, x_j, kv_j, kj, vj)
+        x_j, kv_j, kj, vj = ring_config.forward_recv_fn(recv_buf, x_j, kv_j, kj, vj)
 
     # Make sure all offloads complete and GPU refs to offloaded tensors are dropped
     if ring_config.offloader is not None:
@@ -629,7 +629,7 @@ def ring_forward(
 
     # Kick off first send
     # recv_buf either holds x or kv
-    recv_buf, handle = ring_config.send_in_forward_fn(
+    recv_buf, handle = ring_config.forward_send_fn(
         x_j, kv_j, local_rank, group, step=0, empty=empty
     )
 
@@ -654,7 +654,7 @@ def ring_forward(
         vj_c = vj.contiguous()
 
         # call torch sdpa
-        out_j, l_j = ring_config.attn_core_forward(q, kj_c, vj_c, scale, dropout_p)
+        out_j, l_j = ring_config.attn_core_forward_fn(q, kj_c, vj_c, scale, dropout_p)
         out, lse = _online_softmax_merge(out, lse, out_j, l_j)
         del out_j, l_j, kj_c, vj_c
 
@@ -664,10 +664,10 @@ def ring_forward(
 
             # read either x or kv values from the communicated buffers
             # can put into a helper function when/if there are more complicated options involved
-            x_j, kv_j, kj, vj = ring_config.recv_in_forward(recv_buf, x_j, kv_j, kj, vj)
+            x_j, kv_j, kj, vj = ring_config.forward_recv_fn(recv_buf, x_j, kv_j, kj, vj)
 
             # send x or k/v to the next rank
-            recv_buf, handle = ring_config.send_in_forward_fn(
+            recv_buf, handle = ring_config.forward_send_fn(
                 x_j,
                 kv_j,
                 local_rank,
@@ -871,7 +871,7 @@ def ring_backward(
                         )
 
         # ---- flash attention backward ----
-        dq_j, dk_j, dv_j = ring_config.attn_core_backward(
+        dq_j, dk_j, dv_j = ring_config.attn_core_backward_fn(
             dout, q, kj, vj, out, lse, scale, seq_local, seq_local
         )
         dq += dq_j
@@ -902,7 +902,7 @@ def ring_backward(
     return dq, dk_local, dv_local
 
 
-def _build_send_in_forward(
+def _select_forward_comm_fns(
     send_forward_op: SendForwardOp, send_in_forward: SendForward, ring_comm_fn: Callable
 ) -> tuple[Callable, Callable]:
     """Build the send and receive functions for forward based on the config."""
@@ -1051,7 +1051,7 @@ def _build_send_in_forward(
     return send_func, recv_func
 
 
-def _build_save_for_backward(
+def _select_save_for_backward_fn(
     save_for_backward: SaveBackward,
     save_scope: SaveScope,
     offloader: Optional[NVLinkActivationOffloader],

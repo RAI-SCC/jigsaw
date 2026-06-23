@@ -51,7 +51,7 @@ class Roll(torch.nn.Module):
         return torch.roll(x, shifts=self.shifts, dims=self.dims)
 
 
-class RollSelectionStrategy:
+class RollConfig:
     """Selection strategy for roll function."""
 
     def __init__(
@@ -86,6 +86,7 @@ class DistributedRoll(torch.nn.Module):
         spatial_groups: tuple[dist.ProcessGroup, ...],
         device: torch.device,
         dtype: torch.dtype = torch.float32,
+        config: Optional[RollConfig] = None
     ) -> None:
         super().__init__()
         if len(distributed_dims) != len(spatial_groups):
@@ -100,7 +101,7 @@ class DistributedRoll(torch.nn.Module):
         self.spatial_groups = tuple(spatial_groups)
         self.dtype = dtype
         self.empty = torch.empty(0, device=device, dtype=dtype)
-        self.selector = RollSelectionStrategy(device)
+        self.config = RollConfig(device) if config is None else None
 
     def get_parameter_count(self) -> int:
         """Return dummy parameter count of roll."""
@@ -160,7 +161,7 @@ class DistributedRoll(torch.nn.Module):
             self.distributed_dims,
             self.spatial_groups,
             self.empty,
-            self.selector,
+            self.config,
         )
         out = cast(torch.Tensor, out)
         return out
@@ -176,7 +177,7 @@ class RollCtx(Protocol):
     distributed_dims: tuple[int, ...]
     spatial_groups: tuple[dist.ProcessGroup, ...]
     empty: torch.Tensor
-    selector: RollSelectionStrategy
+    config: RollConfig
 
 
 class RollFunction(torch.autograd.Function):
@@ -190,7 +191,7 @@ class RollFunction(torch.autograd.Function):
         distributed_dims: tuple[int, ...],
         spatial_groups: tuple[dist.ProcessGroup, ...],
         empty: torch.Tensor,
-        selector: RollSelectionStrategy,
+        config: RollConfig,
     ) -> torch.Tensor:
         """Forward pass of distributed roll."""
         return dist_roll.distributed_roll(
@@ -200,7 +201,7 @@ class RollFunction(torch.autograd.Function):
             list(distributed_dims),
             list(spatial_groups),
             empty,
-            selector.comm_halo_1d_fn,
+            config.comm_halo_1d_fn,
         )
 
     @staticmethod
@@ -213,19 +214,19 @@ class RollFunction(torch.autograd.Function):
             tuple[int, ...],
             tuple[dist.ProcessGroup, ...],
             torch.Tensor,
-            RollSelectionStrategy,
+            RollConfig,
         ],
         output: torch.Tensor,
     ) -> None:
         """Context for roll function."""
-        _, shifts, dims, distributed_dims, spatial_groups, empty, selector = inputs
+        _, shifts, dims, distributed_dims, spatial_groups, empty, config = inputs
         c = cast(RollCtx, ctx)
         c.shifts = shifts
         c.dims = dims
         c.distributed_dims = distributed_dims
         c.spatial_groups = spatial_groups
         c.empty = empty
-        c.selector = selector
+        c.config = config
 
     @staticmethod
     def backward(
@@ -240,7 +241,7 @@ class RollFunction(torch.autograd.Function):
             list(ctx.distributed_dims),
             list(ctx.spatial_groups),
             ctx.empty,
-            ctx.selector.comm_halo_1d_fn,
+            ctx.config.comm_halo_1d_fn,
         )
         return grad_input, None, None, None, None, None, None
 
@@ -254,10 +255,10 @@ class RollFunction(torch.autograd.Function):
         distributed_dims: tuple[int, ...],
         spatial_groups: tuple[dist.ProcessGroup, ...],
         empty: torch.Tensor,
-        selector: RollSelectionStrategy,
+        config: RollConfig,
     ) -> tuple[torch.Tensor, int]:
         """Vmap for dealing with roll operations."""
         out = RollFunction.apply(
-            x, shifts, dims, distributed_dims, spatial_groups, empty, selector
+            x, shifts, dims, distributed_dims, spatial_groups, empty, config
         )
         return out, 0

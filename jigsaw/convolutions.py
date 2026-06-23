@@ -23,7 +23,7 @@ def _pair(x: int | tuple[int, ...]) -> tuple[int, int]:
     return (x[0], x[1])
 
 
-class ConvSelectionStrategy:
+class ConvConfig:
     """Selection strategy for convolution kernels and halo communications."""
 
     # type hints
@@ -526,7 +526,7 @@ class ConvSelectionStrategy:
         return grad_b
 
 
-class ConvTransposeSelectionStrategy:
+class ConvTransposeConfig:
     """Selection strategy for convolution transpose kernels and halo communications."""
 
     # type hints
@@ -550,7 +550,7 @@ class ConvTransposeSelectionStrategy:
         device: torch.device,
     ):
         """
-        Initialize ConvTransposeSelectionStrategy.
+        Initialize ConvTransposeConfig.
 
         Parameters
         ----------
@@ -1053,7 +1053,7 @@ class DistributedConv2D(torch.nn.Module):
     # type-hints
     bias: Optional[Parameter]
     parallelism: int
-    selector: ConvSelectionStrategy
+    config: ConvConfig
     bayesian: bool
     spatial_group: dist.ProcessGroup
     channel_group: dist.ProcessGroup
@@ -1085,6 +1085,7 @@ class DistributedConv2D(torch.nn.Module):
         parallelism: int = 4,
         bayesian: bool = False,
         dtype: torch.dtype = torch.float32,
+        config: Optional[ConvConfig] = None
     ):
         """
         Distributed 2D Convolution.
@@ -1122,6 +1123,9 @@ class DistributedConv2D(torch.nn.Module):
             Flag for whether model is vmapped.
         dtype: torch.dtype
             Data type of the convolution.
+        config: Optional[ConvConfig]
+            Configuration and selection strategy of convolutional layer.
+            If None, this will be initialized here.
         """
         super().__init__()
         self.in_channels = in_channels
@@ -1172,7 +1176,7 @@ class DistributedConv2D(torch.nn.Module):
             else None
         )
 
-        self.selector = ConvSelectionStrategy(
+        self.config = ConvConfig(
             self.bayesian,
             self.spatial_group,
             self.channel_group,
@@ -1180,7 +1184,7 @@ class DistributedConv2D(torch.nn.Module):
             self.kernel_size,
             self.stride,
             self.device,
-        )
+        ) if config is None else config
 
         self.weight.register_post_accumulate_grad_hook(
             hooks.make_grad_sync_hook(self.spatial_group)
@@ -1364,7 +1368,7 @@ class DistributedConv2D(torch.nn.Module):
     ) -> None:
         """Reshard parameters of weights according to a new process group."""
         self.parallelism = to_process_mesh_dict[pm_col_key].size()
-        self.selector = ConvSelectionStrategy(
+        self.config = ConvConfig(
             self.bayesian,
             self.spatial_group,
             self.channel_group,
@@ -1469,7 +1473,7 @@ class DistributedConv2D(torch.nn.Module):
             self.parallelism,
             self.empty,
             self.bayesian,
-            self.selector,
+            self.config,
         )
 
         return cast(torch.Tensor, cij[0])
@@ -1494,12 +1498,12 @@ class Conv2d(torch.autograd.Function):
         parallelism: int,
         empty: torch.Tensor,
         bayesian: bool,
-        selector: ConvSelectionStrategy,
+        config: ConvConfig,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass of distributed Conv2d function."""
         # Compute the forward pass
 
-        y, x0, x1, right_to_left, left_to_right = selector.dist_conv2d_fn(
+        y, x0, x1, right_to_left, left_to_right = config.dist_conv2d_fn(
             x,
             weight,
             bias,
@@ -1511,7 +1515,7 @@ class Conv2d(torch.autograd.Function):
             spatial_group=spatial_group,
             channel_group=channel_group,
             empty=empty,
-            selector=selector,
+            config=config,
         )
 
         x_aug = torch.cat([x0, x1], dim=-3)  # concatenate along the channel dimension
@@ -1556,7 +1560,7 @@ class Conv2d(torch.autograd.Function):
             parallelism,
             empty,
             bayesian,
-            selector,
+            config,
         ) = inputs
 
         # Unpack outputs
@@ -1585,7 +1589,7 @@ class Conv2d(torch.autograd.Function):
         c.padding = padding
         c.dilation = dilation
         c.bayesian = bayesian
-        c.selector = selector
+        c.config = config
 
     @staticmethod
     def backward(
@@ -1621,14 +1625,14 @@ class Conv2d(torch.autograd.Function):
             c.spatial_group,
             c.channel_group,
         )
-        selector = c.selector
+        config = c.config
 
         right_to_left, left_to_right = c.halo_sizes[0], c.halo_sizes[1]
         x_shape_padded, x_shape = c.x_shape_padded, c.x_shape
 
-        g_b = selector.grad_bias(grad_output, c.spatial_group)
+        g_b = config.grad_bias(grad_output, c.spatial_group)
 
-        g_x_aug = selector.conv2d_input_fn(
+        g_x_aug = config.conv2d_input_fn(
             x_shape_padded[int(c.bayesian) :],
             weight,
             grad_output.to(weight.dtype),  # handles autocast
@@ -1641,7 +1645,7 @@ class Conv2d(torch.autograd.Function):
 
         # g_x calculation
         # only communicates halos if they exist
-        g_x = selector.communicate_halos_backward(
+        g_x = config.communicate_halos_backward(
             g_x_aug,
             x_shape,
             right_to_left,
@@ -1665,10 +1669,10 @@ class Conv2d(torch.autograd.Function):
             c.in_channels_global,
             channel_group,
             async_op=True,
-            comm_fn=selector.comm_fn,
+            comm_fn=config.comm_fn,
         )
 
-        g_w = selector.conv2d_weight_fn(
+        g_w = config.conv2d_weight_fn(
             x_aug,
             weight.shape[int(c.bayesian) :],
             grad_output.to(weight.dtype),
@@ -1724,7 +1728,7 @@ class Conv2d(torch.autograd.Function):
         parallelism: int,
         empty: torch.Tensor,
         bayesian: bool,
-        selector: ConvSelectionStrategy,
+        config: ConvConfig,
     ) -> tuple[torch.Tensor, Optional[int]]:
         """Handle vmap for Distributed Conv2d."""
         out = Conv2d.apply(
@@ -1742,7 +1746,7 @@ class Conv2d(torch.autograd.Function):
             parallelism,
             empty,
             bayesian,
-            selector,
+            config,
         )
 
         return out, 0
@@ -1778,17 +1782,13 @@ class DistributedConvTranspose2D(torch.nn.Module):
         parallelism: int = 4,
         bayesian: bool = False,
         dtype: torch.dtype = torch.float32,
+        config: Optional[ConvTransposeConfig] = None
     ):
         """
         Distributed ConvTranspose2D.
 
         input shape of forward pass: (N, Cin, Lin) or (S, N, Cin, Lin)
         output shape of forward pass: (N, Cout, Lout) or (S, N, Cout, Lout)
-
-        Distributed 2D Convolution.
-
-        input shape of forward pass: (N, Cin, Lin) or (Cin, Lin)
-        output shape of forward pass: (N, Cout, Lout)
 
         Parameters
         ----------
@@ -1820,6 +1820,9 @@ class DistributedConvTranspose2D(torch.nn.Module):
             Flag for whether model is vmapped.
         dtype: torch.dtype
             Data type of the convolution.
+        config: Optional[ConvTransposeConfig]
+            Configuration and selection strategy of conv transpose layer.
+            If None, this will be initialized here.
         """
         super().__init__()
 
@@ -1868,7 +1871,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
         )
         self.empty = torch.empty(0, device=self.device, dtype=dtype)
 
-        self.selector = ConvTransposeSelectionStrategy(
+        self.config = ConvTransposeConfig(
             self.bayesian,
             self.spatial_group,
             self.channel_group,
@@ -1876,7 +1879,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
             self.kernel_size,
             self.stride,
             self.device,
-        )
+        ) if config is None else config
 
         for p in self.parameters():
             dist.broadcast(p.data, group_src=0, group=self.spatial_group)
@@ -2054,7 +2057,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
     ) -> None:
         """Reshard parameters of weights according to a new process group."""
         self.parallelism = to_process_mesh_dict[pm_col_key].size()
-        self.selector = ConvTransposeSelectionStrategy(
+        self.config = ConvTransposeConfig(
             self.bayesian,
             self.spatial_group,
             self.channel_group,
@@ -2158,7 +2161,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
             self.parallelism,
             self.empty,
             self.bayesian,
-            self.selector,
+            self.config,
         )
         cij_ = cast(torch.Tensor, cij[0])
         return cij_
@@ -2181,7 +2184,7 @@ class ConvCtx(Protocol):
     in_channels_global: int
     b: torch.Tensor | None
     bayesian: bool
-    selector: ConvSelectionStrategy
+    config: ConvConfig
     empty: torch.Tensor
     saved_tensors: tuple[torch.Tensor, torch.Tensor]
 
@@ -2203,7 +2206,7 @@ class ConvTransposeCtx(Protocol):
     in_channels_global: int
     b: torch.Tensor | None
     bayesian: bool
-    selector: ConvTransposeSelectionStrategy
+    config: ConvTransposeConfig
     empty: torch.Tensor
     saved_tensors: tuple[torch.Tensor, torch.Tensor]
 
@@ -2227,10 +2230,10 @@ class ConvTranspose2d(torch.autograd.Function):
         parallelism: int,
         empty: torch.Tensor,
         bayesian: bool,
-        selector: ConvTransposeSelectionStrategy,
+        config: ConvTransposeConfig,
     ) -> tuple[Any, Any, torch.Tensor, Any]:
         """Forward pass for distributed conv transpose 2d."""
-        y, x_aug, x, halo_sizes = selector.dist_conv_transpose2d_fn(
+        y, x_aug, x, halo_sizes = config.dist_conv_transpose2d_fn(
             x,
             weight,
             bias,
@@ -2242,7 +2245,7 @@ class ConvTranspose2d(torch.autograd.Function):
             spatial_group,
             channel_group,
             empty,
-            selector,
+            config,
         )
 
         # Return output and any intermediate values needed for backward
@@ -2271,7 +2274,7 @@ class ConvTranspose2d(torch.autograd.Function):
             parallelism,
             empty,
             bayesian,
-            selector,
+            config,
         ) = inputs
 
         _, x_aug, x_orig, halo_sizes = output
@@ -2295,7 +2298,7 @@ class ConvTranspose2d(torch.autograd.Function):
         c.b = bias
         c.empty = empty  # pre-initialized empty tensor
         c.bayesian = bayesian
-        c.selector = selector
+        c.config = config
 
     @staticmethod
     def backward(
@@ -2356,10 +2359,10 @@ class ConvTranspose2d(torch.autograd.Function):
             ctx.spatial_group,
             ctx.channel_group,
         )
-        selector = ctx.selector
+        config = ctx.config
         in_channels_global = ctx.in_channels_global
 
-        g_x, g_w = selector.dist_conv_transpose2d_backward_fn(
+        g_x, g_w = config.dist_conv_transpose2d_backward_fn(
             grad_output.to(weight.dtype),
             x_aug,
             weight,
@@ -2371,10 +2374,10 @@ class ConvTranspose2d(torch.autograd.Function):
             empty,
             spatial_group,
             channel_group,
-            selector,
+            config,
         )
 
-        g_b = selector.grad_bias(grad_output, spatial_group)
+        g_b = config.grad_bias(grad_output, spatial_group)
 
         return (
             g_x,
@@ -2413,7 +2416,7 @@ class ConvTranspose2d(torch.autograd.Function):
         parallelism: int,
         empty: torch.Tensor,
         bayesian: bool,
-        selector: ConvTransposeSelectionStrategy,
+        config: ConvTransposeConfig,
     ) -> tuple[torch.Tensor, Optional[int]]:
         """Handle vmap for ConvTranspose2d function."""
         out = ConvTranspose2d.apply(
@@ -2431,7 +2434,7 @@ class ConvTranspose2d(torch.autograd.Function):
             parallelism,
             empty,
             bayesian,
-            selector,
+            config,
         )
 
         return out, 0
