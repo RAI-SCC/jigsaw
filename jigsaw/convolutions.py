@@ -1085,6 +1085,7 @@ class DistributedConv2D(torch.nn.Module):
         parallelism: int = 4,
         bayesian: bool = False,
         dtype: torch.dtype = torch.float32,
+        config: Optional[ConvConfig] = None
     ):
         """
         Distributed 2D Convolution.
@@ -1122,6 +1123,9 @@ class DistributedConv2D(torch.nn.Module):
             Flag for whether model is vmapped.
         dtype: torch.dtype
             Data type of the convolution.
+        config: Optional[ConvConfig]
+            Configuration and selection strategy of convolutional layer.
+            If None, this will be initialized here.
         """
         super().__init__()
         self.in_channels = in_channels
@@ -1180,7 +1184,7 @@ class DistributedConv2D(torch.nn.Module):
             self.kernel_size,
             self.stride,
             self.device,
-        )
+        ) if config is None else config
 
         self.weight.register_post_accumulate_grad_hook(
             hooks.make_grad_sync_hook(self.spatial_group)
@@ -1778,17 +1782,13 @@ class DistributedConvTranspose2D(torch.nn.Module):
         parallelism: int = 4,
         bayesian: bool = False,
         dtype: torch.dtype = torch.float32,
+        config: Optional[ConvTransposeConfig] = None
     ):
         """
         Distributed ConvTranspose2D.
 
         input shape of forward pass: (N, Cin, Lin) or (S, N, Cin, Lin)
         output shape of forward pass: (N, Cout, Lout) or (S, N, Cout, Lout)
-
-        Distributed 2D Convolution.
-
-        input shape of forward pass: (N, Cin, Lin) or (Cin, Lin)
-        output shape of forward pass: (N, Cout, Lout)
 
         Parameters
         ----------
@@ -1820,6 +1820,9 @@ class DistributedConvTranspose2D(torch.nn.Module):
             Flag for whether model is vmapped.
         dtype: torch.dtype
             Data type of the convolution.
+        config: Optional[ConvTransposeConfig]
+            Configuration and selection strategy of conv transpose layer.
+            If None, this will be initialized here.
         """
         super().__init__()
 
@@ -1876,7 +1879,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
             self.kernel_size,
             self.stride,
             self.device,
-        )
+        ) if config is None else config
 
         for p in self.parameters():
             dist.broadcast(p.data, group_src=0, group=self.spatial_group)

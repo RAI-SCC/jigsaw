@@ -86,6 +86,7 @@ class DistributedRoll(torch.nn.Module):
         spatial_groups: tuple[dist.ProcessGroup, ...],
         device: torch.device,
         dtype: torch.dtype = torch.float32,
+        config: Optional[RollConfig] = None
     ) -> None:
         super().__init__()
         if len(distributed_dims) != len(spatial_groups):
@@ -100,7 +101,7 @@ class DistributedRoll(torch.nn.Module):
         self.spatial_groups = tuple(spatial_groups)
         self.dtype = dtype
         self.empty = torch.empty(0, device=device, dtype=dtype)
-        self.config = RollConfig(device)
+        self.config = RollConfig(device) if config is None else None
 
     def get_parameter_count(self) -> int:
         """Return dummy parameter count of roll."""

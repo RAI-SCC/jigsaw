@@ -362,6 +362,7 @@ class DistributedXWT(torch.nn.Module):
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         bayesian: bool = False,
+        config: Optional[LinearConfig] = None
     ) -> None:
         """
         Initialize the XWT Linear layer sharded over n processes.
@@ -388,7 +389,10 @@ class DistributedXWT(torch.nn.Module):
         channel_group: dist.ProcessGroup
             Process group containin channel-parallel processes.
         bayesian: bool
-            Boolean flag for whether the model is bayesian
+            Boolean flag for whether the model is bayesian.
+        config: Optional[LinearConfig]
+            Configuration and selection strategy of linear layer.
+            If None, this will be initialized here.
         """
         super().__init__()
 
@@ -425,7 +429,7 @@ class DistributedXWT(torch.nn.Module):
             self.bayesian,
             linear_layer=True,
             device=self.device,
-        )
+        ) if config is None else config
 
         if self.bias is not None:
             self.bias.register_post_accumulate_grad_hook(
@@ -931,6 +935,7 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
         bayesian: bool,
+        config: Optional[LinearConfig]
     ) -> None:
         """
         Initialize the Distributed XWT multiplication operation.
@@ -949,6 +954,9 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
             Process group containing ranks that share channels.
         bayesian: bool
             Boolean flag for whether the model is Bayesian.
+        config: Optional[LinearConfig]
+            Configuration and selection strategy of linear layer.
+            If None, this will be initialized here.
         """
         super().__init__()
         self.local_rank = local_rank
@@ -958,7 +966,7 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
         self.bayesian = bayesian
         self.config = LinearConfig(
             parallelism, None, self.bayesian, linear_layer=False, device=self.device
-        )
+        ) if config is None else config
 
         self.XWT = XWT.apply
 
