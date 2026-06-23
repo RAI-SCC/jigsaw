@@ -6,10 +6,10 @@ import torch
 from jigsaw import convolutions, linear
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
 
+pytestmark = [pytest.mark.distributed_required]
 
-pytestmark = [pytest.mark.gpu_required, pytest.mark.distributed_required]
 
-
+@pytest.mark.dist(4)
 @pytest.mark.parametrize(
     "from_pm_dict,to_pm_dict",
     [
@@ -54,8 +54,8 @@ def test_weight_merging(
         local_rank=from_pm_dict["model"].rank(),
         device=device,
         model_group=from_pm_dict["model"],
-        spatial_group=from_pm_dict["row"],
-        channel_group=from_pm_dict["col"],
+        tensor_group=from_pm_dict["row"],
+        domain_group=from_pm_dict["col"],
         bayesian=False,
     )
     assert isinstance(linear_layer.weight, torch.Tensor)
@@ -80,6 +80,7 @@ def test_weight_merging(
     assert torch.allclose(gathered_bias_before, gathered_bias_after)
 
 
+@pytest.mark.dist(4)
 @pytest.mark.parametrize(
     "from_pm_dict",
     [
@@ -114,8 +115,8 @@ def test_mlp_weight_merging(
                 local_rank=from_pm_dict["model"].rank(),
                 device=device,
                 model_group=from_pm_dict["model"],
-                spatial_group=from_pm_dict["row"],
-                channel_group=from_pm_dict["col"],
+                tensor_group=from_pm_dict["row"],
+                domain_group=from_pm_dict["col"],
             )
 
             self.linear2 = linear.DistributedXWT(
@@ -125,8 +126,8 @@ def test_mlp_weight_merging(
                 local_rank=from_pm_dict["model"].rank(),
                 device=device,
                 model_group=from_pm_dict["model"],
-                spatial_group=from_pm_dict["row"],
-                channel_group=from_pm_dict["col"],
+                tensor_group=from_pm_dict["row"],
+                domain_group=from_pm_dict["col"],
             )
             self.activation = torch.nn.GELU()
 
@@ -183,6 +184,7 @@ def test_mlp_weight_merging(
     )
 
 
+@pytest.mark.dist(4)
 @pytest.mark.parametrize(
     "from_pm_dict,to_pm_dict",
     [
@@ -224,11 +226,9 @@ def test_conv_weight_merging(
         in_channels=in_channels,
         out_channels=out_channels,
         kernel_size=kernel_size,
-        local_rank=from_pm_dict["model"].rank(),
+        device=device,
         spatial_group=from_pm_dict["row"],
         channel_group=from_pm_dict["col"],
-        device=device,
-        parallelism=from_pm_dict["col"].size(),
     )
     assert isinstance(conv_layer.weight, torch.Tensor)
     assert isinstance(conv_layer.bias, torch.Tensor)
@@ -256,6 +256,7 @@ def test_conv_weight_merging(
     assert torch.allclose(gathered_bias_before, gathered_bias_after)
 
 
+@pytest.mark.dist(4)
 @pytest.mark.parametrize(
     "from_pm_dict,to_pm_dict",
     [
@@ -297,11 +298,9 @@ def test_conv_transpose_weight_merging(
         in_channels=in_channels,
         out_channels=out_channels,
         kernel_size=kernel_size,
-        local_rank=from_pm_dict["model"].rank(),
+        device=device,
         spatial_group=from_pm_dict["row"],
         channel_group=from_pm_dict["col"],
-        device=device,
-        parallelism=from_pm_dict["col"].size(),
     )
     assert isinstance(conv_layer.weight, torch.Tensor)
     assert isinstance(conv_layer.bias, torch.Tensor)

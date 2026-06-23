@@ -91,61 +91,45 @@ def communicate_halos(
     x: torch.Tensor,
     right_to_left: int,
     left_to_right: int,
-    local_rank: int,
-    parallelism: int,
     empty: torch.Tensor,
     spatial_group: dist.ProcessGroup,
     async_op: bool,
-) -> tuple[torch.Tensor, Optional[dist.Work]]:
+    comm_fn: Callable,
+) -> tuple[torch.Tensor, list[Optional[dist.Work]]]:
     """Communicate halos over 2way spatial split."""
-    left_right_local_ranks = get_left_right_local_ranks(parallelism)
-
-    if local_rank in left_right_local_ranks[0]:
-        send = x[..., -left_to_right:] if left_to_right > 0 else empty
-        recv = (
+    left_right_local_ranks = get_left_right_local_ranks(spatial_group.size())
+    local_spatial_rank = spatial_group.rank()
+    if local_spatial_rank in left_right_local_ranks[0]:
+        x_send = x[..., -left_to_right:] if left_to_right > 0 else empty
+        x_recv = (
             torch.zeros((*x.shape[:-1], right_to_left), device=x.device, dtype=x.dtype)
             if right_to_left > 0
             else empty
         )
-        send = send.contiguous()
-        if async_op:
-            wait_handle = dist.all_to_all(
-                [empty, recv], [empty, send], group=spatial_group, async_op=async_op
-            )
-            return recv, wait_handle
-        else:
-            dist.all_to_all(
-                [empty, recv], [empty, send], group=spatial_group, async_op=async_op
-            )
-            return recv, None
-    elif local_rank in left_right_local_ranks[1]:
-        send = x[..., :right_to_left] if right_to_left > 0 else empty
-        recv = (
+        x_send = x_send.contiguous()
+        buffer, handles = comm_fn(
+            x_send, x_recv, empty, group=spatial_group, async_op=async_op
+        )
+    elif local_spatial_rank in left_right_local_ranks[1]:
+        x_send = x[..., :right_to_left] if right_to_left > 0 else empty
+        x_recv = (
             torch.zeros((*x.shape[:-1], left_to_right), device=x.device, dtype=x.dtype)
             if left_to_right > 0
             else empty
         )
-        send = send.contiguous()
-        if async_op:
-            wait_handle = dist.all_to_all(
-                [recv, empty], [send, empty], group=spatial_group, async_op=async_op
-            )
-            return recv, wait_handle
-        else:
-            dist.all_to_all(
-                [recv, empty], [send, empty], group=spatial_group, async_op=async_op
-            )
-            return recv, None
-    raise ValueError(f"Unsupported parallelism: {parallelism}")
-    return
+        x_send = x_send.contiguous()
+        buffer, handles = comm_fn(
+            x_send, x_recv, empty, group=spatial_group, async_op=async_op
+        )
+    else:
+        raise ValueError(f"Unsupported parallelism: {spatial_group.size()}")
+    return buffer, handles
 
 
-def communicate_halos_8way(
+def communicate_halos_4space(
     x: torch.Tensor,
     right_to_left: list[int],
     left_to_right: list[int],
-    local_rank: int,
-    parallelism: int,
     empty: torch.Tensor,
     spatial_group: dist.ProcessGroup,
     async_op: bool,
@@ -153,7 +137,7 @@ def communicate_halos_8way(
     """Halo calculation for 8-way split."""
     local_rank = spatial_group.rank()
 
-    match local_rank:
+    match spatial_group.rank():
         case 0:
             send_1 = x[..., -left_to_right[0] :] if left_to_right[0] > 0 else empty
             recv_1 = (
@@ -285,7 +269,6 @@ def conv_transpose_halocalc_twoway(
     stride: int,
     padding: int,
     dilation: int,
-    local_rank: int,
     spatial_group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, int, int, int]:
     """Halo calculation for 2way spatial split."""
@@ -305,8 +288,8 @@ def conv_transpose_halocalc_twoway(
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
 
     left_right_local_ranks = get_left_right_local_ranks(parallelism=4)
-
-    if local_rank in left_right_local_ranks[0]:
+    local_spatial_rank = spatial_group.rank()
+    if local_spatial_rank in left_right_local_ranks[0]:
         send = y[..., -overlap_size:] if overlap_size > 0 else empty
         recv = (
             torch.zeros((*y.shape[:-1], overlap_size), device=x.device, dtype=x.dtype)
@@ -317,7 +300,7 @@ def conv_transpose_halocalc_twoway(
         dist.all_to_all(
             [empty, recv], [empty, send], group=spatial_group, async_op=False
         )
-    elif local_rank in left_right_local_ranks[1]:
+    elif local_spatial_rank in left_right_local_ranks[1]:
         send = y[..., :overlap_size] if overlap_size > 0 else empty
         recv = (
             torch.zeros((*y.shape[:-1], overlap_size), device=x.device, dtype=x.dtype)
@@ -340,7 +323,6 @@ def conv_transpose_halocalc_fourway(
     stride: int,
     padding: int,
     dilation: int,
-    local_rank: int,
     spatial_group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor, list[int], list[int]]:
     """Halo calculation for 4way spatial split."""
@@ -492,7 +474,7 @@ def append_halos(
     return x_with_halos
 
 
-def append_halos_8way(
+def append_halos_4space(
     x: torch.Tensor,
     halo: torch.Tensor,
     spatial_group: dist.ProcessGroup,
@@ -516,7 +498,7 @@ def distributed_conv2d_over_channels(
     x: torch.Tensor,
     w: torch.Tensor,
     b: torch.Tensor,
-    local_rank: int,
+    local_channel_rank: int,
     in_channels_global: int,
     stride: tuple[int, int],
     padding: str | tuple[int, int],
@@ -524,17 +506,16 @@ def distributed_conv2d_over_channels(
     empty: torch.Tensor,
     channel_group: dist.ProcessGroup,
     conv_func: Callable,
+    comm_fn: Callable,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Distributed Conv2d over channels."""
     x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
-    match local_rank % 2:
+
+    x_buffer, x_handles = comm_fn(
+        data=x, buffer=x_buffer, empty=empty, group=channel_group, async_op=True
+    )
+    match local_channel_rank % 2:
         case 0:
-            x_handle = dist.all_to_all(
-                [empty, x_buffer],
-                [empty, x],
-                group=channel_group,
-                async_op=True,
-            )
             y = conv_func(
                 x,
                 w[..., : in_channels_global // 2, :, :],
@@ -542,7 +523,8 @@ def distributed_conv2d_over_channels(
                 padding=padding,
                 dilation=dilation,
             )
-            x_handle.wait()
+            for x_handle in x_handles:
+                x_handle.wait()
             if b is not None:
                 y = (
                     y
@@ -568,12 +550,6 @@ def distributed_conv2d_over_channels(
                 )
             return y, x, x_buffer
         case 1:
-            x_handle = dist.all_to_all(
-                [x_buffer, empty],
-                [x, empty],
-                group=channel_group,
-                async_op=True,
-            )
             y = conv_func(
                 x,
                 w[..., in_channels_global // 2 :, :, :],
@@ -581,7 +557,8 @@ def distributed_conv2d_over_channels(
                 padding=padding,
                 dilation=dilation,
             )
-            x_handle.wait()
+            for x_handle in x_handles:
+                x_handle.wait()
             if b is not None:
                 y = y + conv_func(
                     x_buffer,
@@ -601,7 +578,7 @@ def distributed_conv2d_over_channels(
                 )
             return y, x_buffer, x
         case _:
-            raise ValueError(f"Invalid local_rank % 2: {local_rank % 2}")
+            raise ValueError(f"Invalid local_rank % 2: {local_channel_rank % 2}")
 
 
 def send_g_x_channels(
@@ -610,11 +587,10 @@ def send_g_x_channels(
     empty: torch.Tensor,
     in_channels_global: int,
     channel_group: dist.ProcessGroup,
-    local_rank: int,
     async_op: bool,
 ) -> tuple[torch.Tensor, Optional[dist.Work]]:
     """Perform all_reduce of g_x over channel splits."""
-    match local_rank:
+    match channel_group.rank():
         case 0 | 2:
             send = g_x[..., in_channels_global // 2 :, :]
             send = send.contiguous()
@@ -643,31 +619,20 @@ def send_g_x_channels_2d(
     empty: torch.Tensor,
     in_channels_global: int,
     channel_group: dist.ProcessGroup,
-    local_rank: int,
     async_op: bool,
-) -> tuple[torch.Tensor, Optional[dist.Work]]:
+    comm_fn: Callable,
+) -> tuple[torch.Tensor, list[Optional[dist.Work]]]:
     """Communicate g_x across channel-parallel processes."""
-    match local_rank:
-        case 0 | 2 | 4 | 6:
-            send = g_x[..., in_channels_global // 2 :, :, :]
-            send = send.contiguous()
-            wait_handle = dist.all_to_all(
-                [empty, buffer],
-                [empty, send],
-                group=channel_group,
-                async_op=async_op,
-            )
+    match channel_group.rank():
+        case 0:
+            send_g_x = g_x[..., in_channels_global // 2 :, :, :]
 
-        case 1 | 3 | 5 | 7:
-            send = g_x[..., : in_channels_global // 2, :, :]
-            send = send.contiguous()
-            wait_handle = dist.all_to_all(
-                [buffer, empty],
-                [send, empty],
-                group=channel_group,
-                async_op=async_op,
-            )
-    return buffer, wait_handle
+        case 1:
+            send_g_x = g_x[..., : in_channels_global // 2, :, :]
+
+    send_g_x = send_g_x.contiguous()
+    buffer, handles = comm_fn(send_g_x, buffer, empty, channel_group, async_op=async_op)
+    return buffer, handles
 
 
 def distributed_conv_transpose2d_over_channels(
@@ -678,9 +643,9 @@ def distributed_conv_transpose2d_over_channels(
     stride: tuple[int, int],
     padding: str | tuple[int, int],
     dilation: tuple[int, int],
-    local_rank: int,
     channel_group: dist.ProcessGroup,
     conv_transpose2d_fn: Callable,
+    comm_fn: Callable,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Distributed 2d convolution across channels."""
     # x shape
@@ -688,12 +653,10 @@ def distributed_conv_transpose2d_over_channels(
     empty = torch.empty(0, device=x.device, dtype=x.dtype)
     x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
     x = x.contiguous()
+    x_buffer, handles = comm_fn(x, x_buffer, empty, channel_group, async_op=True)
 
-    match local_rank % 2:
+    match channel_group.rank() % 2:
         case 0:
-            x_handle = dist.all_to_all(
-                [empty, x_buffer], [empty, x], group=channel_group, async_op=True
-            )
             y = conv_transpose2d_fn(
                 x,
                 w[..., : in_channels // 2, :, :, :],
@@ -701,7 +664,8 @@ def distributed_conv_transpose2d_over_channels(
                 padding=padding,
                 dilation=dilation,
             )
-            x_handle.wait()
+            for x_handle in handles:
+                x_handle.wait()
             if b is not None:
                 y = y + conv_transpose2d_fn(
                     x_buffer,
@@ -721,9 +685,6 @@ def distributed_conv_transpose2d_over_channels(
                 )
             return y, x, x_buffer
         case 1:
-            x_handle = dist.all_to_all(
-                [x_buffer, empty], [x, empty], group=channel_group, async_op=True
-            )
             y = conv_transpose2d_fn(
                 x,
                 w[..., in_channels // 2 :, :, :, :],
@@ -731,7 +692,8 @@ def distributed_conv_transpose2d_over_channels(
                 padding=padding,
                 dilation=dilation,
             )
-            x_handle.wait()
+            for x_handle in handles:
+                x_handle.wait()
             if b is not None:
                 y = y + conv_transpose2d_fn(
                     x_buffer,
@@ -751,7 +713,7 @@ def distributed_conv_transpose2d_over_channels(
                 )
             return y, x_buffer, x
 
-    raise ValueError(f"Unsupported local rank: {local_rank}")
+    raise ValueError(f"Unsupported local channel rank: {channel_group.rank()}")
 
 
 def conv2d_fourway(
@@ -763,25 +725,24 @@ def conv2d_fourway(
     padding: str | tuple[int, int],
     dilation: tuple[int, int],
     in_channels: int,
-    local_rank: int,
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     empty: torch.Tensor,
-    selector: Any,
+    config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
     """Distributed 2d convolution."""
     # Setup
-    local_rank = local_rank % 4
+    local_channel_rank = channel_group.rank()
 
     # communicate x1, x0
     right_to_left, left_to_right = calc_halo_sizes(x.shape, kernel_size[1], stride[1])
 
     # Spatial split
-    x_with_halos = selector.communicate_halos_forward(
+    x_with_halos = config.communicate_halos_forward(
         x,
         right_to_left,
         left_to_right,
-        local_rank,
+        local_channel_rank,
         4,
         empty,
         spatial_group,
@@ -796,14 +757,15 @@ def conv2d_fourway(
         x_with_halos,
         w,
         b,
-        local_rank,
+        local_channel_rank,
         in_channels,
         stride,
         padding,
         dilation,
         empty,
         channel_group,
-        selector.conv2d_fn,
+        config.conv2d_fn,
+        config.comm_fn,
     )
     return y, x_left, x_right, right_to_left, left_to_right
 
@@ -817,26 +779,24 @@ def conv2d_eightway(
     padding: tuple[int, int],
     dilation: tuple[int, int],
     in_channels: int,
-    local_rank: int,
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     empty: torch.Tensor,
-    selector: Any,
+    config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int], list[int]]:
     """Distributed 2d convolution."""
     # Setup
-    local_rank = local_rank % 8
 
+    local_channel_rank = channel_group.rank()
     # communicate x1, x0
     right_to_left, left_to_right = calc_halo_sizes_8way(
         x.shape, kernel_size[1], stride[1]
     )
     # Spatial split
-    x_with_halos = selector.communicate_halos_forward(
+    x_with_halos = config.communicate_halos_forward(
         x,
         right_to_left,
         left_to_right,
-        local_rank,
         8,
         empty,
         spatial_group,
@@ -851,17 +811,65 @@ def conv2d_eightway(
         x_with_halos,
         w,
         b,
-        local_rank,
+        local_channel_rank,
         in_channels,
         stride,
         padding,
         dilation,
         empty,
         channel_group,
-        selector.conv2d_fn,
+        config.conv2d_fn,
+        config.comm_fn,
     )
 
     return y, x_left, x_right, right_to_left, left_to_right
+
+
+def conv_transpose2d_twoway(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    b: torch.Tensor,
+    kernel_size: tuple[int, int],
+    stride: tuple[int, int],
+    padding: str | tuple[int, int],
+    dilation: tuple[int, int],
+    in_channels: int,
+    spatial_group: dist.ProcessGroup,
+    channel_group: dist.ProcessGroup,
+    empty: torch.Tensor,
+    config: Any,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Distributed 2d convolution."""
+    # Setup
+
+    y, x0, x1 = distributed_conv_transpose2d_over_channels(
+        x,
+        w,
+        b,
+        in_channels,
+        stride=stride,
+        padding=padding,
+        dilation=dilation,
+        channel_group=channel_group,
+        conv_transpose2d_fn=config.conv_transpose_2d_fn,
+        comm_fn=config.comm_fn,
+    )
+
+    # communicate x1, x0
+    y, halo_sizes = config.communicate_halos_forward(
+        x,
+        y,
+        kernel_size[1],
+        stride=stride[1],
+        padding=padding[1],
+        dilation=dilation[1],
+        spatial_group=spatial_group,
+        parallelism=4,
+    )
+
+    x_aug = torch.cat([x0, x1], dim=-3)
+
+    return y, x_aug, x, halo_sizes
 
 
 def conv_transpose2d_fourway(
@@ -873,61 +881,10 @@ def conv_transpose2d_fourway(
     padding: str | tuple[int, int],
     dilation: tuple[int, int],
     in_channels: int,
-    local_rank: int,
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     empty: torch.Tensor,
-    selector: Any,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Distributed 2d convolution."""
-    # Setup
-    local_rank = local_rank % 4
-
-    y, x0, x1 = distributed_conv_transpose2d_over_channels(
-        x,
-        w,
-        b,
-        in_channels,
-        stride=stride,
-        padding=padding,
-        dilation=dilation,
-        local_rank=local_rank,
-        channel_group=channel_group,
-        conv_transpose2d_fn=selector.conv_transpose_2d_fn,
-    )
-
-    # communicate x1, x0
-    y, halo_sizes = selector.communicate_halos_forward(
-        x,
-        y,
-        kernel_size[1],
-        stride=stride[1],
-        padding=padding[1],
-        dilation=dilation[1],
-        local_rank=local_rank,
-        spatial_group=spatial_group,
-        parallelism=4,
-    )
-
-    x_aug = torch.cat([x0, x1], dim=-3)
-
-    return y, x_aug, x, halo_sizes
-
-
-def conv_transpose2d_eightway(
-    x: torch.Tensor,
-    w: torch.Tensor,
-    b: torch.Tensor,
-    kernel_size: tuple[int, int],
-    stride: tuple[int, int],
-    padding: str | tuple[int, int],
-    dilation: tuple[int, int],
-    in_channels: int,
-    local_rank: int,
-    spatial_group: dist.ProcessGroup,
-    channel_group: dist.ProcessGroup,
-    empty: torch.Tensor,
-    selector: Any,
+    config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Distributed 2d convolution."""
     # Setup
@@ -939,19 +896,18 @@ def conv_transpose2d_eightway(
         stride=stride,
         padding=padding,
         dilation=dilation,
-        local_rank=local_rank,
         channel_group=channel_group,
-        conv_transpose2d_fn=selector.conv_transpose2d_fn,
+        conv_transpose2d_fn=config.conv_transpose2d_fn,
+        comm_fn=config.comm_fn,
     )
 
-    y, halo_sizes = selector.communicate_halos_forward(
+    y, halo_sizes = config.communicate_halos_forward(
         x,
         y,
         kernel_size[1],
         stride=stride[1],
         padding=padding[1],
         dilation=dilation[1],
-        local_rank=local_rank,
         spatial_group=spatial_group,
         parallelism=8,
     )
@@ -967,22 +923,20 @@ def conv_transpose2d_fourway_backward(
     weight: torch.Tensor,
     halo_sizes: torch.Tensor,
     in_channels_global: int,
-    local_rank: int,
     stride: int | tuple[int, ...],
     padding: int | tuple[int, ...],
     dilation: int | tuple[int, ...],
     empty: torch.Tensor,
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
-    selector: Any,
+    config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Backward pass for conv_transpose2d distribtuted 4ways."""
     right_to_left, left_to_right = halo_sizes[0], halo_sizes[1]
-    grad_output = selector.communicate_halos_backward(
+    grad_output = config.communicate_halos_backward(
         grad_output,
         right_to_left,
         left_to_right,
-        local_rank,
         4,
         empty,
         spatial_group=spatial_group,
@@ -990,7 +944,7 @@ def conv_transpose2d_fourway_backward(
     )
 
     # handle autocasting by matching dtype of grad_output to weight dtype
-    g_x, g_w, _ = selector.conv_transpose2d_grad_fn(
+    g_x, g_w, _ = config.conv_transpose2d_grad_fn(
         grad_output,
         x_aug,
         weight,
@@ -1010,18 +964,19 @@ def conv_transpose2d_fourway_backward(
         dtype=g_x.dtype,
     )
 
-    g_x_recv, g_x_handle = send_g_x_channels_2d(
+    g_x_recv, g_x_handles = send_g_x_channels_2d(
         g_x,
         g_x_buffer,
         empty,
         in_channels_global,
         channel_group,
-        local_rank,
         async_op=True,
+        comm_fn=config.comm_fn,
     )
 
-    if g_x_handle is not None:
-        g_x_handle.wait()
+    for g_x_handle in g_x_handles:
+        if g_x_handle is not None:
+            g_x_handle.wait()
 
     g_w_handle = dist.all_reduce(
         g_w, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True
@@ -1043,29 +998,27 @@ def conv_transpose2d_eightway_backward(
     weight: torch.Tensor,
     halo_sizes: torch.Tensor,
     in_channels_global: int,
-    local_rank: int,
     stride: int | tuple[int, ...],
     padding: int | tuple[int, ...],
     dilation: int | tuple[int, ...],
     empty: torch.Tensor,
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
-    selector: Any,
+    config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Backward pass for conv_transpose2d distributed 8ways."""
     right_to_left, left_to_right = halo_sizes[0], halo_sizes[1]
-    grad_output = selector.communicate_halos_backward(
+    grad_output = config.communicate_halos_backward(
         grad_output,
         right_to_left,
         left_to_right,
-        local_rank,
         8,
         empty,
         spatial_group=spatial_group,
         async_op=False,
     )
 
-    g_x, g_w, _ = selector.conv_transpose2d_grad_fn(
+    g_x, g_w, _ = config.conv_transpose2d_grad_fn(
         grad_output.to(weight.dtype),
         x_aug,
         weight,
@@ -1085,14 +1038,14 @@ def conv_transpose2d_eightway_backward(
         dtype=g_x.dtype,
     )
 
-    g_x_recv, g_x_handle = send_g_x_channels_2d(
+    g_x_recv, g_x_handles = send_g_x_channels_2d(
         g_x,
         g_x_buffer,
         empty,
         in_channels_global,
         channel_group,
-        local_rank,
         async_op=True,
+        comm_fn=config.comm_fn,
     )
 
     # make grads identical on all ranks
@@ -1100,12 +1053,13 @@ def conv_transpose2d_eightway_backward(
         g_w, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True
     )
 
-    if g_x_handle is not None:
-        g_x_handle.wait()
+    for g_x_handle in g_x_handles:
+        if g_x_handle is not None:
+            g_x_handle.wait()
 
     g_x = (
         g_x[..., : in_channels_global // 2, :, :] + g_x_recv
-        if local_rank % 2 == 0  # TODO: left/right definitions
+        if channel_group.rank() % 2 == 0  # TODO: left/right definitions
         else g_x[..., in_channels_global // 2 :, :, :] + g_x_recv
     )
 

@@ -140,7 +140,10 @@ class DistributedAttention(torch.nn.Module):
 
         """
         with torch.nn.attention.sdpa_kernel(
-            torch.nn.attention.SDPBackend.FLASH_ATTENTION
+            [
+                torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+                torch.nn.attention.SDPBackend.MATH,
+            ]
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, is_causal=False, dropout_p=self.dropout_p
@@ -318,7 +321,10 @@ class Attention(torch.nn.Module):
 
         """
         with torch.nn.attention.sdpa_kernel(
-            torch.nn.attention.SDPBackend.FLASH_ATTENTION
+            [
+                torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+                torch.nn.attention.SDPBackend.MATH,
+            ]
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, is_causal=False, dropout_p=self.dropout_p
@@ -428,7 +434,6 @@ class Attention(torch.nn.Module):
             dropout_p=attention.dropout_p,
             local_rank=process_mesh_dict[model_kw].rank(),
             device=attention.device,
-            model_group=process_mesh_dict[model_kw],
             spatial_group=process_mesh_dict[row_kw],
             channel_group=process_mesh_dict[col_kw],
             bayesian=False,
