@@ -13,7 +13,7 @@ from . import hooks
 from .utils_aggregate import gather_1d_results, gather_results
 
 
-class LinearSelectionStrategy:
+class LinearConfig:
     """Selection strategy for distributed linear operation."""
 
     def __init__(
@@ -419,7 +419,7 @@ class DistributedXWT(torch.nn.Module):
         self.model_group = model_group
         self.spatial_group = spatial_group
         self.bayesian = bayesian
-        self.selector = LinearSelectionStrategy(
+        self.config = LinearConfig(
             self.parallelism,
             self.bias,
             self.bayesian,
@@ -459,7 +459,7 @@ class DistributedXWT(torch.nn.Module):
             self.bias,
             self.local_rank,
             self.device,
-            self.selector,
+            self.config,
             self.model_group,
             self.spatial_group,
             self.bayesian,
@@ -643,7 +643,7 @@ class DistributedXWT(torch.nn.Module):
         """from_process_mesh has process mesh with 'row' and 'col' flags."""
         # re-define self selector
         self.parallelism = to_process_mesh["row"].size() * to_process_mesh["col"].size()
-        self.selector = LinearSelectionStrategy(
+        self.config = LinearConfig(
             self.parallelism,
             self.bias,
             self.bayesian,
@@ -719,7 +719,7 @@ class LinearCtx(Protocol):
     saved_tensors: tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]
     local_rank: int
     device: torch.Tensor
-    selector: LinearSelectionStrategy
+    config: LinearConfig
     model_group: dist.ProcessGroup
     spatial_group: dist.ProcessGroup
     bayesian: bool
@@ -736,7 +736,7 @@ class XWT(torch.autograd.Function):
         b: torch.Tensor,
         local_rank: int,
         device: torch.device,
-        selector: LinearSelectionStrategy,
+        config: LinearConfig,
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
         bayesian: bool,
@@ -756,8 +756,8 @@ class XWT(torch.autograd.Function):
             Local model rank.
         device : torch.device
             Device to perform computation on.
-        selector : LinearSelectionStrategy
-            Instance of LinearSelectionStrategy class.
+        config : LinearConfig
+            Instance of LinearConfig class.
         model_group : dist.ProcessGroup
             Process group for an individual model-parallel instance.
         spatial_group: dist.ProcessGroup
@@ -771,9 +771,9 @@ class XWT(torch.autograd.Function):
         Cij: torch.Tensor
             Local output tensor of shape (B, out_dim, in_dim) or (S, B, out_dim, in_dim).
         """
-        w = selector.reshape_weights(w)
-        xwt = selector.mm_kernels[0](x, w, local_rank, device, model_group)
-        xwt = selector.add_bias(xwt, b)
+        w = config.reshape_weights(w)
+        xwt = config.mm_kernels[0](x, w, local_rank, device, model_group)
+        xwt = config.add_bias(xwt, b)
 
         xwt = cast(torch.Tensor, xwt)
 
@@ -787,17 +787,17 @@ class XWT(torch.autograd.Function):
         Set up context.
 
         ctx: FunctionCtx
-        inputs: tuple(x, w, b, local_rank, device, selector, spatial_group, bayesian)
+        inputs: tuple(x, w, b, local_rank, device, config, spatial_group, bayesian)
         output: xwt
         """
-        x, w, b, local_rank, device, selector, model_group, spatial_group, bayesian = (
+        x, w, b, local_rank, device, config, model_group, spatial_group, bayesian = (
             inputs
         )
         ctx.save_for_backward(x, w, b)
         c = cast(LinearCtx, ctx)
         c.local_rank = local_rank
         c.device = device
-        c.selector = selector
+        c.config = config
         c.model_group = model_group
         c.spatial_group = spatial_group
         c.bayesian = bayesian
@@ -838,13 +838,13 @@ class XWT(torch.autograd.Function):
         input, weight, bias = ctx.saved_tensors
         local_rank = ctx.local_rank
         device = ctx.device
-        selector = ctx.selector
+        config = ctx.config
         model_group = ctx.model_group
         spatial_group = ctx.spatial_group
 
-        weight = selector.reshape_weights(weight)
+        weight = config.reshape_weights(weight)
 
-        grad_input, grad_weight = selector.mm_kernels[3](
+        grad_input, grad_weight = config.mm_kernels[3](
             grad_output,
             weight,
             input,
@@ -853,11 +853,11 @@ class XWT(torch.autograd.Function):
             model_group=model_group,
         )
 
-        grad_weight = selector.grad_sum(
+        grad_weight = config.grad_sum(
             grad_weight, ctx.bayesian
         )  # sum along batch dimension
 
-        grad_b = selector.grad_bias(grad_output, spatial_group)
+        grad_b = config.grad_bias(grad_output, spatial_group)
 
         return grad_input, grad_weight, grad_b, None, None, None, None, None, None
 
@@ -870,7 +870,7 @@ class XWT(torch.autograd.Function):
         b: Union[torch.Tensor, None],
         local_rank: int,
         device: torch.device,
-        selector: LinearSelectionStrategy,
+        config: LinearConfig,
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
         bayesian: bool,
@@ -884,7 +884,7 @@ class XWT(torch.autograd.Function):
             Metadata object with info.batch_size (size of vmapped dimension).
         in_dims:
             Tuple of Optional[int] describing which dimension of each input
-            is vmapped over. Structure matches (x, w, b, rank, device, selector, model_group, spatial_group, bayesian).
+            is vmapped over. Structure matches (x, w, b, rank, device, config, model_group, spatial_group, bayesian).
         x: torch.Tensor
             Possibly batched input.
         w: torch.Tensor
@@ -895,7 +895,7 @@ class XWT(torch.autograd.Function):
             Local rank.
         device: torch.device
             Device where computation occurs.
-        selector: LinearSelectionStrategy
+        config: LinearConfig
             Instance of selection class with function pointers based on specific config.
         model_group: dist.ProcessGroup
             Domain- and tensor-parallel process group.
@@ -913,7 +913,7 @@ class XWT(torch.autograd.Function):
         """
         x = x.contiguous()
         out = XWT.apply(
-            x, w, b, local_rank, device, selector, model_group, spatial_group, bayesian
+            x, w, b, local_rank, device, config, model_group, spatial_group, bayesian
         )
 
         # out has vmapped dimension at dim 0
@@ -956,7 +956,7 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
         self.model_group = model_group
         self.spatial_group = spatial_group
         self.bayesian = bayesian
-        self.selector = LinearSelectionStrategy(
+        self.config = LinearConfig(
             parallelism, None, self.bayesian, linear_layer=False, device=self.device
         )
 
@@ -992,7 +992,7 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
             b,
             self.local_rank,
             self.device,
-            self.selector,
+            self.config,
             self.model_group,
             self.spatial_group,
             self.bayesian,
@@ -1038,7 +1038,7 @@ class DistributedMatMulXW(torch.nn.Module):
         self.model_group = model_group
         self.bayesian = bayesian
 
-        self.selector = LinearSelectionStrategy(
+        self.config = LinearConfig(
             parallelism, None, self.bayesian, linear_layer=False, device=self.device
         )
 
@@ -1074,7 +1074,7 @@ class DistributedMatMulXW(torch.nn.Module):
             b,
             self.local_rank,
             self.device,
-            self.selector,
+            self.config,
             self.model_group,
             self.bayesian,
         )
@@ -1093,7 +1093,7 @@ class XW(torch.autograd.Function):
         b: Optional[torch.Tensor],
         local_rank: int,
         device: torch.device,
-        selector: LinearSelectionStrategy,
+        config: LinearConfig,
         model_group: dist.ProcessGroup,
         bayesian: bool,
     ) -> torch.Tensor:
@@ -1115,8 +1115,8 @@ class XW(torch.autograd.Function):
             Local model rank
         device : torch.device
             Device to perform computation on.
-        selector: LinearSelectionStrategy
-            Instance of LinearSelectionStrategy class.
+        config: LinearConfig
+            Instance of LinearConfig class.
         model_group : dist.ProcessGroup, optional
             Process group for an individual model-parallel instance.
         bayesian : bool
@@ -1127,9 +1127,9 @@ class XW(torch.autograd.Function):
         C: torch.Tensor
             Local output tensor of shape (B, x_in, out_dim) or (S, B, x_in, out_dim).
         """
-        w = selector.reshape_weights(w)
-        xw = selector.mm_kernels[1](x, w, local_rank, device, model_group)
-        xw = selector.add_bias(xw, b)
+        w = config.reshape_weights(w)
+        xw = config.mm_kernels[1](x, w, local_rank, device, model_group)
+        xw = config.add_bias(xw, b)
         xw = cast(torch.Tensor, xw)
         return xw
 
@@ -1144,12 +1144,12 @@ class XW(torch.autograd.Function):
         inputs: tuple(x, w, b, local_rank, device, parallelism, model_group)
         output: xwt
         """
-        x, w, b, local_rank, device, selector, model_group, bayesian = inputs
+        x, w, b, local_rank, device, config, model_group, bayesian = inputs
         ctx.save_for_backward(x, w, b)
         c = cast(LinearCtx, ctx)
         c.local_rank = local_rank
         c.device = device
-        c.selector = selector
+        c.config = config
         c.model_group = model_group
         c.b = b
         c.bayesian = bayesian
@@ -1182,19 +1182,19 @@ class XW(torch.autograd.Function):
         input, weight, bias = ctx.saved_tensors
         local_rank = ctx.local_rank
         device = ctx.device
-        selector = ctx.selector
+        config = ctx.config
         model_group = ctx.model_group
 
-        weight = selector.reshape_weights(weight)
+        weight = config.reshape_weights(weight)
 
-        grad_input = selector.mm_kernels[0](
+        grad_input = config.mm_kernels[0](
             grad_output,
             weight,
             local_rank=local_rank,
             device=device,
             model_group=model_group,
         )
-        grad_weight = selector.mm_kernels[2](
+        grad_weight = config.mm_kernels[2](
             input,
             grad_output,
             local_rank=local_rank,
@@ -1202,8 +1202,8 @@ class XW(torch.autograd.Function):
             model_group=model_group,
         )
 
-        grad_weight = selector.grad_sum(grad_weight, ctx.bayesian)
-        grad_b = selector.grad_bias(grad_output)
+        grad_weight = config.grad_sum(grad_weight, ctx.bayesian)
+        grad_b = config.grad_bias(grad_output)
 
         return grad_input, grad_weight, grad_b, None, None, None, None, None
 
@@ -1216,7 +1216,7 @@ class XW(torch.autograd.Function):
         b: Optional[torch.Tensor],
         local_rank: int,
         device: torch.device,
-        selector: int,
+        config: int,
         model_group: dist.ProcessGroup,
         bayesian: bool,
     ) -> tuple[torch.Tensor, Optional[int]]:
@@ -1240,8 +1240,8 @@ class XW(torch.autograd.Function):
             Local model rank
         device : torch.device
             Device to perform computation on.
-        selector: LinearSelectionStrategy
-            Instance of LinearSelectionStrategy class.
+        config: LinearConfig
+            Instance of LinearConfig class.
         model_group : dist.ProcessGroup, optional
             Process group for an individual model-parallel instance.
         bayesian : bool
@@ -1255,7 +1255,7 @@ class XW(torch.autograd.Function):
             Index of vmapped dimension in output (0 if batched, None if not).
         """
         x = x.contiguous()
-        out = XW.apply(x, w, b, local_rank, device, selector, model_group, bayesian)
+        out = XW.apply(x, w, b, local_rank, device, config, model_group, bayesian)
 
         # out has vmapped dimension at dim 0
         return out, 0
