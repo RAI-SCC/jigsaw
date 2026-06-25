@@ -3,6 +3,7 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.modules.conv as conv
+import jigsaw.modules.conv_transpose as conv_transpose
 from jigsaw.utils_aggregate import gather_results_as_list
 from tests.process_mesh import *
 
@@ -110,7 +111,7 @@ class TestConv2dTranspose:
         )
         in_dim, out_dim = 6, 10
         kernel_size = 4
-        conv2d = conv.DistributedConvTranspose2D(
+        conv2d = conv_transpose.DistributedConvTranspose2D(
             in_dim,
             out_dim,
             kernel_size,
@@ -152,7 +153,7 @@ class TestConv2dTranspose:
         kernel_size = 4
         h, w = 16, 16
 
-        conv2d = conv.DistributedConvTranspose2D(
+        conv2d = conv_transpose.DistributedConvTranspose2D(
             in_dim,
             out_dim,
             kernel_size,

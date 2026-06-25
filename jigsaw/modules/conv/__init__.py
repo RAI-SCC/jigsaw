@@ -1,1 +1,3 @@
-from .convolutions import DistributedConv2D, DistributedConvTranspose2D
+"""Expose distributed convolutions to public interface."""
+
+from .conv import DistributedConv2D as DistributedConv2D
