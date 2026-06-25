@@ -362,7 +362,7 @@ class DistributedXWT(torch.nn.Module):
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         bayesian: bool = False,
-        config: Optional[LinearConfig] = None
+        config: Optional[LinearConfig] = None,
     ) -> None:
         """
         Initialize the XWT Linear layer sharded over n processes.
@@ -423,13 +423,17 @@ class DistributedXWT(torch.nn.Module):
         self.model_group = model_group
         self.spatial_group = spatial_group
         self.bayesian = bayesian
-        self.config = LinearConfig(
-            self.parallelism,
-            self.bias,
-            self.bayesian,
-            linear_layer=True,
-            device=self.device,
-        ) if config is None else config
+        self.config = (
+            LinearConfig(
+                self.parallelism,
+                self.bias,
+                self.bayesian,
+                linear_layer=True,
+                device=self.device,
+            )
+            if config is None
+            else config
+        )
 
         if self.bias is not None:
             self.bias.register_post_accumulate_grad_hook(
@@ -935,7 +939,7 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
         model_group: dist.ProcessGroup,
         spatial_group: dist.ProcessGroup,
         bayesian: bool,
-        config: Optional[LinearConfig]
+        config: Optional[LinearConfig],
     ) -> None:
         """
         Initialize the Distributed XWT multiplication operation.
@@ -964,9 +968,13 @@ class DistributedMatMulXWTranspose(torch.nn.Module):
         self.model_group = model_group
         self.spatial_group = spatial_group
         self.bayesian = bayesian
-        self.config = LinearConfig(
-            parallelism, None, self.bayesian, linear_layer=False, device=self.device
-        ) if config is None else config
+        self.config = (
+            LinearConfig(
+                parallelism, None, self.bayesian, linear_layer=False, device=self.device
+            )
+            if config is None
+            else config
+        )
 
         self.XWT = XWT.apply
 
