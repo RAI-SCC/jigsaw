@@ -162,7 +162,7 @@ def comm_1d_alltoall(
 def comm_1d_p2p(
     data: torch.Tensor,
     buffer: torch.Tensor,
-    offset: int,
+    direction: int,
     group: dist.ProcessGroup,
     async_op: bool = True,
     tag: int = 0,
@@ -178,7 +178,7 @@ def comm_1d_p2p(
         Data to send.
     buffer: torch.Tensor
         Buffer to receive.
-    offset: int
+    direction: int
         positive direction = send to right.
         negative direction = send to left.
     group: dist.ProcessGroup
@@ -197,8 +197,8 @@ def comm_1d_p2p(
     buffer: torch.Tensor
         Buffer in which the data is received.
     """
-    send_to = (group.rank() + offset) % group.size()
-    recv_from = (group.rank() - offset) % group.size()
+    send_to = (group.rank() + direction) % group.size()
+    recv_from = (group.rank() - direction) % group.size()
     tag = tag * 8
 
     if group.rank() % 2 == 0:
