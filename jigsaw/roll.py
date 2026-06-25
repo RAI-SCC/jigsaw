@@ -86,7 +86,7 @@ class DistributedRoll(torch.nn.Module):
         spatial_groups: tuple[dist.ProcessGroup, ...],
         device: torch.device,
         dtype: torch.dtype = torch.float32,
-        config: Optional[RollConfig] = None
+        config: Optional[RollConfig] = None,
     ) -> None:
         super().__init__()
         if len(distributed_dims) != len(spatial_groups):
