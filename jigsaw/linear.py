@@ -193,16 +193,12 @@ class LinearConfig:
         return grad_b
 
     def _no_reduce_bias(
-        self, grad_output: torch.Tensor, spatial_group: dist.ProcessGroup
+        self, grad_output: torch.Tensor, *args: Any, **kwargs: Any
     ) -> torch.Tensor:
         """Calculate grad wrt bias when spatial synchronization is not required."""
         return grad_output.sum(dim=(-3, -2))
 
-    def _no_bias(
-        self,
-        grad_output: Optional[torch.Tensor],
-        spatial_group: Optional[dist.ProcessGroup],
-    ) -> Optional[torch.Tensor]:
+    def _no_bias(self, *args: Any, **kwargs: Any) -> Optional[torch.Tensor]:
         """Return identity when bias does not exist."""
         return None
 
