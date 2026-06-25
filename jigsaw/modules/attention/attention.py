@@ -6,7 +6,10 @@ import torch
 import torch.distributed as dist
 from einops import rearrange
 
-from . import hooks, linear, ring_attention_helpers
+from jigsaw import hooks
+from jigsaw.modules import linear
+
+from . import ring_attention_helpers
 
 
 class DistributedAttention(torch.nn.Module):

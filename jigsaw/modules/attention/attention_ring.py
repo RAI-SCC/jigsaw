@@ -16,7 +16,8 @@ import torch
 import torch.distributed as dist
 from einops import rearrange
 
-from . import linear
+from jigsaw.modules import linear
+
 from . import ring_attention_helpers as ring_attn
 
 

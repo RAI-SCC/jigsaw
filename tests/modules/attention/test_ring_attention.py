@@ -2,7 +2,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-import jigsaw.ring_attention_helpers as ring_attn_fns
+import jigsaw.modules.attention.ring_attention_helpers as ring_attn_fns
 from jigsaw.utils_aggregate import (
     gather_1d_results,
 )

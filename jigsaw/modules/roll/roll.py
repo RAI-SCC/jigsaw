@@ -5,7 +5,8 @@ from typing import Any, Callable, Optional, Protocol, cast
 import torch
 import torch.distributed as dist
 
-from . import comm
+import jigsaw.comm as comm
+
 from . import distributed_roll as dist_roll
 
 

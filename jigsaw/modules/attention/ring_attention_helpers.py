@@ -10,8 +10,8 @@ from typing import Any, Optional, Protocol, cast
 import torch
 import torch.distributed as dist
 
-from . import comm
-from .offload import NVLinkActivationOffloader
+import jigsaw.comm as comm
+from jigsaw.offload import NVLinkActivationOffloader
 
 
 # --------------------------------------------------------------------------- #

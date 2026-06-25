@@ -4,7 +4,7 @@ from typing import Any, Callable, Protocol
 
 import torch
 
-from jigsaw import attention, convolutions, linear, roll
+from jigsaw.modules import attention, conv, linear, roll
 
 
 class _ConvertibleModule(Protocol):
@@ -23,12 +23,12 @@ class _ConvertibleModule(Protocol):
 
 mapped_modules: dict[type[torch.nn.Module], Any] = {
     torch.nn.Linear: linear.DistributedXWT,
-    torch.nn.Conv2d: convolutions.DistributedConv2D,
-    torch.nn.ConvTranspose2d: convolutions.DistributedConvTranspose2D,
+    torch.nn.Conv2d: conv.DistributedConv2D,
+    torch.nn.ConvTranspose2d: conv.DistributedConvTranspose2D,
     roll.Roll: roll.DistributedRoll,
 }
 container_converters: dict[type[torch.nn.Module], Callable[..., torch.nn.Module]] = {
-    attention.Attention: attention.Attention.convert_to_jigsaw
+    attention.DistributedAttention: attention.Attention.convert_to_jigsaw
 }
 
 

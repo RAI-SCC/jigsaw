@@ -9,9 +9,9 @@ import torch.nn.functional as F
 from torch.nn.grad import conv2d_input, conv2d_weight
 from torch.nn.parameter import Parameter
 
-from . import comm, hooks
-from . import distributed_convolutions as dist_conv
-from .utils_aggregate import gather_1d_results
+from jigsaw import comm, hooks
+from jigsaw.modules.conv import distributed_convolutions as dist_conv
+from jigsaw.utils_aggregate import gather_1d_results
 
 
 def _pair(x: int | tuple[int, ...]) -> tuple[int, int]:
