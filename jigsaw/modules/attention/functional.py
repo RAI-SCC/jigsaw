@@ -5,14 +5,21 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any, Optional, Protocol, cast
-from .config import SaveBackward, SaveScope, SendForward, SendBackward , SendForwardOp
-from .config import RingAttentionConfig
 
 import torch
 import torch.distributed as dist
 
-
 from jigsaw.offload import NVLinkActivationOffloader
+
+from .config import (
+    RingAttentionConfig,
+    SaveBackward,
+    SaveScope,
+    SendBackward,
+    SendForward,
+    SendForwardOp,
+)
+
 
 # --------------------------------------------------------------------------- #
 # small numeric helpers
@@ -914,4 +921,3 @@ def ring_backward(
         ring_config, dk_buf, dv_buf, local_rank, seq_local, group
     )
     return dq, dk_local, dv_local
-

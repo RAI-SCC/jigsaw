@@ -1,10 +1,12 @@
+"""Config for attention."""
+
+from enum import Enum
+from typing import Any, Callable, Optional, cast
+
 import torch
 import torch.distributed as dist
 
 import jigsaw.comm as comm
-from enum import Enum
-from typing import Optional, Any, Callable, cast
-
 from jigsaw.offload import NVLinkActivationOffloader
 
 
