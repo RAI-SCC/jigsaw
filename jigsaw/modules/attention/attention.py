@@ -228,7 +228,6 @@ class DistributedAttention(torch.nn.Module):
         # out has shape [batch, local_heads, local_sequence length, head_dim]
         out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous().to(self.dtype)
         out = cast(torch.Tensor, self.head_concat(out))
-
         # Output: [n_batch, seq_length, output_dim]
         return out
 
