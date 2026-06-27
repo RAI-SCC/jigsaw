@@ -1,14 +1,14 @@
 import pytest
 import torch
 
-import jigsaw.modules.normalization as norm
+import jigsaw.modules.normalization.normalization as norm
 from jigsaw.utils_aggregate import (
     gather_1d_results,
     gather_results,
 )
 from tests.process_mesh import *
 
-pytestmark = [pytest.mark.gpu_required, pytest.mark.distributed_required]
+pytestmark = [pytest.mark.distributed_required]
 
 
 @pytest.mark.parametrize(

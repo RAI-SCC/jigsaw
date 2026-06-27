@@ -1,8 +1,12 @@
+"""Autograd definition for roll functions."""
+
+from typing import Any, Optional, Protocol, cast
+
 import torch
 import torch.distributed as dist
-from .config import RollConfig
-from typing import cast, Optional, Protocol, Any
+
 from . import distributed_roll as dist_roll
+from .config import RollConfig
 
 
 class RollCtx(Protocol):
@@ -16,7 +20,8 @@ class RollCtx(Protocol):
     spatial_groups: tuple[dist.ProcessGroup, ...]
     empty: torch.Tensor
     config: RollConfig
-    
+
+
 class RollFunction(torch.autograd.Function):
     """Autograd wrapper for distributed roll over an arbitrary process mesh."""
 

@@ -1,6 +1,11 @@
-import torch
-from jigsaw import comm
+"""Config for roll modules."""
+
 from typing import Callable
+
+import torch
+
+from jigsaw import comm
+
 
 class RollConfig:
     """Selection strategy for roll function."""
@@ -24,4 +29,3 @@ class RollConfig:
             return comm.comm_1d_p2p
         else:
             raise ValueError(f"No halo 1d function possible for device {device.type}")
-
