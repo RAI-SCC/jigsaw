@@ -2,7 +2,7 @@ import pytest
 import torch
 
 import jigsaw.modules.linear.distributed_matmul_p2p as dist_mm_p2p
-from jigsaw.utils_aggregate import gather_results, gather_results_as_list
+from jigsaw.utils_aggregate import gather_results
 
 pytestmark = [pytest.mark.distributed_required]
 

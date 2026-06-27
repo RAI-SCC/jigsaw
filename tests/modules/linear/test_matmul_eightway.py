@@ -2,8 +2,8 @@ import pytest
 import torch
 import torch.distributed as dist
 
-import jigsaw.distributed_matmul as dist_mm
-import jigsaw.distributed_matmul_p2p as dist_mm_p2p
+import jigsaw.modules.linear.distributed_matmul as dist_mm
+import jigsaw.modules.linear.distributed_matmul_p2p as dist_mm_p2p
 from jigsaw.utils_aggregate import gather_results
 
 pytestmark = [pytest.mark.distributed_required, pytest.mark.dist(8)]
