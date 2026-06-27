@@ -6,7 +6,10 @@ import torch
 import torch.distributed as dist
 from einops import rearrange
 
-from . import hooks, linear, ring_attention_helpers
+from jigsaw import hooks
+from jigsaw.modules import linear
+
+from . import functional
 
 
 class DistributedAttention(torch.nn.Module):
@@ -180,7 +183,7 @@ class DistributedAttention(torch.nn.Module):
             Output of attention computation.
 
         """
-        out = ring_attention_helpers.RingAttentionFunction.apply(
+        out = functional.RingAttentionFunction.apply(
             q,
             k,
             v,

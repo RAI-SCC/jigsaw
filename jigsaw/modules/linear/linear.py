@@ -11,7 +11,7 @@ import jigsaw.hooks as hooks
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
 
 from .config import LinearConfig
-from .functional import XTW, XW, XWT
+from .functional import XW, XWT
 
 
 class DistributedXWT(torch.nn.Module):
@@ -51,7 +51,7 @@ class DistributedXWT(torch.nn.Module):
             Process group containing all ranks within model-parallel instances.
             Is the Union of spatial_group and channel_group.
         spatial_group: dist.ProcessGroup
-            Process group containing domain-parallel processes.
+            Process group containin domain-parallel processes.
         channel_group: dist.ProcessGroup
             Process group containin channel-parallel processes.
         bayesian: bool
@@ -387,7 +387,7 @@ class DistributedXWT(torch.nn.Module):
             del global_bias
 
 
-class DistributedMatMulXWT(torch.nn.Module):
+class DistributedMatMulXWTranspose(torch.nn.Module):
     """Batched distributed matrix-matrix (XWT) multiplication."""
 
     def __init__(
@@ -425,6 +425,7 @@ class DistributedMatMulXWT(torch.nn.Module):
         self.local_rank = local_rank
         self.device = device
         self.model_group = model_group
+        self.spatial_group = spatial_group
         self.bayesian = bayesian
         self.config = (
             LinearConfig(
@@ -460,74 +461,20 @@ class DistributedMatMulXWT(torch.nn.Module):
         Cij: torch.Tensor
             Local output tensor of shape (B, x_in, out_dim) or (S, B, x_in, out_dim).
         """
-        cij = self.XWT(x, w)
+        cij = self.XWT(
+            x,
+            w,
+            b,
+            self.local_rank,
+            self.device,
+            self.config,
+            self.model_group,
+            self.spatial_group,
+            self.bayesian,
+        )
         cij = cast(torch.Tensor, cij)
 
         return cij
-
-    @classmethod
-    def convert_to_jigsaw(
-        cls,
-        xwt: "MatMulXWT",
-        process_mesh_dict: dict,
-        device: torch.device,
-        row_kw: str = "row",
-        col_kw: str = "col",
-        model_kw: str = "model",
-        bayesian: bool = False,
-        config: Optional[LinearConfig] = None,
-    ) -> "DistributedMatMulXWT":
-        """Build a DistributedMatMul from a process mesh + mapping of tensor dim -> mesh axis."""
-        return cls(
-            local_rank=process_mesh_dict[model_kw].rank(),
-            device=device,
-            model_group=process_mesh_dict[model_kw],
-            bayesian=bayesian,
-            config=config,
-        )
-
-
-class MatMulXWT(torch.nn.Module):
-    """Wrap torch roll function in a module."""
-
-    def __init__(
-        self,
-        shifts: tuple,
-        dims: tuple,
-        dtype: torch.dtype = torch.float32,
-    ):
-        """Initialize roll function.
-
-        Parameters
-        ----------
-        shifts: tuple, list
-            number of indices to shift by
-        dims: tuple, list
-            dims to shift by
-        dtype: torch.dtype
-            data type expected of input data
-        """
-        super().__init__()
-        self.shifts = shifts
-        self.dims = dims
-        self.dtype = dtype
-
-    def forward(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of mat-mul (XWT).
-
-        Parameters
-        ----------
-        x: torch.Tensor
-            First tensor
-        w: torch.Tensor
-            Second tensor
-
-        Returns
-        -------
-        Product of x @ w.mT
-        """
-        return x @ w.mT
 
 
 class DistributedMatMulXW(torch.nn.Module):
@@ -607,218 +554,5 @@ class DistributedMatMulXW(torch.nn.Module):
             self.bayesian,
         )
         cij = cast(torch.Tensor, cij)
-
-        return cij
-
-    @classmethod
-    def convert_to_jigsaw(
-        cls,
-        xwt: "MatMulXWT",
-        process_mesh_dict: dict,
-        device: torch.device,
-        row_kw: str = "row",
-        col_kw: str = "col",
-        model_kw: str = "model",
-        bayesian: bool = False,
-        config: Optional[LinearConfig] = None,
-    ) -> "DistributedMatMulXWT":
-        """Build a Distributed mat-mul XW from a process mesh + mapping of tensor dim -> mesh axis."""
-        return cls(
-            local_rank=process_mesh_dict[model_kw].rank(),
-            device=device,
-            model_group=process_mesh_dict[model_kw],
-            spatial_group=process_mesh_dict[row_kw],
-            bayesian=bayesian,
-            config=config,
-        )
-
-
-class MatMulXW(torch.nn.Module):
-    """Batched matrix-matrix (XWT) multiplication distributed across two processes."""
-
-    def __init__(
-        self,
-    ) -> None:
-        """
-        Initialize the distributed XW module.
-
-        Parameters
-        ----------
-        local_rank : int
-            Local model rank.
-        device : torch.device
-            Device to perform computation on.
-        parallelism: int
-            Number of processes the model is distributed over.
-        model_group: dist.ProcessGroup
-            Process group containing all ranks within model-parallel instances.
-        spatial_group: dist.ProcessGroup
-            Process group containing ranks that share channels.
-        bayesian: bool
-            Boolean flag for whether the model is Bayesian.
-        """
-        super().__init__()
-
-    def get_parameter_count(self) -> int:
-        """Return parameter count for matrix multiplication."""
-        return 0
-
-    def forward(
-        self, x: torch.Tensor, w: torch.Tensor, b: Optional[torch.Tensor]
-    ) -> torch.Tensor:
-        """
-        Forward pass of linear layer (XW) distributed across two processes.
-
-        Parameters
-        ----------
-        x: torch.Tensor
-            Local input tensor of shape (B, x_in, in_dim).
-        w: torch.Tensor
-            Local weight tensor of shape (local_in_dim, local_out_dim)
-        b: torch.Tensor | None
-            Local bias tensor of shape (local_out_dim)
-
-        Returns
-        -------
-        Cij: torch.Tensor
-            Local output tensor of shape (B, out_dim, in_dim).
-        """
-        cij = x @ w
-        return cij
-
-
-class DistributedMatMulXTW(torch.nn.Module):
-    """Batched matrix-matrix (XWT) multiplication distributed across two processes."""
-
-    def __init__(
-        self,
-        local_rank: int,
-        device: torch.device,
-        parallelism: int,
-        model_group: dist.ProcessGroup,
-        bayesian: bool,
-    ):
-        """
-        Initialize the distributed XW module.
-
-        Parameters
-        ----------
-        local_rank : int
-            Local model rank.
-        device : torch.device
-            Device to perform computation on.
-        parallelism: int
-            Number of processes the model is distributed over.
-        model_group: dist.ProcessGroup
-            Process group containing all ranks within model-parallel instances.
-        spatial_group: dist.ProcessGroup
-            Process group containing ranks that share channels.
-        bayesian: bool
-            Boolean flag for whether the model is Bayesian.
-        """
-        super().__init__()
-        self.local_rank = local_rank
-        self.device = device
-        self.parallelism = parallelism
-        self.model_group = model_group
-        self.bayesian = bayesian
-
-        self.config = LinearConfig(
-            parallelism, None, self.bayesian, linear_layer=False, device=self.device
-        )
-
-        self.XTW = XTW.apply
-
-    def get_parameter_count(self) -> int:
-        """Return parameter count for matrix multiplication."""
-        return 0
-
-    def forward(
-        self, x: torch.Tensor, w: torch.Tensor, b: Optional[torch.Tensor]
-    ) -> torch.Tensor:
-        """
-        Forward pass of linear layer (XW) distributed across two processes.
-
-        Parameters
-        ----------
-        x: torch.Tensor
-            Local input tensor of shape (B, x_in, in_dim).
-        w: torch.Tensor
-            Local weight tensor of shape (local_in_dim, local_out_dim)
-        b: torch.Tensor | None
-            Local bias tensor of shape (local_out_dim)
-
-        Returns
-        -------
-        Cij: torch.Tensor
-            Local output tensor of shape (B, out_dim, in_dim).
-        """
-        cij = self.XTW(
-            x,
-            w,
-            b,
-            self.local_rank,
-            self.device,
-            self.config,
-            self.model_group,
-            self.bayesian,
-        )
-        cij = cast(torch.Tensor, cij)
-
-        return cij
-
-    @classmethod
-    def convert_to_jigsaw(
-        cls,
-        xtw: "MatMulXTW",
-        process_mesh_dict: dict,
-        device: torch.device,
-        row_kw: str = "row",
-        col_kw: str = "col",
-        model_kw: str = "model",
-        bayesian: bool = False,
-        config: Optional[LinearConfig] = None,
-    ) -> "DistributedMatMulXTW":
-        """Build a Distributed XTW from a process mesh + mapping of tensor dim -> mesh axis."""
-        return cls(
-            local_rank=process_mesh_dict[model_kw].rank(),
-            device=device,
-            model_group=process_mesh_dict[model_kw],
-            spatial_group=process_mesh_dict[row_kw],
-            bayesian=bayesian,
-            config=config,
-        )
-
-
-class MatMulXTW(torch.nn.Module):
-    """Batched matrix-matrix (XWT) multiplication distributed across two processes."""
-
-    def __init__(
-        self,
-    ):
-        """Initialize the distributed XW module."""
-        super().__init__()
-
-    def forward(
-        self, x: torch.Tensor, w: torch.Tensor, b: Optional[torch.Tensor]
-    ) -> torch.Tensor:
-        """
-        Forward pass of linear layer (XW) distributed across two processes.
-
-        Parameters
-        ----------
-        x: torch.Tensor
-            Local input tensor of shape (B, x_in, in_dim).
-        w: torch.Tensor
-            Local weight tensor of shape (local_in_dim, local_out_dim)
-        b: torch.Tensor | None
-            Local bias tensor of shape (local_out_dim)
-
-        Returns
-        -------
-        Cij: torch.Tensor
-            Local output tensor of shape (B, out_dim, in_dim).
-        """
-        cij = x.mT @ w
 
         return cij
