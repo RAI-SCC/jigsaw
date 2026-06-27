@@ -68,6 +68,10 @@ class XWT(torch.autograd.Function):
             Local output tensor of shape (B, out_dim, in_dim) or (S, B, out_dim, in_dim).
         """
         w = config.reshape_weights(w)
+        if torch.is_autocast_enabled(device.type):
+            dtype = torch.get_autocast_dtype(device.type)
+            x = x.to(dtype)
+            w = w.to(dtype)
         xwt = config.mm_kernels[0](x, w, local_rank, device, model_group)
         xwt = config.add_bias(xwt, b)
 
@@ -139,6 +143,8 @@ class XWT(torch.autograd.Function):
         spatial_group = ctx.spatial_group
 
         weight = config.reshape_weights(weight)
+        # handle conversion if necessary here
+        grad_output = grad_output.to(weight.dtype)
 
         grad_input, grad_weight = config.mm_kernels[3](
             grad_output,
