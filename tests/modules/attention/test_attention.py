@@ -1,12 +1,11 @@
 import pytest
 import torch
 
-import jigsaw.attention as attention
+import jigsaw.modules.attention as attention
 from jigsaw.utils_aggregate import (
     gather_1d_results_list,
 )
-
-from .process_mesh import *
+from tests.process_mesh import *
 
 pytestmark = [pytest.mark.distributed_required]
 

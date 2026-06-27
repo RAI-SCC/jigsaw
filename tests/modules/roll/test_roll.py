@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from jigsaw import roll
+from jigsaw.modules import roll
 from jigsaw.utils_aggregate import gather_1d_results
 
 pytestmark = [pytest.mark.distributed_required]

@@ -3,7 +3,7 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.hooks as hooks
-import jigsaw.linear as linear
+import jigsaw.modules.linear as linear
 from jigsaw.utils_aggregate import (
     gather_1d_results,
     gather_1d_results_list,
