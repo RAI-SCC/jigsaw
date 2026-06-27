@@ -1,12 +1,16 @@
-from typing import Callable, Optional, Any
+"""Config setup for ring attention."""
+
+from typing import Any, Callable, Optional
 
 import torch
 import torch.distributed as dist
-from torch.nn.parameter import Parameter
 import torch.nn.functional as F
-from . import distributed_convolutions as dist_conv
-import jigsaw.comm as comm
 from torch.nn.grad import conv2d_input, conv2d_weight
+from torch.nn.parameter import Parameter
+
+import jigsaw.comm as comm
+
+from . import distributed_convolutions as dist_conv
 
 
 class ConvConfig:

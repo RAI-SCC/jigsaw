@@ -1,8 +1,12 @@
+"""Autograd definition for convolutional layers."""
+
+from typing import Any, Optional, Protocol, cast
+
 import torch
 import torch.distributed as dist
-from typing import cast, Any, Optional, Protocol
-from .config import ConvConfig
+
 from . import distributed_convolutions as dist_conv
+from .config import ConvConfig
 
 
 class ConvCtx(Protocol):
@@ -25,7 +29,6 @@ class ConvCtx(Protocol):
     config: ConvConfig
     empty: torch.Tensor
     saved_tensors: tuple[torch.Tensor, torch.Tensor]
-
 
 
 class Conv2d(torch.autograd.Function):

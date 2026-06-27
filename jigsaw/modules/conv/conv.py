@@ -5,13 +5,14 @@ from typing import Callable, Optional, cast
 import numpy as np
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 from jigsaw import hooks
 from jigsaw.utils_aggregate import gather_1d_results
+
 from .config import ConvConfig
 from .functional import Conv2d
+
 
 def _pair(x: int | tuple[int, ...]) -> tuple[int, int]:
     """Convert different types to 2-element tuple."""
@@ -20,8 +21,6 @@ def _pair(x: int | tuple[int, ...]) -> tuple[int, int]:
     if len(x) == 1:
         return (x[0], x[0])
     return (x[0], x[1])
-
-
 
 
 class DistributedConv2D(torch.nn.Module):
@@ -458,8 +457,3 @@ class DistributedConv2D(torch.nn.Module):
         )
 
         return cast(torch.Tensor, cij[0])
-
-
-
-
-

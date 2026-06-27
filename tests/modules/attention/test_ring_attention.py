@@ -2,7 +2,8 @@ import pytest
 import torch
 import torch.distributed as dist
 
-import jigsaw.modules.attention.ring_attention_helpers as ring_attn_fns
+import jigsaw.modules.attention.config as config
+import jigsaw.modules.attention.functional as functional
 from jigsaw.utils_aggregate import (
     gather_1d_results,
 )
@@ -246,43 +247,43 @@ def test_backward_sdpa(
 
 @pytest.mark.dist(4)
 @pytest.mark.parametrize(
-    "send_in_forward", [ring_attn_fns.SendForward.X, ring_attn_fns.SendForward.KV]
+    "send_in_forward", [config.SendForward.X, config.SendForward.KV]
 )
 @pytest.mark.parametrize(
-    "save_for_backward", [ring_attn_fns.SaveBackward.X, ring_attn_fns.SaveBackward.KV]
+    "save_for_backward", [config.SaveBackward.X, config.SaveBackward.KV]
 )
 @pytest.mark.parametrize(
     "send_forward_op",
-    [ring_attn_fns.SendForwardOp.SENDRECV, ring_attn_fns.SendForwardOp.BROADCAST],
+    [config.SendForwardOp.SENDRECV, config.SendForwardOp.BROADCAST],
 )
 @pytest.mark.parametrize(
-    "save_scope", [ring_attn_fns.SaveScope.LOCAL, ring_attn_fns.SaveScope.GLOBAL]
+    "save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL]
 )
 @pytest.mark.parametrize(
     "send_backward",
-    [ring_attn_fns.SendBackward.SEND_DKV, ring_attn_fns.SendBackward.GATHER_DKV],
+    [config.SendBackward.SEND_DKV, config.SendBackward.GATHER_DKV],
 )
-@pytest.mark.parametrize("offloader", [ring_attn_fns.Offload.DISABLED])
+@pytest.mark.parametrize("offloader", [config.Offload.DISABLED])
 def test_ring_forward_backward(
     device: torch.device,
     process_mesh_dict_4x1: dict,
-    send_in_forward: ring_attn_fns.SendForward,
-    save_for_backward: ring_attn_fns.SaveBackward,
-    send_forward_op: ring_attn_fns.SendForwardOp,
-    save_scope: ring_attn_fns.SaveScope,
-    send_backward: ring_attn_fns.SendBackward,
-    offloader: ring_attn_fns.Offload,
+    send_in_forward: config.SendForward,
+    save_for_backward: config.SaveBackward,
+    send_forward_op: config.SendForwardOp,
+    save_scope: config.SaveScope,
+    send_backward: config.SendBackward,
+    offloader: config.Offload,
 ) -> None:
     """Verify if forward-backward pass works for ring attention."""
     if (
-        send_in_forward == ring_attn_fns.SendForward.KV
-        and save_for_backward == ring_attn_fns.SaveBackward.X
+        send_in_forward == config.SendForward.KV
+        and save_for_backward == config.SaveBackward.X
     ):
         pytest.xfail("not yet supported")
 
     process_mesh_dict = process_mesh_dict_4x1
 
-    ring_config = ring_attn_fns.RingAttentionConfig(
+    ring_config = config.RingAttentionConfig(
         device=device,
         send_in_forward=send_in_forward,
         send_forward_op=send_forward_op,
@@ -292,7 +293,7 @@ def test_ring_forward_backward(
         offload=offloader,
     )
 
-    ring_forward = ring_attn_fns.build_ring_forward(ring_config)
+    ring_forward = functional.build_ring_forward(ring_config)
     local_rank = dist.get_rank(group=process_mesh_dict["row"])
     world_size = dist.get_world_size(group=process_mesh_dict["row"])
 
@@ -322,7 +323,7 @@ def test_ring_forward_backward(
     scale = q_local.shape[-1] ** -0.5
 
     # just test helper function forward
-    ring_forward = ring_attn_fns.build_ring_forward(ring_config)
+    ring_forward = functional.build_ring_forward(ring_config)
     out, lse, chunks_to_save = ring_forward(
         q_local,
         k_local,
@@ -343,8 +344,8 @@ def test_ring_forward_backward(
     q_ref = gather_1d_results(q_local, process_mesh_dict, dim=2).requires_grad_(True)
     k_ref = gather_1d_results(k_local, process_mesh_dict, dim=2).requires_grad_(True)
     v_ref = gather_1d_results(v_local, process_mesh_dict, dim=2).requires_grad_(True)
+
     # Reference calculation
-    # ring_attention.ring_attn.build_ring_forward(ring_attention)
     with torch.nn.attention.sdpa_kernel(
         [
             torch.nn.attention.SDPBackend.FLASH_ATTENTION,
@@ -370,7 +371,7 @@ def test_ring_forward_backward(
 
     dout_local = torch.ones_like(out, device=device, dtype=out_ref.dtype)
 
-    dq_local, dk_local, dv_local = ring_attn_fns.ring_backward(
+    dq_local, dk_local, dv_local = functional.ring_backward(
         dout_local,
         q_local,
         out,
@@ -485,13 +486,13 @@ def test_ring_forward_backward(
 #         spatial_group=group,
 #         bayesian=False,
 #         dtype=torch.bfloat16,
-#         ring_config=ring_attn_fns.RingAttentionConfig(
+#         ring_config=config.RingAttentionConfig(
 #             device=device,
-#             send_in_forward=ring_attn_fns.SendForward.X,
-#             save_for_backward=ring_attn_fns.SaveBackward.X,
-#             save_scope=ring_attn_fns.SaveScope.GLOBAL,
-#             send_backward=ring_attn_fns.SendBackward.GATHER_DKV,
-#             offload=ring_attn_fns.Offload.DISABLED,
+#             send_in_forward=config.SendForward.X,
+#             save_for_backward=config.SaveBackward.X,
+#             save_scope=config.SaveScope.GLOBAL,
+#             send_backward=config.SendBackward.GATHER_DKV,
+#             offload=config.Offload.DISABLED,
 #         ),
 #     )
 #     model_baseline = ring_attention.RingBaseline(

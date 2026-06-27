@@ -7,8 +7,8 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from jigsaw import attention_ring, utils
-from jigsaw import ring_attention_helpers as ring_attn_fns
+from jigsaw import  utils
+from jigsaw.modules.attention import config
 
 _default_layer_config: dict[str, int] = {
     "x_features": 256,
@@ -103,7 +103,7 @@ def training_loop(
     mesh_dict: dict[str, dist.ProcessGroup],
     device: torch.device,
     local_rank: int,
-    ring_config: ring_attn_fns.RingAttentionConfig,
+    ring_config: functional.RingAttentionConfig,
     layer_config: dict = _default_layer_config,
     steps: int = 10,
     epochs: int = 3,
@@ -288,26 +288,26 @@ if __name__ == "__main__":
 
     # Set all possible configuration options here
     enum_fields = {
-        "send_in_forward": ring_attn_fns.SendForward,
-        "save_for_backward": ring_attn_fns.SaveBackward,
+        "send_in_forward": config.SendForward,
+        "save_for_backward": config.SaveBackward,
         # "send_forward_op": ring_attn_fns.SendForwardOp,
-        "save_scope": ring_attn_fns.SaveScope,
-        "send_backward": ring_attn_fns.SendBackward,
-        "offload": ring_attn_fns.Offload,
+        "save_scope": config.SaveScope,
+        "send_backward": config.SendBackward,
+        "offload": config.Offload,
     }
 
-    ring_config = ring_attn_fns.RingAttentionConfig(
+    ring_config = config.RingAttentionConfig(
         device=device,
-        send_in_forward=ring_attn_fns.SendForward.X,
-        save_for_backward=ring_attn_fns.SaveBackward.X,
-        send_forward_op=ring_attn_fns.SendForwardOp.SENDRECV,
-        save_scope=ring_attn_fns.SaveScope.GLOBAL,
-        send_backward=ring_attn_fns.SendBackward.GATHER_DKV,
-        offload=ring_attn_fns.Offload.DISABLED,
+        send_in_forward=config.SendForward.X,
+        save_for_backward=config.SaveBackward.X,
+        send_forward_op=config.SendForwardOp.SENDRECV,
+        save_scope=config.SaveScope.GLOBAL,
+        send_backward=config.SendBackward.GATHER_DKV,
+        offload=configs.Offload.DISABLED,
     )
 
     for combo in itertools.product(*[e for e in enum_fields.values()]):
-        ring_config = ring_attn_fns.RingAttentionConfig(
+        ring_config = config.RingAttentionConfig(
             **dict(zip(enum_fields.keys(), combo)),
             device=device,
         )
