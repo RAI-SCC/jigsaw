@@ -76,8 +76,8 @@ def test_xwt_forward_2(device: torch.device, process_mesh_dict_2x1x2: dict) -> N
         local_rank=local_rank,
         device=device,
         model_group=process_mesh_dict_2x1x2["model"],
-        domain_group=process_mesh_dict_2x1x2["col"],
-        tensor_group=process_mesh_dict_2x1x2["row"],
+        column_group=process_mesh_dict_2x1x2["col"],
+        row_group=process_mesh_dict_2x1x2["row"],
         bayesian=False,
     ).to(device)
 

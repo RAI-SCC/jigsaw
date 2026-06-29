@@ -66,9 +66,9 @@ class DistributedXWT(torch.nn.Module):
         assert in_dim % column_group.size() == 0
         assert out_dim % (model_group.size() // column_group.size()) == 0
 
+        bias_dim = out_dim // column_group.size()
         in_dim = in_dim // (column_group.size())
         out_dim = out_dim // (model_group.size() // column_group.size())
-        bias_dim = out_dim
 
         self.weight = torch.nn.Parameter(
             torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev).to(device)
