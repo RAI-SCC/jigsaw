@@ -192,7 +192,7 @@ def _select_forward_comm_fns(
                         recv_buf, handle = ring_comm_fn(
                             x,
                             recv_buf,
-                            offset=1,
+                            1,
                             group=group,
                             async_op=True,
                             tag=step,
@@ -216,7 +216,7 @@ def _select_forward_comm_fns(
                         recv_buf, handle = ring_comm_fn(
                             kv,
                             recv_buf,
-                            offset=1,
+                            1,
                             group=group,
                             async_op=True,
                             empty=empty,

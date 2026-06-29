@@ -552,7 +552,7 @@ class _LocalChunkProvider(_BackwardChunkProvider):
             self._recv_buf, self._handle = self.config.ring_comm_fn(
                 send_buf,
                 self._recv_buf,
-                offset=1,
+                1,
                 group=self.group,
                 async_op=True,
                 empty=self.empty,
@@ -607,7 +607,7 @@ class _LocalChunkProvider(_BackwardChunkProvider):
         self._recv_buf, self._handle = self.config.ring_comm_fn(
             self._recv_buf,
             next_recv,
-            offset=1,
+            1,
             group=self.group,
             async_op=True,
             empty=self.empty,
@@ -812,7 +812,7 @@ def _accumulate_dkv_send(
     dkv = torch.cat([dk_j, dv_j], dim=0).contiguous()
     recv_buf = torch.empty_like(dkv)
     recv_buf, _ = ring_config.ring_comm_fn(
-        dkv, recv_buf, offset=-step, group=group, async_op=False, empty=empty, step=step
+        dkv, recv_buf, -step, group=group, async_op=False, empty=empty, step=step
     )
     dkj_r, dvj_r = torch.chunk(recv_buf, 2, dim=0)
     dk_buf += dkj_r
