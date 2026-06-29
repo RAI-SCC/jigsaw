@@ -4,9 +4,9 @@ import pytest
 import torch
 
 import jigsaw.convert as convert
-from jigsaw.attention import Attention, DistributedAttention
-from jigsaw.linear import DistributedXWT
-from jigsaw.roll import Roll
+from jigsaw.modules.attention import Attention, DistributedAttention
+from jigsaw.modules.linear import DistributedXWT
+from jigsaw.modules.roll import Roll
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
 
 pytestmark = [pytest.mark.distributed_required]

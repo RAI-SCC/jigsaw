@@ -3,7 +3,7 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.hooks as hooks
-import jigsaw.linear as linear
+import jigsaw.modules.linear as linear
 from jigsaw.utils_aggregate import (
     gather_1d_results,
     gather_1d_results_list,
@@ -29,8 +29,8 @@ def test_xwt_forward(device: torch.device, process_mesh_dict_2x2: dict) -> None:
         local_rank,
         device,
         process_mesh_dict_2x2["model"],
-        process_mesh_dict_2x2["row"],
         process_mesh_dict_2x2["col"],
+        process_mesh_dict_2x2["row"],
         bayesian=False,
     ).to(device)
 
@@ -76,8 +76,8 @@ def test_xwt_forward_2(device: torch.device, process_mesh_dict_2x1x2: dict) -> N
         local_rank=local_rank,
         device=device,
         model_group=process_mesh_dict_2x1x2["model"],
-        tensor_group=process_mesh_dict_2x1x2["row"],
         domain_group=process_mesh_dict_2x1x2["col"],
+        tensor_group=process_mesh_dict_2x1x2["row"],
         bayesian=False,
     ).to(device)
 
@@ -118,8 +118,8 @@ def test_xwt_backward(device: torch.device, process_mesh_dict_2x2: dict) -> None
         local_rank,
         device,
         process_mesh_dict_2x2["model"],
-        process_mesh_dict_2x2["row"],
         process_mesh_dict_2x2["col"],
+        process_mesh_dict_2x2["row"],
         False,
     ).to(device)
     w_gathered = gather_results(
@@ -198,8 +198,8 @@ def test_xwt_backward_sum(device: torch.device, process_mesh_dict_2x2: dict) -> 
         local_rank,
         device,
         process_mesh_dict_2x2["model"],
-        process_mesh_dict_2x2["row"],
         process_mesh_dict_2x2["col"],
+        process_mesh_dict_2x2["row"],
         False,
     ).to(device)
     w_gathered = gather_results(
@@ -268,8 +268,8 @@ def test_xwt_bias_init(device: torch.device, process_mesh_dict_2x2: dict) -> Non
         local_rank,
         device,
         process_mesh_dict_2x2["model"],
-        process_mesh_dict_2x2["row"],
         process_mesh_dict_2x2["col"],
+        process_mesh_dict_2x2["row"],
         False,
     ).to(device)
 
@@ -301,8 +301,8 @@ def test_xwt_forward_bias(device: torch.device, process_mesh_dict_2x2: dict) -> 
         local_rank,
         device,
         process_mesh_dict_2x2["model"],
-        process_mesh_dict_2x2["row"],
         process_mesh_dict_2x2["col"],
+        process_mesh_dict_2x2["row"],
         False,
     ).to(device)
     x_in = torch.randn(
@@ -350,8 +350,8 @@ def test_xwt_backward_bias(device: torch.device, process_mesh_dict_2x2: dict) ->
         local_rank,
         device,
         process_mesh_dict_2x2["model"],
-        process_mesh_dict_2x2["row"],
         process_mesh_dict_2x2["col"],
+        process_mesh_dict_2x2["row"],
         False,
     ).to(device)
 
@@ -451,8 +451,8 @@ def test_xwt_backward_2(device: torch.device, process_mesh_dict_2x1x2: dict) -> 
         local_rank,
         device,
         process_mesh_dict_2x1x2["model"],
-        process_mesh_dict_2x1x2["row"],
         process_mesh_dict_2x1x2["col"],
+        process_mesh_dict_2x1x2["row"],
         False,
     ).to(device)
 
@@ -555,9 +555,9 @@ def test_xwt_backward_dtp(device: torch.device, process_mesh_dict_2x2: dict) -> 
         True,
         local_rank,
         device,
+        process_mesh_dict_2x2["model"],
         process_mesh_dict_2x2["col"],
         process_mesh_dict_2x2["row"],
-        process_mesh_dict_2x2["col"],
         False,
     ).to(device)
 
@@ -713,8 +713,8 @@ def test_xwt_backward_sum_8(device: torch.device, process_mesh_dict_4x2: dict) -
         local_rank,
         device,
         process_mesh_dict_4x2["model"],
-        process_mesh_dict_4x2["row"],
         process_mesh_dict_4x2["col"],
+        process_mesh_dict_4x2["row"],
         False,
     )
     w_gathered = gather_results(

@@ -2,7 +2,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-import jigsaw.distributed_matmul as dist_mm
+import jigsaw.modules.linear.distributed_matmul as dist_mm
 from jigsaw.utils_aggregate import gather_results
 
 pytestmark = [pytest.mark.gpu_required, pytest.mark.distributed_required]

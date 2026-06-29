@@ -6,7 +6,10 @@ import torch
 import torch.distributed as dist
 from einops import rearrange
 
-from . import hooks, linear, ring_attention_helpers
+from jigsaw import hooks
+from jigsaw.modules import linear
+
+from . import config, functional
 
 
 class DistributedAttention(torch.nn.Module):
@@ -78,8 +81,8 @@ class DistributedAttention(torch.nn.Module):
                 local_rank=self.local_rank,
                 device=self.device,
                 model_group=self.channel_group,
-                tensor_group=self.spatial_group,
-                domain_group=self.channel_group,
+                row_group=self.spatial_group,
+                column_group=self.channel_group,
                 bayesian=bayesian,
             )
 
@@ -90,8 +93,8 @@ class DistributedAttention(torch.nn.Module):
             local_rank=self.local_rank,
             device=self.device,
             model_group=self.channel_group,
-            tensor_group=self.spatial_group,
-            domain_group=self.channel_group,
+            row_group=self.spatial_group,
+            column_group=self.channel_group,
             bayesian=bayesian,
         )
 
@@ -111,6 +114,10 @@ class DistributedAttention(torch.nn.Module):
             )
 
         self.heads = heads // self.channel_group.size()
+        self.scale = (embed_dim // heads) ** -0.5
+        self.empty = torch.empty(0, device=device)
+        if ring_attention:
+            self.config = config.RingAttentionConfig(device=device)
 
     def _attn_core(
         self,
@@ -180,7 +187,7 @@ class DistributedAttention(torch.nn.Module):
             Output of attention computation.
 
         """
-        out = ring_attention_helpers.RingAttentionFunction.apply(
+        out = functional.RingAttentionFunction.apply(
             q,
             k,
             v,
@@ -190,9 +197,8 @@ class DistributedAttention(torch.nn.Module):
             self.dropout_p,
             self.spatial_group,
             self.empty,
-            None,
             self.local_rank,
-            self.spatial_group.size(),
+            self.config,
         )
         out = cast(torch.Tensor, out)
         return out
@@ -210,7 +216,6 @@ class DistributedAttention(torch.nn.Module):
         qkv = rearrange(
             qkv, "... n i (three h d) -> three ... n h i d", three=3, h=self.heads
         )
-
         if self.qk_norm:
             q, k, v = qkv.unbind(0)
             q = self.q_norm(q).to(torch.bfloat16)
@@ -220,7 +225,6 @@ class DistributedAttention(torch.nn.Module):
             q, k, v = qkv.to(torch.bfloat16).unbind(0)
 
         out = self.attn_core(q, k, v, x=x)
-
         # out has shape [batch, local_heads, local_sequence length, head_dim]
         out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous().to(self.dtype)
         out = cast(torch.Tensor, self.head_concat(out))

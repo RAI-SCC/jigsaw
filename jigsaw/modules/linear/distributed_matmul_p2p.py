@@ -48,11 +48,11 @@ def fused_xw_xtw_twoway(
     )
     match mod:
         case 0:
-            send = dist.isend(grad_output, group_dst=local_rank + 1, group=model_group)
-            recv = dist.irecv(buffer_x, group_src=local_rank + 1, group=model_group)
+            send = dist.isend(grad_output, group_dst=1, group=model_group)
+            recv = dist.irecv(buffer_x, group_src=1, group=model_group)
         case 1:
-            recv = dist.irecv(buffer_x, group_src=local_rank - 1, group=model_group)
-            send = dist.isend(grad_output, group_dst=local_rank - 1, group=model_group)
+            recv = dist.irecv(buffer_x, group_src=0, group=model_group)
+            send = dist.isend(grad_output, group_dst=0, group=model_group)
 
     match mod:
         case 0:
@@ -103,7 +103,6 @@ def xw_transpose_twoway(
         Local result.
     """
     mod = local_rank % 2
-
     w0, w1 = torch.split(wij, wij.shape[-2] // 2, dim=-2)
     buffer_xw = (
         torch.zeros((*xij.shape[:-1], w0.shape[-2])).to(torch.float32).to(device)
@@ -111,12 +110,12 @@ def xw_transpose_twoway(
     match mod:
         case 0:
             xw = torch.matmul(xij, w1.mT)
-            send = dist.isend(xw, group_dst=local_rank + 1, group=model_group)
-            recv = dist.irecv(buffer_xw, group_src=local_rank + 1, group=model_group)
+            send = dist.isend(xw, group_dst=1, group=model_group)
+            recv = dist.irecv(buffer_xw, group_src=1, group=model_group)
         case 1:
             xw = torch.matmul(xij, w0.mT)
-            recv = dist.irecv(buffer_xw, group_src=local_rank - 1, group=model_group)
-            send = dist.isend(xw, group_dst=local_rank - 1, group=model_group)
+            recv = dist.irecv(buffer_xw, group_src=0, group=model_group)
+            send = dist.isend(xw, group_dst=0, group=model_group)
 
     match mod:
         case 0:
@@ -167,11 +166,11 @@ def xw_twoway(
 
     match mod:
         case 0:
-            send = dist.isend(xij, group_dst=local_rank + 1, group=model_group)
-            recv = dist.irecv(buffer_x, group_src=local_rank + 1, group=model_group)
+            send = dist.isend(xij, group_dst=1, group=model_group)
+            recv = dist.irecv(buffer_x, group_src=1, group=model_group)
         case 1:
-            recv = dist.irecv(buffer_x, group_src=local_rank - 1, group=model_group)
-            send = dist.isend(xij, group_dst=local_rank - 1, group=model_group)
+            recv = dist.irecv(buffer_x, group_src=0, group=model_group)
+            send = dist.isend(xij, group_dst=0, group=model_group)
 
     match mod:
         case 0:
@@ -222,11 +221,11 @@ def x_transpose_w_twoway(
 
     match mod:
         case 0:
-            send = dist.isend(xij, group_dst=local_rank + 1, group=model_group)
-            recv = dist.irecv(buffer_x, group_src=local_rank + 1, group=model_group)
+            send = dist.isend(xij, group_dst=1, group=model_group)
+            recv = dist.irecv(buffer_x, group_src=1, group=model_group)
         case 1:
-            recv = dist.irecv(buffer_x, group_src=local_rank - 1, group=model_group)
-            send = dist.isend(xij, group_dst=local_rank - 1, group=model_group)
+            recv = dist.irecv(buffer_x, group_src=0, group=model_group)
+            send = dist.isend(xij, group_dst=0, group=model_group)
 
     match mod:
         case 0:

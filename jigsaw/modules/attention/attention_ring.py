@@ -16,8 +16,10 @@ import torch
 import torch.distributed as dist
 from einops import rearrange
 
-from . import linear
-from . import ring_attention_helpers as ring_attn
+from jigsaw.modules import linear
+
+from .config import RingAttentionConfig
+from .functional import RingAttentionFunction
 
 
 class Ring(torch.nn.Module):
@@ -36,7 +38,7 @@ class Ring(torch.nn.Module):
         spatial_group: dist.ProcessGroup,
         bayesian: bool,
         dtype: torch.dtype,
-        ring_config: ring_attn.RingAttentionConfig,
+        ring_config: RingAttentionConfig,
     ):
         """
 
@@ -78,7 +80,7 @@ class Ring(torch.nn.Module):
 
         x: (n_batch, vars, n_lat, n_lon)
         """
-        out, *_ = ring_attn.RingAttentionFunction.apply(
+        out, *_ = RingAttentionFunction.apply(
             q,
             k,
             v,
@@ -181,7 +183,7 @@ class RingAttention(torch.nn.Module):
         channel_group: dist.ProcessGroup,
         bayesian: bool,
         dtype: torch.dtype,
-        ring_config: ring_attn.RingAttentionConfig,
+        ring_config: RingAttentionConfig,
     ):
         """
 
@@ -213,8 +215,8 @@ class RingAttention(torch.nn.Module):
             local_rank=self.local_rank,
             device=self.device,
             model_group=self.channel_group,
-            spatial_group=self.spatial_group,
-            channel_group=self.channel_group,
+            row_group=self.spatial_group,
+            column_group=self.channel_group,
             bayesian=bayesian,
         )
 
@@ -225,8 +227,8 @@ class RingAttention(torch.nn.Module):
             local_rank=self.local_rank,
             device=self.device,
             model_group=self.channel_group,
-            spatial_group=self.spatial_group,
-            channel_group=self.channel_group,
+            row_group=self.spatial_group,
+            column_group=self.channel_group,
             bayesian=bayesian,
         )
 
@@ -235,13 +237,12 @@ class RingAttention(torch.nn.Module):
         self.empty = torch.empty(0, device=self.device, dtype=self.dtype)
 
         self.ring_config = ring_config
-        ring_attn.ring_forward = ring_attn.build_ring_forward(ring_config)
 
     def _attention_core(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, x: torch.Tensor
     ) -> torch.Tensor:
 
-        out = ring_attn.RingAttentionFunction.apply(
+        out = RingAttentionFunction.apply(
             q,
             k,
             v,
