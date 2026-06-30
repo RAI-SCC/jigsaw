@@ -452,7 +452,7 @@ class Attention(torch.nn.Module):
             device,
             row_kw,
             col_kw,
-            model_kw,
+            col_kw,
         )  # type: ignore[assignment]
         if ring:
             instance.attn_core = DistributedAttention._ring_attn_core  # type: ignore[assignment]
@@ -482,7 +482,7 @@ class Attention(torch.nn.Module):
             device,
             row_kw,
             col_kw,
-            model_kw,
+            col_kw,
         )  # type: ignore[assignment]
 
         # Update head count to reflect local shard

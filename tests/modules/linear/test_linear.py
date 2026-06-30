@@ -541,7 +541,7 @@ def test_xwt_backward_2(device: torch.device, process_mesh_dict_2x1x2: dict) -> 
 @pytest.mark.dist(4)
 def test_xwt_backward_dtp(device: torch.device, process_mesh_dict_2x2: dict) -> None:
     """Test forward-backward pass of a model that employs domain parallel in one axis and channel parallel in the other."""
-    local_rank = dist.get_rank(group=process_mesh_dict_2x2["col"])
+    local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
     torch.manual_seed(process_mesh_dict_2x2["model"].rank())
 
     in_dim, out_dim = 10, 10
@@ -555,7 +555,7 @@ def test_xwt_backward_dtp(device: torch.device, process_mesh_dict_2x2: dict) -> 
         True,
         local_rank,
         device,
-        process_mesh_dict_2x2["model"],
+        process_mesh_dict_2x2["col"],
         process_mesh_dict_2x2["col"],
         process_mesh_dict_2x2["row"],
         False,
