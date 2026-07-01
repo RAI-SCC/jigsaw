@@ -34,7 +34,6 @@ class XWT(torch.autograd.Function):
         device: torch.device,
         config: LinearConfig,
         model_group: dist.ProcessGroup,
-        spatial_group: dist.ProcessGroup,
         bayesian: bool,
     ) -> torch.Tensor:
         """
@@ -90,16 +89,13 @@ class XWT(torch.autograd.Function):
         inputs: tuple(x, w, b, local_rank, device, config, spatial_group, bayesian)
         output: xwt
         """
-        x, w, b, local_rank, device, config, model_group, spatial_group, bayesian = (
-            inputs
-        )
+        x, w, b, local_rank, device, config, model_group, bayesian = inputs
         ctx.save_for_backward(x, w, b)
         c = cast(LinearCtx, ctx)
         c.local_rank = local_rank
         c.device = device
         c.config = config
         c.model_group = model_group
-        c.spatial_group = spatial_group
         c.bayesian = bayesian
 
     @staticmethod
@@ -135,7 +131,7 @@ class XWT(torch.autograd.Function):
         grad_bias: torch.Tensor
             Gradient with respect to the bias.
         """
-        input, weight, bias = ctx.saved_tensors
+        input, weight, _ = ctx.saved_tensors
         local_rank = ctx.local_rank
         device = ctx.device
         config = ctx.config

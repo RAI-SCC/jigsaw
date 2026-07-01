@@ -3,7 +3,6 @@
 from typing import Callable, Optional, Union
 
 import torch
-import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
 from . import distributed_matmul as dist_mm
@@ -151,7 +150,7 @@ class LinearConfig:
             return self._reduce_bias_over_spatial_group
 
     def _reduce_bias_over_spatial_group(
-        self, grad_output: torch.Tensor, spatial_group: dist.ProcessGroup
+        self, grad_output: torch.Tensor
     ) -> torch.Tensor:
         """
         Calculate grad wrt bias.
@@ -169,7 +168,7 @@ class LinearConfig:
         return grad_b
 
     def _reduce_bias_over_spatial_group_nonbayesian(
-        self, grad_output: torch.Tensor, spatial_group: dist.ProcessGroup
+        self, grad_output: torch.Tensor
     ) -> torch.Tensor:
         """
         Calculate grad wrt bias.
@@ -190,7 +189,8 @@ class LinearConfig:
         return grad_b
 
     def _no_reduce_bias(
-        self, grad_output: torch.Tensor, spatial_group: dist.ProcessGroup
+        self,
+        grad_output: torch.Tensor,
     ) -> torch.Tensor:
         """Calculate grad wrt bias when spatial synchronization is not required."""
         return grad_output.sum(dim=(-3, -2))
@@ -198,7 +198,6 @@ class LinearConfig:
     def _no_bias(
         self,
         grad_output: Optional[torch.Tensor],
-        spatial_group: Optional[dist.ProcessGroup],
     ) -> Optional[torch.Tensor]:
         """Return identity when bias does not exist."""
         return None

@@ -135,7 +135,6 @@ class DistributedXWT(torch.nn.Module):
             self.device,
             self.config,
             self.model_group,
-            self.spatial_group,
             self.bayesian,
         )
         cij = cast(torch.Tensor, cij)
@@ -396,7 +395,6 @@ class DistributedMatMulXWT(torch.nn.Module):
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
-        spatial_group: dist.ProcessGroup,
         bayesian: bool = False,
         config: Optional[LinearConfig] = None,
     ) -> None:
@@ -413,8 +411,6 @@ class DistributedMatMulXWT(torch.nn.Module):
             Number of processes the model is distributed over.
         model_group: dist.ProcessGroup
             Process group containing all ranks within model-parallel instances.
-        spatial_group: dist.ProcessGroup
-            Process group containing ranks that share channels.
         bayesian: bool
             Boolean flag for whether the model is Bayesian.
         config: Optional[LinearConfig]
@@ -425,7 +421,6 @@ class DistributedMatMulXWT(torch.nn.Module):
         self.local_rank = local_rank
         self.device = device
         self.model_group = model_group
-        self.spatial_group = spatial_group
         self.bayesian = bayesian
         self.config = (
             LinearConfig(
@@ -442,7 +437,7 @@ class DistributedMatMulXWT(torch.nn.Module):
         return 0
 
     def forward(
-        self, x: torch.Tensor, w: torch.Tensor, b: torch.Tensor
+        self, x: torch.Tensor, w: torch.Tensor, b: torch.Tensor = None
     ) -> torch.Tensor:
         """
         Forward pass of linear layer (XWT) distributed across two processes.
@@ -469,7 +464,6 @@ class DistributedMatMulXWT(torch.nn.Module):
             self.device,
             self.config,
             self.model_group,
-            self.spatial_group,
             self.bayesian,
         )
         cij = cast(torch.Tensor, cij)
@@ -519,7 +513,6 @@ class DistributedMatMulXWT(torch.nn.Module):
             device=device,
             parallelism=process_mesh_dict["model"].size(),
             model_group=process_mesh_dict["model"],
-            spatial_group=process_mesh_dict["row"],
         )
         return instance
 
@@ -571,7 +564,7 @@ class DistributedMatMulXW(torch.nn.Module):
         return 0
 
     def forward(
-        self, x: torch.Tensor, w: torch.Tensor, b: Optional[torch.Tensor]
+        self, x: torch.Tensor, w: torch.Tensor, b: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Forward pass of linear layer (XW) distributed across two processes.
@@ -698,7 +691,7 @@ class DistributedMatMulXTW(torch.nn.Module):
         return 0
 
     def forward(
-        self, x: torch.Tensor, w: torch.Tensor, b: Optional[torch.Tensor]
+        self, x: torch.Tensor, w: torch.Tensor, b: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Forward pass of linear layer (XW) distributed across two processes.
