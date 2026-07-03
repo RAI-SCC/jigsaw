@@ -11,9 +11,9 @@ packages = [
 name = "jigsaw"
 version = "0.0.1"
 authors = [
-  { name="Deifilia Kieckhefen", email="deifilia.kieckhefen@kit.edu"},
+  { name="Deifilia Kieckhefen", email="deifilia.to@gmail.com"},
 ]
-description = "The Jigsaw model parallelization scheme"
+description = "The Jigsaw domain- and tensor-parallelization scheme"
 readme = "README.md"
 requires-python = ">=3.11"
 classifiers = [
@@ -27,103 +27,71 @@ dependencies = [
     "pyyaml",
     "xarray",
     "matplotlib",
-    "einops",
-    "gcsfs"
+    "einops"
 ]
 
 [project.optional-dependencies]
 dev = [
+    # Testing
+    "pytest",
+    "coverage",
+    "pytest-cov",
+    "mpi4py>=4.1.1",
+    "hypothesis>=6.1.1",
+
+    # QA
     "pre-commit",
     "ruff",
     "mypy",
-    "pytest",
-    "coverage",
+
 ]
 scripts = []
 
-[tool.ruff]
-# Exclude a variety of commonly ignored directories.
-exclude = [
-    ".bzr",
-    ".direnv",
-    ".eggs",
-    ".git",
-    ".git-rewrite",
-    ".hg",
-    ".ipynb_checkpoints",
-    ".mypy_cache",
-    ".nox",
-    ".pants.d",
-    ".pyenv",
-    ".pytest_cache",
-    ".pytype",
-    ".ruff_cache",
-    ".svn",
-    ".tox",
-    ".venv",
-    ".vscode",
-    "__pypackages__",
-    "_build",
-    "buck-out",
-    "build",
-    "dist",
-    "node_modules",
-    "site-packages",
-    ".venv",
+# Mypy
+[tool.mypy]
+python_version="3.11"
+packages=["jigsaw"]
+exclude=[
+    'tests/',
+    '^scaling_scripts/',
+    'stash/'
 ]
 
-# Same as Black.
-line-length = 88
-indent-width = 4
+disallow_untyped_defs = true
+disallow_any_unimported = false
+no_implicit_optional = true
+check_untyped_defs=true
+warn_return_any=true
+show_error_codes =true
+warn_unused_ignores=false
+follow_imports = "normal"
+follow_untyped_imports = true
 
+# Ruff
+[tool.ruff]
+target-version = "py312"
+exclude = ["docs", "examples", "scaling_scripts", "stash"]
 
 [tool.ruff.lint]
-# Enable Pyflakes (`F`) and a subset of the pycodestyle (`E`)  codes by default.
-# Unlike Flake8, Ruff doesn't enable pycodestyle warnings (`W`) or
-# McCabe complexity (`C901`) by default.
-select = ["N", "E4", "E7", "E9", "F", "D"]
-ignore = ["D100", "D404"]
-# Enable import sorting
-extend-select = ["I"]
+select = ["E", "F", "I", "D", "D417", "N"]
+ignore = ["E501", "NPY201", "N812"]
 
-# Allow fix for all enabled rules (when `--fix`) is provided.
-fixable = ["ALL"]
-unfixable = []
-
-# Allow unused variables when underscore-prefixed.
-dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
-
-[tool.ruff.format]
-# Like Black, use double quotes for strings.
-quote-style = "double"
-
-# Like Black, indent with spaces, rather than tabs.
-indent-style = "space"
-
-# Like Black, respect magic trailing commas.
-skip-magic-trailing-comma = false
-
-# Like Black, automatically detect the appropriate line ending.
-line-ending = "auto"
-
-# Enable auto-formatting of code examples in docstrings. Markdown,
-# reStructuredText code/literal blocks and doctests are all supported.
-#
-# This is currently disabled by default, but it is planned for this
-# to be opt-out in the future.
-docstring-code-format = false
-
-# Set the line length limit used when formatting code snippets in
-# docstrings.
-#
-# This only has an effect when the `docstring-code-format` setting is
-# enabled.
-docstring-code-line-length = "dynamic"
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D", "F403"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
 
+[tool.ruff.format]
+docstring-code-format = true
+
+# Testing
 [tool.pytest.ini_options]
-testpaths = [
-    "tests",
-]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["jigsaw"]
+command_line = "-m pytest"
+
+[tool.coverage.report]
+format = "markdown"
