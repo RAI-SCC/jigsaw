@@ -52,8 +52,10 @@ class DistributedXWT(torch.nn.Module):
             Is the Union of row and column group.
         column_group: dist.ProcessGroup
             Process group splitting the last dimension of X and W.
+            In a standard case, this would be the channel-wise process group.
         row_group: dist.ProcessGroup
-            Process group splitting the first dimention of W.
+            Process group splitting the first dimension of W.
+            In a standard case, this would be the spatial-wise process group.
         bayesian: bool
             Boolean flag for whether the model is bayesian.
         config: Optional[LinearConfig]
@@ -135,7 +137,7 @@ class DistributedXWT(torch.nn.Module):
             self.device,
             self.config,
             self.model_group,
-            self.column_group,
+            self.row_group,
             self.bayesian,
         )
         cij = cast(torch.Tensor, cij)
@@ -146,7 +148,7 @@ class DistributedXWT(torch.nn.Module):
         num_param = (
             0
             if self.bias is None
-            else self.bias.numel() // dist.get_world_size(group=self.column_group)
+            else self.bias.numel() // dist.get_world_size(group=self.row_group)
         )
         return num_param + self.weight.numel()
 
