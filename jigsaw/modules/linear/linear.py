@@ -66,11 +66,12 @@ class DistributedXWT(torch.nn.Module):
 
         stdev = 1.0 / np.sqrt(in_dim * row_group.size())
         assert in_dim % column_group.size() == 0
-        assert out_dim % (model_group.size() // column_group.size()) == 0
+        # print(f'model group size {model_group.size()} column group size {column_group.size()}')
+        assert out_dim % (row_group.size()) == 0
 
         bias_dim = out_dim // column_group.size()
         in_dim = in_dim // (column_group.size())
-        out_dim = out_dim // (model_group.size() // column_group.size())
+        out_dim = out_dim // (row_group.size())
 
         self.weight = torch.nn.Parameter(
             torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev).to(device)
