@@ -403,7 +403,7 @@ def conv_transpose2d_fourway(
         padding=padding,
         dilation=dilation,
         channel_group=channel_group,
-        conv_transpose2d_fn=config.conv_transpose2d_fn,
+        conv_transpose2d_fn=config.conv_transpose_2d_fn,
         comm_fn=config.comm_fn,
     )
 
