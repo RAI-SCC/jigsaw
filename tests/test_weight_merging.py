@@ -54,8 +54,8 @@ def test_weight_merging(
         local_rank=from_pm_dict["model"].rank(),
         device=device,
         model_group=from_pm_dict["model"],
-        spatial_group=from_pm_dict["row"],
-        channel_group=from_pm_dict["col"],
+        row_group=from_pm_dict["row"],
+        column_group=from_pm_dict["col"],
         bayesian=False,
     )
     assert isinstance(linear_layer.weight, torch.Tensor)
@@ -115,8 +115,8 @@ def test_mlp_weight_merging(
                 local_rank=from_pm_dict["model"].rank(),
                 device=device,
                 model_group=from_pm_dict["model"],
-                spatial_group=from_pm_dict["row"],
-                channel_group=from_pm_dict["col"],
+                row_group=from_pm_dict["row"],
+                column_group=from_pm_dict["col"],
             )
 
             self.linear2 = linear.DistributedXWT(
@@ -126,8 +126,8 @@ def test_mlp_weight_merging(
                 local_rank=from_pm_dict["model"].rank(),
                 device=device,
                 model_group=from_pm_dict["model"],
-                spatial_group=from_pm_dict["row"],
-                channel_group=from_pm_dict["col"],
+                row_group=from_pm_dict["row"],
+                column_group=from_pm_dict["col"],
             )
             self.activation = torch.nn.GELU()
 

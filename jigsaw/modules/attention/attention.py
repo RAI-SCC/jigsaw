@@ -81,8 +81,8 @@ class DistributedAttention(torch.nn.Module):
                 local_rank=self.local_rank,
                 device=self.device,
                 model_group=self.channel_group,
-                spatial_group=self.spatial_group,
-                channel_group=self.channel_group,
+                row_group=self.spatial_group,
+                column_group=self.channel_group,
                 bayesian=bayesian,
             )
 
@@ -93,8 +93,8 @@ class DistributedAttention(torch.nn.Module):
             local_rank=self.local_rank,
             device=self.device,
             model_group=self.channel_group,
-            spatial_group=self.spatial_group,
-            channel_group=self.channel_group,
+            row_group=self.spatial_group,
+            column_group=self.channel_group,
             bayesian=bayesian,
         )
 
@@ -452,7 +452,7 @@ class Attention(torch.nn.Module):
             device,
             row_kw,
             col_kw,
-            model_kw,
+            col_kw,
         )  # type: ignore[assignment]
         if ring:
             instance.attn_core = DistributedAttention._ring_attn_core  # type: ignore[assignment]
@@ -482,7 +482,7 @@ class Attention(torch.nn.Module):
             device,
             row_kw,
             col_kw,
-            model_kw,
+            col_kw,
         )  # type: ignore[assignment]
 
         # Update head count to reflect local shard

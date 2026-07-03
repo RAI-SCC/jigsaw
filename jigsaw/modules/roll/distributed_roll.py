@@ -49,10 +49,15 @@ def exchange_halo_1d(
     recv = torch.zeros_like(halo_to_send)
     offset = 1 if window_size > 0 else -1
     recv, _ = comm_halo_1d_fn(
-        halo_to_send, recv, offset=offset, group=group, async_op=False
+        halo_to_send,
+        recv,
+        offset,
+        group=group,
+        async_op=False,
+        empty=torch.empty(0, device=x.device, dtype=x.dtype),
     )
 
-    x[sl] = recv
+    x[sl_tuple] = recv
     return x
 
 

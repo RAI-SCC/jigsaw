@@ -29,8 +29,8 @@ def test_xwt_forward(device: torch.device, process_mesh_dict_2x2: dict) -> None:
         local_rank,
         device,
         process_mesh_dict_2x2["model"],
-        process_mesh_dict_2x2["row"],
         process_mesh_dict_2x2["col"],
+        process_mesh_dict_2x2["row"],
         bayesian=False,
     ).to(device)
 
@@ -76,8 +76,8 @@ def test_xwt_forward_2(device: torch.device, process_mesh_dict_2x1x2: dict) -> N
         local_rank=local_rank,
         device=device,
         model_group=process_mesh_dict_2x1x2["model"],
-        spatial_group=process_mesh_dict_2x1x2["row"],
-        channel_group=process_mesh_dict_2x1x2["col"],
+        column_group=process_mesh_dict_2x1x2["col"],
+        row_group=process_mesh_dict_2x1x2["row"],
         bayesian=False,
     ).to(device)
 
@@ -118,8 +118,8 @@ def test_xwt_backward(device: torch.device, process_mesh_dict_2x2: dict) -> None
         local_rank,
         device,
         process_mesh_dict_2x2["model"],
-        process_mesh_dict_2x2["row"],
         process_mesh_dict_2x2["col"],
+        process_mesh_dict_2x2["row"],
         False,
     ).to(device)
     w_gathered = gather_results(
@@ -198,8 +198,8 @@ def test_xwt_backward_sum(device: torch.device, process_mesh_dict_2x2: dict) -> 
         local_rank,
         device,
         process_mesh_dict_2x2["model"],
-        process_mesh_dict_2x2["row"],
         process_mesh_dict_2x2["col"],
+        process_mesh_dict_2x2["row"],
         False,
     ).to(device)
     w_gathered = gather_results(
@@ -268,8 +268,8 @@ def test_xwt_bias_init(device: torch.device, process_mesh_dict_2x2: dict) -> Non
         local_rank,
         device,
         process_mesh_dict_2x2["model"],
-        process_mesh_dict_2x2["row"],
         process_mesh_dict_2x2["col"],
+        process_mesh_dict_2x2["row"],
         False,
     ).to(device)
 
@@ -301,8 +301,8 @@ def test_xwt_forward_bias(device: torch.device, process_mesh_dict_2x2: dict) -> 
         local_rank,
         device,
         process_mesh_dict_2x2["model"],
-        process_mesh_dict_2x2["row"],
         process_mesh_dict_2x2["col"],
+        process_mesh_dict_2x2["row"],
         False,
     ).to(device)
     x_in = torch.randn(
@@ -350,8 +350,8 @@ def test_xwt_backward_bias(device: torch.device, process_mesh_dict_2x2: dict) ->
         local_rank,
         device,
         process_mesh_dict_2x2["model"],
-        process_mesh_dict_2x2["row"],
         process_mesh_dict_2x2["col"],
+        process_mesh_dict_2x2["row"],
         False,
     ).to(device)
 
@@ -451,8 +451,8 @@ def test_xwt_backward_2(device: torch.device, process_mesh_dict_2x1x2: dict) -> 
         local_rank,
         device,
         process_mesh_dict_2x1x2["model"],
-        process_mesh_dict_2x1x2["row"],
         process_mesh_dict_2x1x2["col"],
+        process_mesh_dict_2x1x2["row"],
         False,
     ).to(device)
 
@@ -541,7 +541,7 @@ def test_xwt_backward_2(device: torch.device, process_mesh_dict_2x1x2: dict) -> 
 @pytest.mark.dist(4)
 def test_xwt_backward_dtp(device: torch.device, process_mesh_dict_2x2: dict) -> None:
     """Test forward-backward pass of a model that employs domain parallel in one axis and channel parallel in the other."""
-    local_rank = dist.get_rank(group=process_mesh_dict_2x2["col"])
+    local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
     torch.manual_seed(process_mesh_dict_2x2["model"].rank())
 
     in_dim, out_dim = 10, 10
@@ -556,8 +556,8 @@ def test_xwt_backward_dtp(device: torch.device, process_mesh_dict_2x2: dict) -> 
         local_rank,
         device,
         process_mesh_dict_2x2["col"],
-        process_mesh_dict_2x2["row"],
         process_mesh_dict_2x2["col"],
+        process_mesh_dict_2x2["row"],
         False,
     ).to(device)
 
@@ -713,8 +713,8 @@ def test_xwt_backward_sum_8(device: torch.device, process_mesh_dict_4x2: dict) -
         local_rank,
         device,
         process_mesh_dict_4x2["model"],
-        process_mesh_dict_4x2["row"],
         process_mesh_dict_4x2["col"],
+        process_mesh_dict_4x2["row"],
         False,
     )
     w_gathered = gather_results(
