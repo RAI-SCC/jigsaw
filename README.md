@@ -2,20 +2,44 @@
 Code for performing domain- and tensor-parallel training optimized for large image-based data.
 
 ## Structure of repository
-- Jigsaw/ contains all source code for WeatherMixer and Jigsaw parallelization method
-- Jigsaw/data contains
-- cases/ contains all config files and batch submit scripts
-
-##  Data
-To train the model, approximately 60 TB of ERA5 data will need to be downloaded, specifically, the variables (Z, Q, T, U, V) at pressure levels (1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50), and surface variables (MSLP, U10, V10, T2M) The current dataloader is adapted to the following two datasets downloaded from WeatherBench2 (WB2) https://weatherbench2.readthedocs.io/en/latest/data-guide.html.
-
-1. xr.open_zarr('gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr')
-2. xr.open_zarr('gs://weatherbench2/datasets/era5/1959-2023_01_10-full_37-1h-0p25deg-chunk-1.zarr') Dataset(1) is subsampled to a 6-hourly time resolution and to the pressure levels (1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50) hPa. Note that the Dataset(2) has an hourly time resolution and contains all 37 pressure levels. Data can also be obtained from the Copernicus API directly, https://cds.climate.copernicus.eu/api-how-to.
-
-Climatology values can be obtained via https://github.com/google-research/weatherbenchX
+- jigsaw/modules contains the implementations of the individual modules. Currently supported operations are ```nn.Linear, nn.Conv2d, nn.ConvTranspose2d, F.roll, Attention (with or without ring), and  non-parameterized matrix multiplications```.
 
 ## Environment
-The correct Python environment can be obtained with
+This is an installable library. Requirements can be installed with:
 ```
 pip install -e .
+```
+The dev environment (necessary for running tests) can be installed with
+```
+pip install -e .[dev]
+```
+
+## Usage
+_jigsaw_ is designed to follow the interface of PyTorch. The model must be defined exclusively via _jigsaw_ layers. i.e.
+```
+class Linear(torch.nn.Module):
+   def __init__(self, global_in_dim, global_out_dim, process_mesh_dict):
+      self.lin = jigsaw.DistributedXWT(global_in_dim, global_out_dim, process_mesh_dict)
+   def forward(self, x):
+      return self.lin(x)
+```
+When initializing the models, ensure that each model-parallel rank has a different random seed, thus insuring true randomness in the initialization. The DP wrapper will handle weight initialization synchronization across data-parallel ranks. 
+```
+local_rank = model_group.rank()
+set_all_seeds(local_rank)
+model = Linear(global_in_dim, global_out_dim, process_mesh_dict)
+```
+
+### Process mesh
+Each module accepts a ```process_mesh_dict```, where the last two dimensions represent the DTP. Default kw for the dictionary are ``row`` and ``col``. There are two options
+1) Training the model in a fully domain--tensor parallel manner. This means that a process mesh of size (4, 2) will have the parameters sharded across 8 processes.
+2) Training the model with domain-parallelism across the ``rows`` axis, and with domain--tensor parallelism across the ``col`` axis. See the individual modules for detailed usage.
+
+### Dataloader
+As domain parallelism is applied throughout the model training process, the dataloader needs to be written according.
+For a model-parallel group:
+```
+set_all_seeds(0) # constant number for all instances of the model-parallel group
+dataloader = torch.nn.DataLoader(...) # Define the dataloader here
+# The Dataset must return the correct shard of the data samples.
 ```
