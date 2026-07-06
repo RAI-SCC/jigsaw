@@ -118,6 +118,8 @@ def comm_1d_alltoall(
     group: dist.ProcessGroup,
     async_op: bool,
     empty: torch.Tensor,
+    *args: Any,
+    **kwargs: Any,
 ) -> tuple[torch.Tensor, Optional[dist.Work]]:
     """
     Send data to neighbor process using all to all communication.
@@ -137,6 +139,10 @@ def comm_1d_alltoall(
         Boolean flag for whether communication should be asynchronous or not.
     empty: torch.Tensor
         Empty for computational reasons.
+    args: Any
+        Additional args
+    kwargs: Any
+        Additional kwargs
 
     Returns
     -------
