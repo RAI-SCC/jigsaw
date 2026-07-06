@@ -51,7 +51,7 @@ def test_autocast_attention(process_mesh_dict_2x2: dict, device) -> None:
     mse_loss = torch.nn.MSELoss()
 
     for _ in range(5):
-        x = torch.randn(batch, seq // 2, in_dim // 2)
+        x = torch.randn(batch, seq // 2, in_dim // 2, device=device).contiguous()
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
             y = model(x)
         loss = mse_loss(y, torch.ones_like(y))

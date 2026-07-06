@@ -56,12 +56,13 @@ class SendForwardOp(Enum):
 
 
 # --------------------------------------------------------------------------- #
-# attention cores (unchanged)
+# attention cores
 # --------------------------------------------------------------------------- #
 def _attn_core_flash(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale: float, dropout_p: float
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Flash attention forward pass. Returns (out, logsumexp)."""
+    q, k, v = [x.to(torch.float16) for x in (q, k, v)]
     out, logsumexp, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
         q,
         k,
@@ -71,6 +72,7 @@ def _attn_core_flash(
         scale=scale,
         return_debug_mask=False,
     )
+
     return out, logsumexp
 
 

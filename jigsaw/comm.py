@@ -149,12 +149,8 @@ def comm_1d_alltoall(
     buffer: torch.Tensor
         Buffer in which the data is received.
     """
-    if direction > 0:
-        send_to = (group.rank() - 1) % group.size()
-        recv_from = (group.rank() + 1) % group.size()
-    else:
-        send_to = (group.rank() + 1) % group.size()
-        recv_from = (group.rank() - 1) % group.size()
+    send_to = (group.rank() + direction) % group.size()
+    recv_from = (group.rank() - direction) % group.size()
 
     send_list = [empty] * group.size()
     recv_list = [empty] * group.size()

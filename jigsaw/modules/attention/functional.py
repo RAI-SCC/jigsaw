@@ -188,6 +188,7 @@ def _attend_step(
     out_j, l_j = ring_config.attn_core_forward_fn(
         q, kj.contiguous(), vj.contiguous(), scale, dropout_p
     )
+
     return _online_softmax_merge(out, lse, out_j, l_j)
 
 
@@ -250,13 +251,13 @@ def broadcast_forward(
             )
 
         out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
-
         if step < world_size - 1:
             handle.wait()
 
         x_j, kv_j, kj, vj = ring_config.forward_recv_fn(recv_buf, x_j, kv_j, kj, vj)
 
     ring_config.wait_offloads()
+    out = out.to(q.dtype)
     return out, lse, tuple(chunks_to_save)
 
 
@@ -310,6 +311,7 @@ def ring_forward(
             )
 
     ring_config.wait_offloads()
+    out = out.to(q.dtype)
     return out, lse, tuple(chunks_to_save)
 
 

@@ -92,7 +92,7 @@ class TestConv2d:
                 atol=1e-5,
             )
 
-        x = torch.randn(4, in_dim // 2, h, w // 2)
+        x = torch.randn(4, in_dim // 2, h, w // 2, device=device)
         y = conv2d(x)
         y.backward(torch.ones_like(y))
         assert isinstance(y, torch.Tensor)
@@ -181,7 +181,7 @@ class TestConv2dTranspose:
                 atol=1e-5,
             )
 
-        x = torch.randn(4, in_dim // 2, h, w // 2)
+        x = torch.randn(4, in_dim // 2, h, w // 2, device=device)
         y = conv2d(x)
         y.backward(torch.ones_like(y))
         assert isinstance(y, torch.Tensor)
