@@ -168,6 +168,7 @@ def comm_1d_p2p(
     group: dist.ProcessGroup,
     async_op: bool = True,
     tag: int = 0,
+    group_size: Optional[int] = None,
     *args: Any,
     **kwargs: Any,
 ) -> tuple[torch.Tensor, Optional[dist.Work]]:
@@ -199,8 +200,14 @@ def comm_1d_p2p(
     buffer: torch.Tensor
         Buffer in which the data is received.
     """
-    send_to = (group.rank() + direction) % group.size()
-    recv_from = (group.rank() - direction) % group.size()
+    group_size = group.size() if group_size is None else group_size
+
+    send_to = (group.rank() + direction) % group_size
+    recv_from = (group.rank() - direction) % group_size
+    if group.rank() >= 4 and group_size == 4:
+        send_to = send_to + 4
+        recv_from = recv_from + 4
+
     tag = tag * 8
 
     if group.rank() % 2 == 0:

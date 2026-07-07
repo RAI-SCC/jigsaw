@@ -226,7 +226,7 @@ def broadcast_forward(
 
     # Kick off first send
     recv_buf, handle = ring_config.forward_send_fn(
-        x, kv, local_rank, group, step=0, empty=empty
+        x=x, kv=kv, local_rank=local_rank, group=group, step=0, empty=empty
     )
     handle.wait()
     x_j, kv_j, kj, vj = ring_config.forward_recv_fn(recv_buf, x_j, kv_j, kj, vj)
@@ -234,7 +234,12 @@ def broadcast_forward(
     for step in range(world_size):
         if step + 1 < world_size:
             recv_buf, handle = ring_config.forward_send_fn(
-                x, kv, local_rank, group, step + 1
+                x=x,
+                kv=kv,
+                local_rank=local_rank,
+                group=group,
+                step=step + 1,
+                empty=empty,
             )
 
         if ring_config.send_in_forward == SendForward.X:
@@ -315,6 +320,113 @@ def ring_forward(
     return out, lse, tuple(chunks_to_save)
 
 
+def hybrid_forward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    x: torch.Tensor,
+    w_qkv: torch.Tensor,
+    scale: float,
+    dropout_p: float,
+    group: dist.ProcessGroup,
+    empty: torch.Tensor,
+    local_rank: int,
+    world_size: int,
+    ring_config: RingAttentionConfig,
+) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]:
+    """Forward pass for ring attention using broadcast instead of P2P sends."""
+    b, heads, n_local, d = q.shape
+    gpus_per_node = 4  # TODO: indicate the number of GPUs per node
+    n_nodes = world_size // gpus_per_node
+
+    out = torch.zeros_like(q)
+    lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype)
+
+    x_j = x
+
+    # Local KV
+    kv = torch.concat([k.unsqueeze(0), v.unsqueeze(0)]).clone().contiguous()
+    kv_j, kj, vj = kv, k, v
+
+    chunks_to_save: list[torch.Tensor | None]
+    if ring_config.save_scope != SaveScope.GLOBAL:
+        chunks_to_save = [ring_config.save_for_backward_fn(x, kv)]
+    else:
+        chunks_to_save = [None] * world_size  # filled in per-step below
+
+    for node_step in range(n_nodes):
+        # Kick off first send across nodes
+        if node_step < n_nodes - 1:
+            if ring_config.send_in_forward == SendForward.X:
+                internode_recv_buf = torch.empty_like(x_j)
+                internode_recv_buf, internode_handle = ring_config.ring_comm_fn(
+                    data=x.clone(),
+                    buffer=internode_recv_buf,
+                    direction=gpus_per_node * (node_step + 1),
+                    group=group,
+                    async_op=True,
+                    tag=node_step,
+                    empty=empty,
+                )
+            elif ring_config.send_in_forward == SendForward.KV:
+                internode_recv_buf = torch.empty_like(kv_j)
+                internode_recv_buf, internode_handle = ring_config.ring_comm_fn(
+                    data=kv.clone(),
+                    buffer=internode_recv_buf,
+                    direction=gpus_per_node * (node_step + 1),
+                    group=group,
+                    async_op=True,
+                    tag=node_step,
+                    empty=empty,
+                )
+
+        for step in range(gpus_per_node):
+            if step + 1 < gpus_per_node:
+                recv_buf = (
+                    torch.empty_like(x_j)
+                    if ring_config.send_in_forward == SendForward.X
+                    else torch.empty_like(kv_j)
+                )
+                recv_buf, handle = ring_config.ring_comm_fn(
+                    x_j if ring_config.send_in_forward == SendForward.X else kv_j,
+                    recv_buf,
+                    1,
+                    group=group,
+                    async_op=True,
+                    tag=step,
+                    empty=empty,
+                    group_size=gpus_per_node,
+                )
+
+            if ring_config.send_in_forward == SendForward.X:
+                kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
+            if ring_config.save_scope == SaveScope.GLOBAL:
+                global_step = node_step * gpus_per_node + step
+                chunks_to_save[(local_rank - global_step) % world_size] = (
+                    ring_config.save_for_backward_fn(x_j, kv_j)
+                )
+            print(f"kj {kj[0][0][0][0]}")
+            out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
+            if step < gpus_per_node - 1:
+                handle.wait()
+
+            x_j, kv_j, kj, vj = ring_config.forward_recv_fn(recv_buf, x_j, kv_j, kj, vj)
+
+        # --- now consume the internode data that arrived during the inner loop ---
+        if node_step < n_nodes - 1:
+            internode_handle.wait()
+            x_j, kv_j, kj, vj = ring_config.forward_recv_fn(
+                internode_recv_buf, x_j, kv_j, kj, vj
+            )
+
+            # recompute KV for the newly received x, ready for next outer iter
+            kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
+
+    ring_config.wait_offloads()
+    out = out.to(q.dtype)
+    return out, lse, tuple(chunks_to_save)
+
+
 def build_ring_forward(
     ring_config: RingAttentionConfig,
 ) -> Callable[
@@ -337,6 +449,9 @@ def build_ring_forward(
     """Pick the forward implementation (P2P vs broadcast) based on config."""
     if ring_config.send_forward_op == SendForwardOp.BROADCAST:
         return broadcast_forward
+    elif ring_config.send_forward_op == SendForwardOp.HYBRID:
+        return hybrid_forward
+
     return ring_forward
 
 

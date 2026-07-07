@@ -6,9 +6,10 @@ import torch.distributed as dist
 
 
 def make_process_mesh(
-    device_type: str = "nccl",
+    device_type: str = "cuda",
     mesh_shape: list[int] = [2, 2],
     mesh_dim_names: list[str] = ["row", "col"],
+    model_name: str = "model",
 ) -> dict:
     """Return process mesh with rows, columns, and model group."""
     assert len(mesh_shape) == len(mesh_dim_names)
@@ -17,7 +18,6 @@ def make_process_mesh(
     if -1 in mesh_shape:
         index = mesh_shape.index(-1)
         mesh_shape[index] = world_size // -torch.prod(torch.tensor(mesh_shape)).item()
-
     row_col_mesh = dist.device_mesh.init_device_mesh(
         device_type=device_type,
         mesh_shape=tuple(mesh_shape),
@@ -27,7 +27,7 @@ def make_process_mesh(
         model_mesh = dist.device_mesh.init_device_mesh(
             device_type=device_type,
             mesh_shape=tuple([mesh_shape[-1] * mesh_shape[-2]]),
-            mesh_dim_names=tuple(["model"]),
+            mesh_dim_names=tuple([model_name]),
         )
     else:  #
         model_mesh = dist.device_mesh.init_device_mesh(
@@ -39,9 +39,9 @@ def make_process_mesh(
         )
 
     mesh = {
-        "row": row_col_mesh.get_group("row"),
-        "col": row_col_mesh.get_group("col"),
-        "model": model_mesh.get_group("model"),
+        f"{mesh_dim_names[0]}": row_col_mesh.get_group(mesh_dim_names[0]),
+        f"{mesh_dim_names[1]}": row_col_mesh.get_group(mesh_dim_names[1]),
+        f"{model_name}": model_mesh.get_group(model_name),
     }
 
     return mesh
@@ -118,4 +118,15 @@ def process_mesh_dict_1x1(device: torch.Tensor) -> dict:
         device_type=device.type,
         mesh_shape=[1, 1],
         mesh_dim_names=["row", "col"],
+    )
+
+
+@pytest.fixture(scope="session")
+def process_mesh_dict_2x4(device: torch.Tensor) -> dict:
+    """Return process mesh."""
+    print(f"device type {device.type}")
+    return make_process_mesh(
+        device_type=device.type,
+        mesh_shape=[2, 4],
+        mesh_dim_names=["internode", "intranode"],
     )

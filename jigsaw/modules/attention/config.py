@@ -53,6 +53,7 @@ class SendForwardOp(Enum):
 
     SENDRECV = 0
     BROADCAST = 1
+    HYBRID = 2
 
 
 # --------------------------------------------------------------------------- #
@@ -176,7 +177,7 @@ def _select_forward_comm_fns(
     send_func: Callable[..., tuple[torch.Tensor, dist.Work]]
 
     match send_forward_op:
-        case SendForwardOp.SENDRECV:
+        case SendForwardOp.SENDRECV | SendForwardOp.HYBRID:
             match send_in_forward:
                 case SendForward.X:
 
