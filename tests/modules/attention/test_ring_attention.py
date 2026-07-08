@@ -252,8 +252,8 @@ def test_backward_sdpa(
     "save_for_backward", [config.SaveBackward.X, config.SaveBackward.KV]
 )
 @pytest.mark.parametrize(
-    "send_forward_op",
-    [config.SendForwardOp.SENDRECV, config.SendForwardOp.BROADCAST],
+    "send_op",
+    [config.SendOp.P2P, config.SendOp.BROADCAST],
 )
 @pytest.mark.parametrize(
     "save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL]
@@ -268,7 +268,7 @@ def test_ring_forward_backward(
     process_mesh_dict_4x1: dict,
     send_in_forward: config.SendForward,
     save_for_backward: config.SaveBackward,
-    send_forward_op: config.SendForwardOp,
+    send_op: config.SendOp,
     save_scope: config.SaveScope,
     send_backward: config.SendBackward,
     offloader: config.Offload,
@@ -285,7 +285,9 @@ def test_ring_forward_backward(
     ring_config = config.RingAttentionConfig(
         device=device,
         send_in_forward=send_in_forward,
-        send_forward_op=send_forward_op,
+        send_op
+=send_op
+,
         save_for_backward=save_for_backward,
         save_scope=save_scope,
         send_backward=send_backward,
@@ -445,8 +447,8 @@ def test_ring_forward_backward(
     "save_for_backward", [config.SaveBackward.X, config.SaveBackward.KV]
 )
 @pytest.mark.parametrize(
-    "send_forward_op",
-    [config.SendForwardOp.HYBRID],
+    "send_op",
+    [config.SendOp.HYBRID],
 )
 @pytest.mark.parametrize("save_scope", [config.SaveScope.LOCAL])
 @pytest.mark.parametrize(
@@ -459,7 +461,7 @@ def test_ring_hybrid(
     process_mesh_dict_2x4: dict,
     send_in_forward: config.SendForward,
     save_for_backward: config.SaveBackward,
-    send_forward_op: config.SendForwardOp,
+    send_op: config.SendOp,
     save_scope: config.SaveScope,
     send_backward: config.SendBackward,
     offloader: config.Offload,
@@ -476,7 +478,9 @@ def test_ring_hybrid(
     ring_config = config.RingAttentionConfig(
         device=device,
         send_in_forward=send_in_forward,
-        send_forward_op=send_forward_op,
+        send_op
+=send_op
+,
         save_for_backward=save_for_backward,
         save_scope=save_scope,
         send_backward=send_backward,

@@ -42,18 +42,19 @@ class Offload(Enum):
 
 
 class SendBackward(Enum):
-    """Enum for backward communication."""
+    """Enum for accumulating DKV in the backward pass."""
 
     SEND_DKV = 0
     GATHER_DKV = 1
 
 
-class SendForwardOp(Enum):
-    """Enum for forward communication operation."""
+class SendOp(Enum):
+    """Enum for communication operation."""
 
-    SENDRECV = 0
-    BROADCAST = 1
-    HYBRID = 2
+    P2P = 0
+    ALLTOALL = 1
+    BROADCAST = 2
+    HYBRID = 3
 
 
 # --------------------------------------------------------------------------- #
@@ -151,17 +152,17 @@ def _attn_core_math_backward(
 
 
 # --------------------------------------------------------------------------- #
-# forward comm fn selection (unchanged behaviour)
+# forward comm fn selection
 # --------------------------------------------------------------------------- #
 def _select_forward_comm_fns(
-    send_forward_op: SendForwardOp, send_in_forward: SendForward, ring_comm_fn: Callable
+    send_op: SendOp, send_in_forward: SendForward, send_op_fn
 ) -> tuple[Callable, Callable]:
     """
     Define send and receive functions in the forward pass.
 
     Parameters
     ----------
-    send_forward_op: SendForwardOp
+    send_op: SendOp
         Enumeration that defines what type of collective call
         is made in the forward pass.
     send_in_forward: SendForward
@@ -176,8 +177,8 @@ def _select_forward_comm_fns(
     """
     send_func: Callable[..., tuple[torch.Tensor, dist.Work]]
 
-    match send_forward_op:
-        case SendForwardOp.SENDRECV | SendForwardOp.HYBRID:
+    match send_op:
+        case SendOp.P2P | SendOp.ALLTOALL | SendOp.HYBRID:
             match send_in_forward:
                 case SendForward.X:
 
@@ -192,7 +193,7 @@ def _select_forward_comm_fns(
                         **kwargs: Any,
                     ) -> tuple[torch.Tensor, dist.Work]:
                         recv_buf = torch.empty_like(x)
-                        recv_buf, handle = ring_comm_fn(
+                        recv_buf, handle = send_op_fn(
                             x,
                             recv_buf,
                             1,
@@ -216,7 +217,7 @@ def _select_forward_comm_fns(
                         **kwargs: Any,
                     ) -> tuple[torch.Tensor, dist.Work]:
                         recv_buf = torch.empty_like(kv)
-                        recv_buf, handle = ring_comm_fn(
+                        recv_buf, handle = send_op_fn(
                             kv,
                             recv_buf,
                             1,
@@ -232,7 +233,7 @@ def _select_forward_comm_fns(
                         f"send_in_forward option {send_in_forward} not implemented."
                     )
 
-        case SendForwardOp.BROADCAST:
+        case SendOp.BROADCAST:
             match send_in_forward:
                 case SendForward.X:
 
@@ -274,7 +275,7 @@ def _select_forward_comm_fns(
                     )
         case _:
             raise NotImplementedError(
-                f"send_forward_op option {send_forward_op} not implemented."
+                f"send_op option {send_op} not implemented."
             )
 
     match send_in_forward:
@@ -360,7 +361,7 @@ class RingAttentionConfig:
         self,
         device: torch.device = torch.device("cuda"),
         send_in_forward: SendForward = SendForward.KV,
-        send_forward_op: SendForwardOp = SendForwardOp.SENDRECV,
+        send_op: SendOp = SendOp.P2P,
         save_for_backward: SaveBackward = SaveBackward.KV,
         save_scope: SaveScope = SaveScope.LOCAL,
         send_backward: SendBackward = SendBackward.SEND_DKV,
@@ -368,18 +369,19 @@ class RingAttentionConfig:
     ):
         self.send_in_forward = send_in_forward
         self.save_for_backward = save_for_backward
-        self.send_forward_op = send_forward_op
+        self.send_op = send_op
         self.save_scope = save_scope
         self.send_backward = send_backward
         self.offload = offload
         self.device = device
 
         self.offloader = self._init_offloader(offload, device)
-        self.ring_comm_fn = self._select_ring_comm_fn(device)
+        self.p2p_fn = self._p2p_fn(send_op)
+        self.send_op_fn = self._send_op_fn(send_op, device)
         self.attn_core_forward_fn = self._select_attn_core_forward_fn(device)
         self.attn_core_backward_fn = self._select_attn_core_backward_fn(device)
         self.forward_send_fn, self.forward_recv_fn = _select_forward_comm_fns(
-            send_forward_op, send_in_forward, self.ring_comm_fn
+            send_op, send_in_forward, self.send_op_fn
         )
         self.save_for_backward_fn = _select_save_for_backward_fn(
             save_for_backward, save_scope, self.offloader
@@ -395,11 +397,34 @@ class RingAttentionConfig:
             return NVLinkActivationOffloader(device)
         raise ValueError(f"Unhandled offload option {offload}")
 
-    def _select_ring_comm_fn(self, device: torch.device) -> Callable:
-        if device.type == "cuda":
-            return comm.comm_1d_alltoall
-        elif device.type == "cpu":
-            return comm.comm_1d_p2p
+    def _p2p_fn(self, send_op) -> Callable:
+        match send_op: 
+            case SendOp.ALLTOALL:
+                if dist.get_backend() == 'gloo':
+                    return comm.comm_1d_p2p
+                else:
+                    return comm.comm_1d_alltoall
+            case SendOp.P2P:
+                return comm.comm_1d_p2p
+            case SendOp.BROADCAST:
+                if dist.get_backend() == 'gloo':
+                    return comm.comm_1d_p2p
+                else:
+                    return comm.comm_1d_alltoall
+        raise ValueError(f"No valid ring comm functions for dist backend {dist.get_backend()}")
+    
+    def _send_op_fn(self, send_op, device) -> Callable:
+        match send_op: 
+            case SendOp.ALLTOALL:
+                if dist.get_backend() == 'gloo':
+                    return comm.comm_1d_p2p
+                else:
+                    return comm.comm_1d_alltoall
+            case SendOp.P2P:
+                return comm.comm_1d_p2p
+            case SendOp.BROADCAST:
+                return comm.comm_broadcast
+            
         raise ValueError(f"No valid ring comm functions for device {device.type}")
 
     def _select_attn_core_forward_fn(self, device: torch.device) -> Callable:
@@ -427,7 +452,7 @@ class RingAttentionConfig:
         return (
             f"RingAttentionConfig("
             f"send_in_forward={self.send_in_forward.name}, "
-            f"send_forward_op={self.send_forward_op.name}, "
+            f"send_op={self.send_op.name}, "
             f"save_for_backward={self.save_for_backward.name}, "
             f"save_scope={self.save_scope.name}, "
             f"send_backward={self.send_backward.name}, "

@@ -17,7 +17,7 @@ from .config import (
     SaveScope,
     SendBackward,
     SendForward,
-    SendForwardOp,
+    SendOp,
 )
 
 
@@ -359,7 +359,7 @@ def hybrid_forward(
         if node_step < n_nodes - 1:
             if ring_config.send_in_forward == SendForward.X:
                 internode_recv_buf = torch.empty_like(x_j)
-                internode_recv_buf, internode_handle = ring_config.ring_comm_fn(
+                internode_recv_buf, internode_handle = ring_config.p2p_fn(
                     data=x.clone(),
                     buffer=internode_recv_buf,
                     direction=gpus_per_node * (node_step + 1),
@@ -370,7 +370,7 @@ def hybrid_forward(
                 )
             elif ring_config.send_in_forward == SendForward.KV:
                 internode_recv_buf = torch.empty_like(kv_j)
-                internode_recv_buf, internode_handle = ring_config.ring_comm_fn(
+                internode_recv_buf, internode_handle = ring_config.send_op_fn(
                     data=kv.clone(),
                     buffer=internode_recv_buf,
                     direction=gpus_per_node * (node_step + 1),
@@ -387,7 +387,7 @@ def hybrid_forward(
                     if ring_config.send_in_forward == SendForward.X
                     else torch.empty_like(kv_j)
                 )
-                recv_buf, handle = ring_config.ring_comm_fn(
+                recv_buf, handle = ring_config.send_op_fn(
                     x_j if ring_config.send_in_forward == SendForward.X else kv_j,
                     recv_buf,
                     1,
@@ -445,15 +445,15 @@ def build_ring_forward(
     tuple[torch.Tensor, torch.Tensor, tuple],
 ]:
     """Pick the forward implementation (P2P vs broadcast) based on config."""
-    if ring_config.send_forward_op == SendForwardOp.BROADCAST:
+    if ring_config.send_op == SendOp.BROADCAST:
         return broadcast_forward
-    elif ring_config.send_forward_op == SendForwardOp.HYBRID:
+    elif ring_config.send_op == SendOp.HYBRID:
         return hybrid_forward
-    elif ring_config.send_forward_op == SendForwardOp.SENDRECV:
+    elif ring_config.send_op == SendOp.P2P or ring_config.send_op == SendOp.ALLTOALL:
         return ring_forward
     else:
         raise NotImplementedError(
-            f"Unknown send_forward_op: {ring_config.send_forward_op}"
+            f"Unknown send_op: {ring_config.send_op}"
         )
 
 
@@ -669,7 +669,7 @@ class _LocalChunkProvider(_BackwardChunkProvider):
             send_buf = self.x if self.config.send_in_forward == SendForward.X else kv
             self._recv_buf = torch.empty_like(send_buf)
 
-            self._recv_buf, self._handle = self.config.ring_comm_fn(
+            self._recv_buf, self._handle = self.config.send_op_fn(
                 send_buf,
                 self._recv_buf,
                 1,
@@ -724,7 +724,7 @@ class _LocalChunkProvider(_BackwardChunkProvider):
         if step == 0 or step >= world_size - 1:
             return
         next_recv = torch.empty_like(self._recv_buf)
-        self._recv_buf, self._handle = self.config.ring_comm_fn(
+        self._recv_buf, self._handle = self.config.send_op_fn(
             self._recv_buf,
             next_recv,
             1,
@@ -798,6 +798,9 @@ class _LocalChunkProviderBroadcast(_LocalChunkProvider):
         # harmless but wasteful -- guarded via `has_more` below instead.
         return kj, vj, kv
 
+    def maybe_forward(self, step, world_size):
+        return 
+
 
 def _build_backward_chunk_provider(
     ring_config: RingAttentionConfig,
@@ -847,11 +850,11 @@ def _build_backward_chunk_provider(
             ring_config, chunks_to_save, w_qkv, b, seq_local, h, d
         )
     elif ring_config.save_scope == SaveScope.LOCAL:
-        if ring_config.send_forward_op == SendForwardOp.SENDRECV:
+        if ring_config.send_op == SendOp.P2P:
             return _LocalChunkProvider(
                 ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
             )
-        elif ring_config.send_forward_op == SendForwardOp.BROADCAST:
+        elif ring_config.send_op == SendOp.BROADCAST:
             return _LocalChunkProviderBroadcast(
                 ring_config,
                 chunks_to_save,
@@ -1011,7 +1014,7 @@ def _accumulate_dkv_send(
 
     dkv = torch.cat([dk_j, dv_j], dim=0).contiguous()
     recv_buf = torch.empty_like(dkv)
-    recv_buf, _ = ring_config.ring_comm_fn(
+    recv_buf, _ = ring_config.p2p_fn(
         dkv, recv_buf, -step, group=group, async_op=False, empty=empty, step=step
     )
     dkj_r, dvj_r = torch.chunk(recv_buf, 2, dim=0)
@@ -1110,7 +1113,7 @@ def ring_backward(
         dq += dq_j
         del dq_j, kj, vj, kv
 
-        if ring_config.send_forward_op == SendForwardOp.SENDRECV or (
+        if ring_config.send_op == SendOp.P2P or (
             ring_config.save_scope == SaveScope.GLOBAL
         ):
             dk_buf, dv_buf = accumulate_dkv(
@@ -1136,7 +1139,7 @@ def ring_backward(
         if isinstance(chunk_provider, _LocalChunkProvider):
             chunk_provider.maybe_forward(step, world_size)
 
-    if ring_config.send_forward_op != SendForwardOp.BROADCAST or (
+    if ring_config.send_op != SendOp.BROADCAST or (
         ring_config.save_scope == SaveScope.GLOBAL
     ):
         dk_local, dv_local = postprocess_dkv(
