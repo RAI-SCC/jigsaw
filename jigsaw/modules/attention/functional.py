@@ -405,7 +405,6 @@ def hybrid_forward(
                 chunks_to_save[(local_rank - global_step) % world_size] = (
                     ring_config.save_for_backward_fn(x_j, kv_j)
                 )
-            print(f"kj {kj[0][0][0][0]}")
             out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
             if step < gpus_per_node - 1:
                 handle.wait()
@@ -415,12 +414,9 @@ def hybrid_forward(
         # --- now consume the internode data that arrived during the inner loop ---
         if node_step < n_nodes - 1:
             internode_handle.wait()
-            x_j, kv_j, kj, vj = ring_config.forward_recv_fn(
-                internode_recv_buf, x_j, kv_j, kj, vj
-            )
-
-            # recompute KV for the newly received x, ready for next outer iter
-            kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
+            x_j, kv_j, kj, vj = ring_config.forward_recv_fn(internode_recv_buf, x_j, kv_j, kj, vj)
+            if ring_config.send_in_forward == SendForward.X:
+                kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
 
     ring_config.wait_offloads()
     out = out.to(q.dtype)
