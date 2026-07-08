@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from logging import config
 from typing import Any, Optional, Protocol, cast
 
 import torch
@@ -447,8 +448,10 @@ def build_ring_forward(
         return broadcast_forward
     elif ring_config.send_forward_op == SendForwardOp.HYBRID:
         return hybrid_forward
-
-    return ring_forward
+    elif ring_config.send_forward_op == SendForwardOp.SENDRECV:
+        return ring_forward
+    else:
+        raise NotImplementedError(f"Unknown send_forward_op: {ring_config.send_forward_op}")
 
 
 # --------------------------------------------------------------------------- #
@@ -662,6 +665,7 @@ class _LocalChunkProvider(_BackwardChunkProvider):
             # Kick off the first ring send of whichever buffer is configured.
             send_buf = self.x if self.config.send_in_forward == SendForward.X else kv
             self._recv_buf = torch.empty_like(send_buf)
+            
             self._recv_buf, self._handle = self.config.ring_comm_fn(
                 send_buf,
                 self._recv_buf,
@@ -726,7 +730,65 @@ class _LocalChunkProvider(_BackwardChunkProvider):
             empty=self.empty,
             step=step,
         )
+        
+class _LocalChunkProviderBroadcast(_LocalChunkProvider):    
+    def __init__(self,
+        ring_config: RingAttentionConfig,
+        chunks_to_save: tuple[torch.Tensor, ...],
+        x: torch.Tensor,
+        w_qkv: torch.Tensor,
+        b: int,
+        seq_local: int,
+        h: int,
+        d: int,
+        group: dist.ProcessGroup,
+        empty: torch.Tensor,
+        local_rank: torch.Tensor
+    ) -> None:
+        super().__init__(ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty)
+        self._recv_buf = torch.empty_like(x if ring_config.send_in_forward == SendForward.X else chunks_to_save[0])
+        self._handle: Optional[dist.Work] = None
+        self.local_rank = local_rank
+        
+    def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        
+        chunk = self._materialize_chunk0()
+        if self.config.save_for_backward == SaveBackward.KV:
+            kv = chunk
+        else:
+            kv, _, _ = _compute_kv(
+                chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
+            )
 
+        # Kick off the first ring send of whichever buffer is configured.
+        send_buf = self.x if self.config.send_in_forward == SendForward.X else kv
+        self._recv_buf = send_buf if self.local_rank == step else torch.empty_like(send_buf)
+        self._handle = dist.broadcast(
+            self._recv_buf, src=step, group=self.group, async_op=True
+        )
+        
+        
+        # step > 0: receive the chunk that's been circulating, then forward
+        # it on (unless this is the last step).
+        assert self._handle is not None
+        self._handle.wait()
+        recv_buf = self._recv_buf
+
+        if self.config.send_in_forward == SendForward.X:
+            kv, kj, vj = _compute_kv(
+                recv_buf, self.w_qkv, self.b, self.seq_local, self.h, self.d
+            )
+            kj, vj = kj.contiguous(), vj.contiguous()
+        else:
+            kv = recv_buf
+            kj, vj = kv[0].contiguous(), kv[1].contiguous()
+
+        # `world_size` isn't tracked locally; ring_backward only calls us
+        # `world_size` times total, so re-sending on the final step is
+        # harmless but wasteful -- guarded via `has_more` below instead.
+        return kj, vj, kv
+        
+        
 
 def _build_backward_chunk_provider(
     ring_config: RingAttentionConfig,
@@ -739,6 +801,7 @@ def _build_backward_chunk_provider(
     d: int,
     group: dist.ProcessGroup,
     empty: torch.Tensor,
+    local_rank: int
 ) -> _BackwardChunkProvider:
     """
     Build corresponding class that will return the Chunk provider.
@@ -775,9 +838,14 @@ def _build_backward_chunk_provider(
             ring_config, chunks_to_save, w_qkv, b, seq_local, h, d
         )
     elif ring_config.save_scope == SaveScope.LOCAL:
-        return _LocalChunkProvider(
-            ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
-        )
+        if ring_config.send_forward_op == SendForwardOp.SENDRECV:
+            return _LocalChunkProvider(
+                ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
+            )
+        elif ring_config.send_forward_op == SendForwardOp.BROADCAST:
+            return _LocalChunkProviderBroadcast(
+                ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty, local_rank
+            )
     else:
         raise NotImplementedError
 
@@ -1001,36 +1069,44 @@ def ring_backward(
     dk_buf, dv_buf = get_dkv_buffer(ring_config, q, world_size)
 
     chunk_provider = _build_backward_chunk_provider(
-        ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
+        ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty, local_rank
     )
 
     for step in range(world_size):
         kj, vj, kv = chunk_provider.get(step)
-
+        
         dq_j, dk_j, dv_j = ring_config.attn_core_backward_fn(
             dout, q, kj, vj, out, lse, scale, seq_local, seq_local
         )
         dq += dq_j
         del dq_j, kj, vj, kv
 
-        dk_buf, dv_buf = accumulate_dkv(
-            ring_config,
-            dk_buf,
-            dv_buf,
-            dk_j,
-            dv_j,
-            step,
-            world_size,
-            seq_local,
-            local_rank,
-            group,
-            empty,
-        )
-
+        if ring_config.send_forward_op != SendForwardOp.BROADCAST:
+            dk_buf, dv_buf = accumulate_dkv(
+                ring_config,
+                dk_buf,
+                dv_buf,
+                dk_j,
+                dv_j,
+                step,
+                world_size,
+                seq_local,
+                local_rank,
+                group,
+                empty,
+            )
+        else:
+            dist.all_reduce(dk_j, op=dist.ReduceOp.SUM, group=group)
+            dist.all_reduce(dv_j, op=dist.ReduceOp.SUM, group=group)
+            if local_rank == step:
+                dk_local = dk_j
+                dv_local = dv_j
+                
         if isinstance(chunk_provider, _LocalChunkProvider):
             chunk_provider.maybe_forward(step, world_size)
 
-    dk_local, dv_local = postprocess_dkv(
-        ring_config, dk_buf, dv_buf, local_rank, seq_local, group
-    )
+    if ring_config.send_forward_op != SendForwardOp.BROADCAST:
+        dk_local, dv_local = postprocess_dkv(
+            ring_config, dk_buf, dv_buf, local_rank, seq_local, group
+        )
     return dq, dk_local, dv_local

@@ -373,7 +373,6 @@ def test_ring_forward_backward(
 
     dout_local = torch.ones_like(out, device=device, dtype=out_ref.dtype)
 
-    print(f"dtype: {dout_local.dtype} qlocal {q_local.dtype} out {out.dtype}")
     dq_local, dk_local, dv_local = functional.ring_backward(
         dout_local,
         q_local,
