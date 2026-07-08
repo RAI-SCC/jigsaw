@@ -185,9 +185,9 @@ def _select_forward_comm_fns(
                     def send_func(  # type: ignore[assignment]
                         x: torch.Tensor,
                         kv: torch.Tensor,
-                        local_rank: int,
+                        direction: int,
                         group: dist.ProcessGroup,
-                        step: int,
+                        tag: int,
                         empty: torch.Tensor,
                         *args: Any,
                         **kwargs: Any,
@@ -196,10 +196,10 @@ def _select_forward_comm_fns(
                         recv_buf, handle = send_op_fn(
                             x,
                             recv_buf,
-                            1,
+                            direction,
                             group=group,
                             async_op=True,
-                            tag=step,
+                            tag=tag,
                             empty=empty,
                         )
                         return recv_buf, handle
@@ -209,9 +209,9 @@ def _select_forward_comm_fns(
                     def send_func(  # type: ignore[assignment]
                         x: torch.Tensor,
                         kv: torch.Tensor,
-                        local_rank: int,
+                        direction: int,
                         group: dist.ProcessGroup,
-                        step: int,
+                        tag: int,
                         empty: torch.Tensor,
                         *args: Any,
                         **kwargs: Any,
@@ -220,11 +220,11 @@ def _select_forward_comm_fns(
                         recv_buf, handle = send_op_fn(
                             kv,
                             recv_buf,
-                            1,
+                            direction,
                             group=group,
                             async_op=True,
                             empty=empty,
-                            tag=step,
+                            tag=tag,
                         )
                         return recv_buf, handle
 
@@ -386,8 +386,14 @@ class RingAttentionConfig:
         self.save_for_backward_fn = _select_save_for_backward_fn(
             save_for_backward, save_scope, self.offloader
         )
-
+    
     # -- selection helpers ------------------------------------------------- #
+    def _get_data_to_send(self, x, kv):
+        if self.send_in_forward == SendForward.X:
+            return x
+        elif self.send_in_forward == SendForward.KV:
+            return kv
+        
     def _init_offloader(
         self, offload: Offload, device: torch.device
     ) -> Optional[NVLinkActivationOffloader]:

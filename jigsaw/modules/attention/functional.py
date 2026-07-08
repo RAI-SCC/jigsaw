@@ -294,9 +294,9 @@ def ring_forward(
 
     # Kick off first send
     recv_buf, handle = ring_config.forward_send_fn(
-        x_j, kv_j, local_rank, group, step=0, empty=empty
+        x_j, kv_j, direction=1, group=group, tag=0, empty=empty
     )
-
+    
     for step in range(world_size):
         if step > 0 and ring_config.send_in_forward == SendForward.X:
             kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
@@ -310,9 +310,10 @@ def ring_forward(
 
         if step < world_size - 1:
             handle.wait()
+            # receive either x or kv_j
             x_j, kv_j, kj, vj = ring_config.forward_recv_fn(recv_buf, x_j, kv_j, kj, vj)
             recv_buf, handle = ring_config.forward_send_fn(
-                x_j, kv_j, local_rank, group, step=step, empty=empty
+                x_j, kv_j, direction=1, group=group, tag=step, empty=empty
             )
 
     ring_config.wait_offloads()
@@ -1014,6 +1015,7 @@ def _accumulate_dkv_send(
 
     dkv = torch.cat([dk_j, dv_j], dim=0).contiguous()
     recv_buf = torch.empty_like(dkv)
+    
     recv_buf, _ = ring_config.p2p_fn(
         dkv, recv_buf, -step, group=group, async_op=False, empty=empty, step=step
     )

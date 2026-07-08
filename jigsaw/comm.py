@@ -7,32 +7,32 @@ import torch.distributed as dist
 
 
 def comm_2way_alltoall(
-    data_or_buffer: torch.Tensor,
+    data: torch.Tensor,
     buffer: torch.Tensor,
     empty: torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = True,
 ) -> tuple[torch.Tensor, list[Optional[dist.Work]]]:
     """
-    Send data_or_buffer to neighbor process using all-to-all.
+    Send data to neighbor process using all-to-all.
 
     Parameters
     ----------
-    data_or_buffer: torch.Tensor
+    data: torch.Tensor
         Data to send.
     buffer: torch.Tensor
         Buffer to receive.
     empty: torch.Tensor
         Empty for computational reasons.
     group: dist.ProcessGroup
-        Process group within which to send data_or_buffer.
+        Process group within which to send data.
     async_op: bool
         Boolean flag to see if comm should be asynchronous.
 
     Returns
     -------
     buffer: torch.Tensor
-        Buffer in which the data_or_buffer is received.
+        Buffer in which the data is received.
     wait_handle: list[Optional[dist.Work]]
         If async, a list of wait handles. In this function, the length of
         this list will always be 1. It is a list for compatability and extensibility reasons.
@@ -40,12 +40,12 @@ def comm_2way_alltoall(
     match group.rank():
         case 0:
             wait_handle = dist.all_to_all(
-                [empty, buffer], [empty, data_or_buffer], group=group, async_op=async_op
+                [empty, buffer], [empty, data], group=group, async_op=async_op
             )
             return buffer, [wait_handle]
         case 1:
             wait_handle = dist.all_to_all(
-                [buffer, empty], [data_or_buffer, empty], group=group, async_op=async_op
+                [buffer, empty], [data, empty], group=group, async_op=async_op
             )
             return buffer, [wait_handle]
         case _:
@@ -55,32 +55,32 @@ def comm_2way_alltoall(
 
 
 def comm_2way_p2p(
-    data_or_buffer: torch.Tensor,
+    data: torch.Tensor,
     buffer: torch.Tensor,
     empty: torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = True,
 ) -> tuple[torch.Tensor, list[Optional[dist.Work]]]:
     """
-    Send data_or_buffer to neighbor process using P2P communication.
+    Send data to neighbor process using P2P communication.
 
     Parameters
     ----------
-    data_or_buffer: torch.Tensor
+    data: torch.Tensor
         Data to send.
     buffer: torch.Tensor
         Buffer to receive.
     empty: torch.Tensor
         Empty for computational reasons.
     group: dist.ProcessGroup
-        Process group within which to send data_or_buffer.
+        Process group within which to send data.
     async_op: bool
         Boolean flag to see if comm should be asynchronous.
 
     Returns
     -------
     buffer: torch.Tensor
-        Buffer in which the data_or_buffer is received.
+        Buffer in which the data is received.
     wait_handle: list[Optional[dist.Work]]
         If async, a list of wait handles. In this function, the length of
         this list will always be 1. It is a list for compatability and extensibility reasons.
@@ -88,22 +88,22 @@ def comm_2way_p2p(
     match group.rank():
         case 0:
             if async_op:
-                send = dist.isend(data_or_buffer, group_dst=1, group=group)
+                send = dist.isend(data, group_dst=1, group=group)
                 recv = dist.irecv(buffer, group_src=1, group=group)
                 return buffer, [send, recv]
             else:
-                dist.send(data_or_buffer, group_dst=1, group=group)
+                dist.send(data, group_dst=1, group=group)
                 dist.recv(buffer, group_src=1, group=group)
                 return buffer, [None, None]
 
         case 1:
             if async_op:
                 recv = dist.irecv(buffer, group_src=0, group=group)
-                send = dist.isend(data_or_buffer, group_dst=0, group=group)
+                send = dist.isend(data, group_dst=0, group=group)
                 return buffer, [send, recv]
             else:
                 dist.recv(buffer, group_src=0, group=group)
-                dist.send(data_or_buffer, group_dst=0, group=group)
+                dist.send(data, group_dst=0, group=group)
                 return buffer, [None, None]
         case _:
             raise ValueError(
@@ -112,7 +112,7 @@ def comm_2way_p2p(
 
 
 def comm_1d_alltoall(
-    data_or_buffer: torch.Tensor,
+    data: torch.Tensor,
     buffer: torch.Tensor,
     direction: int,
     group: dist.ProcessGroup,
@@ -122,11 +122,11 @@ def comm_1d_alltoall(
     **kwargs: Any,
 ) -> tuple[torch.Tensor, Optional[dist.Work]]:
     """
-    Send data_or_buffer to neighbor process using all to all communication.
+    Send data to neighbor process using all to all communication.
 
     Parameters
     ----------
-    data_or_buffer: torch.Tensor
+    data: torch.Tensor
         Data to send.
     buffer: torch.Tensor
         Buffer to receive.
@@ -134,7 +134,7 @@ def comm_1d_alltoall(
         positive direction = send to right.
         negative direction = send to left.
     group: dist.ProcessGroup
-        Process group within which to send data_or_buffer.
+        Process group within which to send data.
     async_op: bool
         Boolean flag for whether communication should be asynchronous or not.
     empty: torch.Tensor
@@ -147,14 +147,14 @@ def comm_1d_alltoall(
     Returns
     -------
     buffer: torch.Tensor
-        Buffer in which the data_or_buffer is received.
+        Buffer in which the data is received.
     """
     send_to = (group.rank() + direction) % group.size()
     recv_from = (group.rank() - direction) % group.size()
 
     send_list = [empty] * group.size()
     recv_list = [empty] * group.size()
-    send_list[send_to] = data_or_buffer
+    send_list[send_to] = data
     recv_list[recv_from] = buffer
 
     handle = dist.all_to_all(recv_list, send_list, group=group, async_op=async_op)
@@ -162,7 +162,7 @@ def comm_1d_alltoall(
 
 
 def comm_1d_p2p(
-    data_or_buffer: torch.Tensor,
+    data: torch.Tensor,
     buffer: torch.Tensor,
     direction: int,
     group: dist.ProcessGroup,
@@ -173,11 +173,11 @@ def comm_1d_p2p(
     **kwargs: Any,
 ) -> tuple[torch.Tensor, Optional[dist.Work]]:
     """
-    Send data_or_buffer to neighbor process using all to all communication.
+    Send data to neighbor process using all to all communication.
 
     Parameters
     ----------
-    data_or_buffer: torch.Tensor
+    data: torch.Tensor
         Data to send.
     buffer: torch.Tensor
         Buffer to receive.
@@ -185,7 +185,7 @@ def comm_1d_p2p(
         positive direction = send to right.
         negative direction = send to left.
     group: dist.ProcessGroup
-        Process group within which to send data_or_buffer.
+        Process group within which to send data.
     async_op: bool
         Boolean flag to see if operation is asynchronous or not.
     tag: int
@@ -198,7 +198,7 @@ def comm_1d_p2p(
     Returns
     -------
     buffer: torch.Tensor
-        Buffer in which the data_or_buffer is received.
+        Buffer in which the data is received.
     """
     group_size = group.size() if group_size is None else group_size
 
@@ -211,11 +211,11 @@ def comm_1d_p2p(
     tag = tag * 8
 
     if group.rank() % 2 == 0:
-        send = dist.isend(data_or_buffer, group_dst=send_to, group=group, tag=tag)
+        send = dist.isend(data, group_dst=send_to, group=group, tag=tag)
         recv = dist.irecv(buffer, group_src=recv_from, group=group, tag=tag)
     else:
         recv = dist.irecv(buffer, group_src=recv_from, group=group, tag=tag)
-        send = dist.isend(data_or_buffer, group_dst=send_to, group=group, tag=tag)
+        send = dist.isend(data, group_dst=send_to, group=group, tag=tag)
 
     if dist.get_backend() == "gloo":
         dist.barrier()
@@ -231,7 +231,7 @@ def comm_1d_p2p(
 
 
 def comm_broadcast(
-    data_or_buffer: torch.Tensor,
+    data: torch.Tensor,
     src: int,
     group: dist.ProcessGroup,
     async_op: bool = True,
@@ -239,7 +239,7 @@ def comm_broadcast(
     **kwargs: Any,
 ) -> tuple[torch.Tensor, Optional[dist.Work]]:
     """
-    Send data_or_buffer to neighbor process using all to all communication.
+    Send data to neighbor process using all to all communication.
 
     Parameters
     ----------
@@ -251,7 +251,7 @@ def comm_broadcast(
         positive direction = send to right.
         negative direction = send to left.
     group: dist.ProcessGroup
-        Process group within which to send data_or_buffer.
+        Process group within which to send data.
     async_op: bool
         Boolean flag to see if operation is asynchronous or not.
     tag: int
@@ -264,8 +264,8 @@ def comm_broadcast(
     Returns
     -------
     buffer: torch.Tensor
-        Buffer in which the data_or_buffer is received.
+        Buffer in which the data is received.
     """
     
-    handle = dist.broadcast(data_or_buffer, src=src, group=group, async_op=async_op)
-    return data_or_buffer, handle
+    handle = dist.broadcast(data, src=src, group=group, async_op=async_op)
+    return data, handle
