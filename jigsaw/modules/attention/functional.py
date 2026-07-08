@@ -226,7 +226,7 @@ def broadcast_forward(
 
     # Kick off first send
     recv_buf, handle = ring_config.forward_send_fn(
-        x=x, kv=kv, local_rank=local_rank, group=group, step=0, empty=empty
+        x=x, kv=kv, local_rank=local_rank, group=group, src_rank=0, empty=empty
     )
     handle.wait()
     x_j, kv_j, kj, vj = ring_config.forward_recv_fn(recv_buf, x_j, kv_j, kj, vj)
@@ -238,7 +238,7 @@ def broadcast_forward(
                 kv=kv,
                 local_rank=local_rank,
                 group=group,
-                step=step + 1,
+                src_rank=step + 1,
                 empty=empty,
             )
 
@@ -371,7 +371,7 @@ def hybrid_forward(
                 )
             elif ring_config.send_in_forward == SendForward.KV:
                 internode_recv_buf = torch.empty_like(kv_j)
-                internode_recv_buf, internode_handle = ring_config.send_op_fn(
+                internode_recv_buf, internode_handle = ring_config.p2p_fn(
                     data=kv.clone(),
                     buffer=internode_recv_buf,
                     direction=gpus_per_node * (node_step + 1),
@@ -380,7 +380,7 @@ def hybrid_forward(
                     tag=node_step,
                     empty=empty,
                 )
-
+                
         for step in range(gpus_per_node):
             if step + 1 < gpus_per_node:
                 recv_buf = (
@@ -388,19 +388,19 @@ def hybrid_forward(
                     if ring_config.send_in_forward == SendForward.X
                     else torch.empty_like(kv_j)
                 )
+                # Start communicating information in a ring
                 recv_buf, handle = ring_config.send_op_fn(
                     x_j if ring_config.send_in_forward == SendForward.X else kv_j,
                     recv_buf,
-                    1,
+                    direction=1,
                     group=group,
-                    async_op=True,
                     tag=step,
-                    empty=empty,
                     group_size=gpus_per_node,
                 )
 
             if ring_config.send_in_forward == SendForward.X:
                 kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
+                
             if ring_config.save_scope == SaveScope.GLOBAL:
                 global_step = node_step * gpus_per_node + step
                 chunks_to_save[(local_rank - global_step) % world_size] = (
@@ -851,7 +851,7 @@ def _build_backward_chunk_provider(
             ring_config, chunks_to_save, w_qkv, b, seq_local, h, d
         )
     elif ring_config.save_scope == SaveScope.LOCAL:
-        if ring_config.send_op == SendOp.P2P:
+        if ring_config.send_op == SendOp.P2P or ring_config.send_op == SendOp.HYBRID:
             return _LocalChunkProvider(
                 ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
             )
@@ -1117,7 +1117,7 @@ def ring_backward(
 
         if ring_config.send_op == SendOp.P2P or (
             ring_config.save_scope == SaveScope.GLOBAL
-        ):
+        ) or ring_config.send_op == SendOp.HYBRID:
             dk_buf, dv_buf = accumulate_dkv(
                 ring_config,
                 dk_buf,
