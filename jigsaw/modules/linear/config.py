@@ -83,7 +83,10 @@ class LinearConfig:
         self, grad_weight: torch.Tensor, batch_dim: torch.Tensor
     ) -> torch.Tensor:
         """Summation over gradient weights over the batch dimension."""
-        return grad_weight.sum(dim=int(batch_dim))
+        if len(grad_weight.shape) > 2:
+            return grad_weight.sum(dim=int(batch_dim))
+        else:
+            return grad_weight
 
     # Adding xwt + b
     def _add_bias_selection(
@@ -144,13 +147,10 @@ class LinearConfig:
         if bias is None:
             return self._no_bias
         # all_reduce is not required for 2-way parallel models
-        elif parallelism == 2:
-            return self._no_reduce_bias
-        # sync required for 4-or-more-way distributed models
         else:
-            return self._reduce_bias_over_spatial_group
+            return self._bias_sum
 
-    def _reduce_bias_over_spatial_group(
+    def _bias_sum(
         self, grad_output: torch.Tensor, spatial_group: dist.ProcessGroup
     ) -> torch.Tensor:
         """
@@ -165,35 +165,11 @@ class LinearConfig:
         spatial_group: dist.ProcessGroup
             process group of ranks distributed across space (share channels).
         """
-        grad_b = grad_output.sum(dim=(-3, -2))
-        return grad_b
-
-    def _reduce_bias_over_spatial_group_nonbayesian(
-        self, grad_output: torch.Tensor, spatial_group: dist.ProcessGroup
-    ) -> torch.Tensor:
-        """
-        Calculate grad wrt bias.
-
-        grad_b is equal to the gradient output summed over space and batch dim.
-
-        Parameters
-        ----------
-        grad_output: torch.Tensor
-            gradient wrt loss
-        spatial_group: dist.ProcessGroup
-            process group of ranks distributed across space (share channels).
-        """
-        if len(grad_output.shape) == 3:
+        if len(grad_output.shape) > 2:
             grad_b = grad_output.sum(dim=(-3, -2))
         else:
             grad_b = grad_output.sum(dim=(-2))
         return grad_b
-
-    def _no_reduce_bias(
-        self, grad_output: torch.Tensor, spatial_group: dist.ProcessGroup
-    ) -> torch.Tensor:
-        """Calculate grad wrt bias when spatial synchronization is not required."""
-        return grad_output.sum(dim=(-3, -2))
 
     def _no_bias(
         self,

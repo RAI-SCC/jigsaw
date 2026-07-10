@@ -145,7 +145,7 @@ class XWT(torch.autograd.Function):
         weight = config.reshape_weights(weight)
         # handle conversion if necessary here
         grad_output = grad_output.to(weight.dtype)
-
+        input = input.to(weight.dtype)
         grad_input, grad_weight = config.mm_kernels[3](
             grad_output,
             weight,
@@ -154,11 +154,10 @@ class XWT(torch.autograd.Function):
             device=device,
             model_group=model_group,
         )
-
         grad_weight = config.grad_sum(
             grad_weight, ctx.bayesian
         )  # sum along batch dimension
-
+        
         grad_b = config.grad_bias(grad_output, spatial_group)
 
         return grad_input, grad_weight, grad_b, None, None, None, None, None, None
