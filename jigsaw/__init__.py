@@ -1,8 +1,8 @@
 """Jigsaw management package. This package provides classes for distributed model training."""
 
-from .modules.attention import attention as attention
-from .modules.conv import conv as conv
-from .modules.conv_transpose import conv_transpose as conv_transpose
-from .modules.linear import linear as linear
-from .modules.normalization import normalization as normalization
-from .modules.roll import roll as roll
+from .modules import attention as attention
+from .modules import conv as conv
+from .modules import conv_transpose as conv_transpose
+from .modules import linear as linear
+from .modules import normalization as normalization
+from .modules import roll as roll
