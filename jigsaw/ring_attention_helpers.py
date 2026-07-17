@@ -158,7 +158,11 @@ class RingAttentionConfig:
 
 
 def _attn_core_flash(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale: float, dropout_p: float
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    scale: Optional[float] = 0.0,
+    dropout_p: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Call flash attention forward pass.
@@ -193,9 +197,12 @@ def _attn_core_flash(
     return out, logsumexp
 
 
-
 def _attn_core_math(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale: Optional[float]=0.0, dropout_p: float = 0.0
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    scale: Optional[float] = 0.0,
+    dropout_p: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Call vanilla attention forward pass.
@@ -218,7 +225,7 @@ def _attn_core_math(
     logsumexp: torch.Tensor
         Intermediate result for online softmax algorithm.
     """
-    print(f'shape of q here {q.shape}, scale {scale}')
+    print(f"shape of q here {q.shape}, scale {scale}")
     scale = scale or (q.size(-1) ** -0.5)
     scores = (q @ k.mT) * scale
     logsumexp = scores.logsumexp(dim=-1)  # (B, H, Sq)
@@ -310,7 +317,7 @@ def _attn_core_math_backward(
     args: Any
     kwargs: Any
     """
-    
+
     attn = q @ k.mT
     attn = torch.nn.functional.softmax(attn) * scale
     dv = attn.mT @ grad_out  # (B, H, Sk, D)
@@ -589,7 +596,7 @@ def broadcast_forward(
     if ring_config.offloader is not None:
         ring_config.offloader.wait_offloads()
 
-    out = out
+    out = out.to(torch.bfloat16)
     chunks_to_save_tup = tuple(chunks_to_save)
     return out, lse, chunks_to_save_tup
 
@@ -675,7 +682,7 @@ def ring_forward(
     if ring_config.offloader is not None:
         ring_config.offloader.wait_offloads()
 
-    # out = out.to(torch.bfloat16)
+    out = out.to(torch.bfloat16)
 
     chunks_to_save = tuple(chunks_to_save)
     return out, lse, chunks_to_save
@@ -705,13 +712,13 @@ def build_ring_forward(
         return broadcast_forward
     else:
         return ring_forward
-    
 
 
+@torch.no_grad()
 def ring_backward(
     dout: torch.Tensor,
     q: torch.Tensor,
-    out: torch.Tensor,
+    o: torch.Tensor,
     x: torch.Tensor,
     lse: torch.Tensor,
     w_qkv: torch.Tensor,
@@ -817,27 +824,14 @@ def ring_backward(
                     match ring_config.send_in_forward:
                         case SendForward.X:
                             recv_buf = torch.empty_like(x)
-                            recv_buf, handle = ring_config.ring_comm_fn(
-                                x,
-                                recv_buf,
-                                offset=1,
-                                group=group,
-                                async_op=True,
-                                empty=empty,
+                            recv_buf, handle = _ring_send_recv(
+                                x, world_size, local_rank, group, empty, recv_buf
                             )
-                            _, kj, vj = _compute_kv(x, w_qkv, b, seq_local, h, d)
-
                         case SendForward.KV:
                             recv_buf = torch.empty_like(kv)
-                            recv_buf, handle = ring_config.ring_comm_fn(
-                                kv,
-                                recv_buf,
-                                offset=1,
-                                group=group,
-                                async_op=True,
-                                empty=empty,
+                            recv_buf, handle = _ring_send_recv(
+                                kv, world_size, local_rank, group, empty, recv_buf
                             )
-                            kj, vj = kv[0].contiguous(), kv[1].contiguous()
 
                 else:
                     # step > 0: receive next chunk
@@ -854,18 +848,27 @@ def ring_backward(
                     # Send either x or k,v to the next rank
                     if step < world_size - 1:
                         next_recv = torch.empty_like(recv_buf)
-                        recv_buf, handle = ring_config.ring_comm_fn(
-                            recv_buf,
-                            next_recv,
-                            offset=1,
-                            group=group,
-                            async_op=True,
-                            empty=empty,
+                        recv_buf, handle = _ring_send_recv(
+                            recv_buf, world_size, local_rank, group, empty, next_recv
                         )
 
         # ---- flash attention backward ----
-        dq_j, dk_j, dv_j = ring_config.attn_core_backward(
-            dout, q, kj, vj, out, lse, scale, seq_local, seq_local
+        dq_j, dk_j, dv_j = torch.ops.aten._scaled_dot_product_flash_attention_backward(
+            dout,
+            q,
+            kj,
+            vj,
+            o,
+            lse,
+            dropout_p=0.0,
+            is_causal=False,
+            scale=scale,
+            cum_seq_q=None,
+            cum_seq_k=None,
+            max_q=seq_local,
+            max_k=seq_local,
+            philox_seed=torch.zeros(1, dtype=torch.long, device=q.device),
+            philox_offset=torch.zeros(1, dtype=torch.long, device=q.device),
         )
         dq += dq_j
         del dq_j, kj, vj, kv
@@ -893,6 +896,28 @@ def ring_backward(
     )
 
     return dq, dk_local, dv_local
+
+
+def _ring_send_recv(
+    tensor: torch.Tensor,
+    world_size: int,
+    rank: int,
+    group: dist.ProcessGroup,
+    empty: torch.Tensor,
+    recv_buf: torch.Tensor,
+    forward_or_backward: int = 0,
+    offset: int = 1,
+) -> tuple[torch.Tensor, dist.Work]:
+    if forward_or_backward == 0:
+        send_to = (rank + offset) % world_size
+        recv_from = (rank - offset) % world_size
+    else:
+        send_to = (rank - offset) % world_size
+        recv_from = (rank + offset) % world_size
+    output_list = [recv_buf if i == recv_from else empty for i in range(world_size)]
+    input_list = [tensor if i == send_to else empty for i in range(world_size)]
+    handle = dist.all_to_all(output_list, input_list, group=group, async_op=True)
+    return recv_buf, handle
 
 
 def _build_send_in_forward(

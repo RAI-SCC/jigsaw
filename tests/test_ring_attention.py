@@ -9,7 +9,7 @@ from jigsaw.utils_aggregate import (
 )
 from tests.process_mesh import *
 
-pytestmark = [pytest.mark.distributed_required]
+pytestmark = [pytest.mark.dist]
 
 # def test_backward(device, process_mesh):
 #     local_rank = dist.get_rank(group=process_mesh["row"])
@@ -293,11 +293,11 @@ def test_ring_forward_backward_tmp(
     b, h, n_global, d = 3, 6, world_size * 16, 64
     n_local = n_global // world_size
     w_qkv = torch.randn(
-        3 * d * h, d, device=device, requires_grad=True, dtype=torch.float32
+        3 * d * h, d, device=device, requires_grad=True, dtype=torch.bfloat16
     ) / (d**0.5)
     torch.manual_seed(local_rank)  # different seed for input data generation
     x = torch.randn(
-        b, n_local, d, device=device, requires_grad=True, dtype=torch.float32
+        b, n_local, d, device=device, requires_grad=True, dtype=torch.bfloat16
     ) / (d**0.5)
     x = x.contiguous()
     empty = torch.empty(0, device=x.device, dtype=x.dtype)

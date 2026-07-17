@@ -112,10 +112,11 @@ def comm_2way_p2p(
 def comm_1d_alltoall(
     data: torch.Tensor,
     buffer: torch.Tensor,
-    direction: int,
+    offset: int,
     group: dist.ProcessGroup,
     async_op: bool,
     empty: torch.Tensor,
+    **kwargs: Any
 ) -> tuple[torch.Tensor, Optional[dist.Work]]:
     """
     Send data to neighbor process using all to all communication.
@@ -133,19 +134,17 @@ def comm_1d_alltoall(
         Process group within which to send data.
     empty: torch.Tensor
         Empty for computational reasons.
-
+    **kwargs: Any
+    
     Returns
     -------
     buffer: torch.Tensor
         Buffer in which the data is received.
     """
-    if direction > 0:
-        send_to = (group.rank() - 1) % group.size()
-        recv_from = (group.rank() + 1) % group.size()
-    else:
-        send_to = (group.rank() + 1) % group.size()
-        recv_from = (group.rank() - 1) % group.size()
-
+    
+    send_to = (group.rank() + offset) % group.size()
+    recv_from = (group.rank() - offset) % group.size()
+    
     send_list = [empty] * group.size()
     recv_list = [empty] * group.size()
     send_list[send_to] = data
