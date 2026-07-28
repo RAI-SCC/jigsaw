@@ -22,8 +22,8 @@ def test_xwt(process_mesh_dict_2x2, device):
         model_group=process_mesh_dict["model"],
     )
 
-    a = torch.randn(in_dim // 2, mid_dim // 2)
-    b = torch.randn(mid_dim // 2, out_dim // 2).mT.contiguous()
+    a = torch.randn(in_dim // 2, mid_dim // 2, device=device)
+    b = torch.randn(mid_dim // 2, out_dim // 2, device=device).mT.contiguous()
     y = model(a, b)
 
     ref_a = gather_results(a, process_mesh_dict, pm_key_row="row", pm_key_col="col")
@@ -47,8 +47,8 @@ def test_xw(process_mesh_dict_2x2, device):
         model_group=process_mesh_dict["model"],
     )
 
-    a = torch.randn(in_dim // 2, mid_dim // 2)
-    b = torch.randn(mid_dim // 2, out_dim // 2)
+    a = torch.randn(in_dim // 2, mid_dim // 2, device=device)
+    b = torch.randn(mid_dim // 2, out_dim // 2, device=device)
     y = model(a, b)
 
     ref_a = gather_results(a, process_mesh_dict, pm_key_row="row", pm_key_col="col")
@@ -72,8 +72,8 @@ def test_xtw(process_mesh_dict_2x2, device):
         model_group=process_mesh_dict["model"],
     )
 
-    a = torch.randn(in_dim // 2, mid_dim // 2).mT
-    b = torch.randn(mid_dim // 2, out_dim // 2)
+    a = torch.randn(in_dim // 2, mid_dim // 2, device=device).mT.contiguous()
+    b = torch.randn(mid_dim // 2, out_dim // 2, device=device)
     y = model(a, b)
 
     ref_a = gather_results(a, process_mesh_dict, pm_key_row="row", pm_key_col="col")
