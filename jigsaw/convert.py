@@ -13,7 +13,7 @@ mapped_modules: dict[type[torch.nn.Module], Any] = {
     roll.Roll: roll.DistributedRoll,
 }
 container_converters: dict[type[torch.nn.Module], Callable[..., torch.nn.Module]] = {
-    attention.DistributedAttention: attention.Attention.convert_to_jigsaw
+    attention.Attention: attention.Attention.convert_to_jigsaw
 }
 
 

@@ -34,7 +34,7 @@ class XWT(torch.autograd.Function):
         device: torch.device,
         config: LinearConfig,
         model_group: dist.ProcessGroup,
-        bayesian: bool,
+        bayesian: bool = False,
     ) -> torch.Tensor:
         """
         Forward pass of linear layer (XWT) distributed across parallelism processes.
@@ -86,7 +86,7 @@ class XWT(torch.autograd.Function):
         Set up context.
 
         ctx: FunctionCtx
-        inputs: tuple(x, w, b, local_rank, device, config, spatial_group, bayesian)
+        inputs: tuple(x, w, b, local_rank, device, config, model_group, bayesian)
         output: xwt
         """
         x, w, b, local_rank, device, config, model_group, bayesian = inputs
@@ -136,12 +136,11 @@ class XWT(torch.autograd.Function):
         device = ctx.device
         config = ctx.config
         model_group = ctx.model_group
-        spatial_group = ctx.spatial_group
 
         weight = config.reshape_weights(weight)
         # handle conversion if necessary here
         grad_output = grad_output.to(weight.dtype)
-
+        input = input.to(weight.dtype)
         grad_input, grad_weight = config.mm_kernels[3](
             grad_output,
             weight,
@@ -150,12 +149,11 @@ class XWT(torch.autograd.Function):
             device=device,
             model_group=model_group,
         )
-
         grad_weight = config.grad_sum(
             grad_weight, ctx.bayesian
         )  # sum along batch dimension
-
-        grad_b = config.grad_bias(grad_output, spatial_group)
+        
+        grad_b = config.grad_bias(grad_output)
 
         return grad_input, grad_weight, grad_b, None, None, None, None, None, None
 

@@ -3,8 +3,8 @@ import torch
 
 from jigsaw.modules import roll
 from jigsaw.utils_aggregate import gather_1d_results
-
-pytestmark = [pytest.mark.distributed_required]
+from tests.process_mesh import process_mesh_dict_2x2
+pytestmark = [pytest.mark.gpu_required, pytest.mark.dist_required]
 
 
 @pytest.mark.dist(4)

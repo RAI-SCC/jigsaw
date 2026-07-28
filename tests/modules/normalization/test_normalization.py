@@ -8,7 +8,7 @@ from jigsaw.utils_aggregate import (
 )
 from tests.process_mesh import *
 
-pytestmark = [pytest.mark.distributed_required]
+pytestmark = [pytest.mark.gpu_required, pytest.mark.dist_required]
 
 
 @pytest.mark.parametrize(

@@ -25,8 +25,8 @@ class DistributedXWT(torch.nn.Module):
         local_rank: int,
         device: torch.device,
         model_group: dist.ProcessGroup,
-        spatial_group: dist.ProcessGroup,
-        channel_group: dist.ProcessGroup,
+        column_group: dist.ProcessGroup,
+        row_group: dist.ProcessGroup,
         bayesian: bool = False,
         config: Optional[LinearConfig] = None,
     ) -> None:
@@ -49,11 +49,13 @@ class DistributedXWT(torch.nn.Module):
             Number of processes the model is distributed over
         model_group: dist.ProcessGroup
             Process group containing all ranks within model-parallel instances.
-            Is the Union of spatial_group and channel_group.
-        spatial_group: dist.ProcessGroup
-            Process group containin domain-parallel processes.
-        channel_group: dist.ProcessGroup
-            Process group containin channel-parallel processes.
+            Is the Union of row and column group.
+        column_group: dist.ProcessGroup
+            Process group splitting the last dimension of X and W.
+            In a standard case, this would be the channel-wise process group.
+        row_group: dist.ProcessGroup
+            Process group splitting the first dimension of W.
+            In a standard case, this would be the spatial-wise process group.
         bayesian: bool
             Boolean flag for whether the model is bayesian.
         config: Optional[LinearConfig]
@@ -62,14 +64,13 @@ class DistributedXWT(torch.nn.Module):
         """
         super().__init__()
 
-        stdev = 1.0 / np.sqrt(in_dim * channel_group.size())
-        assert out_dim % channel_group.size() == 0
-        assert in_dim % (model_group.size() // channel_group.size()) == 0
-        if bias:
-            assert out_dim % channel_group.size() == 0
-        bias_dim = out_dim // channel_group.size()
-        out_dim = out_dim // (model_group.size() // channel_group.size())
-        in_dim = in_dim // (channel_group.size())
+        stdev = 1.0 / np.sqrt(in_dim * row_group.size())
+        assert in_dim % column_group.size() == 0
+        assert out_dim % (model_group.size() // column_group.size()) == 0
+
+        bias_dim = out_dim // column_group.size()
+        in_dim = in_dim // (column_group.size())
+        out_dim = out_dim // (model_group.size() // column_group.size())
 
         self.weight = torch.nn.Parameter(
             torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev).to(device)
@@ -87,7 +88,8 @@ class DistributedXWT(torch.nn.Module):
         self.device = device
         self.local_rank = local_rank
         self.model_group = model_group
-        self.spatial_group = spatial_group
+        self.column_group = column_group
+        self.row_group = row_group
         self.bayesian = bayesian
         self.config = (
             LinearConfig(
@@ -103,9 +105,9 @@ class DistributedXWT(torch.nn.Module):
 
         if self.bias is not None:
             self.bias.register_post_accumulate_grad_hook(
-                hooks.make_grad_sync_hook(self.spatial_group, async_op=True)
+                hooks.make_grad_sync_hook(self.row_group, async_op=True)
             )
-            dist.broadcast(self.bias.data, group_src=0, group=self.spatial_group)
+            dist.broadcast(self.bias.data, group_src=0, group=self.row_group)
 
         self.XWT = XWT.apply
 
@@ -145,7 +147,7 @@ class DistributedXWT(torch.nn.Module):
         num_param = (
             0
             if self.bias is None
-            else self.bias.numel() // dist.get_world_size(group=self.spatial_group)
+            else self.bias.numel() // dist.get_world_size(group=self.row_group)
         )
         return num_param + self.weight.numel()
 
@@ -201,8 +203,8 @@ class DistributedXWT(torch.nn.Module):
             local_rank=process_mesh_dict[model_kw].rank(),
             device=device,
             model_group=process_mesh_dict[model_kw],
-            spatial_group=process_mesh_dict[row_kw],
-            channel_group=process_mesh_dict[col_kw],
+            row_group=process_mesh_dict[row_kw],
+            column_group=process_mesh_dict[col_kw],
             bayesian=False,  # TODO
         )
 

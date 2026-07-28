@@ -9,7 +9,7 @@ from jigsaw.utils_aggregate import (
 )
 from tests.process_mesh import *
 
-pytestmark = [pytest.mark.distributed_required]
+pytestmark = [pytest.mark.dist_required]
 
 # def test_backward(device, process_mesh):
 #     local_rank = dist.get_rank(group=process_mesh["row"])
@@ -144,7 +144,6 @@ def test_backward_sdpa(
 ) -> None:
     """Test flash kernel with direct call to aten function."""
     world_size = dist.get_world_size(group=process_mesh_dict_4x1["row"])
-
     torch.manual_seed(2)  # same seed for weight initialization
     b, h, n_global, d = 1, 6, world_size * 32, 256
     n_local = n_global // world_size
@@ -296,19 +295,20 @@ def test_ring_forward_backward(
     ring_forward = functional.build_ring_forward(ring_config)
     local_rank = dist.get_rank(group=process_mesh_dict["row"])
     world_size = dist.get_world_size(group=process_mesh_dict["row"])
-
+    dtype = torch.bfloat16 if dist.get_backend() == "nccl" else torch.float32
     torch.manual_seed(2)  # same seed for weight initialization
     b, h, n_global, d = 3, 6, world_size * 16, 16
     n_local = n_global // world_size
+
     w_qkv = torch.randn(
-        3 * d * h, d, device=device, requires_grad=True, dtype=torch.float32
+        3 * d * h, d, device=device, requires_grad=True, dtype=dtype
     ) / (d**0.5)
     torch.manual_seed(local_rank)  # different seed for input data generation
-    x = torch.randn(
-        b, n_local, d, device=device, requires_grad=True, dtype=torch.float32
-    ) / (d**0.5)
+    x = torch.randn(b, n_local, d, device=device, requires_grad=True, dtype=dtype) / (
+        d**0.5
+    )
     x = x.contiguous()
-    empty = torch.empty(0, device=x.device, dtype=x.dtype)
+    empty = torch.empty(0, device=x.device, dtype=dtype)
 
     qkv = x @ w_qkv.mT
     # QKV shape: [B, Nlocal, 3*d*h]
@@ -338,6 +338,7 @@ def test_ring_forward_backward(
         world_size,
         ring_config,
     )
+
     out_full = gather_1d_results(out, process_mesh_dict, dim=2)
     x_full = gather_1d_results(x, process_mesh_dict, dim=1)
     qkv = x_full @ w_qkv.mT
@@ -364,9 +365,10 @@ def test_ring_forward_backward(
     q_ref2 = q_ref2.requires_grad_(True)
     k_ref2 = k_ref2.requires_grad_(True)
     v_ref2 = v_ref2.requires_grad_(True)
-    out_core = ring_config.attn_core_forward_fn(q_ref2, k_ref2, v_ref2, dropout_p=0.0)[
-        0
-    ]
+
+    out_core = ring_config.attn_core_forward_fn(
+        q_ref2, k_ref2, v_ref2, dropout_p=0.0, scale=scale
+    )[0]
     out_core = out_core.requires_grad_(True)
 
     dout_local = torch.ones_like(out, device=device, dtype=out_ref.dtype)
@@ -392,40 +394,46 @@ def test_ring_forward_backward(
     dq_ref, dk_ref, dv_ref = q_ref.grad, k_ref.grad, v_ref.grad
 
     out_core.backward(torch.ones_like(out_core))
-    assert torch.allclose(dq_ref, q_ref2.grad, atol=1e-4)
-    assert torch.allclose(dk_ref, k_ref2.grad, atol=1e-4)
-    assert torch.allclose(dv_ref, v_ref2.grad, atol=1e-4)
+    atol = 1e-2 if dtype == torch.bfloat16 else 1e-3
+    # dq_ref: results from calling torch.nn.SDPA
+    # q_ref2: results from calling forward-backward core functionality
+    # from ring_config.attn_core_forward_fn
+
+    assert torch.allclose(dq_ref, q_ref2.grad, atol=atol)
+    assert torch.allclose(dk_ref, k_ref2.grad, atol=atol)
+    assert torch.allclose(dv_ref, v_ref2.grad, atol=atol)
 
     # gather
     dq_full = gather_1d_results(dq_local, process_mesh_dict, dim=2)
     dk_full = gather_1d_results(dk_local, process_mesh_dict, dim=2)
     dv_full = gather_1d_results(dv_local, process_mesh_dict, dim=2)
 
-    assert torch.allclose(out_full, out_ref, atol=1e-3)
-    assert torch.allclose(dq_full, dq_ref.to(dq_full.dtype), atol=1e-3)
-    assert torch.allclose(dk_full, dk_ref.to(dk_full.dtype), atol=1e-3)
-    assert torch.allclose(dv_full, dv_ref.to(dv_full.dtype), atol=1e-3)
+    # dq_local, dq_full: results from true ring attention
+    assert torch.allclose(out_full, out_ref, atol=atol)
+    assert torch.allclose(dq_full, dq_ref.to(dq_full.dtype), atol=atol)
+    assert torch.allclose(dk_full, dk_ref.to(dk_full.dtype), atol=atol)
+    assert torch.allclose(dv_full, dv_ref.to(dv_full.dtype), atol=atol)
 
     assert torch.allclose(
         dq_local,
         dq_ref[:, :, (local_rank * n_local) : (local_rank + 1) * n_local].to(
             dq_local.dtype
         ),
-        atol=1e-3,
+        atol=atol,
     )
     assert torch.allclose(
         dk_local,
         dk_ref[:, :, (local_rank * n_local) : (local_rank + 1) * n_local].to(
             dk_local.dtype
         ),
-        atol=1e-3,
+        atol=atol,
     )
     assert torch.allclose(
         dv_local,
         dv_ref[:, :, (local_rank * n_local) : (local_rank + 1) * n_local].to(
             dv_local.dtype
         ),
-        atol=1e-3,
+        atol=atol,
     )
 
 

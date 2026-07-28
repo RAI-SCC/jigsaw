@@ -309,7 +309,7 @@ class _DistributedSoftmax(torch.autograd.Function):
     @staticmethod
     def vmap(
         info: Any,
-        in_dims: tuple[Optional[int], ...],
+        in_dims: tuple[int | None, ...],
         x: torch.Tensor,
         dim: int,
         group: dist.ProcessGroup,

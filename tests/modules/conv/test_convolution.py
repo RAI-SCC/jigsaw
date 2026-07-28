@@ -7,7 +7,7 @@ import jigsaw.modules.conv_transpose as conv_transpose
 from jigsaw.utils_aggregate import gather_results_as_list
 from tests.process_mesh import *
 
-pytestmark = [pytest.mark.distributed_required]
+pytestmark = [pytest.mark.dist_required]
 
 
 class TestConv2d:
@@ -92,7 +92,7 @@ class TestConv2d:
                 atol=1e-5,
             )
 
-        x = torch.randn(4, in_dim // 2, h, w // 2)
+        x = torch.randn(4, in_dim // 2, h, w // 2, device=device)
         y = conv2d(x)
         y.backward(torch.ones_like(y))
         assert isinstance(y, torch.Tensor)
@@ -181,7 +181,7 @@ class TestConv2dTranspose:
                 atol=1e-5,
             )
 
-        x = torch.randn(4, in_dim // 2, h, w // 2)
+        x = torch.randn(4, in_dim // 2, h, w // 2, device=device)
         y = conv2d(x)
         y.backward(torch.ones_like(y))
         assert isinstance(y, torch.Tensor)

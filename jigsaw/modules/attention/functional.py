@@ -188,6 +188,7 @@ def _attend_step(
     out_j, l_j = ring_config.attn_core_forward_fn(
         q, kj.contiguous(), vj.contiguous(), scale, dropout_p
     )
+
     return _online_softmax_merge(out, lse, out_j, l_j)
 
 
@@ -250,13 +251,13 @@ def broadcast_forward(
             )
 
         out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
-
         if step < world_size - 1:
             handle.wait()
 
         x_j, kv_j, kj, vj = ring_config.forward_recv_fn(recv_buf, x_j, kv_j, kj, vj)
 
     ring_config.wait_offloads()
+    out = out.to(q.dtype)
     return out, lse, tuple(chunks_to_save)
 
 
@@ -273,7 +274,7 @@ def ring_forward(
     local_rank: int,
     world_size: int,
     ring_config: RingAttentionConfig,
-) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, ...]]:
     """Forward pass for ring attention using point-to-point sends."""
     b, heads, n_local, d = q.shape
     out = torch.zeros_like(q)
@@ -310,6 +311,7 @@ def ring_forward(
             )
 
     ring_config.wait_offloads()
+    out = out.to(q.dtype)
     return out, lse, tuple(chunks_to_save)
 
 
@@ -552,7 +554,7 @@ class _LocalChunkProvider(_BackwardChunkProvider):
             self._recv_buf, self._handle = self.config.ring_comm_fn(
                 send_buf,
                 self._recv_buf,
-                offset=1,
+                1,
                 group=self.group,
                 async_op=True,
                 empty=self.empty,
@@ -607,7 +609,7 @@ class _LocalChunkProvider(_BackwardChunkProvider):
         self._recv_buf, self._handle = self.config.ring_comm_fn(
             self._recv_buf,
             next_recv,
-            offset=1,
+            1,
             group=self.group,
             async_op=True,
             empty=self.empty,
@@ -812,7 +814,7 @@ def _accumulate_dkv_send(
     dkv = torch.cat([dk_j, dv_j], dim=0).contiguous()
     recv_buf = torch.empty_like(dkv)
     recv_buf, _ = ring_config.ring_comm_fn(
-        dkv, recv_buf, offset=-step, group=group, async_op=False, empty=empty, step=step
+        dkv, recv_buf, -step, group=group, async_op=False, empty=empty, step=step
     )
     dkj_r, dvj_r = torch.chunk(recv_buf, 2, dim=0)
     dk_buf += dkj_r

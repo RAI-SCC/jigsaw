@@ -24,10 +24,17 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default="cuda" if torch.cuda.is_available() else "cpu",
     )
 
+    parser.addoption(
+        "--print-all-ranks",
+        action="store_true",
+        default=False,
+        help="Allow all ranks to print; by default only rank 0 prints",
+    )
+
 
 def pytest_configure(config):
     """Configure rank 0 to be the only printing rank."""
-    if mpi_rank != 0:
+    if mpi_rank != 0 and not config.getoption("--print-all-ranks"):
         config.option.verbose = -1
         sys.stdout = open(os.devnull, "w")
         sys.stderr = open(os.devnull, "w")
@@ -38,7 +45,10 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "no_dist_env: skip the dist_env autouse fixture")
     config.addinivalue_line("markers", "gpu_required: test requires GPU")
     config.addinivalue_line(
-        "markers", "distributed_required: test requires distributed environment"
+        "markers", "dist_required: test requires distributed environment"
+    )
+    config.addinivalue_line(
+        "markers", "hybrid_dist_env: test requires distributed environment on both CPU and GPU."
     )
     config.addinivalue_line(
         "markers",
@@ -121,7 +131,7 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if item.get_closest_marker("gpu_required") and not has_gpu:
             item.add_marker(pytest.mark.skip(reason="GPU not available"))
-        if item.get_closest_marker("distributed_required") and not is_distributed:
+        if item.get_closest_marker("dist_required") and not is_distributed:
             item.add_marker(
                 pytest.mark.skip(reason="Not running in distributed environment")
             )

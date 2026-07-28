@@ -6,7 +6,7 @@ import jigsaw.modules.linear.distributed_matmul as dist_mm
 import jigsaw.modules.linear.distributed_matmul_p2p as dist_mm_p2p
 from jigsaw.utils_aggregate import gather_results
 
-pytestmark = [pytest.mark.distributed_required, pytest.mark.dist(8)]
+pytestmark = [pytest.mark.dist_required, pytest.mark.dist(8)]
 
 
 def test_xwt_eightway(device: torch.device, process_mesh_dict_4x2: dict) -> None:

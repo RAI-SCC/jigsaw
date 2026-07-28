@@ -118,6 +118,8 @@ def comm_1d_alltoall(
     group: dist.ProcessGroup,
     async_op: bool,
     empty: torch.Tensor,
+    *args: Any,
+    **kwargs: Any,
 ) -> tuple[torch.Tensor, Optional[dist.Work]]:
     """
     Send data to neighbor process using all to all communication.
@@ -137,18 +139,18 @@ def comm_1d_alltoall(
         Boolean flag for whether communication should be asynchronous or not.
     empty: torch.Tensor
         Empty for computational reasons.
+    args: Any
+        Additional args
+    kwargs: Any
+        Additional kwargs
 
     Returns
     -------
     buffer: torch.Tensor
         Buffer in which the data is received.
     """
-    if direction > 0:
-        send_to = (group.rank() - 1) % group.size()
-        recv_from = (group.rank() + 1) % group.size()
-    else:
-        send_to = (group.rank() + 1) % group.size()
-        recv_from = (group.rank() - 1) % group.size()
+    send_to = (group.rank() + direction) % group.size()
+    recv_from = (group.rank() - direction) % group.size()
 
     send_list = [empty] * group.size()
     recv_list = [empty] * group.size()
@@ -162,7 +164,7 @@ def comm_1d_alltoall(
 def comm_1d_p2p(
     data: torch.Tensor,
     buffer: torch.Tensor,
-    offset: int,
+    direction: int,
     group: dist.ProcessGroup,
     async_op: bool = True,
     tag: int = 0,
@@ -178,7 +180,7 @@ def comm_1d_p2p(
         Data to send.
     buffer: torch.Tensor
         Buffer to receive.
-    offset: int
+    direction: int
         positive direction = send to right.
         negative direction = send to left.
     group: dist.ProcessGroup
@@ -197,8 +199,8 @@ def comm_1d_p2p(
     buffer: torch.Tensor
         Buffer in which the data is received.
     """
-    send_to = (group.rank() + offset) % group.size()
-    recv_from = (group.rank() - offset) % group.size()
+    send_to = (group.rank() + direction) % group.size()
+    recv_from = (group.rank() - direction) % group.size()
     tag = tag * 8
 
     if group.rank() % 2 == 0:
