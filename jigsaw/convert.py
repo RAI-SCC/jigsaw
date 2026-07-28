@@ -1,30 +1,15 @@
 """Convert to jigsaw module."""
 
-from typing import Any, Callable, Protocol
+from typing import Any, Callable
 
 import torch
 
-from jigsaw import attention, convolutions, linear, roll
-
-
-class _ConvertibleModule(Protocol):
-    @classmethod
-    def convert_to_jigsaw(
-        cls,
-        model: torch.nn.Module,
-        *,
-        process_mesh_dict: dict,
-        device: torch.device,
-        row_kw: str,
-        col_kw: str,
-        model_kw: str,
-    ) -> torch.nn.Module: ...
-
+from jigsaw.modules import attention, conv, conv_transpose, linear, roll
 
 mapped_modules: dict[type[torch.nn.Module], Any] = {
     torch.nn.Linear: linear.DistributedXWT,
-    torch.nn.Conv2d: convolutions.DistributedConv2D,
-    torch.nn.ConvTranspose2d: convolutions.DistributedConvTranspose2D,
+    torch.nn.Conv2d: conv.DistributedConv2D,
+    torch.nn.ConvTranspose2d: conv_transpose.DistributedConvTranspose2D,
     roll.Roll: roll.DistributedRoll,
 }
 container_converters: dict[type[torch.nn.Module], Callable[..., torch.nn.Module]] = {

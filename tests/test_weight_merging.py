@@ -3,9 +3,8 @@ import random
 import pytest
 import torch
 
-from jigsaw import convolutions, linear
+from jigsaw.modules import conv, conv_transpose, linear
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
-from tests.process_mesh import *
 
 pytestmark = [pytest.mark.distributed_required]
 
@@ -55,8 +54,8 @@ def test_weight_merging(
         local_rank=from_pm_dict["model"].rank(),
         device=device,
         model_group=from_pm_dict["model"],
-        spatial_group=from_pm_dict["row"],
-        channel_group=from_pm_dict["col"],
+        row_group=from_pm_dict["row"],
+        column_group=from_pm_dict["col"],
         bayesian=False,
     )
     assert isinstance(linear_layer.weight, torch.Tensor)
@@ -116,8 +115,8 @@ def test_mlp_weight_merging(
                 local_rank=from_pm_dict["model"].rank(),
                 device=device,
                 model_group=from_pm_dict["model"],
-                spatial_group=from_pm_dict["row"],
-                channel_group=from_pm_dict["col"],
+                row_group=from_pm_dict["row"],
+                column_group=from_pm_dict["col"],
             )
 
             self.linear2 = linear.DistributedXWT(
@@ -127,8 +126,8 @@ def test_mlp_weight_merging(
                 local_rank=from_pm_dict["model"].rank(),
                 device=device,
                 model_group=from_pm_dict["model"],
-                spatial_group=from_pm_dict["row"],
-                channel_group=from_pm_dict["col"],
+                row_group=from_pm_dict["row"],
+                column_group=from_pm_dict["col"],
             )
             self.activation = torch.nn.GELU()
 
@@ -223,7 +222,7 @@ def test_conv_weight_merging(
     to_pm_dict = request.getfixturevalue(to_pm_dict)
     torch.manual_seed(from_pm_dict["col"].rank())
 
-    conv_layer = convolutions.DistributedConv2D(
+    conv_layer = conv.DistributedConv2D(
         in_channels=in_channels,
         out_channels=out_channels,
         kernel_size=kernel_size,
@@ -295,7 +294,7 @@ def test_conv_transpose_weight_merging(
     to_pm_dict = request.getfixturevalue(to_pm_dict)
     torch.manual_seed(from_pm_dict["col"].rank())
 
-    conv_layer = convolutions.DistributedConvTranspose2D(
+    conv_layer = conv_transpose.DistributedConvTranspose2D(
         in_channels=in_channels,
         out_channels=out_channels,
         kernel_size=kernel_size,

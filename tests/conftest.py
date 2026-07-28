@@ -24,10 +24,17 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default="cuda" if torch.cuda.is_available() else "cpu",
     )
 
+    parser.addoption(
+        "--print-all-ranks",
+        action="store_true",
+        default=False,
+        help="Allow all ranks to print; by default only rank 0 prints",
+    )
+
 
 def pytest_configure(config):
     """Configure rank 0 to be the only printing rank."""
-    if mpi_rank != 0:
+    if mpi_rank != 0 and not config.getoption("--print-all-ranks"):
         config.option.verbose = -1
         sys.stdout = open(os.devnull, "w")
         sys.stderr = open(os.devnull, "w")
