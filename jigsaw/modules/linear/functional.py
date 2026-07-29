@@ -168,7 +168,6 @@ class XWT(torch.autograd.Function):
         device: torch.device,
         config: LinearConfig,
         model_group: dist.ProcessGroup,
-        spatial_group: dist.ProcessGroup,
         bayesian: bool,
     ) -> tuple[torch.Tensor, Optional[int]]:
         """
@@ -195,8 +194,6 @@ class XWT(torch.autograd.Function):
             Instance of selection class with function pointers based on specific config.
         model_group: dist.ProcessGroup
             Domain- and tensor-parallel process group.
-        spatial_group: dist.ProcessGroup
-            Domain-parallel process group.
         bayesian: bool
             Flag to see whether model is bayesian.
 
@@ -209,7 +206,7 @@ class XWT(torch.autograd.Function):
         """
         x = x.contiguous()
         out = XWT.apply(
-            x, w, b, local_rank, device, config, model_group, spatial_group, bayesian
+            x, w, b, local_rank, device, config, model_group, bayesian
         )
 
         # out has vmapped dimension at dim 0
