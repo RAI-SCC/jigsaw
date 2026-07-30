@@ -98,6 +98,12 @@ class DistributedAttention(torch.nn.Module):
             bayesian=bayesian,
         )
 
+        if self.qk_norm:
+            self.q_norm, self.k_norm = (
+                torch.nn.LayerNorm(embed_dim // heads, device=device),
+                torch.nn.LayerNorm(embed_dim // heads, device=device),
+            )
+
         # sync up up spatial parameters
         for p in self.parameters():
             dist.broadcast(
@@ -105,12 +111,6 @@ class DistributedAttention(torch.nn.Module):
             )
             p.register_post_accumulate_grad_hook(
                 hooks.make_grad_sync_hook(self.spatial_group, async_op=True)
-            )
-
-        if self.qk_norm:
-            self.q_norm, self.k_norm = (
-                torch.nn.RMSNorm(embed_dim // heads),
-                torch.nn.RMSNorm(embed_dim // heads),
             )
 
         self.heads = heads // self.channel_group.size()
@@ -209,13 +209,12 @@ class DistributedAttention(torch.nn.Module):
 
         x: (n_batch, vars, n_lat, n_lon)
         """
-        # x_local: [n_batch, n_lat, n_lon, variables]
-        x_patches_local = x
         # shape: [n_batches, spatial_tokens, channel_tokens]
-        qkv = self.qkv(x_patches_local)
+        qkv = self.qkv(x)
         qkv = rearrange(
             qkv, "... n i (three h d) -> three ... n h i d", three=3, h=self.heads
         )
+        
         if self.qk_norm:
             q, k, v = qkv.unbind(0)
             q = self.q_norm(q).to(torch.bfloat16)
