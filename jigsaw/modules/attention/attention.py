@@ -82,7 +82,7 @@ class DistributedAttention(torch.nn.Module):
                 kv_channels=embed_dim // self.heads,
                 num_gqa_groups=self.heads,
                 attention_dropout=self.dropout_p,
-                qkv_format="bhsd",
+                qkv_format="bshd",
                 attn_mask_type="no_mask"
             )
         else:
@@ -255,10 +255,16 @@ class DistributedAttention(torch.nn.Module):
         """
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.qkv(x)
-        qkv = rearrange(
-            qkv, "... n i (three h d) -> three ... n h i d", three=3, h=self.heads
-        )
         
+        if not self.te:
+            qkv = rearrange(
+                qkv, "... n s (three h d) -> three ... n h s d", three=3, h=self.heads
+            )
+        else:
+            qkv = rearrange(
+                qkv, "... n s (three h d) -> three ... n s h d", three=3, h=self.heads
+            )
+            
         if self.qk_norm:
             q, k, v = qkv.unbind(0)
             q = self.q_norm(q).to(torch.bfloat16)
@@ -269,7 +275,11 @@ class DistributedAttention(torch.nn.Module):
 
         out = self.attn_core(q, k, v, x=x)
         # out has shape [batch, local_heads, local_sequence length, head_dim]
-        out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous().to(self.dtype)
+        if self.te:
+            out = rearrange(out, "... n s h d -> ... n s (h d)").contiguous().to(self.dtype)
+        else:
+            out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous().to(self.dtype)
+            
         out = cast(torch.Tensor, self.head_concat(out))
         # Output: [n_batch, seq_length, output_dim]
         return out
