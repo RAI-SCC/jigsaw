@@ -10,7 +10,7 @@ from jigsaw import hooks
 from jigsaw.modules import linear
 
 from . import config, functional
-
+import transformer_engine.pytorch as te
 
 class DistributedAttention(torch.nn.Module):
     """Distributed attention."""
@@ -32,6 +32,7 @@ class DistributedAttention(torch.nn.Module):
         bayesian: bool = False,
         qk_norm: bool = False,
         ring_attention: bool = False,
+        transformer_engine: bool = False,
         dtype: torch.dtype = torch.float32,
     ):
         """
@@ -57,6 +58,11 @@ class DistributedAttention(torch.nn.Module):
         self.dtype = dtype
         self.dropout_p = dropout_p
         self.ring_attention = ring_attention
+        self.te = transformer_engine
+        
+        self.heads = heads // self.channel_group.size()
+        self.scale = (embed_dim // heads) ** -0.5
+        self.empty = torch.empty(0, device=device)
 
         assert heads % self.channel_group.size() == 0, (
             "heads is not divisible by channel group size"
@@ -67,9 +73,20 @@ class DistributedAttention(torch.nn.Module):
                 "Cannot perform ring attention if spatial size is 1."
             )
 
-        self.attn_core = (
-            self._ring_attn_core if self.ring_attention else self._attn_core
-        )
+        if self.ring_attention:
+            self.attn_core = self._ring_attn_core
+        elif self.te:
+            self.attn_core = self._transformer_attn_core
+            self.attn = te.DotProductAttention(
+                num_attention_heads=self.heads,
+                kv_channels=embed_dim // self.heads,
+                num_gqa_groups=self.heads,
+                attention_dropout=self.dropout_p,
+                qkv_format="bhsd",
+                attn_mask_type="no_mask"
+            )
+        else:
+            self.attn_core = self._attn_core
 
         if channel_group.size() == 1:
             self.qkv = torch.nn.Linear(in_dim, embed_dim * 3, bias=False)
@@ -113,9 +130,6 @@ class DistributedAttention(torch.nn.Module):
                 hooks.make_grad_sync_hook(self.spatial_group, async_op=True)
             )
 
-        self.heads = heads // self.channel_group.size()
-        self.scale = (embed_dim // heads) ** -0.5
-        self.empty = torch.empty(0, device=device)
         if ring_attention:
             self.config = config.RingAttentionConfig(device=device)
 
@@ -157,6 +171,36 @@ class DistributedAttention(torch.nn.Module):
             )
         return out
 
+    def _transformer_attn_core(
+            self,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            **kwargs: torch.Tensor,
+        ) -> torch.Tensor:
+            """
+            Attention computation.
+    
+            Parameters
+            ----------
+            q: torch.Tensor
+                Query tensor.
+            k: torch.Tensor
+                Keys tensor.
+            v: torch.Tensor
+                Values tensor.
+            kwargs:
+                Additional optional parameters.
+    
+            Returns
+            -------
+            out: torch.Tensor
+                Output of attention computation.
+    
+            """
+            out = self.attn(q, k, v)
+            return out
+        
     def _ring_attn_core(
         self,
         q: torch.Tensor,
