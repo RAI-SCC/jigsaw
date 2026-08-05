@@ -1,6 +1,6 @@
 """Distributed attention modules."""
 
-from typing import Any, cast
+from typing import Any, Optional, cast
 
 import torch
 import torch.distributed as dist
@@ -11,6 +11,81 @@ from jigsaw.modules import linear
 
 from . import config, functional
 import transformer_engine.pytorch as te
+
+
+class TransformerEngineAttention(torch.autograd.Function):
+    """Autograd wrapper around ``te.DotProductAttention`` that supports ``torch.vmap``.
+
+    ``transformer_engine``'s fused attention kernels are opaque C++/CUDA extensions
+    that do not register a batching rule, so calling them inside ``torch.vmap``
+    (as ``torch_blue`` does for Bayesian sampling) fails.
+
+    By routing the call through a custom ``autograd.Function`` with a ``vmap``
+    staticmethod we get full control over what happens under vmap: we simply fold the
+    vmapped (samples) dimension into the batch dimension, run the kernel once as a
+    *normal, un-vmapped* forward, then unfold the result. Outside of vmap the function
+    is a thin pass-through to ``attn``.
+    """
+
+    @staticmethod
+    def forward(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn: "te.DotProductAttention",
+    ) -> torch.Tensor:
+        """Run TE dot-product attention.
+
+        Parameters
+        ----------
+        q, k, v: torch.Tensor
+            Query/key/value tensors in ``bshd`` format
+            (``[batch, seq, heads, head_dim]``).
+        attn: te.DotProductAttention
+            The transformer-engine attention module to call.
+
+        Returns
+        -------
+        torch.Tensor
+            Attention output in ``bshd`` format.
+        """
+        return attn(q, k, v)
+
+    @staticmethod
+    def setup_context(ctx: Any, inputs: tuple, output: torch.Tensor) -> None:
+        """No context is needed; gradients flow through ``attn`` itself."""
+        return None
+
+    @staticmethod
+    def vmap(
+        info: Any,
+        in_dims: tuple[Optional[int], ...],
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn: "te.DotProductAttention",
+    ) -> tuple[torch.Tensor, int]:
+
+        q_bdim, k_bdim, v_bdim = in_dims[0], in_dims[1], in_dims[2]
+
+        # Move the vmapped dimension to the front for each tensor.
+        q = q.movedim(q_bdim, 0) if q_bdim is not None else q.expand(info.batch_size, *q.shape)
+        k = k.movedim(k_bdim, 0) if k_bdim is not None else k.expand(info.batch_size, *k.shape)
+        v = v.movedim(v_bdim, 0) if v_bdim is not None else v.expand(info.batch_size, *v.shape)
+
+        samples = q.shape[0]
+        # q/k/v now have shape [samples, batch, seq, heads, head_dim].
+        # Fold samples into the batch dimension so TE sees a plain bshd tensor.
+        q = q.flatten(0, 1)
+        k = k.flatten(0, 1)
+        v = v.flatten(0, 1)
+
+        out = attn(q, k, v)
+
+        # Unfold the samples dimension back out to the front.
+        out = out.unflatten(0, (samples, -1))
+        return out, 0
+
 
 class DistributedAttention(torch.nn.Module):
     """Distributed attention."""
@@ -79,7 +154,7 @@ class DistributedAttention(torch.nn.Module):
             self.attn_core = self._transformer_attn_core
             self.attn = te.DotProductAttention(
                 num_attention_heads=self.heads,
-                kv_channels=embed_dim // self.heads,
+                kv_channels=embed_dim // heads,
                 num_gqa_groups=self.heads,
                 attention_dropout=self.dropout_p,
                 qkv_format="bshd",
@@ -198,7 +273,7 @@ class DistributedAttention(torch.nn.Module):
                 Output of attention computation.
     
             """
-            out = self.attn(q, k, v)
+            out = TransformerEngineAttention.apply(q, k, v, self.attn)
             return out
         
     def _ring_attn_core(
@@ -275,9 +350,7 @@ class DistributedAttention(torch.nn.Module):
 
         out = self.attn_core(q, k, v, x=x)
         # out has shape [batch, local_heads, local_sequence length, head_dim]
-        if self.te:
-            out = rearrange(out, "... n s h d -> ... n s (h d)").contiguous().to(self.dtype)
-        else:
+        if not self.te:
             out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous().to(self.dtype)
             
         out = cast(torch.Tensor, self.head_concat(out))
