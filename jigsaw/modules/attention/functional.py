@@ -286,11 +286,12 @@ def ring_forward(
     lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype)
 
     x_j = x
-    chunks_to_save: list[torch.Tensor] = []
 
     # Local KV
     kv = torch.concat([k.unsqueeze(0), v.unsqueeze(0)])
     kv_j, kj, vj = kv, k, v
+    
+    chunks_to_save: list[torch.Tensor] = []
 
     # Kick off first send
     recv_buf, handle = ring_config.forward_send_fn(
@@ -358,28 +359,17 @@ def hybrid_forward(
     for node_step in range(n_nodes):
         # Kick off first send across nodes
         if node_step < n_nodes - 1:
-            if ring_config.send_in_forward == SendForward.X:
-                internode_recv_buf = torch.empty_like(x_j)
-                internode_recv_buf, internode_handle = ring_config.p2p_fn(
-                    data=x.clone(),
-                    buffer=internode_recv_buf,
-                    direction=gpus_per_node * (node_step + 1),
-                    group=group,
-                    async_op=True,
-                    tag=node_step,
-                    empty=empty,
-                )
-            elif ring_config.send_in_forward == SendForward.KV:
-                internode_recv_buf = torch.empty_like(kv_j)
-                internode_recv_buf, internode_handle = ring_config.p2p_fn(
-                    data=kv.clone(),
-                    buffer=internode_recv_buf,
-                    direction=gpus_per_node * (node_step + 1),
-                    group=group,
-                    async_op=True,
-                    tag=node_step,
-                    empty=empty,
-                )
+            internode_recv_buf = torch.empty_like(x_j) if ring_config.send_in_forward == SendForward.X else torch.empty_like(kv_j)
+            internode_recv_buf, internode_handle = ring_config.p2p_fn(
+                data=x.clone() if ring_config.send_in_forward == SendForward.X else kv.clone(),
+                buffer=internode_recv_buf,
+                direction=gpus_per_node * (node_step + 1),
+                group=group,
+                async_op=True,
+                tag=node_step,
+                empty=empty,
+            )
+            
                 
         for step in range(gpus_per_node):
             if step + 1 < gpus_per_node:
@@ -801,6 +791,104 @@ class _LocalChunkProviderBroadcast(_LocalChunkProvider):
 
     def maybe_forward(self, step, world_size):
         return 
+    
+class _LocalChunkProviderHybrid(_LocalChunkProvider):
+    def __init__(
+        self,
+        ring_config: RingAttentionConfig,
+        chunks_to_save: tuple[torch.Tensor, ...],
+        x: torch.Tensor,
+        w_qkv: torch.Tensor,
+        b: int,
+        seq_local: int,
+        h: int,
+        d: int,
+        group: dist.ProcessGroup,
+        empty: torch.Tensor,
+        local_rank: torch.Tensor,
+    ) -> None:
+        super().__init__(
+            ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
+        )
+        self._recv_buf = torch.empty_like(
+            x if ring_config.send_in_forward == SendForward.X else chunks_to_save[0]
+        )
+        self._handle: Optional[dist.Work] = None
+        self.local_rank = local_rank
+        self.gpus_per_node = 4
+        self._internode_handle = None
+        self._internode_recv_buf = None
+
+    def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+        chunk = self._materialize_chunk0()
+        if self.config.save_for_backward == SaveBackward.KV:
+            kv = chunk
+        else:
+            kv, _, _ = _compute_kv(
+                chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
+            )
+
+        # Kick off the first ring send of whichever buffer is configured.
+        node_step = step // self.gpus_per_node
+        if step % self.gpus_per_node == 0: # if we are at the start of a "internode" step
+            internode_recv_buf = torch.empty_like(self.x) if self.config.send_in_forward == SendForward.X else torch.empty_like(kv)
+            internode_recv_buf, internode_handle = self.config.p2p_fn(
+                data=self.x.clone() if self.config.send_in_forward == SendForward.X else kv.clone(),
+                buffer=internode_recv_buf,
+                direction=self.gpus_per_node * (node_step + 1),
+                group=self.group,
+                async_op=True,
+                tag=step % 4,
+                empty=self.empty,
+            )
+            self._internode_handle = internode_handle
+        
+        send_buf = self.x if self.config.send_in_forward == SendForward.X else kv
+        self._recv_buf = torch.empty_like(send_buf)
+
+        
+        # if we are at a multiple of 4,
+        # wait for what is received from the internode buffer
+        if step % self.gpus_per_node == 0 and step > 0:
+            self._internode_handle.wait()
+            send_buf = self._internode_recv_buf
+        
+        # Launch send_op to the neighbouring ranks
+        self._recv_buf, self._handle = self.config.send_op_fn(
+            send_buf,
+            self._recv_buf,
+            1,
+            group=self.group,
+            async_op=True,
+            empty=self.empty,
+            step=step,
+            group_size=self.gpus_per_node
+        )
+        
+            
+        # step > 0: receive the chunk that's been circulating, then forward
+        # it on (unless this is the last step).
+        assert self._handle is not None
+        self._handle.wait()
+        recv_buf = self._recv_buf
+
+        if self.config.send_in_forward == SendForward.X:
+            kv, kj, vj = _compute_kv(
+                recv_buf, self.w_qkv, self.b, self.seq_local, self.h, self.d
+            )
+            kj, vj = kj.contiguous(), vj.contiguous()
+        else:
+            kv = recv_buf
+            kj, vj = kv[0].contiguous(), kv[1].contiguous()
+
+        # `world_size` isn't tracked locally; ring_backward only calls us
+        # `world_size` times total, so re-sending on the final step is
+        # harmless but wasteful -- guarded via `has_more` below instead.
+        return kj, vj, kv
+
+    def maybe_forward(self, step, world_size):
+        return 
 
 
 def _build_backward_chunk_provider(
@@ -851,7 +939,7 @@ def _build_backward_chunk_provider(
             ring_config, chunks_to_save, w_qkv, b, seq_local, h, d
         )
     elif ring_config.save_scope == SaveScope.LOCAL:
-        if ring_config.send_op == SendOp.P2P or ring_config.send_op == SendOp.HYBRID:
+        if ring_config.send_op == SendOp.P2P:
             return _LocalChunkProvider(
                 ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
             )
@@ -868,6 +956,10 @@ def _build_backward_chunk_provider(
                 group,
                 empty,
                 local_rank,
+            )
+        elif ring_config.send_op == SendOp.HYBRID:
+            return _LocalChunkProviderHybrid(
+                ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty, local_rank
             )
     else:
         raise NotImplementedError
@@ -1148,3 +1240,4 @@ def ring_backward(
             ring_config, dk_buf, dv_buf, local_rank, seq_local, group
         )
     return dq, dk_local, dv_local
+

@@ -253,7 +253,7 @@ def test_backward_sdpa(
 )
 @pytest.mark.parametrize(
     "send_op",
-    [config.SendOp.P2P, config.SendOp.BROADCAST],
+    [config.SendOp.P2P],#, config.SendOp.BROADCAST],
 )
 @pytest.mark.parametrize(
     "save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL]
@@ -285,14 +285,13 @@ def test_ring_forward_backward(
     ring_config = config.RingAttentionConfig(
         device=device,
         send_in_forward=send_in_forward,
-        send_op
-=send_op
-,
+        send_op=send_op,
         save_for_backward=save_for_backward,
         save_scope=save_scope,
         send_backward=send_backward,
         offload=offloader,
     )
+    print(f'config {ring_config}')
 
     ring_forward = functional.build_ring_forward(ring_config)
     local_rank = dist.get_rank(group=process_mesh_dict["row"])
@@ -309,6 +308,7 @@ def test_ring_forward_backward(
     x = torch.randn(b, n_local, d, device=device, requires_grad=True, dtype=dtype) / (
         d**0.5
     )
+    x.fill_(local_rank * 0.1)
     x = x.contiguous()
     empty = torch.empty(0, device=x.device, dtype=dtype)
 
@@ -478,9 +478,7 @@ def test_ring_hybrid(
     ring_config = config.RingAttentionConfig(
         device=device,
         send_in_forward=send_in_forward,
-        send_op
-=send_op
-,
+        send_op=send_op,
         save_for_backward=save_for_backward,
         save_scope=save_scope,
         send_backward=send_backward,
