@@ -202,14 +202,16 @@ def comm_1d_p2p(
     """
     group_size = group.size() if group_size is None else group_size
 
+    
     send_to = (group.rank() + direction) % group_size
     recv_from = (group.rank() - direction) % group_size
+    
+    
     if group.rank() >= 4 and group_size == 4:
         send_to = send_to + 4
         recv_from = recv_from + 4
-
+        
     tag = tag * 8
-
     if group.rank() % 2 == 0:
         send = dist.isend(data, group_dst=send_to, group=group, tag=tag)
         recv = dist.irecv(buffer, group_src=recv_from, group=group, tag=tag)
@@ -223,7 +225,6 @@ def comm_1d_p2p(
     if not async_op:
         send.wait()  # type: ignore[union-attr]
         recv.wait()  # type: ignore[union-attr]
-
         return buffer, None
     else:
         send.wait()  # type: ignore[union-attr]
