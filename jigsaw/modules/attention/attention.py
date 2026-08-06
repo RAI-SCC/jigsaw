@@ -11,6 +11,7 @@ from jigsaw.modules import linear
 
 from . import config, functional
 import transformer_engine.pytorch as te
+from transformer_engine.common.recipe import DelayedScaling, Format
 
 
 class TransformerEngineAttention(torch.autograd.Function):
@@ -33,6 +34,7 @@ class TransformerEngineAttention(torch.autograd.Function):
         k: torch.Tensor,
         v: torch.Tensor,
         attn: "te.DotProductAttention",
+        recipe: DelayedScaling
     ) -> torch.Tensor:
         """Run TE dot-product attention.
 
@@ -49,7 +51,9 @@ class TransformerEngineAttention(torch.autograd.Function):
         torch.Tensor
             Attention output in ``bshd`` format.
         """
-        return attn(q, k, v)
+        with te.autocast(enabled=True, recipe=recipe):
+            out = attn(q, k, v)
+        return out
 
     @staticmethod
     def setup_context(ctx: Any, inputs: tuple, output: torch.Tensor) -> None:
@@ -64,6 +68,7 @@ class TransformerEngineAttention(torch.autograd.Function):
         k: torch.Tensor,
         v: torch.Tensor,
         attn: "te.DotProductAttention",
+        recipe: DelayedScaling,
     ) -> tuple[torch.Tensor, int]:
 
         q_bdim, k_bdim, v_bdim = in_dims[0], in_dims[1], in_dims[2]
@@ -80,7 +85,8 @@ class TransformerEngineAttention(torch.autograd.Function):
         k = k.flatten(0, 1)
         v = v.flatten(0, 1)
 
-        out = attn(q, k, v)
+        with te.autocast(enabled=True, recipe=recipe):
+            out = attn(q, k, v)
 
         # Unfold the samples dimension back out to the front.
         out = out.unflatten(0, (samples, -1))
@@ -151,7 +157,19 @@ class DistributedAttention(torch.nn.Module):
         if self.ring_attention:
             self.attn_core = self._ring_attn_core
         elif self.te:
+            fp_format = Format.HYBRID # E4M3 during forward pass, E5M2 during backward pass
+            self.recipe = DelayedScaling(
+                fp8_format=fp_format,
+                amax_history_len=16,
+                amax_compute_algo="max",
+                # using True here required that head_dim % 64 == 0 for ALL TE attention layers,
+                # or otherwise the code will error out.
+                fp8_dpa=True,
+                # leave it on for now and see:
+                fp8_mha=False,
+            )
             self.attn_core = self._transformer_attn_core
+            print(f"Head dim: {embed_dim // heads}")
             self.attn = te.DotProductAttention(
                 num_attention_heads=self.heads,
                 kv_channels=embed_dim // heads,
@@ -273,7 +291,7 @@ class DistributedAttention(torch.nn.Module):
                 Output of attention computation.
     
             """
-            out = TransformerEngineAttention.apply(q, k, v, self.attn)
+            out = TransformerEngineAttention.apply(q, k, v, self.attn, self.recipe)
             return out
         
     def _ring_attn_core(
@@ -340,6 +358,7 @@ class DistributedAttention(torch.nn.Module):
                 qkv, "... n s (three h d) -> three ... n s h d", three=3, h=self.heads
             )
             
+        print(f"QKV: {qkv.shape}")
         if self.qk_norm:
             q, k, v = qkv.unbind(0)
             q = self.q_norm(q).to(torch.bfloat16)
