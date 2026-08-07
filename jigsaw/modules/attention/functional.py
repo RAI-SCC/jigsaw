@@ -676,7 +676,7 @@ def _build_backward_chunk_provider(
 # --------------------------------------------------------------------------- #
 def get_dkv_buffer(
     ring_config: RingAttentionConfig, q: torch.Tensor, world_size: int
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Allocate the dK, dV buffers appropriate for the accumulation strategy.
 
     GATHER_DKV: one global-sized buffer that every step writes its chunk
@@ -689,9 +689,11 @@ def get_dkv_buffer(
             shape = [*q.shape[0:2], world_size * q.shape[2], *q.shape[3:]]
         case SendBackward.SEND_DKV:
             shape = list(q.shape)
+    dkv_buf = torch.zeros((2,) + shape, device=q.device, dtype=q.dtype),
     return (
-        torch.zeros(shape, device=q.device, dtype=q.dtype),
-        torch.zeros(shape, device=q.device, dtype=q.dtype),
+        dkv_buf,
+        dkv_buf[0,...],
+        dkv_buf[1,...]
     )
 
 
@@ -824,6 +826,7 @@ def _accumulate_dkv_send(
 
 def postprocess_dkv(
     ring_config: RingAttentionConfig,
+    dkv_buf: torch.Tensor,
     dk_buf: torch.Tensor,
     dv_buf: torch.Tensor,
     local_rank: int,
@@ -858,10 +861,14 @@ def postprocess_dkv(
     """
     match ring_config.send_backward:
         case SendBackward.GATHER_DKV:
-            dist.all_reduce(dk_buf, op=dist.ReduceOp.SUM, group=group)
-            dist.all_reduce(dv_buf, op=dist.ReduceOp.SUM, group=group)
+            dist.all_reduce(dkv_buf, op=dist.ReduceOp.SUM, group=group)
+            # dist.all_reduce(dk_buf, op=dist.ReduceOp.SUM, group=group)
+            # dist.all_reduce(dv_buf, op=dist.ReduceOp.SUM, group=group)
             lo, hi = local_rank * seq_local, (local_rank + 1) * seq_local
-            return dk_buf[:, :, lo:hi], dv_buf[:, :, lo:hi]
+            dk_buf = dkv_buf[0,:,:,lo:hi]
+            dv_buf = dkv_buf[1,:,:,lo:hi]
+
+            return dk_buf, dv_buf
         case SendBackward.SEND_DKV:
             return dk_buf, dv_buf
 
@@ -887,7 +894,7 @@ def ring_backward(
     """Backward pass for ring attention."""
     b, h, seq_local, d = q.shape
     dq = torch.zeros_like(q, dtype=torch.float32)
-    dk_buf, dv_buf = get_dkv_buffer(ring_config, q, world_size)
+    dkv_buf, dk_buf, dv_buf = get_dkv_buffer(ring_config, q, world_size)
 
     chunk_provider = _build_backward_chunk_provider(
         ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
@@ -920,6 +927,6 @@ def ring_backward(
             chunk_provider.maybe_forward(step, world_size)
 
     dk_local, dv_local = postprocess_dkv(
-        ring_config, dk_buf, dv_buf, local_rank, seq_local, group
+        ring_config, dkv_buf, dk_buf, dv_buf, local_rank, seq_local, group
     )
     return dq, dk_local, dv_local
