@@ -3,25 +3,13 @@ import torch.distributed as dist
 
 import os, sys
 
-sys.path.append(r"/p/home/jusers/pettenuzzo1/juwels/jigsaw")
-print(sys.path)
+sys.path.append(os.path.expanduser('~/jigsaw'))
 
-import MatMul.src.Pytorch.Utility.MatrixManager as MatrixManager
-import MatMul.src.Pytorch.Utility.ProcManager as ProcManager
+from MatMul.scaling.SUMMA import T_SUMMA
+from MatMul.scaling.Cannon import T_Cannon
+# from MatMul.scaling.MGR import T_MGR
 
-import MatMul.src.Pytorch.Methods.SUMMA as SUMMA
-import MatMul.src.Pytorch.Methods.Cannon as Cannon
-import MatMul.src.Pytorch.Methods.MGR as MGR
-
-import time
-
-
-# matrix shape
-n = int(sys.argv[1])
-k = n
-m = n
-
-def scaling():
+def run_scaling_tests():
     ############################# setup
     """Initialize the distributed process group once for the entire test session."""
     rank = int(os.getenv("SLURM_PROCID", -1))
@@ -40,201 +28,154 @@ def scaling():
         init_method="env://",
     )
 
-    ############################# setup rank and groups
+    ############################# setup rank and grid
     rank = dist.get_rank()
     world_size = dist.get_world_size()
 
     grid_size = int(torch.sqrt(torch.tensor(world_size)))
     grid = (grid_size, grid_size)
 
-    coords = ProcManager.GetCoords(rank, grid)
+    n_iter = 5
+    n_warm = 2
 
-    if rank == 0:
-        results = {}
+    # Define the list of matrix shapes/sizes you want to iterate over
+    # matrix_sizes = [256, 512, 1024, 2048, 4096] 
+    matrix_sizes = [8192, 16384, 32768]
 
-    dist.barrier()
+    ############################# Initialize Benchmark Classes once
+    summa_tester = T_SUMMA(grid, device, n_warm, n_iter, rank)
+    cannon_tester = T_Cannon(grid, device, n_warm, n_iter, rank)
+    # mgr_tester = T_MGR(grid, device, n_warm, n_iter, rank)
 
-    ############################# Generate matrices
-    X = torch.rand(n, k) * 2 - 1
-    W = torch.rand(k, m) * 2 - 1
-    XT = torch.rand(k, n) * 2 - 1
-    WT = torch.rand(m, k) * 2 - 1
+    # Iterate over each matrix size
+    for n in matrix_sizes:
+        k = n
+        m = n
 
-    X = X.to(device=device)
-    W = W.to(device=device)
-    XT = XT.to(device=device)
-    WT = WT.to(device=device)
+        if rank == 0:
+            results = {}
+            print(f"\n==========================================")
+            print(f"Running benchmarks for Matrix Size N = {n}")
+            print(f"==========================================")
 
-    ############################# SUMMA
-    if rank == 0:
-        print("Setup done!\nRunning tests for SUMMA...")
+        dist.barrier()
 
-    dist.barrier()
-    if rank == 0:
-        print("Creating communicators...")
+        # Generate and move matrices to device for the current size
+        X = torch.rand(n, k, device=device) * 2 - 1
+        W = torch.rand(k, m, device=device) * 2 - 1
+        XT = torch.rand(k, n, device=device) * 2 - 1
+        WT = torch.rand(m, k, device=device) * 2 - 1
 
-    comm = SUMMA.ComputeGroups(grid)
+        ############################# SUMMA Tests
+        if rank == 0:
+            print("--- Running tests for SUMMA ---")
 
-    if rank == 0:
-        print("Communicators created!")
+        dist.barrier()
+        
+        # X@W
+        if rank == 0: print("Warming up SUMMA X@W...")
+        summa_tester.X_W_warmup(X, W)
+        if rank == 0: print("Running timed SUMMA X@W...")
+        t = summa_tester.X_W(X, W)
+        if rank == 0: results["SUMMA_X@W"] = t
 
-    # multiplications
-    if rank == 0:
-        print("Running SUMMA X@W...")
-        s_t = time.perf_counter()
-    
-    SUMMA.X_W(X, W, grid, device, comm)
-    
-    dist.barrier()
+        dist.barrier()
 
-    if rank == 0:
-        e_t = time.perf_counter()
+        # XT@W
+        if rank == 0: print("Warming up SUMMA X^T@W...")
+        summa_tester.XT_W_warmup(XT, W)
+        if rank == 0: print("Running timed SUMMA X^T@W...")
+        t = summa_tester.XT_W(XT, W)
+        if rank == 0: results["SUMMA_X^T@W"] = t
 
-        results["SUMMA_X@W"] = e_t - s_t
+        dist.barrier()
 
-        print("Done!")
+        # X@WT
+        if rank == 0: print("Warming up SUMMA X@W^T...")
+        summa_tester.X_WT_warmup(X, WT)
+        if rank == 0: print("Running timed SUMMA X@W^T...")
+        t = summa_tester.X_WT(X, WT)
+        if rank == 0: results["SUMMA_X@W^T"] = t
 
-    if rank == 0:
-        print("Running SUMMA X^T@W...")
-        s_t = time.perf_counter()
-    
-    SUMMA.XT_W(XT, W, grid, device, comm)
-    
-    dist.barrier()
+        ############################# Cannon Tests
+        if rank == 0:
+            print("--- Running tests for Cannon ---")
 
-    if rank == 0:
-        e_t = time.perf_counter()
+        dist.barrier()
 
-        results["SUMMA_X^T@W"] = e_t - s_t
+        # X@W
+        if rank == 0: print("Warming up Cannon X@W...")
+        cannon_tester.X_W_warmup(X, W)
+        if rank == 0: print("Running timed Cannon X@W...")
+        t = cannon_tester.X_W(X, W)
+        if rank == 0: results["Cannon_X@W"] = t
 
-        print("Done!")
+        dist.barrier()
 
-    if rank == 0:
-        print("Running SUMMA X@W^T...")
-        s_t = time.perf_counter()
-    
-    SUMMA.X_WT(X, WT, grid, device, comm)
-    
-    dist.barrier()
+        # XT@W
+        if rank == 0: print("Warming up Cannon X^T@W...")
+        cannon_tester.XT_W_warmup(XT, W)
+        if rank == 0: print("Running timed Cannon X^T@W...")
+        t = cannon_tester.XT_W(XT, W)
+        if rank == 0: results["Cannon_X^T@W"] = t
 
-    if rank == 0:
-        e_t = time.perf_counter()
+        dist.barrier()
 
-        results["SUMMA_X@W^T"] = e_t - s_t
+        # X@WT
+        if rank == 0: print("Warming up Cannon X@W^T...")
+        cannon_tester.X_WT_warmup(X, WT)
+        if rank == 0: print("Running timed Cannon X@W^T...")
+        t = cannon_tester.X_WT(X, WT)
+        if rank == 0: results["Cannon_X@W^T"] = t
 
-        print("Done!")
-    
-    ############################# Cannon
-    if rank == 0:
-        print("Running tests for Cannon...")
+        ############################# MGR Tests
+        # if rank == 0:
+        #     print("--- Running tests for MGR ---")
 
-    dist.barrier()
+        # dist.barrier()
 
-    # multiplications
-    if rank == 0:
-        print("Running Cannon X@W...")
-        s_t = time.perf_counter()
-    
-    Cannon.X_W(X, W, grid, device)
-    
-    dist.barrier()
+        # # X@W
+        # if rank == 0: print("Warming up MGR X@W...")
+        # mgr_tester.X_W_warmup(X, W)
+        # if rank == 0: print("Running timed MGR X@W...")
+        # t = mgr_tester.X_W(X, W)
+        # if rank == 0: results["MGR_X@W"] = t
 
-    if rank == 0:
-        e_t = time.perf_counter()
+        # dist.barrier()
 
-        results["Cannon_X@W"] = e_t - s_t
+        # # XT@W
+        # if rank == 0: print("Warming up MGR X^T@W...")
+        # mgr_tester.XT_W_warmup(XT, W)
+        # if rank == 0: print("Running timed MGR X^T@W...")
+        # t = mgr_tester.XT_W(XT, W)
+        # if rank == 0: results["MGR_X^T@W"] = t
 
-        print("Done!")
+        # dist.barrier()
 
-    if rank == 0:
-        print("Running Cannon X^T@W...")
-        s_t = time.perf_counter()
-    
-    Cannon.XT_W(XT, W, grid, device)
-    
-    dist.barrier()
+        # # X@WT
+        # if rank == 0: print("Warming up MGR X@W^T...")
+        # mgr_tester.X_WT_warmup(X, WT)
+        # if rank == 0: print("Running timed MGR X@W^T...")
+        # t = mgr_tester.X_WT(X, WT)
+        # if rank == 0: results["MGR_X@W^T"] = t
 
-    if rank == 0:
-        e_t = time.perf_counter()
+        # Print final aggregated results for this matrix size
+        if rank == 0:
+            print(f"\n[SUMMARY] World Size: {world_size} | Matrix Size N: {n}")
+            print(results)
 
-        results["Cannon_X^T@W"] = e_t - s_t
+        # Free up memory before next matrix size iteration
+        del X, W, XT, WT
+        torch.cuda.empty_cache()
+        dist.barrier()
 
-        print("Done!")
-    
-    if rank == 0:
-        print("Running Cannon X@W^T...")
-        s_t = time.perf_counter()
-    
-    Cannon.X_WT(X, WT, grid, device)
-    
-    dist.barrier()
-
-    if rank == 0:
-        e_t = time.perf_counter()
-
-        results["Cannon_X@W^T"] = e_t - s_t
-
-        print("Done!")
-
-    # ############################# MGR
-    if rank == 0:
-        print("Running tests for MGR...")
-
-    dist.barrier()
-
-    # multiplications
-    if rank == 0:
-        print("Running MGR X@W...")
-        s_t = time.perf_counter()
-    
-    MGR.X_W(X, W, device)
-    
-    dist.barrier()
-
-    if rank == 0:
-        e_t = time.perf_counter()
-
-        results["MGR_X@W"] = e_t - s_t
-
-        print("Done!")
-
-    if rank == 0:
-        print("Running MGR X^T@W...")
-        s_t = time.perf_counter()
-    
-    MGR.XT_W(XT, W, device)
-    
-    dist.barrier()
-
-    if rank == 0:
-        e_t = time.perf_counter()
-
-        results["MGR_X^T@W"] = e_t - s_t
-
-        print("Done!")
-    
-    if rank == 0:
-        print("Running MGR X@W^T...")
-        s_t = time.perf_counter()
-    
-    MGR.X_WT(X, WT, device)
-    
-    dist.barrier()
-
-    if rank == 0:
-        e_t = time.perf_counter()
-
-        results["MGR_X@W^T"] = e_t - s_t
-
-        print("Done!")
-
-    if rank == 0:
-        print(f"{world_size}-{n}: {results}")
+        if rank == 0:
+            print("Done!")
 
 if __name__ == "__main__":
-    print("Starting...")
+    print("Starting scaling test suite...")
 
     try:
-        scaling()
+        run_scaling_tests()
     finally:
         dist.destroy_process_group()
