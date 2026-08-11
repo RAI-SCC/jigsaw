@@ -72,7 +72,14 @@ class DistributedAttention(torch.nn.Module):
         )
 
         if channel_group.size() == 1:
-            self.qkv = torch.nn.Linear(in_dim, embed_dim * 3, bias=False)
+            # device= is required here as much as in the DistributedXWT branch below:
+            # without it the layer is created on the default device, and the parameter
+            # broadcast over the spatial group further down then hands NCCL a CPU tensor
+            # ("No backend type associated with device type cpu"). Only reachable when
+            # the channel group is trivial, i.e. pure spatial parallelism.
+            self.qkv = torch.nn.Linear(
+                in_dim, embed_dim * 3, bias=False, device=self.device
+            )
         else:
             self.qkv = linear.DistributedXWT(
                 in_dim,
@@ -99,6 +106,16 @@ class DistributedAttention(torch.nn.Module):
         )
 
         if self.qk_norm:
+            # NOTE: these are normalized over head_dim (the global embed_dim // heads,
+            # since `heads` here is the constructor argument rather than self.heads), so
+            # unlike qkv and head_concat they are replicated across the *channel* group
+            # as well as the spatial one. The loop below only broadcasts and registers a
+            # grad-sync hook over spatial_group, so each channel rank keeps a gradient
+            # covering only its own heads: the replicas drift apart after the first
+            # optimizer step and each is individually missing the other ranks'
+            # contributions. Left as is pending a decision by the authors -- see also the
+            # RMSNorm/LayerNorm divergence against the serial Attention below, and the
+            # fact that convert_to_jigsaw does not copy q_norm/k_norm parameters.
             self.q_norm, self.k_norm = (
                 torch.nn.LayerNorm(embed_dim // heads, device=device),
                 torch.nn.LayerNorm(embed_dim // heads, device=device),
@@ -200,8 +217,12 @@ class DistributedAttention(torch.nn.Module):
             self.local_rank,
             self.config,
         )
-        out = cast(torch.Tensor, out)
-        return out
+        # RingAttentionFunction.forward returns (out, lse, chunks_to_save); the extra
+        # two are marked non-differentiable and only exist for the backward pass. The
+        # previous cast() here was typing.cast, which does nothing at runtime, so the
+        # whole tuple was handed to rearrange() in forward.
+        out, _lse, _chunks = out
+        return cast(torch.Tensor, out)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -295,8 +316,10 @@ class Attention(torch.nn.Module):
         self.dtype = dtype
         if qk_norm:
             self.q_norm, self.k_norm = (
-                torch.nn.RMSNorm(self.head_dim),
-                torch.nn.RMSNorm(self.head_dim),
+                # device= for the same reason as in DistributedAttention: without it these
+                # land on the default device while qkv and head_concat above are on `device`.
+                torch.nn.RMSNorm(self.head_dim, device=device),
+                torch.nn.RMSNorm(self.head_dim, device=device),
             )
 
     def _attn_core(
@@ -453,8 +476,13 @@ class Attention(torch.nn.Module):
             col_kw,
             col_kw,
         )  # type: ignore[assignment]
-        if ring:
-            instance.attn_core = DistributedAttention._ring_attn_core  # type: ignore[assignment]
+
+        # attn_core is deliberately not reassigned here. __init__ already selected
+        # self._ring_attn_core from the ring_attention=ring argument passed above, and it
+        # bound it to the instance. Assigning DistributedAttention._ring_attn_core onto
+        # the instance instead stored the plain function: instance attributes bypass the
+        # descriptor protocol, so self was never bound and the call in forward shifted
+        # every argument by one (q became self), failing with a missing 'v'.
 
         # [3*embed_dim, input_dim]
         # Now, local W has shape [3*embed_dim, embed_dim//channel size]
@@ -483,6 +511,23 @@ class Attention(torch.nn.Module):
             col_kw,
             col_kw,
         )  # type: ignore[assignment]
+
+        # __init__ registered the spatial grad-sync hook on every parameter, but qkv and
+        # head_concat have since been replaced by the converted submodules, whose
+        # parameters carry no hook. Both are built with model_kw=col_kw, so their weights
+        # are replicated across the spatial group: without the hook each spatial rank
+        # would keep only its own local gradient contribution and the replicas would
+        # drift apart during training.
+        #
+        # Only the weights are hooked here. DistributedXWT.__init__ already registers a
+        # hook on bias over its row group -- which is this same spatial group -- so
+        # hooking every parameter would all-reduce the bias gradient twice. That is
+        # latent rather than active today only because both sublayers are built
+        # bias=False.
+        for module in (instance.qkv, instance.head_concat):
+            module.weight.register_post_accumulate_grad_hook(
+                hooks.make_grad_sync_hook(instance.spatial_group, async_op=True)
+            )
 
         # Update head count to reflect local shard
         instance.heads = heads_per_shard

@@ -203,7 +203,10 @@ class LinearConfig:
         if device.type == "cuda":
             match parallelism:
                 case 1:
-                    return lambda x, w: x @ w.mT
+                    # Callers invoke every kernel with the distributed signature
+                    # (x, w, local_rank, device, model_group); the single-rank case
+                    # ignores the trailing three rather than taking only two.
+                    return lambda x, w, *args, **kwargs: x @ w.mT
                 case 2:
                     return dist_mm.xw_transpose_twoway
                 case 4:
@@ -215,7 +218,10 @@ class LinearConfig:
         elif device.type == "cpu":
             match parallelism:
                 case 1:
-                    return lambda x, w: x @ w.mT
+                    # Callers invoke every kernel with the distributed signature
+                    # (x, w, local_rank, device, model_group); the single-rank case
+                    # ignores the trailing three rather than taking only two.
+                    return lambda x, w, *args, **kwargs: x @ w.mT
                 case 2:
                     return dist_mm_p2p.xw_transpose_twoway
                 case 4:
@@ -234,7 +240,7 @@ class LinearConfig:
         if device.type == "cuda":
             match parallelism:
                 case 1:
-                    return lambda x, w: x @ w
+                    return lambda x, w, *args, **kwargs: x @ w
                 case 2:
                     return dist_mm.xw_twoway
                 case 4:
@@ -246,7 +252,7 @@ class LinearConfig:
         elif device.type == "cpu":
             match parallelism:
                 case 1:
-                    return lambda x, w: x @ w
+                    return lambda x, w, *args, **kwargs: x @ w
                 case 2:
                     return dist_mm_p2p.xw_twoway
                 case 4:
@@ -265,7 +271,7 @@ class LinearConfig:
         if device.type == "cuda":
             match parallelism:
                 case 1:
-                    return lambda x, w: x.mT @ w
+                    return lambda x, w, *args, **kwargs: x.mT @ w
                 case 2:
                     return dist_mm.x_transpose_w_twoway
                 case 4:
@@ -277,7 +283,7 @@ class LinearConfig:
         elif device.type == "cpu":
             match parallelism:
                 case 1:
-                    return lambda x, w: x.mT @ w
+                    return lambda x, w, *args, **kwargs: x.mT @ w
                 case 2:
                     return dist_mm_p2p.x_transpose_w_twoway
                 case 4:

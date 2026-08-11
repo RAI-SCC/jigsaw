@@ -192,6 +192,10 @@ def xw_transpose_twoway(
     """
     mod = local_rank % 2
     wij = wij.to(xij.device)
+    # NOTE: this kernel splits the weight's output dimension locally, so the caller
+    # passes the full out_features and each rank effectively produces out_features // 2.
+    # xw_transpose_fourway does NOT do this -- it multiplies with the whole wij -- so the
+    # two kernels disagree about who owns the output split. See the note there.
     w0, w1 = torch.split(wij, wij.shape[-2] // 2, dim=-2)
 
     match mod:
@@ -456,6 +460,17 @@ def xw_transpose_fourway(
 
     handle_2.wait()
 
+    # NOTE: unlike xw_transpose_twoway, this kernel does not split the weight's output
+    # dimension -- it multiplies with the whole wij, so the local output keeps the full
+    # out_features. The two kernels therefore disagree about who owns that split, and
+    # DistributedXWT.__init__ only divides out_dim by model_group.size() //
+    # column_group.size(), which is 1 whenever the model group *is* the column group (how
+    # DistributedAttention builds qkv and head_concat). Under the 2-way kernel the split
+    # below supplies the missing halving; under this one nothing does, so the local output
+    # stays at the global width and the next layer sees more channels than its local
+    # in_features. That is why attention's head sharding works at channel size 2 and fails
+    # at 4. Unresolved: either this kernel is missing the split, or it expects a weight
+    # that was already output-sharded by the caller.
     match mod:
         case 0:
             cij = torch.matmul(xij, wij.mT)

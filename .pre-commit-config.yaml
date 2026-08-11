@@ -5,7 +5,9 @@ repos:
     hooks:
     - id: pytest
       name: pytest
-      entry: ./.venv/bin/pytest tests
+      # Distributed tests need a multi-rank launcher (tests/run_distributed_tests.sh)
+      # and are excluded here by filename convention, as in torch-harmonics.
+      entry: ./.venv/bin/pytest tests --ignore-glob="**/test_distributed_*"
       language: system
       types: [python]
       pass_filenames: false

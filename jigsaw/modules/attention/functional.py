@@ -107,22 +107,37 @@ class RingAttentionFunction(torch.autograd.Function):
         output: Any,
     ) -> None:
         """Set up context. inputs/output match `forward`'s signature/return."""
-        q, k, v, x, w_qkv, scale, group, empty, local_rank, world_size, config = inputs
+        # These names must line up positionally with forward's signature. They did not:
+        # the list below used to omit dropout_p and add world_size, keeping the same
+        # length of 11 so the unpack still succeeded, but silently shifting everything
+        # from position 7 on. ctx.group then held dropout_p, ctx.empty held the process
+        # group, ctx.local_rank held the empty tensor and ctx.world_size held local_rank,
+        # all of which backward() passes straight into ring_backward.
+        q, k, v, x, w_qkv, scale, dropout_p, group, empty, local_rank, config = inputs
 
         out, lse, chunks_to_save = output
         ctx.mark_non_differentiable(lse)
         ctx.mark_non_differentiable(*chunks_to_save)
 
-        ctx.save_for_backward(
-            q, out, x, lse.mT, w_qkv, *[t for pair in chunks_to_save for t in pair]
-        )
+        # chunks_to_save is a flat tuple of tensors, one per saved chunk -- each one a
+        # kv buffer of shape [2, b, h, n_local, d] or an x chunk, depending on
+        # save_for_backward_fn. Save them unchanged.
+        #
+        # This used to read `*[t for pair in chunks_to_save for t in pair]`, which
+        # iterated each chunk *tensor* along dim 0 rather than unpacking a pair: a kv
+        # chunk was split into separate K and V entries, so the backward chunk providers
+        # read chunks_to_save[0] and got K alone. get() then did kv[0], kv[1] on what was
+        # now the batch dimension, silently returning batch elements when b > 1 and
+        # raising IndexError when b == 1.
+        ctx.save_for_backward(q, out, x, lse.mT, w_qkv, *chunks_to_save)
         c = cast(RingCtx, ctx)
 
         c.empty = empty
         c.scale = scale
         c.local_rank = local_rank
         c.group = group
-        c.world_size = world_size
+        # world_size is not an input to forward; derive it from the group, as forward does.
+        c.world_size = dist.get_world_size(group)
         c.config = config
 
     @staticmethod
