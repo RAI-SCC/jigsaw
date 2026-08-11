@@ -80,12 +80,19 @@ def XT_W(X, W, device):
 
     # all_to_all transposition of X (inefficient reallocation of memory, but required 
     #    because of the choice of having the result as (n/p * m) (row division))
-    send_buf = list(X.view(X.shape[0], world_size, sub_n // world_size).permute(1, 0, 2).contiguous().unbind(0))
-    recv_buf = [torch.zeros_like(send_buf[0]) for _ in range(world_size)]
+    # send_buf = list(X.view(X.shape[0], world_size, sub_n // world_size).permute(1, 0, 2).contiguous().unbind(0))
+    # recv_buf = [torch.zeros_like(send_buf[0]) for _ in range(world_size)]
 
-    dist.all_to_all(recv_buf, send_buf, dist.group.WORLD)
+    # dist.all_to_all(recv_buf, send_buf, dist.group.WORLD)
 
-    X = torch.cat(recv_buf).T
+    # X = torch.cat(recv_buf).T
+
+    X = X.view(X.shape[0], world_size, sub_n // world_size).permute(1, 0, 2).contiguous()
+    recv_buf = torch.empty_like(X)
+
+    dist.all_to_all_single(recv_buf, X, group=dist.group.WORLD)
+
+    X = recv_buf.permute(2, 0, 1).reshape(X.shape[2], -1)
 
     # if rank == 0:
     #     print(f"X shape: {X.shape}\nW Shape: {W.shape}\nRes shape: {result_local[:, 0:sub_m].shape}")
@@ -139,15 +146,26 @@ def X_WT(X, W, device):
     right_neighbor = (rank + 1) % world_size
 
     # all_to_all transposition of X (inefficient reallocation of memory, but required)
-    send_buf = list(W.view(world_size, sub_m, W.shape[1]).unbind(0))
-    recv_buf = [torch.zeros_like(send_buf[0]) for _ in range(world_size)]
+    # send_buf = list(W.view(world_size, sub_m, W.shape[1]).unbind(0))
+    # recv_buf = [torch.zeros_like(send_buf[0]) for _ in range(world_size)]
 
-    dist.all_to_all(recv_buf, send_buf, dist.group.WORLD)
+    # dist.all_to_all(recv_buf, send_buf, dist.group.WORLD)
 
-    W = torch.cat(recv_buf, dim=1)
+    # W = torch.cat(recv_buf, dim=1)
 
-    if rank == 0:
-        print(f"X shape: {X.shape}\nW Shape: {W.shape}")
+    W = W.view(world_size, sub_m, W.shape[1])
+    
+    # 2. Unica allocazione per il buffer di ricezione
+    recv_buf = torch.empty_like(W)
+
+    # 3. Comunicazione collettiva a puntatore singolo
+    dist.all_to_all_single(recv_buf, W, group=dist.group.WORLD)
+
+    # 4. Reshape a costo zero (sostituisce il vecchio torch.cat)
+    W = recv_buf.permute(1, 0, 2).reshape(sub_m, -1)
+
+    # if rank == 0:
+    #     print(f"X shape: {X.shape}\nW Shape: {W.shape}")
 
     # 3. CICLO RING
     W_next = torch.empty_like(W)
