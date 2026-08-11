@@ -288,7 +288,6 @@ def _select_forward_comm_fns(
                         *args: Any,
                         **kwargs: Any,
                     ) -> tuple[torch.Tensor, dist.Work]:
-                        print(f'hello')
                         recv_buf = torch.empty_like(x)
                         recv_buf, handle = send_op_fn(
                             x,

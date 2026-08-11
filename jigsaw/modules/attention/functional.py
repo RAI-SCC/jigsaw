@@ -321,6 +321,12 @@ def ring_forward(
     out = out.to(q.dtype)
     return out, lse, tuple(chunks_to_save)
 
+def get_send_recv_ranks_hybrid(local_rank, gpus_per_node=4):
+    base_node_rank = local_rank // gpus_per_node
+    send_to = (local_rank + 1) % gpus_per_node + base_node_rank * gpus_per_node
+    recv_from = (local_rank - 1) % gpus_per_node + base_node_rank * gpus_per_node
+
+    return [send_to, recv_from]
 
 def hybrid_forward(
     q: torch.Tensor,
@@ -357,7 +363,6 @@ def hybrid_forward(
 
     for node_step in range(n_nodes):
         # Kick off first send across nodes
-
         if node_step < n_nodes - 1:
             internode_recv_buf = (
                 torch.empty_like(x_j)
@@ -377,7 +382,7 @@ def hybrid_forward(
                 tag=node_step,
                 empty=empty,
             )
-
+        send_recv_ranks = get_send_recv_ranks_hybrid(local_rank, gpus_per_node=gpus_per_node)
         for step in range(gpus_per_node):
             if step + 1 < gpus_per_node:
                 recv_buf = (
@@ -389,10 +394,9 @@ def hybrid_forward(
                 recv_buf, handle = ring_config.send_op_fn(
                     x_j if ring_config.send_in_forward == SendForward.X else kv_j,
                     recv_buf,
-                    direction=1,
+                    send_recv_ranks=send_recv_ranks,
                     group=group,
                     tag=step,
-                    group_size=gpus_per_node,
                 )
 
             if ring_config.send_in_forward == SendForward.X:
@@ -864,17 +868,18 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
             if step % self.gpus_per_node == 0 and step > 0:
                 self._internode_handle.wait()
                 send_buf = self._internode_recv_buf
+            send_recv_ranks = get_send_recv_ranks_hybrid(self.local_rank, gpus_per_node=self.gpus_per_node)
             # Launch send_op to the neighbouring ranks
             self._recv_buf, self._handle = self.config.send_op_fn(
                 send_buf,
                 self._recv_buf,
-                1,
+                send_recv_ranks=send_recv_ranks,
                 group=self.group,
                 async_op=True,
                 empty=self.empty,
                 step=step,
-                group_size=self.gpus_per_node,
             )
+            print(f'R{dist.get_rank()} STEP {step} recv_buf {self.x[0][0][0]}')
             
             if self.config.send_in_forward == SendForward.X:
                 # Local Q always attends its own local K/V on step 0.
@@ -898,7 +903,7 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
             recv_buf = self._recv_buf        
 
         if self.config.send_in_forward == SendForward.X:
-            print(f'R{dist.get_rank()} step {step} recv_buf {recv_buf[0][0][0]}')
+            print(f'R{dist.get_rank()} STEP {step} recv_buf {recv_buf[0][0][0]}')
             kv, kj, vj = _compute_kv(
                 recv_buf, self.w_qkv, self.b, self.seq_local, self.h, self.d
             )
@@ -945,16 +950,15 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
 
         next_recv = torch.empty_like(self._recv_buf)
         # intranode if necessary
+        send_recv_ranks = get_send_recv_ranks_hybrid(self.local_rank, gpus_per_node=self.gpus_per_node)
         self._recv_buf, self._handle = self.config.send_op_fn(
             self._recv_buf,
             next_recv,
-            1,
+            send_recv_ranks=send_recv_ranks,
             group=self.group,
             async_op=True,
             empty=self.empty,
-            step=step,
-            group_size=self.gpus_per_node,
-        )
+            step=step,        )
 
 
 def _build_backward_chunk_provider(
@@ -1135,6 +1139,31 @@ def _accumulate_dkv_gather(
     dv_buf[:, :, lo:hi] += dv_j
     return dk_buf, dv_buf
 
+def get_send_recv_ranks(rank, step, nodes, gpus_per_node):
+    node, local = divmod(rank, gpus_per_node)
+    if step % gpus_per_node == 0 : # temporarily block out this path
+        # node-dimension ring, local index fixed
+        send_node = (node - (step+1)) % nodes
+        recv_node = (node + (step+1)) % nodes
+        send_to   = send_node * gpus_per_node + local
+        recv_from = recv_node * gpus_per_node + local
+        print(f'\%4 R{rank}: local {local} send node {send_node} recv node {recv_node} node {node} send to {send_to} recv from {recv_from}')
+    else:
+        # local-dimension ring, node fixed
+        
+        base_node_rank = rank // gpus_per_node
+        send_to = (rank - step ) % gpus_per_node + base_node_rank * gpus_per_node
+        recv_from = (rank + step) % gpus_per_node + base_node_rank * gpus_per_node
+        
+        if step > 4 and rank >= 4:
+            send_to -= 4
+            recv_from -= 4
+        elif step > 4 and rank < 4:
+            send_to += 4
+            recv_from += 4 
+        print(f'STEP {step} R{rank}:  send to {send_to} recv from {recv_from}')
+
+    return send_to, recv_from
 
 def _accumulate_dkv_send(
     ring_config: RingAttentionConfig,
@@ -1190,22 +1219,19 @@ def _accumulate_dkv_send(
         # step 4 --> rank 4, 5 --> rank 7, 6 -> rank
         
         # Rank 4: step 1 --> rank 7
-        node_step = step // 4 
+        send_recv_ranks = get_send_recv_ranks(dist.get_rank(group), step=step, nodes=group.size()//4, gpus_per_node=4)
         if step % 4 != 0:
-            # TODO: start here 
             # groups are not set correctly
             # since we artificially have a group of size 4
             # rank 6 needs to send to 5 in the beginning, and not 3
-            offset = 4 * (node_step + 1) - step % 4 
-            print(f'DKV: R{dist.get_rank()}  step {step} sending to {offset}')
+            # print(f'DKV: R{dist.get_rank()}  step {step} sending to {send_recv_ranks[0]} recv from {send_recv_ranks[1]}')
             recv_buf, _ = ring_config.p2p_fn(
-                dkv, recv_buf, offset, group=group, async_op=False, empty=empty, step=step, group_size=4
+                dkv, recv_buf, send_recv_ranks=send_recv_ranks, group=group, async_op=False, empty=empty, step=step
             ) 
         else:
-            offset= 4*node_step
-            print(f'DKV: R{dist.get_rank()}  step {step} sending to {offset}')
+            # print(f'DKV: R{dist.get_rank()}  step {step} sending to {send_recv_ranks[0]} recv from {send_recv_ranks[1]}')
             recv_buf, _ = ring_config.p2p_fn(
-                dkv, recv_buf, offset, group=group, async_op=False, empty=empty, step=step, group_size=8
+                dkv, recv_buf,  send_recv_ranks=send_recv_ranks, group=group, async_op=False, empty=empty, step=step, group_size=8
             )
     else:
         recv_buf, _ = ring_config.p2p_fn(

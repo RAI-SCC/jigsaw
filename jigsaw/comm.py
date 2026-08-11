@@ -164,8 +164,9 @@ def comm_1d_alltoall(
 def comm_1d_p2p(
     data: torch.Tensor,
     buffer: torch.Tensor,
-    direction: int,
-    group: dist.ProcessGroup,
+    direction: Optional[int] = None,
+    send_recv_ranks: Optional[list[int]] = None,
+    group: dist.ProcessGroup = None,
     async_op: bool = True,
     tag: int = 0,
     group_size: Optional[int] = None,
@@ -202,15 +203,12 @@ def comm_1d_p2p(
     """
     group_size = group.size() if group_size is None else group_size
 
-    
-    send_to = (group.rank() + direction) % group_size
-    recv_from = (group.rank() - direction) % group_size
-    
-    
-    if group.rank() >= 4 and group_size == 4:
-        send_to = send_to + 4
-        recv_from = recv_from + 4
-        
+    if send_recv_ranks is None:
+        send_to = (group.rank() + direction) % group_size
+        recv_from = (group.rank() - direction) % group_size
+    else:
+        send_to, recv_from = send_recv_ranks
+    # print(f'R{dist.get_rank()} send to {send_to} recv from {recv_from}. Group size {group_size}')
     tag = tag * 8
     if group.rank() % 2 == 0:
         send = dist.isend(data, group_dst=send_to, group=group, tag=tag)
