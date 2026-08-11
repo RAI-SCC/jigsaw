@@ -337,8 +337,12 @@ class DistributedAttention(torch.nn.Module):
             self.local_rank,
             self.config,
         )
-        out = cast(torch.Tensor, out)
-        return out
+        # RingAttentionFunction.forward returns (out, lse, chunks_to_save); the extra
+        # two are marked non-differentiable and only exist for the backward pass. The
+        # previous cast() here was typing.cast, which does nothing at runtime, so the
+        # whole tuple was handed to rearrange() in forward.
+        out, _lse, _chunks = out
+        return cast(torch.Tensor, out)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -604,8 +608,13 @@ class Attention(torch.nn.Module):
             col_kw,
             col_kw,
         )  # type: ignore[assignment]
-        if ring:
-            instance.attn_core = DistributedAttention._ring_attn_core  # type: ignore[assignment]
+
+        # attn_core is deliberately not reassigned here. __init__ already selected
+        # self._ring_attn_core from the ring_attention=ring argument passed above, and it
+        # bound it to the instance. Assigning DistributedAttention._ring_attn_core onto
+        # the instance instead stored the plain function: instance attributes bypass the
+        # descriptor protocol, so self was never bound and the call in forward shifted
+        # every argument by one (q became self), failing with a missing 'v'.
 
         # [3*embed_dim, input_dim]
         # Now, local W has shape [3*embed_dim, embed_dim//channel size]

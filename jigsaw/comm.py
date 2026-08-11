@@ -6,6 +6,22 @@ import torch
 import torch.distributed as dist
 
 
+def _matching_empty(empty: torch.Tensor, data: torch.Tensor) -> torch.Tensor:
+    """
+    Return a zero-element placeholder whose dtype matches the payload.
+
+    all_to_all requires every tensor in the send and receive lists to share a dtype,
+    and these helpers pad those lists with `empty` in the slots that carry nothing.
+    Callers supply `empty` once at construction to avoid re-allocating, but the payload
+    dtype is not always known that early: DistributedAttention casts q/k/v to bfloat16
+    inside forward while its cached placeholder is float32. Reconciling here keeps that
+    invariant a property of the communication helper rather than of every caller.
+
+    A zero-element tensor owns no storage, so allocating one on mismatch is free.
+    """
+    return empty if empty.dtype == data.dtype else data.new_empty(0)
+
+
 def comm_2way_alltoall(
     data: torch.Tensor,
     buffer: torch.Tensor,
@@ -37,6 +53,7 @@ def comm_2way_alltoall(
         If async, a list of wait handles. In this function, the length of
         this list will always be 1. It is a list for compatability and extensibility reasons.
     """
+    empty = _matching_empty(empty, data)
     match group.rank():
         case 0:
             wait_handle = dist.all_to_all(
@@ -152,6 +169,7 @@ def comm_1d_alltoall(
     send_to = (group.rank() + direction) % group.size()
     recv_from = (group.rank() - direction) % group.size()
 
+    empty = _matching_empty(empty, data)
     send_list = [empty] * group.size()
     recv_list = [empty] * group.size()
     send_list[send_to] = data
