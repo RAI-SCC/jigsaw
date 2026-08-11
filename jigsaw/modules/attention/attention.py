@@ -357,8 +357,7 @@ class DistributedAttention(torch.nn.Module):
             qkv = rearrange(
                 qkv, "... n s (three h d) -> three ... n s h d", three=3, h=self.heads
             )
-            
-        print(f"QKV: {qkv.shape}")
+
         if self.qk_norm:
             q, k, v = qkv.unbind(0)
             q = self.q_norm(q).to(torch.bfloat16)
@@ -366,6 +365,12 @@ class DistributedAttention(torch.nn.Module):
             v = v.to(torch.bfloat16)
         else:
             q, k, v = qkv.to(torch.bfloat16).unbind(0)
+
+        if self.te:
+            # Guarantee a qkv_layout TE supports (bshd_bshd_bshd) rather than relying on
+            # the cast above to preserve a usable stride order. No-op when q/k/v are
+            # already dense; when they aren't, TE would copy them internally anyway.
+            q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
 
         out = self.attn_core(q, k, v, x=x)
         # out has shape [batch, local_heads, local_sequence length, head_dim]
@@ -629,6 +634,23 @@ class Attention(torch.nn.Module):
             col_kw,
             col_kw,
         )  # type: ignore[assignment]
+
+        # __init__ registered the spatial grad-sync hook on every parameter, but qkv and
+        # head_concat have since been replaced by the converted submodules, whose
+        # parameters carry no hook. Both are built with model_kw=col_kw, so their weights
+        # are replicated across the spatial group: without the hook each spatial rank
+        # would keep only its own local gradient contribution and the replicas would
+        # drift apart during training.
+        #
+        # Only the weights are hooked here. DistributedXWT.__init__ already registers a
+        # hook on bias over its row group -- which is this same spatial group -- so
+        # hooking every parameter would all-reduce the bias gradient twice. That is
+        # latent rather than active today only because both sublayers are built
+        # bias=False.
+        for module in (instance.qkv, instance.head_concat):
+            module.weight.register_post_accumulate_grad_hook(
+                hooks.make_grad_sync_hook(instance.spatial_group, async_op=True)
+            )
 
         # Update head count to reflect local shard
         instance.heads = heads_per_shard

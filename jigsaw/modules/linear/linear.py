@@ -208,9 +208,23 @@ class DistributedXWT(torch.nn.Module):
             bayesian=False,  # TODO
         )
 
-        # Map weights — clone so the original graph is detached
-        row_rank = process_mesh_dict[row_kw].rank()
-        row_shard = model.out_features // process_mesh_dict[row_kw].size()
+        # Map weights — clone so the original graph is detached.
+        #
+        # The constructor shards out_features by model_group.size() // column_group.size(),
+        # not by the row group size, and the two only coincide when model_kw names the
+        # full model group. Callers that pass a different group — Attention passes
+        # col_kw, leaving out_features replicated across the row group — would otherwise
+        # get a weight whose shape contradicts the one the constructor allocated. Since
+        # the assignment below rebinds .data, that mismatch is silent.
+        out_parallelism = (
+            process_mesh_dict[model_kw].size() // process_mesh_dict[col_kw].size()
+        )
+        row_rank = (
+            process_mesh_dict[row_kw].rank() % out_parallelism
+            if out_parallelism > 1
+            else 0
+        )
+        row_shard = model.out_features // out_parallelism
         col_rank = process_mesh_dict[col_kw].rank()
         col_shard = model.in_features // process_mesh_dict[col_kw].size()
 
