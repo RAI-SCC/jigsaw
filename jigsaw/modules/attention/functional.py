@@ -1085,9 +1085,14 @@ def accumulate_dkv(
     """Fold this step's locally computed dk_j, dv_j into the running dK, dV."""
     match ring_config.send_backward:
         case SendBackward.GATHER_DKV:
-            return _accumulate_dkv_gather(
-                dk_buf, dv_buf, dk_j, dv_j, step, seq_local, local_rank, world_size
-            )
+            if ring_config.send_op == SendOp.HYBRID:
+                return _accumulate_dkv_hybrid(
+                    dk_buf, dv_buf, dk_j, dv_j, step, seq_local, local_rank, world_size
+                )
+            else:
+                return _accumulate_dkv_gather(
+                    dk_buf, dv_buf, dk_j, dv_j, step, seq_local, local_rank, world_size
+                )
         case SendBackward.SEND_DKV:
             return _accumulate_dkv_send(
                 ring_config, dk_buf, dv_buf, dk_j, dv_j, step, group, empty
@@ -1139,6 +1144,73 @@ def _accumulate_dkv_gather(
     dv_buf[:, :, lo:hi] += dv_j
     return dk_buf, dv_buf
 
+def _accumulate_dkv_hybrid(
+    dk_buf: torch.Tensor,
+    dv_buf: torch.Tensor,
+    dk_j: torch.Tensor,
+    dv_j: torch.Tensor,
+    step: int,
+    seq_local: int,
+    local_rank: int,
+    world_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Accumulate local dk, dv in the correct space in the buffer.
+
+    Used when each rank stores the full global size of dk, dv buffers.
+
+    Parameters
+    ----------
+    dk_buf: torch.Tensor
+        Buffer for accumulating dk.
+    dv_buf: torch.Tensor
+        Buffer for accumulating dv.
+    dk_j: torch.Tensor
+        Local result for dk for step j.
+    dv_j: torch.Tensor
+        Local result for dk for step j.
+    step: int
+        Step number in ring attention.
+    seq_local: int
+        Local sequence length.
+    local_rank: int
+        Local rank within ring attention.
+    world_size: int
+        World size of ring attention.
+
+    Returns
+    -------
+    dk_buf, dv_buf: torch.Tensor, torch.Tensor
+        Accumulated buffers for dk and dv.
+    """
+    node, local = divmod(local_rank, 4)
+    if step % 4 == 0 : # temporarily block out this path
+        # node-dimension ring, local index fixed
+        send_node = (node - (step)) % world_size // 4
+        send_to   = send_node * 4 + local
+        if local_rank >=4 and step == 4:
+            send_to = (local_rank - 4) % 4
+        elif step == 4:
+            send_to = local_rank + 4
+        if step == 0: 
+            send_to = local_rank
+    else:
+        # local-dimension ring, node fixed
+        base_node_rank = local_rank // 4
+        send_to = (local_rank - step ) % 4 + base_node_rank * 4
+            
+        if step > 4 and local_rank >= 4:
+            send_to -= 4
+        elif step > 4 and local_rank < 4:
+            send_to += 4
+
+    print(f'step {step} global chunk idx {send_to}')
+    global_chunk_idx = send_to
+    lo, hi = global_chunk_idx * seq_local, (global_chunk_idx + 1) * seq_local
+    dk_buf[:, :, lo:hi] += dk_j
+    dv_buf[:, :, lo:hi] += dv_j
+    return dk_buf, dv_buf
+
 def get_send_recv_ranks(rank, step, nodes, gpus_per_node):
     node, local = divmod(rank, gpus_per_node)
     if step % gpus_per_node == 0 : # temporarily block out this path
@@ -1147,7 +1219,6 @@ def get_send_recv_ranks(rank, step, nodes, gpus_per_node):
         recv_node = (node + (step+1)) % nodes
         send_to   = send_node * gpus_per_node + local
         recv_from = recv_node * gpus_per_node + local
-        print(f'\%4 R{rank}: local {local} send node {send_node} recv node {recv_node} node {node} send to {send_to} recv from {recv_from}')
     else:
         # local-dimension ring, node fixed
         
@@ -1161,7 +1232,6 @@ def get_send_recv_ranks(rank, step, nodes, gpus_per_node):
         elif step > 4 and rank < 4:
             send_to += 4
             recv_from += 4 
-        print(f'STEP {step} R{rank}:  send to {send_to} recv from {recv_from}')
 
     return send_to, recv_from
 

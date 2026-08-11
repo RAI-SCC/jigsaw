@@ -609,7 +609,6 @@ def test_ring_hybrid(
     assert torch.allclose(out_full, out_ref, atol=atol)
     assert torch.allclose(dq_full.sum(), dq_ref.to(dq_full.dtype).sum())
     assert torch.allclose(dq_full, dq_ref.to(dq_full.dtype), atol=atol)
-    print(f'dk_full - dk_ref {(dk_full - dk_ref).sum()}')
     # assert torch.allclose(dk_full.sum(), dk_ref.to(dk_full.dtype).sum())
     assert torch.allclose(dk_full, dk_ref.to(dk_full.dtype), atol=atol)
     assert torch.allclose(dv_full, dv_ref.to(dv_full.dtype), atol=atol)
