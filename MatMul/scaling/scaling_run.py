@@ -7,7 +7,7 @@ sys.path.append(os.path.expanduser('~/jigsaw'))
 
 from MatMul.scaling.SUMMA import T_SUMMA
 from MatMul.scaling.Cannon import T_Cannon
-# from MatMul.scaling.MGR import T_MGR
+from MatMul.scaling.MGR import T_MGR
 
 def run_scaling_tests():
     ############################# setup
@@ -40,12 +40,13 @@ def run_scaling_tests():
 
     # Define the list of matrix shapes/sizes you want to iterate over
     # matrix_sizes = [256, 512, 1024, 2048, 4096] 
-    matrix_sizes = [8192, 16384, 32768]
+    # matrix_sizes = [8192, 16384, 32768]
+    matrix_sizes = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 
     ############################# Initialize Benchmark Classes once
     summa_tester = T_SUMMA(grid, device, n_warm, n_iter, rank)
     cannon_tester = T_Cannon(grid, device, n_warm, n_iter, rank)
-    # mgr_tester = T_MGR(grid, device, n_warm, n_iter, rank)
+    mgr_tester = T_MGR(grid, device, n_warm, n_iter, rank)
 
     # Iterate over each matrix size
     for n in matrix_sizes:
@@ -128,46 +129,57 @@ def run_scaling_tests():
         t = cannon_tester.X_WT(X, WT)
         if rank == 0: results["Cannon_X@W^T"] = t
 
+        # Free up memory before next matrix size iteration
+        del X, W, XT, WT
+        torch.cuda.empty_cache()
+        dist.barrier()
+
         ############################# MGR Tests
-        # if rank == 0:
-        #     print("--- Running tests for MGR ---")
+        N = int(n * (world_size ** 0.5))
+        K = int(k * (world_size ** 0.5))
+        M = int(m * (world_size ** 0.5))
 
-        # dist.barrier()
+        # Generate and move matrices to device for the current size
+        X = torch.rand(N // world_size, K, device=device) * 2 - 1
+        W = torch.rand(K, M // world_size, device=device) * 2 - 1
+        XT = torch.rand(K // world_size, N, device=device) * 2 - 1
+        WT = torch.rand(M, K // world_size, device=device) * 2 - 1
 
-        # # X@W
-        # if rank == 0: print("Warming up MGR X@W...")
-        # mgr_tester.X_W_warmup(X, W)
-        # if rank == 0: print("Running timed MGR X@W...")
-        # t = mgr_tester.X_W(X, W)
-        # if rank == 0: results["MGR_X@W"] = t
+        if rank == 0:
+            print("--- Running tests for MGR ---")
 
-        # dist.barrier()
+        # add matrix generator        
 
-        # # XT@W
-        # if rank == 0: print("Warming up MGR X^T@W...")
-        # mgr_tester.XT_W_warmup(XT, W)
-        # if rank == 0: print("Running timed MGR X^T@W...")
-        # t = mgr_tester.XT_W(XT, W)
-        # if rank == 0: results["MGR_X^T@W"] = t
+        dist.barrier()
 
-        # dist.barrier()
+        if rank == 0: print("Warming up MGR X@W...")
+        mgr_tester.X_W_warmup(X, W)
+        if rank == 0: print("Running timed MGR X@W...")
+        t = mgr_tester.X_W(X, W)
+        if rank == 0: results["MGR_X@W"] = t
 
-        # # X@WT
-        # if rank == 0: print("Warming up MGR X@W^T...")
-        # mgr_tester.X_WT_warmup(X, WT)
-        # if rank == 0: print("Running timed MGR X@W^T...")
-        # t = mgr_tester.X_WT(X, WT)
-        # if rank == 0: results["MGR_X@W^T"] = t
+        dist.barrier()
+
+        if rank == 0: print("Warming up MGR X^T@W...")
+        mgr_tester.XT_W_warmup(XT, W)
+        if rank == 0: print("Running timed MGR X^T@W...")
+        t = mgr_tester.XT_W(XT, W)
+        if rank == 0: results["MGR_X^T@W"] = t
+
+        dist.barrier()
+
+        if rank == 0: print("Warming up MGR X@W^T...")
+        mgr_tester.X_WT_warmup(X, WT)
+        if rank == 0: print("Running timed MGR X@W^T...")
+        t = mgr_tester.X_WT(X, WT)
+        if rank == 0: results["MGR_X@W^T"] = t
+
+        dist.barrier()
 
         # Print final aggregated results for this matrix size
         if rank == 0:
             print(f"\n[SUMMARY] World Size: {world_size} | Matrix Size N: {n}")
             print(results)
-
-        # Free up memory before next matrix size iteration
-        del X, W, XT, WT
-        torch.cuda.empty_cache()
-        dist.barrier()
 
         if rank == 0:
             print("Done!")
