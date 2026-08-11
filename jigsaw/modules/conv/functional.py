@@ -208,8 +208,14 @@ class Conv2d(torch.autograd.Function):
             async_op=True,
         )
 
+        # Receive buffer for the channel exchange: the channel dimension shrinks by the
+        # channel group size, not by a hardcoded 2.
         g_x_buffer = torch.zeros(
-            (*g_x.shape[:-3], g_x.shape[-3] // 2, *g_x.shape[-2:]),
+            (
+                *g_x.shape[:-3],
+                g_x.shape[-3] // channel_group.size(),
+                *g_x.shape[-2:],
+            ),
             device=g_x.device,
             dtype=g_x.dtype,
         )

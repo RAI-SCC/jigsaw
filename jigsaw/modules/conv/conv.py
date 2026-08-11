@@ -105,7 +105,9 @@ class DistributedConv2D(torch.nn.Module):
         """
         super().__init__()
         self.in_channels = in_channels
-        self.out_channels = out_channels // 2  # TODO: //2 should be channel group size
+        # convert_to_jigsaw already shards the weight by the channel group size, so a
+        # hardcoded 2 here only agreed with it when that group happened to have size 2.
+        self.out_channels = out_channels // channel_group.size()
 
         self.kernel_size = _pair(kernel_size)
         self.stride = _pair(stride)
@@ -256,7 +258,9 @@ class DistributedConv2D(torch.nn.Module):
 
         if model.bias is not None:
             assert instance.bias is not None
-            bias_size = model.out_features // process_mesh_dict[col_kw].size()
+            # torch.nn.Conv2d exposes out_channels, not out_features; the latter raised
+            # AttributeError for every conv with a bias.
+            bias_size = model.out_channels // process_mesh_dict[col_kw].size()
             instance.bias.data = model.bias.data[
                 in_rank * bias_size : (in_rank + 1) * bias_size
             ].clone()
