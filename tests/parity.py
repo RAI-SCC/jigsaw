@@ -21,11 +21,42 @@ Two jigsaw-specific points shape the design:
   and differ.
 """
 
+import contextlib
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 import torch
 import torch.distributed as dist
+
+
+@contextlib.contextmanager
+def no_tf32() -> Iterator[None]:
+    """
+    Disable TF32 for the duration of a parity comparison, restoring it afterwards.
+
+    torch.backends.cudnn.allow_tf32 defaults to True, which gives fp32 convolutions a
+    10-bit mantissa and roughly 1e-3 relative error. That alone would be tolerable if
+    both sides made the same error, but the serial and distributed paths contract the
+    channel axis in a different order and pick different cuDNN algorithms, so the two
+    errors do not cancel. The drift grows with the reduction length (in_channels *
+    kernel * kernel), which makes the tolerance a layer-shape property rather than a
+    property of the distribution being tested.
+
+    Disabling it keeps the comparison about the sharding, which is what these tests are
+    for. torch-harmonics does the same in its distributed convolution tests.
+    """
+    cudnn, matmul = (
+        torch.backends.cudnn.allow_tf32,
+        torch.backends.cuda.matmul.allow_tf32,
+    )
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_tf32 = False
+    try:
+        yield
+    finally:
+        torch.backends.cudnn.allow_tf32 = cudnn
+        torch.backends.cuda.matmul.allow_tf32 = matmul
 
 #: Placement marking a tensor as replicated (not sharded) across a mesh dimension.
 REPLICATED = "replicated"
@@ -187,7 +218,16 @@ def assert_close(
 ParamRule = ShardSpec | Callable[[torch.Tensor], torch.Tensor]
 
 
-def check_parity(
+def check_parity(*args: Any, **kwargs: Any) -> None:
+    """Compare a distributed module against its serial counterpart, with TF32 off.
+
+    Thin wrapper around :func:`_check_parity`; see that function for the parameters.
+    """
+    with no_tf32():
+        _check_parity(*args, **kwargs)
+
+
+def _check_parity(
     serial_module: torch.nn.Module,
     build_distributed: Callable[[torch.nn.Module], torch.nn.Module],
     input_shape: tuple[int, ...],

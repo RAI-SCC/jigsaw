@@ -182,7 +182,14 @@ class DistributedAttention(torch.nn.Module):
             self.attn_core = self._attn_core
 
         if channel_group.size() == 1:
-            self.qkv = torch.nn.Linear(in_dim, embed_dim * 3, bias=False)
+            # device= is required here as much as in the DistributedXWT branch below:
+            # without it the layer is created on the default device, and the parameter
+            # broadcast over the spatial group further down then hands NCCL a CPU tensor
+            # ("No backend type associated with device type cpu"). Only reachable when
+            # the channel group is trivial, i.e. pure spatial parallelism.
+            self.qkv = torch.nn.Linear(
+                in_dim, embed_dim * 3, bias=False, device=self.device
+            )
         else:
             self.qkv = linear.DistributedXWT(
                 in_dim,
@@ -209,6 +216,16 @@ class DistributedAttention(torch.nn.Module):
         )
 
         if self.qk_norm:
+            # NOTE: these are normalized over head_dim (the global embed_dim // heads,
+            # since `heads` here is the constructor argument rather than self.heads), so
+            # unlike qkv and head_concat they are replicated across the *channel* group
+            # as well as the spatial one. The loop below only broadcasts and registers a
+            # grad-sync hook over spatial_group, so each channel rank keeps a gradient
+            # covering only its own heads: the replicas drift apart after the first
+            # optimizer step and each is individually missing the other ranks'
+            # contributions. Left as is pending a decision by the authors -- see also the
+            # RMSNorm/LayerNorm divergence against the serial Attention below, and the
+            # fact that convert_to_jigsaw does not copy q_norm/k_norm parameters.
             self.q_norm, self.k_norm = (
                 torch.nn.LayerNorm(embed_dim // heads, device=device),
                 torch.nn.LayerNorm(embed_dim // heads, device=device),
@@ -449,9 +466,11 @@ class Attention(torch.nn.Module):
         self.qk_norm = qk_norm
         self.dtype = dtype
         if qk_norm:
+            # device= for the same reason as in DistributedAttention: without it these
+            # land on the default device while qkv and head_concat above are on `device`.
             self.q_norm, self.k_norm = (
-                torch.nn.RMSNorm(self.head_dim),
-                torch.nn.RMSNorm(self.head_dim),
+                torch.nn.RMSNorm(self.head_dim, device=device),
+                torch.nn.RMSNorm(self.head_dim, device=device),
             )
 
     def _attn_core(
