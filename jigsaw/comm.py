@@ -219,32 +219,20 @@ def comm_1d_p2p(
     # print(f'R{dist.get_rank()} send to {send_to} recv from {recv_from}. Group size {group_size}')
     tag = tag * 8
     
-    if (group.rank() - send_to) % 2 == 1: # if odd and even ranks
-        if group.rank() % 2 == 0: # 
-            send = dist.isend(data, group_dst=send_to, group=group, tag=tag)
-            recv = dist.irecv(buffer, group_src=recv_from, group=group, tag=tag)
-        else:
-            recv = dist.irecv(buffer, group_src=recv_from, group=group, tag=tag)
-            send = dist.isend(data, group_dst=send_to, group=group, tag=tag)
-    else:
-        if ((group.rank() // 4) % 2) == 0: # hybrid
-            send = dist.isend(data, group_dst=send_to, group=group, tag=tag)
-            recv = dist.irecv(buffer, group_src=recv_from, group=group, tag=tag)
-        else:
-            recv = dist.irecv(buffer, group_src=recv_from, group=group, tag=tag)
-            send = dist.isend(data, group_dst=send_to, group=group, tag=tag)
-        
+    send_op = dist.P2POp(dist.isend, data, group_peer=send_to, group=group)
+    recv_op = dist.P2POp(dist.irecv, buffer, group_peer=recv_from, group=group)
+    reqs = dist.batch_isend_irecv([send_op, recv_op])
 
     if dist.get_backend() == "gloo":
         dist.barrier()
 
     if not async_op:
-        send.wait()  # type: ignore[union-attr]
-        recv.wait()  # type: ignore[union-attr]
+        # send.wait()  # type: ignore[union-attr]
+        reqs[0].wait()  # type: ignore[union-attr]
         return buffer, None
     else:
-        send.wait()  # type: ignore[union-attr]
-        return buffer, recv
+        # send.wait()  # type: ignore[union-attr]
+        return buffer, reqs[0]
 
 
 def comm_broadcast(

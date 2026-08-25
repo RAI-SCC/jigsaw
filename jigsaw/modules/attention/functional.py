@@ -874,7 +874,7 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
                 empty=self.empty,
                 step=step,
             )
-            print(f'R{dist.get_rank()} STEP {step} recv_buf {self.x[0][0][0]}')
+            # print(f'R{dist.get_rank()} STEP {step} recv_buf {self.x[0][0][0]}')
             
             if self.config.send_in_forward == SendForward.X:
                 # Local Q always attends its own local K/V on step 0.
@@ -898,7 +898,7 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
             recv_buf = self._recv_buf        
 
         if self.config.send_in_forward == SendForward.X:
-            print(f'R{dist.get_rank()} STEP {step} recv_buf {recv_buf[0][0][0]}')
+            # print(f'R{dist.get_rank()} STEP {step} recv_buf {recv_buf[0][0][0]}')
             kv, kj, vj = _compute_kv(
                 recv_buf, self.w_qkv, self.b, self.seq_local, self.h, self.d
             )
@@ -927,7 +927,7 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
                 if self.config.send_in_forward == SendForward.X
                 else torch.empty_like(kv)
             )
-            print(f'Internode send {step} sending {self._internode_recv_buf[0][0][0]}')
+            # print(f'Internode send {step} sending {self._internode_recv_buf[0][0][0]}')
             self._internode_recv_buf, self._internode_handle = self.config.p2p_fn(
                 data=self._internode_recv_buf,
                 buffer=internode_recv_buf,
@@ -1199,7 +1199,7 @@ def _accumulate_dkv_hybrid(
         elif step > 4 and local_rank < 4:
             send_to += 4
 
-    print(f'step {step} global chunk idx {send_to}')
+    # print(f'step {step} global chunk idx {send_to}')
     global_chunk_idx = send_to
     lo, hi = global_chunk_idx * seq_local, (global_chunk_idx + 1) * seq_local
     dk_buf[:, :, lo:hi] += dk_j

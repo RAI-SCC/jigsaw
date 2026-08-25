@@ -269,9 +269,9 @@ if __name__ == "__main__":
 
     # Set all possible configuration options here
     enum_fields = {
+        "send_op": config.SendOp,
         "send_in_forward": config.SendForward,
         "save_for_backward": config.SaveBackward,
-        # "send_op": config.SendOp,
         "save_scope": config.SaveScope,
         "send_backward": config.SendBackward,
         "offload": config.Offload,

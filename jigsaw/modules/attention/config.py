@@ -412,7 +412,7 @@ class RingAttentionConfig:
         self,
         device: torch.device = torch.device("cuda"),
         send_in_forward: SendForward = SendForward.X,
-        send_op: SendOp = SendOp.ALLTOALL,
+        send_op: SendOp = SendOp.HYBRID,
         save_for_backward: SaveBackward = SaveBackward.KV,
         save_scope: SaveScope = SaveScope.GLOBAL,
         send_backward: SendBackward = SendBackward.SEND_DKV,
