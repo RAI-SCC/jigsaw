@@ -29,6 +29,7 @@ class DistributedXWT(torch.nn.Module):
         row_group: dist.ProcessGroup,
         bayesian: bool = False,
         config: Optional[LinearConfig] = None,
+        dtype: torch.dtype = torch.float32
     ) -> None:
         """
         Initialize the XWT Linear layer sharded over n processes.
@@ -64,6 +65,9 @@ class DistributedXWT(torch.nn.Module):
         """
         super().__init__()
 
+        self.dtype = dtype
+        self.device = device
+        
         stdev = 1.0 / np.sqrt(in_dim * row_group.size())
         assert in_dim % column_group.size() == 0
         assert out_dim % (model_group.size() // column_group.size()) == 0
@@ -73,12 +77,12 @@ class DistributedXWT(torch.nn.Module):
         out_dim = out_dim // (model_group.size() // column_group.size())
 
         self.weight = torch.nn.Parameter(
-            torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev).to(device)
+            torch.zeros(out_dim, in_dim, dtype=self.dtype, device=self.device).uniform_(-stdev, stdev)
         )
         self.parallelism = model_group.size()
 
         self.bias = (
-            torch.nn.Parameter(torch.zeros(bias_dim).uniform_(-stdev, stdev).to(device))
+            torch.nn.Parameter(torch.zeros(bias_dim, dtype=self.dtype, device=self.device).uniform_(-stdev, stdev))
             if bias
             else None
         )
