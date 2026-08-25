@@ -107,7 +107,7 @@ class RingAttentionFunction(torch.autograd.Function):
         output: Any,
     ) -> None:
         """Set up context. inputs/output match `forward`'s signature/return."""
-        q, k, v, x, w_qkv, scale, group, empty, local_rank, world_size, config = inputs
+        q, k, v, x, w_qkv, scale, dropout_p, group, empty, local_rank, config = inputs
 
         out, lse, chunks_to_save = output
         ctx.mark_non_differentiable(lse)
@@ -117,12 +117,11 @@ class RingAttentionFunction(torch.autograd.Function):
             q, out, x, lse.mT, w_qkv, *[t for pair in chunks_to_save for t in pair]
         )
         c = cast(RingCtx, ctx)
-
         c.empty = empty
         c.scale = scale
         c.local_rank = local_rank
         c.group = group
-        c.world_size = world_size
+        c.world_size = dist.get_world_size(group) # This is recomputed in forward and in setup context
         c.config = config
 
     @staticmethod
@@ -668,7 +667,6 @@ class _LocalChunkProvider(_BackwardChunkProvider):
             # Kick off the first ring send of whichever buffer is configured.
             send_buf = self.x if self.config.send_in_forward == SendForward.X else kv
             self._recv_buf = torch.empty_like(send_buf)
-
             self._recv_buf, self._handle = self.config.send_op_fn(
                 send_buf,
                 self._recv_buf,

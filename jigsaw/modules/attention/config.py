@@ -51,8 +51,8 @@ class SendBackward(Enum):
 class SendOp(Enum):
     """Enum for communication operation."""
 
-    P2P = 0
-    ALLTOALL = 1
+    ALLTOALL = 0
+    P2P = 1
     BROADCAST = 2
     HYBRID = 3
 

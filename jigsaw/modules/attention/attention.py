@@ -1,6 +1,6 @@
 """Distributed attention modules."""
 
-from typing import Any, cast
+from typing import Any, cast, Optional
 
 import torch
 import torch.distributed as dist
@@ -33,6 +33,7 @@ class DistributedAttention(torch.nn.Module):
         qk_norm: bool = False,
         ring_attention: bool = False,
         dtype: torch.dtype = torch.float32,
+        config: Optional[config.RingAttentionConfig] = None,
     ):
         """
 
@@ -58,21 +59,23 @@ class DistributedAttention(torch.nn.Module):
         self.dropout_p = dropout_p
         self.ring_attention = ring_attention
 
-        assert heads % self.channel_group.size() == 0, (
-            "heads is not divisible by channel group size"
-        )
+        assert (
+            heads % self.channel_group.size() == 0
+        ), "heads is not divisible by channel group size"
 
         if self.ring_attention:
-            assert spatial_group.size() > 1, (
-                "Cannot perform ring attention if spatial size is 1."
-            )
+            assert (
+                spatial_group.size() > 1
+            ), "Cannot perform ring attention if spatial size is 1."
 
         self.attn_core = (
             self._ring_attn_core if self.ring_attention else self._attn_core
         )
 
         if channel_group.size() == 1:
-            self.qkv = torch.nn.Linear(in_dim, embed_dim * 3, bias=False)
+            self.qkv = torch.nn.Linear(
+                in_dim, embed_dim * 3, bias=False, device=device, dtype=self.dtype
+            )
         else:
             self.qkv = linear.DistributedXWT(
                 in_dim,
@@ -84,6 +87,7 @@ class DistributedAttention(torch.nn.Module):
                 row_group=self.spatial_group,
                 column_group=self.channel_group,
                 bayesian=bayesian,
+                dtype=self.dtype,
             )
 
         self.head_concat = linear.DistributedXWT(
@@ -96,6 +100,7 @@ class DistributedAttention(torch.nn.Module):
             row_group=self.spatial_group,
             column_group=self.channel_group,
             bayesian=bayesian,
+            dtype=self.dtype,
         )
 
         # sync up up spatial parameters
@@ -109,15 +114,19 @@ class DistributedAttention(torch.nn.Module):
 
         if self.qk_norm:
             self.q_norm, self.k_norm = (
-                torch.nn.RMSNorm(embed_dim // heads),
-                torch.nn.RMSNorm(embed_dim // heads),
+                torch.nn.LayerNorm(embed_dim // heads, device=device),
+                torch.nn.LayerNorm(embed_dim // heads, device=device),
             )
 
         self.heads = heads // self.channel_group.size()
         self.scale = (embed_dim // heads) ** -0.5
         self.empty = torch.empty(0, device=device)
-        if ring_attention:
-            self.config = config.RingAttentionConfig(device=device)
+
+        self.config = (
+            config.RingAttentionConfig(device=device)
+            if ring_attention and config is None
+            else config
+        )
 
     def _attn_core(
         self,
@@ -199,7 +208,7 @@ class DistributedAttention(torch.nn.Module):
             self.empty,
             self.local_rank,
             self.config,
-        )
+        )[0]
         out = cast(torch.Tensor, out)
         return out
 
@@ -410,12 +419,12 @@ class Attention(torch.nn.Module):
         channel_rank = process_mesh_dict[col_kw].rank()
         spatial_size = process_mesh_dict[row_kw].size()
 
-        assert attention.heads % channel_size == 0, (
-            f"num_heads={attention.heads} not divisible by channel size {channel_size}"
-        )
-        assert attention.embed_dim % spatial_size == 0, (
-            f"embed_dim={attention.embed_dim} not divisible by spatial size {spatial_size}"
-        )
+        assert (
+            attention.heads % channel_size == 0
+        ), f"num_heads={attention.heads} not divisible by channel size {channel_size}"
+        assert (
+            attention.embed_dim % spatial_size == 0
+        ), f"embed_dim={attention.embed_dim} not divisible by spatial size {spatial_size}"
 
         heads_per_shard = attention.heads // channel_size
 
