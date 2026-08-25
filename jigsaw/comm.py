@@ -218,12 +218,22 @@ def comm_1d_p2p(
         send_to, recv_from = send_recv_ranks
     # print(f'R{dist.get_rank()} send to {send_to} recv from {recv_from}. Group size {group_size}')
     tag = tag * 8
-    if group.rank() % 2 == 0:
-        send = dist.isend(data, group_dst=send_to, group=group, tag=tag)
-        recv = dist.irecv(buffer, group_src=recv_from, group=group, tag=tag)
+    
+    if (group.rank() - send_to) % 2 == 1: # if odd and even ranks
+        if group.rank() % 2 == 0: # 
+            send = dist.isend(data, group_dst=send_to, group=group, tag=tag)
+            recv = dist.irecv(buffer, group_src=recv_from, group=group, tag=tag)
+        else:
+            recv = dist.irecv(buffer, group_src=recv_from, group=group, tag=tag)
+            send = dist.isend(data, group_dst=send_to, group=group, tag=tag)
     else:
-        recv = dist.irecv(buffer, group_src=recv_from, group=group, tag=tag)
-        send = dist.isend(data, group_dst=send_to, group=group, tag=tag)
+        if ((group.rank() // 4) % 2) == 0: # 
+            send = dist.isend(data, group_dst=send_to, group=group, tag=tag)
+            recv = dist.irecv(buffer, group_src=recv_from, group=group, tag=tag)
+        else:
+            recv = dist.irecv(buffer, group_src=recv_from, group=group, tag=tag)
+            send = dist.isend(data, group_dst=send_to, group=group, tag=tag)
+        
 
     if dist.get_backend() == "gloo":
         dist.barrier()

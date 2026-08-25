@@ -164,13 +164,13 @@ def training_loop(
 
     return epoch_times
 
-@torch.no_grad()
+# @torch.no_grad()
 def train_one_epoch(model: torch.nn.Module, x: torch.Tensor, steps: int = 5):
     # X has shape [B, Nlocal, d//2]
     for _ in range(steps):
         output = model(x.detach())
         # print(f'R{dist.get_rank(group=None)}/{dist.get_world_size(group=None)} output {output.sum()}')
-        # output.sum().backward()
+        output.sum().backward()
 
 
 def ref_training_loop(mesh_dict, device, n_epochs, n_steps=10):
@@ -271,7 +271,7 @@ if __name__ == "__main__":
     enum_fields = {
         "send_in_forward": config.SendForward,
         "save_for_backward": config.SaveBackward,
-        "send_op": config.SendOp,
+        # "send_op": config.SendOp,
         "save_scope": config.SaveScope,
         "send_backward": config.SendBackward,
         "offload": config.Offload,

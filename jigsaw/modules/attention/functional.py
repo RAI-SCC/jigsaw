@@ -1007,7 +1007,7 @@ def _build_backward_chunk_provider(
             ring_config, chunks_to_save, w_qkv, b, seq_local, h, d
         )
     elif ring_config.save_scope == SaveScope.LOCAL:
-        if ring_config.send_op == SendOp.P2P:
+        if ring_config.send_op == SendOp.P2P or ring_config.send_op == SendOp.ALLTOALL:
             return _LocalChunkProvider(
                 ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
             )
