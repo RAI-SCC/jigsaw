@@ -97,7 +97,6 @@ class RingAttentionFunction(torch.autograd.Function):
             world_size,
             config,
         )
-
         return out, lse, chunks_to_save
 
     @staticmethod
@@ -108,13 +107,11 @@ class RingAttentionFunction(torch.autograd.Function):
     ) -> None:
         """Set up context. inputs/output match `forward`'s signature/return."""
         q, k, v, x, w_qkv, scale, dropout_p, group, empty, local_rank, config = inputs
-
         out, lse, chunks_to_save = output
         ctx.mark_non_differentiable(lse)
         ctx.mark_non_differentiable(*chunks_to_save)
-
         ctx.save_for_backward(
-            q, out, x, lse.mT, w_qkv, *[t for pair in chunks_to_save for t in pair]
+            q, out, x, lse.mT, w_qkv, *chunks_to_save # *[t for pair in chunks_to_save for t in pair]
         )
         c = cast(RingCtx, ctx)
         c.empty = empty

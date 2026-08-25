@@ -373,7 +373,7 @@ def _select_save_for_backward_fn(
                 return lambda x, kv: offloader.offload(x)
             # keep on GPU -- must clone if Xj will be overwritten by recv next iter
             if save_scope == SaveScope.GLOBAL:
-                return lambda x, kv: x
+                return lambda x, kv: x.clone()
             return lambda x, kv: x
 
         case SaveBackward.KV:
@@ -411,10 +411,10 @@ class RingAttentionConfig:
     def __init__(
         self,
         device: torch.device = torch.device("cuda"),
-        send_in_forward: SendForward = SendForward.KV,
-        send_op: SendOp = SendOp.P2P,
+        send_in_forward: SendForward = SendForward.X,
+        send_op: SendOp = SendOp.ALLTOALL,
         save_for_backward: SaveBackward = SaveBackward.KV,
-        save_scope: SaveScope = SaveScope.LOCAL,
+        save_scope: SaveScope = SaveScope.GLOBAL,
         send_backward: SendBackward = SendBackward.SEND_DKV,
         offload: Offload = Offload.DISABLED,
     ):

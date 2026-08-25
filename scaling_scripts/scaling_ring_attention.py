@@ -280,7 +280,7 @@ if __name__ == "__main__":
     ring_config = config.RingAttentionConfig(
         device=device,
         send_in_forward=config.SendForward.X,
-        send_op=config.SendOp.HYBRID,
+        # send_op=config.SendOp.HYBRID,
         save_for_backward=config.SaveBackward.X,
         save_scope=config.SaveScope.GLOBAL,
         send_backward=config.SendBackward.GATHER_DKV,

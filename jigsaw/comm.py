@@ -227,7 +227,7 @@ def comm_1d_p2p(
             recv = dist.irecv(buffer, group_src=recv_from, group=group, tag=tag)
             send = dist.isend(data, group_dst=send_to, group=group, tag=tag)
     else:
-        if ((group.rank() // 4) % 2) == 0: # 
+        if ((group.rank() // 4) % 2) == 0: # hybrid
             send = dist.isend(data, group_dst=send_to, group=group, tag=tag)
             recv = dist.irecv(buffer, group_src=recv_from, group=group, tag=tag)
         else:
