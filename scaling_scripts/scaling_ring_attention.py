@@ -6,6 +6,7 @@ import sys
 import numpy as np
 import torch
 import torch.distributed as dist
+import gc
 
 from jigsaw import  utils
 from jigsaw.modules.attention import config, attention
@@ -157,12 +158,13 @@ def training_loop(
         )
         end.record()
         torch.cuda.synchronize()
+        del x
 
         epoch_times[epoch] = start.elapsed_time(end) / 1000 / 60
 
     return epoch_times
 
-
+@torch.no_grad()
 def train_one_epoch(model: torch.nn.Module, x: torch.Tensor, steps: int = 5):
     # X has shape [B, Nlocal, d//2]
     for _ in range(steps):
@@ -257,13 +259,6 @@ if __name__ == "__main__":
     n_global = layer_config.get("n_global", _default_layer_config["n_global"])
     embed_dim = layer_config.get("embed_dim", x_features // heads)
 
-    w_qkv = torch.randn(
-        3 * embed_dim * heads,
-        x_features,
-        device=device,
-        requires_grad=True,
-        dtype=torch.bfloat16,
-    )
     ## Run the reference training loop to get baseline epoch times
     ref_epoch_time = ref_training_loop(
         mesh_dict,
@@ -285,14 +280,14 @@ if __name__ == "__main__":
     ring_config = config.RingAttentionConfig(
         device=device,
         send_in_forward=config.SendForward.X,
-        send_op=config.SendOp.ALLTOALL,
+        send_op=config.SendOp.HYBRID,
         save_for_backward=config.SaveBackward.X,
         save_scope=config.SaveScope.GLOBAL,
         send_backward=config.SendBackward.GATHER_DKV,
         offload=config.Offload.DISABLED,
     )
 
-    for combo in itertools.product(*[e for e in enum_fields.values()]):
+    for i, combo in enumerate(itertools.product(*enum_fields.values())):
         ring_config = config.RingAttentionConfig(
             **dict(zip(enum_fields.keys(), combo)),
             device=device,
@@ -316,5 +311,4 @@ if __name__ == "__main__":
             ref_time = np.average(ref_epoch_time[1:])
             # print(f"Average ref time is {ref_time}")
             print(f"Config: {ring_config} - Speedup {ref_time / parallel_time}")
-
     dist.destroy_process_group()
