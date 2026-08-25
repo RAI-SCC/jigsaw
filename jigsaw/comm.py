@@ -114,10 +114,12 @@ def comm_2way_p2p(
 def comm_1d_alltoall(
     data: torch.Tensor,
     buffer: torch.Tensor,
-    direction: int,
-    group: dist.ProcessGroup,
-    async_op: bool,
-    empty: torch.Tensor,
+    direction: Optional[int] = None,
+    send_recv_ranks: Optional[list[int]] = None,
+    group: dist.ProcessGroup = None,
+    async_op: bool = True,
+    empty: torch.Tensor = None,
+    group_size: Optional[int] = None,
     *args: Any,
     **kwargs: Any,
 ) -> tuple[torch.Tensor, Optional[dist.Work]]:
@@ -149,8 +151,14 @@ def comm_1d_alltoall(
     buffer: torch.Tensor
         Buffer in which the data is received.
     """
-    send_to = (group.rank() + direction) % group.size()
-    recv_from = (group.rank() - direction) % group.size()
+    group_size = group.size() if group_size is None else group_size
+    empty = torch.empty(0, device=data.device, dtype=data.dtype) # TODO: reinitializing empty
+    
+    if send_recv_ranks is None:
+        send_to = (group.rank() + direction) % group_size
+        recv_from = (group.rank() - direction) % group_size
+    else:
+        send_to, recv_from = send_recv_ranks
 
     send_list = [empty] * group.size()
     recv_list = [empty] * group.size()

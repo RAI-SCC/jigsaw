@@ -373,7 +373,7 @@ def _select_save_for_backward_fn(
                 return lambda x, kv: offloader.offload(x)
             # keep on GPU -- must clone if Xj will be overwritten by recv next iter
             if save_scope == SaveScope.GLOBAL:
-                return lambda x, kv: x.clone()
+                return lambda x, kv: x
             return lambda x, kv: x
 
         case SaveBackward.KV:

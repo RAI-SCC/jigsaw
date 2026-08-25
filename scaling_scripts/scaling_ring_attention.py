@@ -8,10 +8,10 @@ import torch
 import torch.distributed as dist
 
 from jigsaw import  utils
-from jigsaw.modules.attention import config
+from jigsaw.modules.attention import config, attention
 
 _default_layer_config: dict[str, int] = {
-    "x_features": 256,
+    "x_features": 2048,
     "batch_size": 1,
     "heads": 8,
     "n_global": 512,
@@ -103,7 +103,7 @@ def training_loop(
     mesh_dict: dict[str, dist.ProcessGroup],
     device: torch.device,
     local_rank: int,
-    ring_config: functional.RingAttentionConfig,
+    ring_config: config.RingAttentionConfig,
     layer_config: dict = _default_layer_config,
     steps: int = 10,
     epochs: int = 3,
@@ -115,19 +115,21 @@ def training_loop(
     torch.manual_seed(local_rank)
 
     # define stripped down attention calculation
-    ring_attention = attention_ring.Ring(
-        x_features=x_features,
+    ring_attention = attention.DistributedAttention(
+        in_dim=x_features,
         embed_dim=embed_dim,
-        output_dim=embed_dim,
+        out_dim=embed_dim,
         heads=heads,
         dropout_p=0.0,
         local_rank=local_rank,
         device=device,
-        parallelism=mesh_dict["model"].size(),
-        spatial_group=mesh_dict["model"],
+        spatial_group=mesh_dict["row"],
+        channel_group=mesh_dict["col"],
         bayesian=False,
+        qk_norm=False,
+        ring_attention=True,
         dtype=torch.bfloat16,
-        ring_config=ring_config,
+        config=ring_config,
     )
 
     n_epochs = epochs
@@ -144,25 +146,14 @@ def training_loop(
             requires_grad=True,
             dtype=torch.bfloat16,
         ) / (x_features**0.5)
-        qkv = torch.matmul(x, w_qkv.mT)
-        q, k, v = [
-            t.detach().requires_grad_(True)
-            for t in qkv.reshape(
-                batch_size, n_global // mesh_dict["model"].size(), 3, heads, embed_dim
-            ).permute(2, 0, 3, 1, 4)
-        ]
-
+        
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         train_one_epoch(
             ring_attention,
             x,
-            q,
-            k,
-            v,
-            w_qkv,
-            steps=steps,
+            steps=steps
         )
         end.record()
         torch.cuda.synchronize()
@@ -172,28 +163,30 @@ def training_loop(
     return epoch_times
 
 
-def train_one_epoch(model: torch.nn.Module, x, q, k, v, w_qkv, steps: int = 10):
+def train_one_epoch(model: torch.nn.Module, x: torch.Tensor, steps: int = 5):
     # X has shape [B, Nlocal, d//2]
     for _ in range(steps):
-        output = model(x.detach(), q, k, v, w_qkv, None)
-        output.sum().backward()
+        output = model(x.detach())
+        # print(f'R{dist.get_rank(group=None)}/{dist.get_world_size(group=None)} output {output.sum()}')
+        # output.sum().backward()
 
 
-def ref_training_loop(mesh_dict, layer_config, n_epochs, n_steps=10):
+def ref_training_loop(mesh_dict, device, n_epochs, n_steps=10):
     epoch_times = np.zeros(n_epochs)
     # define baseline model
-
-    model_baseline = attention_ring.RingBaseline(
-        x_features=x_features,
+    model_baseline = attention.DistributedAttention(
+        in_dim=x_features,
         embed_dim=embed_dim,
-        output_dim=embed_dim,
+        out_dim=embed_dim,
         heads=heads,
-        dropout=0.0,
+        dropout_p=0.0,
         local_rank=local_rank,
         device=device,
-        parallelism=mesh_dict["model"].size(),
-        spatial_group=mesh_dict["model"],
+        spatial_group=mesh_dict["row"],
+        channel_group=mesh_dict["col"],
         bayesian=False,
+        qk_norm=False,
+        ring_attention=False,
         dtype=torch.bfloat16,
     )
 
@@ -206,18 +199,11 @@ def ref_training_loop(mesh_dict, layer_config, n_epochs, n_steps=10):
             requires_grad=True,
             dtype=torch.bfloat16,
         ) / (x_features**0.5)
-        qkv = torch.matmul(x, w_qkv.mT)
-        q, k, v = [
-            t.detach().requires_grad_(True)
-            for t in qkv.reshape(batch_size, n_global, 3, heads, embed_dim).permute(
-                2, 0, 3, 1, 4
-            )
-        ]
 
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        train_one_epoch(model_baseline, x, q, k, v, w_qkv, steps=n_steps)
+        train_one_epoch(model_baseline, x, steps=n_steps)
         end.record()
         torch.cuda.synchronize()
 
@@ -233,7 +219,7 @@ if __name__ == "__main__":
     args = parse_args()
 
     device, localid, local_rank, world_size = utils.init_cuda()
-    mesh_dict = make_process_mesh("nccl")
+    mesh_dict = make_process_mesh("nccl", mesh_shape=[world_size, 1])
 
     # Process layer configuration overrides in the same way
     layer_config = _default_layer_config.copy()
@@ -281,7 +267,7 @@ if __name__ == "__main__":
     ## Run the reference training loop to get baseline epoch times
     ref_epoch_time = ref_training_loop(
         mesh_dict,
-        layer_config,
+        device,
         epochs,
         steps,
     )
@@ -290,7 +276,7 @@ if __name__ == "__main__":
     enum_fields = {
         "send_in_forward": config.SendForward,
         "save_for_backward": config.SaveBackward,
-        # "send_forward_op": ring_attn_fns.SendForwardOp,
+        "send_op": config.SendOp,
         "save_scope": config.SaveScope,
         "send_backward": config.SendBackward,
         "offload": config.Offload,
@@ -299,11 +285,11 @@ if __name__ == "__main__":
     ring_config = config.RingAttentionConfig(
         device=device,
         send_in_forward=config.SendForward.X,
+        send_op=config.SendOp.ALLTOALL,
         save_for_backward=config.SaveBackward.X,
-        send_forward_op=config.SendForwardOp.SENDRECV,
         save_scope=config.SaveScope.GLOBAL,
         send_backward=config.SendBackward.GATHER_DKV,
-        offload=configs.Offload.DISABLED,
+        offload=config.Offload.DISABLED,
     )
 
     for combo in itertools.product(*[e for e in enum_fields.values()]):
