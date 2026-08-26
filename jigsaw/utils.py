@@ -13,7 +13,7 @@ def set_all_seeds(seed: int = 0) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def init_cuda() -> tuple[str, int, int, int]:
+def init_cuda() -> tuple[torch.device, int, int, int]:
     """
     Initialize DistributedDataParallel.
 

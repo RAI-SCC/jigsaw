@@ -2,23 +2,18 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Any, Optional, Protocol, cast
-
-from .functional import _compute_kv, get_send_recv_ranks_hybrid
 
 import torch
 import torch.distributed as dist
 
 from .config import (
     RingAttentionConfig,
-    SaveBackward,
     SaveScope,
-    SendBackward,
     SendForward,
     SendOp,
 )
+from .functional import _compute_kv, get_send_recv_ranks_hybrid
 
 
 # --------------------------------------------------------------------------- #
@@ -58,29 +53,15 @@ def _attend_step(
 
     return _online_softmax_merge(out, lse, out_j, l_j)
 
+
 # --------------------------------------------------------------------------- #
 # forward implementations for ring attention
 # --------------------------------------------------------------------------- #
 
+
 def build_ring_forward(
     ring_config: RingAttentionConfig,
-) -> Callable[
-    [
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        float,
-        float,
-        dist.ProcessGroup,
-        torch.Tensor,
-        int,
-        int,
-        RingAttentionConfig,
-    ],
-    tuple[torch.Tensor, torch.Tensor, tuple],
-]:
+) -> Callable[..., tuple[torch.Tensor, torch.Tensor, tuple]]:
     """Pick the forward implementation (P2P vs broadcast) based on config."""
     match ring_config.send_op:
         case SendOp.BROADCAST:
@@ -93,7 +74,8 @@ def build_ring_forward(
             return hybrid_broadcast_forward
         case _:
             raise NotImplementedError(f"Unknown send_op: {ring_config.send_op}")
-        
+
+
 def broadcast_forward(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -223,6 +205,7 @@ def ring_forward(
     out = out.to(q.dtype)
     return out, lse, tuple(chunks_to_save)
 
+
 def hybrid_p2p_forward(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -277,7 +260,9 @@ def hybrid_p2p_forward(
                 tag=node_step,
                 empty=empty,
             )
-        send_recv_ranks = get_send_recv_ranks_hybrid(local_rank, gpus_per_node=gpus_per_node)
+        send_recv_ranks = get_send_recv_ranks_hybrid(
+            local_rank, gpus_per_node=gpus_per_node
+        )
         for step in range(gpus_per_node):
             if step + 1 < gpus_per_node:
                 recv_buf = (
@@ -320,6 +305,7 @@ def hybrid_p2p_forward(
     ring_config.wait_offloads()
     out = out.to(q.dtype)
     return out, lse, tuple(chunks_to_save)
+
 
 def hybrid_broadcast_forward(
     q: torch.Tensor,
@@ -384,8 +370,12 @@ def hybrid_broadcast_forward(
 
         # Kick off first intra-node broadcast
         recv_buf, handle = ring_config.forward_send_fn(
-            x=own_x, kv=own_kv, local_rank=intranode_rank,
-            group=intranode_group, src_rank=0, empty=empty,
+            x=own_x,
+            kv=own_kv,
+            local_rank=intranode_rank,
+            group=intranode_group,
+            src_rank=0,
+            empty=empty,
         )
         handle.wait()
         x_j, kv_j, kj, vj = ring_config.forward_recv_fn(recv_buf, x_j, kv_j, kj, vj)
@@ -431,5 +421,3 @@ def hybrid_broadcast_forward(
     ring_config.wait_offloads()
     out = out.to(q.dtype)
     return out, lse, tuple(chunks_to_save)
-
-

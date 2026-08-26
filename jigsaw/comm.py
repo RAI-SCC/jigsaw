@@ -116,9 +116,9 @@ def comm_1d_alltoall(
     buffer: torch.Tensor,
     direction: Optional[int] = None,
     send_recv_ranks: Optional[list[int]] = None,
-    group: dist.ProcessGroup = None,
+    group: Optional[dist.ProcessGroup] = None,
     async_op: bool = True,
-    empty: torch.Tensor = None,
+    empty: Optional[torch.Tensor] = None,
     group_size: Optional[int] = None,
     *args: Any,
     **kwargs: Any,
@@ -141,6 +141,10 @@ def comm_1d_alltoall(
         Boolean flag for whether communication should be asynchronous or not.
     empty: torch.Tensor
         Empty for computational reasons.
+    send_recv_ranks: list[int], optional
+        Explicit send and receive rank pair.
+    group_size: int, optional
+        Size of the process group.
     args: Any
         Additional args
     kwargs: Any
@@ -151,10 +155,16 @@ def comm_1d_alltoall(
     buffer: torch.Tensor
         Buffer in which the data is received.
     """
+    if group is None:
+        raise ValueError("group is required")
     group_size = group.size() if group_size is None else group_size
-    empty = torch.empty(0, device=data.device, dtype=data.dtype) # TODO: reinitializing empty
-    
+    empty = torch.empty(
+        0, device=data.device, dtype=data.dtype
+    )  # TODO: reinitializing empty
+
     if send_recv_ranks is None:
+        if direction is None:
+            raise ValueError("direction is required when send_recv_ranks is omitted")
         send_to = (group.rank() + direction) % group_size
         recv_from = (group.rank() - direction) % group_size
     else:
@@ -174,7 +184,7 @@ def comm_1d_p2p(
     buffer: torch.Tensor,
     direction: Optional[int] = None,
     send_recv_ranks: Optional[list[int]] = None,
-    group: dist.ProcessGroup = None,
+    group: Optional[dist.ProcessGroup] = None,
     async_op: bool = True,
     tag: int = 0,
     group_size: Optional[int] = None,
@@ -199,6 +209,10 @@ def comm_1d_p2p(
         Boolean flag to see if operation is asynchronous or not.
     tag: int
         Identifier tag for p2p ops.
+    send_recv_ranks: list[int], optional
+        Explicit send and receive rank pair.
+    group_size: int, optional
+        Size of the process group.
     args: Any
         Additional args
     kwargs: Any
@@ -209,16 +223,20 @@ def comm_1d_p2p(
     buffer: torch.Tensor
         Buffer in which the data is received.
     """
+    if group is None:
+        raise ValueError("group is required")
     group_size = group.size() if group_size is None else group_size
 
     if send_recv_ranks is None:
+        if direction is None:
+            raise ValueError("direction is required when send_recv_ranks is omitted")
         send_to = (group.rank() + direction) % group_size
         recv_from = (group.rank() - direction) % group_size
     else:
         send_to, recv_from = send_recv_ranks
     # print(f'R{dist.get_rank()} send to {send_to} recv from {recv_from}. Group size {group_size}')
     tag = tag * 8
-    
+
     send_op = dist.P2POp(dist.isend, data, group_peer=send_to, group=group)
     recv_op = dist.P2POp(dist.irecv, buffer, group_peer=recv_from, group=group)
     reqs = dist.batch_isend_irecv([send_op, recv_op])
@@ -248,13 +266,10 @@ def comm_broadcast(
 
     Parameters
     ----------
-    data_or_buffer: torch.Tensor
+    data: torch.Tensor
         Data to send.
-    buffer: torch.Tensor
-        Buffer to receive.
-    direction: int
-        positive direction = send to right.
-        negative direction = send to left.
+    src: int
+        Source rank for the broadcast.
     group: dist.ProcessGroup
         Process group within which to send data.
     async_op: bool
@@ -271,6 +286,5 @@ def comm_broadcast(
     buffer: torch.Tensor
         Buffer in which the data is received.
     """
-    
     handle = dist.broadcast(data, src=src, group=group, async_op=async_op)
     return data, handle

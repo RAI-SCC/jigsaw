@@ -56,6 +56,7 @@ class SendOp(Enum):
     BROADCAST = 2
     HYBRID_P2P = 3
     HYBRID_BROADCAST = 4
+    HYBRID = HYBRID_P2P
 
 
 # --------------------------------------------------------------------------- #
@@ -156,7 +157,7 @@ def _attn_core_math_backward(
 # forward comm fn selection
 # --------------------------------------------------------------------------- #
 def _select_forward_comm_fns(
-    send_op: SendOp, send_in_forward: SendForward, send_op_fn
+    send_op: SendOp, send_in_forward: SendForward, send_op_fn: Callable[..., Any]
 ) -> tuple[Callable, Callable]:
     """
     Define send and receive functions in the forward pass.
@@ -168,7 +169,7 @@ def _select_forward_comm_fns(
         is made in the forward pass.
     send_in_forward: SendForward
         Enumeration to define if X or KV are communicated in the forward.
-    ring_comm_fn: Callable
+    send_op_fn: Callable
         Function handle to the "ring" communication.
 
     Returns
@@ -264,7 +265,9 @@ def _select_forward_comm_fns(
                         *args: Any,
                         **kwargs: Any,
                     ) -> tuple[torch.Tensor, dist.Work]:
-                        recv_buf = kv if src_rank == local_rank else torch.empty_like(kv)
+                        recv_buf = (
+                            kv if src_rank == local_rank else torch.empty_like(kv)
+                        )
                         handle = dist.broadcast(
                             recv_buf, src=src_rank, group=group, async_op=True
                         )
@@ -285,7 +288,7 @@ def _select_forward_comm_fns(
                         group: dist.ProcessGroup,
                         tag: int,
                         empty: torch.Tensor,
-                        group_size=4,
+                        group_size: int = 4,
                         *args: Any,
                         **kwargs: Any,
                     ) -> tuple[torch.Tensor, dist.Work]:
@@ -298,7 +301,7 @@ def _select_forward_comm_fns(
                             async_op=True,
                             tag=tag,
                             empty=empty,
-                            group_size=group_size
+                            group_size=group_size,
                         )
                         return recv_buf, handle
 
@@ -326,9 +329,7 @@ def _select_forward_comm_fns(
                         )
                         return recv_buf, handle
         case _:
-            raise NotImplementedError(
-                f"send_op option {send_op} not implemented."
-            )
+            raise NotImplementedError(f"send_op option {send_op} not implemented.")
 
     match send_in_forward:
         case SendForward.X:
@@ -438,14 +439,14 @@ class RingAttentionConfig:
         self.save_for_backward_fn = _select_save_for_backward_fn(
             save_for_backward, save_scope, self.offloader
         )
-    
+
     # -- selection helpers ------------------------------------------------- #
-    def _get_data_to_send(self, x, kv):
+    def _get_data_to_send(self, x: torch.Tensor, kv: torch.Tensor) -> torch.Tensor:
         if self.send_in_forward == SendForward.X:
             return x
         elif self.send_in_forward == SendForward.KV:
             return kv
-        
+
     def _init_offloader(
         self, offload: Offload, device: torch.device
     ) -> Optional[NVLinkActivationOffloader]:
@@ -455,34 +456,34 @@ class RingAttentionConfig:
             return NVLinkActivationOffloader(device)
         raise ValueError(f"Unhandled offload option {offload}")
 
-    def _p2p_fn(self, send_op) -> Callable:
-        if dist.get_backend() == 'gloo':
+    def _p2p_fn(self, send_op: SendOp) -> Callable[..., Any]:
+        if dist.get_backend() == "gloo":
             return comm.comm_1d_p2p
         else:
-            match send_op: 
+            match send_op:
                 case SendOp.ALLTOALL:
                     return comm.comm_1d_alltoall
                 case SendOp.P2P:
                     return comm.comm_1d_p2p
                 case SendOp.BROADCAST:
                     return comm.comm_1d_alltoall
-        
+
         # Default comm function type is p2p
         return comm.comm_1d_p2p
-    
-    def _send_op_fn(self, send_op, device) -> Callable:
-        if dist.get_backend() == 'gloo':
+
+    def _send_op_fn(self, send_op: SendOp, device: torch.device) -> Callable[..., Any]:
+        if dist.get_backend() == "gloo":
             return comm.comm_1d_p2p
-        
-        match send_op: 
+
+        match send_op:
             case SendOp.ALLTOALL | SendOp.HYBRID_P2P:
-                if dist.get_backend() != 'gloo':
+                if dist.get_backend() != "gloo":
                     return comm.comm_1d_alltoall
             case SendOp.P2P | SendOp.HYBRID_P2P:
                 return comm.comm_1d_p2p
             case SendOp.BROADCAST:
                 return comm.comm_broadcast
-            
+
         return comm.comm_1d_p2p
 
     def _select_attn_core_forward_fn(self, device: torch.device) -> Callable:

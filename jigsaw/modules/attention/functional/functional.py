@@ -2,26 +2,14 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from collections.abc import Callable
-from typing import Any, Optional, Protocol, cast
+from typing import Any, Protocol, cast
 
 import torch
 import torch.distributed as dist
 
-from jigsaw.offload import NVLinkActivationOffloader
-from .forward import build_ring_forward
-from .backward import ring_backward
-
-from .config import (
+from ..config import (
     RingAttentionConfig,
-    SaveBackward,
-    SaveScope,
-    SendBackward,
-    SendForward,
-    SendOp,
 )
-
 
 
 def _compute_kv(
@@ -34,14 +22,13 @@ def _compute_kv(
     return kv, kv[0], kv[1]
 
 
-
-def get_send_recv_ranks_hybrid(local_rank, gpus_per_node=4):
+def get_send_recv_ranks_hybrid(local_rank: int, gpus_per_node: int = 4) -> list[int]:
+    """Return neighboring ranks for intra-node hybrid communication."""
     base_node_rank = local_rank // gpus_per_node
     send_to = (local_rank + 1) % gpus_per_node + base_node_rank * gpus_per_node
     recv_from = (local_rank - 1) % gpus_per_node + base_node_rank * gpus_per_node
 
     return [send_to, recv_from]
-
 
 
 class RingCtx(Protocol):
@@ -82,6 +69,8 @@ class RingAttentionFunction(torch.autograd.Function):
         world_size = dist.get_world_size(group)
         empty = torch.empty(0, device=x.device, dtype=x.dtype)
 
+        from .forward import build_ring_forward
+
         ring_forward_fn = build_ring_forward(config)
         out, lse, chunks_to_save = ring_forward_fn(
             q,
@@ -111,14 +100,21 @@ class RingAttentionFunction(torch.autograd.Function):
         ctx.mark_non_differentiable(lse)
         ctx.mark_non_differentiable(*chunks_to_save)
         ctx.save_for_backward(
-            q, out, x, lse.mT, w_qkv, *chunks_to_save # *[t for pair in chunks_to_save for t in pair]
+            q,
+            out,
+            x,
+            lse.mT,
+            w_qkv,
+            *chunks_to_save,  # *[t for pair in chunks_to_save for t in pair]
         )
         c = cast(RingCtx, ctx)
         c.empty = empty
         c.scale = scale
         c.local_rank = local_rank
         c.group = group
-        c.world_size = dist.get_world_size(group) # This is recomputed in forward and in setup context
+        c.world_size = dist.get_world_size(
+            group
+        )  # This is recomputed in forward and in setup context
         c.config = config
 
     @staticmethod
@@ -143,6 +139,8 @@ class RingAttentionFunction(torch.autograd.Function):
         """Backward pass of ring attention."""
         q, out, x, lse, w_qkv = ctx.saved_tensors[:5]
         chunks_to_save = ctx.saved_tensors[5:]
+
+        from .backward import ring_backward
 
         dq, dk, dv = ring_backward(
             dout,

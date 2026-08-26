@@ -1,6 +1,6 @@
 """Distributed attention modules."""
 
-from typing import Any, cast, Optional
+from typing import Any, Optional, cast
 
 import torch
 import torch.distributed as dist
@@ -9,7 +9,8 @@ from einops import rearrange
 from jigsaw import hooks
 from jigsaw.modules import linear
 
-from . import config, functional
+from . import config as attention_config
+from .functional.functional import RingAttentionFunction
 
 
 class DistributedAttention(torch.nn.Module):
@@ -33,7 +34,7 @@ class DistributedAttention(torch.nn.Module):
         qk_norm: bool = False,
         ring_attention: bool = False,
         dtype: torch.dtype = torch.float32,
-        config: Optional[config.RingAttentionConfig] = None,
+        config: Optional[attention_config.RingAttentionConfig] = None,
     ):
         """
 
@@ -59,14 +60,14 @@ class DistributedAttention(torch.nn.Module):
         self.dropout_p = dropout_p
         self.ring_attention = ring_attention
 
-        assert (
-            heads % self.channel_group.size() == 0
-        ), "heads is not divisible by channel group size"
+        assert heads % self.channel_group.size() == 0, (
+            "heads is not divisible by channel group size"
+        )
 
         if self.ring_attention:
-            assert (
-                spatial_group.size() > 1
-            ), "Cannot perform ring attention if spatial size is 1."
+            assert spatial_group.size() > 1, (
+                "Cannot perform ring attention if spatial size is 1."
+            )
 
         self.attn_core = (
             self._ring_attn_core if self.ring_attention else self._attn_core
@@ -123,7 +124,7 @@ class DistributedAttention(torch.nn.Module):
         self.empty = torch.empty(0, device=device)
 
         self.config = (
-            config.RingAttentionConfig(device=device)
+            attention_config.RingAttentionConfig(device=device)
             if ring_attention and config is None
             else config
         )
@@ -196,7 +197,7 @@ class DistributedAttention(torch.nn.Module):
             Output of attention computation.
 
         """
-        out = functional.RingAttentionFunction.apply(
+        out = RingAttentionFunction.apply(
             q,
             k,
             v,
@@ -419,12 +420,12 @@ class Attention(torch.nn.Module):
         channel_rank = process_mesh_dict[col_kw].rank()
         spatial_size = process_mesh_dict[row_kw].size()
 
-        assert (
-            attention.heads % channel_size == 0
-        ), f"num_heads={attention.heads} not divisible by channel size {channel_size}"
-        assert (
-            attention.embed_dim % spatial_size == 0
-        ), f"embed_dim={attention.embed_dim} not divisible by spatial size {spatial_size}"
+        assert attention.heads % channel_size == 0, (
+            f"num_heads={attention.heads} not divisible by channel size {channel_size}"
+        )
+        assert attention.embed_dim % spatial_size == 0, (
+            f"embed_dim={attention.embed_dim} not divisible by spatial size {spatial_size}"
+        )
 
         heads_per_shard = attention.heads // channel_size
 

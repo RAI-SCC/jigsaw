@@ -147,7 +147,7 @@ def training_loop(
             requires_grad=True,
             dtype=torch.bfloat16,
         ) / (x_features**0.5)
-        
+
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()

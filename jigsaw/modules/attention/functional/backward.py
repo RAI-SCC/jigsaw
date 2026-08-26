@@ -1,10 +1,20 @@
+"""Backward implementations for ring attention."""
+
 import torch
 import torch.distributed as dist
 
-from jigsaw.modules.attention.config import SendBackward, RingAttentionConfig, SaveScope, SendOp
+from jigsaw.modules.attention.config import (
+    RingAttentionConfig,
+    SaveScope,
+    SendBackward,
+    SendOp,
+)
 
-from .chunk_provider import _build_backward_chunk_provider, _LocalChunkProviderHybridBroadcast, _LocalChunkProvider
-
+from .chunk_provider import (
+    _build_backward_chunk_provider,
+    _LocalChunkProvider,
+    _LocalChunkProviderHybridBroadcast,
+)
 
 # --------------------------------------------------------------------------- #
 # backward: main loop
@@ -91,7 +101,6 @@ def ring_backward(
             ring_config, dk_buf, dv_buf, local_rank, seq_local, group
         )
     return dq, dk_local, dv_local
-
 
 
 # --------------------------------------------------------------------------- #
@@ -193,6 +202,7 @@ def _accumulate_dkv_gather(
     dv_buf[:, :, lo:hi] += dv_j
     return dk_buf, dv_buf
 
+
 def _accumulate_dkv_hybrid(
     dk_buf: torch.Tensor,
     dv_buf: torch.Tensor,
@@ -233,21 +243,21 @@ def _accumulate_dkv_hybrid(
         Accumulated buffers for dk and dv.
     """
     node, local = divmod(local_rank, 4)
-    if step % 4 == 0 : # temporarily block out this path
+    if step % 4 == 0:  # temporarily block out this path
         # node-dimension ring, local index fixed
         send_node = (node - (step)) % world_size // 4
-        send_to   = send_node * 4 + local
-        if local_rank >=4 and step == 4:
+        send_to = send_node * 4 + local
+        if local_rank >= 4 and step == 4:
             send_to = (local_rank - 4) % 4
         elif step == 4:
             send_to = local_rank + 4
-        if step == 0: 
+        if step == 0:
             send_to = local_rank
     else:
         # local-dimension ring, node fixed
         base_node_rank = local_rank // 4
-        send_to = (local_rank - step ) % 4 + base_node_rank * 4
-            
+        send_to = (local_rank - step) % 4 + base_node_rank * 4
+
         if step > 4 and local_rank >= 4:
             send_to -= 4
         elif step > 4 and local_rank < 4:
@@ -260,29 +270,34 @@ def _accumulate_dkv_hybrid(
     dv_buf[:, :, lo:hi] += dv_j
     return dk_buf, dv_buf
 
-def get_send_recv_ranks(rank, step, nodes, gpus_per_node):
+
+def get_send_recv_ranks(
+    rank: int, step: int, nodes: int, gpus_per_node: int
+) -> tuple[int, int]:
+    """Return the send and receive ranks for a hybrid backward step."""
     node, local = divmod(rank, gpus_per_node)
-    if step % gpus_per_node == 0 : # temporarily block out this path
+    if step % gpus_per_node == 0:  # temporarily block out this path
         # node-dimension ring, local index fixed
-        send_node = (node - (step+1)) % nodes
-        recv_node = (node + (step+1)) % nodes
-        send_to   = send_node * gpus_per_node + local
+        send_node = (node - (step + 1)) % nodes
+        recv_node = (node + (step + 1)) % nodes
+        send_to = send_node * gpus_per_node + local
         recv_from = recv_node * gpus_per_node + local
     else:
         # local-dimension ring, node fixed
-        
+
         base_node_rank = rank // gpus_per_node
-        send_to = (rank - step ) % gpus_per_node + base_node_rank * gpus_per_node
+        send_to = (rank - step) % gpus_per_node + base_node_rank * gpus_per_node
         recv_from = (rank + step) % gpus_per_node + base_node_rank * gpus_per_node
-        
+
         if step > 4 and rank >= 4:
             send_to -= 4
             recv_from -= 4
         elif step > 4 and rank < 4:
             send_to += 4
-            recv_from += 4 
+            recv_from += 4
 
     return send_to, recv_from
+
 
 def _accumulate_dkv_send(
     ring_config: RingAttentionConfig,
@@ -336,25 +351,46 @@ def _accumulate_dkv_send(
     if ring_config.send_op == SendOp.HYBRID_P2P:
         # step 1 --> rank 3 2-> rank 2, 3-> rank 1
         # step 4 --> rank 4, 5 --> rank 7, 6 -> rank
-        
+
         # Rank 4: step 1 --> rank 7
-        send_recv_ranks = get_send_recv_ranks(dist.get_rank(group), step=step, nodes=group.size()//4, gpus_per_node=4)
+        send_recv_ranks = get_send_recv_ranks(
+            dist.get_rank(group), step=step, nodes=group.size() // 4, gpus_per_node=4
+        )
         if step % 4 != 0:
             # groups are not set correctly
             # since we artificially have a group of size 4
             # rank 6 needs to send to 5 in the beginning, and not 3
             # print(f'DKV: R{dist.get_rank()}  step {step} sending to {send_recv_ranks[0]} recv from {send_recv_ranks[1]}')
             recv_buf, _ = ring_config.p2p_fn(
-                dkv, recv_buf, send_recv_ranks=send_recv_ranks, group=group, async_op=False, empty=empty, step=step
-            ) 
+                dkv,
+                recv_buf,
+                send_recv_ranks=send_recv_ranks,
+                group=group,
+                async_op=False,
+                empty=empty,
+                step=step,
+            )
         else:
             # print(f'DKV: R{dist.get_rank()}  step {step} sending to {send_recv_ranks[0]} recv from {send_recv_ranks[1]}')
             recv_buf, _ = ring_config.p2p_fn(
-                dkv, recv_buf,  send_recv_ranks=send_recv_ranks, group=group, async_op=False, empty=empty, step=step, group_size=8
+                dkv,
+                recv_buf,
+                send_recv_ranks=send_recv_ranks,
+                group=group,
+                async_op=False,
+                empty=empty,
+                step=step,
+                group_size=8,
             )
     else:
         recv_buf, _ = ring_config.p2p_fn(
-            dkv, recv_buf, group.size()-step, group=group, async_op=False, empty=empty, step=step
+            dkv,
+            recv_buf,
+            group.size() - step,
+            group=group,
+            async_op=False,
+            empty=empty,
+            step=step,
         )
     dkj_r, dvj_r = torch.chunk(recv_buf, 2, dim=0)
     dk_buf += dkj_r
@@ -404,4 +440,3 @@ def postprocess_dkv(
             return dk_buf[:, :, lo:hi], dv_buf[:, :, lo:hi]
         case SendBackward.SEND_DKV:
             return dk_buf, dv_buf
-
