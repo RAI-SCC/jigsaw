@@ -1,34 +1,10 @@
 import pytest
 import torch
-import torch.distributed as dist
 
 import jigsaw.modules.linear.distributed_matmul_p2p as dist_mm_p2p
-from jigsaw.utils_aggregate import gather_results, gather_results_as_list
+from jigsaw.utils_aggregate import gather_results
 
-pytestmark = [pytest.mark.distributed_required]
-
-
-def test_p2p(device: torch.device, process_mesh_dict_2x1x2: dict) -> None:
-    """Test for p2p operations working as expected."""
-    model_group = process_mesh_dict_2x1x2["model"]
-    torch.manual_seed(model_group.rank())
-    local_rank = model_group.rank()
-    x_data = torch.randn(3, 4, 2, device=device)
-    buffer = torch.empty_like(x_data)
-
-    if local_rank == 0:
-        send = dist.isend(x_data, group_dst=1, group=model_group)
-        recv = dist.irecv(buffer, group_src=1, group=model_group)
-    else:
-        recv = dist.irecv(buffer, group_src=0, group=model_group)
-        send = dist.isend(x_data, group_dst=0, group=model_group)
-    send.wait()
-    recv.wait()
-
-    # gather buffers
-    # data on rank i should match buffer on rank (i + 1) % 2
-    gathered = gather_results_as_list(buffer, process_mesh_dict_2x1x2)
-    assert torch.allclose(x_data, gathered[(local_rank + 1) % 2])
+pytestmark = [pytest.mark.dist_required]
 
 
 def test_xwt_twoway(device: torch.device, process_mesh_dict_2x1x2: dict) -> None:

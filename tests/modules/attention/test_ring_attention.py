@@ -9,7 +9,7 @@ from jigsaw.utils_aggregate import (
 )
 from tests.process_mesh import *
 
-pytestmark = [pytest.mark.distributed_required]
+pytestmark = [pytest.mark.dist_required]
 
 # def test_backward(device, process_mesh):
 #     local_rank = dist.get_rank(group=process_mesh["row"])

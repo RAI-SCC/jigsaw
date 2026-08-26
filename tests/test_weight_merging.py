@@ -6,7 +6,7 @@ import torch
 from jigsaw.modules import conv, conv_transpose, linear
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
 
-pytestmark = [pytest.mark.distributed_required]
+pytestmark = [pytest.mark.dist_required]
 
 
 @pytest.mark.dist(4)

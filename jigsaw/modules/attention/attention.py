@@ -219,13 +219,12 @@ class DistributedAttention(torch.nn.Module):
 
         x: (n_batch, vars, n_lat, n_lon)
         """
-        # x_local: [n_batch, n_lat, n_lon, variables]
-        x_patches_local = x
         # shape: [n_batches, spatial_tokens, channel_tokens]
-        qkv = self.qkv(x_patches_local)
+        qkv = self.qkv(x)
         qkv = rearrange(
             qkv, "... n i (three h d) -> three ... n h i d", three=3, h=self.heads
         )
+        
         if self.qk_norm:
             q, k, v = qkv.unbind(0)
             q = self.q_norm(q).to(torch.bfloat16)

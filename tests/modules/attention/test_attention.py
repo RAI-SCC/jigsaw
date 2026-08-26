@@ -7,8 +7,7 @@ from jigsaw.utils_aggregate import (
 )
 from tests.process_mesh import *
 
-pytestmark = [pytest.mark.distributed_required]
-
+pytestmark = [pytest.mark.dist_required]
 
 @pytest.mark.dist(4)
 def test_init_attention(device: torch.device, process_mesh_dict_2x2: dict) -> None:
@@ -36,7 +35,6 @@ def test_init_attention(device: torch.device, process_mesh_dict_2x2: dict) -> No
     )
     assert torch.allclose(weights[0], weights[2])
     assert not torch.allclose(weights[0], weights[1])
-
 
 @pytest.mark.dist(4)
 def test_attention_sync(device: torch.device, process_mesh_dict_2x2: dict) -> None:

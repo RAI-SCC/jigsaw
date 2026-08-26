@@ -7,7 +7,7 @@ import jigsaw.modules.conv_transpose as conv_transpose
 from jigsaw.utils_aggregate import gather_results_as_list
 from tests.process_mesh import *
 
-pytestmark = [pytest.mark.distributed_required]
+pytestmark = [pytest.mark.dist_required]
 
 
 class TestConv2d:
