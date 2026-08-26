@@ -54,7 +54,8 @@ class SendOp(Enum):
     ALLTOALL = 0
     P2P = 1
     BROADCAST = 2
-    HYBRID = 3
+    HYBRID_P2P = 3
+    HYBRID_BROADCAST = 4
 
 
 # --------------------------------------------------------------------------- #
@@ -273,7 +274,7 @@ def _select_forward_comm_fns(
                     raise NotImplementedError(
                         f"send_in_forward option {send_in_forward} not implemented."
                     )
-        case SendOp.HYBRID:
+        case SendOp.HYBRID_P2P:
             match send_in_forward:
                 case SendForward.X:
 
@@ -412,7 +413,7 @@ class RingAttentionConfig:
         self,
         device: torch.device = torch.device("cuda"),
         send_in_forward: SendForward = SendForward.X,
-        send_op: SendOp = SendOp.HYBRID,
+        send_op: SendOp = SendOp.HYBRID_P2P,
         save_for_backward: SaveBackward = SaveBackward.KV,
         save_scope: SaveScope = SaveScope.GLOBAL,
         send_backward: SendBackward = SendBackward.SEND_DKV,
@@ -474,10 +475,10 @@ class RingAttentionConfig:
             return comm.comm_1d_p2p
         
         match send_op: 
-            case SendOp.ALLTOALL | SendOp.HYBRID:
+            case SendOp.ALLTOALL | SendOp.HYBRID_P2P:
                 if dist.get_backend() != 'gloo':
                     return comm.comm_1d_alltoall
-            case SendOp.P2P | SendOp.HYBRID:
+            case SendOp.P2P | SendOp.HYBRID_P2P:
                 return comm.comm_1d_p2p
             case SendOp.BROADCAST:
                 return comm.comm_broadcast

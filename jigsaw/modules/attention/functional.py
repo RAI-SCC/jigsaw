@@ -555,7 +555,7 @@ def build_ring_forward(
     """Pick the forward implementation (P2P vs broadcast) based on config."""
     if ring_config.send_op == SendOp.BROADCAST:
         return broadcast_forward
-    elif ring_config.send_op == SendOp.HYBRID:
+    elif ring_config.send_op == SendOp.HYBRID_P2P:
         return hybrid_p2p_forward
     elif ring_config.send_op == SendOp.P2P or ring_config.send_op == SendOp.ALLTOALL:
         return ring_forward
@@ -840,7 +840,6 @@ class _LocalChunkProvider(_BackwardChunkProvider):
             step=step,
         )
 
-
 class _LocalChunkProviderBroadcast(_LocalChunkProvider):
     def __init__(
         self,
@@ -908,7 +907,7 @@ class _LocalChunkProviderBroadcast(_LocalChunkProvider):
         return
 
 
-class _LocalChunkProviderHybrid(_LocalChunkProvider):
+class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
     def __init__(
         self,
         ring_config: RingAttentionConfig,
@@ -1065,7 +1064,168 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
             group=self.group,
             async_op=True,
             empty=self.empty,
-            step=step,        )
+            step=step,        
+        )
+        
+_INTRANODE_GROUPS: dict[tuple[int, int], dist.ProcessGroup] = {}
+
+
+def _get_intranode_group(
+    group: dist.ProcessGroup, gpus_per_node: int
+) -> dist.ProcessGroup:
+    """Return (and cache) the sub-group containing this rank's node.
+
+    NOTE: `dist.new_group` is collective -- every rank must build every
+    sub-group in the same order. Ranks passed to `new_group` are WORLD ranks,
+    so this assumes `group` is WORLD (as the P2P path already does when it
+    derives peers from `local_rank`).
+    """
+    key = (id(group), gpus_per_node)
+    cached = _INTRANODE_GROUPS.get(key)
+    if cached is not None:
+        return cached
+
+    world = dist.get_world_size(group)
+    rank = dist.get_rank(group)
+    mine = None
+    for start in range(0, world, gpus_per_node):
+        ranks = list(range(start, min(start + gpus_per_node, world)))
+        sub = dist.new_group(ranks=ranks)
+        if rank in ranks:
+            mine = sub
+    assert mine is not None
+    _INTRANODE_GROUPS[key] = mine
+    return mine
+
+
+class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
+    """Hybrid ring provider: broadcast intra-node, P2P inter-node.
+
+    Each rank owns exactly one buffer per "node round" (`_node_chunk`):
+      * round 0  -> its own local x/kv
+      * round k  -> the chunk received over the inter-node P2P link
+
+    Within a round of `gpus_per_node` steps, the rank whose local index equals
+    `step % gpus_per_node` broadcasts its `_node_chunk` to the node sub-group,
+    so after a full round every rank has seen every chunk resident on the node.
+    Unlike the P2P variant there is no intra-node rotation, so `_node_chunk`
+    is stable for the whole round and can be handed straight to the inter-node
+    send at the round boundary.
+    """
+
+    def __init__(
+        self,
+        ring_config: RingAttentionConfig,
+        chunks_to_save: tuple[torch.Tensor, ...],
+        x: torch.Tensor,
+        w_qkv: torch.Tensor,
+        b: int,
+        seq_local: int,
+        h: int,
+        d: int,
+        group: dist.ProcessGroup,
+        empty: torch.Tensor,
+        local_rank: torch.Tensor,
+        gpus_per_node: int = 4,
+        intranode_group: Optional[dist.ProcessGroup] = None,
+    ) -> None:
+        super().__init__(
+            ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
+        )
+        self._recv_buf = torch.empty_like(
+            x if ring_config.send_in_forward == SendForward.X else chunks_to_save[0]
+        )
+        self._handle: Optional[dist.Work] = None
+        self.local_rank = int(local_rank)
+        self.gpus_per_node = gpus_per_node
+        self.intranode_group = intranode_group or _get_intranode_group(
+            group, gpus_per_node
+        )
+        # First rank of this node; broadcast sources are node_base + local idx.
+        self._node_base = (self.local_rank // gpus_per_node) * gpus_per_node
+
+        self._node_chunk: Optional[torch.Tensor] = None
+        self._internode_handle = None
+        self._internode_recv_buf = None
+
+    def _launch_internode(self, data: torch.Tensor, step: int) -> None:
+        buf = torch.empty_like(data)
+        self._internode_recv_buf, self._internode_handle = self.config.p2p_fn(
+            data=data,
+            buffer=buf,
+            direction=self.gpus_per_node,
+            group=self.group,
+            async_op=True,
+            tag=step % self.gpus_per_node,
+            empty=self.empty,
+            group_size=self.group.size(),
+        )
+
+    def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if step == 0:
+            chunk = self._materialize_chunk0()
+            if self.config.save_for_backward == SaveBackward.KV:
+                kv = chunk
+            else:
+                kv, _, _ = _compute_kv(
+                    chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
+                )
+            self._node_chunk = (
+                self.x if self.config.send_in_forward == SendForward.X else kv
+            )
+            # Round 0's inter-node hop is launched immediately; it lands at
+            # step == gpus_per_node. Clone so the broadcast below (which may
+            # alias `_node_chunk`) can never race the in-flight send.
+            self._launch_internode(self._node_chunk.clone(), step)
+
+        elif step % self.gpus_per_node == 0:
+            # New node round: adopt the chunk that arrived from the previous node.
+            assert self._internode_handle is not None
+            self._internode_handle.wait()
+            self._node_chunk = self._internode_recv_buf
+
+        assert self._node_chunk is not None
+
+        # Intra-node broadcast. The source rank reuses its own buffer in place
+        # (contents unchanged); everyone else receives into scratch.
+        src = self._node_base + (step % self.gpus_per_node)
+        self._recv_buf = (
+            self._node_chunk
+            if self.local_rank == src
+            else torch.empty_like(self._node_chunk)
+        )
+        self._handle = dist.broadcast(
+            self._recv_buf, src=src, group=self.intranode_group, async_op=True
+        )
+        self._handle.wait()
+        recv_buf = self._recv_buf
+
+        if self.config.send_in_forward == SendForward.X:
+            kv, kj, vj = _compute_kv(
+                recv_buf, self.w_qkv, self.b, self.seq_local, self.h, self.d
+            )
+            kj, vj = kj.contiguous(), vj.contiguous()
+        else:
+            kv = recv_buf
+            kj, vj = kv[0].contiguous(), kv[1].contiguous()
+
+        return kj, vj, kv
+
+    def maybe_forward(self, step: int, world_size: int) -> None:
+        # Intra-node movement is handled entirely by the broadcast in `get`;
+        # the only thing left to schedule is the next inter-node hop, issued a
+        # full round ahead so it overlaps the `gpus_per_node` local broadcasts.
+        if step == 0 or step >= world_size - 1:
+            return
+        if step % self.gpus_per_node != 0:
+            return
+        if step // self.gpus_per_node >= (self.group.size() // self.gpus_per_node) - 1:
+            return
+
+        assert self._node_chunk is not None
+        # `_node_chunk` is read-only for the rest of the round (broadcast source
+        # or idle), so it can be sent without a copy.
+        self._launch_internode(self._node_chunk, step)
 
 
 def _build_backward_chunk_provider(
@@ -1111,43 +1271,59 @@ def _build_backward_chunk_provider(
     -------
     _BackwardChunkProvider
     """
-    if ring_config.save_scope == SaveScope.GLOBAL:
-        return _GlobalChunkProvider(
-            ring_config, chunks_to_save, w_qkv, b, seq_local, h, d
-        )
-    elif ring_config.save_scope == SaveScope.LOCAL:
-        if ring_config.send_op == SendOp.P2P or ring_config.send_op == SendOp.ALLTOALL:
-            return _LocalChunkProvider(
-                ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
+    match ring_config.save_scope:
+        case SaveScope.GLOBAL:    
+            return _GlobalChunkProvider(
+                ring_config, chunks_to_save, w_qkv, b, seq_local, h, d
             )
-        elif ring_config.send_op == SendOp.BROADCAST:
-            return _LocalChunkProviderBroadcast(
-                ring_config,
-                chunks_to_save,
-                x,
-                w_qkv,
-                b,
-                seq_local,
-                h,
-                d,
-                group,
-                empty,
-                local_rank,
-            )
-        elif ring_config.send_op == SendOp.HYBRID:
-            return _LocalChunkProviderHybrid(
-                ring_config,
-                chunks_to_save,
-                x,
-                w_qkv,
-                b,
-                seq_local,
-                h,
-                d,
-                group,
-                empty,
-                local_rank,
-            )
+        case SaveScope.LOCAL:
+            match ring_config.send_op:
+                case SendOp.P2P | SendOp.ALLTOALL:    
+                    return _LocalChunkProvider(
+                        ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
+                    )
+                case SendOp.BROADCAST
+                    return _LocalChunkProviderBroadcast(
+                        ring_config,
+                        chunks_to_save,
+                        x,
+                        w_qkv,
+                        b,
+                        seq_local,
+                        h,
+                        d,
+                        group,
+                        empty,
+                        local_rank,
+                    )
+                case SendOp.HYBRID_P2P:
+                    return _LocalChunkProviderHybridP2P(
+                        ring_config,
+                        chunks_to_save,
+                        x,
+                        w_qkv,
+                        b,
+                        seq_local,
+                        h,
+                        d,
+                        group,
+                        empty,
+                        local_rank,
+                    )
+                case SendOp.HYBRID_BROADCAST
+                    return _LocalChunkProviderHybridBroadcast(
+                        ring_config,
+                        chunks_to_save,
+                        x,
+                        w_qkv,
+                        b,
+                        seq_local,
+                        h,
+                        d,
+                        group,
+                        empty,
+                        local_rank,
+                    )
     else:
         raise NotImplementedError
 
@@ -1192,7 +1368,7 @@ def accumulate_dkv(
     """Fold this step's locally computed dk_j, dv_j into the running dK, dV."""
     match ring_config.send_backward:
         case SendBackward.GATHER_DKV:
-            if ring_config.send_op == SendOp.HYBRID:
+            if ring_config.send_op == SendOp.HYBRID_P2P:
                 return _accumulate_dkv_hybrid(
                     dk_buf, dv_buf, dk_j, dv_j, step, seq_local, local_rank, world_size
                 )
@@ -1391,7 +1567,7 @@ def _accumulate_dkv_send(
     recv_buf = torch.empty_like(dkv)
 
     # hybrid
-    if ring_config.send_op == SendOp.HYBRID:
+    if ring_config.send_op == SendOp.HYBRID_P2P:
         # step 1 --> rank 3 2-> rank 2, 3-> rank 1
         # step 4 --> rank 4, 5 --> rank 7, 6 -> rank
         
@@ -1513,7 +1689,7 @@ def ring_backward(
         if (
             ring_config.send_op == SendOp.P2P
             or (ring_config.save_scope == SaveScope.GLOBAL)
-            or ring_config.send_op == SendOp.HYBRID
+            or ring_config.send_op == SendOp.HYBRID_P2P
         ):
             dk_buf, dv_buf = accumulate_dkv(
                 ring_config,
@@ -1536,7 +1712,7 @@ def ring_backward(
                 dv_local = dv_j
 
         if isinstance(chunk_provider, _LocalChunkProvider) or isinstance(
-            chunk_provider, _LocalChunkProviderHybrid
+            chunk_provider, _LocalChunkProviderHybridBroadcast
         ):
             chunk_provider.maybe_forward(step, world_size)
 
