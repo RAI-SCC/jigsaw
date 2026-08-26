@@ -448,7 +448,7 @@ def test_ring_forward_backward(
 )
 @pytest.mark.parametrize(
     "send_op",
-    [config.SendOp.HYBRID],
+    [config.SendOp.ALLTOALL, config.SendOp.P2P, config.SendOp.BROADCAST, config.SendOp.HYBRID_P2P, config.SendOp.HYBRID_BROADCAST],
 )
 @pytest.mark.parametrize("save_scope", [config.SaveScope.LOCAL])
 @pytest.mark.parametrize(
@@ -521,6 +521,22 @@ def test_ring_hybrid(
 
     # just test helper function forward
     ring_forward = functional.build_ring_forward(ring_config)
+    forward_kwargs = {
+        "empty": empty,
+        "local_rank": local_rank,
+        "world_size": world_size,
+        "ring_config": ring_config,
+    }
+    if send_op == config.SendOp.HYBRID_BROADCAST:
+        forward_kwargs.update(
+            {
+                "internode_group": process_mesh_dict["internode"],
+                "intranode_group": process_mesh_dict["intranode"],
+            }
+        )
+    else:
+        forward_kwargs["group"] = process_mesh_dict["model"]
+
     out, lse, chunks_to_save = ring_forward(
         q_local,
         k_local,
@@ -529,11 +545,7 @@ def test_ring_hybrid(
         w_qkv,
         scale,
         0.0,
-        group=process_mesh_dict["model"],
-        empty=empty,
-        local_rank=local_rank,
-        world_size=world_size,
-        ring_config=ring_config,
+        **forward_kwargs,
     )
 
     out_full = gather_1d_results(out, process_mesh_dict, dim=2)

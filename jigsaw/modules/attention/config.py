@@ -56,7 +56,6 @@ class SendOp(Enum):
     BROADCAST = 2
     HYBRID_P2P = 3
     HYBRID_BROADCAST = 4
-    HYBRID = HYBRID_P2P
 
 
 # --------------------------------------------------------------------------- #
