@@ -358,7 +358,7 @@ class _LocalChunkProvider(_BackwardChunkProvider):
             self._recv_buf, self._handle = self.config.send_op_fn(
                 send_buf,
                 self._recv_buf,
-                1,
+                direction=-1,
                 group=self.group,
                 async_op=True,
                 empty=self.empty,
@@ -412,7 +412,7 @@ class _LocalChunkProvider(_BackwardChunkProvider):
         self._recv_buf, self._handle = self.config.send_op_fn(
             self._recv_buf,
             next_recv,
-            1,
+            direction=-1,
             group=self.group,
             async_op=True,
             empty=self.empty,
@@ -492,7 +492,7 @@ class _LocalChunkProviderBroadcast(_LocalChunkProvider):
             kv, _, _ = _compute_kv(
                 chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
             )
-
+        
         # Kick off the first ring send of whichever buffer is configured.
         send_buf = self.x if self.config.send_in_forward == SendForward.X else kv
         self._recv_buf = (

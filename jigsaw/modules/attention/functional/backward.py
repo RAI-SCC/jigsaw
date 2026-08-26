@@ -57,18 +57,19 @@ def ring_backward(
 
     for step in range(world_size):
         kj, vj, kv = chunk_provider.get(step)
-
         dq_j, dk_j, dv_j = ring_config.attn_core_backward_fn(
             dout, q, kj, vj, out, lse, scale, seq_local, seq_local
         )
         dq += dq_j
         del dq_j, kj, vj, kv
 
-        if (
-            ring_config.send_op == SendOp.P2P
-            or (ring_config.save_scope == SaveScope.GLOBAL)
-            or ring_config.send_op == SendOp.HYBRID_P2P
-        ):
+        if ring_config.send_backward != SendBackward.GATHER_DKV and ring_config.send_op == SendOp.BROADCAST:
+            dist.all_reduce(dk_j, op=dist.ReduceOp.SUM, group=group)
+            dist.all_reduce(dv_j, op=dist.ReduceOp.SUM, group=group)
+            if local_rank == step:
+                dk_buf = dk_j
+                dv_buf = dv_j
+        else:
             dk_buf, dv_buf = accumulate_dkv(
                 ring_config,
                 dk_buf,
@@ -82,24 +83,21 @@ def ring_backward(
                 group,
                 empty,
             )
-        else:
-            dist.all_reduce(dk_j, op=dist.ReduceOp.SUM, group=group)
-            dist.all_reduce(dv_j, op=dist.ReduceOp.SUM, group=group)
-            if local_rank == step:
-                dk_local = dk_j
-                dv_local = dv_j
+        # else:
+        #     # TODO: I don't think this has to be blocking.
+        #     print(f'R {dist.get_rank()} step {step} dk_j {dk_j.sum()}')
+            
 
         if isinstance(chunk_provider, _LocalChunkProvider) or isinstance(
             chunk_provider, _LocalChunkProviderHybridBroadcast
         ):
             chunk_provider.maybe_forward(step, world_size)
 
-    if ring_config.send_op != SendOp.BROADCAST or (
-        ring_config.save_scope == SaveScope.GLOBAL
-    ):
-        dk_local, dv_local = postprocess_dkv(
-            ring_config, dk_buf, dv_buf, local_rank, seq_local, group
-        )
+    dk_local, dv_local = postprocess_dkv(
+        ring_config, dk_buf, dv_buf, local_rank, seq_local, group
+    )
+    if dist.get_rank()==0:
+        print(f'dq {dq.sum()}, dk_local {dk_local.sum()}')
     return dq, dk_local, dv_local
 
 
@@ -196,7 +194,7 @@ def _accumulate_dkv_gather(
     dk_buf, dv_buf: torch.Tensor, torch.Tensor
         Accumulated buffers for dk and dv.
     """
-    global_chunk_idx = (local_rank - step) % world_size
+    global_chunk_idx = (local_rank + step) % world_size
     lo, hi = global_chunk_idx * seq_local, (global_chunk_idx + 1) * seq_local
     dk_buf[:, :, lo:hi] += dk_j
     dv_buf[:, :, lo:hi] += dv_j
@@ -278,16 +276,16 @@ def get_send_recv_ranks(
     node, local = divmod(rank, gpus_per_node)
     if step % gpus_per_node == 0:  # temporarily block out this path
         # node-dimension ring, local index fixed
-        send_node = (node - (step + 1)) % nodes
-        recv_node = (node + (step + 1)) % nodes
+        send_node = (node + (step + 1)) % nodes
+        recv_node = (node - (step + 1)) % nodes
         send_to = send_node * gpus_per_node + local
         recv_from = recv_node * gpus_per_node + local
     else:
         # local-dimension ring, node fixed
 
         base_node_rank = rank // gpus_per_node
-        send_to = (rank - step) % gpus_per_node + base_node_rank * gpus_per_node
-        recv_from = (rank + step) % gpus_per_node + base_node_rank * gpus_per_node
+        send_to = (rank + step) % gpus_per_node + base_node_rank * gpus_per_node
+        recv_from = (rank - step) % gpus_per_node + base_node_rank * gpus_per_node
 
         if step > 4 and rank >= 4:
             send_to -= 4
@@ -386,7 +384,7 @@ def _accumulate_dkv_send(
         recv_buf, _ = ring_config.p2p_fn(
             dkv,
             recv_buf,
-            group.size() - step,
+            step,
             group=group,
             async_op=False,
             empty=empty,

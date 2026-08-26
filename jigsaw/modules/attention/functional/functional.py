@@ -59,8 +59,8 @@ def get_send_recv_ranks_hybrid(local_rank: int, gpus_per_node: int = 4) -> list[
         Two-element list containing the send rank and receive rank.
     """
     base_node_rank = local_rank // gpus_per_node
-    send_to = (local_rank + 1) % gpus_per_node + base_node_rank * gpus_per_node
-    recv_from = (local_rank - 1) % gpus_per_node + base_node_rank * gpus_per_node
+    send_to = (local_rank - 1) % gpus_per_node + base_node_rank * gpus_per_node
+    recv_from = (local_rank + 1) % gpus_per_node + base_node_rank * gpus_per_node
 
     return [send_to, recv_from]
 

@@ -7,7 +7,7 @@ from collections.abc import Callable
 import torch
 import torch.distributed as dist
 
-from .config import (
+from jigsaw.modules.attention.config import (
     RingAttentionConfig,
     SaveScope,
     SendForward,
@@ -140,7 +140,7 @@ def broadcast_forward(
                 kv=kv,
                 local_rank=local_rank,
                 group=group,
-                src_rank=step + 1,
+                src_rank=(step + 1) % group.size(),
                 empty=empty,
             )
 
@@ -197,7 +197,7 @@ def ring_forward(
 
     # Kick off first send
     recv_buf, handle = ring_config.forward_send_fn(
-        x_j, kv_j, direction=1, group=group, tag=0, empty=empty
+        x_j, kv_j, direction=-1, group=group, tag=0, empty=empty
     )
 
     for step in range(world_size):
@@ -216,7 +216,7 @@ def ring_forward(
             # receive either x or kv_j
             x_j, kv_j, kj, vj = ring_config.forward_recv_fn(recv_buf, x_j, kv_j, kj, vj)
             recv_buf, handle = ring_config.forward_send_fn(
-                x_j, kv_j, direction=1, group=group, tag=step, empty=empty
+                x_j, kv_j, direction=-1, group=group, tag=step, empty=empty
             )
 
     ring_config.wait_offloads()
