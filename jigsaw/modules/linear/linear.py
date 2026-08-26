@@ -451,7 +451,7 @@ class DistributedMatMulXWT(torch.nn.Module):
         return 0
 
     def forward(
-        self, x: torch.Tensor, w: torch.Tensor, b: torch.Tensor = None
+        self, x: torch.Tensor, w: torch.Tensor, b: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Forward pass of linear layer (XWT) distributed across two processes.

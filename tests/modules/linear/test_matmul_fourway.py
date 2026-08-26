@@ -5,7 +5,6 @@ import torch.distributed as dist
 import jigsaw.modules.linear.distributed_matmul as dist_mm
 import jigsaw.modules.linear.distributed_matmul_p2p as dist_mm_p2p
 from jigsaw.utils_aggregate import gather_results
-from tests.process_mesh import process_mesh_dict_2x2
 
 pytestmark = [pytest.mark.dist_required, pytest.mark.dist(4)]
 

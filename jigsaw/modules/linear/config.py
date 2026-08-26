@@ -4,7 +4,6 @@ from typing import Callable, Optional, Union
 
 import torch
 from torch.nn.parameter import Parameter
-import torch.distributed as dist
 
 from . import distributed_matmul as dist_mm
 from . import distributed_matmul_p2p as dist_mm_p2p
@@ -166,9 +165,7 @@ class LinearConfig:
         else:
             return self._bias_sum
 
-    def _bias_sum(
-        self, grad_output: torch.Tensor
-    ) -> torch.Tensor:
+    def _bias_sum(self, grad_output: torch.Tensor) -> torch.Tensor:
         """
         Calculate grad wrt bias.
 

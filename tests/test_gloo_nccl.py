@@ -1,4 +1,5 @@
 """Test cpu-gpu backend being initialized"""
+
 import math
 import os
 import subprocess
@@ -7,7 +8,12 @@ import pytest
 import torch
 import torch.distributed as dist
 
-pytestmark = [pytest.mark.gpu_required, pytest.mark.dist_required, pytest.mark.hybrid_dist_env]
+pytestmark = [
+    pytest.mark.gpu_required,
+    pytest.mark.dist_required,
+    pytest.mark.hybrid_dist_env,
+]
+
 
 @pytest.fixture(scope="module")
 def dist_gloo_env():
