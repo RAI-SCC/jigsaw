@@ -22,6 +22,24 @@ from .functional import _compute_kv, get_send_recv_ranks_hybrid
 def _online_softmax_merge(
     o1: torch.Tensor, l1: torch.Tensor, o2: torch.Tensor, l2: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Merge two partial online-softmax attention results.
+
+    Parameters
+    ----------
+    o1 : torch.Tensor
+        Output tensor for the first partial result.
+    l1 : torch.Tensor
+        Log-sum-exp values for the first partial result.
+    o2 : torch.Tensor
+        Output tensor for the second partial result.
+    l2 : torch.Tensor
+        Log-sum-exp values for the second partial result.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Result returned by the operation.
+    """
     l_new = torch.logaddexp(l1, l2)
     e1 = torch.exp(l1 - l_new)
     e2 = torch.exp(l2 - l_new)

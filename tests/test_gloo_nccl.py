@@ -86,12 +86,30 @@ def make_process_mesh(
 
 @pytest.mark.no_dist_env
 def test_backend_init(dist_gloo_env):
+    """Verify distributed backend initialization.
+
+    Parameters
+    ----------
+    dist_gloo_env : Any
+        Distributed environment configuration for the Gloo backend.
+
+    """
     _ = make_process_mesh("nccl", [4, 2])
     return
 
 
 @pytest.mark.no_dist_env
 def test_cpu_allreduce(dist_gloo_env, device):
+    """Verify CPU all-reduce communication.
+
+    Parameters
+    ----------
+    dist_gloo_env : Any
+        Distributed environment configuration for the Gloo backend.
+    device : Any
+        Device on which tensors and communication are placed.
+
+    """
     _ = make_process_mesh("nccl", [4, 2])
     x = torch.randn(40, 4, device=device)
     x_cpu = x.to("cpu")

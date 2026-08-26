@@ -14,6 +14,14 @@ class RollConfig:
         self,
         device: torch.device = torch.device("cuda"),
     ):
+        """Initialize the object.
+
+        Parameters
+        ----------
+        device : torch.device
+            Device on which tensors and communication are placed.
+
+        """
         self.comm_halo_1d_fn = self._comm_halo_1d_fn_selection(device)
 
     def _comm_halo_1d_fn_selection(self, device: torch.device) -> Callable:

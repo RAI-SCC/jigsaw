@@ -32,6 +32,16 @@ from jigsaw.modules.attention import DistributedAttention
 
 @pytest.mark.dist(4)
 def test_autocast_attention(process_mesh_dict_2x2: dict, device) -> None:
+    """Verify attention under autocast.
+
+    Parameters
+    ----------
+    process_mesh_dict_2x2 : dict
+        Two-by-two process mesh used by the test.
+    device : Any
+        Device on which tensors and communication are placed.
+
+    """
     process_mesh_dict = process_mesh_dict_2x2
     local_rank = process_mesh_dict["model"].rank()
     batch, seq, in_dim, out_dim = 1, 2, 8, 8

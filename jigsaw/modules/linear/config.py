@@ -21,6 +21,22 @@ class LinearConfig:
         linear_layer: bool = True,
         device: torch.device = torch.device("cuda"),
     ):
+        """Initialize the object.
+
+        Parameters
+        ----------
+        parallelism : int
+            Number of processes participating in parallel execution.
+        bias : torch.Tensor | None
+            Optional bias parameter.
+        bayesian : bool
+            Whether to use Bayesian parameter sampling.
+        linear_layer : bool
+            Whether the operation belongs to a linear layer.
+        device : torch.device
+            Device on which tensors and communication are placed.
+
+        """
         self.mm_kernels = self._mm_kernel_selection(parallelism, device)
         self.grad_bias = self._grad_bias_selection(parallelism, bias, bayesian)
         self.add_bias = self._add_bias_selection(bias, bayesian)
@@ -319,6 +335,20 @@ class LinearConfig:
     def _select_xw_xtw_fused_kernel(
         self, parallelism: int, device: torch.device = torch.device("cuda")
     ) -> Callable:
+        """Select the fused matrix multiplication kernel.
+
+        Parameters
+        ----------
+        parallelism : int
+            Number of processes participating in parallel execution.
+        device : torch.device
+            Device on which tensors and communication are placed.
+
+        Returns
+        -------
+        Callable
+            Result returned by the operation.
+        """
         if device.type == "cuda":
             match parallelism:
                 case 1:

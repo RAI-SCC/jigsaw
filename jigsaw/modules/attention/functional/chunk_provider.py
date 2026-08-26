@@ -331,6 +331,18 @@ class _LocalChunkProvider(_BackwardChunkProvider):
         return chunk
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return the tensors for the requested ring step.
+
+        Parameters
+        ----------
+        step : int
+            Current ring step.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+            Result returned by the operation.
+        """
         if step == 0:
             chunk = self._materialize_chunk0()
             if self.config.save_for_backward == SaveBackward.KV:
@@ -423,6 +435,34 @@ class _LocalChunkProviderBroadcast(_LocalChunkProvider):
         empty: torch.Tensor,
         local_rank: int,
     ) -> None:
+        """Initialize the object.
+
+        Parameters
+        ----------
+        ring_config : RingAttentionConfig
+            Ring-attention configuration controlling communication and saving.
+        chunks_to_save : tuple[torch.Tensor, ...]
+            Saved activation chunks used to reconstruct backward inputs.
+        x : torch.Tensor
+            Input tensor.
+        w_qkv : torch.Tensor
+            Fused query, key, and value projection weights.
+        b : int
+            Batch size for the input tensors.
+        seq_local : int
+            Sequence length owned by the current process.
+        h : int
+            Number of attention heads.
+        d : int
+            Embedding dimension per attention head.
+        group : dist.ProcessGroup
+            Process group used for distributed communication.
+        empty : torch.Tensor
+            Empty tensor used by communication helpers.
+        local_rank : int
+            Rank of the current process.
+
+        """
         super().__init__(
             ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
         )
@@ -433,7 +473,18 @@ class _LocalChunkProviderBroadcast(_LocalChunkProvider):
         self.local_rank = local_rank
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return the tensors for the requested ring step.
 
+        Parameters
+        ----------
+        step : int
+            Current ring step.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+            Result returned by the operation.
+        """
         chunk = self._materialize_chunk0()
         if self.config.save_for_backward == SaveBackward.KV:
             kv = chunk
@@ -472,6 +523,16 @@ class _LocalChunkProviderBroadcast(_LocalChunkProvider):
         return kj, vj, kv
 
     def maybe_forward(self, step: int, world_size: int) -> None:
+        """Schedule communication for the next ring step.
+
+        Parameters
+        ----------
+        step : int
+            Current ring step.
+        world_size : int
+            Number of processes in the distributed group.
+
+        """
         return
 
 
@@ -490,6 +551,34 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
         empty: torch.Tensor,
         local_rank: int,
     ) -> None:
+        """Initialize the object.
+
+        Parameters
+        ----------
+        ring_config : RingAttentionConfig
+            Ring-attention configuration controlling communication and saving.
+        chunks_to_save : tuple[torch.Tensor, ...]
+            Saved activation chunks used to reconstruct backward inputs.
+        x : torch.Tensor
+            Input tensor.
+        w_qkv : torch.Tensor
+            Fused query, key, and value projection weights.
+        b : int
+            Batch size for the input tensors.
+        seq_local : int
+            Sequence length owned by the current process.
+        h : int
+            Number of attention heads.
+        d : int
+            Embedding dimension per attention head.
+        group : dist.ProcessGroup
+            Process group used for distributed communication.
+        empty : torch.Tensor
+            Empty tensor used by communication helpers.
+        local_rank : int
+            Rank of the current process.
+
+        """
         super().__init__(
             ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
         )
@@ -503,6 +592,18 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
         self._internode_recv_buf = None
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return the tensors for the requested ring step.
+
+        Parameters
+        ----------
+        step : int
+            Current ring step.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+            Result returned by the operation.
+        """
         if step == 0:
             chunk = self._materialize_chunk0()
             if self.config.save_for_backward == SaveBackward.KV:
@@ -591,6 +692,16 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
         return kj, vj, kv
 
     def maybe_forward(self, step: int, world_size: int) -> None:
+        """Schedule communication for the next ring step.
+
+        Parameters
+        ----------
+        step : int
+            Current ring step.
+        world_size : int
+            Number of processes in the distributed group.
+
+        """
         if step == 0 or step >= world_size - 1:
             return
 
@@ -700,6 +811,38 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
         gpus_per_node: int = 4,
         intranode_group: Optional[dist.ProcessGroup] = None,
     ) -> None:
+        """Initialize the object.
+
+        Parameters
+        ----------
+        ring_config : RingAttentionConfig
+            Ring-attention configuration controlling communication and saving.
+        chunks_to_save : tuple[torch.Tensor, ...]
+            Saved activation chunks used to reconstruct backward inputs.
+        x : torch.Tensor
+            Input tensor.
+        w_qkv : torch.Tensor
+            Fused query, key, and value projection weights.
+        b : int
+            Batch size for the input tensors.
+        seq_local : int
+            Sequence length owned by the current process.
+        h : int
+            Number of attention heads.
+        d : int
+            Embedding dimension per attention head.
+        group : dist.ProcessGroup
+            Process group used for distributed communication.
+        empty : torch.Tensor
+            Empty tensor used by communication helpers.
+        local_rank : int
+            Rank of the current process.
+        gpus_per_node : int
+            Number of processes assigned to each node.
+        intranode_group : Optional[dist.ProcessGroup]
+            Process group containing ranks on the current node.
+
+        """
         super().__init__(
             ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
         )
@@ -720,6 +863,16 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
         self._internode_recv_buf = None
 
     def _launch_internode(self, data: torch.Tensor, step: int) -> None:
+        """Launch an inter-node tensor transfer.
+
+        Parameters
+        ----------
+        data : torch.Tensor
+            Tensor data to communicate.
+        step : int
+            Current ring step.
+
+        """
         buf = torch.empty_like(data)
         self._internode_recv_buf, self._internode_handle = self.config.p2p_fn(
             data=data,
@@ -733,6 +886,18 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
         )
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return the tensors for the requested ring step.
+
+        Parameters
+        ----------
+        step : int
+            Current ring step.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+            Result returned by the operation.
+        """
         if step == 0:
             chunk = self._materialize_chunk0()
             if self.config.save_for_backward == SaveBackward.KV:
@@ -786,6 +951,16 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
         # Intra-node movement is handled entirely by the broadcast in `get`;
         # the only thing left to schedule is the next inter-node hop, issued a
         # full round ahead so it overlaps the `gpus_per_node` local broadcasts.
+        """Schedule communication for the next ring step.
+
+        Parameters
+        ----------
+        step : int
+            Current ring step.
+        world_size : int
+            Number of processes in the distributed group.
+
+        """
         if step == 0 or step >= world_size - 1:
             return
         if step % self.gpus_per_node != 0:

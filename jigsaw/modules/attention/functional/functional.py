@@ -15,7 +15,28 @@ from ..config import (
 def _compute_kv(
     xj: torch.Tensor, w_qkv: torch.Tensor, b: int, n_local: int, h: int, d: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Compute (K, V) from X. Returns (KV, Kj, Vj). KV is the underlying buffer."""
+    """Compute key and value tensors from an input chunk.
+
+    Parameters
+    ----------
+    xj : torch.Tensor
+        Input sequence chunk.
+    w_qkv : torch.Tensor
+        Fused query, key, and value projection weights.
+    b : int
+        Batch size.
+    n_local : int
+        Sequence length of the local chunk.
+    h : int
+        Number of attention heads.
+    d : int
+        Embedding dimension per head.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        The fused key-value tensor and its key and value views.
+    """
     kv = (
         (xj @ w_qkv[d * h :, :].mT).reshape(b, n_local, 2, h, d).permute(2, 0, 3, 1, 4)
     ).contiguous()
@@ -23,7 +44,20 @@ def _compute_kv(
 
 
 def get_send_recv_ranks_hybrid(local_rank: int, gpus_per_node: int = 4) -> list[int]:
-    """Return neighboring ranks for intra-node hybrid communication."""
+    """Return neighboring ranks for intra-node hybrid communication.
+
+    Parameters
+    ----------
+    local_rank : int
+        Rank of the current process.
+    gpus_per_node : int, default=4
+        Number of processes assigned to each node.
+
+    Returns
+    -------
+    list[int]
+        Two-element list containing the send rank and receive rank.
+    """
     base_node_rank = local_rank // gpus_per_node
     send_to = (local_rank + 1) % gpus_per_node + base_node_rank * gpus_per_node
     recv_from = (local_rank - 1) % gpus_per_node + base_node_rank * gpus_per_node
@@ -65,7 +99,34 @@ class RingAttentionFunction(torch.autograd.Function):
         local_rank: int,
         config: RingAttentionConfig,
     ) -> tuple[torch.Tensor, torch.Tensor, tuple]:
-        """Forward pass of ring attention."""
+        """Run the ring-attention forward pass.
+
+        Parameters
+        ----------
+        q, k, v : torch.Tensor
+            Local query, key, and value tensors.
+        x : torch.Tensor
+            Local input sequence chunk.
+        w_qkv : torch.Tensor
+            Fused query, key, and value projection weights.
+        scale : float
+            Attention scaling factor.
+        dropout_p : float
+            Attention dropout probability.
+        group : dist.ProcessGroup
+            Distributed process group used for ring communication.
+        empty : torch.Tensor
+            Empty tensor used by communication helpers.
+        local_rank : int
+            Rank within the process group.
+        config : RingAttentionConfig
+            Ring-attention configuration.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, tuple]
+            Attention output, log-sum-exp values, and saved chunks.
+        """
         world_size = dist.get_world_size(group)
         empty = torch.empty(0, device=x.device, dtype=x.dtype)
 
@@ -94,7 +155,17 @@ class RingAttentionFunction(torch.autograd.Function):
         inputs: Any,
         output: Any,
     ) -> None:
-        """Set up context. inputs/output match `forward`'s signature/return."""
+        """Save forward results and metadata for the backward pass.
+
+        Parameters
+        ----------
+        ctx : torch.autograd.function.FunctionCtx
+            Autograd context receiving saved tensors and metadata.
+        inputs : Any
+            Inputs passed to :meth:`forward`.
+        output : Any
+            Values returned by :meth:`forward`.
+        """
         q, k, v, x, w_qkv, scale, dropout_p, group, empty, local_rank, config = inputs
         out, lse, chunks_to_save = output
         ctx.mark_non_differentiable(lse)
@@ -136,7 +207,25 @@ class RingAttentionFunction(torch.autograd.Function):
         None,
         None,
     ]:
-        """Backward pass of ring attention."""
+        """Compute gradients for the ring-attention forward pass.
+
+        Parameters
+        ----------
+        ctx : RingCtx
+            Autograd context containing saved tensors and configuration.
+        dout : torch.Tensor
+            Gradient of the attention output.
+        grad_l : torch.Tensor
+            Gradient placeholder for the non-differentiable log-sum-exp output.
+        grad_kv_chunks : list
+            Gradient placeholders for saved non-differentiable chunks.
+
+        Returns
+        -------
+        tuple[torch.Tensor, ...]
+            Gradients for differentiable inputs followed by ``None`` for
+            non-differentiable inputs.
+        """
         q, out, x, lse, w_qkv = ctx.saved_tensors[:5]
         chunks_to_save = ctx.saved_tensors[5:]
 

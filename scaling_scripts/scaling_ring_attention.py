@@ -20,6 +20,13 @@ _default_layer_config: dict[str, int] = {
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the scaling run.
+
+    Returns
+    -------
+    argparse.Namespace
+        Result returned by the operation.
+    """
     parser = argparse.ArgumentParser(
         description="Scale ring attention experiments with flexible configuration"
     )
@@ -167,6 +174,18 @@ def training_loop(
 # @torch.no_grad()
 def train_one_epoch(model: torch.nn.Module, x: torch.Tensor, steps: int = 5):
     # X has shape [B, Nlocal, d//2]
+    """Train the model for one epoch.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Model whose parameters are processed.
+    x : torch.Tensor
+        Input tensor.
+    steps : int
+        Number of ring or training steps.
+
+    """
     for _ in range(steps):
         output = model(x.detach())
         # print(f'R{dist.get_rank(group=None)}/{dist.get_world_size(group=None)} output {output.sum()}')
@@ -174,6 +193,20 @@ def train_one_epoch(model: torch.nn.Module, x: torch.Tensor, steps: int = 5):
 
 
 def ref_training_loop(mesh_dict, device, n_epochs, n_steps=10):
+    """Run the reference training loop.
+
+    Parameters
+    ----------
+    mesh_dict : Any
+        Process mesh mapping parallel dimensions to process groups.
+    device : Any
+        Device on which tensors and communication are placed.
+    n_epochs : Any
+        Number of training epochs.
+    n_steps : Any
+        Number of training steps.
+
+    """
     epoch_times = np.zeros(n_epochs)
     # define baseline model
     model_baseline = attention.DistributedAttention(

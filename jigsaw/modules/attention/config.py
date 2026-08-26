@@ -194,6 +194,33 @@ def _select_forward_comm_fns(
                         *args: Any,
                         **kwargs: Any,
                     ) -> tuple[torch.Tensor, dist.Work]:
+                        """Send the configured tensor to the next ring participant.
+
+                        Parameters
+                        ----------
+                        x : torch.Tensor
+                            Input tensor.
+                        kv : torch.Tensor
+                            Fused key-value tensor.
+                        direction : int
+                            Direction of the ring communication.
+                        group : dist.ProcessGroup
+                            Process group used for distributed communication.
+                        tag : int
+                            Communication tag.
+                        empty : torch.Tensor
+                            Empty tensor used by communication helpers.
+
+                        args : tuple[Any, ...]
+                            Additional positional arguments.
+                        kwargs : dict[str, Any]
+                            Additional keyword arguments.
+
+                        Returns
+                        -------
+                        tuple[torch.Tensor, dist.Work]
+                            Result returned by the operation.
+                        """
                         recv_buf = torch.empty_like(x)
                         recv_buf, handle = send_op_fn(
                             x,
@@ -218,6 +245,33 @@ def _select_forward_comm_fns(
                         *args: Any,
                         **kwargs: Any,
                     ) -> tuple[torch.Tensor, dist.Work]:
+                        """Send the configured tensor to the next ring participant.
+
+                        Parameters
+                        ----------
+                        x : torch.Tensor
+                            Input tensor.
+                        kv : torch.Tensor
+                            Fused key-value tensor.
+                        direction : int
+                            Direction of the ring communication.
+                        group : dist.ProcessGroup
+                            Process group used for distributed communication.
+                        tag : int
+                            Communication tag.
+                        empty : torch.Tensor
+                            Empty tensor used by communication helpers.
+
+                        args : tuple[Any, ...]
+                            Additional positional arguments.
+                        kwargs : dict[str, Any]
+                            Additional keyword arguments.
+
+                        Returns
+                        -------
+                        tuple[torch.Tensor, dist.Work]
+                            Result returned by the operation.
+                        """
                         recv_buf = torch.empty_like(kv)
                         recv_buf, handle = send_op_fn(
                             kv,
@@ -248,6 +302,31 @@ def _select_forward_comm_fns(
                         *args: Any,
                         **kwargs: Any,
                     ) -> tuple[torch.Tensor, dist.Work]:
+                        """Send the configured tensor to the next ring participant.
+
+                        Parameters
+                        ----------
+                        x : torch.Tensor
+                            Input tensor.
+                        kv : torch.Tensor
+                            Fused key-value tensor.
+                        local_rank : int
+                            Rank of the current process.
+                        group : dist.ProcessGroup
+                            Process group used for distributed communication.
+                        src_rank : int
+                            Source rank for the broadcast.
+
+                        args : tuple[Any, ...]
+                            Additional positional arguments.
+                        kwargs : dict[str, Any]
+                            Additional keyword arguments.
+
+                        Returns
+                        -------
+                        tuple[torch.Tensor, dist.Work]
+                            Result returned by the operation.
+                        """
                         recv_buf = x if src_rank == local_rank else torch.empty_like(x)
                         handle = dist.broadcast(
                             recv_buf, src=src_rank, group=group, async_op=True
@@ -265,6 +344,31 @@ def _select_forward_comm_fns(
                         *args: Any,
                         **kwargs: Any,
                     ) -> tuple[torch.Tensor, dist.Work]:
+                        """Send the configured tensor to the next ring participant.
+
+                        Parameters
+                        ----------
+                        x : torch.Tensor
+                            Input tensor.
+                        kv : torch.Tensor
+                            Fused key-value tensor.
+                        local_rank : int
+                            Rank of the current process.
+                        group : dist.ProcessGroup
+                            Process group used for distributed communication.
+                        src_rank : int
+                            Source rank for the broadcast.
+
+                        args : tuple[Any, ...]
+                            Additional positional arguments.
+                        kwargs : dict[str, Any]
+                            Additional keyword arguments.
+
+                        Returns
+                        -------
+                        tuple[torch.Tensor, dist.Work]
+                            Result returned by the operation.
+                        """
                         recv_buf = (
                             kv if src_rank == local_rank else torch.empty_like(kv)
                         )
@@ -292,6 +396,35 @@ def _select_forward_comm_fns(
                         *args: Any,
                         **kwargs: Any,
                     ) -> tuple[torch.Tensor, dist.Work]:
+                        """Send the configured tensor to the next ring participant.
+
+                        Parameters
+                        ----------
+                        x : torch.Tensor
+                            Input tensor.
+                        kv : torch.Tensor
+                            Fused key-value tensor.
+                        direction : int
+                            Direction of the ring communication.
+                        group : dist.ProcessGroup
+                            Process group used for distributed communication.
+                        tag : int
+                            Communication tag.
+                        empty : torch.Tensor
+                            Empty tensor used by communication helpers.
+                        group_size : int
+                            Number of ranks in the communication group.
+
+                        args : tuple[Any, ...]
+                            Additional positional arguments.
+                        kwargs : dict[str, Any]
+                            Additional keyword arguments.
+
+                        Returns
+                        -------
+                        tuple[torch.Tensor, dist.Work]
+                            Result returned by the operation.
+                        """
                         recv_buf = torch.empty_like(x)
                         recv_buf, handle = send_op_fn(
                             x,
@@ -317,6 +450,33 @@ def _select_forward_comm_fns(
                         *args: Any,
                         **kwargs: Any,
                     ) -> tuple[torch.Tensor, dist.Work]:
+                        """Send the configured tensor to the next ring participant.
+
+                        Parameters
+                        ----------
+                        x : torch.Tensor
+                            Input tensor.
+                        kv : torch.Tensor
+                            Fused key-value tensor.
+                        direction : int
+                            Direction of the ring communication.
+                        group : dist.ProcessGroup
+                            Process group used for distributed communication.
+                        tag : int
+                            Communication tag.
+                        empty : torch.Tensor
+                            Empty tensor used by communication helpers.
+
+                        args : tuple[Any, ...]
+                            Additional positional arguments.
+                        kwargs : dict[str, Any]
+                            Additional keyword arguments.
+
+                        Returns
+                        -------
+                        tuple[torch.Tensor, dist.Work]
+                            Result returned by the operation.
+                        """
                         recv_buf = torch.empty_like(kv)
                         recv_buf, handle = send_op_fn(
                             kv,
@@ -341,6 +501,26 @@ def _select_forward_comm_fns(
                 kj: torch.Tensor,
                 vj: torch.Tensor,
             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+                """Update the received ring tensors.
+
+                Parameters
+                ----------
+                recv_buf : torch.Tensor
+                    Tensor buffer receiving communicated data.
+                xj : torch.Tensor
+                    Input sequence chunk.
+                kv_j : torch.Tensor
+                    Fused key-value tensor for the current ring chunk.
+                kj : torch.Tensor
+                    Key tensor for the current ring chunk.
+                vj : torch.Tensor
+                    Value tensor for the current ring chunk.
+
+                Returns
+                -------
+                tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+                    Result returned by the operation.
+                """
                 return recv_buf, kv_j, kj, vj
 
         case SendForward.KV:
@@ -352,6 +532,26 @@ def _select_forward_comm_fns(
                 kj: torch.Tensor,
                 vj: torch.Tensor,
             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+                """Update the received ring tensors.
+
+                Parameters
+                ----------
+                recv_buf : torch.Tensor
+                    Tensor buffer receiving communicated data.
+                xj : torch.Tensor
+                    Input sequence chunk.
+                kv_j : torch.Tensor
+                    Fused key-value tensor for the current ring chunk.
+                kj : torch.Tensor
+                    Key tensor for the current ring chunk.
+                vj : torch.Tensor
+                    Value tensor for the current ring chunk.
+
+                Returns
+                -------
+                tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+                    Result returned by the operation.
+                """
                 kv_j = recv_buf
                 return xj, kv_j, kv_j[0], kv_j[1]
 
@@ -383,6 +583,20 @@ def _select_save_for_backward_fn(
             if isinstance(offloader, NVLinkActivationOffloader):
 
                 def offload_kv(x: torch.Tensor, kv: torch.Tensor) -> torch.Tensor:
+                    """Offload the key-value tensor for backward computation.
+
+                    Parameters
+                    ----------
+                    x : torch.Tensor
+                        Input tensor.
+                    kv : torch.Tensor
+                        Fused key-value tensor.
+
+                    Returns
+                    -------
+                    torch.Tensor
+                        Result returned by the operation.
+                    """
                     kv_cpu = cast(torch.Tensor, offloader.offload(kv))
                     del kv
                     return kv_cpu
@@ -420,6 +634,26 @@ class RingAttentionConfig:
         send_backward: SendBackward = SendBackward.SEND_DKV,
         offload: Offload = Offload.DISABLED,
     ):
+        """Initialize the object.
+
+        Parameters
+        ----------
+        device : torch.device
+            Device on which tensors and communication are placed.
+        send_in_forward : SendForward
+            Tensor representation communicated during the forward pass.
+        send_op : SendOp
+            Communication operation used by the ring.
+        save_for_backward : SaveBackward
+            Tensor representation saved for the backward pass.
+        save_scope : SaveScope
+            Scope in which intermediate tensors are saved.
+        send_backward : SendBackward
+            Strategy used to communicate backward gradients.
+        offload : Offload
+            Activation offloading policy.
+
+        """
         self.send_in_forward = send_in_forward
         self.save_for_backward = save_for_backward
         self.send_op = send_op
@@ -442,6 +676,20 @@ class RingAttentionConfig:
 
     # -- selection helpers ------------------------------------------------- #
     def _get_data_to_send(self, x: torch.Tensor, kv: torch.Tensor) -> torch.Tensor:
+        """Select the tensor representation used for communication.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor.
+        kv : torch.Tensor
+            Fused key-value tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Result returned by the operation.
+        """
         if self.send_in_forward == SendForward.X:
             return x
         elif self.send_in_forward == SendForward.KV:
@@ -450,6 +698,20 @@ class RingAttentionConfig:
     def _init_offloader(
         self, offload: Offload, device: torch.device
     ) -> Optional[NVLinkActivationOffloader]:
+        """Initialize the configured activation offloader.
+
+        Parameters
+        ----------
+        offload : Offload
+            Activation offloading policy.
+        device : torch.device
+            Device on which tensors and communication are placed.
+
+        Returns
+        -------
+        Optional[NVLinkActivationOffloader]
+            Result returned by the operation.
+        """
         if offload == Offload.DISABLED:
             return None
         elif offload == Offload.CPU:
@@ -457,6 +719,18 @@ class RingAttentionConfig:
         raise ValueError(f"Unhandled offload option {offload}")
 
     def _p2p_fn(self, send_op: SendOp) -> Callable[..., Any]:
+        """Select the point-to-point communication function.
+
+        Parameters
+        ----------
+        send_op : SendOp
+            Communication operation used by the ring.
+
+        Returns
+        -------
+        Callable[..., Any]
+            Result returned by the operation.
+        """
         if dist.get_backend() == "gloo":
             return comm.comm_1d_p2p
         else:
@@ -472,6 +746,20 @@ class RingAttentionConfig:
         return comm.comm_1d_p2p
 
     def _send_op_fn(self, send_op: SendOp, device: torch.device) -> Callable[..., Any]:
+        """Select the configured communication function.
+
+        Parameters
+        ----------
+        send_op : SendOp
+            Communication operation used by the ring.
+        device : torch.device
+            Device on which tensors and communication are placed.
+
+        Returns
+        -------
+        Callable[..., Any]
+            Result returned by the operation.
+        """
         if dist.get_backend() == "gloo":
             return comm.comm_1d_p2p
 
@@ -487,6 +775,18 @@ class RingAttentionConfig:
         return comm.comm_1d_p2p
 
     def _select_attn_core_forward_fn(self, device: torch.device) -> Callable:
+        """Select the attention forward kernel for the device.
+
+        Parameters
+        ----------
+        device : torch.device
+            Device on which tensors and communication are placed.
+
+        Returns
+        -------
+        Callable
+            Result returned by the operation.
+        """
         if device.type == "cuda":
             return _attn_core_flash
         elif device.type == "cpu":
@@ -494,6 +794,18 @@ class RingAttentionConfig:
         raise ValueError(f"No valid attention core forward for device {device.type}")
 
     def _select_attn_core_backward_fn(self, device: torch.device) -> Callable:
+        """Select the attention backward kernel for the device.
+
+        Parameters
+        ----------
+        device : torch.device
+            Device on which tensors and communication are placed.
+
+        Returns
+        -------
+        Callable
+            Result returned by the operation.
+        """
         if device.type == "cuda":
             return _attn_core_flash_backward
         elif device.type == "cpu":

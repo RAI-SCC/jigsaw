@@ -64,6 +64,26 @@ class DistributedRoll(torch.nn.Module):
         dtype: torch.dtype = torch.float32,
         config: Optional[RollConfig] = None,
     ) -> None:
+        """Initialize the object.
+
+        Parameters
+        ----------
+        shifts : tuple[int, ...]
+            Per-dimension roll offsets.
+        dims : tuple[int, ...]
+            Dimensions along which the operation is applied.
+        distributed_dims : tuple[int, ...]
+            Dimensions partitioned across distributed ranks.
+        spatial_groups : tuple[dist.ProcessGroup, ...]
+            Spatial process groups used by the operation.
+        device : torch.device
+            Device on which tensors and communication are placed.
+        dtype : torch.dtype
+            Data type used for tensor values.
+        config : Optional[RollConfig]
+            Operation configuration object.
+
+        """
         super().__init__()
         if len(distributed_dims) != len(spatial_groups):
             raise ValueError("distributed_dims and spatial_groups must align")
