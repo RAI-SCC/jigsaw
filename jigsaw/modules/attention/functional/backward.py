@@ -63,31 +63,20 @@ def ring_backward(
         dq += dq_j
         del dq_j, kj, vj, kv
 
-        if ring_config.send_backward != SendBackward.GATHER_DKV and ring_config.send_op == SendOp.BROADCAST:
-            dist.all_reduce(dk_j, op=dist.ReduceOp.SUM, group=group)
-            dist.all_reduce(dv_j, op=dist.ReduceOp.SUM, group=group)
-            if local_rank == step:
-                dk_buf = dk_j
-                dv_buf = dv_j
-        else:
-            dk_buf, dv_buf = accumulate_dkv(
-                ring_config,
-                dk_buf,
-                dv_buf,
-                dk_j,
-                dv_j,
-                step,
-                world_size,
-                seq_local,
-                local_rank,
-                group,
-                empty,
-            )
-        # else:
-        #     # TODO: I don't think this has to be blocking.
-        #     print(f'R {dist.get_rank()} step {step} dk_j {dk_j.sum()}')
-            
-
+        dk_buf, dv_buf = accumulate_dkv(
+            ring_config,
+            dk_buf,
+            dv_buf,
+            dk_j,
+            dv_j,
+            step,
+            world_size,
+            seq_local,
+            local_rank,
+            group,
+            empty,
+        )
+        
         if isinstance(chunk_provider, _LocalChunkProvider) or isinstance(
             chunk_provider, _LocalChunkProviderHybridBroadcast
         ):
@@ -96,8 +85,8 @@ def ring_backward(
     dk_local, dv_local = postprocess_dkv(
         ring_config, dk_buf, dv_buf, local_rank, seq_local, group
     )
-    if dist.get_rank()==0:
-        print(f'dq {dq.sum()}, dk_local {dk_local.sum()}')
+    if dist.get_rank() == 0:
+        print(f"dq {dq.sum()}, dk_local {dk_local.sum()}")
     return dq, dk_local, dv_local
 
 
@@ -146,8 +135,13 @@ def accumulate_dkv(
                     dk_buf, dv_buf, dk_j, dv_j, step, seq_local, local_rank, world_size
                 )
             else:
+                # This switch is necessary because 
+                if ring_config.send_op == SendOp.BROADCAST:
+                    global_chunk_idx = (local_rank - step) % world_size
+                else:
+                    global_chunk_idx = (local_rank + step) % world_size
                 return _accumulate_dkv_gather(
-                    dk_buf, dv_buf, dk_j, dv_j, step, seq_local, local_rank, world_size
+                    dk_buf, dv_buf, dk_j, dv_j, step, seq_local, local_rank, world_size, global_chunk_idx
                 )
         case SendBackward.SEND_DKV:
             return _accumulate_dkv_send(
@@ -164,6 +158,7 @@ def _accumulate_dkv_gather(
     seq_local: int,
     local_rank: int,
     world_size: int,
+    global_chunk_idx: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Accumulate local dk, dv in the correct space in the buffer.
@@ -194,7 +189,6 @@ def _accumulate_dkv_gather(
     dk_buf, dv_buf: torch.Tensor, torch.Tensor
         Accumulated buffers for dk and dv.
     """
-    global_chunk_idx = (local_rank + step) % world_size
     lo, hi = global_chunk_idx * seq_local, (global_chunk_idx + 1) * seq_local
     dk_buf[:, :, lo:hi] += dk_j
     dv_buf[:, :, lo:hi] += dv_j
@@ -296,7 +290,6 @@ def get_send_recv_ranks(
 
     return send_to, recv_from
 
-
 def _accumulate_dkv_send(
     ring_config: RingAttentionConfig,
     dk_buf: torch.Tensor,
@@ -384,7 +377,7 @@ def _accumulate_dkv_send(
         recv_buf, _ = ring_config.p2p_fn(
             dkv,
             recv_buf,
-            step,
+            step if ring_config.send_op != SendOp.BROADCAST else -step,
             group=group,
             async_op=False,
             empty=empty,
