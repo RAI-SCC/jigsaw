@@ -17,8 +17,8 @@ def test_autocast_linear(process_mesh_dict_2x2: dict, device) -> None:
         local_rank=local_rank,
         device=device,
         model_group=process_mesh_dict["model"],
-        spatial_group=process_mesh_dict["row"],
-        channel_group=process_mesh_dict["col"],
+        row_group=process_mesh_dict["row"],
+        column_group=process_mesh_dict["col"],
     )
 
     mse_loss = torch.nn.MSELoss()
