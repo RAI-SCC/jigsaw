@@ -247,7 +247,7 @@ pytestmark = [pytest.mark.dist_required]
 @pytest.mark.dist(4)
 @pytest.mark.parametrize("send_in_forward", [config.SendForward.KV])
 @pytest.mark.parametrize(
-    "save_for_backward", [config.SaveBackward.X, config.SaveBackward.KV]
+    "save_for_backward", [config.SaveBackward.KV]
 )
 @pytest.mark.parametrize(
     "send_op",

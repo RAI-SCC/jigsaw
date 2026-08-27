@@ -41,6 +41,25 @@ def ring_backward(
     dq = torch.zeros_like(q, dtype=torch.float32)
     dk_buf, dv_buf = get_dkv_buffer(ring_config, q, world_size)
 
+    # Cases where every rank processes the *same* global chunk `step` at ring
+    # step `step`: the partial dK/dV for chunk `step` just needs a SUM
+    # all-reduce, with the owning rank (`local_rank == step`) keeping it. The
+    # kept buffer is already the final local per-rank gradient, so it bypasses
+    # `postprocess_dkv` entirely (its GATHER_DKV branch would slice a global
+    # buffer this path never builds).
+    #   * BROADCAST + LOCAL: rank `step` fans its chunk out each step.
+    #   * any GLOBAL + SEND_DKV: the forward stored `chunks_to_save` by global
+    #     chunk id, so `_GlobalChunkProvider` hands every rank global chunk
+    #     `step`; SEND_DKV keeps a local-sized buffer (GATHER_DKV keeps its
+    #     global buffer + final all-reduce instead).
+    all_reduce_dkv = (
+        ring_config.send_op == SendOp.BROADCAST
+        and ring_config.save_scope == SaveScope.LOCAL
+    ) or (
+        ring_config.save_scope == SaveScope.GLOBAL
+        and ring_config.send_backward == SendBackward.SEND_DKV
+    )
+
     chunk_provider = _build_backward_chunk_provider(
         ring_config,
         chunks_to_save,
@@ -63,22 +82,6 @@ def ring_backward(
         dq += dq_j
         del dq_j, kj, vj, kv
 
-        # Cases where every rank processes the *same* global chunk `step` at
-        # ring step `step`: the partial dK/dV for chunk `step` just needs a SUM
-        # all-reduce, with the owning rank (`local_rank == step`) keeping it.
-        #   * BROADCAST + LOCAL: rank `step` fans its chunk out each step.
-        #   * any GLOBAL + SEND_DKV: the forward stored `chunks_to_save` by
-        #     global chunk id, so `_GlobalChunkProvider` hands every rank
-        #     global chunk `step`; SEND_DKV keeps a local-sized buffer, so an
-        #     all-reduce is the natural fold (GATHER_DKV keeps its global
-        #     buffer + final all-reduce instead).
-        all_reduce_dkv = (
-            ring_config.send_op == SendOp.BROADCAST
-            and ring_config.save_scope == SaveScope.LOCAL
-        ) or (
-            ring_config.save_scope == SaveScope.GLOBAL
-            and ring_config.send_backward == SendBackward.SEND_DKV
-        )
         if all_reduce_dkv:
             dist.all_reduce(dk_j, op=dist.ReduceOp.SUM, group=group)
             dist.all_reduce(dv_j, op=dist.ReduceOp.SUM, group=group)
@@ -104,6 +107,10 @@ def ring_backward(
             chunk_provider, _LocalChunkProviderHybridBroadcast
         ):
             chunk_provider.maybe_forward(step, world_size)
+
+    if all_reduce_dkv:
+        # `dk_buf`/`dv_buf` already hold this rank's final local gradient.
+        return dq, dk_buf, dv_buf
 
     dk_local, dv_local = postprocess_dkv(
         ring_config, dk_buf, dv_buf, local_rank, seq_local, group
