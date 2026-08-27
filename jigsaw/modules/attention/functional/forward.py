@@ -85,10 +85,10 @@ def build_ring_forward(
     match ring_config.send_op:
         case SendOp.BROADCAST:
             return broadcast_forward
-        case SendOp.HYBRID_P2P:
-            return hybrid_p2p_forward
         case SendOp.P2P | SendOp.ALLTOALL:
             return ring_forward
+        case SendOp.HYBRID_P2P:
+            return hybrid_p2p_forward
         case SendOp.HYBRID_BROADCAST:
             return hybrid_broadcast_forward
         case _:
@@ -211,7 +211,6 @@ def ring_forward(
             chunks_to_save.append(ring_config.save_for_backward_fn(x_j, kv_j))
 
         out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
-
         if step < world_size - 1:
             handle.wait()
             # receive either x or kv_j

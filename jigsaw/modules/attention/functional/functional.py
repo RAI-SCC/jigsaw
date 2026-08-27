@@ -9,8 +9,8 @@ import torch.distributed as dist
 
 from ..config import (
     RingAttentionConfig,
+    SendOp
 )
-
 
 def _compute_kv(
     xj: torch.Tensor, w_qkv: torch.Tensor, b: int, n_local: int, h: int, d: int
@@ -129,9 +129,7 @@ class RingAttentionFunction(torch.autograd.Function):
         """
         world_size = dist.get_world_size(group)
         empty = torch.empty(0, device=x.device, dtype=x.dtype)
-
         from .forward import build_ring_forward
-
         ring_forward_fn = build_ring_forward(config)
         out, lse, chunks_to_save = ring_forward_fn(
             q,

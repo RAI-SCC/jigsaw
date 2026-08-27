@@ -380,7 +380,6 @@ class _LocalChunkProvider(_BackwardChunkProvider):
         self._handle.wait()
         recv_buf = self._recv_buf
         if self.config.send_in_forward == SendForward.X:
-            print(f"A2A step {step} x{recv_buf[0][0][0]}")
             kv, kj, vj = _compute_kv(
                 recv_buf, self.w_qkv, self.b, self.seq_local, self.h, self.d
             )
@@ -490,7 +489,6 @@ class _LocalChunkProviderBroadcast(_LocalChunkProvider):
         if self.config.save_for_backward == SaveBackward.KV:
             kv = chunk
         else:
-            print(f"step {step} x {chunk[0][0][0]}")
             kv, _, _ = _compute_kv(
                 chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
             )

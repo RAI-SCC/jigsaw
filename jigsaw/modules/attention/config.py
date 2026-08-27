@@ -632,6 +632,7 @@ class RingAttentionConfig:
         save_scope: SaveScope = SaveScope.GLOBAL,
         send_backward: SendBackward = SendBackward.SEND_DKV,
         offload: Offload = Offload.DISABLED,
+        gpus_per_node: int = 4
     ):
         """Initialize the object.
 
@@ -659,6 +660,7 @@ class RingAttentionConfig:
         self.save_scope = save_scope
         self.send_backward = send_backward
         self.offload = offload
+        self.gpus_per_node = gpus_per_node
         self.device = device
 
         self.offloader = self._init_offloader(offload, device)

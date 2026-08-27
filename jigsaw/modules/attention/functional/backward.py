@@ -5,6 +5,7 @@ import torch.distributed as dist
 
 from jigsaw.modules.attention.config import (
     RingAttentionConfig,
+    SaveScope,
     SendBackward,
     SendOp,
 )
@@ -61,31 +62,39 @@ def ring_backward(
         )
         dq += dq_j
         del dq_j, kj, vj, kv
-
-        dk_buf, dv_buf = accumulate_dkv(
-            ring_config,
-            dk_buf,
-            dv_buf,
-            dk_j,
-            dv_j,
-            step,
-            world_size,
-            seq_local,
-            local_rank,
-            group,
-            empty,
-        )
-
+        
+        if ring_config.send_op == SendOp.BROADCAST and ring_config.save_scope == SaveScope.LOCAL:
+            dist.all_reduce(dk_j, op=dist.ReduceOp.SUM, group=group)
+            dist.all_reduce(dv_j, op=dist.ReduceOp.SUM, group=group)
+            if local_rank == step:
+                dk_buf = dk_j
+                dv_buf = dv_j
+        else:
+            dk_buf, dv_buf = accumulate_dkv(
+                ring_config,
+                dk_buf,
+                dv_buf,
+                dk_j,
+                dv_j,
+                step,
+                world_size,
+                seq_local,
+                local_rank,
+                group,
+                empty,
+            )
+        
+        print(f'R {dist.get_rank()} final step {step} dk {dk_buf.sum()}')
+        
         if isinstance(chunk_provider, _LocalChunkProvider) or isinstance(
             chunk_provider, _LocalChunkProviderHybridBroadcast
         ):
             chunk_provider.maybe_forward(step, world_size)
-
+        
     dk_local, dv_local = postprocess_dkv(
         ring_config, dk_buf, dv_buf, local_rank, seq_local, group
     )
-    if dist.get_rank() == 0:
-        print(f"dq {dq.sum()}, dk_local {dk_local.sum()}")
+
     return dq, dk_local, dv_local
 
 
@@ -151,6 +160,7 @@ def accumulate_dkv(
                     global_chunk_idx,
                 )
         case SendBackward.SEND_DKV:
+            # if ring_config.send_op == SendOp.BROADCAST:
             return _accumulate_dkv_send(
                 ring_config, dk_buf, dv_buf, dk_j, dv_j, step, group, empty
             )
@@ -300,6 +310,51 @@ def get_send_recv_ranks(
     return send_to, recv_from
 
 
+def _accumulate_dkv_send_broadcast(
+    ring_config: RingAttentionConfig,
+    dk_buf: torch.Tensor,
+    dv_buf: torch.Tensor,
+    dk_j: torch.Tensor,
+    dv_j: torch.Tensor,
+    step: int,
+    group: dist.ProcessGroup,
+    empty: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Send dk and dv to the corresponding rank.
+
+    After a rank computes dk and dv on the chunk of the data that it sees,
+    send the values back to the home rank for accumulation.
+
+    Parameters
+    ----------
+    ring_config: RingAttentionConfig
+        Configuration for ring attention.
+    dk_buf: torch.Tensor
+        Buffer to accumulate dk.
+    dv_buf: torch.Tensor
+        Buffer to accumulate dv.
+    dk_j: torch.Tensor
+        Local result of dk.
+    dv_j: torch.Tensor
+        Local result of dv.
+    step: int
+        Step.
+    group: dist.ProcessGroup
+        Process group for ring attention.
+    empty: torch.Tensor
+        Empty tensor for computational reasons.
+
+    Returns
+    -------
+    dk_buf, dv_buf: torch.Tensor, torch.Tensor
+        Accumulated values of dk and dv.
+    """
+    
+    dist.all_reduce(dk_j, op=dist.ReduceOp.SUM, group=group)
+    dist.all_reduce(dv_j, op=dist.ReduceOp.SUM, group=group)
+    return dk_j, dv_j
+    
 def _accumulate_dkv_send(
     ring_config: RingAttentionConfig,
     dk_buf: torch.Tensor,
