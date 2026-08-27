@@ -64,15 +64,19 @@ def ring_backward(
         del dq_j, kj, vj, kv
         
         # Cases where every rank processes the *same* global chunk `step` at
-        # ring step `step` (broadcast-style fan-out, or a GLOBAL-scope direct
-        # lookup): the partial dK/dV for chunk `step` just needs a SUM
+        # ring step `step`: the partial dK/dV for chunk `step` just needs a SUM
         # all-reduce, with the owning rank (`local_rank == step`) keeping it.
+        #   * BROADCAST + LOCAL: rank `step` fans its chunk out each step.
+        #   * any GLOBAL + SEND_DKV: the forward stored `chunks_to_save` by
+        #     global chunk id, so `_GlobalChunkProvider` hands every rank
+        #     global chunk `step`; SEND_DKV keeps a local-sized buffer, so an
+        #     all-reduce is the natural fold (GATHER_DKV keeps its global
+        #     buffer + final all-reduce instead).
         all_reduce_dkv = (
             ring_config.send_op == SendOp.BROADCAST
             and ring_config.save_scope == SaveScope.LOCAL
         ) or (
-            ring_config.send_op == SendOp.HYBRID_P2P
-            and ring_config.save_scope == SaveScope.GLOBAL
+            ring_config.save_scope == SaveScope.GLOBAL
             and ring_config.send_backward == SendBackward.SEND_DKV
         )
         if all_reduce_dkv:
@@ -148,41 +152,31 @@ def accumulate_dkv(
     """Fold this step's locally computed dk_j, dv_j into the running dK, dV."""
     match ring_config.send_backward:
         case SendBackward.GATHER_DKV:
-            if ring_config.send_op == SendOp.HYBRID_P2P:
-                if ring_config.save_scope == SaveScope.GLOBAL:
-                    # GLOBAL scope: the backward chunk provider looks chunks up
-                    # directly, so ring step `step` == global chunk index.
-                    return _accumulate_dkv_gather(
-                        dk_buf,
-                        dv_buf,
-                        dk_j,
-                        dv_j,
-                        step,
-                        seq_local,
-                        local_rank,
-                        world_size,
-                        step,
-                    )
+            if ring_config.save_scope == SaveScope.GLOBAL:
+                # The forward stored `chunks_to_save` by global chunk id and
+                # `_GlobalChunkProvider` looks them up directly, so ring step
+                # `step` == global chunk index for every send_op.
+                global_chunk_idx = step
+            elif ring_config.send_op == SendOp.HYBRID_P2P:
+                # LOCAL hybrid: chunks re-circulate through the node/local ring.
                 return _accumulate_dkv_hybrid(
                     dk_buf, dv_buf, dk_j, dv_j, step, seq_local, local_rank, world_size
                 )
+            elif ring_config.send_op == SendOp.BROADCAST:
+                global_chunk_idx = (local_rank - step) % world_size
             else:
-                # This switch is necessary because
-                if ring_config.send_op == SendOp.BROADCAST:
-                    global_chunk_idx = (local_rank - step) % world_size
-                else:
-                    global_chunk_idx = (local_rank + step) % world_size
-                return _accumulate_dkv_gather(
-                    dk_buf,
-                    dv_buf,
-                    dk_j,
-                    dv_j,
-                    step,
-                    seq_local,
-                    local_rank,
-                    world_size,
-                    global_chunk_idx,
-                )
+                global_chunk_idx = (local_rank + step) % world_size
+            return _accumulate_dkv_gather(
+                dk_buf,
+                dv_buf,
+                dk_j,
+                dv_j,
+                step,
+                seq_local,
+                local_rank,
+                world_size,
+                global_chunk_idx,
+            )
         case SendBackward.SEND_DKV:
             # if ring_config.send_op == SendOp.BROADCAST:
             return _accumulate_dkv_send(

@@ -154,9 +154,9 @@ def broadcast_forward(
                 kv_j, kj, vj = kv, k, v
 
         if ring_config.save_scope == SaveScope.GLOBAL:
-            chunks_to_save[(local_rank - step) % world_size] = (
-                ring_config.save_for_backward_fn(x_j, kv_j)
-            )
+            # `x_j` at loop iteration `step` is global chunk `step` (identical on
+            # every rank: it was received from the `src_rank=step` broadcast).
+            chunks_to_save[step] = ring_config.save_for_backward_fn(x_j, kv_j)
 
         out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
         if step < world_size - 1:
@@ -194,7 +194,15 @@ def ring_forward(
     kv = torch.concat([k.unsqueeze(0), v.unsqueeze(0)])
     kv_j, kj, vj = kv, k, v
 
-    chunks_to_save: list[torch.Tensor] = []
+    # LOCAL: only own (step-0) chunk is kept; backward re-rings the rest.
+    # GLOBAL: keep every chunk, indexed by *global chunk id* so the backward
+    # `_GlobalChunkProvider` (a plain `chunks[step]` lookup) sees ring step
+    # == global chunk index.
+    chunks_to_save: list[torch.Tensor | None]
+    if ring_config.save_scope == SaveScope.GLOBAL:
+        chunks_to_save = [None] * world_size
+    else:
+        chunks_to_save = []
 
     # Kick off first send
     recv_buf, handle = ring_config.forward_send_fn(
@@ -205,9 +213,13 @@ def ring_forward(
         if step > 0 and ring_config.send_in_forward == SendForward.X:
             kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
 
-        # save_scope == LOCAL: only own (step 0) chunk; backward re-rings.
-        # save_scope == GLOBAL: save every step's chunk.
-        if ring_config.save_scope == SaveScope.GLOBAL or step == 0:
+        if ring_config.save_scope == SaveScope.GLOBAL:
+            # `direction=-1` ring: after `step` receives, `x_j` originates from
+            # rank `(local_rank + step) % world_size`.
+            chunks_to_save[(local_rank + step) % world_size] = (
+                ring_config.save_for_backward_fn(x_j, kv_j)
+            )
+        elif step == 0:
             chunks_to_save.append(ring_config.save_for_backward_fn(x_j, kv_j))
 
         out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
