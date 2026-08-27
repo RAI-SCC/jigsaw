@@ -63,7 +63,19 @@ def ring_backward(
         dq += dq_j
         del dq_j, kj, vj, kv
         
-        if ring_config.send_op == SendOp.BROADCAST and ring_config.save_scope == SaveScope.LOCAL:
+        # Cases where every rank processes the *same* global chunk `step` at
+        # ring step `step` (broadcast-style fan-out, or a GLOBAL-scope direct
+        # lookup): the partial dK/dV for chunk `step` just needs a SUM
+        # all-reduce, with the owning rank (`local_rank == step`) keeping it.
+        all_reduce_dkv = (
+            ring_config.send_op == SendOp.BROADCAST
+            and ring_config.save_scope == SaveScope.LOCAL
+        ) or (
+            ring_config.send_op == SendOp.HYBRID_P2P
+            and ring_config.save_scope == SaveScope.GLOBAL
+            and ring_config.send_backward == SendBackward.SEND_DKV
+        )
+        if all_reduce_dkv:
             dist.all_reduce(dk_j, op=dist.ReduceOp.SUM, group=group)
             dist.all_reduce(dv_j, op=dist.ReduceOp.SUM, group=group)
             if local_rank == step:
@@ -137,6 +149,20 @@ def accumulate_dkv(
     match ring_config.send_backward:
         case SendBackward.GATHER_DKV:
             if ring_config.send_op == SendOp.HYBRID_P2P:
+                if ring_config.save_scope == SaveScope.GLOBAL:
+                    # GLOBAL scope: the backward chunk provider looks chunks up
+                    # directly, so ring step `step` == global chunk index.
+                    return _accumulate_dkv_gather(
+                        dk_buf,
+                        dv_buf,
+                        dk_j,
+                        dv_j,
+                        step,
+                        seq_local,
+                        local_rank,
+                        world_size,
+                        step,
+                    )
                 return _accumulate_dkv_hybrid(
                     dk_buf, dv_buf, dk_j, dv_j, step, seq_local, local_rank, world_size
                 )

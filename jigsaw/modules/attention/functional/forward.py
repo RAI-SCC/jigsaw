@@ -301,8 +301,21 @@ def hybrid_p2p_forward(
                 kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
 
             if ring_config.save_scope == SaveScope.GLOBAL:
-                global_step = node_step * gpus_per_node + step
-                chunks_to_save[(local_rank + global_step) % world_size] = (
+                # `x_j`/`kv_j` currently hold the chunk owned by the rank
+                #   node_base(node_step) + (local_idx + step) % gpus_per_node
+                # where the node index advances by one per inter-node hop and
+                # the intra-node ring advances the local index by one per step.
+                # Store it at that global-chunk slot so the backward
+                # `_GlobalChunkProvider` (a plain `chunks[step]` lookup) sees
+                # ring step == global chunk index.
+                node_idx = local_rank // gpus_per_node
+                local_idx = local_rank % gpus_per_node
+                cur_node = (node_idx + node_step) % n_nodes
+                global_chunk_idx = (
+                    cur_node * gpus_per_node
+                    + (local_idx + step) % gpus_per_node
+                )
+                chunks_to_save[global_chunk_idx] = (
                     ring_config.save_for_backward_fn(x_j, kv_j)
                 )
             out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
