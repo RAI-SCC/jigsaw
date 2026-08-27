@@ -14,7 +14,7 @@ from jigsaw.modules.attention.config import (
     SendOp,
 )
 
-from .functional import _compute_kv, get_send_recv_ranks_hybrid
+from .functional import _compute_kv, get_hybrid_topology
 
 
 # --------------------------------------------------------------------------- #
@@ -250,12 +250,21 @@ def hybrid_p2p_forward(
     world_size: int,
     ring_config: RingAttentionConfig,
 ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]:
-    """Forward pass for ring attention using broadcast instead of P2P sends."""
+    """Forward pass for ring attention with a hybrid intra-/inter-node ring.
+
+    Each "node round" rotates a chunk through the ``gpus_per_node`` ranks of a
+    node with an intra-node P2P ring, then hops to the next node with a single
+    inter-node P2P send. Peers come from :class:`HybridTopology`, so there is no
+    ``// gpus_per_node`` arithmetic here.
+    """
     b, heads, n_local, d = q.shape
-    gpus_per_node = ring_config.gpus_per_node
-    n_nodes = world_size // gpus_per_node
-    if world_size % gpus_per_node:
-        raise ValueError("world_size must be divisible by gpus_per_node")
+    topo = get_hybrid_topology(group, ring_config.gpus_per_node)
+    gpn, n_nodes = topo.gpus_per_node, topo.n_nodes
+
+    # Intra-node ring: send to the previous local rank, receive from the next.
+    # Inter-node hop: send to the previous node, receive from the next.
+    intra_ranks = [topo.intra_peer(-1), topo.intra_peer(1)]
+    inter_ranks = [topo.inter_peer(-1), topo.inter_peer(1)]
 
     out = torch.zeros_like(q)
     lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype)
@@ -272,7 +281,7 @@ def hybrid_p2p_forward(
         chunks_to_save = [None] * world_size  # filled in per-step below
 
     for node_step in range(n_nodes):
-        # Kick off first send across nodes
+        # Kick off this round's inter-node send of the original local chunk.
         if node_step < n_nodes - 1:
             internode_recv_buf = (
                 torch.empty_like(x_j)
@@ -286,17 +295,14 @@ def hybrid_p2p_forward(
                     else kv.clone()
                 ),
                 buffer=internode_recv_buf,
-                direction=-gpus_per_node,
+                send_recv_ranks=inter_ranks,
                 group=group,
                 async_op=True,
                 tag=node_step,
                 empty=empty,
             )
-        send_recv_ranks = get_send_recv_ranks_hybrid(
-            local_rank, gpus_per_node=gpus_per_node
-        )
-        for step in range(gpus_per_node):
-            if step + 1 < gpus_per_node:
+        for step in range(gpn):
+            if step + 1 < gpn:
                 recv_buf = (
                     torch.empty_like(x_j)
                     if ring_config.send_in_forward == SendForward.X
@@ -306,7 +312,7 @@ def hybrid_p2p_forward(
                 recv_buf, handle = ring_config.send_op_fn(
                     x_j if ring_config.send_in_forward == SendForward.X else kv_j,
                     recv_buf,
-                    send_recv_ranks=send_recv_ranks,
+                    send_recv_ranks=intra_ranks,
                     group=group,
                     tag=step,
                 )
@@ -315,25 +321,19 @@ def hybrid_p2p_forward(
                 kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
 
             if ring_config.save_scope == SaveScope.GLOBAL:
-                # `x_j`/`kv_j` currently hold the chunk owned by the rank
-                #   node_base(node_step) + (local_idx + step) % gpus_per_node
-                # where the node index advances by one per inter-node hop and
-                # the intra-node ring advances the local index by one per step.
-                # Store it at that global-chunk slot so the backward
-                # `_GlobalChunkProvider` (a plain `chunks[step]` lookup) sees
-                # ring step == global chunk index.
-                node_idx = local_rank // gpus_per_node
-                local_idx = local_rank % gpus_per_node
-                cur_node = (node_idx + node_step) % n_nodes
-                global_chunk_idx = (
-                    cur_node * gpus_per_node + (local_idx + step) % gpus_per_node
-                )
+                # `x_j`/`kv_j` currently hold the chunk owned by the ring rank
+                #   (node_idx + node_step) % n_nodes, (local_idx + step) % gpn
+                # -- the node index advances by one per inter-node hop and the
+                # local index by one per intra-node step. Store it at that
+                # global-chunk slot so the backward `_GlobalChunkProvider` (a
+                # plain `chunks[step]` lookup) sees ring step == global chunk.
+                cur_node = (topo.node_idx + node_step) % n_nodes
+                global_chunk_idx = cur_node * gpn + (topo.local_idx + step) % gpn
                 chunks_to_save[global_chunk_idx] = ring_config.save_for_backward_fn(
                     x_j, kv_j
                 )
             out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
-            print(f"step {step} forward send_recv_ranks {send_recv_ranks}")
-            if step < gpus_per_node - 1:
+            if step < gpn - 1:
                 handle.wait()
 
             x_j, kv_j, kj, vj = ring_config.forward_recv_fn(recv_buf, x_j, kv_j, kj, vj)

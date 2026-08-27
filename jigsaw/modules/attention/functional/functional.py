@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from itertools import product
 from typing import Any, Protocol, cast
 
@@ -138,6 +139,116 @@ def build_intxxnode_groups(
                 internode_groups.append(group)
 
     return internode_groups, intranode_groups
+
+
+# --------------------------------------------------------------------------- #
+# hybrid (intra-node + inter-node) ring topology
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class HybridTopology:
+    """Node/rank layout of a 1-D ring split into equal-sized nodes.
+
+    The ring's ``world_size`` ranks are cut into ``n_nodes`` contiguous nodes of
+    ``gpus_per_node`` ranks each. Ring position ``p`` (``0 <= p < world_size``)
+    owns global sequence chunk ``p`` and lives at ``(p // gpus_per_node,
+    p % gpus_per_node)``. Every peer lookup a hybrid ring needs -- the next rank
+    along the intra-node ring, the next along the inter-node ring, or the rank
+    at an arbitrary ``(node, local)`` -- is a table lookup here, so callers
+    never open-code ``// gpus_per_node`` / ``% gpus_per_node`` arithmetic.
+
+    ``intranode_group`` / ``internode_group`` are the sub-groups containing this
+    rank, provided for collectives (e.g. broadcasts); the P2P ring paths address
+    peers by ring position over the full group instead.
+    """
+
+    n_nodes: int
+    gpus_per_node: int
+    node_idx: int
+    local_idx: int
+    intranode_group: dist.ProcessGroup
+    internode_group: dist.ProcessGroup
+    _grid: tuple[tuple[int, ...], ...]
+
+    @property
+    def ring_rank(self) -> int:
+        """This rank's position in the ring (``node_idx * gpn + local_idx``)."""
+        return self.node_idx * self.gpus_per_node + self.local_idx
+
+    def rank_at(self, node: int, local: int) -> int:
+        """Ring position at ``(node, local)``, both taken modulo their extent."""
+        return self._grid[node % self.n_nodes][local % self.gpus_per_node]
+
+    def intra_peer(self, offset: int) -> int:
+        """Ring position ``offset`` steps along this rank's intra-node ring."""
+        return self.rank_at(self.node_idx, self.local_idx + offset)
+
+    def inter_peer(self, offset: int) -> int:
+        """Ring position ``offset`` steps along this rank's inter-node ring."""
+        return self.rank_at(self.node_idx + offset, self.local_idx)
+
+
+_HYBRID_TOPOLOGY_CACHE: dict[tuple[int, int], HybridTopology] = {}
+
+
+def get_hybrid_topology(
+    group: dist.ProcessGroup, gpus_per_node: int
+) -> HybridTopology:
+    """Build (and cache) the :class:`HybridTopology` for ``group``.
+
+    ``dist.new_group`` is collective over the *world*: every rank must build
+    every sub-group in the same order, so this assumes ``group`` spans the
+    whole world (the hybrid P2P paths already assume this when they address
+    peers by ring position). The result is cached per ``(group, gpus_per_node)``.
+
+    Parameters
+    ----------
+    group : dist.ProcessGroup
+        The ring's process group.
+    gpus_per_node : int
+        Number of consecutive ring ranks that share a node.
+
+    Returns
+    -------
+    HybridTopology
+    """
+    key = (id(group), gpus_per_node)
+    cached = _HYBRID_TOPOLOGY_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    if gpus_per_node <= 0:
+        raise ValueError("gpus_per_node must be positive")
+    world_ranks = list(dist.get_process_group_ranks(group))
+    world_size = len(world_ranks)
+    if world_size % gpus_per_node:
+        raise ValueError("ring size must be divisible by gpus_per_node")
+    n_nodes = world_size // gpus_per_node
+
+    grid = tuple(
+        tuple(node * gpus_per_node + local for local in range(gpus_per_node))
+        for node in range(n_nodes)
+    )
+    intra_subs = [
+        dist.new_group(ranks=[world_ranks[pos] for pos in grid[node]])
+        for node in range(n_nodes)
+    ]
+    inter_subs = [
+        dist.new_group(ranks=[world_ranks[grid[node][local]] for node in range(n_nodes)])
+        for local in range(gpus_per_node)
+    ]
+
+    node_idx, local_idx = divmod(dist.get_rank(group), gpus_per_node)
+    topo = HybridTopology(
+        n_nodes=n_nodes,
+        gpus_per_node=gpus_per_node,
+        node_idx=node_idx,
+        local_idx=local_idx,
+        intranode_group=intra_subs[node_idx],
+        internode_group=inter_subs[local_idx],
+        _grid=grid,
+    )
+    _HYBRID_TOPOLOGY_CACHE[key] = topo
+    return topo
 
 
 class RingCtx(Protocol):

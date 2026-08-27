@@ -3,7 +3,7 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.modules.attention.config as config
-from jigsaw.modules.attention.functional import forward, backward
+from jigsaw.modules.attention.functional import backward, forward, functional
 from jigsaw.utils_aggregate import (
     gather_1d_results,
 )

@@ -588,7 +588,13 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
         )
         self._handle: Optional[dist.Work] = None
         self.local_rank = local_rank
-        self.gpus_per_node = ring_config.gpus_per_node
+        self.topo = get_hybrid_topology(group, ring_config.gpus_per_node)
+        self._gpn = self.topo.gpus_per_node
+        # Intra-node ring: send to the previous local rank, receive from the
+        # next -- mirroring the forward. Inter-node hop reverses the node ring
+        # relative to the forward: send to the next node, receive from the prev.
+        self._intra_ranks = [self.topo.intra_peer(-1), self.topo.intra_peer(1)]
+        self._inter_ranks = [self.topo.inter_peer(1), self.topo.inter_peer(-1)]
         self._internode_handle = None
         self._internode_recv_buf = None
 
@@ -610,7 +616,6 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
             if self.config.save_for_backward == SaveBackward.KV:
                 kv = chunk
             else:
-                print(f'R{dist.get_rank()} step {step} chunk {chunk.sum()}')
                 kv, _, _ = _compute_kv(
                     chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
                 )
@@ -621,7 +626,6 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
                 if self.config.send_in_forward == SendForward.X
                 else torch.empty_like(kv)
             )
-            # print(f"R{self.local_rank} Step {step} Internode send send buf is {self.x[0][0][0]}")
 
             self._internode_recv_buf, self._internode_handle = self.config.p2p_fn(
                 data=(
@@ -630,32 +634,26 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
                     else kv.clone()
                 ),
                 buffer=internode_recv_buf,
-                direction=self.gpus_per_node,
+                send_recv_ranks=self._inter_ranks,
                 group=self.group,
                 async_op=True,
-                tag=step % 4,
+                tag=step % self._gpn,
                 empty=self.empty,
             )
 
             send_buf = self.x if self.config.send_in_forward == SendForward.X else kv
             self._recv_buf = torch.empty_like(send_buf)
 
-            # if we are at a multiple of 4,
-            # wait for what is received from the internode buffer
-            send_recv_ranks = get_send_recv_ranks_hybrid(
-                self.local_rank, gpus_per_node=self.gpus_per_node
-            )
             # Launch send_op to the neighbouring ranks
             self._recv_buf, self._handle = self.config.send_op_fn(
                 send_buf,
                 self._recv_buf,
-                send_recv_ranks=send_recv_ranks,
+                send_recv_ranks=self._intra_ranks,
                 group=self.group,
                 async_op=True,
                 empty=self.empty,
                 step=step,
             )
-            # print(f'R{dist.get_rank()} STEP {step} recv_buf {self.x[0][0][0]}')
 
             if self.config.send_in_forward == SendForward.X:
                 # Local Q always attends its own local K/V on step 0.
@@ -669,7 +667,7 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
         # step > 0: receive the chunk that's been circulating, then forward
         # it on (unless this is the last step).
 
-        if step % self.gpus_per_node == 0:  # if we are receiving from internode
+        if step % self._gpn == 0:  # if we are receiving from internode
             assert self._internode_handle is not None
             self._internode_handle.wait()
             recv_buf = self._internode_recv_buf
@@ -679,8 +677,6 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
             recv_buf = self._recv_buf
 
         if self.config.send_in_forward == SendForward.X:
-            # print(f'R{dist.get_rank()} STEP {step} recv_buf {recv_buf[0][0][0]}')
-            print(f'R{dist.get_rank()} step {step} chunk {recv_buf.sum()}')
             kv, kj, vj = _compute_kv(
                 recv_buf, self.w_qkv, self.b, self.seq_local, self.h, self.d
             )
@@ -708,42 +704,34 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
         if step == 0 or step >= world_size - 1:
             return
 
-        if step % self.gpus_per_node == 0 and step // self.gpus_per_node < (
-            self.group.size() // self.gpus_per_node - 1
-        ):  # if we are at the start of a "internode" step
-            # internode if necessary
-            current_buf = self._recv_buf
+        node_step = step // self._gpn
+        if step % self._gpn == 0 and node_step < self.topo.n_nodes - 1:
+            # Relay the inter-node chunk one more hop along the node ring.
             internode_recv_buf = (
                 torch.empty_like(self.x)
                 if self.config.send_in_forward == SendForward.X
-                else torch.empty_like(current_buf)
+                else torch.empty_like(self._recv_buf)
             )
-            # print(f'Internode send {step} sending {self._internode_recv_buf[0][0][0]}')
             self._internode_recv_buf, self._internode_handle = self.config.p2p_fn(
                 data=self._internode_recv_buf,
                 buffer=internode_recv_buf,
-                direction=self.gpus_per_node,
+                send_recv_ranks=self._inter_ranks,
                 group=self.group,
                 async_op=True,
-                tag=step % 4,
+                tag=step % self._gpn,
                 empty=self.empty,
-                group_size=self.group.size(),
             )
-        # if we are here, intranode recv buffer is overwritten
-        # by internode message
-        if step % self.gpus_per_node == 0:
+        # At a node boundary the intra-node ring restarts from the chunk that
+        # just arrived over the inter-node link.
+        if step % self._gpn == 0:
             assert self._internode_recv_buf is not None
             self._recv_buf = self._internode_recv_buf
 
         next_recv = torch.empty_like(self._recv_buf)
-        # intranode if necessary
-        send_recv_ranks = get_send_recv_ranks_hybrid(
-            self.local_rank, gpus_per_node=self.gpus_per_node
-        )
         self._recv_buf, self._handle = self.config.send_op_fn(
             self._recv_buf,
             next_recv,
-            send_recv_ranks=send_recv_ranks,
+            send_recv_ranks=self._intra_ranks,
             group=self.group,
             async_op=True,
             empty=self.empty,

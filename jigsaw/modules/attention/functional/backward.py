@@ -177,25 +177,22 @@ def accumulate_dkv(
                     world_size,
                     ring_config.gpus_per_node,
                 )
+            elif ring_config.send_op == SendOp.BROADCAST:
+                global_chunk_idx = (local_rank - step) % world_size
             else:
-                # This switch is necessary because
-                if ring_config.send_op == SendOp.BROADCAST:
-                    global_chunk_idx = (local_rank - step) % world_size
-                else:
-                    global_chunk_idx = (local_rank + step) % world_size
-                return _accumulate_dkv_gather(
-                    dk_buf,
-                    dv_buf,
-                    dk_j,
-                    dv_j,
-                    step,
-                    seq_local,
-                    local_rank,
-                    world_size,
-                    global_chunk_idx,
-                )
+                global_chunk_idx = (local_rank + step) % world_size
+            return _accumulate_dkv_gather(
+                dk_buf,
+                dv_buf,
+                dk_j,
+                dv_j,
+                step,
+                seq_local,
+                local_rank,
+                world_size,
+                global_chunk_idx,
+            )
         case SendBackward.SEND_DKV:
-            # if ring_config.send_op == SendOp.BROADCAST:
             return _accumulate_dkv_send(
                 ring_config, dk_buf, dv_buf, dk_j, dv_j, step, group, empty
             )
