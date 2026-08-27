@@ -569,7 +569,7 @@ def test_ring_forward_backward(
         config.SendOp.HYBRID_BROADCAST,
         config.SendOp.P2P,
         config.SendOp.ALLTOALL,
-        config.SendOp.BROADCAST
+        config.SendOp.BROADCAST,
     ],
 )
 @pytest.mark.parametrize(

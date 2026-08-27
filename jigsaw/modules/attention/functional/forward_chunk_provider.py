@@ -175,6 +175,7 @@ class _RingForwardChunkProvider(_ForwardChunkProvider):
             Contiguous key and value tensors for chunk ``step``.
         """
         if step > 0:
+            assert self._handle is not None
             self._handle.wait()
             self._recv(self._recv_buf)
             if step + 1 < self.world_size:

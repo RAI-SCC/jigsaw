@@ -139,9 +139,7 @@ def ring_forward(
     """
     b, heads, n_local, d = q.shape
     out = torch.zeros_like(q)
-    lse = torch.full(
-        (b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype
-    )
+    lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype)
 
     provider = build_forward_chunk_provider(
         ring_config, q, k, v, x, w_qkv, group, empty, local_rank, world_size
