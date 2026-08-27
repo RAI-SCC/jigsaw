@@ -739,51 +739,24 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
         )
 
 
-_INTRANODE_GROUPS: dict[tuple[int, int], dist.ProcessGroup] = {}
-
-
-def _get_intranode_group(
-    group: dist.ProcessGroup, gpus_per_node: int
-) -> dist.ProcessGroup:
-    """Return (and cache) the sub-group containing this rank's node.
-
-    NOTE: `dist.new_group` is collective -- every rank must build every
-    sub-group in the same order. Ranks passed to `new_group` are WORLD ranks,
-    so this assumes `group` is WORLD (as the P2P path already does when it
-    derives peers from `local_rank`).
-    """
-    key = (id(group), gpus_per_node)
-    cached = _INTRANODE_GROUPS.get(key)
-    if cached is not None:
-        return cached
-
-    world = dist.get_world_size(group)
-    rank = dist.get_rank(group)
-    mine: Optional[dist.ProcessGroup] = None
-    for start in range(0, world, gpus_per_node):
-        ranks = list(range(start, min(start + gpus_per_node, world)))
-        sub = dist.new_group(ranks=ranks)
-        if rank in ranks:
-            mine = sub
-    if mine is None:
-        raise RuntimeError("Current rank is not present in any intra-node group")
-    _INTRANODE_GROUPS[key] = mine
-    return mine
-
-
 class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
-    """Hybrid ring provider: broadcast intra-node, P2P inter-node.
+    """Hybrid backward chunk provider: broadcast intra-node, P2P inter-node.
 
-    Each rank owns exactly one buffer per "node round" (`_node_chunk`):
+    The backward twin of :func:`hybrid_broadcast_forward`. Each rank keeps one
+    ``_node_chunk`` per node round:
+
       * round 0  -> its own local x/kv
-      * round k  -> the chunk received over the inter-node P2P link
+      * round k  -> the chunk that arrived over the inter-node P2P link
 
-    Within a round of `gpus_per_node` steps, the rank whose local index equals
-    `step % gpus_per_node` broadcasts its `_node_chunk` to the node sub-group,
-    so after a full round every rank has seen every chunk resident on the node.
-    Unlike the P2P variant there is no intra-node rotation, so `_node_chunk`
-    is stable for the whole round and can be handed straight to the inter-node
-    send at the round boundary.
+    Within a round of ``gpus_per_node`` steps the node-local rank ``step % gpn``
+    broadcasts its ``_node_chunk`` to the node, so after a full round every node
+    rank has seen every chunk resident on the node. There is no intra-node
+    rotation, so ``_node_chunk`` is stable for the round and can be handed
+    straight to the next inter-node hop.
+
+    The inter-node ring runs opposite to the forward (send to the next node,
+    receive from the previous), matching :class:`_LocalChunkProviderHybridP2P`.
+    Peers/sub-groups come from :class:`HybridTopology`.
     """
 
     def __init__(
@@ -799,8 +772,6 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
         group: dist.ProcessGroup,
         empty: torch.Tensor,
         local_rank: int,
-        gpus_per_node: int = 4,
-        intranode_group: Optional[dist.ProcessGroup] = None,
     ) -> None:
         """Initialize the object.
 
@@ -828,10 +799,6 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
             Empty tensor used by communication helpers.
         local_rank : int
             Rank of the current process.
-        gpus_per_node : int
-            Number of processes assigned to each node.
-        intranode_group : Optional[dist.ProcessGroup]
-            Process group containing ranks on the current node.
 
         """
         super().__init__(
@@ -842,38 +809,36 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
         )
         self._handle: Optional[dist.Work] = None
         self.local_rank = int(local_rank)
-        self.gpus_per_node = gpus_per_node
-        self.intranode_group = intranode_group or _get_intranode_group(
-            group, gpus_per_node
-        )
-        # First rank of this node; broadcast sources are node_base + local idx.
-        self._node_base = (self.local_rank // gpus_per_node) * gpus_per_node
+        self.topo = get_hybrid_topology(group, ring_config.gpus_per_node)
+        self._gpn = self.topo.gpus_per_node
+        self.intranode_group = self.topo.intranode_group
+        # Inter-node hop: send to the next node, receive from the previous.
+        self._inter_ranks = [self.topo.inter_peer(1), self.topo.inter_peer(-1)]
 
         self._node_chunk: Optional[torch.Tensor] = None
-        self._internode_handle = None
-        self._internode_recv_buf = None
+        self._internode_handle: Optional[dist.Work] = None
+        self._internode_recv_buf: Optional[torch.Tensor] = None
 
     def _launch_internode(self, data: torch.Tensor, step: int) -> None:
-        """Launch an inter-node tensor transfer.
+        """Launch an inter-node transfer of ``data`` along the node ring.
 
         Parameters
         ----------
         data : torch.Tensor
-            Tensor data to communicate.
+            Tensor to send on.
         step : int
-            Current ring step.
+            Current ring step (only its intra-node phase is used as the tag).
 
         """
         buf = torch.empty_like(data)
         self._internode_recv_buf, self._internode_handle = self.config.p2p_fn(
             data=data,
             buffer=buf,
-            direction=self.gpus_per_node,
+            send_recv_ranks=self._inter_ranks,
             group=self.group,
             async_op=True,
-            tag=step % self.gpus_per_node,
+            tag=step % self._gpn,
             empty=self.empty,
-            group_size=self.group.size(),
         )
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -905,7 +870,7 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
             # alias `_node_chunk`) can never race the in-flight send.
             self._launch_internode(self._node_chunk.clone(), step)
 
-        elif step % self.gpus_per_node == 0:
+        elif step % self._gpn == 0:
             # New node round: adopt the chunk that arrived from the previous node.
             assert self._internode_handle is not None
             self._internode_handle.wait()
@@ -913,18 +878,14 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
 
         assert self._node_chunk is not None
 
-        # Intra-node broadcast. The source rank reuses its own buffer in place
-        # (contents unchanged); everyone else receives into scratch.
-        src = self._node_base + (step % self.gpus_per_node)
+        # Intra-node broadcast. The source rank reuses its own buffer in place;
+        # everyone else receives into scratch.
+        src = self.topo.rank_at(self.topo.node_idx, step)
+        is_src = self.topo.local_idx == step % self._gpn
         self._recv_buf = (
-            self._node_chunk
-            if self.local_rank == src
-            else torch.empty_like(self._node_chunk)
+            self._node_chunk if is_src else torch.empty_like(self._node_chunk)
         )
-        self._handle = dist.broadcast(
-            self._recv_buf, src=src, group=self.intranode_group, async_op=True
-        )
-        self._handle.wait()
+        dist.broadcast(self._recv_buf, src=src, group=self.intranode_group)
         recv_buf = self._recv_buf
 
         if self.config.send_in_forward == SendForward.X:
@@ -939,10 +900,11 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
         return kj, vj, kv
 
     def maybe_forward(self, step: int, world_size: int) -> None:
-        # Intra-node movement is handled entirely by the broadcast in `get`;
-        # the only thing left to schedule is the next inter-node hop, issued a
-        # full round ahead so it overlaps the `gpus_per_node` local broadcasts.
-        """Schedule communication for the next ring step.
+        """Schedule the next inter-node hop at a node-round boundary.
+
+        Intra-node movement is handled entirely by the broadcast in ``get``;
+        the only thing left is the next inter-node hop, issued a full round
+        ahead so it overlaps the ``gpus_per_node`` local broadcasts.
 
         Parameters
         ----------
@@ -954,9 +916,9 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
         """
         if step == 0 or step >= world_size - 1:
             return
-        if step % self.gpus_per_node != 0:
+        if step % self._gpn != 0:
             return
-        if step // self.gpus_per_node >= (self.group.size() // self.gpus_per_node) - 1:
+        if step // self._gpn >= self.topo.n_nodes - 1:
             return
 
         assert self._node_chunk is not None

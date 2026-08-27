@@ -123,21 +123,38 @@ def ring_backward(
 # --------------------------------------------------------------------------- #
 # backward: dK/dV accumulation across the ring
 # --------------------------------------------------------------------------- #
+def _use_global_dkv_buffer(ring_config: RingAttentionConfig) -> bool:
+    """Whether dK/dV accumulate into a global-sized buffer + a final all-reduce.
+
+    True for GATHER_DKV always, and for HYBRID_BROADCAST + LOCAL regardless of
+    ``send_backward``: its intra-node broadcast makes every node rank produce a
+    partial for the *same* chunk, so a positional scatter + final all-reduce is
+    the natural fold and there is no meaningful P2P relay. (Mirrors how
+    BROADCAST + LOCAL ignores ``send_backward``.)
+    """
+    if ring_config.send_backward == SendBackward.GATHER_DKV:
+        return True
+    return (
+        ring_config.send_op == SendOp.HYBRID_BROADCAST
+        and ring_config.save_scope == SaveScope.LOCAL
+    )
+
+
 def get_dkv_buffer(
     ring_config: RingAttentionConfig, q: torch.Tensor, world_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Allocate the dK, dV buffers appropriate for the accumulation strategy.
 
-    GATHER_DKV: one global-sized buffer that every step writes its chunk
-        into at the right offset, all-reduced at the end.
-    SEND_DKV: a local-sized buffer that dK/dV are added into, with partial
-        sums P2P-relayed around the ring each step.
+    Global buffer (see :func:`_use_global_dkv_buffer`): one global-sized buffer
+        that every step writes its chunk into at the right offset, all-reduced
+        at the end.
+    Otherwise (SEND_DKV relay): a local-sized buffer that dK/dV are added into,
+        with partial sums P2P-relayed around the ring each step.
     """
-    match ring_config.send_backward:
-        case SendBackward.GATHER_DKV:
-            shape = [*q.shape[0:2], world_size * q.shape[2], *q.shape[3:]]
-        case SendBackward.SEND_DKV:
-            shape = list(q.shape)
+    if _use_global_dkv_buffer(ring_config):
+        shape = [*q.shape[0:2], world_size * q.shape[2], *q.shape[3:]]
+    else:
+        shape = list(q.shape)
     return (
         torch.zeros(shape, device=q.device, dtype=q.dtype),
         torch.zeros(shape, device=q.device, dtype=q.dtype),
@@ -158,38 +175,41 @@ def accumulate_dkv(
     empty: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fold this step's locally computed dk_j, dv_j into the running dK, dV."""
-    match ring_config.send_backward:
-        case SendBackward.GATHER_DKV:
-            if ring_config.save_scope == SaveScope.GLOBAL:
-                # The forward stored `chunks_to_save` by global chunk id and
-                # `_GlobalChunkProvider` looks them up directly, so ring step
-                # `step` == global chunk index for every send_op.
-                global_chunk_idx = step
-            elif ring_config.send_op == SendOp.HYBRID_P2P:
-                # LOCAL hybrid: chunks re-circulate through the node/local ring.
-                topo = get_hybrid_topology(group, ring_config.gpus_per_node)
-                return _accumulate_dkv_hybrid(
-                    dk_buf, dv_buf, dk_j, dv_j, step, seq_local, topo
-                )
-            elif ring_config.send_op == SendOp.BROADCAST:
-                global_chunk_idx = (local_rank - step) % world_size
-            else:
-                global_chunk_idx = (local_rank + step) % world_size
-            return _accumulate_dkv_gather(
-                dk_buf,
-                dv_buf,
-                dk_j,
-                dv_j,
-                step,
-                seq_local,
-                local_rank,
-                world_size,
-                global_chunk_idx,
-            )
-        case SendBackward.SEND_DKV:
-            return _accumulate_dkv_send(
-                ring_config, dk_buf, dv_buf, dk_j, dv_j, step, group, empty
-            )
+    if not _use_global_dkv_buffer(ring_config):
+        return _accumulate_dkv_send(
+            ring_config, dk_buf, dv_buf, dk_j, dv_j, step, group, empty
+        )
+
+    if ring_config.save_scope == SaveScope.GLOBAL:
+        # The forward stored `chunks_to_save` by global chunk id and
+        # `_GlobalChunkProvider` looks them up directly, so ring step
+        # `step` == global chunk index for every send_op.
+        global_chunk_idx = step
+    elif ring_config.send_op == SendOp.HYBRID_P2P:
+        # LOCAL hybrid: chunks re-circulate through the node/local ring.
+        topo = get_hybrid_topology(group, ring_config.gpus_per_node)
+        return _accumulate_dkv_hybrid(dk_buf, dv_buf, dk_j, dv_j, step, seq_local, topo)
+    elif ring_config.send_op == SendOp.HYBRID_BROADCAST:
+        # LOCAL hybrid broadcast: every node rank saw the same chunk this step.
+        topo = get_hybrid_topology(group, ring_config.gpus_per_node)
+        return _accumulate_dkv_hybrid_broadcast(
+            dk_buf, dv_buf, dk_j, dv_j, step, seq_local, topo
+        )
+    elif ring_config.send_op == SendOp.BROADCAST:
+        global_chunk_idx = (local_rank - step) % world_size
+    else:
+        global_chunk_idx = (local_rank + step) % world_size
+    return _accumulate_dkv_gather(
+        dk_buf,
+        dv_buf,
+        dk_j,
+        dv_j,
+        step,
+        seq_local,
+        local_rank,
+        world_size,
+        global_chunk_idx,
+    )
 
 
 def _accumulate_dkv_gather(
@@ -276,6 +296,49 @@ def _accumulate_dkv_hybrid(
     """
     node_step = step // topo.gpus_per_node
     global_chunk_idx = topo.rank_at(topo.node_idx - node_step, topo.local_idx + step)
+    lo, hi = global_chunk_idx * seq_local, (global_chunk_idx + 1) * seq_local
+    dk_buf[:, :, lo:hi] += dk_j
+    dv_buf[:, :, lo:hi] += dv_j
+    return dk_buf, dv_buf
+
+
+def _accumulate_dkv_hybrid_broadcast(
+    dk_buf: torch.Tensor,
+    dv_buf: torch.Tensor,
+    dk_j: torch.Tensor,
+    dv_j: torch.Tensor,
+    step: int,
+    seq_local: int,
+    topo: HybridTopology,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Add this step's dK/dV into the global buffer at the right chunk slot.
+
+    Used for LOCAL-scope HYBRID_BROADCAST. The backward chunk provider
+    broadcasts the chunk owned by node-local rank ``step % gpn`` of the node
+    ``node_idx - step // gpn`` (the inter-node ring runs backwards relative to
+    the forward), so -- unlike :func:`_accumulate_dkv_hybrid` -- the local index
+    is the broadcast source, not ``local_idx + step``.
+
+    Parameters
+    ----------
+    dk_buf, dv_buf : torch.Tensor
+        Global-sized buffers accumulating dK / dV.
+    dk_j, dv_j : torch.Tensor
+        This step's local dK / dV partials.
+    step : int
+        Backward ring step.
+    seq_local : int
+        Local sequence length.
+    topo : HybridTopology
+        Node/rank layout of the ring.
+
+    Returns
+    -------
+    dk_buf, dv_buf : torch.Tensor
+        The updated buffers.
+    """
+    node_step = step // topo.gpus_per_node
+    global_chunk_idx = topo.rank_at(topo.node_idx - node_step, step)
     lo, hi = global_chunk_idx * seq_local, (global_chunk_idx + 1) * seq_local
     dk_buf[:, :, lo:hi] += dk_j
     dv_buf[:, :, lo:hi] += dv_j
@@ -452,11 +515,9 @@ def postprocess_dkv(
     dk_buf, dv_buf: tuple[torch.Tensor, torch.Tensor]
         Final results of dk and dv that correspond to each rank.
     """
-    match ring_config.send_backward:
-        case SendBackward.GATHER_DKV:
-            dist.all_reduce(dk_buf, op=dist.ReduceOp.SUM, group=group)
-            dist.all_reduce(dv_buf, op=dist.ReduceOp.SUM, group=group)
-            lo, hi = local_rank * seq_local, (local_rank + 1) * seq_local
-            return dk_buf[:, :, lo:hi], dv_buf[:, :, lo:hi]
-        case SendBackward.SEND_DKV:
-            return dk_buf, dv_buf
+    if _use_global_dkv_buffer(ring_config):
+        dist.all_reduce(dk_buf, op=dist.ReduceOp.SUM, group=group)
+        dist.all_reduce(dv_buf, op=dist.ReduceOp.SUM, group=group)
+        lo, hi = local_rank * seq_local, (local_rank + 1) * seq_local
+        return dk_buf[:, :, lo:hi], dv_buf[:, :, lo:hi]
+    return dk_buf, dv_buf

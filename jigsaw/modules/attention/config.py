@@ -380,7 +380,10 @@ def _select_forward_comm_fns(
                     raise NotImplementedError(
                         f"send_in_forward option {send_in_forward} not implemented."
                     )
-        case SendOp.HYBRID_P2P:
+        case SendOp.HYBRID_P2P | SendOp.HYBRID_BROADCAST:
+            # HYBRID_BROADCAST drives its own intra-node broadcast / inter-node
+            # P2P directly and never calls these helpers; it is grouped here
+            # only so config construction does not raise.
             match send_in_forward:
                 case SendForward.X:
 

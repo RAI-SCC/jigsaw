@@ -360,20 +360,30 @@ def hybrid_broadcast_forward(
     w_qkv: torch.Tensor,
     scale: float,
     dropout_p: float,
-    internode_group: dist.ProcessGroup,
-    intranode_group: dist.ProcessGroup,
+    group: dist.ProcessGroup,
     empty: torch.Tensor,
     local_rank: int,
     world_size: int,
     ring_config: RingAttentionConfig,
 ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]:
-    """Forward pass for ring attention: intra-node broadcast, inter-node P2P."""
+    """Forward pass: intra-node broadcast, inter-node P2P.
+
+    Structured like :func:`hybrid_p2p_forward` -- an outer loop over node rounds
+    with one inter-node P2P hop each -- but the intra-node ring is replaced by a
+    per-round sweep of ``gpus_per_node`` broadcasts (à la :func:`broadcast_forward`):
+    at inner step ``s`` the node-local rank ``s`` broadcasts its chunk to the
+    node. Peers/sub-groups come from :class:`HybridTopology`, so there is no
+    ``// gpus_per_node`` arithmetic here.
+    """
     b, heads, n_local, d = q.shape
-    gpus_per_node = ring_config.gpus_per_node
-    n_nodes = world_size // gpus_per_node
-    if world_size % gpus_per_node:
-        raise ValueError("world_size must be divisible by gpus_per_node")
-    intranode_rank = local_rank % gpus_per_node
+    topo = get_hybrid_topology(group, ring_config.gpus_per_node)
+    gpn, n_nodes = topo.gpus_per_node, topo.n_nodes
+    intranode_group = topo.intranode_group
+    send_x = ring_config.send_in_forward == SendForward.X
+
+    # Inter-node hop: send to the previous node, receive from the next (mirrors
+    # hybrid_p2p_forward).
+    inter_ranks = [topo.inter_peer(-1), topo.inter_peer(1)]
 
     out = torch.zeros_like(q)
     lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype)
@@ -390,79 +400,59 @@ def hybrid_broadcast_forward(
         chunks_to_save = [None] * world_size  # filled in per-step below
 
     for node_step in range(n_nodes):
-        # Kick off first send across nodes (unchanged)
+        cur_node = (topo.node_idx + node_step) % n_nodes
+
+        # Kick off this round's inter-node send of the original local chunk.
         if node_step < n_nodes - 1:
-            internode_recv_buf = (
-                torch.empty_like(x_j)
-                if ring_config.send_in_forward == SendForward.X
-                else torch.empty_like(kv_j)
-            )
+            internode_recv_buf = torch.empty_like(x_j if send_x else kv_j)
             internode_recv_buf, internode_handle = ring_config.p2p_fn(
-                data=(
-                    x.clone()
-                    if ring_config.send_in_forward == SendForward.X
-                    else kv.clone()
-                ),
+                data=(x.clone() if send_x else kv.clone()),
                 buffer=internode_recv_buf,
-                direction=gpus_per_node,
-                group=internode_group,
+                send_recv_ranks=inter_ranks,
+                group=group,
                 async_op=True,
                 tag=node_step,
                 empty=empty,
             )
 
-        # own_x/own_kv: this rank's current chunk for the round (fixed for the
-        # duration of the intra-node broadcast, mirrors broadcast_forward's x/kv)
+        # This rank's chunk for the round: broadcast unchanged when it is our
+        # turn (mirrors broadcast_forward's fixed local x/kv).
         own_x, own_kv = x_j, kv_j
+        own_buf = own_x if send_x else own_kv
 
-        # Kick off first intra-node broadcast
-        recv_buf, handle = ring_config.forward_send_fn(
-            x=own_x,
-            kv=own_kv,
-            local_rank=intranode_rank,
-            group=intranode_group,
-            src_rank=0,
-            empty=empty,
-        )
-        handle.wait()
-        x_j, kv_j, kj, vj = ring_config.forward_recv_fn(recv_buf, x_j, kv_j, kj, vj)
+        for step in range(gpn):
+            src = topo.rank_at(topo.node_idx, step)
+            is_src = topo.local_idx == step
+            recv_buf = own_buf if is_src else torch.empty_like(own_buf)
+            dist.broadcast(recv_buf, src=src, group=intranode_group)
 
-        for step in range(gpus_per_node):
-            if step + 1 < gpus_per_node:
-                recv_buf, handle = ring_config.forward_send_fn(
-                    x=own_x,
-                    kv=own_kv,
-                    local_rank=intranode_rank,
-                    group=intranode_group,
-                    src_rank=step + 1,
-                    empty=empty,
-                )
-
-            if ring_config.send_in_forward == SendForward.X:
-                if step != intranode_rank:
-                    kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
-                else:
+            if send_x:
+                x_j = recv_buf
+                if is_src:
                     kv_j, kj, vj = own_kv, own_kv[0], own_kv[1]
+                else:
+                    kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
+            else:
+                kv_j, kj, vj = recv_buf, recv_buf[0], recv_buf[1]
 
             if ring_config.save_scope == SaveScope.GLOBAL:
-                global_step = node_step * gpus_per_node + step
-                chunks_to_save[(local_rank - global_step) % world_size] = (
+                # Broadcast source is node-local index `step`, so the chunk seen
+                # here is global chunk `cur_node * gpn + step` -- identical on
+                # every node rank. Store it so the backward `_GlobalChunkProvider`
+                # (a plain `chunks[step]` lookup) sees ring step == global chunk.
+                chunks_to_save[cur_node * gpn + step] = (
                     ring_config.save_for_backward_fn(x_j, kv_j)
                 )
 
             out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
-            if step < gpus_per_node - 1:
-                handle.wait()
 
-            x_j, kv_j, kj, vj = ring_config.forward_recv_fn(recv_buf, x_j, kv_j, kj, vj)
-
-        # --- consume the internode data that arrived during the intra-node round ---
+        # --- consume the internode data that arrived during the round ---
         if node_step < n_nodes - 1:
             internode_handle.wait()
             x_j, kv_j, kj, vj = ring_config.forward_recv_fn(
                 internode_recv_buf, x_j, kv_j, kj, vj
             )
-            if ring_config.send_in_forward == SendForward.X:
+            if send_x:
                 kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
 
     ring_config.wait_offloads()
