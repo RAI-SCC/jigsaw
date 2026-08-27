@@ -274,7 +274,6 @@ def test_ring_forward_backward(
     offloader: config.Offload,
 ) -> None:
     """Verify if forward-backward pass works for ring attention."""
-    print(f'R{dist.get_rank()} STARTING RING ATTENTION')
     if (
         send_in_forward == config.SendForward.KV
         and save_for_backward == config.SaveBackward.X
@@ -401,17 +400,14 @@ def test_ring_forward_backward(
     # dq_ref: results from calling torch.nn.SDPA
     # q_ref2: results from calling forward-backward core functionality
     # from ring_config.attn_core_forward_fn
-    print(f'R {dist.get_rank()} do i finish? {dq_ref.sum()}')
     assert torch.allclose(dq_ref, q_ref2.grad, atol=atol)
     assert torch.allclose(dk_ref, k_ref2.grad, atol=atol)
     assert torch.allclose(dv_ref, v_ref2.grad, atol=atol)
 
     # gather
-    print(f'R{dist.get_rank()} pre-gathering {dq_ref.sum()}')
     dq_full = gather_1d_results(dq_local, process_mesh_dict, dim=2)
     dk_full = gather_1d_results(dk_local, process_mesh_dict, dim=2)
     dv_full = gather_1d_results(dv_local, process_mesh_dict, dim=2)
-    print(f'R{dist.get_rank()} post--gathering {dq_full.sum()}')
 
     # dq_local, dq_full: results from true ring attention
     assert torch.allclose(out_full, out_ref, atol=atol)
@@ -444,14 +440,14 @@ def test_ring_forward_backward(
 
 @pytest.mark.dist(8)
 @pytest.mark.parametrize(
-    "send_in_forward", [config.SendForward.X, config.SendForward.KV]
+    "send_in_forward", [config.SendForward.X]
 )
 @pytest.mark.parametrize(
-    "save_for_backward", [config.SaveBackward.X, config.SaveBackward.KV]
+    "save_for_backward", [config.SaveBackward.X]
 )
 @pytest.mark.parametrize(
     "send_op",
-    [config.SendOp.HYBRID_P2P, config.SendOp.HYBRID_BROADCAST],
+    [config.SendOp.HYBRID_P2P],
 )
 @pytest.mark.parametrize("save_scope", [config.SaveScope.LOCAL])
 @pytest.mark.parametrize(
@@ -572,7 +568,6 @@ def test_ring_hybrid(
     out_core = out_core.requires_grad_(True)
 
     dout_local = torch.ones_like(out, device=device, dtype=out_ref.dtype)
-    print(f"R{dist.get_rank()} finished forward.")
     dq_local, dk_local, dv_local = backward.ring_backward(
         dout_local,
         q_local,

@@ -84,8 +84,6 @@ def ring_backward(
                 empty,
             )
         
-        print(f'R {dist.get_rank()} final step {step} dk {dk_buf.sum()}')
-        
         if isinstance(chunk_provider, _LocalChunkProvider) or isinstance(
             chunk_provider, _LocalChunkProviderHybridBroadcast
         ):
@@ -253,10 +251,13 @@ def _accumulate_dkv_hybrid(
     dk_buf, dv_buf: torch.Tensor, torch.Tensor
         Accumulated buffers for dk and dv.
     """
+    # TODO: gpus per node as variable instead of hard-coded
+    # 0 1 2 3 4 5 6 7
+    
     node, local = divmod(local_rank, 4)
     if step % 4 == 0:  # temporarily block out this path
         # node-dimension ring, local index fixed
-        send_node = (node - (step)) % world_size // 4
+        send_node = (node + (step)) % world_size // 4
         send_to = send_node * 4 + local
         if local_rank >= 4 and step == 4:
             send_to = (local_rank - 4) % 4
@@ -267,14 +268,14 @@ def _accumulate_dkv_hybrid(
     else:
         # local-dimension ring, node fixed
         base_node_rank = local_rank // 4
-        send_to = (local_rank - step) % 4 + base_node_rank * 4
+        send_to = (local_rank + step) % 4 + base_node_rank * 4
 
         if step > 4 and local_rank >= 4:
             send_to -= 4
         elif step > 4 and local_rank < 4:
             send_to += 4
 
-    # print(f'step {step} global chunk idx {send_to}')
+    print(f'R{dist.get_rank()} step {step} global chunk idx {send_to}')
     global_chunk_idx = send_to
     lo, hi = global_chunk_idx * seq_local, (global_chunk_idx + 1) * seq_local
     dk_buf[:, :, lo:hi] += dk_j
@@ -416,7 +417,6 @@ def _accumulate_dkv_send(
             # groups are not set correctly
             # since we artificially have a group of size 4
             # rank 6 needs to send to 5 in the beginning, and not 3
-            # print(f'DKV: R{dist.get_rank()}  step {step} sending to {send_recv_ranks[0]} recv from {send_recv_ranks[1]}')
             recv_buf, _ = ring_config.p2p_fn(
                 dkv,
                 recv_buf,

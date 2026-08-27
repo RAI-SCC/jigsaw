@@ -272,7 +272,7 @@ def hybrid_p2p_forward(
                     else kv.clone()
                 ),
                 buffer=internode_recv_buf,
-                direction=gpus_per_node,
+                direction=-gpus_per_node,
                 group=group,
                 async_op=True,
                 tag=node_step,
@@ -302,7 +302,7 @@ def hybrid_p2p_forward(
 
             if ring_config.save_scope == SaveScope.GLOBAL:
                 global_step = node_step * gpus_per_node + step
-                chunks_to_save[(local_rank - global_step) % world_size] = (
+                chunks_to_save[(local_rank + global_step) % world_size] = (
                     ring_config.save_for_backward_fn(x_j, kv_j)
                 )
             out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
