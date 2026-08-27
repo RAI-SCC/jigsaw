@@ -62,7 +62,7 @@ def ring_backward(
         )
         dq += dq_j
         del dq_j, kj, vj, kv
-        
+
         # Cases where every rank processes the *same* global chunk `step` at
         # ring step `step`: the partial dK/dV for chunk `step` just needs a SUM
         # all-reduce, with the owning rank (`local_rank == step`) keeping it.
@@ -99,12 +99,12 @@ def ring_backward(
                 group,
                 empty,
             )
-        
+
         if isinstance(chunk_provider, _LocalChunkProvider) or isinstance(
             chunk_provider, _LocalChunkProviderHybridBroadcast
         ):
             chunk_provider.maybe_forward(step, world_size)
-        
+
     dk_local, dv_local = postprocess_dkv(
         ring_config, dk_buf, dv_buf, local_rank, seq_local, group
     )
@@ -273,7 +273,7 @@ def _accumulate_dkv_hybrid(
     """
     # TODO: gpus per node as variable instead of hard-coded
     # 0 1 2 3 4 5 6 7
-    
+
     node, local = divmod(local_rank, 4)
     if step % 4 == 0:  # temporarily block out this path
         # node-dimension ring, local index fixed
@@ -370,11 +370,11 @@ def _accumulate_dkv_send_broadcast(
     dk_buf, dv_buf: torch.Tensor, torch.Tensor
         Accumulated values of dk and dv.
     """
-    
     dist.all_reduce(dk_j, op=dist.ReduceOp.SUM, group=group)
     dist.all_reduce(dv_j, op=dist.ReduceOp.SUM, group=group)
     return dk_j, dv_j
-    
+
+
 def _accumulate_dkv_send(
     ring_config: RingAttentionConfig,
     dk_buf: torch.Tensor,
@@ -428,7 +428,7 @@ def _accumulate_dkv_send(
         send_recv_ranks = get_send_recv_ranks(
             dist.get_rank(group), step=step, nodes=group.size() // 4, gpus_per_node=4
         )
-        print(f'step {step} send_recv_ranks {send_recv_ranks}')
+        print(f"step {step} send_recv_ranks {send_recv_ranks}")
         if step % 4 != 0:
             # groups are not set correctly
             # since we artificially have a group of size 4

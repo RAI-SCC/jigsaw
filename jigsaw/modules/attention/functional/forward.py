@@ -182,7 +182,7 @@ def ring_forward(
     local_rank: int,
     world_size: int,
     ring_config: RingAttentionConfig,
-) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, ...]]:
+) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]:
     """Forward pass for ring attention using point-to-point sends."""
     b, heads, n_local, d = q.shape
     out = torch.zeros_like(q)
@@ -324,14 +324,13 @@ def hybrid_p2p_forward(
                 local_idx = local_rank % gpus_per_node
                 cur_node = (node_idx + node_step) % n_nodes
                 global_chunk_idx = (
-                    cur_node * gpus_per_node
-                    + (local_idx + step) % gpus_per_node
+                    cur_node * gpus_per_node + (local_idx + step) % gpus_per_node
                 )
-                chunks_to_save[global_chunk_idx] = (
-                    ring_config.save_for_backward_fn(x_j, kv_j)
+                chunks_to_save[global_chunk_idx] = ring_config.save_for_backward_fn(
+                    x_j, kv_j
                 )
             out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
-            print(f'step {step} forward send_recv_ranks {send_recv_ranks}')
+            print(f"step {step} forward send_recv_ranks {send_recv_ranks}")
             if step < gpus_per_node - 1:
                 handle.wait()
 
