@@ -17,7 +17,7 @@ from jigsaw.modules.attention.config import (
 )
 from jigsaw.offload import NVLinkActivationOffloader
 
-from .functional import _compute_kv, get_send_recv_ranks_hybrid
+from .functional import _compute_kv, get_hybrid_topology
 
 
 def _build_backward_chunk_provider(
@@ -243,7 +243,7 @@ class _GlobalChunkProvider(_BackwardChunkProvider):
             kv = chunk
             return kv[0].contiguous(), kv[1].contiguous(), kv
         elif self.config.save_for_backward == SaveBackward.X:
-            print(f'R{dist.get_rank()} step {step} chunk {chunk.sum()}')
+            print(f"R{dist.get_rank()} step {step} chunk {chunk.sum()}")
             kv, kj, vj = _compute_kv(
                 chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
             )

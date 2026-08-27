@@ -10,10 +10,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
-from ..config import (
-    RingAttentionConfig,
-    SendOp
-)
+from ..config import RingAttentionConfig
+
 
 def _compute_kv(
     xj: torch.Tensor, w_qkv: torch.Tensor, b: int, n_local: int, h: int, d: int
@@ -44,28 +42,6 @@ def _compute_kv(
         (xj @ w_qkv[d * h :, :].mT).reshape(b, n_local, 2, h, d).permute(2, 0, 3, 1, 4)
     ).contiguous()
     return kv, kv[0], kv[1]
-
-
-def get_send_recv_ranks_hybrid(local_rank: int, gpus_per_node: int = 4) -> list[int]:
-    """Return neighboring ranks for intra-node hybrid communication.
-
-    Parameters
-    ----------
-    local_rank : int
-        Rank of the current process.
-    gpus_per_node : int, default=4
-        Number of processes assigned to each node.
-
-    Returns
-    -------
-    list[int]
-        Two-element list containing the send rank and receive rank.
-    """
-    base_node_rank = local_rank // gpus_per_node
-    send_to = (local_rank - 1) % gpus_per_node + base_node_rank * gpus_per_node
-    recv_from = (local_rank + 1) % gpus_per_node + base_node_rank * gpus_per_node
-
-    return [send_to, recv_from]
 
 
 def build_intxxnode_groups(
@@ -171,7 +147,7 @@ class HybridTopology:
 
     @property
     def ring_rank(self) -> int:
-        """This rank's position in the ring (``node_idx * gpn + local_idx``)."""
+        """Position of this rank in the ring (``node_idx * gpn + local_idx``)."""
         return self.node_idx * self.gpus_per_node + self.local_idx
 
     def rank_at(self, node: int, local: int) -> int:
@@ -190,9 +166,7 @@ class HybridTopology:
 _HYBRID_TOPOLOGY_CACHE: dict[tuple[int, int], HybridTopology] = {}
 
 
-def get_hybrid_topology(
-    group: dist.ProcessGroup, gpus_per_node: int
-) -> HybridTopology:
+def get_hybrid_topology(group: dist.ProcessGroup, gpus_per_node: int) -> HybridTopology:
     """Build (and cache) the :class:`HybridTopology` for ``group``.
 
     ``dist.new_group`` is collective over the *world*: every rank must build
@@ -233,7 +207,9 @@ def get_hybrid_topology(
         for node in range(n_nodes)
     ]
     inter_subs = [
-        dist.new_group(ranks=[world_ranks[grid[node][local]] for node in range(n_nodes)])
+        dist.new_group(
+            ranks=[world_ranks[grid[node][local]] for node in range(n_nodes)]
+        )
         for local in range(gpus_per_node)
     ]
 
@@ -316,6 +292,7 @@ class RingAttentionFunction(torch.autograd.Function):
         world_size = dist.get_world_size(group)
         empty = torch.empty(0, device=x.device, dtype=x.dtype)
         from .forward import build_ring_forward
+
         ring_forward_fn = build_ring_forward(config)
         out, lse, chunks_to_save = ring_forward_fn(
             q,

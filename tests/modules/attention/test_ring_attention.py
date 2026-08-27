@@ -365,9 +365,7 @@ def test_build_intxxnode_groups_arbitrary_mesh_shapes(
 
 @pytest.mark.dist(4)
 @pytest.mark.parametrize("send_in_forward", [config.SendForward.KV])
-@pytest.mark.parametrize(
-    "save_for_backward", [config.SaveBackward.KV]
-)
+@pytest.mark.parametrize("save_for_backward", [config.SaveBackward.KV])
 @pytest.mark.parametrize(
     "send_op",
     [config.SendOp.ALLTOALL, config.SendOp.P2P, config.SendOp.BROADCAST],

@@ -7,7 +7,6 @@ from .functional import (
     RingAttentionFunction,
     build_intxxnode_groups,
     get_hybrid_topology,
-    get_send_recv_ranks_hybrid,
 )
 
 __all__ = [
@@ -16,6 +15,5 @@ __all__ = [
     "build_intxxnode_groups",
     "build_ring_forward",
     "get_hybrid_topology",
-    "get_send_recv_ranks_hybrid",
     "ring_backward",
 ]
