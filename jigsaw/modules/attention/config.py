@@ -56,6 +56,7 @@ class SendOp(Enum):
     BROADCAST = 2
     HYBRID_P2P = 3
     HYBRID_BROADCAST = 4
+    HYBRID_ALLTOALL = 5
 
 
 # --------------------------------------------------------------------------- #
@@ -380,10 +381,12 @@ def _select_forward_comm_fns(
                     raise NotImplementedError(
                         f"send_in_forward option {send_in_forward} not implemented."
                     )
-        case SendOp.HYBRID_P2P | SendOp.HYBRID_BROADCAST:
+        case SendOp.HYBRID_P2P | SendOp.HYBRID_BROADCAST | SendOp.HYBRID_ALLTOALL:
             # HYBRID_BROADCAST drives its own intra-node broadcast / inter-node
             # P2P directly and never calls these helpers; it is grouped here
-            # only so config construction does not raise.
+            # only so config construction does not raise. HYBRID_ALLTOALL shares
+            # HYBRID_P2P's ring logic, differing only in the comm primitive
+            # (see _p2p_fn / _send_op_fn).
             match send_in_forward:
                 case SendForward.X:
 
@@ -750,6 +753,9 @@ class RingAttentionConfig:
                     return comm.comm_1d_p2p
                 case SendOp.BROADCAST:
                     return comm.comm_1d_alltoall
+                case SendOp.HYBRID_ALLTOALL:
+                    # Inter-node hop over all-to-all (HYBRID_P2P uses p2p here).
+                    return comm.comm_1d_alltoall
 
         # Default comm function type is p2p
         return comm.comm_1d_p2p
@@ -773,7 +779,7 @@ class RingAttentionConfig:
             return comm.comm_1d_p2p
 
         match send_op:
-            case SendOp.ALLTOALL | SendOp.HYBRID_P2P:
+            case SendOp.ALLTOALL | SendOp.HYBRID_P2P | SendOp.HYBRID_ALLTOALL:
                 if dist.get_backend() != "gloo":
                     return comm.comm_1d_alltoall
             case SendOp.P2P | SendOp.HYBRID_P2P:

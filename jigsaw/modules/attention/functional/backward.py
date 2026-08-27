@@ -185,7 +185,7 @@ def accumulate_dkv(
         # `_GlobalChunkProvider` looks them up directly, so ring step
         # `step` == global chunk index for every send_op.
         global_chunk_idx = step
-    elif ring_config.send_op == SendOp.HYBRID_P2P:
+    elif ring_config.send_op in (SendOp.HYBRID_P2P, SendOp.HYBRID_ALLTOALL):
         # LOCAL hybrid: chunks re-circulate through the node/local ring.
         topo = get_hybrid_topology(group, ring_config.gpus_per_node)
         return _accumulate_dkv_hybrid(dk_buf, dv_buf, dk_j, dv_j, step, seq_local, topo)
@@ -453,7 +453,7 @@ def _accumulate_dkv_send(
     recv_buf = torch.empty_like(dkv)
 
     # hybrid
-    if ring_config.send_op == SendOp.HYBRID_P2P:
+    if ring_config.send_op in (SendOp.HYBRID_P2P, SendOp.HYBRID_ALLTOALL):
         topo = get_hybrid_topology(group, ring_config.gpus_per_node)
         send_recv_ranks = _hybrid_dkv_relay_peers(topo, step)
         recv_buf, _ = ring_config.p2p_fn(

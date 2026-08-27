@@ -262,6 +262,11 @@ class _BroadcastForwardChunkProvider(_ForwardChunkProvider):
 class _HybridP2PForwardChunkProvider(_ForwardChunkProvider):
     """``gpus_per_node`` intra-node ring steps per node round, one inter-node hop each.
 
+    Serves both ``SendOp.HYBRID_P2P`` and ``SendOp.HYBRID_ALLTOALL`` -- the ring
+    logic is identical, only the underlying comm primitive differs (the
+    ``ring_config`` picks ``comm_1d_p2p`` vs ``comm_1d_alltoall`` for the
+    inter-node hop; see :meth:`RingAttentionConfig._p2p_fn`).
+
     The forward twin of
     :class:`~.chunk_provider._LocalChunkProviderHybridP2P`. Ring step ``s`` maps
     to ``divmod(s, gpus_per_node) == (node_step, inner)``; the inter-node send of
@@ -504,7 +509,7 @@ def build_forward_chunk_provider(
             return _BroadcastForwardChunkProvider(*args)
         case SendOp.P2P | SendOp.ALLTOALL:
             return _RingForwardChunkProvider(*args)
-        case SendOp.HYBRID_P2P:
+        case SendOp.HYBRID_P2P | SendOp.HYBRID_ALLTOALL:
             return _HybridP2PForwardChunkProvider(*args)
         case SendOp.HYBRID_BROADCAST:
             return _HybridBroadcastForwardChunkProvider(*args)

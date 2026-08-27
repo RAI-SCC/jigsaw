@@ -555,15 +555,21 @@ def test_ring_forward_backward(
 
 
 @pytest.mark.dist(8)
-@pytest.mark.parametrize("send_in_forward", [config.SendForward.X])
-@pytest.mark.parametrize("save_for_backward", [config.SaveBackward.X])
+@pytest.mark.parametrize(
+    "send_in_forward", [config.SendForward.X, config.SendForward.KV]
+)
+@pytest.mark.parametrize(
+    "save_for_backward", [config.SaveBackward.X, config.SaveBackward.KV]
+)
 @pytest.mark.parametrize(
     "send_op",
     [
         config.SendOp.HYBRID_P2P,
+        config.SendOp.HYBRID_ALLTOALL,
         config.SendOp.HYBRID_BROADCAST,
         config.SendOp.P2P,
         config.SendOp.ALLTOALL,
+        config.SendOp.BROADCAST
     ],
 )
 @pytest.mark.parametrize(

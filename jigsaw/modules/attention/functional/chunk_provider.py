@@ -99,7 +99,7 @@ def _build_backward_chunk_provider(
                         empty,
                         local_rank,
                     )
-                case SendOp.HYBRID_P2P:
+                case SendOp.HYBRID_P2P | SendOp.HYBRID_ALLTOALL:
                     return _LocalChunkProviderHybridP2P(
                         ring_config,
                         chunks_to_save,
