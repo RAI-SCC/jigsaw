@@ -75,6 +75,61 @@ def test_build_intxxnode_groups_rejects_invalid_node_size(
         functional.build_intxxnode_groups(process_mesh, gpus_per_node=0)
 
 
+@pytest.mark.dist(48)
+def test_build_intxxnode_groups_four_dimensional_mesh(
+    device: torch.device,
+) -> None:
+    """Build groups for a four-dimensional mesh with uneven node chunks."""
+    process_mesh = dist.device_mesh.init_device_mesh(
+        device_type=device.type,
+        mesh_shape=(2, 3, 4, 2),
+        mesh_dim_names=("dp", "row", "col", "replica"),
+    )
+
+    internode_groups, intranode_groups = functional.build_intxxnode_groups(
+        process_mesh, gpus_per_node=2
+    )
+
+    assert sorted({dist.get_world_size(group) for group in internode_groups}) == [1, 2]
+    assert sorted({dist.get_world_size(group) for group in intranode_groups}) == [1, 2]
+
+
+@pytest.mark.dist(8)
+@pytest.mark.parametrize(
+    ("mesh_shape", "mesh_dim_names", "gpus_per_node", "expected_size"),
+    [
+        ((8, 1), ("row", "col"), 8, (1, 8)),
+        ((4, 2), ("row", "col"), 2, (2, 2)),
+        ((2, 2, 2), ("dp", "row", "col"), 2, (1, 2)),
+        ((2, 1, 2, 2), ("dp", "row", "col", "replica"), 1, (1, 1)),
+    ],
+)
+def test_build_intxxnode_groups_arbitrary_mesh_shapes(
+    device: torch.device,
+    mesh_shape: tuple[int, ...],
+    mesh_dim_names: tuple[str, ...],
+    gpus_per_node: int,
+    expected_size: tuple[int, int],
+) -> None:
+    """Build groups for arbitrary-dimensional meshes with eight ranks."""
+    process_mesh = dist.device_mesh.init_device_mesh(
+        device_type=device.type,
+        mesh_shape=mesh_shape,
+        mesh_dim_names=mesh_dim_names,
+    )
+
+    internode_groups, intranode_groups = functional.build_intxxnode_groups(
+        process_mesh, gpus_per_node=gpus_per_node
+    )
+
+    assert sorted({dist.get_world_size(group) for group in internode_groups}) == [
+        expected_size[0]
+    ]
+    assert sorted({dist.get_world_size(group) for group in intranode_groups}) == [
+        expected_size[1]
+    ]
+
+
 # def test_backward(device, process_mesh):
 #     local_rank = dist.get_rank(group=process_mesh["row"])
 #     world_size = dist.get_world_size(group=process_mesh["row"])
