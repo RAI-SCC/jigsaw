@@ -449,7 +449,7 @@ def test_ring_forward_backward(
     "send_op",
     [config.SendOp.HYBRID_P2P],
 )
-@pytest.mark.parametrize("save_scope", [config.SaveScope.LOCAL])
+@pytest.mark.parametrize("save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL])
 @pytest.mark.parametrize(
     "send_backward",
     [config.SendBackward.SEND_DKV, config.SendBackward.GATHER_DKV],

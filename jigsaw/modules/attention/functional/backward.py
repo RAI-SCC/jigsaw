@@ -275,7 +275,6 @@ def _accumulate_dkv_hybrid(
         elif step > 4 and local_rank < 4:
             send_to += 4
 
-    print(f'R{dist.get_rank()} step {step} global chunk idx {send_to}')
     global_chunk_idx = send_to
     lo, hi = global_chunk_idx * seq_local, (global_chunk_idx + 1) * seq_local
     dk_buf[:, :, lo:hi] += dk_j
@@ -406,13 +405,10 @@ def _accumulate_dkv_send(
 
     # hybrid
     if ring_config.send_op == SendOp.HYBRID_P2P:
-        # step 1 --> rank 3 2-> rank 2, 3-> rank 1
-        # step 4 --> rank 4, 5 --> rank 7, 6 -> rank
-
-        # Rank 4: step 1 --> rank 7
         send_recv_ranks = get_send_recv_ranks(
             dist.get_rank(group), step=step, nodes=group.size() // 4, gpus_per_node=4
         )
+        print(f'step {step} send_recv_ranks {send_recv_ranks}')
         if step % 4 != 0:
             # groups are not set correctly
             # since we artificially have a group of size 4

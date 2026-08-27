@@ -100,7 +100,6 @@ def gather_1d_results(
 ) -> torch.Tensor:
     """Gather tensor distributed across process mesh rows along any dimension."""
     n_rows = process_mesh_dict[pm_key].size()
-    print(f'rank {dist.get_rank()} entered gathering code. x shape is {x.shape}')
     tensor_list = [
         torch.zeros(x.shape, dtype=x.dtype, device=x.device) for _ in range(n_rows)
     ]

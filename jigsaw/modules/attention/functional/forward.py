@@ -306,6 +306,7 @@ def hybrid_p2p_forward(
                     ring_config.save_for_backward_fn(x_j, kv_j)
                 )
             out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
+            print(f'step {step} forward send_recv_ranks {send_recv_ranks}')
             if step < gpus_per_node - 1:
                 handle.wait()
 
