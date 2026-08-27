@@ -245,9 +245,7 @@ pytestmark = [pytest.mark.dist_required]
 
 
 @pytest.mark.dist(4)
-@pytest.mark.parametrize(
-    "send_in_forward", [ config.SendForward.KV]
-)
+@pytest.mark.parametrize("send_in_forward", [config.SendForward.KV])
 @pytest.mark.parametrize(
     "save_for_backward", [config.SaveBackward.X, config.SaveBackward.KV]
 )
@@ -256,7 +254,8 @@ pytestmark = [pytest.mark.dist_required]
     [config.SendOp.ALLTOALL, config.SendOp.P2P, config.SendOp.BROADCAST],
 )
 @pytest.mark.parametrize(
-    "save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL],
+    "save_scope",
+    [config.SaveScope.LOCAL, config.SaveScope.GLOBAL],
 )
 @pytest.mark.parametrize(
     "send_backward",
@@ -290,7 +289,7 @@ def test_ring_forward_backward(
         send_backward=send_backward,
         offload=offloader,
     )
-    print(f'R{dist.get_rank()} config {ring_config}')
+    print(f"R{dist.get_rank()} config {ring_config}")
 
     ring_forward = forward.build_ring_forward(ring_config)
     local_rank = dist.get_rank(group=process_mesh_dict["row"])
@@ -339,7 +338,7 @@ def test_ring_forward_backward(
         world_size,
         ring_config,
     )
-    print(f'R{dist.get_rank()} out {out.sum()}')
+    print(f"R{dist.get_rank()} out {out.sum()}")
     out_full = gather_1d_results(out, process_mesh_dict, dim=2)
     x_full = gather_1d_results(x, process_mesh_dict, dim=1)
     qkv = x_full @ w_qkv.mT
@@ -389,7 +388,7 @@ def test_ring_forward_backward(
         ring_config=ring_config,
         empty=empty,
     )
-    print(f'R{dist.get_rank()} dq {dq_local.sum()}')
+    print(f"R{dist.get_rank()} dq {dq_local.sum()}")
 
     # Backward pass
     out_ref.backward(torch.ones_like(out_ref))
@@ -439,17 +438,15 @@ def test_ring_forward_backward(
 
 
 @pytest.mark.dist(8)
-@pytest.mark.parametrize(
-    "send_in_forward", [config.SendForward.X]
-)
-@pytest.mark.parametrize(
-    "save_for_backward", [config.SaveBackward.X]
-)
+@pytest.mark.parametrize("send_in_forward", [config.SendForward.X])
+@pytest.mark.parametrize("save_for_backward", [config.SaveBackward.X])
 @pytest.mark.parametrize(
     "send_op",
-    [config.SendOp.HYBRID_P2P],
+    [config.SendOp.HYBRID_P2P, config.SendOp.P2P, config.SendOp.ALLTOALL],
 )
-@pytest.mark.parametrize("save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL])
+@pytest.mark.parametrize(
+    "save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL]
+)
 @pytest.mark.parametrize(
     "send_backward",
     [config.SendBackward.SEND_DKV, config.SendBackward.GATHER_DKV],
