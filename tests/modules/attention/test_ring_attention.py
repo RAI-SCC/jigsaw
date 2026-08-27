@@ -448,7 +448,13 @@ def test_ring_forward_backward(
 )
 @pytest.mark.parametrize(
     "send_op",
-    [config.SendOp.ALLTOALL, config.SendOp.P2P, config.SendOp.BROADCAST, config.SendOp.HYBRID_P2P, config.SendOp.HYBRID_BROADCAST],
+    [
+        config.SendOp.ALLTOALL,
+        config.SendOp.P2P,
+        config.SendOp.BROADCAST,
+        config.SendOp.HYBRID_P2P,
+        config.SendOp.HYBRID_BROADCAST,
+    ],
 )
 @pytest.mark.parametrize("save_scope", [config.SaveScope.LOCAL])
 @pytest.mark.parametrize(

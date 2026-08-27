@@ -5,7 +5,6 @@ import torch.distributed as dist
 
 from jigsaw.modules.attention.config import (
     RingAttentionConfig,
-    SaveScope,
     SendBackward,
     SendOp,
 )
@@ -76,7 +75,7 @@ def ring_backward(
             group,
             empty,
         )
-        
+
         if isinstance(chunk_provider, _LocalChunkProvider) or isinstance(
             chunk_provider, _LocalChunkProviderHybridBroadcast
         ):
@@ -135,13 +134,21 @@ def accumulate_dkv(
                     dk_buf, dv_buf, dk_j, dv_j, step, seq_local, local_rank, world_size
                 )
             else:
-                # This switch is necessary because 
+                # This switch is necessary because
                 if ring_config.send_op == SendOp.BROADCAST:
                     global_chunk_idx = (local_rank - step) % world_size
                 else:
                     global_chunk_idx = (local_rank + step) % world_size
                 return _accumulate_dkv_gather(
-                    dk_buf, dv_buf, dk_j, dv_j, step, seq_local, local_rank, world_size, global_chunk_idx
+                    dk_buf,
+                    dv_buf,
+                    dk_j,
+                    dv_j,
+                    step,
+                    seq_local,
+                    local_rank,
+                    world_size,
+                    global_chunk_idx,
                 )
         case SendBackward.SEND_DKV:
             return _accumulate_dkv_send(
@@ -158,7 +165,7 @@ def _accumulate_dkv_gather(
     seq_local: int,
     local_rank: int,
     world_size: int,
-    global_chunk_idx: int
+    global_chunk_idx: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Accumulate local dk, dv in the correct space in the buffer.
@@ -183,6 +190,8 @@ def _accumulate_dkv_gather(
         Local rank within ring attention.
     world_size: int
         World size of ring attention.
+    global_chunk_idx: int
+        Index of the sequence chunk represented by the local gradients.
 
     Returns
     -------
@@ -289,6 +298,7 @@ def get_send_recv_ranks(
             recv_from += 4
 
     return send_to, recv_from
+
 
 def _accumulate_dkv_send(
     ring_config: RingAttentionConfig,
