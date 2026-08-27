@@ -632,6 +632,7 @@ class RingAttentionConfig:
         save_scope: SaveScope = SaveScope.GLOBAL,
         send_backward: SendBackward = SendBackward.SEND_DKV,
         offload: Offload = Offload.DISABLED,
+        gpus_per_node: int = 4,
     ):
         """Initialize the object.
 
@@ -651,8 +652,12 @@ class RingAttentionConfig:
             Strategy used to communicate backward gradients.
         offload : Offload
             Activation offloading policy.
+        gpus_per_node : int
+            Number of ranks assigned to each node for hybrid communication.
 
         """
+        if gpus_per_node <= 0:
+            raise ValueError("gpus_per_node must be positive")
         self.send_in_forward = send_in_forward
         self.save_for_backward = save_for_backward
         self.send_op = send_op
@@ -660,6 +665,7 @@ class RingAttentionConfig:
         self.send_backward = send_backward
         self.offload = offload
         self.device = device
+        self.gpus_per_node = gpus_per_node
 
         self.offloader = self._init_offloader(offload, device)
         self.p2p_fn = self._p2p_fn(send_op)

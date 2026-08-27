@@ -589,7 +589,7 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
         )
         self._handle: Optional[dist.Work] = None
         self.local_rank = local_rank
-        self.gpus_per_node = 4
+        self.gpus_per_node = ring_config.gpus_per_node
         self._internode_handle = None
         self._internode_recv_buf = None
 

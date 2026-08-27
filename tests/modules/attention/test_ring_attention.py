@@ -11,6 +11,70 @@ from tests.process_mesh import *
 
 pytestmark = [pytest.mark.dist_required]
 
+
+@pytest.mark.dist(4)
+@pytest.mark.parametrize(
+    ("gpus_per_node", "expected_internode_size", "expected_intranode_size"),
+    [(1, 2, 1), (2, 1, 2)],
+)
+def test_build_intxxnode_groups(
+    device: torch.device,
+    gpus_per_node: int,
+    expected_internode_size: int,
+    expected_intranode_size: int,
+) -> None:
+    """Build row-based inter-node and intra-node process groups.
+
+    Parameters
+    ----------
+    device : torch.device
+        Device used to initialize the process mesh.
+    gpus_per_node : int
+        Number of row ranks assigned to each node.
+    expected_internode_size : int
+        Expected size of the returned inter-node group.
+    expected_intranode_size : int
+        Expected size of the returned intra-node group.
+    """
+    process_mesh = dist.device_mesh.init_device_mesh(
+        device_type=device.type,
+        mesh_shape=(2, 2),
+        mesh_dim_names=("row", "col"),
+    )
+
+    internode_groups, intranode_groups = functional.build_intxxnode_groups(
+        process_mesh, gpus_per_node=gpus_per_node
+    )
+
+    assert len(internode_groups) == 1
+    assert len(intranode_groups) == 1
+    assert dist.get_world_size(internode_groups[0]) == expected_internode_size
+    assert dist.get_world_size(intranode_groups[0]) == expected_intranode_size
+    assert dist.get_rank(internode_groups[0]) >= 0
+    assert dist.get_rank(intranode_groups[0]) >= 0
+
+
+@pytest.mark.dist(4)
+def test_build_intxxnode_groups_rejects_invalid_node_size(
+    device: torch.device,
+) -> None:
+    """Reject a non-positive number of GPUs per node.
+
+    Parameters
+    ----------
+    device : torch.device
+        Device used to initialize the process mesh.
+    """
+    process_mesh = dist.device_mesh.init_device_mesh(
+        device_type=device.type,
+        mesh_shape=(2, 2),
+        mesh_dim_names=("row", "col"),
+    )
+
+    with pytest.raises(ValueError, match="gpus_per_node must be positive"):
+        functional.build_intxxnode_groups(process_mesh, gpus_per_node=0)
+
+
 # def test_backward(device, process_mesh):
 #     local_rank = dist.get_rank(group=process_mesh["row"])
 #     world_size = dist.get_world_size(group=process_mesh["row"])

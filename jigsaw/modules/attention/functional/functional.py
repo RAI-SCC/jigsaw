@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from itertools import product
 from typing import Any, Protocol, cast
 
 import torch
 import torch.distributed as dist
+from torch.distributed.device_mesh import DeviceMesh
 
 from ..config import (
     RingAttentionConfig,
@@ -63,6 +65,79 @@ def get_send_recv_ranks_hybrid(local_rank: int, gpus_per_node: int = 4) -> list[
     recv_from = (local_rank + 1) % gpus_per_node + base_node_rank * gpus_per_node
 
     return [send_to, recv_from]
+
+
+def build_intxxnode_groups(
+    process_mesh: DeviceMesh, gpus_per_node: int = 4
+) -> tuple[list[dist.ProcessGroup], list[dist.ProcessGroup]]:
+    """Build inter-node and intra-node groups along the row dimension.
+
+    The row dimension is partitioned into contiguous node-sized chunks. Each
+    chunk becomes an intra-node group, and ranks at the same offset in each
+    chunk become an inter-node group. This is repeated independently for every
+    combination of coordinates in the other mesh dimensions.
+
+    Parameters
+    ----------
+    process_mesh : dist.ProcessMesh
+        Mesh containing a dimension named ``"row"``.
+    gpus_per_node : int, default=4
+        Maximum number of row ranks assigned to one node.
+
+    Returns
+    -------
+    tuple[list[dist.ProcessGroup], list[dist.ProcessGroup]]
+        The inter-node and intra-node groups containing the current rank.
+
+    Raises
+    ------
+    ValueError
+        If ``gpus_per_node`` is not positive or the mesh has no row
+        dimension.
+    """
+    if gpus_per_node <= 0:
+        raise ValueError("gpus_per_node must be positive")
+    if process_mesh.mesh_dim_names is None or "row" not in process_mesh.mesh_dim_names:
+        raise ValueError('process_mesh must contain a "row" dimension')
+
+    row_axis = process_mesh.mesh_dim_names.index("row")
+    mesh = process_mesh.mesh
+    other_shape = tuple(
+        size for axis, size in enumerate(mesh.shape) if axis != row_axis
+    )
+    row_size = mesh.shape[row_axis]
+    current_rank = dist.get_rank()
+    internode_groups: list[dist.ProcessGroup] = []
+    intranode_groups: list[dist.ProcessGroup] = []
+
+    for coordinates in product(*(range(size) for size in other_shape)):
+        coordinate_iter = iter(coordinates)
+        mesh_index = tuple(
+            slice(None) if axis == row_axis else next(coordinate_iter)
+            for axis in range(mesh.ndim)
+        )
+        row_ranks = mesh[mesh_index].tolist()
+        node_chunks = [
+            row_ranks[start : start + gpus_per_node]
+            for start in range(0, row_size, gpus_per_node)
+        ]
+
+        for ranks in node_chunks:
+            group = dist.new_group(ranks=ranks)
+            if current_rank in ranks:
+                intranode_groups.append(group)
+
+        for local_offset in range(min(gpus_per_node, row_size)):
+            ranks = [
+                chunk[local_offset]
+                for chunk in node_chunks
+                if local_offset < len(chunk)
+            ]
+            group = dist.new_group(ranks=ranks)
+            if current_rank in ranks:
+                internode_groups.append(group)
+
+    return internode_groups, intranode_groups
 
 
 class RingCtx(Protocol):

@@ -241,8 +241,10 @@ def hybrid_p2p_forward(
 ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]:
     """Forward pass for ring attention using broadcast instead of P2P sends."""
     b, heads, n_local, d = q.shape
-    gpus_per_node = 4  # TODO: indicate the number of GPUs per node
+    gpus_per_node = ring_config.gpus_per_node
     n_nodes = world_size // gpus_per_node
+    if world_size % gpus_per_node:
+        raise ValueError("world_size must be divisible by gpus_per_node")
 
     out = torch.zeros_like(q)
     lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype)
@@ -343,8 +345,10 @@ def hybrid_broadcast_forward(
 ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]:
     """Forward pass for ring attention: intra-node broadcast, inter-node P2P."""
     b, heads, n_local, d = q.shape
-    gpus_per_node = 4  # TODO: indicate the number of GPUs per node
+    gpus_per_node = ring_config.gpus_per_node
     n_nodes = world_size // gpus_per_node
+    if world_size % gpus_per_node:
+        raise ValueError("world_size must be divisible by gpus_per_node")
     intranode_rank = local_rank % gpus_per_node
 
     out = torch.zeros_like(q)

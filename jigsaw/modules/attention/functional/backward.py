@@ -131,7 +131,15 @@ def accumulate_dkv(
         case SendBackward.GATHER_DKV:
             if ring_config.send_op == SendOp.HYBRID_P2P:
                 return _accumulate_dkv_hybrid(
-                    dk_buf, dv_buf, dk_j, dv_j, step, seq_local, local_rank, world_size
+                    dk_buf,
+                    dv_buf,
+                    dk_j,
+                    dv_j,
+                    step,
+                    seq_local,
+                    local_rank,
+                    world_size,
+                    ring_config.gpus_per_node,
                 )
             else:
                 # This switch is necessary because
@@ -213,6 +221,7 @@ def _accumulate_dkv_hybrid(
     seq_local: int,
     local_rank: int,
     world_size: int,
+    gpus_per_node: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Accumulate local dk, dv in the correct space in the buffer.
@@ -237,32 +246,24 @@ def _accumulate_dkv_hybrid(
         Local rank within ring attention.
     world_size: int
         World size of ring attention.
+    gpus_per_node: int
+        Number of ranks assigned to each node.
 
     Returns
     -------
     dk_buf, dv_buf: torch.Tensor, torch.Tensor
         Accumulated buffers for dk and dv.
     """
-    node, local = divmod(local_rank, 4)
-    if step % 4 == 0:  # temporarily block out this path
+    node, local = divmod(local_rank, gpus_per_node)
+    nodes = world_size // gpus_per_node
+    if step % gpus_per_node == 0:
         # node-dimension ring, local index fixed
-        send_node = (node - (step)) % world_size // 4
-        send_to = send_node * 4 + local
-        if local_rank >= 4 and step == 4:
-            send_to = (local_rank - 4) % 4
-        elif step == 4:
-            send_to = local_rank + 4
-        if step == 0:
-            send_to = local_rank
+        send_node = (node + 1) % nodes
+        send_to = send_node * gpus_per_node + local
     else:
         # local-dimension ring, node fixed
-        base_node_rank = local_rank // 4
-        send_to = (local_rank - step) % 4 + base_node_rank * 4
-
-        if step > 4 and local_rank >= 4:
-            send_to -= 4
-        elif step > 4 and local_rank < 4:
-            send_to += 4
+        base_node_rank = local_rank // gpus_per_node
+        send_to = (local_rank - 1) % gpus_per_node + base_node_rank * gpus_per_node
 
     # print(f'step {step} global chunk idx {send_to}')
     global_chunk_idx = send_to
@@ -355,34 +356,20 @@ def _accumulate_dkv_send(
 
         # Rank 4: step 1 --> rank 7
         send_recv_ranks = get_send_recv_ranks(
-            dist.get_rank(group), step=step, nodes=group.size() // 4, gpus_per_node=4
+            dist.get_rank(group),
+            step=step,
+            nodes=group.size() // ring_config.gpus_per_node,
+            gpus_per_node=ring_config.gpus_per_node,
         )
-        if step % 4 != 0:
-            # groups are not set correctly
-            # since we artificially have a group of size 4
-            # rank 6 needs to send to 5 in the beginning, and not 3
-            # print(f'DKV: R{dist.get_rank()}  step {step} sending to {send_recv_ranks[0]} recv from {send_recv_ranks[1]}')
-            recv_buf, _ = ring_config.p2p_fn(
-                dkv,
-                recv_buf,
-                send_recv_ranks=send_recv_ranks,
-                group=group,
-                async_op=False,
-                empty=empty,
-                step=step,
-            )
-        else:
-            # print(f'DKV: R{dist.get_rank()}  step {step} sending to {send_recv_ranks[0]} recv from {send_recv_ranks[1]}')
-            recv_buf, _ = ring_config.p2p_fn(
-                dkv,
-                recv_buf,
-                send_recv_ranks=send_recv_ranks,
-                group=group,
-                async_op=False,
-                empty=empty,
-                step=step,
-                group_size=8,
-            )
+        recv_buf, _ = ring_config.p2p_fn(
+            dkv,
+            recv_buf,
+            send_recv_ranks=send_recv_ranks,
+            group=group,
+            async_op=False,
+            empty=empty,
+            step=step,
+        )
     else:
         recv_buf, _ = ring_config.p2p_fn(
             dkv,
