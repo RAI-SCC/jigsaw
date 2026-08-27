@@ -42,7 +42,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 def pytest_configure(config):
     """Configure rank 0 to be the only printing rank."""
-    if mpi_rank != 1 and not config.getoption("--print-all-ranks"):
+    if mpi_rank != 0 and not config.getoption("--print-all-ranks"):
         config.option.verbose = -1
         sys.stdout = open(os.devnull, "w")
         sys.stderr = open(os.devnull, "w")

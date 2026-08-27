@@ -85,10 +85,10 @@ def build_ring_forward(
     match ring_config.send_op:
         case SendOp.BROADCAST:
             return broadcast_forward
-        case SendOp.HYBRID_P2P:
-            return hybrid_p2p_forward
         case SendOp.P2P | SendOp.ALLTOALL:
             return ring_forward
+        case SendOp.HYBRID_P2P:
+            return hybrid_p2p_forward
         case SendOp.HYBRID_BROADCAST:
             return hybrid_broadcast_forward
         case _:
@@ -154,9 +154,9 @@ def broadcast_forward(
                 kv_j, kj, vj = kv, k, v
 
         if ring_config.save_scope == SaveScope.GLOBAL:
-            chunks_to_save[(local_rank - step) % world_size] = (
-                ring_config.save_for_backward_fn(x_j, kv_j)
-            )
+            # `x_j` at loop iteration `step` is global chunk `step` (identical on
+            # every rank: it was received from the `src_rank=step` broadcast).
+            chunks_to_save[step] = ring_config.save_for_backward_fn(x_j, kv_j)
 
         out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
         if step < world_size - 1:
@@ -182,7 +182,7 @@ def ring_forward(
     local_rank: int,
     world_size: int,
     ring_config: RingAttentionConfig,
-) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, ...]]:
+) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]:
     """Forward pass for ring attention using point-to-point sends."""
     b, heads, n_local, d = q.shape
     out = torch.zeros_like(q)
@@ -194,7 +194,15 @@ def ring_forward(
     kv = torch.concat([k.unsqueeze(0), v.unsqueeze(0)])
     kv_j, kj, vj = kv, k, v
 
-    chunks_to_save: list[torch.Tensor] = []
+    # LOCAL: only own (step-0) chunk is kept; backward re-rings the rest.
+    # GLOBAL: keep every chunk, indexed by *global chunk id* so the backward
+    # `_GlobalChunkProvider` (a plain `chunks[step]` lookup) sees ring step
+    # == global chunk index.
+    chunks_to_save: list[torch.Tensor | None]
+    if ring_config.save_scope == SaveScope.GLOBAL:
+        chunks_to_save = [None] * world_size
+    else:
+        chunks_to_save = []
 
     # Kick off first send
     recv_buf, handle = ring_config.forward_send_fn(
@@ -205,13 +213,16 @@ def ring_forward(
         if step > 0 and ring_config.send_in_forward == SendForward.X:
             kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
 
-        # save_scope == LOCAL: only own (step 0) chunk; backward re-rings.
-        # save_scope == GLOBAL: save every step's chunk.
-        if ring_config.save_scope == SaveScope.GLOBAL or step == 0:
+        if ring_config.save_scope == SaveScope.GLOBAL:
+            # `direction=-1` ring: after `step` receives, `x_j` originates from
+            # rank `(local_rank + step) % world_size`.
+            chunks_to_save[(local_rank + step) % world_size] = (
+                ring_config.save_for_backward_fn(x_j, kv_j)
+            )
+        elif step == 0:
             chunks_to_save.append(ring_config.save_for_backward_fn(x_j, kv_j))
 
         out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
-
         if step < world_size - 1:
             handle.wait()
             # receive either x or kv_j
@@ -275,7 +286,7 @@ def hybrid_p2p_forward(
                     else kv.clone()
                 ),
                 buffer=internode_recv_buf,
-                direction=gpus_per_node,
+                direction=-gpus_per_node,
                 group=group,
                 async_op=True,
                 tag=node_step,
@@ -304,11 +315,24 @@ def hybrid_p2p_forward(
                 kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
 
             if ring_config.save_scope == SaveScope.GLOBAL:
-                global_step = node_step * gpus_per_node + step
-                chunks_to_save[(local_rank - global_step) % world_size] = (
-                    ring_config.save_for_backward_fn(x_j, kv_j)
+                # `x_j`/`kv_j` currently hold the chunk owned by the rank
+                #   node_base(node_step) + (local_idx + step) % gpus_per_node
+                # where the node index advances by one per inter-node hop and
+                # the intra-node ring advances the local index by one per step.
+                # Store it at that global-chunk slot so the backward
+                # `_GlobalChunkProvider` (a plain `chunks[step]` lookup) sees
+                # ring step == global chunk index.
+                node_idx = local_rank // gpus_per_node
+                local_idx = local_rank % gpus_per_node
+                cur_node = (node_idx + node_step) % n_nodes
+                global_chunk_idx = (
+                    cur_node * gpus_per_node + (local_idx + step) % gpus_per_node
+                )
+                chunks_to_save[global_chunk_idx] = ring_config.save_for_backward_fn(
+                    x_j, kv_j
                 )
             out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
+            print(f"step {step} forward send_recv_ranks {send_recv_ranks}")
             if step < gpus_per_node - 1:
                 handle.wait()
 

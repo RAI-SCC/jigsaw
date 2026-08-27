@@ -243,6 +243,7 @@ class _GlobalChunkProvider(_BackwardChunkProvider):
             kv = chunk
             return kv[0].contiguous(), kv[1].contiguous(), kv
         elif self.config.save_for_backward == SaveBackward.X:
+            print(f'R{dist.get_rank()} step {step} chunk {chunk.sum()}')
             kv, kj, vj = _compute_kv(
                 chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
             )
@@ -380,7 +381,6 @@ class _LocalChunkProvider(_BackwardChunkProvider):
         self._handle.wait()
         recv_buf = self._recv_buf
         if self.config.send_in_forward == SendForward.X:
-            print(f"A2A step {step} x{recv_buf[0][0][0]}")
             kv, kj, vj = _compute_kv(
                 recv_buf, self.w_qkv, self.b, self.seq_local, self.h, self.d
             )
@@ -490,7 +490,6 @@ class _LocalChunkProviderBroadcast(_LocalChunkProvider):
         if self.config.save_for_backward == SaveBackward.KV:
             kv = chunk
         else:
-            print(f"step {step} x {chunk[0][0][0]}")
             kv, _, _ = _compute_kv(
                 chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
             )
@@ -611,6 +610,7 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
             if self.config.save_for_backward == SaveBackward.KV:
                 kv = chunk
             else:
+                print(f'R{dist.get_rank()} step {step} chunk {chunk.sum()}')
                 kv, _, _ = _compute_kv(
                     chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
                 )
@@ -680,6 +680,7 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
 
         if self.config.send_in_forward == SendForward.X:
             # print(f'R{dist.get_rank()} STEP {step} recv_buf {recv_buf[0][0][0]}')
+            print(f'R{dist.get_rank()} step {step} chunk {recv_buf.sum()}')
             kv, kj, vj = _compute_kv(
                 recv_buf, self.w_qkv, self.b, self.seq_local, self.h, self.d
             )

@@ -5,6 +5,7 @@ import torch.distributed as dist
 
 from jigsaw.modules.attention.config import (
     RingAttentionConfig,
+    SaveScope,
     SendBackward,
     SendOp,
 )
@@ -40,6 +41,25 @@ def ring_backward(
     dq = torch.zeros_like(q, dtype=torch.float32)
     dk_buf, dv_buf = get_dkv_buffer(ring_config, q, world_size)
 
+    # Cases where every rank processes the *same* global chunk `step` at ring
+    # step `step`: the partial dK/dV for chunk `step` just needs a SUM
+    # all-reduce, with the owning rank (`local_rank == step`) keeping it. The
+    # kept buffer is already the final local per-rank gradient, so it bypasses
+    # `postprocess_dkv` entirely (its GATHER_DKV branch would slice a global
+    # buffer this path never builds).
+    #   * BROADCAST + LOCAL: rank `step` fans its chunk out each step.
+    #   * any GLOBAL + SEND_DKV: the forward stored `chunks_to_save` by global
+    #     chunk id, so `_GlobalChunkProvider` hands every rank global chunk
+    #     `step`; SEND_DKV keeps a local-sized buffer (GATHER_DKV keeps its
+    #     global buffer + final all-reduce instead).
+    all_reduce_dkv = (
+        ring_config.send_op == SendOp.BROADCAST
+        and ring_config.save_scope == SaveScope.LOCAL
+    ) or (
+        ring_config.save_scope == SaveScope.GLOBAL
+        and ring_config.send_backward == SendBackward.SEND_DKV
+    )
+
     chunk_provider = _build_backward_chunk_provider(
         ring_config,
         chunks_to_save,
@@ -62,30 +82,40 @@ def ring_backward(
         dq += dq_j
         del dq_j, kj, vj, kv
 
-        dk_buf, dv_buf = accumulate_dkv(
-            ring_config,
-            dk_buf,
-            dv_buf,
-            dk_j,
-            dv_j,
-            step,
-            world_size,
-            seq_local,
-            local_rank,
-            group,
-            empty,
-        )
+        if all_reduce_dkv:
+            dist.all_reduce(dk_j, op=dist.ReduceOp.SUM, group=group)
+            dist.all_reduce(dv_j, op=dist.ReduceOp.SUM, group=group)
+            if local_rank == step:
+                dk_buf = dk_j
+                dv_buf = dv_j
+        else:
+            dk_buf, dv_buf = accumulate_dkv(
+                ring_config,
+                dk_buf,
+                dv_buf,
+                dk_j,
+                dv_j,
+                step,
+                world_size,
+                seq_local,
+                local_rank,
+                group,
+                empty,
+            )
 
         if isinstance(chunk_provider, _LocalChunkProvider) or isinstance(
             chunk_provider, _LocalChunkProviderHybridBroadcast
         ):
             chunk_provider.maybe_forward(step, world_size)
 
+    if all_reduce_dkv:
+        # `dk_buf`/`dv_buf` already hold this rank's final local gradient.
+        return dq, dk_buf, dv_buf
+
     dk_local, dv_local = postprocess_dkv(
         ring_config, dk_buf, dv_buf, local_rank, seq_local, group
     )
-    if dist.get_rank() == 0:
-        print(f"dq {dq.sum()}, dk_local {dk_local.sum()}")
+
     return dq, dk_local, dv_local
 
 
@@ -129,7 +159,13 @@ def accumulate_dkv(
     """Fold this step's locally computed dk_j, dv_j into the running dK, dV."""
     match ring_config.send_backward:
         case SendBackward.GATHER_DKV:
-            if ring_config.send_op == SendOp.HYBRID_P2P:
+            if ring_config.save_scope == SaveScope.GLOBAL:
+                # The forward stored `chunks_to_save` by global chunk id and
+                # `_GlobalChunkProvider` looks them up directly, so ring step
+                # `step` == global chunk index for every send_op.
+                global_chunk_idx = step
+            elif ring_config.send_op == SendOp.HYBRID_P2P:
+                # LOCAL hybrid: chunks re-circulate through the node/local ring.
                 return _accumulate_dkv_hybrid(
                     dk_buf,
                     dv_buf,
@@ -159,6 +195,7 @@ def accumulate_dkv(
                     global_chunk_idx,
                 )
         case SendBackward.SEND_DKV:
+            # if ring_config.send_op == SendOp.BROADCAST:
             return _accumulate_dkv_send(
                 ring_config, dk_buf, dv_buf, dk_j, dv_j, step, group, empty
             )
@@ -265,7 +302,6 @@ def _accumulate_dkv_hybrid(
         base_node_rank = local_rank // gpus_per_node
         send_to = (local_rank - 1) % gpus_per_node + base_node_rank * gpus_per_node
 
-    # print(f'step {step} global chunk idx {send_to}')
     global_chunk_idx = send_to
     lo, hi = global_chunk_idx * seq_local, (global_chunk_idx + 1) * seq_local
     dk_buf[:, :, lo:hi] += dk_j
@@ -299,6 +335,51 @@ def get_send_recv_ranks(
             recv_from += 4
 
     return send_to, recv_from
+
+
+def _accumulate_dkv_send_broadcast(
+    ring_config: RingAttentionConfig,
+    dk_buf: torch.Tensor,
+    dv_buf: torch.Tensor,
+    dk_j: torch.Tensor,
+    dv_j: torch.Tensor,
+    step: int,
+    group: dist.ProcessGroup,
+    empty: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Send dk and dv to the corresponding rank.
+
+    After a rank computes dk and dv on the chunk of the data that it sees,
+    send the values back to the home rank for accumulation.
+
+    Parameters
+    ----------
+    ring_config: RingAttentionConfig
+        Configuration for ring attention.
+    dk_buf: torch.Tensor
+        Buffer to accumulate dk.
+    dv_buf: torch.Tensor
+        Buffer to accumulate dv.
+    dk_j: torch.Tensor
+        Local result of dk.
+    dv_j: torch.Tensor
+        Local result of dv.
+    step: int
+        Step.
+    group: dist.ProcessGroup
+        Process group for ring attention.
+    empty: torch.Tensor
+        Empty tensor for computational reasons.
+
+    Returns
+    -------
+    dk_buf, dv_buf: torch.Tensor, torch.Tensor
+        Accumulated values of dk and dv.
+    """
+    dist.all_reduce(dk_j, op=dist.ReduceOp.SUM, group=group)
+    dist.all_reduce(dv_j, op=dist.ReduceOp.SUM, group=group)
+    return dk_j, dv_j
 
 
 def _accumulate_dkv_send(
@@ -351,10 +432,6 @@ def _accumulate_dkv_send(
 
     # hybrid
     if ring_config.send_op == SendOp.HYBRID_P2P:
-        # step 1 --> rank 3 2-> rank 2, 3-> rank 1
-        # step 4 --> rank 4, 5 --> rank 7, 6 -> rank
-
-        # Rank 4: step 1 --> rank 7
         send_recv_ranks = get_send_recv_ranks(
             dist.get_rank(group),
             step=step,

@@ -664,6 +664,7 @@ class RingAttentionConfig:
         self.save_scope = save_scope
         self.send_backward = send_backward
         self.offload = offload
+        self.gpus_per_node = gpus_per_node
         self.device = device
         self.gpus_per_node = gpus_per_node
 

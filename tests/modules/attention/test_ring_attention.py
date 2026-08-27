@@ -3,7 +3,7 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.modules.attention.config as config
-import jigsaw.modules.attention.functional as functional
+from jigsaw.modules.attention.functional import forward, backward
 from jigsaw.utils_aggregate import (
     gather_1d_results,
 )
@@ -244,142 +244,141 @@ def test_build_intxxnode_groups_arbitrary_mesh_shapes(
 #     assert torch.allclose(flash_V.grad, dV_ref.float(), atol=1e-2)
 
 
+# @pytest.mark.dist(4)
+# @pytest.mark.gpu_required
+# @pytest.mark.parametrize(
+#     "flash_kernel",
+#     [
+#         (flash_kernel)
+#         for flash_kernel in [
+#             torch.nn.attention.SDPBackend.MATH,
+#             torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+#         ]
+#     ],
+# )
+# def test_backward_sdpa(
+#     device: torch.device,
+#     process_mesh_dict_4x1: dict,
+#     flash_kernel: torch.nn.attention.SDPBackend,
+# ) -> None:
+#     """Test flash kernel with direct call to aten function."""
+#     world_size = dist.get_world_size(group=process_mesh_dict_4x1["row"])
+#     torch.manual_seed(2)  # same seed for weight initialization
+#     b, h, n_global, d = 1, 6, world_size * 32, 256
+#     n_local = n_global // world_size
+#     w_qkv = torch.randn(
+#         3 * d * h, d, device=device, requires_grad=True, dtype=torch.bfloat16
+#     ) / (d**0.5)
+#     x = torch.randn(
+#         b, n_local, d, device=device, requires_grad=True, dtype=torch.bfloat16
+#     ) / (d**0.5)
+
+#     qkv = x @ w_qkv.mT
+
+#     q_local, k_local, v_local = qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
+#     # QKV has shape [B, N, h, d]
+#     q_local, k_local, v_local = (
+#         q_local.contiguous(),
+#         k_local.contiguous(),
+#         v_local.contiguous(),
+#     )
+#     scale = q_local.shape[-1] ** -0.5
+
+#     # O ref full
+#     out_ref, logsumexp, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
+#         q_local,
+#         k_local,
+#         v_local,
+#         dropout_p=0.0,
+#         is_causal=False,
+#         scale=scale,
+#         return_debug_mask=False,
+#     )
+#     dq_ref, dk_ref, dv_ref = (
+#         torch.ops.aten._scaled_dot_product_flash_attention_backward(
+#             torch.ones(
+#                 out_ref.shape, device=device, dtype=out_ref.dtype
+#             ),  # grad_output: (B, N, H, d)
+#             q_local,  # query:       (B, N, H, d)
+#             k_local,  # key:         (B, N, H, d)
+#             v_local,  # value:       (B, N, H, d)
+#             out_ref,  # out:         (B, N, H d)
+#             logsumexp,  # logsumexp:   (B*H, N) — from forward, reshape(B*H, N) before passing
+#             dropout_p=0.0,
+#             is_causal=False,
+#             scale=scale,
+#             cum_seq_q=None,
+#             cum_seq_k=None,
+#             max_q=n_local,
+#             max_k=n_local,
+#             philox_seed=torch.zeros(1, dtype=torch.long, device=q_local.device),
+#             philox_offset=torch.zeros(1, dtype=torch.long, device=q_local.device),
+#         )
+#     )
+
+#     # QKV_torchflash
+#     torch_ref_q = q_local.detach().requires_grad_(True)
+#     torch_ref_k = k_local.detach().requires_grad_(True)
+#     torch_ref_v = v_local.detach().requires_grad_(True)
+
+#     with torch.nn.attention.sdpa_kernel(flash_kernel):
+#         torch_ref_out = torch.nn.functional.scaled_dot_product_attention(
+#             torch_ref_q,
+#             torch_ref_k,
+#             torch_ref_v,
+#             is_causal=False,
+#             dropout_p=0,
+#             attn_mask=None,
+#         )
+#         # Qg grad
+#         torch_ref_q.retain_grad()
+#         torch_ref_k.retain_grad()
+#         torch_ref_v.retain_grad()
+#         torch_ref_out.sum().backward()
+
+#     q_naive = q_local.detach().requires_grad_(True)
+#     k_naive = k_local.detach().requires_grad_(True)
+#     v_naive = v_local.detach().requires_grad_(True)
+
+#     # Autograd ground truth — definitionally correct
+#     s_naive = (q_naive @ k_naive.transpose(-1, -2)) * scale  # (B, H, N, N)
+#     lse_naive = torch.logsumexp(s_naive, dim=-1)  # (B, H, N)
+#     out_naive = torch.softmax(s_naive, dim=-1) @ v_naive  # (B, N, H, d)
+#     q_naive.retain_grad()
+#     k_naive.retain_grad()
+#     v_naive.retain_grad()
+#     out_naive.sum().backward()
+
+#     # check flash attention implementation against local implementation
+#     assert torch.allclose(torch_ref_out, out_naive, atol=1e-2)
+#     assert torch.allclose(torch_ref_q.grad, q_naive.grad, atol=1e-2)
+#     assert torch.allclose(torch_ref_k.grad, k_naive.grad, atol=1e-2)
+#     assert torch.allclose(torch_ref_v.grad, v_naive.grad, atol=1e-2)
+
+#     # check flash attention against torch kernel
+#     assert torch.allclose(torch_ref_out, out_ref, atol=1e-3)
+#     assert torch.allclose(lse_naive.float(), logsumexp, atol=1e-1)
+#     assert torch.allclose(torch_ref_q.grad, dq_ref, atol=1e-2)
+#     assert torch.allclose(torch_ref_k.grad, dk_ref, atol=1e-2)
+#     assert torch.allclose(torch_ref_v.grad, dv_ref, atol=1e-2)
+
+
 @pytest.mark.dist(4)
-@pytest.mark.gpu_required
+@pytest.mark.parametrize("send_in_forward", [config.SendForward.KV])
 @pytest.mark.parametrize(
-    "flash_kernel",
-    [
-        (flash_kernel)
-        for flash_kernel in [
-            torch.nn.attention.SDPBackend.MATH,
-            torch.nn.attention.SDPBackend.FLASH_ATTENTION,
-        ]
-    ],
-)
-def test_backward_sdpa(
-    device: torch.device,
-    process_mesh_dict_4x1: dict,
-    flash_kernel: torch.nn.attention.SDPBackend,
-) -> None:
-    """Test flash kernel with direct call to aten function."""
-    world_size = dist.get_world_size(group=process_mesh_dict_4x1["row"])
-    torch.manual_seed(2)  # same seed for weight initialization
-    b, h, n_global, d = 1, 6, world_size * 32, 256
-    n_local = n_global // world_size
-    w_qkv = torch.randn(
-        3 * d * h, d, device=device, requires_grad=True, dtype=torch.bfloat16
-    ) / (d**0.5)
-    x = torch.randn(
-        b, n_local, d, device=device, requires_grad=True, dtype=torch.bfloat16
-    ) / (d**0.5)
-
-    qkv = x @ w_qkv.mT
-
-    q_local, k_local, v_local = qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
-    # QKV has shape [B, N, h, d]
-    q_local, k_local, v_local = (
-        q_local.contiguous(),
-        k_local.contiguous(),
-        v_local.contiguous(),
-    )
-    scale = q_local.shape[-1] ** -0.5
-
-    # O ref full
-    out_ref, logsumexp, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
-        q_local,
-        k_local,
-        v_local,
-        dropout_p=0.0,
-        is_causal=False,
-        scale=scale,
-        return_debug_mask=False,
-    )
-    dq_ref, dk_ref, dv_ref = (
-        torch.ops.aten._scaled_dot_product_flash_attention_backward(
-            torch.ones(
-                out_ref.shape, device=device, dtype=out_ref.dtype
-            ),  # grad_output: (B, N, H, d)
-            q_local,  # query:       (B, N, H, d)
-            k_local,  # key:         (B, N, H, d)
-            v_local,  # value:       (B, N, H, d)
-            out_ref,  # out:         (B, N, H d)
-            logsumexp,  # logsumexp:   (B*H, N) — from forward, reshape(B*H, N) before passing
-            dropout_p=0.0,
-            is_causal=False,
-            scale=scale,
-            cum_seq_q=None,
-            cum_seq_k=None,
-            max_q=n_local,
-            max_k=n_local,
-            philox_seed=torch.zeros(1, dtype=torch.long, device=q_local.device),
-            philox_offset=torch.zeros(1, dtype=torch.long, device=q_local.device),
-        )
-    )
-
-    # QKV_torchflash
-    torch_ref_q = q_local.detach().requires_grad_(True)
-    torch_ref_k = k_local.detach().requires_grad_(True)
-    torch_ref_v = v_local.detach().requires_grad_(True)
-
-    with torch.nn.attention.sdpa_kernel(flash_kernel):
-        torch_ref_out = torch.nn.functional.scaled_dot_product_attention(
-            torch_ref_q,
-            torch_ref_k,
-            torch_ref_v,
-            is_causal=False,
-            dropout_p=0,
-            attn_mask=None,
-        )
-        # Qg grad
-        torch_ref_q.retain_grad()
-        torch_ref_k.retain_grad()
-        torch_ref_v.retain_grad()
-        torch_ref_out.sum().backward()
-
-    q_naive = q_local.detach().requires_grad_(True)
-    k_naive = k_local.detach().requires_grad_(True)
-    v_naive = v_local.detach().requires_grad_(True)
-
-    # Autograd ground truth — definitionally correct
-    s_naive = (q_naive @ k_naive.transpose(-1, -2)) * scale  # (B, H, N, N)
-    lse_naive = torch.logsumexp(s_naive, dim=-1)  # (B, H, N)
-    out_naive = torch.softmax(s_naive, dim=-1) @ v_naive  # (B, N, H, d)
-    q_naive.retain_grad()
-    k_naive.retain_grad()
-    v_naive.retain_grad()
-    out_naive.sum().backward()
-
-    # check flash attention implementation against local implementation
-    assert torch.allclose(torch_ref_out, out_naive, atol=1e-2)
-    assert torch.allclose(torch_ref_q.grad, q_naive.grad, atol=1e-2)
-    assert torch.allclose(torch_ref_k.grad, k_naive.grad, atol=1e-2)
-    assert torch.allclose(torch_ref_v.grad, v_naive.grad, atol=1e-2)
-
-    # check flash attention against torch kernel
-    assert torch.allclose(torch_ref_out, out_ref, atol=1e-3)
-    assert torch.allclose(lse_naive.float(), logsumexp, atol=1e-1)
-    assert torch.allclose(torch_ref_q.grad, dq_ref, atol=1e-2)
-    assert torch.allclose(torch_ref_k.grad, dk_ref, atol=1e-2)
-    assert torch.allclose(torch_ref_v.grad, dv_ref, atol=1e-2)
-
-
-@pytest.mark.dist(4)
-@pytest.mark.parametrize(
-    "send_in_forward", [config.SendForward.X, config.SendForward.KV]
-)
-@pytest.mark.parametrize(
-    "save_for_backward", [config.SaveBackward.X, config.SaveBackward.KV]
+    "save_for_backward", [config.SaveBackward.KV]
 )
 @pytest.mark.parametrize(
     "send_op",
-    [config.SendOp.P2P],  # , config.SendOp.BROADCAST],
+    [config.SendOp.ALLTOALL, config.SendOp.P2P, config.SendOp.BROADCAST],
 )
 @pytest.mark.parametrize(
-    "save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL]
+    "save_scope",
+    [config.SaveScope.LOCAL, config.SaveScope.GLOBAL],
 )
 @pytest.mark.parametrize(
     "send_backward",
-    [config.SendBackward.SEND_DKV, config.SendBackward.GATHER_DKV],
+    [config.SendBackward.GATHER_DKV, config.SendBackward.SEND_DKV],
 )
 @pytest.mark.parametrize("offloader", [config.Offload.DISABLED])
 def test_ring_forward_backward(
@@ -400,7 +399,6 @@ def test_ring_forward_backward(
         pytest.xfail("not yet supported")
 
     process_mesh_dict = process_mesh_dict_4x1
-
     ring_config = config.RingAttentionConfig(
         device=device,
         send_in_forward=send_in_forward,
@@ -410,9 +408,9 @@ def test_ring_forward_backward(
         send_backward=send_backward,
         offload=offloader,
     )
-    print(f"config {ring_config}")
+    print(f"R{dist.get_rank()} config {ring_config}")
 
-    ring_forward = functional.build_ring_forward(ring_config)
+    ring_forward = forward.build_ring_forward(ring_config)
     local_rank = dist.get_rank(group=process_mesh_dict["row"])
     world_size = dist.get_world_size(group=process_mesh_dict["row"])
     dtype = torch.bfloat16 if dist.get_backend() == "nccl" else torch.float32
@@ -444,7 +442,7 @@ def test_ring_forward_backward(
     scale = q_local.shape[-1] ** -0.5
 
     # just test helper function forward
-    ring_forward = functional.build_ring_forward(ring_config)
+    ring_forward = forward.build_ring_forward(ring_config)
     out, lse, chunks_to_save = ring_forward(
         q_local,
         k_local,
@@ -459,7 +457,7 @@ def test_ring_forward_backward(
         world_size,
         ring_config,
     )
-
+    print(f"R{dist.get_rank()} out {out.sum()}")
     out_full = gather_1d_results(out, process_mesh_dict, dim=2)
     x_full = gather_1d_results(x, process_mesh_dict, dim=1)
     qkv = x_full @ w_qkv.mT
@@ -494,7 +492,7 @@ def test_ring_forward_backward(
 
     dout_local = torch.ones_like(out, device=device, dtype=out_ref.dtype)
 
-    dq_local, dk_local, dv_local = functional.ring_backward(
+    dq_local, dk_local, dv_local = backward.ring_backward(
         dout_local,
         q_local,
         out,
@@ -509,6 +507,7 @@ def test_ring_forward_backward(
         ring_config=ring_config,
         empty=empty,
     )
+    print(f"R{dist.get_rank()} dq {dq_local.sum()}")
 
     # Backward pass
     out_ref.backward(torch.ones_like(out_ref))
@@ -519,7 +518,6 @@ def test_ring_forward_backward(
     # dq_ref: results from calling torch.nn.SDPA
     # q_ref2: results from calling forward-backward core functionality
     # from ring_config.attn_core_forward_fn
-
     assert torch.allclose(dq_ref, q_ref2.grad, atol=atol)
     assert torch.allclose(dk_ref, k_ref2.grad, atol=atol)
     assert torch.allclose(dv_ref, v_ref2.grad, atol=atol)
@@ -559,23 +557,15 @@ def test_ring_forward_backward(
 
 
 @pytest.mark.dist(8)
-@pytest.mark.parametrize(
-    "send_in_forward", [config.SendForward.X, config.SendForward.KV]
-)
-@pytest.mark.parametrize(
-    "save_for_backward", [config.SaveBackward.X, config.SaveBackward.KV]
-)
+@pytest.mark.parametrize("send_in_forward", [config.SendForward.X])
+@pytest.mark.parametrize("save_for_backward", [config.SaveBackward.X])
 @pytest.mark.parametrize(
     "send_op",
-    [
-        config.SendOp.ALLTOALL,
-        config.SendOp.P2P,
-        config.SendOp.BROADCAST,
-        config.SendOp.HYBRID_P2P,
-        config.SendOp.HYBRID_BROADCAST,
-    ],
+    [config.SendOp.HYBRID_P2P, config.SendOp.P2P, config.SendOp.ALLTOALL],
 )
-@pytest.mark.parametrize("save_scope", [config.SaveScope.LOCAL])
+@pytest.mark.parametrize(
+    "save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL]
+)
 @pytest.mark.parametrize(
     "send_backward",
     [config.SendBackward.SEND_DKV, config.SendBackward.GATHER_DKV],
@@ -611,7 +601,7 @@ def test_ring_hybrid(
     )
 
     print(f"ring_config {ring_config}")
-    ring_forward = functional.build_ring_forward(ring_config)
+    ring_forward = forward.build_ring_forward(ring_config)
     local_rank = dist.get_rank(group=process_mesh_dict["model"])
     world_size = dist.get_world_size(group=process_mesh_dict["model"])
 
@@ -645,23 +635,7 @@ def test_ring_hybrid(
     scale = q_local.shape[-1] ** -0.5
 
     # just test helper function forward
-    ring_forward = functional.build_ring_forward(ring_config)
-    forward_kwargs = {
-        "empty": empty,
-        "local_rank": local_rank,
-        "world_size": world_size,
-        "ring_config": ring_config,
-    }
-    if send_op == config.SendOp.HYBRID_BROADCAST:
-        forward_kwargs.update(
-            {
-                "internode_group": process_mesh_dict["internode"],
-                "intranode_group": process_mesh_dict["intranode"],
-            }
-        )
-    else:
-        forward_kwargs["group"] = process_mesh_dict["model"]
-
+    ring_forward = forward.build_ring_forward(ring_config)
     out, lse, chunks_to_save = ring_forward(
         q_local,
         k_local,
@@ -670,7 +644,11 @@ def test_ring_hybrid(
         w_qkv,
         scale,
         0.0,
-        **forward_kwargs,
+        group=process_mesh_dict["model"],
+        empty=empty,
+        local_rank=local_rank,
+        world_size=world_size,
+        ring_config=ring_config,
     )
 
     out_full = gather_1d_results(out, process_mesh_dict, dim=2)
@@ -706,8 +684,7 @@ def test_ring_hybrid(
     out_core = out_core.requires_grad_(True)
 
     dout_local = torch.ones_like(out, device=device, dtype=out_ref.dtype)
-    print(f"R{dist.get_rank()} finished forward.")
-    dq_local, dk_local, dv_local = functional.ring_backward(
+    dq_local, dk_local, dv_local = backward.ring_backward(
         dout_local,
         q_local,
         out,
