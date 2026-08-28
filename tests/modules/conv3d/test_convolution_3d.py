@@ -449,6 +449,25 @@ def _conv3d_multi_spatial_reference_check(
         dtype=torch.float32,
     ).to(device)
 
+    # When a halo exchange is needed, every split axis's global output must be
+    # divisible by that axis's group size; otherwise the module rejects the call
+    # cleanly rather than returning a wrong result. Predict that and check the
+    # error path instead of the numeric one.
+    split_idxs = [i for i, n in enumerate((nd, nh, nw)) if n > 1]
+    groups_per_axis = (nd, nh, nw)
+    global_sizes = (depth, height, width)
+    halo = not all(k == s for k, s in zip(kernel_size, stride)) or any(
+        padding[i] != 0 or dilation[i] != 1 for i in split_idxs
+    )
+    if halo:
+        for i in split_idxs:
+            ext = dilation[i] * (kernel_size[i] - 1) + 1
+            g_out = (global_sizes[i] + 2 * padding[i] - ext) // stride[i] + 1
+            if g_out % groups_per_axis[i] != 0:
+                with pytest.raises(NotImplementedError):
+                    conv(x_local.clone().requires_grad_(True))
+                return
+
     def _gather_spatial(t: torch.Tensor) -> torch.Tensor:
         t = gather_1d_results(t, mesh, dim=-4, pm_key="col")
         t = gather_1d_results(t, mesh, dim=-3, pm_key="sd")
@@ -518,6 +537,39 @@ def _conv3d_multi_spatial_reference_check(
 
 class TestConv3dMultiSpatial:
     """Distributed Conv3d with the domain split along several spatial axes."""
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
+    )
+    def test_dh_split_arbitrary_params(
+        self,
+        device: torch.device,
+        spatial_mesh_2x2x1_dhw: dict,
+        kernel: Triple,
+        stride: Triple,
+        padding: Triple,
+        dilation: Triple,
+    ) -> None:
+        """2x2 (depth, height) split: every kernel/stride/padding/dilation combo.
+
+        Each combo is either matched against a single-process conv3d or (when
+        its global output is not divisible by the spatial group) asserted to be
+        rejected with ``NotImplementedError`` -- never silently wrong.
+        """
+        _conv3d_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x2x1_dhw,
+            in_channels=6,
+            out_channels=12,
+            kernel_size=kernel,
+            depth=12,
+            height=12,
+            width=6,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+        )
 
     @pytest.mark.dist(4)
     def test_dh_split_no_halo(

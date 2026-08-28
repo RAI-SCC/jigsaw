@@ -18,6 +18,28 @@ def _pair(value: Pair) -> tuple[int, int]:
     return (value, value) if isinstance(value, int) else tuple(value)
 
 
+# (kernel, stride, padding, dilation) -- each entry is an int or an (h, w)
+# tuple, so asymmetric kernels/strides/paddings/dilations are covered. Sweeps
+# the no-halo regime, stride < / > kernel, unit-stride, dilated, stride ==
+# kernel forced onto the halo path by padding/dilation, and combos whose global
+# output is not divisible by the spatial group (which must be rejected cleanly).
+MULTI_CASES_2D = [
+    (2, 2, 0, 1),
+    (3, 2, 1, 1),
+    (2, 3, 1, 1),
+    (3, 1, 1, 1),
+    (3, 1, 2, 2),
+    ((3, 4), (2, 2), (1, 1), 1),
+    ((4, 2), (2, 3), (1, 0), 1),
+    (2, 2, 1, 1),
+    ((3, 3), (3, 3), (0, 0), (1, 2)),
+    (3, 2, 0, 1),
+]
+MULTI_IDS_2D = [
+    f"k{k}_s{s}_p{p}_d{d}".replace(" ", "") for (k, s, p, d) in MULTI_CASES_2D
+]
+
+
 def _conv2d_reference_check(
     device: torch.device,
     mesh: dict,
@@ -573,6 +595,25 @@ def _conv2d_multi_spatial_reference_check(
         dtype=torch.float32,
     ).to(device)
 
+    # When a halo exchange is needed, every split axis's global output must be
+    # divisible by that axis's group size; otherwise the module rejects the call
+    # cleanly rather than returning a wrong result. Predict that and check the
+    # error path instead of the numeric one.
+    split_idxs = [i for i, n in enumerate((nh, nw)) if n > 1]
+    groups_per_axis = (nh, nw)
+    global_sizes = (height, width)
+    halo = not all(k == s for k, s in zip(kernel_size, stride)) or any(
+        padding[i] != 0 or dilation[i] != 1 for i in split_idxs
+    )
+    if halo:
+        for i in split_idxs:
+            ext = dilation[i] * (kernel_size[i] - 1) + 1
+            g_out = (global_sizes[i] + 2 * padding[i] - ext) // stride[i] + 1
+            if g_out % groups_per_axis[i] != 0:
+                with pytest.raises(NotImplementedError):
+                    conv2d(x_local.clone().requires_grad_(True))
+                return
+
     # --- reconstruct the equivalent global convolution ---------------------
     def _gather_spatial(t: torch.Tensor) -> torch.Tensor:
         t = gather_1d_results(t, mesh, dim=-3, pm_key="col")
@@ -638,6 +679,38 @@ def _conv2d_multi_spatial_reference_check(
 
 class TestConv2dMultiSpatial:
     """Distributed Conv2d with the domain split along several spatial axes."""
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"), MULTI_CASES_2D, ids=MULTI_IDS_2D
+    )
+    def test_hw_split_arbitrary_params(
+        self,
+        device: torch.device,
+        spatial_mesh_2x2_hw: dict,
+        kernel: Pair,
+        stride: Pair,
+        padding: Pair,
+        dilation: Pair,
+    ) -> None:
+        """2x2 height/width split: every kernel/stride/padding/dilation combo.
+
+        Each combo is either matched against a single-process conv2d or (when
+        its global output is not divisible by the spatial group) asserted to be
+        rejected with ``NotImplementedError`` -- never silently wrong.
+        """
+        _conv2d_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x2_hw,
+            in_channels=6,
+            out_channels=12,
+            kernel_size=kernel,
+            height=24,
+            width=24,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+        )
 
     @pytest.mark.dist(4)
     def test_hw_split_no_halo(
