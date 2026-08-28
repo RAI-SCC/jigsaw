@@ -65,71 +65,39 @@ def _build_backward_chunk_provider(
     -------
     _BackwardChunkProvider
     """
-    match ring_config.save_scope:
-        case SaveScope.GLOBAL:
-            return _GlobalChunkProvider(
-                ring_config, chunks_to_save, w_qkv, b, seq_local, h, d
-            )
-        case SaveScope.LOCAL:
-            match ring_config.send_op:
-                case SendOp.P2P | SendOp.ALLTOALL:
-                    return _LocalChunkProvider(
-                        ring_config,
-                        chunks_to_save,
-                        x,
-                        w_qkv,
-                        b,
-                        seq_local,
-                        h,
-                        d,
-                        group,
-                        empty,
-                    )
-                case SendOp.BROADCAST:
-                    return _LocalChunkProviderBroadcast(
-                        ring_config,
-                        chunks_to_save,
-                        x,
-                        w_qkv,
-                        b,
-                        seq_local,
-                        h,
-                        d,
-                        group,
-                        empty,
-                        local_rank,
-                    )
-                case SendOp.HYBRID_P2P | SendOp.HYBRID_ALLTOALL:
-                    return _LocalChunkProviderHybridP2P(
-                        ring_config,
-                        chunks_to_save,
-                        x,
-                        w_qkv,
-                        b,
-                        seq_local,
-                        h,
-                        d,
-                        group,
-                        empty,
-                        local_rank,
-                    )
-                case SendOp.HYBRID_BROADCAST:
-                    return _LocalChunkProviderHybridBroadcast(
-                        ring_config,
-                        chunks_to_save,
-                        x,
-                        w_qkv,
-                        b,
-                        seq_local,
-                        h,
-                        d,
-                        group,
-                        empty,
-                        local_rank,
-                    )
+    if ring_config.save_scope == SaveScope.GLOBAL:
+        return _GlobalChunkProvider(
+            ring_config, chunks_to_save, w_qkv, b, seq_local, h, d
+        )
+    if ring_config.save_scope != SaveScope.LOCAL:
+        raise NotImplementedError(f"Unknown save_scope: {ring_config.save_scope}")
+
+    # Every LOCAL-scope provider takes the same positional args; only the plain
+    # P2P/all-to-all ring has no use for the trailing `local_rank`.
+    args = (
+        ring_config,
+        chunks_to_save,
+        x,
+        w_qkv,
+        b,
+        seq_local,
+        h,
+        d,
+        group,
+        empty,
+        local_rank,
+    )
+    match ring_config.send_op:
+        case SendOp.P2P | SendOp.ALLTOALL:
+            return _LocalChunkProvider(*args[:-1])
+        case SendOp.BROADCAST:
+            return _LocalChunkProviderBroadcast(*args)
+        case SendOp.HYBRID_P2P | SendOp.HYBRID_ALLTOALL:
+            return _LocalChunkProviderHybridP2P(*args)
+        case SendOp.HYBRID_BROADCAST:
+            return _LocalChunkProviderHybridBroadcast(*args)
         case _:
-            raise NotImplementedError
-    raise RuntimeError("Unable to build a backward chunk provider")
+            raise NotImplementedError(f"Unknown send_op: {ring_config.send_op}")
 
 
 # --------------------------------------------------------------------------- #
