@@ -8,7 +8,6 @@ from jigsaw.utils_aggregate import (
     gather_1d_results,
 )
 from tests.process_mesh import *
-
 pytestmark = [pytest.mark.dist_required]
 
 
@@ -356,7 +355,7 @@ def test_get_hybrid_topology_rejects_bad_args(device: torch.device) -> None:
 
 
 @pytest.mark.dist(4)
-@pytest.mark.parametrize("send_in_forward", [config.SendForward.KV])
+@pytest.mark.parametrize("send_in_forward", [config.SendForward.X, config.SendForward.KV])
 @pytest.mark.parametrize("save_for_backward", [config.SaveBackward.KV])
 @pytest.mark.parametrize(
     "send_op",
@@ -370,7 +369,7 @@ def test_get_hybrid_topology_rejects_bad_args(device: torch.device) -> None:
     "send_backward",
     [config.SendBackward.GATHER_DKV, config.SendBackward.SEND_DKV],
 )
-@pytest.mark.parametrize("offloader", [config.Offload.DISABLED])
+@pytest.mark.parametrize("offloader", [config.Offload.DISABLED, config.Offload.CPU])
 def test_ring_forward_backward(
     device: torch.device,
     process_mesh_dict_4x1: dict,
@@ -566,7 +565,7 @@ def test_ring_forward_backward(
     "send_backward",
     [config.SendBackward.SEND_DKV, config.SendBackward.GATHER_DKV],
 )
-@pytest.mark.parametrize("offloader", [config.Offload.DISABLED])
+@pytest.mark.parametrize("offloader", [config.Offload.DISABLED, config.Offload.CPU])
 def test_ring_hybrid(
     device: torch.device,
     process_mesh_dict_2x4: dict,
