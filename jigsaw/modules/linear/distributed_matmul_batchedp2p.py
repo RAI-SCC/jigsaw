@@ -4,25 +4,7 @@ This module mirrors :mod:`jigsaw.modules.linear.distributed_matmul_p2p` one-to-o
 but every communication phase is issued through a single
 :func:`torch.distributed.batch_isend_irecv` call instead of many individual
 ``dist.isend`` / ``dist.irecv`` calls.
-
-Is it faster?
-    * NCCL / CUDA: usually yes for the wider (four-/eight-way) schedules. The
-      backend coalesces the whole batch into one grouped NCCL call
-      (``ncclGroupStart``/``ncclGroupEnd``), which removes per-op launch overhead,
-      lets the transfers run concurrently, and sidesteps the isend/irecv ordering
-      that the plain module hand-tunes to stay deadlock-free.
-    * Gloo / CPU: no. ``batch_isend_irecv`` on Gloo simply loops over the same
-      ``isend``/``irecv`` calls in list order, so throughput is unchanged; the
-      only difference is a tidier call site.
-
-The public functions are the plain-p2p bodies verbatim. ``dist.isend`` /
-``dist.irecv`` are rebound to shims that append a :class:`torch.distributed.P2POp`
-to a per-call batch and hand back a lazy handle. The batch is issued as one
-``batch_isend_irecv`` the first time any handle is waited on, so the original
-interleaving of ``wait()`` and ``matmul`` still overlaps communication with
-compute. As in the plain module, only the handles the body explicitly waits on
-are waited on; the rest (mostly sends) are left to the next collective.
-"""
+ The batch is issued as one."""
 
 import contextvars
 import functools
