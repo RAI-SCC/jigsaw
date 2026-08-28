@@ -586,7 +586,7 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
         self._internode_handle: Optional[dist.Work] = None
         self._internode_recv_buf: Optional[torch.Tensor] = None
 
-    def _launch_internode(self, data: torch.Tensor, step: int) -> None:
+    def _launch_inter_backward(self, data: torch.Tensor, step: int) -> None:
         """Launch an inter-node transfer of ``data`` along the node ring.
 
         Parameters
@@ -623,6 +623,18 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProviderHybrid):
         # next -- mirroring the forward.
         self._intra_ranks = [self.topo.intra_peer(-1), self.topo.intra_peer(1)]
 
+    def _launch_intra_backward(self, src: torch.Tensor, step: int) -> None:
+        """Start the intra-node ring send of ``src`` to the next node-local peer."""
+        self._recv_buf, self._handle = self.config.send_op_fn(
+            src,
+            torch.empty_like(src),
+            send_recv_ranks=self._intra_ranks,
+            group=self.group,
+            async_op=True,
+            empty=self.empty,
+            step=step,
+        )
+
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return the tensors for the requested ring step.
 
@@ -640,7 +652,7 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProviderHybrid):
             kv = self._kv0()
 
             # Kick off the inter-node hop and the first intra-node ring send.
-            self._launch_internode(
+            self._launch_inter_backward(
                 self.x.clone()
                 if self.config.send_in_forward == SendForward.X
                 else kv.clone(),
@@ -648,16 +660,7 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProviderHybrid):
             )
 
             send_buf = self.x if self.config.send_in_forward == SendForward.X else kv
-            self._recv_buf = torch.empty_like(send_buf)
-            self._recv_buf, self._handle = self.config.send_op_fn(
-                send_buf,
-                self._recv_buf,
-                send_recv_ranks=self._intra_ranks,
-                group=self.group,
-                async_op=True,
-                empty=self.empty,
-                step=step,
-            )
+            self._launch_intra_backward(send_buf, step)
 
             if self.config.send_in_forward == SendForward.X:
                 # Local Q always attends its own local K/V on step 0.
@@ -700,21 +703,12 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProviderHybrid):
             assert self._internode_recv_buf is not None
             if node_step < self.topo.n_nodes - 1:
                 # Relay the inter-node chunk one more hop along the node ring.
-                self._launch_internode(self._internode_recv_buf, step)
+                self._launch_inter_backward(self._internode_recv_buf, step)
             # At a node boundary the intra-node ring restarts from the chunk
             # that just arrived over the inter-node link.
             self._recv_buf = self._internode_recv_buf
 
-        next_recv = torch.empty_like(self._recv_buf)
-        self._recv_buf, self._handle = self.config.send_op_fn(
-            self._recv_buf,
-            next_recv,
-            send_recv_ranks=self._intra_ranks,
-            group=self.group,
-            async_op=True,
-            empty=self.empty,
-            step=step,
-        )
+        self._launch_intra_backward(self._recv_buf, step)
 
 
 class _LocalChunkProviderHybridBroadcast(_LocalChunkProviderHybrid):
@@ -760,7 +754,7 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProviderHybrid):
             # Round 0's inter-node hop is launched immediately; it lands at
             # step == gpus_per_node. Clone so the broadcast below (which may
             # alias `_node_chunk`) can never race the in-flight send.
-            self._launch_internode(self._node_chunk.clone(), step)
+            self._launch_inter_backward(self._node_chunk.clone(), step)
 
         elif step % self._gpn == 0:
             # New node round: adopt the chunk that arrived from the previous node.
@@ -805,4 +799,4 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProviderHybrid):
         assert self._node_chunk is not None
         # `_node_chunk` is read-only for the rest of the round (broadcast source
         # or idle), so it can be sent without a copy.
-        self._launch_internode(self._node_chunk, step)
+        self._launch_inter_backward(self._node_chunk, step)

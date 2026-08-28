@@ -282,7 +282,7 @@ class _HybridForwardChunkProvider(_ForwardChunkProvider):
         self._inter_recv_buf: Optional[torch.Tensor] = None
         self._inter_handle: Optional[dist.Work] = None
 
-    def _launch_inter(self, node_step: int) -> None:
+    def _launch_inter_forward(self, node_step: int) -> None:
         """Start this round's inter-node send of the original local chunk."""
         buf = torch.empty_like(self.x_j if self.send_x else self.kv_j)
         self._inter_recv_buf, self._inter_handle = self.config.p2p_fn(
@@ -322,7 +322,7 @@ class _HybridP2PForwardChunkProvider(_HybridForwardChunkProvider):
         self._intra_recv_buf: Optional[torch.Tensor] = None
         self._intra_handle: Optional[dist.Work] = None
 
-    def _launch_intra(self, inner: int) -> None:
+    def _launch_intra_forward(self, inner: int) -> None:
         """Start the intra-node ring send of the chunk currently in hand."""
         src = self.x_j if self.send_x else self.kv_j
         self._intra_recv_buf, self._intra_handle = self.config.send_op_fn(
@@ -354,9 +354,9 @@ class _HybridP2PForwardChunkProvider(_HybridForwardChunkProvider):
                 self._inter_handle.wait()
                 self._recv(self._inter_recv_buf)
             if node_step < self.n_nodes - 1:
-                self._launch_inter(node_step)
+                self._launch_inter_forward(node_step)
         if inner + 1 < self.gpn:
-            self._launch_intra(inner)
+            self._launch_intra_forward(inner)
 
         if self.send_x:
             self._kv_from_x()
@@ -433,7 +433,7 @@ class _HybridBroadcastForwardChunkProvider(_HybridForwardChunkProvider):
             self._own_kv = self.kv_j
             self._own_buf = self.x_j if self.send_x else self.kv_j
             if node_step < self.n_nodes - 1:
-                self._launch_inter(node_step)
+                self._launch_inter_forward(node_step)
 
         assert self._own_buf is not None and self._own_kv is not None
         src = self.topo.rank_at(self.topo.node_idx, inner)
