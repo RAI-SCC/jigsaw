@@ -45,7 +45,7 @@ def _compute_kv(
 
 
 def build_intxxnode_groups(
-    process_mesh: DeviceMesh, gpus_per_node: int = 4
+    process_mesh: DeviceMesh, gpus_per_node: int = 4, row_kw: str = "row"
 ) -> tuple[list[dist.ProcessGroup], list[dist.ProcessGroup]]:
     """Build inter-node and intra-node groups along the row dimension.
 
@@ -57,9 +57,11 @@ def build_intxxnode_groups(
     Parameters
     ----------
     process_mesh : dist.ProcessMesh
-        Mesh containing a dimension named ``"row"``.
+        Mesh containing a dimension named ``row_kw``.
     gpus_per_node : int, default=4
         Maximum number of row ranks assigned to one node.
+    row_kw : str, default="row"
+        Name of the mesh dimension treated as the row dimension.
 
     Returns
     -------
@@ -74,10 +76,10 @@ def build_intxxnode_groups(
     """
     if gpus_per_node <= 0:
         raise ValueError("gpus_per_node must be positive")
-    if process_mesh.mesh_dim_names is None or "row" not in process_mesh.mesh_dim_names:
-        raise ValueError('process_mesh must contain a "row" dimension')
+    if process_mesh.mesh_dim_names is None or row_kw not in process_mesh.mesh_dim_names:
+        raise ValueError(f'process_mesh must contain a "{row_kw}" dimension')
 
-    row_axis = process_mesh.mesh_dim_names.index("row")
+    row_axis = process_mesh.mesh_dim_names.index(row_kw)
     mesh = process_mesh.mesh
     other_shape = tuple(
         size for axis, size in enumerate(mesh.shape) if axis != row_axis

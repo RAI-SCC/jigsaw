@@ -55,6 +55,69 @@ def test_build_intxxnode_groups(
 
 
 @pytest.mark.dist(4)
+@pytest.mark.parametrize(
+    ("gpus_per_node", "expected_internode_size", "expected_intranode_size"),
+    [(1, 2, 1), (2, 1, 2)],
+)
+def test_build_intxxnode_groups_custom_row_kw(
+    device: torch.device,
+    gpus_per_node: int,
+    expected_internode_size: int,
+    expected_intranode_size: int,
+) -> None:
+    """Build groups for a mesh whose row dimension is named differently.
+
+    Parameters
+    ----------
+    device : torch.device
+        Device used to initialize the process mesh.
+    gpus_per_node : int
+        Number of row ranks assigned to each node.
+    expected_internode_size : int
+        Expected size of the returned inter-node group.
+    expected_intranode_size : int
+        Expected size of the returned intra-node group.
+    """
+    process_mesh = dist.device_mesh.init_device_mesh(
+        device_type=device.type,
+        mesh_shape=(2, 2),
+        mesh_dim_names=("spatial", "col"),
+    )
+
+    internode_groups, intranode_groups = functional.build_intxxnode_groups(
+        process_mesh, gpus_per_node=gpus_per_node, row_kw="spatial"
+    )
+
+    assert len(internode_groups) == 1
+    assert len(intranode_groups) == 1
+    assert dist.get_world_size(internode_groups[0]) == expected_internode_size
+    assert dist.get_world_size(intranode_groups[0]) == expected_intranode_size
+    assert dist.get_rank(internode_groups[0]) >= 0
+    assert dist.get_rank(intranode_groups[0]) >= 0
+
+
+@pytest.mark.dist(4)
+def test_build_intxxnode_groups_rejects_missing_row_kw(
+    device: torch.device,
+) -> None:
+    """Reject a mesh that lacks the requested row dimension.
+
+    Parameters
+    ----------
+    device : torch.device
+        Device used to initialize the process mesh.
+    """
+    process_mesh = dist.device_mesh.init_device_mesh(
+        device_type=device.type,
+        mesh_shape=(2, 2),
+        mesh_dim_names=("row", "col"),
+    )
+
+    with pytest.raises(ValueError, match='must contain a "spatial" dimension'):
+        functional.build_intxxnode_groups(process_mesh, row_kw="spatial")
+
+
+@pytest.mark.dist(4)
 def test_build_intxxnode_groups_rejects_invalid_node_size(
     device: torch.device,
 ) -> None:
