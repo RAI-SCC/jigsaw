@@ -152,7 +152,7 @@ class XWT(torch.autograd.Function):
         grad_weight = config.grad_sum(
             grad_weight, ctx.bayesian
         )  # sum along batch dimension
-        
+
         grad_b = config.grad_bias(grad_output)
 
         return grad_input, grad_weight, grad_b, None, None, None, None, None, None
@@ -205,9 +205,7 @@ class XWT(torch.autograd.Function):
             Index of vmapped dimension in output (0 if batched, None if not).
         """
         x = x.contiguous()
-        out = XWT.apply(
-            x, w, b, local_rank, device, config, model_group, bayesian
-        )
+        out = XWT.apply(x, w, b, local_rank, device, config, model_group, bayesian)
 
         # out has vmapped dimension at dim 0
         return out, 0

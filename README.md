@@ -23,7 +23,7 @@ class Linear(torch.nn.Module):
    def forward(self, x):
       return self.lin(x)
 ```
-When initializing the models, ensure that each model-parallel rank has a different random seed, thus insuring true randomness in the initialization. The DP wrapper will handle weight initialization synchronization across data-parallel ranks. 
+When initializing the models, ensure that each model-parallel rank has a different random seed, thus insuring true randomness in the initialization. The DP wrapper will handle weight initialization synchronization across data-parallel ranks.
 ```
 local_rank = model_group.rank()
 set_all_seeds(local_rank)

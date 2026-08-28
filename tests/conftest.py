@@ -48,7 +48,8 @@ def pytest_configure(config):
         "markers", "dist_required: test requires distributed environment"
     )
     config.addinivalue_line(
-        "markers", "hybrid_dist_env: test requires distributed environment on both CPU and GPU."
+        "markers",
+        "hybrid_dist_env: test requires distributed environment on both CPU and GPU.",
     )
     config.addinivalue_line(
         "markers",
