@@ -3,7 +3,7 @@
 A single driver loop (:func:`ring_forward`) handles every communication strategy
 by delegating to a :class:`~.forward_chunk_provider._ForwardChunkProvider`,
 mirroring how :func:`.backward.ring_backward` delegates to a
-:class:`~.chunk_provider._BackwardChunkProvider`.
+:class:`~.backward_chunk_provider._BackwardChunkProvider`.
 """
 
 from __future__ import annotations

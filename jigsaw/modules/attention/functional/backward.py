@@ -10,7 +10,7 @@ from jigsaw.modules.attention.config import (
     SendOp,
 )
 
-from .chunk_provider import _build_backward_chunk_provider
+from .backward_chunk_provider import _build_backward_chunk_provider
 from .functional import HybridTopology, get_hybrid_topology
 
 # --------------------------------------------------------------------------- #

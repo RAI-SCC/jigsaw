@@ -1,6 +1,6 @@
 """Chunk providers for the ring-attention forward pass.
 
-The forward twin of :mod:`chunk_provider`. Where the backward pass drives a
+The forward twin of :mod:`backward_chunk_provider`. Where the backward pass drives a
 single loop over :class:`_BackwardChunkProvider`, the forward pass drives a
 single loop over :class:`_ForwardChunkProvider`: every communication strategy
 (plain P2P/all-to-all ring, broadcast ring, and their hybrid intra-/inter-node
@@ -151,7 +151,7 @@ class _ForwardChunkProvider(ABC):
 class _RingForwardChunkProvider(_ForwardChunkProvider):
     """One P2P (or all-to-all) send/recv per step around a ``direction=-1`` ring.
 
-    The forward twin of :class:`~.chunk_provider._LocalChunkProvider`.
+    The forward twin of :class:`~.backward_chunk_provider._LocalChunkProvider`.
     """
 
     def __init__(self, *args: object) -> None:
@@ -203,7 +203,7 @@ class _BroadcastForwardChunkProvider(_ForwardChunkProvider):
     """Per-step broadcast: at step ``s`` rank ``s`` fans its chunk out to the group.
 
     The forward twin of
-    :class:`~.chunk_provider._LocalChunkProviderBroadcast`.
+    :class:`~.backward_chunk_provider._LocalChunkProviderBroadcast`.
     """
 
     def __init__(self, *args: object) -> None:
@@ -269,7 +269,7 @@ class _HybridP2PForwardChunkProvider(_ForwardChunkProvider):
     inter-node hop; see :meth:`RingAttentionConfig._p2p_fn`).
 
     The forward twin of
-    :class:`~.chunk_provider._LocalChunkProviderHybridP2P`. Ring step ``s`` maps
+    :class:`~.backward_chunk_provider._LocalChunkProviderHybridP2P`. Ring step ``s`` maps
     to ``divmod(s, gpus_per_node) == (node_step, inner)``; the inter-node send of
     this rank's original chunk is launched at ``inner == 0`` and consumed at the
     start of the next round.
@@ -376,7 +376,7 @@ class _HybridBroadcastForwardChunkProvider(_ForwardChunkProvider):
     """Per-round sweep of ``gpus_per_node`` intra-node broadcasts, one inter-node hop.
 
     The forward twin of
-    :class:`~.chunk_provider._LocalChunkProviderHybridBroadcast`. At inner step
+    :class:`~.backward_chunk_provider._LocalChunkProviderHybridBroadcast`. At inner step
     ``s`` the node-local rank ``s`` broadcasts its round chunk to the node; the
     round chunk is stable for the round, so there is no intra-node rotation.
     """
