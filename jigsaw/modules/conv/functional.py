@@ -11,7 +11,7 @@ from .config import ConvConfig
 class ConvCtx(Protocol):
     """Protocol for types stored within ctx."""
 
-    x_shape_padded: torch.Size
+    local_in_width: int
     stride: int | tuple[int, ...]
     padding: int | tuple[int, ...]
     dilation: int | tuple[int, ...]
@@ -24,7 +24,12 @@ class ConvCtx(Protocol):
 
 
 class Conv2d(torch.autograd.Function):
-    """Autograd function for distributed 2D convolution (stride == kernel_size)."""
+    """Autograd function for distributed 2D convolution.
+
+    Handles both the no-halo regime (``stride == kernel_size``) and the halo
+    regime (``stride != kernel_size``); the kernels are picked by
+    :class:`~jigsaw.modules.conv.config.ConvConfig`.
+    """
 
     @staticmethod
     def forward(
@@ -46,15 +51,11 @@ class Conv2d(torch.autograd.Function):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of distributed Conv2d function.
 
-        Returns ``(y, x_aug)`` where ``y`` is this rank's output-channel slice
-        and ``x_aug`` is the gathered full-channel input kept for backward.
+        Returns ``(y, x_aug)`` where ``y`` is this rank's output-channel (and,
+        in the halo regime, output-column) slice and ``x_aug`` is the input kept
+        for backward: the gathered full-channel input in the no-halo regime, or
+        additionally halo-padded along the width axis in the halo regime.
         """
-        if any(k != s for k, s in zip(kernel_size, stride)):
-            raise NotImplementedError(
-                "Distributed Conv2d currently supports only stride == kernel_size "
-                "(no halo exchange)."
-            )
-
         y, x_aug = config.dist_conv2d_fn(
             x,
             weight,
@@ -62,6 +63,7 @@ class Conv2d(torch.autograd.Function):
             stride=stride,
             padding=padding,
             dilation=dilation,
+            spatial_group=spatial_group,
             channel_group=channel_group,
             config=config,
         )
@@ -117,7 +119,9 @@ class Conv2d(torch.autograd.Function):
         c.spatial_group = spatial_group
         c.channel_group = channel_group
         c.in_channels_global = in_channels
-        c.x_shape_padded = x_aug.shape
+        # width of this rank's owned input slice (pre channel-gather, pre halo);
+        # the halo backward needs it to fold halo-column grads back to owners.
+        c.local_in_width = x.shape[-1]
         c.stride = stride
         c.padding = padding
         c.dilation = dilation
@@ -148,48 +152,33 @@ class Conv2d(torch.autograd.Function):
     ]:
         """Backward pass of the distributed Conv2d.
 
-        Each rank holds the full-channel grad wrt input for its own
-        output-channel slice; summing those across the channel group and keeping
-        this rank's channel slice yields ``g_x``. ``g_w`` / ``g_b`` need no
-        channel reduction (spatial ranks are reduced by the parameter hook).
+        ``g_b`` is the local ``grad_output`` sum (spatial ranks are reduced by
+        the parameter hook). ``g_x`` / ``g_w`` are delegated to the regime-
+        specific kernel picked in :class:`ConvConfig`: in the no-halo regime each
+        rank holds the full-channel grad wrt input for its own output-channel
+        slice and only the channel group is reduced; in the halo regime the grad
+        is additionally folded back onto the owning spatial ranks.
         """
         c = cast(ConvCtx, ctx)
         x_aug, weight = c.saved_tensors
-        stride, padding, dilation = (c.stride, c.padding, c.dilation)
-        channel_group = c.channel_group
         config = c.config
-
-        x_shape_padded = c.x_shape_padded
 
         g_b = config.grad_bias(grad_output, c.spatial_group)
 
-        g_x = config.conv2d_input_fn(
-            x_shape_padded[int(c.bayesian) :],
-            weight,
-            grad_output.to(weight.dtype),  # handles autocast
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-        ).contiguous()
-
-        g_x_handle = dist.all_reduce(
-            g_x, op=dist.ReduceOp.SUM, group=channel_group, async_op=True
-        )
-
-        g_w = config.conv2d_weight_fn(
+        g_x, g_w = config.dist_conv2d_backward_fn(
+            grad_output,
             x_aug,
-            weight.shape[int(c.bayesian) :],
-            grad_output.to(weight.dtype),
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
+            weight,
+            c.stride,
+            c.padding,
+            c.dilation,
+            c.in_channels_global,
+            c.local_in_width,
+            c.spatial_group,
+            c.channel_group,
+            c.bayesian,
+            config,
         )
-
-        g_x_handle.wait()
-
-        shard = c.in_channels_global // channel_group.size()
-        start = channel_group.rank() * shard
-        g_x = g_x[..., start : start + shard, :, :]
 
         return (
             g_x,

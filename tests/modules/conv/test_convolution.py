@@ -20,17 +20,23 @@ def _conv2d_reference_check(
     height: int,
     width: int,
     batch: int = 2,
+    stride: int | None = None,
+    padding: int = 0,
+    dilation: int = 1,
 ) -> None:
     """Compare a distributed ``DistributedConv2D`` against a single-process conv2d.
 
-    Works for any ``row.size()`` (spatial) x ``col.size()`` (channel) mesh.
-    Rebuilds the equivalent non-distributed convolution from the sharded weight,
-    bias and input, runs both forward and backward, and checks the output plus
-    every gradient (input, weight, bias) after gathering the distributed shards.
+    Works for any ``row.size()`` (spatial) x ``col.size()`` (channel) mesh and
+    for both the no-halo regime (``stride == kernel_size``, the default) and the
+    halo regime (any other stride). Rebuilds the equivalent non-distributed
+    convolution from the sharded weight, bias and input, runs both forward and
+    backward, and checks the output plus every gradient (input, weight, bias)
+    after gathering the distributed shards.
     """
     row_group, col_group = mesh["row"], mesh["col"]
     n_spatial, n_channel = row_group.size(), col_group.size()
     model_group = mesh["model"]
+    stride = kernel_size if stride is None else stride
 
     torch.manual_seed(model_group.rank())
     x_local = torch.randn(
@@ -44,9 +50,9 @@ def _conv2d_reference_check(
         device=device,
         spatial_group=row_group,
         channel_group=col_group,
-        stride=kernel_size,
-        padding=(0,),
-        dilation=1,
+        stride=stride,
+        padding=(padding, padding),
+        dilation=dilation,
         groups=1,
         bias=True,
         parallelism=model_group.size(),
@@ -68,7 +74,14 @@ def _conv2d_reference_check(
     weight_global.requires_grad_(True)
     bias_global.requires_grad_(True)
 
-    y_ref = F.conv2d(x_global, weight_global, bias_global, stride=kernel_size)
+    y_ref = F.conv2d(
+        x_global,
+        weight_global,
+        bias_global,
+        stride=stride,
+        padding=padding,
+        dilation=dilation,
+    )
 
     torch.manual_seed(2024)
     grad_global = torch.randn(y_ref.shape, device=device)
@@ -79,6 +92,9 @@ def _conv2d_reference_check(
     y = conv2d(x_dist)
 
     out_local = out_channels // n_channel
+    assert y_ref.shape[-1] % n_spatial == 0, (
+        f"global output width {y_ref.shape[-1]} not divisible by spatial size {n_spatial}"
+    )
     ow_local = y_ref.shape[-1] // n_spatial
     grad_local = grad_global[
         ...,
@@ -159,10 +175,59 @@ class TestConv2d:
             width=16,
         )
 
-    def test_requires_stride_equals_kernel(
+    def test_stride_lt_kernel_halo(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        """Halo-exchange convolutions (stride != kernel_size) are rejected."""
+        """Overlapping windows (stride < kernel_size) match a single-process conv2d."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            stride=2,
+            padding=1,
+        )
+
+    def test_stride_gt_kernel_halo(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """Strided-past-kernel windows (stride > kernel_size) match a plain conv2d."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=2,
+            height=14,
+            width=14,
+            stride=4,
+            padding=0,
+        )
+
+    def test_dilated_halo(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """Dilated 'same'-style conv (stride 1) matches a plain conv2d."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=3,
+            height=16,
+            width=16,
+            stride=1,
+            padding=2,
+            dilation=2,
+        )
+
+    def test_string_padding_rejected_with_halo(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """String padding is not supported once a halo exchange is needed."""
         conv2d = conv.DistributedConv2D(
             8,
             12,
@@ -171,7 +236,7 @@ class TestConv2d:
             spatial_group=process_mesh_dict_2x2["row"],
             channel_group=process_mesh_dict_2x2["col"],
             stride=2,
-            padding=(0,),
+            padding="same",
             dilation=1,
             groups=1,
             bias=True,
@@ -230,6 +295,57 @@ class TestConv2dParallel:
             kernel_size=4,
             height=16,
             width=16,
+        )
+
+    @pytest.mark.dist(4)
+    def test_halo_1x4(
+        self, device: torch.device, process_mesh_dict_1x4: dict
+    ) -> None:
+        """Halo regime with no spatial split (channel-only, group size 1 path)."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_1x4,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            stride=2,
+            padding=1,
+        )
+
+    @pytest.mark.dist(4)
+    def test_halo_4x1(
+        self, device: torch.device, process_mesh_dict_4x1: dict
+    ) -> None:
+        """Halo regime with 4-way spatial split (real cross-rank exchange)."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_4x1,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=32,
+            width=32,
+            stride=2,
+            padding=1,
+        )
+
+    @pytest.mark.dist(8)
+    def test_halo_2x4(
+        self, device: torch.device, process_mesh_dict_2x4_rowcol: dict
+    ) -> None:
+        """Halo regime combined with 4-way channel parallelism."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x4_rowcol,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            stride=2,
+            padding=1,
         )
 
 

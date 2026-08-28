@@ -16,6 +16,7 @@ class ConvConfig:
 
     # type hints
     dist_conv2d_fn: Callable
+    dist_conv2d_backward_fn: Callable
 
     def __init__(
         self,
@@ -50,9 +51,17 @@ class ConvConfig:
         self.conv2d_weight_fn = self._conv2d_weight_fn_selection(bayesian)
         self.weight_reshape = self._reshape_weights_selection(bayesian)
         self.grad_bias = self._grad_bias_selection(spatial_group, bias)
-        # One kernel covers every (spatial_group.size(), channel_group.size())
-        # combination in the no-halo regime.
-        self.dist_conv2d_fn = dist_conv.conv2d_nway
+        # ``stride == kernel_size`` (on every axis) tiles the domain with no
+        # overlap, so the spatial split needs no communication. Otherwise
+        # neighbouring output columns share input columns and the spatial ranks
+        # exchange halos. One kernel covers every group-size combination in each
+        # regime.
+        if all(k == s for k, s in zip(kernel_size, stride)):
+            self.dist_conv2d_fn = dist_conv.conv2d_nway
+            self.dist_conv2d_backward_fn = dist_conv.conv2d_nway_backward
+        else:
+            self.dist_conv2d_fn = dist_conv.conv2d_halo_nway
+            self.dist_conv2d_backward_fn = dist_conv.conv2d_halo_nway_backward
 
     def _conv2d_fn_selection(self, bayesian: bool) -> Callable:
         """
