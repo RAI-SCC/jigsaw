@@ -3,7 +3,7 @@
 import torch
 import torch.distributed as dist
 
-from .distributed_matmul import _get_preallocated_buffer
+from jigsaw.modules.buffers import get_preallocated_buffer
 
 
 def x_transpose_twoway(
@@ -35,7 +35,7 @@ def x_transpose_twoway(
 
     x0, x1 = torch.split(x, x.shape[-2] // 2, dim=-2)
     x0, x1 = x0.contiguous(), x1.contiguous()
-    buffer_x = _get_preallocated_buffer(x1.shape, x1.dtype, local_rank, device)
+    buffer_x = get_preallocated_buffer(x1.shape, x1.dtype, local_rank, device)
     empty = torch.empty(0, device=device, dtype=x.dtype)
 
     match mod:
@@ -123,14 +123,14 @@ def x_transpose_fourway(
             x_recv_list = [
                 empty,
                 empty,
-                _get_preallocated_buffer(x.shape, x.dtype, local_rank, device, 0),
+                get_preallocated_buffer(x.shape, x.dtype, local_rank, device, 0),
                 empty,
             ]
         case 2:
             x_send_list = [empty, x, empty, empty]
             x_recv_list = [
                 empty,
-                _get_preallocated_buffer(x.shape, x.dtype, local_rank, device, 0),
+                get_preallocated_buffer(x.shape, x.dtype, local_rank, device, 0),
                 empty,
                 empty,
             ]
@@ -182,8 +182,8 @@ def x_transpose_eightway(
     # split upon last dimension
     x0, x1 = torch.split(xij, xij.shape[-1] // 2, dim=-1)
     x0, x1 = x0.contiguous(), x1.contiguous()
-    cij0 = _get_preallocated_buffer(x0.shape, xij.dtype, local_rank, device, index=0)
-    cij1 = _get_preallocated_buffer(x1.shape, xij.dtype, local_rank, device, index=0)
+    cij0 = get_preallocated_buffer(x0.shape, xij.dtype, local_rank, device, index=0)
+    cij1 = get_preallocated_buffer(x1.shape, xij.dtype, local_rank, device, index=0)
 
     match mod:
         case 0:

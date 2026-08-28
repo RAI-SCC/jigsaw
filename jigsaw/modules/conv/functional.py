@@ -5,6 +5,8 @@ from typing import Any, Optional, Protocol, cast
 import torch
 import torch.distributed as dist
 
+from jigsaw.modules.buffers import get_preallocated_buffer
+
 from . import distributed_convolutions as dist_conv
 from .config import ConvConfig
 
@@ -208,10 +210,11 @@ class Conv2d(torch.autograd.Function):
             async_op=True,
         )
 
-        g_x_buffer = torch.zeros(
-            (*g_x.shape[:-3], g_x.shape[-3] // 2, *g_x.shape[-2:]),
-            device=g_x.device,
-            dtype=g_x.dtype,
+        g_x_buffer = get_preallocated_buffer(
+            torch.Size((*g_x.shape[:-3], g_x.shape[-3] // 2, *g_x.shape[-2:])),
+            g_x.dtype,
+            channel_group.rank(),
+            g_x.device,
         )
 
         g_x_recv, g_x_handles = dist_conv.send_g_x_channels_2d(
