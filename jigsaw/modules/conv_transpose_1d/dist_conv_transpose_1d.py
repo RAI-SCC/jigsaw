@@ -91,6 +91,25 @@ def _channel_shard(
     return g_x[..., start : start + shard, :]
 
 
+def _needs_halo(
+    spatial_group: dist.ProcessGroup,
+    padding: str | tuple[int],
+    dilation: tuple[int],
+) -> bool:
+    """Whether a nominally no-halo call (``stride == kernel``) still needs a halo.
+
+    ``stride == kernel_size`` only tiles the length axis with no overlap when it
+    also has zero padding and unit dilation. With a real spatial split and either
+    of those non-trivial, the raw local outputs overlap / are cropped and the
+    halo path is required.
+    """
+    return (
+        spatial_group.size() > 1
+        and isinstance(padding, tuple)
+        and (padding[0] != 0 or dilation[0] != 1)
+    )
+
+
 # ---------------------------------------------------------------------------
 # no-halo regime (stride == kernel_size)
 # ---------------------------------------------------------------------------
@@ -113,6 +132,11 @@ def conv_transpose1d_nway(
     Returns ``(y, x_full)`` where ``x_full`` is the gathered full-channel input
     kept for the backward pass.
     """
+    if _needs_halo(spatial_group, padding, dilation):
+        return conv_transpose1d_halo_nway(
+            x, w, b, stride, padding, dilation, spatial_group, channel_group, config
+        )
+
     x_full = _gather_full_channels(x.contiguous(), channel_group)
 
     if b is not None:
@@ -148,6 +172,22 @@ def conv_transpose1d_nway_backward(
     slice yields ``g_x``. ``g_w`` needs no channel reduction (spatial ranks are
     reduced by the parameter hook).
     """
+    if _needs_halo(spatial_group, padding, dilation):
+        return conv_transpose1d_halo_nway_backward(
+            grad_output,
+            x_aug,
+            weight,
+            stride,
+            padding,
+            dilation,
+            in_channels_global,
+            local_in_length,
+            spatial_group,
+            channel_group,
+            bayesian,
+            config,
+        )
+
     g_x, g_w = _grad_input_weight(
         grad_output, x_aug, weight, stride, padding, dilation, config
     )

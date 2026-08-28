@@ -17,6 +17,26 @@ def _triple(value: Triple) -> tuple[int, int, int]:
     return (value, value, value) if isinstance(value, int) else tuple(value)
 
 
+# (kernel, stride, padding, dilation) -- each entry is an int or a (d, h, w)
+# tuple, so asymmetric kernels/strides/paddings/dilations are covered. The split
+# axis is the width (last) axis. The last few entries exercise the
+# ``stride == kernel`` config branch with non-trivial split-axis padding/dilation
+# (must still route through the halo path) and a combo whose global output width
+# is not divisible by an even spatial group (must raise ``NotImplementedError``).
+ARBITRARY_CASES = [
+    (2, 2, 0, 1),
+    (4, 2, 1, 1),
+    (2, 4, 1, 1),
+    (3, 1, 2, 2),
+    ((2, 3, 5), (2, 2, 3), (0, 1, 1), 1),
+    ((3, 3, 6), (2, 2, 2), (1, 1, 2), 1),
+    (2, 2, 1, 1),
+    ((3, 3, 3), (3, 3, 3), (0, 0, 0), (1, 1, 2)),
+    (3, 2, 1, 1),
+]
+ARBITRARY_IDS = [f"k{k}_s{s}_p{p}_d{d}".replace(" ", "") for (k, s, p, d) in ARBITRARY_CASES]
+
+
 def _conv3d_transpose_reference_check(
     device: torch.device,
     mesh: dict,
@@ -35,9 +55,15 @@ def _conv3d_transpose_reference_check(
 
     Works for any ``row.size()`` (spatial, splits the width axis) x ``col.size()``
     (channel) mesh and for both the no-halo regime (``stride == kernel_size``) and
-    the halo regime. Rebuilds the equivalent non-distributed transpose convolution
-    from the sharded weight, bias and input, runs forward and backward on both,
-    and checks the output plus every gradient after gathering the shards.
+    the halo regime (any other stride, or ``stride == kernel_size`` with
+    split-axis padding/dilation). Rebuilds the equivalent non-distributed
+    transpose convolution from the sharded weight, bias and input, runs forward
+    and backward on both, and checks the output plus every gradient after
+    gathering the distributed shards.
+
+    When the global output width is not divisible by the spatial group size the
+    distributed layer cannot shard the output evenly; this asserts it raises
+    ``NotImplementedError`` instead of returning a wrong result.
     """
     row_group, col_group = mesh["row"], mesh["col"]
     n_spatial, n_channel = row_group.size(), col_group.size()
@@ -98,6 +124,12 @@ def _conv3d_transpose_reference_check(
         dilation=dilation,
     )
 
+    # global output not divisible by the spatial ranks -> unsupported, cleanly.
+    if n_spatial > 1 and y_ref.shape[-1] % n_spatial != 0:
+        with pytest.raises(NotImplementedError):
+            conv(x_local.clone().requires_grad_(True))
+        return
+
     torch.manual_seed(2024)
     grad_global = torch.randn(y_ref.shape, device=device)
     y_ref.backward(grad_global)
@@ -107,10 +139,6 @@ def _conv3d_transpose_reference_check(
     y = conv(x_dist)
 
     out_local = out_channels // n_channel
-    assert y_ref.shape[-1] % n_spatial == 0, (
-        f"global output width {y_ref.shape[-1]} not divisible by spatial "
-        f"size {n_spatial}"
-    )
     ow_local = y_ref.shape[-1] // n_spatial
     grad_local = grad_global[
         ...,
@@ -171,53 +199,31 @@ class TestConv3dTranspose:
                 weights_gathered[i], weights_gathered[i + col_comm_size], atol=1e-5
             )
 
-    def test_forward_backward(
-        self, device: torch.device, process_mesh_dict_2x2: dict
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
+    )
+    def test_arbitrary_params(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        kernel: Triple,
+        stride: Triple,
+        padding: Triple,
+        dilation: Triple,
     ) -> None:
-        """No-halo regime (stride == kernel) matches a single-process op."""
+        """2x2 mesh: arbitrary kernel/stride/padding/dilation, incl. asymmetric."""
         _conv3d_transpose_reference_check(
             device,
             process_mesh_dict_2x2,
             in_channels=8,
             out_channels=12,
-            kernel_size=2,
-            depth=6,
-            height=6,
-            width=16,
-        )
-
-    def test_stride_lt_kernel_halo(
-        self, device: torch.device, process_mesh_dict_2x2: dict
-    ) -> None:
-        """Overlapping raw outputs (stride < kernel_size) match a plain op."""
-        _conv3d_transpose_reference_check(
-            device,
-            process_mesh_dict_2x2,
-            in_channels=8,
-            out_channels=12,
-            kernel_size=4,
-            depth=6,
-            height=6,
-            width=16,
-            stride=2,
-            padding=1,
-        )
-
-    def test_asymmetric_kernel_stride_halo(
-        self, device: torch.device, process_mesh_dict_2x2: dict
-    ) -> None:
-        """Non-square kernel and stride, stride != kernel on the split axis."""
-        _conv3d_transpose_reference_check(
-            device,
-            process_mesh_dict_2x2,
-            in_channels=8,
-            out_channels=12,
-            kernel_size=(2, 3, 4),
-            depth=6,
-            height=6,
-            width=16,
-            stride=(2, 2, 2),
-            padding=(0, 1, 1),
+            kernel_size=kernel,
+            depth=4,
+            height=4,
+            width=12,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
         )
 
     def test_string_padding_rejected_with_halo(
@@ -240,7 +246,7 @@ class TestConv3dTranspose:
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
-        x = torch.randn(2, 4, 6, 6, 8, device=device)
+        x = torch.randn(2, 4, 4, 4, 8, device=device)
         with pytest.raises(NotImplementedError):
             conv(x)
 
@@ -249,53 +255,85 @@ class TestConv3dTransposeParallel:
     """DistributedConvTranspose3d across arbitrary spatial and channel sizes."""
 
     @pytest.mark.dist(4)
-    def test_forward_backward_1x4(
-        self, device: torch.device, process_mesh_dict_1x4: dict
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
+    )
+    def test_arbitrary_params_1x4(
+        self,
+        device: torch.device,
+        process_mesh_dict_1x4: dict,
+        kernel: Triple,
+        stride: Triple,
+        padding: Triple,
+        dilation: Triple,
     ) -> None:
-        """Pure channel parallelism (4 channel ranks, no spatial split)."""
+        """Pure channel parallelism: every param combo works (no spatial split)."""
         _conv3d_transpose_reference_check(
             device,
             process_mesh_dict_1x4,
             in_channels=8,
             out_channels=12,
-            kernel_size=2,
-            depth=6,
-            height=6,
-            width=16,
+            kernel_size=kernel,
+            depth=4,
+            height=4,
+            width=12,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
         )
 
     @pytest.mark.dist(4)
-    def test_halo_4x1(
-        self, device: torch.device, process_mesh_dict_4x1: dict
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
+    )
+    def test_arbitrary_params_4x1(
+        self,
+        device: torch.device,
+        process_mesh_dict_4x1: dict,
+        kernel: Triple,
+        stride: Triple,
+        padding: Triple,
+        dilation: Triple,
     ) -> None:
-        """Halo regime with 4-way spatial split (real cross-rank exchange)."""
+        """Pure 4-way spatial split with arbitrary params (real halo exchange)."""
         _conv3d_transpose_reference_check(
             device,
             process_mesh_dict_4x1,
             in_channels=8,
             out_channels=12,
-            kernel_size=4,
-            depth=6,
-            height=6,
-            width=32,
-            stride=2,
-            padding=1,
+            kernel_size=kernel,
+            depth=4,
+            height=4,
+            width=24,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
         )
 
     @pytest.mark.dist(8)
-    def test_halo_2x4(
-        self, device: torch.device, process_mesh_dict_2x4_rowcol: dict
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
+    )
+    def test_arbitrary_params_2x4(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x4_rowcol: dict,
+        kernel: Triple,
+        stride: Triple,
+        padding: Triple,
+        dilation: Triple,
     ) -> None:
-        """Halo regime combined with 4-way channel parallelism."""
+        """2-way spatial x 4-way channel with arbitrary params."""
         _conv3d_transpose_reference_check(
             device,
             process_mesh_dict_2x4_rowcol,
             in_channels=8,
             out_channels=12,
-            kernel_size=4,
-            depth=6,
-            height=6,
-            width=16,
-            stride=2,
-            padding=1,
+            kernel_size=kernel,
+            depth=4,
+            height=4,
+            width=12,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
         )
