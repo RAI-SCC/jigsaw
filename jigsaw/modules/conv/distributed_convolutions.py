@@ -46,6 +46,26 @@ def _gather_full_channels(
     return torch.cat(slices, dim=-3)
 
 
+def _needs_halo(
+    spatial_group: dist.ProcessGroup,
+    padding: str | tuple[int, int],
+    dilation: tuple[int, int],
+) -> bool:
+    """Whether a nominally no-halo call (``stride == kernel``) still needs a halo.
+
+    ``stride == kernel_size`` only tiles the split (width) axis with no overlap
+    when it also has zero padding and unit dilation. With a real spatial split
+    and either of those non-trivial, the local slices' interior edges would be
+    wrongly zero-padded / their windows would overlap, so the halo path is
+    required.
+    """
+    return (
+        spatial_group.size() > 1
+        and isinstance(padding, tuple)
+        and (padding[1] != 0 or dilation[1] != 1)
+    )
+
+
 def distributed_conv2d_over_channels_nway(
     x: torch.Tensor,
     w: torch.Tensor,
@@ -97,6 +117,11 @@ def conv2d_nway(
     Returns ``(y, x_full)`` where ``x_full`` is the gathered full-channel input
     kept for the backward pass.
     """
+    if _needs_halo(spatial_group, padding, dilation):
+        return conv2d_halo_nway(
+            x, w, b, stride, padding, dilation, spatial_group, channel_group, config
+        )
+
     return distributed_conv2d_over_channels_nway(
         x,
         w,
@@ -130,6 +155,22 @@ def conv2d_nway_backward(
     slice yields ``g_x``. ``g_w`` needs no channel reduction (spatial ranks are
     reduced by the parameter hook).
     """
+    if _needs_halo(spatial_group, padding, dilation):
+        return conv2d_halo_nway_backward(
+            grad_output,
+            x_aug,
+            weight,
+            stride,
+            padding,
+            dilation,
+            in_channels_global,
+            local_in_width,
+            spatial_group,
+            channel_group,
+            bayesian,
+            config,
+        )
+
     g_x = config.conv2d_input_fn(
         x_aug.shape[int(bayesian) :],
         weight,

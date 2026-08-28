@@ -183,7 +183,13 @@ def halo_scatter_add(
     g_x_local = g_x_need.new_zeros((*g_x_need.shape[:-1], local_in_size))
 
     if group_size == 1:
-        return (g_x_need[..., -lo : -lo + local_in_size]).contiguous()
+        # ``g_x_need`` covers global input positions ``[lo, hi)``; the owned
+        # positions are ``[0, local_in_size)``. Positions of the owned range that
+        # the span does not reach (a ``stride > 1`` tail, or the ``lo < 0``
+        # padding head) carry no gradient and stay zero.
+        lo_c, hi_c = max(lo, 0), min(hi, global_n)
+        g_x_local[..., lo_c:hi_c] = g_x_need[..., lo_c - lo : hi_c - lo]
+        return g_x_local.contiguous()
 
     empty = g_x_need.new_empty((*g_x_need.shape[:-1], 0))
     send_parts: list[torch.Tensor] = []
