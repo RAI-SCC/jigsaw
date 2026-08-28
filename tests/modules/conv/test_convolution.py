@@ -10,33 +10,45 @@ from tests.process_mesh import *
 
 pytestmark = [pytest.mark.dist_required]
 
+Pair = int | tuple[int, int]
+
+
+def _pair(value: Pair) -> tuple[int, int]:
+    """Normalise an ``int`` or 2-tuple to a ``(h, w)`` tuple."""
+    return (value, value) if isinstance(value, int) else tuple(value)
+
 
 def _conv2d_reference_check(
     device: torch.device,
     mesh: dict,
     in_channels: int,
     out_channels: int,
-    kernel_size: int,
+    kernel_size: Pair,
     height: int,
     width: int,
     batch: int = 2,
-    stride: int | None = None,
-    padding: int = 0,
-    dilation: int = 1,
+    stride: Pair | None = None,
+    padding: Pair = 0,
+    dilation: Pair = 1,
 ) -> None:
     """Compare a distributed ``DistributedConv2D`` against a single-process conv2d.
 
     Works for any ``row.size()`` (spatial) x ``col.size()`` (channel) mesh and
     for both the no-halo regime (``stride == kernel_size``, the default) and the
-    halo regime (any other stride). Rebuilds the equivalent non-distributed
-    convolution from the sharded weight, bias and input, runs both forward and
-    backward, and checks the output plus every gradient (input, weight, bias)
-    after gathering the distributed shards.
+    halo regime (any other stride). ``kernel_size`` / ``stride`` / ``padding`` /
+    ``dilation`` accept an ``int`` or a ``(h, w)`` tuple, so asymmetric kernels
+    and strides are covered. Rebuilds the equivalent non-distributed convolution
+    from the sharded weight, bias and input, runs both forward and backward, and
+    checks the output plus every gradient (input, weight, bias) after gathering
+    the distributed shards.
     """
     row_group, col_group = mesh["row"], mesh["col"]
     n_spatial, n_channel = row_group.size(), col_group.size()
     model_group = mesh["model"]
-    stride = kernel_size if stride is None else stride
+    kernel_size = _pair(kernel_size)
+    stride = kernel_size if stride is None else _pair(stride)
+    padding = _pair(padding)
+    dilation = _pair(dilation)
 
     torch.manual_seed(model_group.rank())
     x_local = torch.randn(
@@ -51,7 +63,7 @@ def _conv2d_reference_check(
         spatial_group=row_group,
         channel_group=col_group,
         stride=stride,
-        padding=(padding, padding),
+        padding=padding,
         dilation=dilation,
         groups=1,
         bias=True,
@@ -224,6 +236,22 @@ class TestConv2d:
             dilation=2,
         )
 
+    def test_asymmetric_kernel_stride_halo(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """2x2 mesh, non-square kernel and stride, stride != kernel on both axes."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=(3, 4),
+            height=16,
+            width=16,
+            stride=(2, 2),
+            padding=(1, 1),
+        )
+
     def test_string_padding_rejected_with_halo(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
@@ -346,6 +374,58 @@ class TestConv2dParallel:
             width=16,
             stride=2,
             padding=1,
+        )
+
+    @pytest.mark.dist(8)
+    def test_halo_2x4_asymmetric_kernel_stride(
+        self, device: torch.device, process_mesh_dict_2x4_rowcol: dict
+    ) -> None:
+        """2x4 mesh, non-square kernel and stride, stride < kernel on both axes."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x4_rowcol,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=(3, 4),
+            height=17,
+            width=16,
+            stride=(2, 3),
+            padding=(1, 2),
+        )
+
+    @pytest.mark.dist(8)
+    def test_halo_2x4_asymmetric_stride_gt_kernel(
+        self, device: torch.device, process_mesh_dict_2x4_rowcol: dict
+    ) -> None:
+        """2x4 mesh, non-square kernel and stride, width stride > kernel."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x4_rowcol,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=(4, 2),
+            height=16,
+            width=18,
+            stride=(2, 3),
+            padding=(1, 0),
+        )
+
+    @pytest.mark.dist(8)
+    def test_halo_2x4_asymmetric_dilation(
+        self, device: torch.device, process_mesh_dict_2x4_rowcol: dict
+    ) -> None:
+        """2x4 mesh, non-square stride and dilation over the halo exchange."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x4_rowcol,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=(3, 3),
+            height=16,
+            width=16,
+            stride=(1, 2),
+            padding=(2, 1),
+            dilation=(2, 1),
         )
 
 
