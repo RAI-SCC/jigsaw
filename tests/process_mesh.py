@@ -124,7 +124,6 @@ def process_mesh_dict_1x1(device: torch.Tensor) -> dict:
 @pytest.fixture(scope="session")
 def process_mesh_dict_2x4(device: torch.Tensor) -> dict:
     """Return process mesh."""
-    print(f"device type {device.type}")
     return make_process_mesh(
         device_type=device.type,
         mesh_shape=[2, 4],

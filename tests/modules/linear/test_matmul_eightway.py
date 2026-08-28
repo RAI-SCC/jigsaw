@@ -59,7 +59,6 @@ def test_xw_eightway(device: torch.device, process_mesh_dict_4x2: dict) -> None:
             x, w, rank, device, model_group=process_mesh_dict_4x2["model"]
         )
     result = gather_results(result, process_mesh_dict=process_mesh_dict_4x2)
-    print(f"difference {(x_all @ w_all).sum() - result.sum()}")
     assert torch.allclose(x_all @ w_all, result, atol=1e-5)
 
 

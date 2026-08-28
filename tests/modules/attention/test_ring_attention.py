@@ -445,7 +445,6 @@ def test_ring_forward_backward(
         world_size,
         ring_config,
     )
-    print(f"R{dist.get_rank()} out {out.sum()}")
     out_full = gather_1d_results(out, process_mesh_dict, dim=2)
     x_full = gather_1d_results(x, process_mesh_dict, dim=1)
     qkv = x_full @ w_qkv.mT
@@ -494,7 +493,6 @@ def test_ring_forward_backward(
         chunks_to_save,
         ring_config=ring_config,
     )
-    print(f"R{dist.get_rank()} dq {dq_local.sum()}")
 
     # Backward pass
     out_ref.backward(torch.ones_like(out_ref))
@@ -598,7 +596,6 @@ def test_ring_hybrid(
         offload=offloader,
     )
 
-    print(f"ring_config {ring_config}")
     ring_forward = forward.build_ring_forward(ring_config)
     local_rank = dist.get_rank(group=process_mesh_dict["model"])
     world_size = dist.get_world_size(group=process_mesh_dict["model"])

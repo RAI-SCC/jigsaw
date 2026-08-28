@@ -89,7 +89,6 @@ def make_process_mesh(
             mesh_dim_names=tuple(["model"]),
         )
     else:  #
-        print(f"mesh shape! {mesh_shape[:-2]}")
         model_mesh = dist.device_mesh.init_device_mesh(
             device_type=device_type,
             mesh_shape=tuple(
@@ -188,7 +187,6 @@ def train_one_epoch(model: torch.nn.Module, x: torch.Tensor, steps: int = 5):
     """
     for _ in range(steps):
         output = model(x.detach())
-        # print(f'R{dist.get_rank(group=None)}/{dist.get_world_size(group=None)} output {output.sum()}')
         output.sum().backward()
 
 

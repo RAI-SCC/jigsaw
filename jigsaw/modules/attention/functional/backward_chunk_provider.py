@@ -222,7 +222,6 @@ class _GlobalChunkProvider(_BackwardChunkProvider):
             kv = chunk
             return kv[0].contiguous(), kv[1].contiguous(), kv
         elif self.config.save_for_backward == SaveBackward.X:
-            print(f"R{dist.get_rank()} step {step} chunk {chunk.sum()}")
             kv, kj, vj = _compute_kv(
                 chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
             )
