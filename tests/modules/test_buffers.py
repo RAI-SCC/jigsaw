@@ -1,4 +1,4 @@
-"""Unit tests for ``_get_preallocated_buffer`` buffer caching / keying.
+"""Unit tests for ``get_preallocated_buffer`` buffer caching / keying.
 
 These are plain (non-distributed) tests: the function under test only needs a
 ``torch.device`` and exercises the module-level ``_prealloc_buffers`` cache.
@@ -7,9 +7,10 @@ These are plain (non-distributed) tests: the function under test only needs a
 import pytest
 import torch
 
-from jigsaw.modules.linear.distributed_matmul import (
-    _get_preallocated_buffer,
+from jigsaw.modules.buffers import (
     _prealloc_buffers,
+    clear_preallocated_buffers,
+    get_preallocated_buffer,
 )
 
 CPU = torch.device("cpu")
@@ -18,9 +19,9 @@ CPU = torch.device("cpu")
 @pytest.fixture(autouse=True)
 def _clear_buffer_cache():
     """Isolate every test from the process-global buffer cache."""
-    _prealloc_buffers.clear()
+    clear_preallocated_buffers()
     yield
-    _prealloc_buffers.clear()
+    clear_preallocated_buffers()
 
 
 # --- helpers -----------------------------------------------------------------
@@ -29,7 +30,7 @@ def _clear_buffer_cache():
 
 
 def _alloc(shape=(8,), dtype=torch.float32, local_rank=0, device=CPU, index=0):
-    return _get_preallocated_buffer(
+    return get_preallocated_buffer(
         torch.Size(shape), dtype, local_rank, device, index
     )
 
@@ -38,7 +39,7 @@ def _alloc(shape=(8,), dtype=torch.float32, local_rank=0, device=CPU, index=0):
 
 
 def test_returns_requested_shape_dtype_device_and_is_zeroed():
-    buf = _get_preallocated_buffer(torch.Size([2, 3]), torch.float64, 0, CPU)
+    buf = get_preallocated_buffer(torch.Size([2, 3]), torch.float64, 0, CPU)
     assert buf.shape == (2, 3)
     assert buf.dtype == torch.float64
     assert buf.device == CPU
@@ -46,7 +47,7 @@ def test_returns_requested_shape_dtype_device_and_is_zeroed():
 
 
 def test_multidim_shape_produces_a_writable_view():
-    buf = _get_preallocated_buffer(torch.Size([2, 3, 4]), torch.float32, 0, CPU)
+    buf = get_preallocated_buffer(torch.Size([2, 3, 4]), torch.float32, 0, CPU)
     assert buf.shape == (2, 3, 4)
     assert buf.numel() == 24
     buf[1, 2, 3] = 5.0
@@ -57,8 +58,8 @@ def test_multidim_shape_produces_a_writable_view():
 
 
 def test_distinct_call_sites_get_distinct_storage_despite_identical_args():
-    a = _get_preallocated_buffer(torch.Size([4]), torch.float32, 0, CPU)
-    b = _get_preallocated_buffer(torch.Size([4]), torch.float32, 0, CPU)
+    a = get_preallocated_buffer(torch.Size([4]), torch.float32, 0, CPU)
+    b = get_preallocated_buffer(torch.Size([4]), torch.float32, 0, CPU)
 
     assert a.data_ptr() != b.data_ptr()
 
@@ -71,10 +72,10 @@ def test_distinct_call_sites_get_distinct_storage_despite_identical_args():
 def test_concurrent_recv_buffers_do_not_overwrite_each_other():
     # Mirrors the real usage: several same-shape/dtype/rank buffers requested
     # from different lines and kept live at once as irecv targets.
-    b0 = _get_preallocated_buffer(torch.Size([3, 3]), torch.float32, 1, CPU)
-    b1 = _get_preallocated_buffer(torch.Size([3, 3]), torch.float32, 1, CPU)
-    b2 = _get_preallocated_buffer(torch.Size([3, 3]), torch.float32, 1, CPU)
-    b3 = _get_preallocated_buffer(torch.Size([3, 3]), torch.float32, 1, CPU)
+    b0 = get_preallocated_buffer(torch.Size([3, 3]), torch.float32, 1, CPU)
+    b1 = get_preallocated_buffer(torch.Size([3, 3]), torch.float32, 1, CPU)
+    b2 = get_preallocated_buffer(torch.Size([3, 3]), torch.float32, 1, CPU)
+    b3 = get_preallocated_buffer(torch.Size([3, 3]), torch.float32, 1, CPU)
 
     bufs = [b0, b1, b2, b3]
     for i, b in enumerate(bufs):

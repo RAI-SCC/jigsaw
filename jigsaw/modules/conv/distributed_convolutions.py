@@ -5,6 +5,8 @@ from typing import Any, Callable, Optional
 import torch
 import torch.distributed as dist
 
+from jigsaw.modules.buffers import get_preallocated_buffer
+
 
 def calc_halo_sizes(
     x_shape: torch.Size,
@@ -102,7 +104,12 @@ def communicate_halos(
     if local_spatial_rank in left_right_local_ranks[0]:
         x_send = x[..., -left_to_right:] if left_to_right > 0 else empty
         x_recv = (
-            torch.zeros((*x.shape[:-1], right_to_left), device=x.device, dtype=x.dtype)
+            get_preallocated_buffer(
+                torch.Size((*x.shape[:-1], right_to_left)),
+                x.dtype,
+                local_spatial_rank,
+                x.device,
+            )
             if right_to_left > 0
             else empty
         )
@@ -113,7 +120,12 @@ def communicate_halos(
     elif local_spatial_rank in left_right_local_ranks[1]:
         x_send = x[..., :right_to_left] if right_to_left > 0 else empty
         x_recv = (
-            torch.zeros((*x.shape[:-1], left_to_right), device=x.device, dtype=x.dtype)
+            get_preallocated_buffer(
+                torch.Size((*x.shape[:-1], left_to_right)),
+                x.dtype,
+                local_spatial_rank,
+                x.device,
+            )
             if left_to_right > 0
             else empty
         )
@@ -141,8 +153,11 @@ def communicate_halos_4space(
         case 0:
             send_1 = x[..., -left_to_right[0] :] if left_to_right[0] > 0 else empty
             recv_1 = (
-                torch.zeros(
-                    (*x.shape[:-1], right_to_left[0]), device=x.device, dtype=x.dtype
+                get_preallocated_buffer(
+                    torch.Size((*x.shape[:-1], right_to_left[0])),
+                    x.dtype,
+                    local_rank,
+                    x.device,
                 )
                 if right_to_left[0] > 0
                 else empty
@@ -168,15 +183,21 @@ def communicate_halos_4space(
             send_0 = x[..., : right_to_left[0]] if right_to_left[0] > 0 else empty
             send_2 = x[..., -left_to_right[1] :] if left_to_right[1] > 0 else empty
             recv_0 = (
-                torch.zeros(
-                    (*x.shape[:-1], left_to_right[0]), device=x.device, dtype=x.dtype
+                get_preallocated_buffer(
+                    torch.Size((*x.shape[:-1], left_to_right[0])),
+                    x.dtype,
+                    local_rank,
+                    x.device,
                 )
                 if left_to_right[0] > 0
                 else empty
             )
             recv_2 = (
-                torch.zeros(
-                    (*x.shape[:-1], right_to_left[2]), device=x.device, dtype=x.dtype
+                get_preallocated_buffer(
+                    torch.Size((*x.shape[:-1], right_to_left[2])),
+                    x.dtype,
+                    local_rank,
+                    x.device,
                 )
                 if left_to_right[2] > 0
                 else empty
@@ -202,15 +223,21 @@ def communicate_halos_4space(
             send_1 = x[..., : right_to_left[1]] if right_to_left[1] > 0 else empty
             send_3 = x[..., -left_to_right[2] :] if left_to_right[2] > 0 else empty
             recv_1 = (
-                torch.zeros(
-                    (*x.shape[:-1], left_to_right[1]), device=x.device, dtype=x.dtype
+                get_preallocated_buffer(
+                    torch.Size((*x.shape[:-1], left_to_right[1])),
+                    x.dtype,
+                    local_rank,
+                    x.device,
                 )
                 if left_to_right[1] > 0
                 else empty
             )
             recv_3 = (
-                torch.zeros(
-                    (*x.shape[:-1], right_to_left[2]), device=x.device, dtype=x.dtype
+                get_preallocated_buffer(
+                    torch.Size((*x.shape[:-1], right_to_left[2])),
+                    x.dtype,
+                    local_rank,
+                    x.device,
                 )
                 if left_to_right[2] > 0
                 else empty
@@ -235,8 +262,11 @@ def communicate_halos_4space(
         case 3:
             send_2 = x[..., -left_to_right[2] :] if right_to_left[2] > 0 else empty
             recv_2 = (
-                torch.zeros(
-                    (*x.shape[:-1], left_to_right[2]), device=x.device, dtype=x.dtype
+                get_preallocated_buffer(
+                    torch.Size((*x.shape[:-1], left_to_right[2])),
+                    x.dtype,
+                    local_rank,
+                    x.device,
                 )
                 if right_to_left[2] > 0
                 else empty
@@ -316,7 +346,9 @@ def distributed_conv2d_over_channels(
     comm_fn: Callable,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Distributed Conv2d over channels."""
-    x_buffer = torch.zeros(x.shape, device=x.device, dtype=x.dtype)
+    x_buffer = get_preallocated_buffer(
+        x.shape, x.dtype, local_channel_rank, x.device
+    )
 
     x_buffer, x_handles = comm_fn(
         data=x, buffer=x_buffer, empty=empty, group=channel_group, async_op=True
