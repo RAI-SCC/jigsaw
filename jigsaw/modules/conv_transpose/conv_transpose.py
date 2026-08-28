@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
+from jigsaw import hooks
 from jigsaw.utils_aggregate import gather_1d_results
 
 from .config import ConvTransposeConfig
@@ -27,6 +28,13 @@ class DistributedConvTranspose2D(torch.nn.Module):
 
     # type hints
     bias: Optional[Parameter]
+    parallelism: int
+    config: ConvTransposeConfig
+    bayesian: bool
+    spatial_group: dist.ProcessGroup
+    channel_group: dist.ProcessGroup
+    empty: torch.Tensor
+    device: torch.device
     kernel_size: tuple[int, int]
     stride: tuple[int, int]
     padding: str | tuple[int, int]
@@ -105,22 +113,25 @@ class DistributedConvTranspose2D(torch.nn.Module):
         else:
             self.padding = _pair(padding)
 
-        assert in_channels % 2 == 0, "number of input channels is not divisible by 2"
-        assert out_channels % 2 == 0, "number of output channels is not divisible by 2"
-
         self.groups = groups
         self.device = device
         self.spatial_group = spatial_group
         self.channel_group = channel_group
         self.parallelism = parallelism
         self.in_channels = in_channels
-        self.out_channels = out_channels // 2
+        # Output channels are sharded across the channel-parallel group.
+        self.out_channels = out_channels // channel_group.size()
         self.bayesian = bayesian
 
         # Initialize
         k = np.sqrt(
             self.groups
-            / (self.out_channels * 2 * self.kernel_size[0] * self.kernel_size[1])
+            / (
+                self.out_channels
+                * channel_group.size()
+                * self.kernel_size[0]
+                * self.kernel_size[1]
+            )
         )
         self.weight = torch.nn.Parameter(
             torch.zeros(
@@ -155,6 +166,13 @@ class DistributedConvTranspose2D(torch.nn.Module):
             else config
         )
 
+        self.weight.register_post_accumulate_grad_hook(
+            hooks.make_grad_sync_hook(self.spatial_group)
+        )
+        if self.bias is not None:
+            self.bias.register_post_accumulate_grad_hook(
+                hooks.make_grad_sync_hook(self.spatial_group)
+            )
         for p in self.parameters():
             dist.broadcast(p.data, group_src=0, group=self.spatial_group)
 
@@ -206,8 +224,8 @@ class DistributedConvTranspose2D(torch.nn.Module):
             Instance of jigsaw distributed ConvTranspose layer.
             Jigsaw layer contains weights and biases given from torch.nn.ConvTranspose2d layer.
         """
-        assert model.in_channels % process_mesh_dict[col_kw].size() == 0, (
-            "in_features is not divisible by process mesh cols"
+        assert model.out_channels % process_mesh_dict[col_kw].size() == 0, (
+            "out_channels is not divisible by process mesh cols"
         )
 
         instance = cls(
@@ -226,12 +244,13 @@ class DistributedConvTranspose2D(torch.nn.Module):
             bayesian=False,  # TODO
             dtype=model.weight.dtype,
         )
-        # Map weights — clone so the original graph is detached
-        in_rank = process_mesh_dict[col_kw].rank()
-        in_shard = model.in_channels // process_mesh_dict[col_kw].size()
+        # Map weights — clone so the original graph is detached. The channel
+        # group shards the weight's *output* channel axis (dim 1).
+        out_rank = process_mesh_dict[col_kw].rank()
+        out_shard = model.weight.shape[1] // process_mesh_dict[col_kw].size()
 
         instance.weight.data = (
-            model.weight.data[:, in_rank * in_shard : (in_rank + 1) * in_shard]
+            model.weight.data[:, out_rank * out_shard : (out_rank + 1) * out_shard]
             .clone()
             .to(device)
         )
@@ -239,9 +258,9 @@ class DistributedConvTranspose2D(torch.nn.Module):
         if isinstance(model.bias, torch.Tensor) and isinstance(
             instance.bias, torch.Tensor
         ):
-            bias_size = model.out_features // process_mesh_dict[col_kw].size()
+            bias_size = model.out_channels // process_mesh_dict[col_kw].size()
             instance.bias.data = model.bias.data[
-                in_rank * bias_size : (in_rank + 1) * bias_size
+                out_rank * bias_size : (out_rank + 1) * bias_size
             ].clone()
         return instance
 
@@ -353,8 +372,8 @@ class DistributedConvTranspose2D(torch.nn.Module):
             *weight_shape_global[2:],
         )
 
-        assert weight_shape_global[0] % to_process_mesh_dict[pm_col_key].size() == 0, (
-            f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh_dict[pm_col_key].size()}"
+        assert weight_shape_global[1] % to_process_mesh_dict[pm_col_key].size() == 0, (
+            f"global weight shape[1] is {weight_shape_global[1]} which is not divisible by {to_process_mesh_dict[pm_col_key].size()}"
         )
 
         # gather

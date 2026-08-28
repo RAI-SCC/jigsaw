@@ -1,4 +1,7 @@
-"""Autograd definition for ConvTranspose."""
+"""Autograd definition for the distributed transpose convolution.
+
+Mirrors :mod:`jigsaw.modules.conv.functional` for ``F.conv_transpose2d``.
+"""
 
 from typing import Any, Optional, Protocol, cast
 
@@ -9,29 +12,27 @@ from .config import ConvTransposeConfig
 
 
 class ConvTransposeCtx(Protocol):
-    """Protocol for types stored within ctx."""
+    """Protocol for the values stashed on ``ctx`` between forward and backward."""
 
-    halo_sizes: int | tuple[int, ...]
-    x_shape_padded: torch.Size
-    x_shape: torch.Size
-    kernel_size: int | tuple[int, ...]
+    local_in_width: int
     stride: int | tuple[int, ...]
     padding: int | tuple[int, ...]
     dilation: int | tuple[int, ...]
     spatial_group: dist.ProcessGroup
     channel_group: dist.ProcessGroup
-    device: torch.device
-    parallelism: int
     in_channels_global: int
-    b: torch.Tensor | None
     bayesian: bool
     config: ConvTransposeConfig
-    empty: torch.Tensor
     saved_tensors: tuple[torch.Tensor, torch.Tensor]
 
 
 class ConvTranspose2d(torch.autograd.Function):
-    """Autograd function for batched matrix-matrix (XWT) multiplication distributed across n processes."""
+    """Autograd function for the distributed 2-D transpose convolution.
+
+    Handles both the no-halo regime (``stride == kernel_size``) and the halo
+    regime (``stride != kernel_size``); the kernels are picked by
+    :class:`~jigsaw.modules.conv_transpose.config.ConvTransposeConfig`.
+    """
 
     @staticmethod
     def forward(
@@ -50,34 +51,34 @@ class ConvTranspose2d(torch.autograd.Function):
         empty: torch.Tensor,
         bayesian: bool,
         config: ConvTransposeConfig,
-    ) -> tuple[Any, Any, torch.Tensor, Any]:
-        """Forward pass for distributed conv transpose 2d."""
-        y, x_aug, x, halo_sizes = config.dist_conv_transpose2d_fn(
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass of the distributed ConvTranspose2d function.
+
+        Returns ``(y, x_aug)`` where ``y`` is this rank's output-channel (and, in
+        the halo regime, output-column) slice and ``x_aug`` is the gathered
+        full-channel input kept for the backward pass.
+        """
+        y, x_aug = config.dist_conv_transpose2d_fn(
             x,
             weight,
             bias,
-            kernel_size,
-            stride,
-            padding,
-            dilation,
-            in_channels,
-            spatial_group,
-            channel_group,
-            empty,
-            config,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            spatial_group=spatial_group,
+            channel_group=channel_group,
+            config=config,
         )
 
-        # Return output and any intermediate values needed for backward
-        return y, x_aug, x, halo_sizes
+        return y, x_aug
 
     @staticmethod
     def setup_context(
         ctx: torch.autograd.function.FunctionCtx,
         inputs: Any,
-        output: tuple[Any, Any, torch.Tensor, Any],
+        output: tuple[torch.Tensor, torch.Tensor],
     ) -> None:
-        """Set up context."""
-        # Unpack inputs
+        """Stash tensors and metadata needed for the backward pass."""
         (
             x,
             weight,
@@ -96,36 +97,30 @@ class ConvTranspose2d(torch.autograd.Function):
             config,
         ) = inputs
 
-        _, x_aug, x_orig, halo_sizes = output
+        _, x_aug = output
+
+        # x_aug carries no gradient of its own; g_x flows through input 0.
         ctx.mark_non_differentiable(x_aug)
-        ctx.mark_non_differentiable(x_orig)
-        ctx.mark_non_differentiable(halo_sizes)
+
         ctx.save_for_backward(x_aug, weight)
-
         c = cast(ConvTransposeCtx, ctx)
-
-        c.halo_sizes = halo_sizes
-        c.x_shape_padded = x_aug.shape
-        c.x_shape = x_orig.shape
-
-        c.stride, c.padding, c.dilation = (stride, padding, dilation)
         c.spatial_group = spatial_group
         c.channel_group = channel_group
-        c.device = device
-        c.parallelism = parallelism
         c.in_channels_global = in_channels
-        c.b = bias
-        c.empty = empty  # pre-initialized empty tensor
+        # width of this rank's owned input slice (pre channel-gather); the halo
+        # backward needs it to size the raw-output span it folds grads back onto.
+        c.local_in_width = x.shape[-1]
+        c.stride = stride
+        c.padding = padding
+        c.dilation = dilation
         c.bayesian = bayesian
         c.config = config
 
     @staticmethod
     def backward(
-        ctx: ConvTransposeCtx,
+        ctx: torch.autograd.function.FunctionCtx,
         grad_output: torch.Tensor,
-        grad_x_aug: torch.Tensor,
-        grad_x_orig: torch.Tensor,
-        halo_sizes: torch.Tensor,
+        grad_x_aug: None,  # No gradient for x_aug
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -142,67 +137,41 @@ class ConvTranspose2d(torch.autograd.Function):
         None,
         None,
         None,
-        None,
     ]:
+        """Backward pass of the distributed ConvTranspose2d.
+
+        ``g_b`` is the local ``grad_output`` sum (spatial ranks are reduced by
+        the parameter hook). ``g_x`` / ``g_w`` are delegated to the regime-
+        specific kernel picked in :class:`ConvTransposeConfig`: each rank holds
+        the full-channel grad wrt input for its own output-channel slice, which
+        is reduced across the channel group; the halo regime additionally folds
+        the grad back onto the owning spatial ranks.
         """
-        Backward pass of linear layer (XWT) distributed across two processes.
+        c = cast(ConvTransposeCtx, ctx)
+        x_aug, weight = c.saved_tensors
+        config = c.config
 
-        Parameters
-        ----------
-        ctx : torch.autograd.Function.ctx
-            Context object to save information for backward computation.
-        grad_output : tensor
-            The gradient of the loss with respect to the output of the layer.
-        grad_x_aug: None
-            Empty tensor for torch compatability reasons.
-        grad_x_orig: None
-            Empty tensor for torch compatability reasons.
-        halo_sizes: None
-            Empty tensor for torch compatability reasons.
-
-        Returns
-        -------
-        grad_input: torch.Tensor
-            Gradient with respect to the input.
-        grad_weight: torch.Tensor
-            Gradient with respect to the weights.
-        grad_bias: torch.Tensor
-            Gradient with respect to the bias.
-        """
-        ctx = cast(ConvTransposeCtx, ctx)
-        x_aug, weight = ctx.saved_tensors
-        empty = ctx.empty
-
-        stride, padding, dilation = (ctx.stride, ctx.padding, ctx.dilation)
-        spatial_group, channel_group = (
-            ctx.spatial_group,
-            ctx.channel_group,
-        )
-        config = ctx.config
-        in_channels_global = ctx.in_channels_global
+        g_b = config.grad_bias(grad_output, c.spatial_group)
 
         g_x, g_w = config.dist_conv_transpose2d_backward_fn(
-            grad_output.to(weight.dtype),
+            grad_output,
             x_aug,
             weight,
-            halo_sizes,
-            in_channels_global,
-            stride,
-            padding,
-            dilation,
-            empty,
-            spatial_group,
-            channel_group,
+            c.stride,
+            c.padding,
+            c.dilation,
+            c.in_channels_global,
+            c.local_in_width,
+            c.spatial_group,
+            c.channel_group,
+            c.bayesian,
             config,
         )
-
-        g_b = config.grad_bias(grad_output, spatial_group)
 
         return (
             g_x,
             g_w,
             g_b,
-            None,
             None,
             None,
             None,
@@ -224,10 +193,10 @@ class ConvTranspose2d(torch.autograd.Function):
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: torch.Tensor,
-        kernel_size: tuple[int | int],
-        stride: tuple[int | int],
-        padding: tuple[int | int],
-        dilation: tuple[int | int],
+        kernel_size: int,
+        stride: int,
+        padding: int,
+        dilation: int,
         in_channels: int,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
@@ -237,7 +206,7 @@ class ConvTranspose2d(torch.autograd.Function):
         bayesian: bool,
         config: ConvTransposeConfig,
     ) -> tuple[torch.Tensor, Optional[int]]:
-        """Handle vmap for ConvTranspose2d function."""
+        """Handle vmap for the distributed ConvTranspose2d."""
         out = ConvTranspose2d.apply(
             x,
             weight,
