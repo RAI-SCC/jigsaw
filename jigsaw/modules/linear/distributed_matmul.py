@@ -30,17 +30,8 @@ def _get_preallocated_buffer(
     forward/backward passes do not keep re-allocating the peer-to-peer
     communication buffers. The buffer is keyed on the *call site* (the source
     file and line of the immediate caller) together with
-    ``device``/``dtype``/``local_rank``/``index`` -- deliberately **not** on
-    ``shape``.
-
-    Keying on ``shape``/``dtype``/``local_rank`` (the previous scheme) is
-    unsafe: nearly every call site asks for several buffers with an identical
-    shape, dtype and rank that must stay live at the same time (e.g. concurrent
-    ``irecv`` targets). A key built only from those attributes hands the same
-    storage out twice and the peers clobber each other's data. A call site, by
-    contrast, corresponds to exactly one logical buffer, and ``index``
-    disambiguates the cases where one source line produces several buffers.
-
+    ``device``/``dtype``/``local_rank``/``index``.
+    
     Parameters
     ----------
     shape : torch.Size
