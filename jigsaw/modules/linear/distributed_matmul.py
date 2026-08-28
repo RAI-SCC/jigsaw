@@ -1,5 +1,6 @@
 """Distributed matrix multiplication implementation."""
 
+import sys
 from typing import Any, cast
 
 import torch
@@ -8,7 +9,11 @@ import torch.distributed as dist
 streams = None
 streamz = None
 
-_prealloc_buffers: dict[tuple[torch.dtype, int, int], tuple[None, int]] = {}
+# Reusable communication buffers, keyed by *logical* buffer slot (see
+# ``_get_preallocated_buffer``). Each value is a flat 1-D allocation that is
+# grown on demand; callers get an appropriately shaped view onto it.
+_BufferKey = tuple[str, int, str, torch.dtype, int, int]
+_prealloc_buffers: dict[_BufferKey, torch.Tensor] = {}
 
 
 def _get_preallocated_buffer(
@@ -19,52 +24,67 @@ def _get_preallocated_buffer(
     index: int = 0,
 ) -> torch.Tensor:
     """
-    Retrieve or create a preallocated buffer.
+    Retrieve (or lazily allocate) a reusable buffer for the calling site.
 
-    Parameters.
+    A single flat allocation is cached and reused across calls so that repeated
+    forward/backward passes do not keep re-allocating the peer-to-peer
+    communication buffers. The buffer is keyed on the *call site* (the source
+    file and line of the immediate caller) together with
+    ``device``/``dtype``/``local_rank``/``index`` -- deliberately **not** on
+    ``shape``.
+
+    Keying on ``shape``/``dtype``/``local_rank`` (the previous scheme) is
+    unsafe: nearly every call site asks for several buffers with an identical
+    shape, dtype and rank that must stay live at the same time (e.g. concurrent
+    ``irecv`` targets). A key built only from those attributes hands the same
+    storage out twice and the peers clobber each other's data. A call site, by
+    contrast, corresponds to exactly one logical buffer, and ``index``
+    disambiguates the cases where one source line produces several buffers.
+
+    Parameters
     ----------
-    shape : tuple
-        The shape of the buffer to be created or retrieved.
+    shape : torch.Size
+        Shape of the view to return. The backing allocation is grown when the
+        requested element count exceeds what is currently cached; a smaller
+        request reuses the existing allocation and returns a trimmed view.
     dtype : torch.dtype
-        The data type of the buffer.
-    device : torch.device
-        Device to perform computation on.
+        Data type of the buffer.
     local_rank : int
-        Local rank.
+        Local rank; keeps buffers belonging to different ranks that share a
+        process from aliasing.
+    device : torch.device
+        Device the buffer lives on.
     index : int, optional
-        An additional index to differentiate buffers (default is 0).
+        Extra discriminator for multiple buffers requested from a single call
+        site (default is 0).
 
     Returns
     -------
     torch.Tensor
-        Preallocated buffer.
+        A zeroed view onto the cached buffer with the requested ``shape``.
     """
-    # TODO: re-introduce buffers
-    # global streams, streamz
-    # streams = [torch.cuda.Stream() for _ in range(2)]
-    # streamz = [torch.cuda.Stream() for _ in range(4)]
-    key = (dtype, local_rank, index)
-    if key not in _prealloc_buffers:
-        _prealloc_buffers[key] = (None, 0)
-
-    buf, buf_numel = _prealloc_buffers[key]
+    caller = sys._getframe(1)
+    key: _BufferKey = (
+        caller.f_code.co_filename,
+        caller.f_lineno,
+        str(device),
+        dtype,
+        local_rank,
+        index,
+    )
 
     needed = 1
-
     for dim in shape:
         needed *= dim
 
-    # Reallocate if buffer is None or too small
-    # if buf is None or needed > buf_numel:
-    buf = torch.zeros(needed, dtype=dtype, device=device)
-    # buf_numel = needed
-    # _prealloc_buffers[key] = (buf, buf_numel)
-    return buf.view(*shape)
-    # else:
-    #     out, _ = _prealloc_buffers[key]
-    #     out = out[:needed].view(*shape)
+    buf = _prealloc_buffers.get(key)
+    if buf is None or buf.numel() < needed:
+        buf = torch.empty(needed, dtype=dtype, device=device)
+        _prealloc_buffers[key] = buf
 
-    #     return out
+    out = buf[:needed]
+    out.zero_()
+    return out.view(*shape)
 
 
 def fused_xw_xtw_oneway(
