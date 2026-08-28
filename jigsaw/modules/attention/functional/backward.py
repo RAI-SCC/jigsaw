@@ -120,18 +120,12 @@ def ring_backward(
 def _use_global_dkv_buffer(ring_config: RingAttentionConfig) -> bool:
     """Whether dK/dV accumulate into a global-sized buffer + a final all-reduce.
 
-    True for GATHER_DKV always, and for HYBRID_BROADCAST + LOCAL regardless of
-    ``send_backward``: its intra-node broadcast makes every node rank produce a
-    partial for the *same* chunk, so a positional scatter + final all-reduce is
-    the natural fold and there is no meaningful P2P relay. (Mirrors how
-    BROADCAST + LOCAL ignores ``send_backward``.)
+    True for GATHER_DKV always. HYBRID_BROADCAST + LOCAL folds into a
+    local-sized buffer instead (see :func:`_accumulate_dkv_hybrid_broadcast`):
+    an intra-node all-reduce collapses the per-node partials, then the node-sum
+    is relayed to its owning node over the inter-node ring.
     """
-    if ring_config.send_backward == SendBackward.GATHER_DKV:
-        return True
-    return (
-        ring_config.send_op == SendOp.HYBRID_BROADCAST
-        and ring_config.save_scope == SaveScope.LOCAL
-    )
+    return ring_config.send_backward == SendBackward.GATHER_DKV
 
 
 def get_dkv_buffer(
@@ -170,6 +164,13 @@ def accumulate_dkv(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fold this step's locally computed dk_j, dv_j into the running dK, dV."""
     if not _use_global_dkv_buffer(ring_config):
+        if (
+            ring_config.send_op == SendOp.HYBRID_BROADCAST
+            and ring_config.save_scope == SaveScope.LOCAL
+        ):
+            return _accumulate_dkv_hybrid_broadcast(
+                ring_config, dk_buf, dv_buf, dk_j, dv_j, step, group, empty
+            )
         return _accumulate_dkv_send(
             ring_config, dk_buf, dv_buf, dk_j, dv_j, step, group, empty
         )
@@ -333,6 +334,61 @@ def _accumulate_dkv_send(
     dkj_r, dvj_r = torch.chunk(recv_buf, 2, dim=0)
     dk_buf += dkj_r
     dv_buf += dvj_r
+    return dk_buf, dv_buf
+
+
+def _accumulate_dkv_hybrid_broadcast(
+    ring_config: RingAttentionConfig,
+    dk_buf: torch.Tensor,
+    dv_buf: torch.Tensor,
+    dk_j: torch.Tensor,
+    dv_j: torch.Tensor,
+    step: int,
+    group: dist.ProcessGroup,
+    empty: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fold a HYBRID_BROADCAST + LOCAL step's dK/dV into local-sized buffers.
+
+    The intra-node broadcast makes every rank on a node compute a partial for
+    the *same* chunk ``(node_idx - node_step, phase)``, so the ``gpus_per_node``
+    partials are first summed with an intra-node all-reduce. When that chunk
+    lives on another node (``node_step != 0``) the node-sum is relayed to it
+    over the inter-node ring, and the mirror node hands back the partial for our
+    own chunk. Only the chunk owner -- node-local rank ``phase`` -- keeps a
+    partial.
+    """
+    topo = get_hybrid_topology(group, ring_config.gpus_per_node)
+    node_step, phase = divmod(step, topo.gpus_per_node)
+    is_owner = topo.local_idx == phase
+
+    dkv = torch.cat([dk_j, dv_j], dim=0).contiguous()
+    dist.all_reduce(dkv, op=dist.ReduceOp.SUM, group=topo.intranode_group)
+
+    if node_step != 0:
+        # Inter-node ring hop as a whole-group permutation: every rank hands its
+        # node-sum to its counterpart at node ``node_idx - node_step`` and
+        # receives from ``node_idx + node_step``. Only node-local rank ``phase``
+        # ends up with the partial for a chunk it owns; the rest take part to
+        # keep the collective whole and discard what they receive.
+        recv = torch.empty_like(dkv)
+        recv, _ = ring_config.p2p_fn(
+            dkv,
+            recv,
+            send_recv_ranks=(
+                topo.inter_peer(-node_step),
+                topo.inter_peer(node_step),
+            ),
+            group=group,
+            async_op=False,
+            empty=empty,
+            step=step,
+        )
+        dkv = recv
+
+    if is_owner:
+        dkj_r, dvj_r = torch.chunk(dkv, 2, dim=0)
+        dk_buf += dkj_r
+        dv_buf += dvj_r
     return dk_buf, dv_buf
 
 
