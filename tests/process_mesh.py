@@ -39,8 +39,8 @@ def make_process_mesh(
         )
 
     mesh = {
-        f"{mesh_dim_names[0]}": row_col_mesh.get_group(mesh_dim_names[0]),
-        f"{mesh_dim_names[1]}": row_col_mesh.get_group(mesh_dim_names[1]),
+        f"{mesh_dim_names[-2]}": row_col_mesh.get_group(mesh_dim_names[-2]),
+        f"{mesh_dim_names[-1]}": row_col_mesh.get_group(mesh_dim_names[-1]),
         f"{model_name}": model_mesh.get_group(model_name),
     }
 
