@@ -4,10 +4,11 @@ from typing import Any, Callable
 
 import torch
 
-from jigsaw.modules import attention, conv, conv_transpose, linear, roll
+from jigsaw.modules import attention, conv, conv1d, conv_transpose, linear, roll
 
 mapped_modules: dict[type[torch.nn.Module], Any] = {
     torch.nn.Linear: linear.DistributedXWT,
+    torch.nn.Conv1d: conv1d.DistributedConv1D,
     torch.nn.Conv2d: conv.DistributedConv2D,
     torch.nn.ConvTranspose2d: conv_transpose.DistributedConvTranspose2D,
     roll.Roll: roll.DistributedRoll,
