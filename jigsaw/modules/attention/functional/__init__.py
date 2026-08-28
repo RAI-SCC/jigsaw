@@ -5,14 +5,12 @@ from .forward import build_ring_forward
 from .functional import (
     HybridTopology,
     RingAttentionFunction,
-    build_intxxnode_groups,
     get_hybrid_topology,
 )
 
 __all__ = [
     "HybridTopology",
     "RingAttentionFunction",
-    "build_intxxnode_groups",
     "build_ring_forward",
     "get_hybrid_topology",
     "ring_backward",

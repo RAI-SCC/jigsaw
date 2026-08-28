@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from itertools import product
 from typing import Any, Protocol, cast
 
 import torch
 import torch.distributed as dist
-from torch.distributed.device_mesh import DeviceMesh
 
 from ..config import RingAttentionConfig
 
@@ -42,81 +40,6 @@ def _compute_kv(
         (xj @ w_qkv[d * h :, :].mT).reshape(b, n_local, 2, h, d).permute(2, 0, 3, 1, 4)
     ).contiguous()
     return kv, kv[0], kv[1]
-
-
-def build_intxxnode_groups(
-    process_mesh: DeviceMesh, gpus_per_node: int = 4, row_kw: str = "row"
-) -> tuple[list[dist.ProcessGroup], list[dist.ProcessGroup]]:
-    """Build inter-node and intra-node groups along the row dimension.
-
-    The row dimension is partitioned into contiguous node-sized chunks. Each
-    chunk becomes an intra-node group, and ranks at the same offset in each
-    chunk become an inter-node group. This is repeated independently for every
-    combination of coordinates in the other mesh dimensions.
-
-    Parameters
-    ----------
-    process_mesh : dist.ProcessMesh
-        Mesh containing a dimension named ``row_kw``.
-    gpus_per_node : int, default=4
-        Maximum number of row ranks assigned to one node.
-    row_kw : str, default="row"
-        Name of the mesh dimension treated as the row dimension.
-
-    Returns
-    -------
-    tuple[list[dist.ProcessGroup], list[dist.ProcessGroup]]
-        The inter-node and intra-node groups containing the current rank.
-
-    Raises
-    ------
-    ValueError
-        If ``gpus_per_node`` is not positive or the mesh has no row
-        dimension.
-    """
-    if gpus_per_node <= 0:
-        raise ValueError("gpus_per_node must be positive")
-    if process_mesh.mesh_dim_names is None or row_kw not in process_mesh.mesh_dim_names:
-        raise ValueError(f'process_mesh must contain a "{row_kw}" dimension')
-
-    row_axis = process_mesh.mesh_dim_names.index(row_kw)
-    mesh = process_mesh.mesh
-    other_shape = tuple(
-        size for axis, size in enumerate(mesh.shape) if axis != row_axis
-    )
-    row_size = mesh.shape[row_axis]
-    current_rank = dist.get_rank()
-    internode_groups: list[dist.ProcessGroup] = []
-    intranode_groups: list[dist.ProcessGroup] = []
-
-    for coordinates in product(*(range(size) for size in other_shape)):
-        coordinate_iter = iter(coordinates)
-        mesh_index = tuple(
-            slice(None) if axis == row_axis else next(coordinate_iter)
-            for axis in range(mesh.ndim)
-        )
-        row_ranks = mesh[mesh_index].tolist()
-        node_chunks = [
-            row_ranks[start : start + gpus_per_node]
-            for start in range(0, row_size, gpus_per_node)
-        ]
-
-        for ranks in node_chunks:
-            group = dist.new_group(ranks=ranks)
-            if current_rank in ranks:
-                intranode_groups.append(group)
-
-        for local_offset in range(min(gpus_per_node, row_size)):
-            ranks = [
-                chunk[local_offset]
-                for chunk in node_chunks
-                if local_offset < len(chunk)
-            ]
-            group = dist.new_group(ranks=ranks)
-            if current_rank in ranks:
-                internode_groups.append(group)
-
-    return internode_groups, intranode_groups
 
 
 # --------------------------------------------------------------------------- #
@@ -165,55 +88,69 @@ class HybridTopology:
         return self.rank_at(self.node_idx + offset, self.local_idx)
 
 
-_HYBRID_TOPOLOGY_CACHE: dict[tuple[int, int], HybridTopology] = {}
+_HYBRID_TOPOLOGY_CACHE: dict[tuple[dist.ProcessGroup, int], HybridTopology] = {}
 
 
 def get_hybrid_topology(group: dist.ProcessGroup, gpus_per_node: int) -> HybridTopology:
     """Build (and cache) the :class:`HybridTopology` for ``group``.
 
-    ``dist.new_group`` is collective over the *world*: every rank must build
-    every sub-group in the same order, so this assumes ``group`` spans the
-    whole world (the hybrid P2P paths already assume this when they address
-    peers by ring position). The result is cached per ``(group, gpus_per_node)``.
+    Sub-group creation is a world-wide collective:
+    :func:`torch.distributed.new_subgroups_by_enumeration` issues one
+    ``new_group`` per sub-group and every rank must enter every call in the same
+    order. ``group`` must therefore span the whole world, which is also what the
+    hybrid P2P paths assume when they address peers by ring position (ring
+    position ``==`` global rank). The result is cached per
+    ``(group, gpus_per_node)``; the group is used as the key directly so a freed
+    process group can never alias a live one (as ``id(group)`` could).
 
     Parameters
     ----------
     group : dist.ProcessGroup
-        The ring's process group.
+        The ring's process group; must contain every rank in the default group.
     gpus_per_node : int
         Number of consecutive ring ranks that share a node.
 
     Returns
     -------
     HybridTopology
+
+    Raises
+    ------
+    ValueError
+        If ``gpus_per_node`` is not positive, ``group`` does not span the whole
+        world, or the world size is not divisible by ``gpus_per_node``.
     """
-    key = (id(group), gpus_per_node)
+    key = (group, gpus_per_node)
     cached = _HYBRID_TOPOLOGY_CACHE.get(key)
     if cached is not None:
         return cached
 
     if gpus_per_node <= 0:
         raise ValueError("gpus_per_node must be positive")
-    world_ranks = list(dist.get_process_group_ranks(group))
-    world_size = len(world_ranks)
+    world_size = dist.get_world_size(group)
+    if world_size != dist.get_world_size():
+        raise ValueError("get_hybrid_topology requires a group spanning the whole world")
     if world_size % gpus_per_node:
         raise ValueError("ring size must be divisible by gpus_per_node")
     n_nodes = world_size // gpus_per_node
 
+    # Ring position p lives at (p // gpus_per_node, p % gpus_per_node); with the
+    # whole-world assumption ring position == global rank, so the two partitions
+    # below are expressed directly in global ranks.
     grid = tuple(
         tuple(node * gpus_per_node + local for local in range(gpus_per_node))
         for node in range(n_nodes)
     )
-    intra_subs = [
-        dist.new_group(ranks=[world_ranks[pos] for pos in grid[node]])
-        for node in range(n_nodes)
-    ]
-    inter_subs = [
-        dist.new_group(
-            ranks=[world_ranks[grid[node][local]] for node in range(n_nodes)]
-        )
-        for local in range(gpus_per_node)
-    ]
+    # Contiguous chunk -> intra-node ring; same local offset across nodes ->
+    # inter-node ring. Each is a full partition of the world, so
+    # `new_subgroups_by_enumeration` builds every sub-group in one fixed order
+    # and hands back the one holding this rank.
+    intranode_group, _ = dist.new_subgroups_by_enumeration(
+        [list(row) for row in grid]
+    )
+    internode_group, _ = dist.new_subgroups_by_enumeration(
+        [[grid[node][local] for node in range(n_nodes)] for local in range(gpus_per_node)]
+    )
 
     node_idx, local_idx = divmod(dist.get_rank(group), gpus_per_node)
     topo = HybridTopology(
@@ -221,8 +158,8 @@ def get_hybrid_topology(group: dist.ProcessGroup, gpus_per_node: int) -> HybridT
         gpus_per_node=gpus_per_node,
         node_idx=node_idx,
         local_idx=local_idx,
-        intranode_group=intra_subs[node_idx],
-        internode_group=inter_subs[local_idx],
+        intranode_group=intranode_group,
+        internode_group=internode_group,
         _grid=grid,
     )
     _HYBRID_TOPOLOGY_CACHE[key] = topo
