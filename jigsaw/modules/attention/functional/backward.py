@@ -13,6 +13,11 @@ from jigsaw.modules.attention.config import (
 from .backward_chunk_provider import _build_backward_chunk_provider
 from .functional import HybridTopology, get_hybrid_topology
 
+# Hybrid send-ops whose backward chunk provider rotates chunks intra-node as well
+# as inter-node, so a step's dK/dV belongs to local index ``local_idx + step``
+# rather than ``step`` (HYBRID_BROADCAST leaves the chunk put intra-node).
+_INTRA_ROTATING_HYBRIDS = frozenset({SendOp.HYBRID_P2P, SendOp.HYBRID_ALLTOALL})
+
 # --------------------------------------------------------------------------- #
 # backward: main loop
 # --------------------------------------------------------------------------- #
@@ -195,8 +200,7 @@ def accumulate_dkv(
                 node_step = step // topo.gpus_per_node
                 local = (
                     topo.local_idx + step
-                    if ring_config.send_op
-                    in (SendOp.HYBRID_P2P, SendOp.HYBRID_ALLTOALL)
+                    if ring_config.send_op in _INTRA_ROTATING_HYBRIDS
                     else step
                 )
                 global_chunk_idx = topo.rank_at(topo.node_idx - node_step, local)
@@ -311,7 +315,7 @@ def _accumulate_dkv_send(
     recv_buf = torch.empty_like(dkv)
 
     # hybrid
-    if ring_config.send_op in (SendOp.HYBRID_P2P, SendOp.HYBRID_ALLTOALL):
+    if ring_config.send_op in _INTRA_ROTATING_HYBRIDS:
         topo = get_hybrid_topology(group, ring_config.gpus_per_node)
         send_recv_ranks = _hybrid_dkv_relay_peers(topo, step)
         recv_buf, _ = ring_config.p2p_fn(
