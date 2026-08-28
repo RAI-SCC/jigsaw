@@ -185,20 +185,24 @@ def accumulate_dkv(
         # `_GlobalChunkProvider` looks them up directly, so ring step
         # `step` == global chunk index for every send_op.
         global_chunk_idx = step
-    elif ring_config.send_op == SendOp.HYBRID_P2P:
-        # LOCAL hybrid: chunks re-circulate through the node/local ring.
-        topo = get_hybrid_topology(group, ring_config.gpus_per_node)
-        return _accumulate_dkv_hybrid(dk_buf, dv_buf, dk_j, dv_j, step, seq_local, topo)
-    elif ring_config.send_op == SendOp.HYBRID_BROADCAST:
-        # LOCAL hybrid broadcast: every node rank saw the same chunk this step.
-        topo = get_hybrid_topology(group, ring_config.gpus_per_node)
-        return _accumulate_dkv_hybrid_broadcast(
-            dk_buf, dv_buf, dk_j, dv_j, step, seq_local, topo
-        )
-    elif ring_config.send_op == SendOp.BROADCAST:
-        global_chunk_idx = (local_rank - step) % ring_group_size
     else:
-        global_chunk_idx = (local_rank + step) % ring_group_size
+        match ring_config.send_op:
+            case SendOp.HYBRID_P2P:
+                # LOCAL hybrid: chunks re-circulate through the node/local ring.
+                topo = get_hybrid_topology(group, ring_config.gpus_per_node)
+                return _accumulate_dkv_hybrid(
+                    dk_buf, dv_buf, dk_j, dv_j, step, seq_local, topo
+                )
+            case SendOp.HYBRID_BROADCAST:
+                # LOCAL hybrid broadcast: every node rank saw the same chunk this step.
+                topo = get_hybrid_topology(group, ring_config.gpus_per_node)
+                return _accumulate_dkv_hybrid_broadcast(
+                    dk_buf, dv_buf, dk_j, dv_j, step, seq_local, topo
+                )
+            case SendOp.BROADCAST:
+                global_chunk_idx = (local_rank - step) % ring_group_size
+            case _:
+                global_chunk_idx = (local_rank + step) % ring_group_size
     return _accumulate_dkv_gather(
         dk_buf,
         dv_buf,
