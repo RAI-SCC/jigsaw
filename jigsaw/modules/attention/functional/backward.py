@@ -32,7 +32,7 @@ def ring_backward(
     scale: float,
     group: dist.ProcessGroup,
     local_rank: int,
-    world_size: int,
+    ring_group_size: int,
     chunks_to_save: tuple[torch.Tensor, ...],
     ring_config: RingAttentionConfig,
     empty: torch.Tensor,
@@ -40,7 +40,7 @@ def ring_backward(
     """Backward pass for ring attention."""
     b, h, seq_local, d = q.shape
     dq = torch.zeros_like(q, dtype=torch.float32)
-    dk_buf, dv_buf = get_dkv_buffer(ring_config, q, world_size)
+    dk_buf, dv_buf = get_dkv_buffer(ring_config, q, ring_group_size)
 
     # Cases where every rank processes the *same* global chunk `step` at ring
     # step `step`: the partial dK/dV for chunk `step` just needs a SUM
@@ -75,7 +75,7 @@ def ring_backward(
         local_rank,
     )
 
-    for step in range(world_size):
+    for step in range(ring_group_size):
         kj, vj, kv = chunk_provider.get(step)
         dq_j, dk_j, dv_j = ring_config.attn_core_backward_fn(
             dout, q, kj, vj, out, lse, scale, seq_local, seq_local
@@ -97,7 +97,7 @@ def ring_backward(
                 dk_j,
                 dv_j,
                 step,
-                world_size,
+                ring_group_size,
                 seq_local,
                 local_rank,
                 group,
@@ -107,7 +107,7 @@ def ring_backward(
         if isinstance(chunk_provider, _LocalChunkProvider) or isinstance(
             chunk_provider, _LocalChunkProviderHybridBroadcast
         ):
-            chunk_provider.maybe_forward(step, world_size)
+            chunk_provider.maybe_forward(step, ring_group_size)
 
     if all_reduce_dkv:
         # `dk_buf`/`dv_buf` already hold this rank's final local gradient.
@@ -141,7 +141,7 @@ def _use_global_dkv_buffer(ring_config: RingAttentionConfig) -> bool:
 
 
 def get_dkv_buffer(
-    ring_config: RingAttentionConfig, q: torch.Tensor, world_size: int
+    ring_config: RingAttentionConfig, q: torch.Tensor, ring_group_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Allocate the dK, dV buffers appropriate for the accumulation strategy.
 
@@ -152,7 +152,7 @@ def get_dkv_buffer(
         with partial sums P2P-relayed around the ring each step.
     """
     if _use_global_dkv_buffer(ring_config):
-        shape = [*q.shape[0:2], world_size * q.shape[2], *q.shape[3:]]
+        shape = [*q.shape[0:2], ring_group_size * q.shape[2], *q.shape[3:]]
     else:
         shape = list(q.shape)
     return (
@@ -168,7 +168,7 @@ def accumulate_dkv(
     dk_j: torch.Tensor,
     dv_j: torch.Tensor,
     step: int,
-    world_size: int,
+    ring_group_size: int,
     seq_local: int,
     local_rank: int,
     group: dist.ProcessGroup,
@@ -196,9 +196,9 @@ def accumulate_dkv(
             dk_buf, dv_buf, dk_j, dv_j, step, seq_local, topo
         )
     elif ring_config.send_op == SendOp.BROADCAST:
-        global_chunk_idx = (local_rank - step) % world_size
+        global_chunk_idx = (local_rank - step) % ring_group_size
     else:
-        global_chunk_idx = (local_rank + step) % world_size
+        global_chunk_idx = (local_rank + step) % ring_group_size
     return _accumulate_dkv_gather(
         dk_buf,
         dv_buf,
@@ -207,7 +207,7 @@ def accumulate_dkv(
         step,
         seq_local,
         local_rank,
-        world_size,
+        ring_group_size,
         global_chunk_idx,
     )
 
@@ -220,7 +220,7 @@ def _accumulate_dkv_gather(
     step: int,
     seq_local: int,
     local_rank: int,
-    world_size: int,
+    ring_group_size: int,
     global_chunk_idx: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -244,8 +244,8 @@ def _accumulate_dkv_gather(
         Local sequence length.
     local_rank: int
         Local rank within ring attention.
-    world_size: int
-        World size of ring attention.
+    ring_group_size: int
+        Number of ranks in the ring group.
     global_chunk_idx: int
         Index of the sequence chunk represented by the local gradients.
 

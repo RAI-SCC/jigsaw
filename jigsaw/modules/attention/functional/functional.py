@@ -49,13 +49,14 @@ def _compute_kv(
 class HybridTopology:
     """Node/rank layout of a 1-D ring split into equal-sized nodes.
 
-    The ring's ``world_size`` ranks are cut into ``n_nodes`` contiguous nodes of
-    ``gpus_per_node`` ranks each. Ring position ``p`` (``0 <= p < world_size``)
-    owns global sequence chunk ``p`` and lives at ``(p // gpus_per_node,
-    p % gpus_per_node)``. Every peer lookup a hybrid ring needs -- the next rank
-    along the intra-node ring, the next along the inter-node ring, or the rank
-    at an arbitrary ``(node, local)`` -- is a table lookup here, so callers
-    never open-code ``// gpus_per_node`` / ``% gpus_per_node`` arithmetic.
+    The ring's ranks (``group.size()`` of them) are cut into ``n_nodes``
+    contiguous nodes of ``gpus_per_node`` ranks each. Ring position ``p``
+    (``0 <= p < group.size()``) owns global sequence chunk ``p`` and lives at
+    ``(p // gpus_per_node, p % gpus_per_node)``. Every peer lookup a hybrid ring
+    needs -- the next rank along the intra-node ring, the next along the
+    inter-node ring, or the rank at an arbitrary ``(node, local)`` -- is a table
+    lookup here, so callers never open-code ``// gpus_per_node`` /
+    ``% gpus_per_node`` arithmetic.
 
     ``intranode_group`` / ``internode_group`` are the sub-groups containing this
     rank, provided for collectives (e.g. broadcasts); the P2P ring paths address
@@ -94,19 +95,24 @@ _HYBRID_TOPOLOGY_CACHE: dict[tuple[dist.ProcessGroup, int], HybridTopology] = {}
 def get_hybrid_topology(group: dist.ProcessGroup, gpus_per_node: int) -> HybridTopology:
     """Build (and cache) the :class:`HybridTopology` for ``group``.
 
-    Sub-group creation is a world-wide collective:
-    :func:`torch.distributed.new_subgroups_by_enumeration` issues one
-    ``new_group`` per sub-group and every rank must enter every call in the same
-    order. ``group`` must therefore span the whole world, which is also what the
-    hybrid P2P paths assume when they address peers by ring position (ring
-    position ``==`` global rank). The result is cached per
-    ``(group, gpus_per_node)``; the group is used as the key directly so a freed
+    ``group`` is the ring itself -- typically one dimension of a larger device
+    mesh (e.g. the ``row`` group of a ``(dp, row, col)`` mesh), so the ring's
+    world size is ``group.size()``, *not* the global world size. Ring position
+    ``p`` (``0 <= p < group.size()``) is the rank ``p`` of ``group``; it maps to
+    global rank ``dist.get_process_group_ranks(group)[p]``.
+
+    The intra-/inter-node sub-groups are created with
+    ``use_local_synchronization=True`` so that the rings living at the other mesh
+    coordinates can build their own sub-groups concurrently -- only the members
+    of each sub-group synchronise, so ranks outside this ring never have to enter
+    (or even know about) these ``new_group`` calls. The result is cached per
+    ``(group, gpus_per_node)``; the group object is the key directly so a freed
     process group can never alias a live one (as ``id(group)`` could).
 
     Parameters
     ----------
     group : dist.ProcessGroup
-        The ring's process group; must contain every rank in the default group.
+        The ring's process group (one mesh dimension, or the whole world).
     gpus_per_node : int
         Number of consecutive ring ranks that share a node.
 
@@ -117,8 +123,8 @@ def get_hybrid_topology(group: dist.ProcessGroup, gpus_per_node: int) -> HybridT
     Raises
     ------
     ValueError
-        If ``gpus_per_node`` is not positive, ``group`` does not span the whole
-        world, or the world size is not divisible by ``gpus_per_node``.
+        If ``gpus_per_node`` is not positive or the ring size
+        (``group.size()``) is not divisible by ``gpus_per_node``.
     """
     key = (group, gpus_per_node)
     cached = _HYBRID_TOPOLOGY_CACHE.get(key)
@@ -127,32 +133,35 @@ def get_hybrid_topology(group: dist.ProcessGroup, gpus_per_node: int) -> HybridT
 
     if gpus_per_node <= 0:
         raise ValueError("gpus_per_node must be positive")
-    world_size = dist.get_world_size(group)
-    if world_size != dist.get_world_size():
-        raise ValueError("get_hybrid_topology requires a group spanning the whole world")
-    if world_size % gpus_per_node:
+    # Global ranks of this ring's members, ordered by ring position.
+    ring_global_ranks = dist.get_process_group_ranks(group)
+    ring_group_size = len(ring_global_ranks)
+    if ring_group_size % gpus_per_node:
         raise ValueError("ring size must be divisible by gpus_per_node")
-    n_nodes = world_size // gpus_per_node
+    n_nodes = ring_group_size // gpus_per_node
 
-    # Ring position p lives at (p // gpus_per_node, p % gpus_per_node); with the
-    # whole-world assumption ring position == global rank, so the two partitions
-    # below are expressed directly in global ranks.
+    # `grid` is in ring-position space (0 .. ring_group_size - 1); the P2P paths
+    # address peers by ring position over `group`. Ring position p lives at
+    # (p // gpus_per_node, p % gpus_per_node).
     grid = tuple(
         tuple(node * gpus_per_node + local for local in range(gpus_per_node))
         for node in range(n_nodes)
     )
-    # Contiguous chunk -> intra-node ring; same local offset across nodes ->
-    # inter-node ring. Each is a full partition of the world, so
-    # `new_subgroups_by_enumeration` builds every sub-group in one fixed order
-    # and hands back the one holding this rank.
-    intranode_group, _ = dist.new_subgroups_by_enumeration(
-        [list(row) for row in grid]
-    )
-    internode_group, _ = dist.new_subgroups_by_enumeration(
-        [[grid[node][local] for node in range(n_nodes)] for local in range(gpus_per_node)]
-    )
 
     node_idx, local_idx = divmod(dist.get_rank(group), gpus_per_node)
+
+    # Build only the two sub-groups this rank belongs to. Every other member of
+    # each sub-group derives the identical rank list, and
+    # `use_local_synchronization=True` keeps the barrier local to those members,
+    # so the rings at other mesh coordinates stay independent.
+    intranode_group = dist.new_group(
+        ranks=[ring_global_ranks[p] for p in grid[node_idx]],
+        use_local_synchronization=True,
+    )
+    internode_group = dist.new_group(
+        ranks=[ring_global_ranks[grid[node][local_idx]] for node in range(n_nodes)],
+        use_local_synchronization=True,
+    )
     topo = HybridTopology(
         n_nodes=n_nodes,
         gpus_per_node=gpus_per_node,
@@ -173,7 +182,7 @@ class RingCtx(Protocol):
     scale: float
     local_rank: int
     group: dist.ProcessGroup
-    world_size: int
+    ring_group_size: int
     config: RingAttentionConfig
     saved_tensors: tuple[
         torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, tuple
@@ -228,7 +237,7 @@ class RingAttentionFunction(torch.autograd.Function):
         tuple[torch.Tensor, torch.Tensor, tuple]
             Attention output, log-sum-exp values, and saved chunks.
         """
-        world_size = dist.get_world_size(group)
+        ring_group_size = dist.get_world_size(group)
         empty = torch.empty(0, device=x.device, dtype=x.dtype)
         from .forward import build_ring_forward
 
@@ -244,7 +253,7 @@ class RingAttentionFunction(torch.autograd.Function):
             group,
             empty,
             local_rank,
-            world_size,
+            ring_group_size,
             config,
         )
         return out, lse, chunks_to_save
@@ -283,7 +292,7 @@ class RingAttentionFunction(torch.autograd.Function):
         c.scale = scale
         c.local_rank = local_rank
         c.group = group
-        c.world_size = dist.get_world_size(
+        c.ring_group_size = dist.get_world_size(
             group
         )  # This is recomputed in forward and in setup context
         c.config = config
@@ -341,7 +350,7 @@ class RingAttentionFunction(torch.autograd.Function):
             ctx.scale,
             ctx.group,
             ctx.local_rank,
-            ctx.world_size,
+            ctx.ring_group_size,
             cast(tuple[torch.Tensor, ...], chunks_to_save),
             ring_config=ctx.config,
             empty=ctx.empty,

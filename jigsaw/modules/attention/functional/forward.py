@@ -106,7 +106,7 @@ def broadcast_forward(
     group: dist.ProcessGroup,
     empty: torch.Tensor,
     local_rank: int,
-    world_size: int,
+    ring_group_size: int,
     ring_config: RingAttentionConfig,
 ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]:
     """Forward pass for ring attention using broadcast instead of P2P sends."""
@@ -125,7 +125,7 @@ def broadcast_forward(
     if ring_config.save_scope != SaveScope.GLOBAL:
         chunks_to_save = [ring_config.save_for_backward_fn(x, kv)]
     else:
-        chunks_to_save = [None] * world_size  # filled in per-step below
+        chunks_to_save = [None] * ring_group_size  # filled in per-step below
 
     # Kick off first send
     recv_buf, handle = ring_config.forward_send_fn(
@@ -134,8 +134,8 @@ def broadcast_forward(
     handle.wait()
     x_j, kv_j, kj, vj = ring_config.forward_recv_fn(recv_buf, x_j, kv_j, kj, vj)
 
-    for step in range(world_size):
-        if step + 1 < world_size:
+    for step in range(ring_group_size):
+        if step + 1 < ring_group_size:
             recv_buf, handle = ring_config.forward_send_fn(
                 x=x,
                 kv=kv,
@@ -159,7 +159,7 @@ def broadcast_forward(
             chunks_to_save[step] = ring_config.save_for_backward_fn(x_j, kv_j)
 
         out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
-        if step < world_size - 1:
+        if step < ring_group_size - 1:
             handle.wait()
 
         x_j, kv_j, kj, vj = ring_config.forward_recv_fn(recv_buf, x_j, kv_j, kj, vj)
@@ -180,7 +180,7 @@ def ring_forward(
     group: dist.ProcessGroup,
     empty: torch.Tensor,
     local_rank: int,
-    world_size: int,
+    ring_group_size: int,
     ring_config: RingAttentionConfig,
 ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]:
     """Forward pass for ring attention using point-to-point sends."""
@@ -200,7 +200,7 @@ def ring_forward(
     # == global chunk index.
     chunks_to_save: list[torch.Tensor | None]
     if ring_config.save_scope == SaveScope.GLOBAL:
-        chunks_to_save = [None] * world_size
+        chunks_to_save = [None] * ring_group_size
     else:
         chunks_to_save = []
 
@@ -209,21 +209,21 @@ def ring_forward(
         x_j, kv_j, direction=-1, group=group, tag=0, empty=empty
     )
 
-    for step in range(world_size):
+    for step in range(ring_group_size):
         if step > 0 and ring_config.send_in_forward == SendForward.X:
             kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
 
         if ring_config.save_scope == SaveScope.GLOBAL:
             # `direction=-1` ring: after `step` receives, `x_j` originates from
-            # rank `(local_rank + step) % world_size`.
-            chunks_to_save[(local_rank + step) % world_size] = (
+            # rank `(local_rank + step) % ring_group_size`.
+            chunks_to_save[(local_rank + step) % ring_group_size] = (
                 ring_config.save_for_backward_fn(x_j, kv_j)
             )
         elif step == 0:
             chunks_to_save.append(ring_config.save_for_backward_fn(x_j, kv_j))
 
         out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
-        if step < world_size - 1:
+        if step < ring_group_size - 1:
             handle.wait()
             # receive either x or kv_j
             x_j, kv_j, kj, vj = ring_config.forward_recv_fn(recv_buf, x_j, kv_j, kj, vj)
@@ -247,7 +247,7 @@ def hybrid_p2p_forward(
     group: dist.ProcessGroup,
     empty: torch.Tensor,
     local_rank: int,
-    world_size: int,
+    ring_group_size: int,
     ring_config: RingAttentionConfig,
 ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]:
     """Forward pass for ring attention with a hybrid intra-/inter-node ring.
@@ -278,7 +278,7 @@ def hybrid_p2p_forward(
     if ring_config.save_scope != SaveScope.GLOBAL:
         chunks_to_save = [ring_config.save_for_backward_fn(x, kv)]
     else:
-        chunks_to_save = [None] * world_size  # filled in per-step below
+        chunks_to_save = [None] * ring_group_size  # filled in per-step below
 
     for node_step in range(n_nodes):
         # Kick off this round's inter-node send of the original local chunk.
@@ -363,7 +363,7 @@ def hybrid_broadcast_forward(
     group: dist.ProcessGroup,
     empty: torch.Tensor,
     local_rank: int,
-    world_size: int,
+    ring_group_size: int,
     ring_config: RingAttentionConfig,
 ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]:
     """Forward pass: intra-node broadcast, inter-node P2P.
@@ -397,7 +397,7 @@ def hybrid_broadcast_forward(
     if ring_config.save_scope != SaveScope.GLOBAL:
         chunks_to_save = [ring_config.save_for_backward_fn(x, kv)]
     else:
-        chunks_to_save = [None] * world_size  # filled in per-step below
+        chunks_to_save = [None] * ring_group_size  # filled in per-step below
 
     for node_step in range(n_nodes):
         cur_node = (topo.node_idx + node_step) % n_nodes

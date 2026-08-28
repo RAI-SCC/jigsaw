@@ -389,12 +389,12 @@ class _LocalChunkProvider(_BackwardChunkProvider):
             kv = recv_buf
             kj, vj = kv[0].contiguous(), kv[1].contiguous()
 
-        # `world_size` isn't tracked locally; ring_backward only calls us
-        # `world_size` times total, so re-sending on the final step is
+        # `ring_group_size` isn't tracked locally; ring_backward only calls us
+        # `ring_group_size` times total, so re-sending on the final step is
         # harmless but wasteful -- guarded via `has_more` below instead.
         return kj, vj, kv
 
-    def maybe_forward(self, step: int, world_size: int) -> None:
+    def maybe_forward(self, step: int, ring_group_size: int) -> None:
         """
         Send chunk to next partner rank if necessary.
 
@@ -404,10 +404,10 @@ class _LocalChunkProvider(_BackwardChunkProvider):
         ----------
         step: int
             stage of the ring attention.
-        world_size: int
+        ring_group_size: int
             Size of the domain-parallel group.
         """
-        if step == 0 or step >= world_size - 1:
+        if step == 0 or step >= ring_group_size - 1:
             return
         next_recv = torch.empty_like(self._recv_buf)
         self._recv_buf, self._handle = self.config.send_op_fn(
@@ -518,19 +518,19 @@ class _LocalChunkProviderBroadcast(_LocalChunkProvider):
             kv = recv_buf
             kj, vj = kv[0].contiguous(), kv[1].contiguous()
 
-        # `world_size` isn't tracked locally; ring_backward only calls us
-        # `world_size` times total, so re-sending on the final step is
+        # `ring_group_size` isn't tracked locally; ring_backward only calls us
+        # `ring_group_size` times total, so re-sending on the final step is
         # harmless but wasteful -- guarded via `has_more` below instead.
         return kj, vj, kv
 
-    def maybe_forward(self, step: int, world_size: int) -> None:
+    def maybe_forward(self, step: int, ring_group_size: int) -> None:
         """Schedule communication for the next ring step.
 
         Parameters
         ----------
         step : int
             Current ring step.
-        world_size : int
+        ring_group_size : int
             Number of processes in the distributed group.
 
         """
@@ -685,23 +685,23 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
             kv = recv_buf
             kj, vj = kv[0].contiguous(), kv[1].contiguous()
 
-        # `world_size` isn't tracked locally; ring_backward only calls us
-        # `world_size` times total, so re-sending on the final step is
+        # `ring_group_size` isn't tracked locally; ring_backward only calls us
+        # `ring_group_size` times total, so re-sending on the final step is
         # harmless but wasteful -- guarded via `has_more` below instead.
         return kj, vj, kv
 
-    def maybe_forward(self, step: int, world_size: int) -> None:
+    def maybe_forward(self, step: int, ring_group_size: int) -> None:
         """Schedule communication for the next ring step.
 
         Parameters
         ----------
         step : int
             Current ring step.
-        world_size : int
+        ring_group_size : int
             Number of processes in the distributed group.
 
         """
-        if step == 0 or step >= world_size - 1:
+        if step == 0 or step >= ring_group_size - 1:
             return
 
         node_step = step // self._gpn
@@ -899,7 +899,7 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
 
         return kj, vj, kv
 
-    def maybe_forward(self, step: int, world_size: int) -> None:
+    def maybe_forward(self, step: int, ring_group_size: int) -> None:
         """Schedule the next inter-node hop at a node-round boundary.
 
         Intra-node movement is handled entirely by the broadcast in ``get``;
@@ -910,11 +910,11 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
         ----------
         step : int
             Current ring step.
-        world_size : int
+        ring_group_size : int
             Number of processes in the distributed group.
 
         """
-        if step == 0 or step >= world_size - 1:
+        if step == 0 or step >= ring_group_size - 1:
             return
         if step % self._gpn != 0:
             return
