@@ -61,7 +61,15 @@ class ConvConfig:
         )
         self.comm_fn = self._channel_comm_fn_selection(channel_group, device)
         # Select communicate halos
-        self._communicate_halos_fn_selection(spatial_group)
+        self._communicate_halos_fn_selection(spatial_group, channel_group)
+
+        if channel_group.size() > 2 and any(
+            k != s for k, s in zip(kernel_size, stride)
+        ):
+            raise NotImplementedError(
+                "Channel groups wider than two ranks are only supported when "
+                "stride == kernel_size (no halo exchange)."
+            )
 
     def _channel_comm_fn_selection(
         self, channel_group: dist.ProcessGroup, device: torch.device
@@ -83,32 +91,45 @@ class ConvConfig:
         Callable[[torch.Tensor, torch.Tensor, torch.Tensor, dist.ProcessGroup, bool], tuple[torch.Tensor, list[Optional[dist.Work]]]]
             Result returned by the operation.
         """
+        # Channel groups wider than two ranks drive their communication through
+        # collective all-gather / all-reduce calls (see ``conv2d_nway_channels``)
+        # rather than this pairwise primitive, so ``comm_fn`` is left as a no-op.
+        def identity(
+            data: torch.Tensor,
+            buffer: torch.Tensor,
+            empty: torch.Tensor,
+            group: dist.ProcessGroup,
+            async_op: bool,
+        ) -> tuple[torch.Tensor, list[Optional[dist.Work]]]:
+            """Return ``data`` untouched (no channel communication needed)."""
+            return data, [None]
+
         if device.type == "cuda":
             match channel_group.size():
                 case 1:
-                    return lambda data, buffer, empty, group, async_op: (data, [None])
+                    return identity
                 case 2:
                     return comm.comm_2way_alltoall
                 case _:
-                    raise NotImplementedError(
-                        f"comm all to all is not implemented for channel group size {channel_group.size()}."
-                    )
+                    return identity
         elif device.type == "cpu":
             match channel_group.size():
                 case 1:
-                    return lambda data, buffer, empty, group, async_op: (data, [None])
+                    return identity
                 case 2:
                     return comm.comm_2way_p2p
                 case _:
-                    raise NotImplementedError(
-                        f"comm all to all is not implemented for channel group size {channel_group.size()}."
-                    )
+                    return identity
         else:
             raise NotImplementedError(
                 f"comm function not implemented for device type {device.type}"
             )
 
-    def _communicate_halos_fn_selection(self, spatial_group: dist.ProcessGroup) -> None:
+    def _communicate_halos_fn_selection(
+        self,
+        spatial_group: dist.ProcessGroup,
+        channel_group: dist.ProcessGroup,
+    ) -> None:
         """
         Select function for halo communication.
 
@@ -116,6 +137,8 @@ class ConvConfig:
         ----------
         spatial_group: dist.ProcessGroup
             Domain-parallel process group.
+        channel_group: dist.ProcessGroup
+            Channel-parallel process group.
         """
         if spatial_group.size() == 2:
             self.communicate_halos = dist_conv.communicate_halos
@@ -125,6 +148,12 @@ class ConvConfig:
             self.communicate_halos = dist_conv.communicate_halos_4space
             self.append_halos = dist_conv.append_halos_4space
             self.dist_conv2d_fn = dist_conv.conv2d_eightway
+
+        if channel_group.size() > 2:
+            # Channel groups wider than two ranks use a collective-based
+            # convolution that also covers the (no-halo) spatial split, so it
+            # overrides whatever was selected above.
+            self.dist_conv2d_fn = dist_conv.conv2d_nway_channels
 
     def _communicate_halos_selection(
         self,

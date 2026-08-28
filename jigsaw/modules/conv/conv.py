@@ -105,7 +105,8 @@ class DistributedConv2D(torch.nn.Module):
         """
         super().__init__()
         self.in_channels = in_channels
-        self.out_channels = out_channels // 2  # TODO: //2 should be channel group size
+        # Output channels are sharded across the channel-parallel group.
+        self.out_channels = out_channels // channel_group.size()
 
         self.kernel_size = _pair(kernel_size)
         self.stride = _pair(stride)

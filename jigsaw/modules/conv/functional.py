@@ -72,7 +72,11 @@ class Conv2d(torch.autograd.Function):
             config=config,
         )
 
-        x_aug = torch.cat([x0, x1], dim=-3)  # concatenate along the channel dimension
+        # ``x1`` is ``None`` for the wide-channel-group path, where ``x0`` is
+        # already the gathered full-channel input.
+        x_aug = (
+            torch.cat([x0, x1], dim=-3) if x1 is not None else x0
+        )  # concatenate along the channel dimension
         halo_sizes = torch.tensor(
             [right_to_left, left_to_right]
         )  # save halo sizes in tensor
@@ -210,41 +214,65 @@ class Conv2d(torch.autograd.Function):
             async_op=True,
         )
 
-        g_x_buffer = get_preallocated_buffer(
-            torch.Size((*g_x.shape[:-3], g_x.shape[-3] // 2, *g_x.shape[-2:])),
-            g_x.dtype,
-            channel_group.rank(),
-            g_x.device,
-        )
+        if channel_group.size() > 2:
+            # Wide channel groups: each rank holds the full-channel grad wrt
+            # input for its own output-channel slice. Summing those across the
+            # channel group and keeping this rank's channel slice yields g_x.
+            g_x = g_x.contiguous()
+            g_x_handle = dist.all_reduce(
+                g_x, op=dist.ReduceOp.SUM, group=channel_group, async_op=True
+            )
 
-        g_x_recv, g_x_handles = dist_conv.send_g_x_channels_2d(
-            g_x,
-            g_x_buffer,
-            empty,
-            c.in_channels_global,
-            channel_group,
-            async_op=True,
-            comm_fn=config.comm_fn,
-        )
+            g_w = config.conv2d_weight_fn(
+                x_aug,
+                weight.shape[int(c.bayesian) :],
+                grad_output.to(weight.dtype),
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
 
-        g_w = config.conv2d_weight_fn(
-            x_aug,
-            weight.shape[int(c.bayesian) :],
-            grad_output.to(weight.dtype),
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-        )
+            g_x_handle.wait()
 
-        for g_x_handle in g_x_handles:
-            if g_x_handle is not None:
-                g_x_handle.wait()
+            shard = c.in_channels_global // channel_group.size()
+            start = channel_group.rank() * shard
+            g_x = g_x[..., start : start + shard, :, :]
+        else:
+            g_x_buffer = get_preallocated_buffer(
+                torch.Size((*g_x.shape[:-3], g_x.shape[-3] // 2, *g_x.shape[-2:])),
+                g_x.dtype,
+                channel_group.rank(),
+                g_x.device,
+            )
 
-        g_x = (
-            g_x[..., : c.in_channels_global // 2, :, :] + g_x_recv
-            if channel_group.rank() % 2 == 0
-            else g_x[..., c.in_channels_global // 2 :, :, :] + g_x_recv
-        )
+            g_x_recv, g_x_handles = dist_conv.send_g_x_channels_2d(
+                g_x,
+                g_x_buffer,
+                empty,
+                c.in_channels_global,
+                channel_group,
+                async_op=True,
+                comm_fn=config.comm_fn,
+            )
+
+            g_w = config.conv2d_weight_fn(
+                x_aug,
+                weight.shape[int(c.bayesian) :],
+                grad_output.to(weight.dtype),
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
+
+            for g_x_handle in g_x_handles:
+                if g_x_handle is not None:
+                    g_x_handle.wait()
+
+            g_x = (
+                g_x[..., : c.in_channels_global // 2, :, :] + g_x_recv
+                if channel_group.rank() % 2 == 0
+                else g_x[..., c.in_channels_global // 2 :, :, :] + g_x_recv
+            )
 
         return (
             g_x,

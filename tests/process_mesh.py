@@ -129,3 +129,13 @@ def process_mesh_dict_2x4(device: torch.Tensor) -> dict:
         mesh_shape=[2, 4],
         mesh_dim_names=["internode", "intranode"],
     )
+
+
+@pytest.fixture(scope="session")
+def process_mesh_dict_2x4_rowcol(device: torch.Tensor) -> dict:
+    """Return a 2 (spatial) x 4 (channel) process mesh keyed as row/col."""
+    return make_process_mesh(
+        device_type=device.type,
+        mesh_shape=[2, 4],
+        mesh_dim_names=["row", "col"],
+    )

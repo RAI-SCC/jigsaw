@@ -420,6 +420,68 @@ def distributed_conv2d_over_channels(
             raise ValueError(f"Invalid local_rank % 2: {local_channel_rank % 2}")
 
 
+def distributed_conv2d_over_channels_nway(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    b: torch.Tensor,
+    stride: tuple[int, int],
+    padding: str | tuple[int, int],
+    dilation: tuple[int, int],
+    channel_group: dist.ProcessGroup,
+    conv_func: Callable,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Channel-parallel Conv2d for channel groups wider than two ranks.
+
+    Each rank owns a contiguous ``in_channels // channel_group.size()`` slice of
+    the input channels and the matching slice of the weight's *output* channels
+    (``w`` still carries every input channel). The ranks all-gather their input
+    slices, rebuild the full-channel input and run the local convolution, so the
+    result already holds this rank's output-channel slice.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        This rank's input-channel slice, shape ``(..., C_in / G, H, W)``.
+    w : torch.Tensor
+        This rank's weight slice, shape ``(C_out / G, C_in, kH, kW)``.
+    b : torch.Tensor
+        This rank's bias slice, or ``None``.
+    stride : tuple[int, int]
+        Convolution stride.
+    padding : str | tuple[int, int]
+        Convolution padding.
+    dilation : tuple[int, int]
+        Convolution dilation.
+    channel_group : dist.ProcessGroup
+        Channel-parallel process group.
+    conv_func : Callable
+        Convolution primitive (``F.conv2d`` or a vmapped variant).
+
+    Returns
+    -------
+    y : torch.Tensor
+        This rank's output-channel slice.
+    x_full : torch.Tensor
+        The gathered full-channel input, needed for the backward pass.
+    """
+    group_size = channel_group.size()
+    local_channel_rank = channel_group.rank()
+
+    x = x.contiguous()
+    slices = [torch.empty_like(x) for _ in range(group_size)]
+    dist.all_gather(slices, x, group=channel_group)
+    # Keep this rank's own slice wired into the autograd graph.
+    slices[local_channel_rank] = x
+    x_full = torch.cat(slices, dim=-3)
+
+    if b is not None:
+        y = conv_func(x_full, w, b, stride=stride, padding=padding, dilation=dilation)
+    else:
+        y = conv_func(x_full, w, stride=stride, padding=padding, dilation=dilation)
+
+    return y, x_full
+
+
 def send_g_x_channels(
     g_x: torch.Tensor,
     buffer: torch.Tensor,
@@ -581,3 +643,41 @@ def conv2d_eightway(
     )
 
     return y, x_left, x_right, right_to_left, left_to_right
+
+
+def conv2d_nway_channels(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    b: torch.Tensor,
+    kernel_size: tuple[int, int],
+    stride: tuple[int, int],
+    padding: str | tuple[int, int],
+    dilation: tuple[int, int],
+    in_channels: int,
+    spatial_group: dist.ProcessGroup,
+    channel_group: dist.ProcessGroup,
+    empty: torch.Tensor,
+    config: Any,
+) -> tuple[torch.Tensor, torch.Tensor, None, int, int]:
+    """Distributed 2d convolution for channel groups wider than two ranks.
+
+    Only the no-halo case (``stride == kernel_size``) is supported, so the
+    spatial split needs no halo exchange: every spatial rank convolves its own
+    domain slice independently while the channel group cooperates through
+    :func:`distributed_conv2d_over_channels_nway`.
+
+    The return signature mirrors :func:`conv2d_fourway`. The third element (the
+    second saved activation used by the 2-way path) is ``None`` and the halo
+    sizes are always zero.
+    """
+    y, x_full = distributed_conv2d_over_channels_nway(
+        x,
+        w,
+        b,
+        stride,
+        padding,
+        dilation,
+        channel_group,
+        config.conv2d_fn,
+    )
+    return y, x_full, None, 0, 0
