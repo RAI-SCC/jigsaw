@@ -3,13 +3,124 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.modules.attention.config as config
-from jigsaw.modules.attention.functional import forward, backward
+from jigsaw.modules.attention.functional import backward, forward, functional
 from jigsaw.utils_aggregate import (
     gather_1d_results,
 )
 from tests.process_mesh import *
 
 pytestmark = [pytest.mark.dist_required]
+
+
+@pytest.mark.dist(8)
+@pytest.mark.parametrize("gpus_per_node", [1, 2, 4, 8])
+def test_get_hybrid_topology(device: torch.device, gpus_per_node: int) -> None:
+    """Split the world ring into intra-/inter-node sub-groups.
+
+    Parameters
+    ----------
+    device : torch.device
+        Device used to initialize the process group.
+    gpus_per_node : int
+        Number of consecutive ring ranks that share a node.
+    """
+    group = dist.group.WORLD
+    assert group is not None
+    world_size = dist.get_world_size(group)
+    rank = dist.get_rank(group)
+
+    functional._HYBRID_TOPOLOGY_CACHE.pop((group, gpus_per_node), None)
+    topo = functional.get_hybrid_topology(group, gpus_per_node)
+
+    assert topo.gpus_per_node == gpus_per_node
+    assert topo.n_nodes == world_size // gpus_per_node
+    assert (topo.node_idx, topo.local_idx) == divmod(rank, gpus_per_node)
+    assert topo.ring_rank == rank
+
+    assert dist.get_world_size(topo.intranode_group) == gpus_per_node
+    assert dist.get_world_size(topo.internode_group) == topo.n_nodes
+
+    # Intra-node peers are the contiguous chunk; inter-node peers share the
+    # local offset across nodes.
+    node_start = topo.node_idx * gpus_per_node
+    assert sorted(dist.get_process_group_ranks(topo.intranode_group)) == list(
+        range(node_start, node_start + gpus_per_node)
+    )
+    assert sorted(dist.get_process_group_ranks(topo.internode_group)) == list(
+        range(topo.local_idx, world_size, gpus_per_node)
+    )
+
+    # Cached: same object on the second call.
+    assert functional.get_hybrid_topology(group, gpus_per_node) is topo
+
+
+@pytest.mark.dist(8)
+@pytest.mark.parametrize("gpus_per_node", [1, 2, 4])
+def test_get_hybrid_topology_on_mesh_subgroup(
+    device: torch.device, gpus_per_node: int
+) -> None:
+    """Run the ring over one mesh dimension, not the global world.
+
+    With a ``(row=4, col=2)`` mesh the ring is the ``row`` group: its world
+    size is 4 (not 8), and the two ``col`` rings build their sub-groups
+    independently over their own global ranks.
+
+    Parameters
+    ----------
+    device : torch.device
+        Device used to initialize the process mesh.
+    gpus_per_node : int
+        Number of consecutive ring ranks that share a node.
+    """
+    mesh = dist.device_mesh.init_device_mesh(
+        device_type=device.type,
+        mesh_shape=(4, 2),
+        mesh_dim_names=("row", "col"),
+    )
+    group = mesh.get_group("row")
+    ring_global_ranks = dist.get_process_group_ranks(group)
+    world_size = len(ring_global_ranks)
+    assert world_size == 4  # ring size == size(row), not the global world size
+
+    functional._HYBRID_TOPOLOGY_CACHE.pop((group, gpus_per_node), None)
+    topo = functional.get_hybrid_topology(group, gpus_per_node)
+
+    ring_pos = dist.get_rank(group)
+    node_idx, local_idx = divmod(ring_pos, gpus_per_node)
+    n_nodes = world_size // gpus_per_node
+
+    assert (topo.n_nodes, topo.node_idx, topo.local_idx) == (n_nodes, node_idx, local_idx)
+    assert dist.get_world_size(topo.intranode_group) == gpus_per_node
+    assert dist.get_world_size(topo.internode_group) == n_nodes
+
+    node_start = node_idx * gpus_per_node
+    assert sorted(dist.get_process_group_ranks(topo.intranode_group)) == sorted(
+        ring_global_ranks[node_start : node_start + gpus_per_node]
+    )
+    assert sorted(dist.get_process_group_ranks(topo.internode_group)) == sorted(
+        ring_global_ranks[node * gpus_per_node + local_idx] for node in range(n_nodes)
+    )
+    # Every member of a sub-group lands on the same underlying group.
+    assert functional.get_hybrid_topology(group, gpus_per_node) is topo
+
+
+@pytest.mark.dist(4)
+def test_get_hybrid_topology_rejects_bad_args(device: torch.device) -> None:
+    """Reject a non-positive or non-dividing ``gpus_per_node``.
+
+    Parameters
+    ----------
+    device : torch.device
+        Device used to initialize the process group.
+    """
+    group = dist.group.WORLD
+    assert group is not None
+
+    with pytest.raises(ValueError, match="gpus_per_node must be positive"):
+        functional.get_hybrid_topology(group, 0)
+    with pytest.raises(ValueError, match="divisible by gpus_per_node"):
+        functional.get_hybrid_topology(group, 3)
+
 
 # def test_backward(device, process_mesh):
 #     local_rank = dist.get_rank(group=process_mesh["row"])
@@ -246,9 +357,7 @@ pytestmark = [pytest.mark.dist_required]
 
 @pytest.mark.dist(4)
 @pytest.mark.parametrize("send_in_forward", [config.SendForward.KV])
-@pytest.mark.parametrize(
-    "save_for_backward", [config.SaveBackward.KV]
-)
+@pytest.mark.parametrize("save_for_backward", [config.SaveBackward.KV])
 @pytest.mark.parametrize(
     "send_op",
     [config.SendOp.ALLTOALL, config.SendOp.P2P, config.SendOp.BROADCAST],
@@ -442,7 +551,12 @@ def test_ring_forward_backward(
 @pytest.mark.parametrize("save_for_backward", [config.SaveBackward.X])
 @pytest.mark.parametrize(
     "send_op",
-    [config.SendOp.HYBRID_P2P, config.SendOp.P2P, config.SendOp.ALLTOALL],
+    [
+        config.SendOp.HYBRID_P2P,
+        config.SendOp.HYBRID_BROADCAST,
+        config.SendOp.P2P,
+        config.SendOp.ALLTOALL,
+    ],
 )
 @pytest.mark.parametrize(
     "save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL]
@@ -528,7 +642,7 @@ def test_ring_hybrid(
         group=process_mesh_dict["model"],
         empty=empty,
         local_rank=local_rank,
-        world_size=world_size,
+        ring_group_size=world_size,
         ring_config=ring_config,
     )
 

@@ -17,7 +17,7 @@ from jigsaw.modules.attention.config import (
 )
 from jigsaw.offload import NVLinkActivationOffloader
 
-from .functional import _compute_kv, get_send_recv_ranks_hybrid
+from .functional import _compute_kv, get_hybrid_topology
 
 
 def _build_backward_chunk_provider(
@@ -144,6 +144,20 @@ class _BackwardChunkProvider(ABC):
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return contiguous (kj, vj) and the underlying kv buffer for `step`."""
 
+    def maybe_forward(self, step: int, ring_group_size: int) -> None:
+        """Kick off communication for the next ring step, if any.
+
+        No-op by default; providers that re-circulate chunks override this.
+
+        Parameters
+        ----------
+        step : int
+            Current ring step.
+        ring_group_size : int
+            Number of ranks in the ring group.
+        """
+        return
+
 
 class _GlobalChunkProvider(_BackwardChunkProvider):
     """
@@ -243,7 +257,7 @@ class _GlobalChunkProvider(_BackwardChunkProvider):
             kv = chunk
             return kv[0].contiguous(), kv[1].contiguous(), kv
         elif self.config.save_for_backward == SaveBackward.X:
-            print(f'R{dist.get_rank()} step {step} chunk {chunk.sum()}')
+            print(f"R{dist.get_rank()} step {step} chunk {chunk.sum()}")
             kv, kj, vj = _compute_kv(
                 chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
             )
@@ -331,6 +345,47 @@ class _LocalChunkProvider(_BackwardChunkProvider):
             chunk = gpu
         return chunk
 
+    def _kv0(self) -> torch.Tensor:
+        """KV tensor for this rank's own (step-0) saved chunk.
+
+        Returns
+        -------
+        torch.Tensor
+            The ``kv`` buffer, taken straight from the saved chunk when KV was
+            saved, or recomputed from the saved ``x`` otherwise.
+        """
+        chunk = self._materialize_chunk0()
+        if self.config.save_for_backward == SaveBackward.KV:
+            return chunk
+        kv, _, _ = _compute_kv(
+            chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
+        )
+        return kv
+
+    def _kv_from(
+        self, recv_buf: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Unpack a received ring buffer into contiguous ``(kj, vj, kv)``.
+
+        Parameters
+        ----------
+        recv_buf : torch.Tensor
+            The buffer that just arrived over the ring -- an ``x`` chunk when
+            ``send_in_forward`` is ``X``, otherwise a fused ``kv`` buffer.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+            Contiguous ``kj``, ``vj`` and the underlying ``kv`` buffer.
+        """
+        if self.config.send_in_forward == SendForward.X:
+            kv, kj, vj = _compute_kv(
+                recv_buf, self.w_qkv, self.b, self.seq_local, self.h, self.d
+            )
+            return kj.contiguous(), vj.contiguous(), kv
+        kv = recv_buf
+        return kv[0].contiguous(), kv[1].contiguous(), kv
+
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return the tensors for the requested ring step.
 
@@ -345,13 +400,7 @@ class _LocalChunkProvider(_BackwardChunkProvider):
             Result returned by the operation.
         """
         if step == 0:
-            chunk = self._materialize_chunk0()
-            if self.config.save_for_backward == SaveBackward.KV:
-                kv = chunk
-            else:
-                kv, _, _ = _compute_kv(
-                    chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
-                )
+            kv = self._kv0()
 
             # Kick off the first ring send of whichever buffer is configured.
             send_buf = self.x if self.config.send_in_forward == SendForward.X else kv
@@ -375,26 +424,13 @@ class _LocalChunkProvider(_BackwardChunkProvider):
                 kj, vj = kv[0].contiguous(), kv[1].contiguous()
             return kj, vj, kv
 
-        # step > 0: receive the chunk that's been circulating, then forward
-        # it on (unless this is the last step).
+        # step > 0: receive the chunk that's been circulating; `maybe_forward`
+        # relays it on (unless this is the last step).
         assert self._handle is not None
         self._handle.wait()
-        recv_buf = self._recv_buf
-        if self.config.send_in_forward == SendForward.X:
-            kv, kj, vj = _compute_kv(
-                recv_buf, self.w_qkv, self.b, self.seq_local, self.h, self.d
-            )
-            kj, vj = kj.contiguous(), vj.contiguous()
-        else:
-            kv = recv_buf
-            kj, vj = kv[0].contiguous(), kv[1].contiguous()
+        return self._kv_from(self._recv_buf)
 
-        # `world_size` isn't tracked locally; ring_backward only calls us
-        # `world_size` times total, so re-sending on the final step is
-        # harmless but wasteful -- guarded via `has_more` below instead.
-        return kj, vj, kv
-
-    def maybe_forward(self, step: int, world_size: int) -> None:
+    def maybe_forward(self, step: int, ring_group_size: int) -> None:
         """
         Send chunk to next partner rank if necessary.
 
@@ -404,10 +440,10 @@ class _LocalChunkProvider(_BackwardChunkProvider):
         ----------
         step: int
             stage of the ring attention.
-        world_size: int
+        ring_group_size: int
             Size of the domain-parallel group.
         """
-        if step == 0 or step >= world_size - 1:
+        if step == 0 or step >= ring_group_size - 1:
             return
         next_recv = torch.empty_like(self._recv_buf)
         self._recv_buf, self._handle = self.config.send_op_fn(
@@ -486,13 +522,7 @@ class _LocalChunkProviderBroadcast(_LocalChunkProvider):
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
             Result returned by the operation.
         """
-        chunk = self._materialize_chunk0()
-        if self.config.save_for_backward == SaveBackward.KV:
-            kv = chunk
-        else:
-            kv, _, _ = _compute_kv(
-                chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
-            )
+        kv = self._kv0()
 
         # Kick off the first ring send of whichever buffer is configured.
         send_buf = self.x if self.config.send_in_forward == SendForward.X else kv
@@ -503,41 +533,123 @@ class _LocalChunkProviderBroadcast(_LocalChunkProvider):
             self._recv_buf, src=step, group=self.group, async_op=True
         )
 
-        # step > 0: receive the chunk that's been circulating, then forward
-        # it on (unless this is the last step).
         assert self._handle is not None
         self._handle.wait()
-        recv_buf = self._recv_buf
+        return self._kv_from(self._recv_buf)
 
-        if self.config.send_in_forward == SendForward.X:
-            kv, kj, vj = _compute_kv(
-                recv_buf, self.w_qkv, self.b, self.seq_local, self.h, self.d
-            )
-            kj, vj = kj.contiguous(), vj.contiguous()
-        else:
-            kv = recv_buf
-            kj, vj = kv[0].contiguous(), kv[1].contiguous()
-
-        # `world_size` isn't tracked locally; ring_backward only calls us
-        # `world_size` times total, so re-sending on the final step is
-        # harmless but wasteful -- guarded via `has_more` below instead.
-        return kj, vj, kv
-
-    def maybe_forward(self, step: int, world_size: int) -> None:
-        """Schedule communication for the next ring step.
+    def maybe_forward(self, step: int, ring_group_size: int) -> None:
+        """Do nothing: every step is a fresh broadcast issued in ``get``.
 
         Parameters
         ----------
         step : int
             Current ring step.
-        world_size : int
-            Number of processes in the distributed group.
+        ring_group_size : int
+            Number of ranks in the ring group.
 
         """
         return
 
 
-class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
+class _LocalChunkProviderHybrid(_LocalChunkProvider):
+    """Shared plumbing for the two hybrid (intra-node + inter-node) providers.
+
+    Both hybrids move chunks between nodes with the same reversed inter-node P2P
+    ring (send to the next node, receive from the previous -- opposite the
+    forward). They differ only in how a chunk travels *within* a node:
+    :class:`_LocalChunkProviderHybridP2P` rotates it one P2P hop per step,
+    :class:`_LocalChunkProviderHybridBroadcast` keeps it put and broadcasts. This
+    base holds the common state and the inter-node launch helper; each subclass
+    implements ``get`` / ``maybe_forward`` for its intra-node scheme.
+    """
+
+    def __init__(
+        self,
+        ring_config: RingAttentionConfig,
+        chunks_to_save: tuple[torch.Tensor, ...],
+        x: torch.Tensor,
+        w_qkv: torch.Tensor,
+        b: int,
+        seq_local: int,
+        h: int,
+        d: int,
+        group: dist.ProcessGroup,
+        empty: torch.Tensor,
+        local_rank: int,
+    ) -> None:
+        """Initialize the shared hybrid state.
+
+        Parameters
+        ----------
+        ring_config : RingAttentionConfig
+            Ring-attention configuration controlling communication and saving.
+        chunks_to_save : tuple[torch.Tensor, ...]
+            Saved activation chunks used to reconstruct backward inputs.
+        x : torch.Tensor
+            Input tensor.
+        w_qkv : torch.Tensor
+            Fused query, key, and value projection weights.
+        b : int
+            Batch size for the input tensors.
+        seq_local : int
+            Sequence length owned by the current process.
+        h : int
+            Number of attention heads.
+        d : int
+            Embedding dimension per attention head.
+        group : dist.ProcessGroup
+            Process group used for distributed communication.
+        empty : torch.Tensor
+            Empty tensor used by communication helpers.
+        local_rank : int
+            Rank of the current process.
+        """
+        super().__init__(
+            ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
+        )
+        self._recv_buf = torch.empty_like(
+            x if ring_config.send_in_forward == SendForward.X else chunks_to_save[0]
+        )
+        self._handle: Optional[dist.Work] = None
+        self.local_rank = int(local_rank)
+        self.topo = get_hybrid_topology(group, ring_config.gpus_per_node)
+        self._gpn = self.topo.gpus_per_node
+        # Inter-node hop: send to the next node, receive from the previous
+        # (opposite the forward's node ring).
+        self._inter_ranks = [self.topo.inter_peer(1), self.topo.inter_peer(-1)]
+        self._internode_handle: Optional[dist.Work] = None
+        self._internode_recv_buf: Optional[torch.Tensor] = None
+
+    def _launch_internode(self, data: torch.Tensor, step: int) -> None:
+        """Launch an inter-node transfer of ``data`` along the node ring.
+
+        Parameters
+        ----------
+        data : torch.Tensor
+            Tensor to send on.
+        step : int
+            Current ring step (only its intra-node phase is used as the tag).
+        """
+        buf = torch.empty_like(data)
+        self._internode_recv_buf, self._internode_handle = self.config.p2p_fn(
+            data=data,
+            buffer=buf,
+            send_recv_ranks=self._inter_ranks,
+            group=self.group,
+            async_op=True,
+            tag=step % self._gpn,
+            empty=self.empty,
+        )
+
+
+class _LocalChunkProviderHybridP2P(_LocalChunkProviderHybrid):
+    """Hybrid backward chunk provider: P2P intra-node, P2P inter-node.
+
+    The backward twin of :func:`hybrid_p2p_forward`. A chunk rotates through the
+    ``gpus_per_node`` node-local ranks with one intra-node P2P send per step, and
+    hops to the next node over the inter-node ring at each node boundary.
+    """
+
     def __init__(
         self,
         ring_config: RingAttentionConfig,
@@ -578,19 +690,23 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
             Empty tensor used by communication helpers.
         local_rank : int
             Rank of the current process.
-
         """
         super().__init__(
-            ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
+            ring_config,
+            chunks_to_save,
+            x,
+            w_qkv,
+            b,
+            seq_local,
+            h,
+            d,
+            group,
+            empty,
+            local_rank,
         )
-        self._recv_buf = torch.empty_like(
-            x if ring_config.send_in_forward == SendForward.X else chunks_to_save[0]
-        )
-        self._handle: Optional[dist.Work] = None
-        self.local_rank = local_rank
-        self.gpus_per_node = 4
-        self._internode_handle = None
-        self._internode_recv_buf = None
+        # Intra-node ring: send to the previous local rank, receive from the
+        # next -- mirroring the forward.
+        self._intra_ranks = [self.topo.intra_peer(-1), self.topo.intra_peer(1)]
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return the tensors for the requested ring step.
@@ -606,56 +722,27 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
             Result returned by the operation.
         """
         if step == 0:
-            chunk = self._materialize_chunk0()
-            if self.config.save_for_backward == SaveBackward.KV:
-                kv = chunk
-            else:
-                print(f'R{dist.get_rank()} step {step} chunk {chunk.sum()}')
-                kv, _, _ = _compute_kv(
-                    chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
-                )
+            kv = self._kv0()
 
-            # Kick off the first ring send of whichever buffer is configured.
-            internode_recv_buf = (
-                torch.empty_like(self.x)
+            # Kick off the inter-node hop and the first intra-node ring send.
+            self._launch_internode(
+                self.x.clone()
                 if self.config.send_in_forward == SendForward.X
-                else torch.empty_like(kv)
-            )
-            # print(f"R{self.local_rank} Step {step} Internode send send buf is {self.x[0][0][0]}")
-
-            self._internode_recv_buf, self._internode_handle = self.config.p2p_fn(
-                data=(
-                    self.x.clone()
-                    if self.config.send_in_forward == SendForward.X
-                    else kv.clone()
-                ),
-                buffer=internode_recv_buf,
-                direction=self.gpus_per_node,
-                group=self.group,
-                async_op=True,
-                tag=step % 4,
-                empty=self.empty,
+                else kv.clone(),
+                step,
             )
 
             send_buf = self.x if self.config.send_in_forward == SendForward.X else kv
             self._recv_buf = torch.empty_like(send_buf)
-
-            # if we are at a multiple of 4,
-            # wait for what is received from the internode buffer
-            send_recv_ranks = get_send_recv_ranks_hybrid(
-                self.local_rank, gpus_per_node=self.gpus_per_node
-            )
-            # Launch send_op to the neighbouring ranks
             self._recv_buf, self._handle = self.config.send_op_fn(
                 send_buf,
                 self._recv_buf,
-                send_recv_ranks=send_recv_ranks,
+                send_recv_ranks=self._intra_ranks,
                 group=self.group,
                 async_op=True,
                 empty=self.empty,
                 step=step,
             )
-            # print(f'R{dist.get_rank()} STEP {step} recv_buf {self.x[0][0][0]}')
 
             if self.config.send_in_forward == SendForward.X:
                 # Local Q always attends its own local K/V on step 0.
@@ -666,11 +753,11 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
                 kj, vj = kv[0].contiguous(), kv[1].contiguous()
             return kj, vj, kv
 
-        # step > 0: receive the chunk that's been circulating, then forward
-        # it on (unless this is the last step).
-
-        if step % self.gpus_per_node == 0:  # if we are receiving from internode
+        # step > 0: wait on whichever link delivered this step's chunk -- the
+        # inter-node hop at a node boundary, the intra-node ring otherwise.
+        if step % self._gpn == 0:
             assert self._internode_handle is not None
+            assert self._internode_recv_buf is not None
             self._internode_handle.wait()
             recv_buf = self._internode_recv_buf
         else:
@@ -678,72 +765,36 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
             self._handle.wait()
             recv_buf = self._recv_buf
 
-        if self.config.send_in_forward == SendForward.X:
-            # print(f'R{dist.get_rank()} STEP {step} recv_buf {recv_buf[0][0][0]}')
-            print(f'R{dist.get_rank()} step {step} chunk {recv_buf.sum()}')
-            kv, kj, vj = _compute_kv(
-                recv_buf, self.w_qkv, self.b, self.seq_local, self.h, self.d
-            )
-            kj, vj = kj.contiguous(), vj.contiguous()
-        else:
-            kv = recv_buf
-            kj, vj = kv[0].contiguous(), kv[1].contiguous()
+        return self._kv_from(recv_buf)
 
-        # `world_size` isn't tracked locally; ring_backward only calls us
-        # `world_size` times total, so re-sending on the final step is
-        # harmless but wasteful -- guarded via `has_more` below instead.
-        return kj, vj, kv
-
-    def maybe_forward(self, step: int, world_size: int) -> None:
-        """Schedule communication for the next ring step.
+    def maybe_forward(self, step: int, ring_group_size: int) -> None:
+        """Relay this step's chunk to the next node-local (and node) peer.
 
         Parameters
         ----------
         step : int
             Current ring step.
-        world_size : int
-            Number of processes in the distributed group.
-
+        ring_group_size : int
+            Number of ranks in the ring group.
         """
-        if step == 0 or step >= world_size - 1:
+        if step == 0 or step >= ring_group_size - 1:
             return
 
-        if step % self.gpus_per_node == 0 and step // self.gpus_per_node < (
-            self.group.size() // self.gpus_per_node - 1
-        ):  # if we are at the start of a "internode" step
-            # internode if necessary
-            current_buf = self._recv_buf
-            internode_recv_buf = (
-                torch.empty_like(self.x)
-                if self.config.send_in_forward == SendForward.X
-                else torch.empty_like(current_buf)
-            )
-            # print(f'Internode send {step} sending {self._internode_recv_buf[0][0][0]}')
-            self._internode_recv_buf, self._internode_handle = self.config.p2p_fn(
-                data=self._internode_recv_buf,
-                buffer=internode_recv_buf,
-                direction=self.gpus_per_node,
-                group=self.group,
-                async_op=True,
-                tag=step % 4,
-                empty=self.empty,
-                group_size=self.group.size(),
-            )
-        # if we are here, intranode recv buffer is overwritten
-        # by internode message
-        if step % self.gpus_per_node == 0:
+        node_step = step // self._gpn
+        if step % self._gpn == 0:
             assert self._internode_recv_buf is not None
+            if node_step < self.topo.n_nodes - 1:
+                # Relay the inter-node chunk one more hop along the node ring.
+                self._launch_internode(self._internode_recv_buf, step)
+            # At a node boundary the intra-node ring restarts from the chunk
+            # that just arrived over the inter-node link.
             self._recv_buf = self._internode_recv_buf
 
         next_recv = torch.empty_like(self._recv_buf)
-        # intranode if necessary
-        send_recv_ranks = get_send_recv_ranks_hybrid(
-            self.local_rank, gpus_per_node=self.gpus_per_node
-        )
         self._recv_buf, self._handle = self.config.send_op_fn(
             self._recv_buf,
             next_recv,
-            send_recv_ranks=send_recv_ranks,
+            send_recv_ranks=self._intra_ranks,
             group=self.group,
             async_op=True,
             empty=self.empty,
@@ -751,51 +802,20 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProvider):
         )
 
 
-_INTRANODE_GROUPS: dict[tuple[int, int], dist.ProcessGroup] = {}
+class _LocalChunkProviderHybridBroadcast(_LocalChunkProviderHybrid):
+    """Hybrid backward chunk provider: broadcast intra-node, P2P inter-node.
 
+    The backward twin of :func:`hybrid_broadcast_forward`. Each rank keeps one
+    ``_node_chunk`` per node round:
 
-def _get_intranode_group(
-    group: dist.ProcessGroup, gpus_per_node: int
-) -> dist.ProcessGroup:
-    """Return (and cache) the sub-group containing this rank's node.
-
-    NOTE: `dist.new_group` is collective -- every rank must build every
-    sub-group in the same order. Ranks passed to `new_group` are WORLD ranks,
-    so this assumes `group` is WORLD (as the P2P path already does when it
-    derives peers from `local_rank`).
-    """
-    key = (id(group), gpus_per_node)
-    cached = _INTRANODE_GROUPS.get(key)
-    if cached is not None:
-        return cached
-
-    world = dist.get_world_size(group)
-    rank = dist.get_rank(group)
-    mine: Optional[dist.ProcessGroup] = None
-    for start in range(0, world, gpus_per_node):
-        ranks = list(range(start, min(start + gpus_per_node, world)))
-        sub = dist.new_group(ranks=ranks)
-        if rank in ranks:
-            mine = sub
-    if mine is None:
-        raise RuntimeError("Current rank is not present in any intra-node group")
-    _INTRANODE_GROUPS[key] = mine
-    return mine
-
-
-class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
-    """Hybrid ring provider: broadcast intra-node, P2P inter-node.
-
-    Each rank owns exactly one buffer per "node round" (`_node_chunk`):
       * round 0  -> its own local x/kv
-      * round k  -> the chunk received over the inter-node P2P link
+      * round k  -> the chunk that arrived over the inter-node P2P link
 
-    Within a round of `gpus_per_node` steps, the rank whose local index equals
-    `step % gpus_per_node` broadcasts its `_node_chunk` to the node sub-group,
-    so after a full round every rank has seen every chunk resident on the node.
-    Unlike the P2P variant there is no intra-node rotation, so `_node_chunk`
-    is stable for the whole round and can be handed straight to the inter-node
-    send at the round boundary.
+    Within a round of ``gpus_per_node`` steps the node-local rank ``step % gpn``
+    broadcasts its ``_node_chunk`` to the node, so after a full round every node
+    rank has seen every chunk resident on the node. There is no intra-node
+    rotation, so ``_node_chunk`` is stable for the round and can be handed
+    straight to the next inter-node hop.
     """
 
     def __init__(
@@ -811,8 +831,6 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
         group: dist.ProcessGroup,
         empty: torch.Tensor,
         local_rank: int,
-        gpus_per_node: int = 4,
-        intranode_group: Optional[dist.ProcessGroup] = None,
     ) -> None:
         """Initialize the object.
 
@@ -840,53 +858,22 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
             Empty tensor used by communication helpers.
         local_rank : int
             Rank of the current process.
-        gpus_per_node : int
-            Number of processes assigned to each node.
-        intranode_group : Optional[dist.ProcessGroup]
-            Process group containing ranks on the current node.
-
         """
         super().__init__(
-            ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
+            ring_config,
+            chunks_to_save,
+            x,
+            w_qkv,
+            b,
+            seq_local,
+            h,
+            d,
+            group,
+            empty,
+            local_rank,
         )
-        self._recv_buf = torch.empty_like(
-            x if ring_config.send_in_forward == SendForward.X else chunks_to_save[0]
-        )
-        self._handle: Optional[dist.Work] = None
-        self.local_rank = int(local_rank)
-        self.gpus_per_node = gpus_per_node
-        self.intranode_group = intranode_group or _get_intranode_group(
-            group, gpus_per_node
-        )
-        # First rank of this node; broadcast sources are node_base + local idx.
-        self._node_base = (self.local_rank // gpus_per_node) * gpus_per_node
-
+        self.intranode_group = self.topo.intranode_group
         self._node_chunk: Optional[torch.Tensor] = None
-        self._internode_handle = None
-        self._internode_recv_buf = None
-
-    def _launch_internode(self, data: torch.Tensor, step: int) -> None:
-        """Launch an inter-node tensor transfer.
-
-        Parameters
-        ----------
-        data : torch.Tensor
-            Tensor data to communicate.
-        step : int
-            Current ring step.
-
-        """
-        buf = torch.empty_like(data)
-        self._internode_recv_buf, self._internode_handle = self.config.p2p_fn(
-            data=data,
-            buffer=buf,
-            direction=self.gpus_per_node,
-            group=self.group,
-            async_op=True,
-            tag=step % self.gpus_per_node,
-            empty=self.empty,
-            group_size=self.group.size(),
-        )
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return the tensors for the requested ring step.
@@ -902,13 +889,7 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
             Result returned by the operation.
         """
         if step == 0:
-            chunk = self._materialize_chunk0()
-            if self.config.save_for_backward == SaveBackward.KV:
-                kv = chunk
-            else:
-                kv, _, _ = _compute_kv(
-                    chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
-                )
+            kv = self._kv0()
             self._node_chunk = (
                 self.x if self.config.send_in_forward == SendForward.X else kv
             )
@@ -917,7 +898,7 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
             # alias `_node_chunk`) can never race the in-flight send.
             self._launch_internode(self._node_chunk.clone(), step)
 
-        elif step % self.gpus_per_node == 0:
+        elif step % self._gpn == 0:
             # New node round: adopt the chunk that arrived from the previous node.
             assert self._internode_handle is not None
             self._internode_handle.wait()
@@ -925,50 +906,36 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProvider):
 
         assert self._node_chunk is not None
 
-        # Intra-node broadcast. The source rank reuses its own buffer in place
-        # (contents unchanged); everyone else receives into scratch.
-        src = self._node_base + (step % self.gpus_per_node)
+        # Intra-node broadcast. The source rank reuses its own buffer in place;
+        # everyone else receives into scratch.
+        src = self.topo.rank_at(self.topo.node_idx, step)
+        is_src = self.topo.local_idx == step % self._gpn
         self._recv_buf = (
-            self._node_chunk
-            if self.local_rank == src
-            else torch.empty_like(self._node_chunk)
+            self._node_chunk if is_src else torch.empty_like(self._node_chunk)
         )
-        self._handle = dist.broadcast(
-            self._recv_buf, src=src, group=self.intranode_group, async_op=True
-        )
-        self._handle.wait()
-        recv_buf = self._recv_buf
+        dist.broadcast(self._recv_buf, src=src, group=self.intranode_group)
 
-        if self.config.send_in_forward == SendForward.X:
-            kv, kj, vj = _compute_kv(
-                recv_buf, self.w_qkv, self.b, self.seq_local, self.h, self.d
-            )
-            kj, vj = kj.contiguous(), vj.contiguous()
-        else:
-            kv = recv_buf
-            kj, vj = kv[0].contiguous(), kv[1].contiguous()
+        return self._kv_from(self._recv_buf)
 
-        return kj, vj, kv
+    def maybe_forward(self, step: int, ring_group_size: int) -> None:
+        """Schedule the next inter-node hop at a node-round boundary.
 
-    def maybe_forward(self, step: int, world_size: int) -> None:
-        # Intra-node movement is handled entirely by the broadcast in `get`;
-        # the only thing left to schedule is the next inter-node hop, issued a
-        # full round ahead so it overlaps the `gpus_per_node` local broadcasts.
-        """Schedule communication for the next ring step.
+        Intra-node movement is handled entirely by the broadcast in ``get``;
+        the only thing left is the next inter-node hop, issued a full round
+        ahead so it overlaps the ``gpus_per_node`` local broadcasts.
 
         Parameters
         ----------
         step : int
             Current ring step.
-        world_size : int
-            Number of processes in the distributed group.
-
+        ring_group_size : int
+            Number of ranks in the ring group.
         """
-        if step == 0 or step >= world_size - 1:
+        if step == 0 or step >= ring_group_size - 1:
             return
-        if step % self.gpus_per_node != 0:
+        if step % self._gpn != 0:
             return
-        if step // self.gpus_per_node >= (self.group.size() // self.gpus_per_node) - 1:
+        if step // self._gpn >= self.topo.n_nodes - 1:
             return
 
         assert self._node_chunk is not None
