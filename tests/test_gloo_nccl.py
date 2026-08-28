@@ -73,7 +73,6 @@ def make_process_mesh(
             mesh_dim_names=tuple(["model"]),
         )
     else:  #
-        print(f"mesh shape! {mesh_shape[:-2]}")
         model_mesh = dist.device_mesh.init_device_mesh(
             device_type=device_type,
             mesh_shape=tuple(

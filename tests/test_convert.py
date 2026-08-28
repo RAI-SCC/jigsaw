@@ -405,7 +405,6 @@ def test_attention(device: torch.device, process_mesh_dict_2x1x2: dict) -> None:
             return values
 
     transformer = Attention(embed_dim, heads)
-    print("Attention")
     # copy weights
     q_weight = transformer.q.weight.clone()
     x_global = torch.randn(1, x_seq, embed_dim, device=device)
@@ -576,7 +575,6 @@ def test_jigsaw_transformer(
         dist_head_cat_grad, process_mesh_dict_2x1x2, pm_key="col", dim=-1
     )
 
-    print("transformer")
     assert ref_forward is not None
     assert ref_qkv_w is not None
     assert ref_qkv_grad is not None
@@ -677,7 +675,6 @@ def test_jigsaw_conv2d(device: torch.device, process_mesh_dict_2x2: dict) -> Non
     assert isinstance(dist_d_x, torch.Tensor)
     dist_d_x = gather_1d_results(dist_d_x, process_mesh_dict_2x2, dim=1, pm_key="col")
     dist_d_x = gather_1d_results(dist_d_x, process_mesh_dict_2x2, dim=-1, pm_key="row")
-    print(f"conv2d {dist_d_x.sum()}")
     assert ref_forward is not None
     assert ref_conv_weights is not None
     assert ref_d_w is not None
@@ -688,7 +685,6 @@ def test_jigsaw_conv2d(device: torch.device, process_mesh_dict_2x2: dict) -> Non
     assert torch.allclose(ref_conv_weights, dist_w, atol=1e-5), "weights do not match"
     assert torch.allclose(ref_d_w, dist_d_w, atol=1e-4), "weight grad does not match"
     assert torch.allclose(ref_d_x, dist_d_x, atol=1e-4), "weight grad does not match"
-    print(f"R{torch.distributed.get_rank()} made it to this assertion")
 
 
 def test_jigsaw_conv2dtranspose(
@@ -700,7 +696,6 @@ def test_jigsaw_conv2dtranspose(
     out_channels = 32
     kernel_size = 4
     h, w = 100, 100
-    print("conv2dtranspose")
     torch.use_deterministic_algorithms(True)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False

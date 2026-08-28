@@ -10,8 +10,13 @@ from jigsaw.modules.attention.config import (
     SendOp,
 )
 
-from .chunk_provider import _build_backward_chunk_provider
+from .backward_chunk_provider import _build_backward_chunk_provider
 from .functional import HybridTopology, get_hybrid_topology
+
+# Hybrid send-ops whose backward chunk provider rotates chunks intra-node as well
+# as inter-node, so a step's dK/dV belongs to local index ``local_idx + step``
+# rather than ``step`` (HYBRID_BROADCAST leaves the chunk put intra-node).
+_INTRA_ROTATING_HYBRIDS = frozenset({SendOp.HYBRID_P2P, SendOp.HYBRID_ALLTOALL})
 
 # --------------------------------------------------------------------------- #
 # backward: main loop
@@ -31,7 +36,6 @@ def ring_backward(
     ring_group_size: int,
     chunks_to_save: tuple[torch.Tensor, ...],
     ring_config: RingAttentionConfig,
-    empty: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for ring attention."""
     b, h, seq_local, d = q.shape
@@ -67,7 +71,6 @@ def ring_backward(
         h,
         d,
         group,
-        empty,
         local_rank,
     )
 
@@ -97,7 +100,6 @@ def ring_backward(
                 seq_local,
                 local_rank,
                 group,
-                empty,
             )
 
         # No-op for providers that don't re-circulate chunks (e.g. global).
@@ -160,7 +162,6 @@ def accumulate_dkv(
     seq_local: int,
     local_rank: int,
     group: dist.ProcessGroup,
-    empty: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fold this step's locally computed dk_j, dv_j into the running dK, dV."""
     if not _use_global_dkv_buffer(ring_config):
@@ -169,10 +170,10 @@ def accumulate_dkv(
             and ring_config.save_scope == SaveScope.LOCAL
         ):
             return _accumulate_dkv_hybrid_broadcast(
-                ring_config, dk_buf, dv_buf, dk_j, dv_j, step, group, empty
+                ring_config, dk_buf, dv_buf, dk_j, dv_j, step, group
             )
         return _accumulate_dkv_send(
-            ring_config, dk_buf, dv_buf, dk_j, dv_j, step, group, empty
+            ring_config, dk_buf, dv_buf, dk_j, dv_j, step, group
         )
 
     if ring_config.save_scope == SaveScope.GLOBAL:
@@ -184,17 +185,18 @@ def accumulate_dkv(
         # LOCAL scope: the backward chunk provider re-circulates chunks, so the
         # global chunk this step's dK/dV belongs to depends on the send_op.
         match ring_config.send_op:
-            case SendOp.HYBRID_P2P | SendOp.HYBRID_BROADCAST:
+            case SendOp.HYBRID_P2P | SendOp.HYBRID_BROADCAST | SendOp.HYBRID_ALLTOALL:
                 # The chunk sits on node `node_idx - step // gpn` (the inter-node
-                # ring runs backwards relative to the forward). HYBRID_P2P also
-                # rotates it intra-node, so its local index is `local_idx + step`;
-                # HYBRID_BROADCAST leaves it put and node-local rank `step % gpn`
-                # was the broadcast source, so `step` is the local index.
+                # ring runs backwards relative to the forward). HYBRID_P2P and
+                # HYBRID_ALLTOALL also rotate it intra-node, so its local index
+                # is `local_idx + step`; HYBRID_BROADCAST leaves it put and
+                # node-local rank `step % gpn` was the broadcast source, so
+                # `step` is the local index.
                 topo = get_hybrid_topology(group, ring_config.gpus_per_node)
                 node_step = step // topo.gpus_per_node
                 local = (
                     topo.local_idx + step
-                    if ring_config.send_op == SendOp.HYBRID_P2P
+                    if ring_config.send_op in _INTRA_ROTATING_HYBRIDS
                     else step
                 )
                 global_chunk_idx = topo.rank_at(topo.node_idx - node_step, local)
@@ -268,7 +270,6 @@ def _accumulate_dkv_send(
     dv_j: torch.Tensor,
     step: int,
     group: dist.ProcessGroup,
-    empty: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Send dk and dv to the corresponding rank.
@@ -292,8 +293,6 @@ def _accumulate_dkv_send(
         Step.
     group: dist.ProcessGroup
         Process group for ring attention.
-    empty: torch.Tensor
-        Empty tensor for computational reasons.
 
     Returns
     -------
@@ -309,7 +308,7 @@ def _accumulate_dkv_send(
     recv_buf = torch.empty_like(dkv)
 
     # hybrid
-    if ring_config.send_op == SendOp.HYBRID_P2P:
+    if ring_config.send_op in _INTRA_ROTATING_HYBRIDS:
         topo = get_hybrid_topology(group, ring_config.gpus_per_node)
         send_recv_ranks = _hybrid_dkv_relay_peers(topo, step)
         recv_buf, _ = ring_config.p2p_fn(
@@ -318,7 +317,6 @@ def _accumulate_dkv_send(
             send_recv_ranks=send_recv_ranks,
             group=group,
             async_op=False,
-            empty=empty,
             step=step,
         )
     else:
@@ -328,7 +326,6 @@ def _accumulate_dkv_send(
             step if ring_config.send_op != SendOp.BROADCAST else -step,
             group=group,
             async_op=False,
-            empty=empty,
             step=step,
         )
     dkj_r, dvj_r = torch.chunk(recv_buf, 2, dim=0)
@@ -345,7 +342,6 @@ def _accumulate_dkv_hybrid_broadcast(
     dv_j: torch.Tensor,
     step: int,
     group: dist.ProcessGroup,
-    empty: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fold a HYBRID_BROADCAST + LOCAL step's dK/dV into local-sized buffers.
 
@@ -380,7 +376,6 @@ def _accumulate_dkv_hybrid_broadcast(
             ),
             group=group,
             async_op=False,
-            empty=empty,
             step=step,
         )
         dkv = recv

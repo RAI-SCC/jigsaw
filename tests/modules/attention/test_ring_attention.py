@@ -417,7 +417,6 @@ def test_ring_forward_backward(
     )
     x.fill_(local_rank * 0.1)
     x = x.contiguous()
-    empty = torch.empty(0, device=x.device, dtype=dtype)
 
     qkv = x @ w_qkv.mT
     # QKV shape: [B, Nlocal, 3*d*h]
@@ -442,12 +441,10 @@ def test_ring_forward_backward(
         scale,
         0.0,
         process_mesh_dict["row"],
-        empty,
         local_rank,
         world_size,
         ring_config,
     )
-    print(f"R{dist.get_rank()} out {out.sum()}")
     out_full = gather_1d_results(out, process_mesh_dict, dim=2)
     x_full = gather_1d_results(x, process_mesh_dict, dim=1)
     qkv = x_full @ w_qkv.mT
@@ -495,9 +492,7 @@ def test_ring_forward_backward(
         world_size,
         chunks_to_save,
         ring_config=ring_config,
-        empty=empty,
     )
-    print(f"R{dist.get_rank()} dq {dq_local.sum()}")
 
     # Backward pass
     out_ref.backward(torch.ones_like(out_ref))
@@ -547,15 +542,21 @@ def test_ring_forward_backward(
 
 
 @pytest.mark.dist(8)
-@pytest.mark.parametrize("send_in_forward", [config.SendForward.X])
-@pytest.mark.parametrize("save_for_backward", [config.SaveBackward.X])
+@pytest.mark.parametrize(
+    "send_in_forward", [config.SendForward.X, config.SendForward.KV]
+)
+@pytest.mark.parametrize(
+    "save_for_backward", [config.SaveBackward.X, config.SaveBackward.KV]
+)
 @pytest.mark.parametrize(
     "send_op",
     [
         config.SendOp.HYBRID_P2P,
+        config.SendOp.HYBRID_ALLTOALL,
         config.SendOp.HYBRID_BROADCAST,
         config.SendOp.P2P,
         config.SendOp.ALLTOALL,
+        config.SendOp.BROADCAST,
     ],
 )
 @pytest.mark.parametrize(
@@ -595,7 +596,6 @@ def test_ring_hybrid(
         offload=offloader,
     )
 
-    print(f"ring_config {ring_config}")
     ring_forward = forward.build_ring_forward(ring_config)
     local_rank = dist.get_rank(group=process_mesh_dict["model"])
     world_size = dist.get_world_size(group=process_mesh_dict["model"])
@@ -615,7 +615,6 @@ def test_ring_hybrid(
     )
     x = x.contiguous()
     x = x.fill_(0.1 * local_rank)
-    empty = torch.empty(0, device=x.device, dtype=dtype)
 
     qkv = x @ w_qkv.mT
     # QKV shape: [B, Nlocal, 3*d*h]
@@ -640,7 +639,6 @@ def test_ring_hybrid(
         scale,
         0.0,
         group=process_mesh_dict["model"],
-        empty=empty,
         local_rank=local_rank,
         ring_group_size=world_size,
         ring_config=ring_config,
@@ -692,7 +690,6 @@ def test_ring_hybrid(
         world_size,
         chunks_to_save,
         ring_config=ring_config,
-        empty=empty,
     )
 
     # Backward pass

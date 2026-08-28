@@ -121,7 +121,6 @@ class DistributedAttention(torch.nn.Module):
 
         self.heads = heads // self.channel_group.size()
         self.scale = (embed_dim // heads) ** -0.5
-        self.empty = torch.empty(0, device=device)
 
         self.config = (
             attention_config.RingAttentionConfig(device=device)
@@ -206,7 +205,6 @@ class DistributedAttention(torch.nn.Module):
             self.scale,
             self.dropout_p,
             self.spatial_group,
-            self.empty,
             self.local_rank,
             self.config,
         )[0]
