@@ -144,6 +144,20 @@ class _BackwardChunkProvider(ABC):
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return contiguous (kj, vj) and the underlying kv buffer for `step`."""
 
+    def maybe_forward(self, step: int, ring_group_size: int) -> None:
+        """Kick off communication for the next ring step, if any.
+
+        No-op by default; providers that re-circulate chunks override this.
+
+        Parameters
+        ----------
+        step : int
+            Current ring step.
+        ring_group_size : int
+            Number of ranks in the ring group.
+        """
+        return
+
 
 class _GlobalChunkProvider(_BackwardChunkProvider):
     """
@@ -743,6 +757,7 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProviderHybrid):
         # inter-node hop at a node boundary, the intra-node ring otherwise.
         if step % self._gpn == 0:
             assert self._internode_handle is not None
+            assert self._internode_recv_buf is not None
             self._internode_handle.wait()
             recv_buf = self._internode_recv_buf
         else:
@@ -766,13 +781,13 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProviderHybrid):
             return
 
         node_step = step // self._gpn
-        if step % self._gpn == 0 and node_step < self.topo.n_nodes - 1:
-            # Relay the inter-node chunk one more hop along the node ring.
-            self._launch_internode(self._internode_recv_buf, step)
-        # At a node boundary the intra-node ring restarts from the chunk that
-        # just arrived over the inter-node link.
         if step % self._gpn == 0:
             assert self._internode_recv_buf is not None
+            if node_step < self.topo.n_nodes - 1:
+                # Relay the inter-node chunk one more hop along the node ring.
+                self._launch_internode(self._internode_recv_buf, step)
+            # At a node boundary the intra-node ring restarts from the chunk
+            # that just arrived over the inter-node link.
             self._recv_buf = self._internode_recv_buf
 
         next_recv = torch.empty_like(self._recv_buf)

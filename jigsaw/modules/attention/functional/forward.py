@@ -51,6 +51,25 @@ def _online_softmax_merge(
 # --------------------------------------------------------------------------- #
 # forward implementations
 # --------------------------------------------------------------------------- #
+def _init_out_lse(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Zeroed output and ``-inf`` log-sum-exp accumulators shaped like ``q``.
+
+    Parameters
+    ----------
+    q : torch.Tensor
+        Local query tensor ``(b, heads, n_local, d)``.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        ``out`` (zeros, like ``q``) and ``lse`` (``-inf``, ``(b, heads, n_local)``).
+    """
+    b, heads, n_local, _ = q.shape
+    out = torch.zeros_like(q)
+    lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype)
+    return out, lse
+
+
 def _attend_step(
     ring_config: RingAttentionConfig,
     q: torch.Tensor,
@@ -111,9 +130,8 @@ def broadcast_forward(
 ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]:
     """Forward pass for ring attention using broadcast instead of P2P sends."""
     b, heads, n_local, d = q.shape
-
-    out = torch.zeros_like(q)
-    lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype)
+    send_x = ring_config.send_in_forward == SendForward.X
+    out, lse = _init_out_lse(q)
 
     x_j = x
 
@@ -145,7 +163,7 @@ def broadcast_forward(
                 empty=empty,
             )
 
-        if ring_config.send_in_forward == SendForward.X:
+        if send_x:
             if step != local_rank:
                 # Recompute KV from current Xj (received in previous iter)
                 kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
@@ -185,8 +203,8 @@ def ring_forward(
 ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]:
     """Forward pass for ring attention using point-to-point sends."""
     b, heads, n_local, d = q.shape
-    out = torch.zeros_like(q)
-    lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype)
+    send_x = ring_config.send_in_forward == SendForward.X
+    out, lse = _init_out_lse(q)
 
     x_j = x
 
@@ -210,7 +228,7 @@ def ring_forward(
     )
 
     for step in range(ring_group_size):
-        if step > 0 and ring_config.send_in_forward == SendForward.X:
+        if step > 0 and send_x:
             kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
 
         if ring_config.save_scope == SaveScope.GLOBAL:
@@ -258,6 +276,7 @@ def hybrid_p2p_forward(
     ``// gpus_per_node`` arithmetic here.
     """
     b, heads, n_local, d = q.shape
+    send_x = ring_config.send_in_forward == SendForward.X
     topo = get_hybrid_topology(group, ring_config.gpus_per_node)
     gpn, n_nodes = topo.gpus_per_node, topo.n_nodes
 
@@ -266,8 +285,7 @@ def hybrid_p2p_forward(
     intra_ranks = [topo.intra_peer(-1), topo.intra_peer(1)]
     inter_ranks = [topo.inter_peer(-1), topo.inter_peer(1)]
 
-    out = torch.zeros_like(q)
-    lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype)
+    out, lse = _init_out_lse(q)
     x_j = x
 
     # Local KV
@@ -283,17 +301,9 @@ def hybrid_p2p_forward(
     for node_step in range(n_nodes):
         # Kick off this round's inter-node send of the original local chunk.
         if node_step < n_nodes - 1:
-            internode_recv_buf = (
-                torch.empty_like(x_j)
-                if ring_config.send_in_forward == SendForward.X
-                else torch.empty_like(kv_j)
-            )
+            internode_recv_buf = torch.empty_like(x_j if send_x else kv_j)
             internode_recv_buf, internode_handle = ring_config.p2p_fn(
-                data=(
-                    x.clone()
-                    if ring_config.send_in_forward == SendForward.X
-                    else kv.clone()
-                ),
+                data=(x.clone() if send_x else kv.clone()),
                 buffer=internode_recv_buf,
                 send_recv_ranks=inter_ranks,
                 group=group,
@@ -303,21 +313,17 @@ def hybrid_p2p_forward(
             )
         for step in range(gpn):
             if step + 1 < gpn:
-                recv_buf = (
-                    torch.empty_like(x_j)
-                    if ring_config.send_in_forward == SendForward.X
-                    else torch.empty_like(kv_j)
-                )
+                recv_buf = torch.empty_like(x_j if send_x else kv_j)
                 # Start communicating information in a ring
                 recv_buf, handle = ring_config.send_op_fn(
-                    x_j if ring_config.send_in_forward == SendForward.X else kv_j,
+                    x_j if send_x else kv_j,
                     recv_buf,
                     send_recv_ranks=intra_ranks,
                     group=group,
                     tag=step,
                 )
 
-            if ring_config.send_in_forward == SendForward.X:
+            if send_x:
                 kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
 
             if ring_config.save_scope == SaveScope.GLOBAL:
@@ -344,7 +350,7 @@ def hybrid_p2p_forward(
             x_j, kv_j, kj, vj = ring_config.forward_recv_fn(
                 internode_recv_buf, x_j, kv_j, kj, vj
             )
-            if ring_config.send_in_forward == SendForward.X:
+            if send_x:
                 kv_j, kj, vj = _compute_kv(x_j, w_qkv, b, n_local, heads, d)
 
     ring_config.wait_offloads()
@@ -385,8 +391,7 @@ def hybrid_broadcast_forward(
     # hybrid_p2p_forward).
     inter_ranks = [topo.inter_peer(-1), topo.inter_peer(1)]
 
-    out = torch.zeros_like(q)
-    lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype)
+    out, lse = _init_out_lse(q)
     x_j = x
 
     # Local KV
