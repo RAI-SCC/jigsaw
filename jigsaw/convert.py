@@ -4,13 +4,24 @@ from typing import Any, Callable
 
 import torch
 
-from jigsaw.modules import attention, conv, conv1d, conv_transpose, linear, roll
+from jigsaw.modules import (
+    attention,
+    conv,
+    conv1d,
+    conv_transpose,
+    conv_transpose_1d,
+    conv_transpose_3d,
+    linear,
+    roll,
+)
 
 mapped_modules: dict[type[torch.nn.Module], Any] = {
     torch.nn.Linear: linear.DistributedXWT,
     torch.nn.Conv1d: conv1d.DistributedConv1D,
     torch.nn.Conv2d: conv.DistributedConv2D,
+    torch.nn.ConvTranspose1d: conv_transpose_1d.DistributedConvTranspose1D,
     torch.nn.ConvTranspose2d: conv_transpose.DistributedConvTranspose2D,
+    torch.nn.ConvTranspose3d: conv_transpose_3d.DistributedConvTranspose3D,
     roll.Roll: roll.DistributedRoll,
 }
 container_converters: dict[type[torch.nn.Module], Callable[..., torch.nn.Module]] = {
