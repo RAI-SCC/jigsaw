@@ -29,6 +29,7 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 
+from jigsaw.comm import get_empty
 from jigsaw.modules.attention.config import (
     RingAttentionConfig,
     SaveScope,
@@ -54,7 +55,6 @@ class _ForwardChunkProvider(ABC):
         x: torch.Tensor,
         w_qkv: torch.Tensor,
         group: dist.ProcessGroup,
-        empty: torch.Tensor,
         local_rank: int,
         world_size: int,
     ) -> None:
@@ -72,8 +72,6 @@ class _ForwardChunkProvider(ABC):
             Fused query, key, and value projection weights.
         group : dist.ProcessGroup
             Process group used for ring communication.
-        empty : torch.Tensor
-            Empty tensor used by the communication helpers.
         local_rank : int
             Rank of the current process within ``group``.
         world_size : int
@@ -82,7 +80,6 @@ class _ForwardChunkProvider(ABC):
         self.config = ring_config
         self.q, self.k, self.v, self.x, self.w_qkv = q, k, v, x, w_qkv
         self.group = group
-        self.empty = empty
         self.local_rank = local_rank
         self.world_size = world_size
         self.b, self.h, self.n_local, self.d = q.shape
@@ -158,7 +155,7 @@ class _RingForwardChunkProvider(_ForwardChunkProvider):
         """Kick off the first ring send of the local chunk."""
         super().__init__(*args)  # type: ignore[arg-type]
         self._recv_buf, self._handle = self.config.forward_send_fn(
-            self.x_j, self.kv_j, direction=-1, group=self.group, tag=0, empty=self.empty
+            self.x_j, self.kv_j, direction=-1, group=self.group, tag=0
         )
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -185,7 +182,6 @@ class _RingForwardChunkProvider(_ForwardChunkProvider):
                     direction=-1,
                     group=self.group,
                     tag=step,
-                    empty=self.empty,
                 )
             if self.send_x:
                 self._kv_from_x()
@@ -209,7 +205,7 @@ class _BroadcastForwardChunkProvider(_ForwardChunkProvider):
     def __init__(self, *args: object) -> None:
         """Initialize the broadcast bookkeeping."""
         super().__init__(*args)  # type: ignore[arg-type]
-        self._recv_buf: torch.Tensor = self.empty
+        self._recv_buf: torch.Tensor = get_empty(self.q.device, self.q.dtype)
         self._handle: Optional[dist.Work] = None
 
     def _kick(self, src_rank: int) -> None:
@@ -220,7 +216,6 @@ class _BroadcastForwardChunkProvider(_ForwardChunkProvider):
             local_rank=self.local_rank,
             group=self.group,
             src_rank=src_rank % self.world_size,
-            empty=self.empty,
         )
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -292,7 +287,6 @@ class _HybridForwardChunkProvider(_ForwardChunkProvider):
             group=self.group,
             async_op=True,
             tag=node_step,
-            empty=self.empty,
         )
 
 
@@ -473,7 +467,6 @@ def build_forward_chunk_provider(
     x: torch.Tensor,
     w_qkv: torch.Tensor,
     group: dist.ProcessGroup,
-    empty: torch.Tensor,
     local_rank: int,
     world_size: int,
 ) -> _ForwardChunkProvider:
@@ -491,8 +484,6 @@ def build_forward_chunk_provider(
         Fused query, key, and value projection weights.
     group : dist.ProcessGroup
         Process group used for ring communication.
-    empty : torch.Tensor
-        Empty tensor used by the communication helpers.
     local_rank : int
         Rank of the current process within ``group``.
     world_size : int
@@ -503,7 +494,7 @@ def build_forward_chunk_provider(
     _ForwardChunkProvider
         The provider for the configured communication strategy.
     """
-    args = (ring_config, q, k, v, x, w_qkv, group, empty, local_rank, world_size)
+    args = (ring_config, q, k, v, x, w_qkv, group, local_rank, world_size)
     match ring_config.send_op:
         case SendOp.BROADCAST:
             return _BroadcastForwardChunkProvider(*args)

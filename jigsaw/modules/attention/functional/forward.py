@@ -95,7 +95,6 @@ def ring_forward(
     scale: float,
     dropout_p: float,
     group: dist.ProcessGroup,
-    empty: torch.Tensor,
     local_rank: int,
     ring_group_size: int,
     ring_config: RingAttentionConfig,
@@ -123,8 +122,6 @@ def ring_forward(
         Attention dropout probability.
     group : dist.ProcessGroup
         Distributed process group used for ring communication.
-    empty : torch.Tensor
-        Empty tensor used by the communication helpers.
     local_rank : int
         Rank within ``group``.
     ring_group_size : int
@@ -142,7 +139,7 @@ def ring_forward(
     lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype)
 
     provider = build_forward_chunk_provider(
-        ring_config, q, k, v, x, w_qkv, group, empty, local_rank, ring_group_size
+        ring_config, q, k, v, x, w_qkv, group, local_rank, ring_group_size
     )
 
     for step in range(ring_group_size):

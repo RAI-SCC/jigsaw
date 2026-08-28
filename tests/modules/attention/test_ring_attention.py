@@ -417,7 +417,6 @@ def test_ring_forward_backward(
     )
     x.fill_(local_rank * 0.1)
     x = x.contiguous()
-    empty = torch.empty(0, device=x.device, dtype=dtype)
 
     qkv = x @ w_qkv.mT
     # QKV shape: [B, Nlocal, 3*d*h]
@@ -442,7 +441,6 @@ def test_ring_forward_backward(
         scale,
         0.0,
         process_mesh_dict["row"],
-        empty,
         local_rank,
         world_size,
         ring_config,
@@ -495,7 +493,6 @@ def test_ring_forward_backward(
         world_size,
         chunks_to_save,
         ring_config=ring_config,
-        empty=empty,
     )
     print(f"R{dist.get_rank()} dq {dq_local.sum()}")
 
@@ -621,7 +618,6 @@ def test_ring_hybrid(
     )
     x = x.contiguous()
     x = x.fill_(0.1 * local_rank)
-    empty = torch.empty(0, device=x.device, dtype=dtype)
 
     qkv = x @ w_qkv.mT
     # QKV shape: [B, Nlocal, 3*d*h]
@@ -646,7 +642,6 @@ def test_ring_hybrid(
         scale,
         0.0,
         group=process_mesh_dict["model"],
-        empty=empty,
         local_rank=local_rank,
         ring_group_size=world_size,
         ring_config=ring_config,
@@ -698,7 +693,6 @@ def test_ring_hybrid(
         world_size,
         chunks_to_save,
         ring_config=ring_config,
-        empty=empty,
     )
 
     # Backward pass

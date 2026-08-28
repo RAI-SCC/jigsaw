@@ -36,7 +36,6 @@ def ring_backward(
     ring_group_size: int,
     chunks_to_save: tuple[torch.Tensor, ...],
     ring_config: RingAttentionConfig,
-    empty: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for ring attention."""
     b, h, seq_local, d = q.shape
@@ -72,7 +71,6 @@ def ring_backward(
         h,
         d,
         group,
-        empty,
         local_rank,
     )
 
@@ -102,7 +100,6 @@ def ring_backward(
                 seq_local,
                 local_rank,
                 group,
-                empty,
             )
 
         # No-op for providers that don't re-circulate chunks (e.g. global).
@@ -165,7 +162,6 @@ def accumulate_dkv(
     seq_local: int,
     local_rank: int,
     group: dist.ProcessGroup,
-    empty: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fold this step's locally computed dk_j, dv_j into the running dK, dV."""
     if not _use_global_dkv_buffer(ring_config):
@@ -174,10 +170,10 @@ def accumulate_dkv(
             and ring_config.save_scope == SaveScope.LOCAL
         ):
             return _accumulate_dkv_hybrid_broadcast(
-                ring_config, dk_buf, dv_buf, dk_j, dv_j, step, group, empty
+                ring_config, dk_buf, dv_buf, dk_j, dv_j, step, group
             )
         return _accumulate_dkv_send(
-            ring_config, dk_buf, dv_buf, dk_j, dv_j, step, group, empty
+            ring_config, dk_buf, dv_buf, dk_j, dv_j, step, group
         )
 
     if ring_config.save_scope == SaveScope.GLOBAL:
@@ -274,7 +270,6 @@ def _accumulate_dkv_send(
     dv_j: torch.Tensor,
     step: int,
     group: dist.ProcessGroup,
-    empty: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Send dk and dv to the corresponding rank.
@@ -298,8 +293,6 @@ def _accumulate_dkv_send(
         Step.
     group: dist.ProcessGroup
         Process group for ring attention.
-    empty: torch.Tensor
-        Empty tensor for computational reasons.
 
     Returns
     -------
@@ -324,7 +317,6 @@ def _accumulate_dkv_send(
             send_recv_ranks=send_recv_ranks,
             group=group,
             async_op=False,
-            empty=empty,
             step=step,
         )
     else:
@@ -334,7 +326,6 @@ def _accumulate_dkv_send(
             step if ring_config.send_op != SendOp.BROADCAST else -step,
             group=group,
             async_op=False,
-            empty=empty,
             step=step,
         )
     dkj_r, dvj_r = torch.chunk(recv_buf, 2, dim=0)
@@ -351,7 +342,6 @@ def _accumulate_dkv_hybrid_broadcast(
     dv_j: torch.Tensor,
     step: int,
     group: dist.ProcessGroup,
-    empty: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fold a HYBRID_BROADCAST + LOCAL step's dK/dV into local-sized buffers.
 
@@ -386,7 +376,6 @@ def _accumulate_dkv_hybrid_broadcast(
             ),
             group=group,
             async_op=False,
-            empty=empty,
             step=step,
         )
         dkv = recv

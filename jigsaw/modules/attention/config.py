@@ -251,7 +251,6 @@ def _select_forward_send_fn(
         direction: int,
         group: dist.ProcessGroup,
         tag: int,
-        empty: torch.Tensor,
         group_size: Optional[int] = None,
         **_: Any,
     ) -> tuple[torch.Tensor, Optional[dist.Work]]:
@@ -263,7 +262,6 @@ def _select_forward_send_fn(
             group=group,
             async_op=True,
             tag=tag,
-            empty=empty,
             group_size=group_size,
         )
         return recv_buf, handle

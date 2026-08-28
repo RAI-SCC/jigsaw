@@ -8,6 +8,7 @@ from typing import Optional, cast
 import torch
 import torch.distributed as dist
 
+from jigsaw.comm import get_empty
 from jigsaw.modules.attention.config import (
     RingAttentionConfig,
     SaveBackward,
@@ -30,7 +31,6 @@ def _build_backward_chunk_provider(
     h: int,
     d: int,
     group: dist.ProcessGroup,
-    empty: torch.Tensor,
     local_rank: int,
 ) -> _BackwardChunkProvider:
     """
@@ -56,8 +56,6 @@ def _build_backward_chunk_provider(
         Per-head embedding dimension.
     group: dist.ProcessGroup
         Process group for ring attention.
-    empty: torch.Tensor
-        Empty tensor for computation reasons.
     local_rank: int
         Rank within the distributed attention group.
 
@@ -84,7 +82,6 @@ def _build_backward_chunk_provider(
         h,
         d,
         group,
-        empty,
         local_rank,
     )
     match ring_config.send_op:
@@ -254,7 +251,6 @@ class _LocalChunkProvider(_BackwardChunkProvider):
         h: int,
         d: int,
         group: dist.ProcessGroup,
-        empty: torch.Tensor,
     ) -> None:
         """
         Initialize LocalChunkProvider.
@@ -279,8 +275,6 @@ class _LocalChunkProvider(_BackwardChunkProvider):
             Embedding dimension per head.
         group: dist.ProcessGroup
             Process group upon which ring attention is performed.
-        empty: torch.Tensor
-            Empty tensor for computational reasons.
         """
         self.config = ring_config
         self.chunk0 = chunks_to_save[0]
@@ -288,9 +282,8 @@ class _LocalChunkProvider(_BackwardChunkProvider):
         self.w_qkv = w_qkv
         self.b, self.seq_local, self.h, self.d = b, seq_local, h, d
         self.group = group
-        self.empty = empty
 
-        self._recv_buf = empty
+        self._recv_buf = get_empty(x.device, x.dtype)
         self._handle: Optional[dist.Work] = None
 
     def _materialize_chunk0(self) -> torch.Tensor:
@@ -379,7 +372,6 @@ class _LocalChunkProvider(_BackwardChunkProvider):
                 direction=-1,
                 group=self.group,
                 async_op=True,
-                empty=self.empty,
                 step=step,
             )
 
@@ -420,7 +412,6 @@ class _LocalChunkProvider(_BackwardChunkProvider):
             direction=-1,
             group=self.group,
             async_op=True,
-            empty=self.empty,
             step=step,
         )
 
@@ -508,7 +499,6 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
         h: int,
         d: int,
         group: dist.ProcessGroup,
-        empty: torch.Tensor,
         local_rank: int,
     ) -> None:
         """Initialize the shared hybrid state.
@@ -533,13 +523,11 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
             Embedding dimension per attention head.
         group : dist.ProcessGroup
             Process group used for distributed communication.
-        empty : torch.Tensor
-            Empty tensor used by communication helpers.
         local_rank : int
             Rank of the current process.
         """
         super().__init__(
-            ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
+            ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group
         )
         self._recv_buf = torch.empty_like(
             x if ring_config.send_in_forward == SendForward.X else chunks_to_save[0]
@@ -572,7 +560,6 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
             group=self.group,
             async_op=True,
             tag=step % self._gpn,
-            empty=self.empty,
         )
 
 
@@ -599,7 +586,6 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProviderHybrid):
             send_recv_ranks=self._intra_ranks,
             group=self.group,
             async_op=True,
-            empty=self.empty,
             step=step,
         )
 

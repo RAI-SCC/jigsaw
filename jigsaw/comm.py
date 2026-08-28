@@ -1,9 +1,23 @@
 """Module for communication operations."""
 
+from functools import lru_cache
 from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
+
+
+@lru_cache(maxsize=None)
+def get_empty(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """Return a cached zero-length tensor for ``(device, dtype)``.
+
+    ``dist.all_to_all`` needs a placeholder entry for every rank a given hop
+    doesn't actually exchange data with. Those entries carry nothing, so a
+    single shared empty tensor per ``(device, dtype)`` suffices; caching it here
+    avoids threading one through every ring-attention call site and reallocating
+    it on every hop.
+    """
+    return torch.empty(0, device=device, dtype=dtype)
 
 
 def comm_2way_alltoall(
@@ -118,7 +132,6 @@ def comm_1d_alltoall(
     send_recv_ranks: Optional[list[int]] = None,
     group: Optional[dist.ProcessGroup] = None,
     async_op: bool = True,
-    empty: Optional[torch.Tensor] = None,
     group_size: Optional[int] = None,
     *args: Any,
     **kwargs: Any,
@@ -139,8 +152,6 @@ def comm_1d_alltoall(
         Process group within which to send data.
     async_op: bool
         Boolean flag for whether communication should be asynchronous or not.
-    empty: torch.Tensor
-        Empty for computational reasons.
     send_recv_ranks: list[int], optional
         Explicit send and receive rank pair.
     group_size: int, optional
@@ -158,9 +169,7 @@ def comm_1d_alltoall(
     if group is None:
         raise ValueError("group is required")
     group_size = group.size() if group_size is None else group_size
-    empty = torch.empty(
-        0, device=data.device, dtype=data.dtype
-    )  # TODO: reinitializing empty
+    empty = get_empty(data.device, data.dtype)
 
     if send_recv_ranks is None:
         if direction is None:

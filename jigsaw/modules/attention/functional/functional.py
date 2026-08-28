@@ -178,7 +178,6 @@ def get_hybrid_topology(group: dist.ProcessGroup, gpus_per_node: int) -> HybridT
 class RingCtx(Protocol):
     """Protocol for types stored within ctx."""
 
-    empty: torch.Tensor
     scale: float
     local_rank: int
     group: dist.ProcessGroup
@@ -205,7 +204,6 @@ class RingAttentionFunction(torch.autograd.Function):
         scale: float,
         dropout_p: float,
         group: dist.ProcessGroup,
-        empty: torch.Tensor,
         local_rank: int,
         config: RingAttentionConfig,
     ) -> tuple[torch.Tensor, torch.Tensor, tuple]:
@@ -225,8 +223,6 @@ class RingAttentionFunction(torch.autograd.Function):
             Attention dropout probability.
         group : dist.ProcessGroup
             Distributed process group used for ring communication.
-        empty : torch.Tensor
-            Empty tensor used by communication helpers.
         local_rank : int
             Rank within the process group.
         config : RingAttentionConfig
@@ -238,7 +234,6 @@ class RingAttentionFunction(torch.autograd.Function):
             Attention output, log-sum-exp values, and saved chunks.
         """
         ring_group_size = dist.get_world_size(group)
-        empty = torch.empty(0, device=x.device, dtype=x.dtype)
         from .forward import build_ring_forward
 
         ring_forward_fn = build_ring_forward(config)
@@ -251,7 +246,6 @@ class RingAttentionFunction(torch.autograd.Function):
             scale,
             dropout_p,
             group,
-            empty,
             local_rank,
             ring_group_size,
             config,
@@ -275,7 +269,7 @@ class RingAttentionFunction(torch.autograd.Function):
         output : Any
             Values returned by :meth:`forward`.
         """
-        q, k, v, x, w_qkv, scale, dropout_p, group, empty, local_rank, config = inputs
+        q, k, v, x, w_qkv, scale, dropout_p, group, local_rank, config = inputs
         out, lse, chunks_to_save = output
         ctx.mark_non_differentiable(lse)
         ctx.mark_non_differentiable(*chunks_to_save)
@@ -288,7 +282,6 @@ class RingAttentionFunction(torch.autograd.Function):
             *chunks_to_save,  # *[t for pair in chunks_to_save for t in pair]
         )
         c = cast(RingCtx, ctx)
-        c.empty = empty
         c.scale = scale
         c.local_rank = local_rank
         c.group = group
@@ -307,7 +300,6 @@ class RingAttentionFunction(torch.autograd.Function):
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
-        None,
         None,
         None,
         None,
@@ -353,7 +345,6 @@ class RingAttentionFunction(torch.autograd.Function):
             ctx.ring_group_size,
             cast(tuple[torch.Tensor, ...], chunks_to_save),
             ring_config=ctx.config,
-            empty=ctx.empty,
         )
 
-        return dq, dk, dv, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None
