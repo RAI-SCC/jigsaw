@@ -183,21 +183,20 @@ def accumulate_dkv(
         # LOCAL scope: the backward chunk provider re-circulates chunks, so the
         # global chunk this step's dK/dV belongs to depends on the send_op.
         match ring_config.send_op:
-            case SendOp.HYBRID_P2P:
-                # Chunk rode the node/local ring: after `step` steps this rank
-                # holds chunk `(node_idx - step // gpn, local_idx + step)` (the
-                # inter-node ring runs backwards relative to the forward).
+            case SendOp.HYBRID_P2P | SendOp.HYBRID_BROADCAST:
+                # The chunk sits on node `node_idx - step // gpn` (the inter-node
+                # ring runs backwards relative to the forward). HYBRID_P2P also
+                # rotates it intra-node, so its local index is `local_idx + step`;
+                # HYBRID_BROADCAST leaves it put and node-local rank `step % gpn`
+                # was the broadcast source, so `step` is the local index.
                 topo = get_hybrid_topology(group, ring_config.gpus_per_node)
                 node_step = step // topo.gpus_per_node
-                global_chunk_idx = topo.rank_at(
-                    topo.node_idx - node_step, topo.local_idx + step
+                local = (
+                    topo.local_idx + step
+                    if ring_config.send_op == SendOp.HYBRID_P2P
+                    else step
                 )
-            case SendOp.HYBRID_BROADCAST:
-                # Node-local rank `step % gpn` broadcast its chunk this step, so
-                # the local index is the broadcast source, not `local_idx + step`.
-                topo = get_hybrid_topology(group, ring_config.gpus_per_node)
-                node_step = step // topo.gpus_per_node
-                global_chunk_idx = topo.rank_at(topo.node_idx - node_step, step)
+                global_chunk_idx = topo.rank_at(topo.node_idx - node_step, local)
             case SendOp.BROADCAST:
                 global_chunk_idx = (local_rank - step) % ring_group_size
             case _:
@@ -229,7 +228,7 @@ def _accumulate_dkv_gather(
     dk_j: torch.Tensor
         Local result for dk for step j.
     dv_j: torch.Tensor
-        Local result for dk for step j.
+        Local result for dv for step j.
     seq_local: int
         Local sequence length.
     global_chunk_idx: int
