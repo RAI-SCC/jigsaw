@@ -5,6 +5,7 @@ from typing import Any, cast
 import torch
 import torch.distributed as dist
 
+from jigsaw.comm import get_empty, resolve_matmul_dtype
 from jigsaw.modules.buffers import get_preallocated_buffer
 
 streams = None
@@ -74,7 +75,7 @@ def fused_xw_xtw_twoway(
     buffer_x = get_preallocated_buffer(
         grad_output.shape, grad_output.dtype, local_rank, device
     )
-    empty = torch.empty(0, device=device, dtype=grad_output.dtype)
+    empty = get_empty(device, grad_output.dtype)
 
     match mod:
         case 0:
@@ -138,27 +139,25 @@ def xw_transpose_twoway(
     wij = wij.to(xij.device)
     w0, w1 = torch.split(wij, wij.shape[-2] // 2, dim=-2)
 
+    # ``xw`` is a matmul result, so under autocast its dtype is not knowable
+    # from the inputs alone. Resolve it up front so the receive buffer and the
+    # placeholder can be allocated before the ``xw`` matmul runs.
+    xw_dtype = resolve_matmul_dtype(device, xij, wij)
+    buffer_xw = get_preallocated_buffer(
+        cast(torch.Size, (*xij.shape[:-1], w0.shape[-2])),
+        xw_dtype,
+        local_rank,
+        device,
+    )
+    empty = get_empty(device, xw_dtype)
+
     match mod:
         case 0:
             xw = torch.matmul(xij, w1.mT)
-            buffer_xw = get_preallocated_buffer(
-                cast(torch.Size, (*xij.shape[:-1], w0.shape[-2])),
-                xw.dtype,
-                local_rank,
-                device,
-            )
-            empty = torch.empty(0, device=device, dtype=xw.dtype)
             xw_send_list = [empty, xw]
             xw_recv_list = [empty, buffer_xw]
         case 1:
             xw = torch.matmul(xij, w0.mT)
-            buffer_xw = get_preallocated_buffer(
-                cast(torch.Size, (*xij.shape[:-1], w0.shape[-2])),
-                xw.dtype,
-                local_rank,
-                device,
-            )
-            empty = torch.empty(0, device=device, dtype=xw.dtype)
             xw_send_list = [xw, empty]
             xw_recv_list = [buffer_xw, empty]
 
@@ -211,7 +210,7 @@ def xw_twoway(
     mod = local_rank % 2
     w0, w1 = torch.split(wij, wij.shape[-2] // 2, dim=-2)
     buffer_x = get_preallocated_buffer(xij.shape, xij.dtype, local_rank, device)
-    empty = torch.empty(0, device=device, dtype=xij.dtype)
+    empty = get_empty(device, xij.dtype)
 
     match mod:
         case 0:
@@ -267,7 +266,7 @@ def x_transpose_w_twoway(
         Local result.
     """
     mod = local_rank % 2
-    empty = torch.empty(0, device=device, dtype=xij.dtype)
+    empty = get_empty(device, xij.dtype)
 
     buffer_x = get_preallocated_buffer(xij.shape, xij.dtype, local_rank, device)
 
@@ -327,7 +326,7 @@ def xw_transpose_fourway(
         Local result.
     """
     mod = local_rank % 4
-    empty = torch.empty(0, device=device, dtype=xij.dtype)
+    empty = get_empty(device, xij.dtype)
 
     match mod:
         case 0:
@@ -454,7 +453,7 @@ def xw_fourway(
         Local result.
     """
     mod = local_rank % 4
-    empty = torch.empty(0, device=device, dtype=xij.dtype)
+    empty = get_empty(device, xij.dtype)
 
     xdtype, wdtype = xij.dtype, wij.dtype
     xij = xij.contiguous()
@@ -586,7 +585,7 @@ def fused_xw_xtw_fourway(
     Gradient with respect to the input and gradient of the weights.
     """
     mod = local_rank % 4
-    empty = torch.empty(0, device=device, dtype=grad_output.dtype)
+    empty = get_empty(device, grad_output.dtype)
 
     grad_output = grad_output.contiguous()
     xdtype, wdtype, idtype = grad_output.dtype, weight.dtype, input.dtype
@@ -785,7 +784,7 @@ def x_transpose_w_fourway(
         Local result.
     """
     mod = local_rank % 4
-    empty = torch.empty(0, device=device, dtype=xij.dtype)
+    empty = get_empty(device, xij.dtype)
 
     xdtype, wdtype = xij.dtype, wij.dtype
 
@@ -915,7 +914,7 @@ def xw_transpose_eightway_(
         Local result.
     """
     mod = local_rank % 8
-    empty = torch.empty(0, device=device, dtype=xij.dtype)
+    empty = get_empty(device, xij.dtype)
 
     match mod:
         case 0:
@@ -1240,7 +1239,7 @@ def xw_transpose_eightway(
         Local result.
     """
     mod = local_rank % 8
-    empty = torch.empty(0, device=device, dtype=xij.dtype)
+    empty = get_empty(device, xij.dtype)
     streams: list[torch.cuda.Stream] = [torch.cuda.Stream() for _ in range(2)]
     match mod:
         case 0:
@@ -1565,7 +1564,7 @@ def xw_eightway_(
     """
     # mod = rank % 8
     mod = local_rank
-    empty = torch.empty(0, device=device, dtype=xij.dtype)
+    empty = get_empty(device, xij.dtype)
     match mod:
         case 0:
             x_send_list = [empty, xij, empty, empty, empty, empty, empty, empty]
@@ -1889,7 +1888,7 @@ def xw_eightway(
         Local result.
     """
     mod = local_rank % 8
-    empty = torch.empty(0, device=device, dtype=torch.float32)
+    empty = get_empty(device, torch.float32)
     streams: list[torch.cuda.Stream] = [torch.cuda.Stream() for _ in range(2)]
 
     w0 = get_preallocated_buffer(
@@ -1909,7 +1908,7 @@ def xw_eightway(
 
     w0_shape = w0.shape
     split_size = w0_shape[-2] // 2
-    empty = torch.empty(0, device=device, dtype=torch.float32)
+    empty = get_empty(device, torch.float32)
 
     match mod:
         case 0:
@@ -2234,7 +2233,7 @@ def x_transpose_w_eightway_(
         Local result.
     """
     mod = local_rank % 8
-    empty = torch.empty(0, device=device, dtype=torch.float32)
+    empty = get_empty(device, torch.float32)
 
     # split upon last dimension
     x0, x1 = torch.split(xij, xij.shape[-1] // 2, dim=-1)
@@ -2545,7 +2544,7 @@ def x_transpose_w_eightway(
         Local result.
     """
     mod = local_rank % 8
-    empty = torch.empty(0, device=device, dtype=torch.float32)
+    empty = get_empty(device, torch.float32)
 
     x0, x1 = torch.split(xij.mT, xij.shape[-1] // 2, dim=-2)
     x0, x1 = x0.contiguous(), x1.contiguous()

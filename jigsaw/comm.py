@@ -20,6 +20,23 @@ def get_empty(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     return torch.empty(0, device=device, dtype=dtype)
 
 
+def resolve_matmul_dtype(device: torch.device, *operands: torch.Tensor) -> torch.dtype:
+    """Return the dtype a ``matmul`` over ``operands`` produces on ``device``.
+
+    Mirrors the autocast handling in :mod:`jigsaw.modules.linear.functional`: an
+    active autocast forces the op to run (and emit) in the autocast dtype,
+    otherwise the result takes the operands' promoted dtype. Resolving it here
+    lets a call site size the receive buffer for a matmul result *before*
+    running the matmul that would otherwise be the only way to learn the dtype.
+    """
+    if torch.is_autocast_enabled(device.type):
+        return torch.get_autocast_dtype(device.type)
+    dtype = operands[0].dtype
+    for operand in operands[1:]:
+        dtype = torch.promote_types(dtype, operand.dtype)
+    return dtype
+
+
 def comm_2way_alltoall(
     data: torch.Tensor,
     buffer: torch.Tensor,

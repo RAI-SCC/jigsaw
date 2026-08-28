@@ -5,6 +5,7 @@ from typing import cast
 import torch
 import torch.distributed as dist
 
+from jigsaw.comm import resolve_matmul_dtype
 from jigsaw.modules.buffers import get_preallocated_buffer
 
 # mypy: disable-error-code="union-attr"
@@ -104,8 +105,16 @@ def xw_transpose_twoway(
     """
     mod = local_rank % 2
     w0, w1 = torch.split(wij, wij.shape[-2] // 2, dim=-2)
-    buffer_xw = (
-        torch.zeros((*xij.shape[:-1], w0.shape[-2])).to(torch.float32).to(device)
+
+    # ``xw`` is a matmul result, so under autocast its dtype is not knowable
+    # from the inputs alone. Resolve it up front so the receive buffer can be
+    # allocated from the shared cache before the ``xw`` matmul runs.
+    xw_dtype = resolve_matmul_dtype(device, xij, wij)
+    buffer_xw = get_preallocated_buffer(
+        cast(torch.Size, (*xij.shape[:-1], w0.shape[-2])),
+        xw_dtype,
+        local_rank,
+        device,
     )
     match mod:
         case 0:
