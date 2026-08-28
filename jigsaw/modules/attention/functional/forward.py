@@ -97,7 +97,7 @@ def ring_forward(
     group: dist.ProcessGroup,
     empty: torch.Tensor,
     local_rank: int,
-    world_size: int,
+    ring_group_size: int,
     ring_config: RingAttentionConfig,
 ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]:
     """Forward pass for ring attention.

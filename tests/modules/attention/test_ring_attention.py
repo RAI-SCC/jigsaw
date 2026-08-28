@@ -12,122 +12,114 @@ from tests.process_mesh import *
 pytestmark = [pytest.mark.dist_required]
 
 
-@pytest.mark.dist(4)
-@pytest.mark.parametrize(
-    ("gpus_per_node", "expected_internode_size", "expected_intranode_size"),
-    [(1, 2, 1), (2, 1, 2)],
-)
-def test_build_intxxnode_groups(
-    device: torch.device,
-    gpus_per_node: int,
-    expected_internode_size: int,
-    expected_intranode_size: int,
+@pytest.mark.dist(8)
+@pytest.mark.parametrize("gpus_per_node", [1, 2, 4, 8])
+def test_get_hybrid_topology(device: torch.device, gpus_per_node: int) -> None:
+    """Split the world ring into intra-/inter-node sub-groups.
+
+    Parameters
+    ----------
+    device : torch.device
+        Device used to initialize the process group.
+    gpus_per_node : int
+        Number of consecutive ring ranks that share a node.
+    """
+    group = dist.group.WORLD
+    assert group is not None
+    world_size = dist.get_world_size(group)
+    rank = dist.get_rank(group)
+
+    functional._HYBRID_TOPOLOGY_CACHE.pop((group, gpus_per_node), None)
+    topo = functional.get_hybrid_topology(group, gpus_per_node)
+
+    assert topo.gpus_per_node == gpus_per_node
+    assert topo.n_nodes == world_size // gpus_per_node
+    assert (topo.node_idx, topo.local_idx) == divmod(rank, gpus_per_node)
+    assert topo.ring_rank == rank
+
+    assert dist.get_world_size(topo.intranode_group) == gpus_per_node
+    assert dist.get_world_size(topo.internode_group) == topo.n_nodes
+
+    # Intra-node peers are the contiguous chunk; inter-node peers share the
+    # local offset across nodes.
+    node_start = topo.node_idx * gpus_per_node
+    assert sorted(dist.get_process_group_ranks(topo.intranode_group)) == list(
+        range(node_start, node_start + gpus_per_node)
+    )
+    assert sorted(dist.get_process_group_ranks(topo.internode_group)) == list(
+        range(topo.local_idx, world_size, gpus_per_node)
+    )
+
+    # Cached: same object on the second call.
+    assert functional.get_hybrid_topology(group, gpus_per_node) is topo
+
+
+@pytest.mark.dist(8)
+@pytest.mark.parametrize("gpus_per_node", [1, 2, 4])
+def test_get_hybrid_topology_on_mesh_subgroup(
+    device: torch.device, gpus_per_node: int
 ) -> None:
-    """Build row-based inter-node and intra-node process groups.
+    """Run the ring over one mesh dimension, not the global world.
+
+    With a ``(row=4, col=2)`` mesh the ring is the ``row`` group: its world
+    size is 4 (not 8), and the two ``col`` rings build their sub-groups
+    independently over their own global ranks.
 
     Parameters
     ----------
     device : torch.device
         Device used to initialize the process mesh.
     gpus_per_node : int
-        Number of row ranks assigned to each node.
-    expected_internode_size : int
-        Expected size of the returned inter-node group.
-    expected_intranode_size : int
-        Expected size of the returned intra-node group.
+        Number of consecutive ring ranks that share a node.
     """
-    process_mesh = dist.device_mesh.init_device_mesh(
+    mesh = dist.device_mesh.init_device_mesh(
         device_type=device.type,
-        mesh_shape=(2, 2),
+        mesh_shape=(4, 2),
         mesh_dim_names=("row", "col"),
     )
+    group = mesh.get_group("row")
+    ring_global_ranks = dist.get_process_group_ranks(group)
+    world_size = len(ring_global_ranks)
+    assert world_size == 4  # ring size == size(row), not the global world size
 
-    internode_groups, intranode_groups = functional.build_intxxnode_groups(
-        process_mesh, gpus_per_node=gpus_per_node
+    functional._HYBRID_TOPOLOGY_CACHE.pop((group, gpus_per_node), None)
+    topo = functional.get_hybrid_topology(group, gpus_per_node)
+
+    ring_pos = dist.get_rank(group)
+    node_idx, local_idx = divmod(ring_pos, gpus_per_node)
+    n_nodes = world_size // gpus_per_node
+
+    assert (topo.n_nodes, topo.node_idx, topo.local_idx) == (n_nodes, node_idx, local_idx)
+    assert dist.get_world_size(topo.intranode_group) == gpus_per_node
+    assert dist.get_world_size(topo.internode_group) == n_nodes
+
+    node_start = node_idx * gpus_per_node
+    assert sorted(dist.get_process_group_ranks(topo.intranode_group)) == sorted(
+        ring_global_ranks[node_start : node_start + gpus_per_node]
     )
-
-    assert len(internode_groups) == 1
-    assert len(intranode_groups) == 1
-    assert dist.get_world_size(internode_groups[0]) == expected_internode_size
-    assert dist.get_world_size(intranode_groups[0]) == expected_intranode_size
-    assert dist.get_rank(internode_groups[0]) >= 0
-    assert dist.get_rank(intranode_groups[0]) >= 0
+    assert sorted(dist.get_process_group_ranks(topo.internode_group)) == sorted(
+        ring_global_ranks[node * gpus_per_node + local_idx] for node in range(n_nodes)
+    )
+    # Every member of a sub-group lands on the same underlying group.
+    assert functional.get_hybrid_topology(group, gpus_per_node) is topo
 
 
 @pytest.mark.dist(4)
-def test_build_intxxnode_groups_rejects_invalid_node_size(
-    device: torch.device,
-) -> None:
-    """Reject a non-positive number of GPUs per node.
+def test_get_hybrid_topology_rejects_bad_args(device: torch.device) -> None:
+    """Reject a non-positive or non-dividing ``gpus_per_node``.
 
     Parameters
     ----------
     device : torch.device
-        Device used to initialize the process mesh.
+        Device used to initialize the process group.
     """
-    process_mesh = dist.device_mesh.init_device_mesh(
-        device_type=device.type,
-        mesh_shape=(2, 2),
-        mesh_dim_names=("row", "col"),
-    )
+    group = dist.group.WORLD
+    assert group is not None
 
     with pytest.raises(ValueError, match="gpus_per_node must be positive"):
-        functional.build_intxxnode_groups(process_mesh, gpus_per_node=0)
-
-
-@pytest.mark.dist(48)
-def test_build_intxxnode_groups_four_dimensional_mesh(
-    device: torch.device,
-) -> None:
-    """Build groups for a four-dimensional mesh with uneven node chunks."""
-    process_mesh = dist.device_mesh.init_device_mesh(
-        device_type=device.type,
-        mesh_shape=(2, 3, 4, 2),
-        mesh_dim_names=("dp", "row", "col", "replica"),
-    )
-
-    internode_groups, intranode_groups = functional.build_intxxnode_groups(
-        process_mesh, gpus_per_node=2
-    )
-
-    assert sorted({dist.get_world_size(group) for group in internode_groups}) == [1, 2]
-    assert sorted({dist.get_world_size(group) for group in intranode_groups}) == [1, 2]
-
-
-@pytest.mark.dist(8)
-@pytest.mark.parametrize(
-    ("mesh_shape", "mesh_dim_names", "gpus_per_node", "expected_size"),
-    [
-        ((8, 1), ("row", "col"), 8, (1, 8)),
-        ((4, 2), ("row", "col"), 2, (2, 2)),
-        ((2, 2, 2), ("dp", "row", "col"), 2, (1, 2)),
-        ((2, 1, 2, 2), ("dp", "row", "col", "replica"), 1, (1, 1)),
-    ],
-)
-def test_build_intxxnode_groups_arbitrary_mesh_shapes(
-    device: torch.device,
-    mesh_shape: tuple[int, ...],
-    mesh_dim_names: tuple[str, ...],
-    gpus_per_node: int,
-    expected_size: tuple[int, int],
-) -> None:
-    """Build groups for arbitrary-dimensional meshes with eight ranks."""
-    process_mesh = dist.device_mesh.init_device_mesh(
-        device_type=device.type,
-        mesh_shape=mesh_shape,
-        mesh_dim_names=mesh_dim_names,
-    )
-
-    internode_groups, intranode_groups = functional.build_intxxnode_groups(
-        process_mesh, gpus_per_node=gpus_per_node
-    )
-
-    assert sorted({dist.get_world_size(group) for group in internode_groups}) == [
-        expected_size[0]
-    ]
-    assert sorted({dist.get_world_size(group) for group in intranode_groups}) == [
-        expected_size[1]
-    ]
+        functional.get_hybrid_topology(group, 0)
+    with pytest.raises(ValueError, match="divisible by gpus_per_node"):
+        functional.get_hybrid_topology(group, 3)
 
 
 # def test_backward(device, process_mesh):
@@ -656,7 +648,7 @@ def test_ring_hybrid(
         group=process_mesh_dict["model"],
         empty=empty,
         local_rank=local_rank,
-        world_size=world_size,
+        ring_group_size=world_size,
         ring_config=ring_config,
     )
 
