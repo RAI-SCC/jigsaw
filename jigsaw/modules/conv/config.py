@@ -21,7 +21,7 @@ class ConvConfig:
     def __init__(
         self,
         bayesian: bool,
-        spatial_group: dist.ProcessGroup,
+        spatial_groups: tuple[dist.ProcessGroup | None, ...],
         channel_group: dist.ProcessGroup,
         bias: Parameter | None,
         kernel_size: tuple[int, int],
@@ -33,8 +33,9 @@ class ConvConfig:
 
         bayesian: bool
             Flag for whether the model is bayesian.
-        spatial_group: dist.ProcessGroup
-            Domain-parallel process group.
+        spatial_groups: tuple[dist.ProcessGroup | None, ...]
+            Per-axis domain-parallel process groups, aligned with ``(H, W)``.
+            ``None`` (or size 1) marks an axis that is not split.
         channel_group: dist.ProcessGroup
             Tensor-parallel process group.
         bias: torch.Tensor | None
@@ -50,7 +51,7 @@ class ConvConfig:
         self.conv2d_input_fn = self._conv2d_input_fn_selection(bayesian)
         self.conv2d_weight_fn = self._conv2d_weight_fn_selection(bayesian)
         self.weight_reshape = self._reshape_weights_selection(bayesian)
-        self.grad_bias = self._grad_bias_selection(spatial_group, bias)
+        self.grad_bias = self._grad_bias_selection(bias)
         # ``stride == kernel_size`` (on every axis) tiles the domain with no
         # overlap, so the spatial split needs no communication. Otherwise
         # neighbouring output columns share input columns and the spatial ranks
@@ -164,77 +165,24 @@ class ConvConfig:
         """No-op."""
         return w
 
-    def _grad_bias_selection(
-        self, spatial_group: dist.ProcessGroup, bias: Optional[torch.Tensor]
-    ) -> Callable:
-        """
-        Selector function for grad bias reduction.
-
-        Grad of bias needs to be all-reduced to synchronize across spatial process.
-
-        Parameters
-        ----------
-        spatial_group: dist.ProcessGroup
-            Domain-parallel process group.
-        bias: Optional[torch.Tensor]
-            Bias tensor.
-
-        Returns
-        -------
-        Callable
-        """
+    def _grad_bias_selection(self, bias: Optional[torch.Tensor]) -> Callable:
+        """Select the grad-bias reducer; the spatial reduction is done by a hook."""
         if bias is None:
             return self._no_bias
-        elif spatial_group.size() == 2:
-            return self._no_reduce_grad_bias
-        else:
-            return self._reduce_bias_over_spatial_group
+        return self._sum_grad_bias
 
     def _no_bias(self, *args: Any, **kwargs: Any) -> None:
         """No-op."""
         return None
 
-    def _no_reduce_grad_bias(
+    def _sum_grad_bias(
         self,
         grad_output: torch.Tensor,
         spatial_group: Optional[dist.ProcessGroup] = None,
     ) -> torch.Tensor:
-        """
-        Sum grad_output to get grad_bias.
+        """Sum ``grad_output`` over batch and spatial axes, leaving the channels.
 
-        Parameters
-        ----------
-        grad_output: torch.Tensor
-            Gradient wrt output.
-        spatial_group: dist.ProcessGroup
-            Process group for domain-parallel ranks.
-
-        Returns
-        -------
-        grad_bias: torch.Tensor
-            Gradient wrt bias.
+        The spatial-grid reduction of this local sum is done by the parameter
+        gradient hook registered on the bias.
         """
         return grad_output.sum(dim=(-4, -2, -1))
-
-    def _reduce_bias_over_spatial_group(
-        self,
-        grad_output: torch.Tensor,
-        spatial_group: Optional[dist.ProcessGroup] = None,
-    ) -> torch.Tensor:
-        """
-        Sum grad_output to get grad_bias.
-
-        Parameters
-        ----------
-        grad_output: torch.Tensor
-            Gradient wrt output.
-        spatial_group: dist.ProcessGroup
-            Process group for domain-parallel ranks.
-
-        Returns
-        -------
-        grad_bias: torch.Tensor
-            Gradient wrt bias.
-        """
-        grad_b = grad_output.sum(dim=(-4, -2, -1))
-        return grad_b

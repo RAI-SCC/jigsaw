@@ -376,3 +376,287 @@ class TestConv3dParallel:
             padding=padding,
             dilation=dilation,
         )
+
+
+# ---------------------------------------------------------------------------
+# multi-spatial-dim parallelism: the domain is split along depth / height /
+# width simultaneously.
+# ---------------------------------------------------------------------------
+def _conv3d_multi_spatial_reference_check(
+    device: torch.device,
+    mesh: dict,
+    in_channels: int,
+    out_channels: int,
+    kernel_size: Triple,
+    depth: int,
+    height: int,
+    width: int,
+    batch: int = 2,
+    stride: Triple | None = None,
+    padding: Triple = 0,
+    dilation: Triple = 1,
+) -> None:
+    """Compare a ``DistributedConv3D`` split along D/H/W to a plain conv3d.
+
+    ``mesh`` carries ``sd`` (depth), ``sh`` (height), ``sw`` (width) and ``col``
+    (channel) groups plus a ``model`` group over every rank. Any spatial group
+    may be size 1 (that axis is then not split). Covers the no-halo regime
+    (``stride == kernel_size``) and the halo regime, and checks the output plus
+    every gradient after gathering the sharded results.
+    """
+    d_group, h_group, w_group, c_group = (
+        mesh["sd"],
+        mesh["sh"],
+        mesh["sw"],
+        mesh["col"],
+    )
+    model_group = mesh["model"]
+    nd, nh, nw, nc = (
+        d_group.size(),
+        h_group.size(),
+        w_group.size(),
+        c_group.size(),
+    )
+    kernel_size = _triple(kernel_size)
+    stride = kernel_size if stride is None else _triple(stride)
+    padding = _triple(padding)
+    dilation = _triple(dilation)
+
+    torch.manual_seed(model_group.rank())
+    x_local = torch.randn(
+        batch,
+        in_channels // nc,
+        depth // nd,
+        height // nh,
+        width // nw,
+        device=device,
+    )
+
+    conv = conv3d.DistributedConv3D(
+        in_channels,
+        out_channels,
+        kernel_size,
+        device=device,
+        spatial_group=[d_group, h_group, w_group],
+        channel_group=c_group,
+        stride=stride,
+        padding=padding,
+        dilation=dilation,
+        groups=1,
+        bias=True,
+        parallelism=model_group.size(),
+        bayesian=False,
+        dtype=torch.float32,
+    ).to(device)
+
+    def _gather_spatial(t: torch.Tensor) -> torch.Tensor:
+        t = gather_1d_results(t, mesh, dim=-4, pm_key="col")
+        t = gather_1d_results(t, mesh, dim=-3, pm_key="sd")
+        t = gather_1d_results(t, mesh, dim=-2, pm_key="sh")
+        return gather_1d_results(t, mesh, dim=-1, pm_key="sw")
+
+    weight_global = gather_1d_results(
+        conv.weight.detach(), mesh, dim=0, pm_key="col"
+    ).clone()
+    bias_global = gather_1d_results(
+        conv.bias.detach(), mesh, dim=0, pm_key="col"
+    ).clone()
+    x_global = _gather_spatial(x_local).clone()
+
+    x_global.requires_grad_(True)
+    weight_global.requires_grad_(True)
+    bias_global.requires_grad_(True)
+
+    y_ref = F.conv3d(
+        x_global,
+        weight_global,
+        bias_global,
+        stride=stride,
+        padding=padding,
+        dilation=dilation,
+    )
+
+    assert (
+        y_ref.shape[-3] % nd == 0
+        and y_ref.shape[-2] % nh == 0
+        and y_ref.shape[-1] % nw == 0
+    ), (
+        f"global output {tuple(y_ref.shape[-3:])} not divisible by spatial "
+        f"grid ({nd}, {nh}, {nw})"
+    )
+
+    torch.manual_seed(2024)
+    grad_global = torch.randn(y_ref.shape, device=device)
+    y_ref.backward(grad_global)
+
+    x_dist = x_local.clone().requires_grad_(True)
+    y = conv(x_dist)
+
+    oc_local = out_channels // nc
+    od_local = y_ref.shape[-3] // nd
+    oh_local = y_ref.shape[-2] // nh
+    ow_local = y_ref.shape[-1] // nw
+    grad_local = grad_global[
+        ...,
+        c_group.rank() * oc_local : (c_group.rank() + 1) * oc_local,
+        d_group.rank() * od_local : (d_group.rank() + 1) * od_local,
+        h_group.rank() * oh_local : (h_group.rank() + 1) * oh_local,
+        w_group.rank() * ow_local : (w_group.rank() + 1) * ow_local,
+    ].contiguous()
+    y.backward(grad_local)
+
+    y_global = _gather_spatial(y.detach())
+    x_grad_global = _gather_spatial(x_dist.grad)
+    w_grad_global = gather_1d_results(conv.weight.grad, mesh, dim=0, pm_key="col")
+    b_grad_global = gather_1d_results(conv.bias.grad, mesh, dim=0, pm_key="col")
+
+    assert torch.allclose(y_global, y_ref, atol=1e-4, rtol=1e-4)
+    assert torch.allclose(x_grad_global, x_global.grad, atol=1e-4, rtol=1e-4)
+    assert torch.allclose(w_grad_global, weight_global.grad, atol=1e-4, rtol=1e-4)
+    assert torch.allclose(b_grad_global, bias_global.grad, atol=1e-4, rtol=1e-4)
+
+
+class TestConv3dMultiSpatial:
+    """Distributed Conv3d with the domain split along several spatial axes."""
+
+    @pytest.mark.dist(4)
+    def test_dh_split_no_halo(
+        self, device: torch.device, spatial_mesh_2x2x1_dhw: dict
+    ) -> None:
+        """2 (depth) x 2 (height) split, stride == kernel (no communication)."""
+        _conv3d_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x2x1_dhw,
+            in_channels=6,
+            out_channels=12,
+            kernel_size=2,
+            depth=8,
+            height=8,
+            width=8,
+        )
+
+    @pytest.mark.dist(4)
+    def test_dh_split_halo(
+        self, device: torch.device, spatial_mesh_2x2x1_dhw: dict
+    ) -> None:
+        """2 (depth) x 2 (height) split, overlapping windows on both axes."""
+        _conv3d_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x2x1_dhw,
+            in_channels=6,
+            out_channels=12,
+            kernel_size=3,
+            depth=12,
+            height=12,
+            width=12,
+            stride=2,
+            padding=1,
+        )
+
+    @pytest.mark.dist(4)
+    def test_dw_split_halo(
+        self, device: torch.device, spatial_mesh_2x1x2_dhw: dict
+    ) -> None:
+        """Depth and width split, height not split, overlapping windows."""
+        _conv3d_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x1x2_dhw,
+            in_channels=6,
+            out_channels=12,
+            kernel_size=3,
+            depth=12,
+            height=6,
+            width=12,
+            stride=2,
+            padding=1,
+        )
+
+    @pytest.mark.dist(4)
+    def test_dh_split_halo_asymmetric(
+        self, device: torch.device, spatial_mesh_2x2x1_dhw: dict
+    ) -> None:
+        """2x2 (D, H) split, non-square kernel/stride/padding, stride != kernel."""
+        _conv3d_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x2x1_dhw,
+            in_channels=6,
+            out_channels=12,
+            kernel_size=(2, 3, 3),
+            depth=12,
+            height=12,
+            width=12,
+            stride=(2, 2, 1),
+            padding=(0, 1, 1),
+        )
+
+    @pytest.mark.dist(8)
+    def test_dhw_split_no_halo(
+        self, device: torch.device, spatial_mesh_2x2x2_dhw: dict
+    ) -> None:
+        """Full 2x2x2 depth/height/width split, stride == kernel."""
+        _conv3d_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x2x2_dhw,
+            in_channels=6,
+            out_channels=12,
+            kernel_size=2,
+            depth=8,
+            height=8,
+            width=8,
+        )
+
+    @pytest.mark.dist(8)
+    def test_dhw_split_halo(
+        self, device: torch.device, spatial_mesh_2x2x2_dhw: dict
+    ) -> None:
+        """Full 2x2x2 depth/height/width split, overlapping windows on all axes."""
+        _conv3d_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x2x2_dhw,
+            in_channels=6,
+            out_channels=12,
+            kernel_size=3,
+            depth=12,
+            height=12,
+            width=12,
+            stride=2,
+            padding=1,
+        )
+
+    @pytest.mark.dist(8)
+    def test_dh_split_plus_channel_halo(
+        self, device: torch.device, spatial_mesh_2x2x1_dhw_x2c: dict
+    ) -> None:
+        """2x2 (D, H) split combined with 2-way channel parallelism."""
+        _conv3d_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x2x1_dhw_x2c,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            depth=16,
+            height=16,
+            width=8,
+            stride=2,
+            padding=1,
+        )
+
+    @pytest.mark.dist(4)
+    def test_wrong_length_sequence_rejected(
+        self, device: torch.device, spatial_mesh_2x2x1_dhw: dict
+    ) -> None:
+        """A spatial_group sequence must have one entry per spatial axis."""
+        with pytest.raises(ValueError):
+            conv3d.DistributedConv3D(
+                6,
+                12,
+                2,
+                device=device,
+                spatial_group=[
+                    spatial_mesh_2x2x1_dhw["sd"],
+                    spatial_mesh_2x2x1_dhw["sh"],
+                ],
+                channel_group=spatial_mesh_2x2x1_dhw["col"],
+                stride=2,
+                parallelism=spatial_mesh_2x2x1_dhw["model"].size(),
+            ).to(device)
