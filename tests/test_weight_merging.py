@@ -107,6 +107,18 @@ def test_mlp_weight_merging(
 
     class MLP(torch.nn.Module):
         def __init__(self, in_dim: int, hidden_dim: int, out_dim: int):
+            """Initialize the object.
+
+            Parameters
+            ----------
+            in_dim : int
+                Input feature dimension.
+            hidden_dim : int
+                Hidden feature dimension.
+            out_dim : int
+                Output feature dimension.
+
+            """
             super().__init__()
             self.linear1 = linear.DistributedXWT(
                 in_dim,
@@ -132,6 +144,18 @@ def test_mlp_weight_merging(
             self.activation = torch.nn.GELU()
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Run the module forward pass.
+
+            Parameters
+            ----------
+            x : torch.Tensor
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Result returned by the operation.
+            """
             x = self.linear1(x)
             x = self.activation(x)
             x = self.linear2(x)

@@ -40,6 +40,16 @@ def test_init_attention(device: torch.device, process_mesh_dict_2x2: dict) -> No
 
 @pytest.mark.dist(4)
 def test_attention_sync(device: torch.device, process_mesh_dict_2x2: dict) -> None:
+    """Verify synchronized distributed attention.
+
+    Parameters
+    ----------
+    device : torch.device
+        Device on which tensors and communication are placed.
+    process_mesh_dict_2x2 : dict
+        Two-by-two process mesh used by the test.
+
+    """
     in_dim, embed_dim, out_dim = 256, 256, 256
     heads = 4
     model = attention.DistributedAttention(

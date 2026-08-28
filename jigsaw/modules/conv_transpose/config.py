@@ -74,7 +74,20 @@ class ConvTransposeConfig:
         [torch.Tensor, torch.Tensor, torch.Tensor, dist.ProcessGroup, bool],
         tuple[torch.Tensor, list[Optional[dist.Work]]],
     ]:
+        """Select the channel communication function.
 
+        Parameters
+        ----------
+        channel_group : dist.ProcessGroup
+            Process group used for channel or tensor parallelism.
+        device : torch.device
+            Device on which tensors and communication are placed.
+
+        Returns
+        -------
+        Callable[[torch.Tensor, torch.Tensor, torch.Tensor, dist.ProcessGroup, bool], tuple[torch.Tensor, list[Optional[dist.Work]]]]
+            Result returned by the operation.
+        """
         if device.type == "cuda":
             match channel_group.size():
                 case 1:

@@ -69,7 +69,20 @@ class ConvConfig:
         [torch.Tensor, torch.Tensor, torch.Tensor, dist.ProcessGroup, bool],
         tuple[torch.Tensor, list[Optional[dist.Work]]],
     ]:
+        """Select the channel communication function.
 
+        Parameters
+        ----------
+        channel_group : dist.ProcessGroup
+            Process group used for channel or tensor parallelism.
+        device : torch.device
+            Device on which tensors and communication are placed.
+
+        Returns
+        -------
+        Callable[[torch.Tensor, torch.Tensor, torch.Tensor, dist.ProcessGroup, bool], tuple[torch.Tensor, list[Optional[dist.Work]]]]
+            Result returned by the operation.
+        """
         if device.type == "cuda":
             match channel_group.size():
                 case 1:
@@ -119,6 +132,22 @@ class ConvConfig:
         stride: tuple[int, int],
         spatial_group: dist.ProcessGroup,
     ) -> tuple[Callable, Callable]:
+        """Select the halo communication functions.
+
+        Parameters
+        ----------
+        kernel_size : tuple[int, int]
+            Spatial size of the convolution kernel.
+        stride : tuple[int, int]
+            Convolution stride.
+        spatial_group : dist.ProcessGroup
+            Process group used for spatial or domain parallelism.
+
+        Returns
+        -------
+        tuple[Callable, Callable]
+            Result returned by the operation.
+        """
         if isinstance(kernel_size, int) and isinstance(stride, int):
             if kernel_size == stride:
                 return (

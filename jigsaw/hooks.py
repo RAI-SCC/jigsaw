@@ -37,11 +37,20 @@ def make_grad_sync_hook(
     handles: list[torch.distributed.Work] = []
 
     def _finalize() -> None:
+        """Wait for all queued gradient communications to complete."""
         for h in handles:
             h.wait()
         handles.clear()
 
     def hook(param: Parameter) -> None:
+        """Synchronize or scale a parameter gradient.
+
+        Parameters
+        ----------
+        param : Parameter
+            Parameter whose gradient is processed.
+
+        """
         if param.grad is None:
             return
         if async_op:
@@ -78,6 +87,14 @@ def make_grad_scaling_hook(parallelism: int) -> Callable:
     """
 
     def hook(param: Parameter) -> None:
+        """Synchronize or scale a parameter gradient.
+
+        Parameters
+        ----------
+        param : Parameter
+            Parameter whose gradient is processed.
+
+        """
         if param.grad is not None:
             param.grad = param.grad / parallelism
 
