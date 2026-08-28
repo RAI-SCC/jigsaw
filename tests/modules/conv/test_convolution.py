@@ -11,95 +11,7 @@ from tests.process_mesh import *
 pytestmark = [pytest.mark.dist_required]
 
 
-class TestConv2d:
-    def test_param_init_conv2d(
-        self, device: torch.device, process_mesh_dict_2x2: dict
-    ) -> None:
-        """Verify initial weights for Conv2d are correctly synchronized."""
-        local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
-        torch.manual_seed(local_rank)  # each process gets a different initial seed
-        row_comm_size, col_comm_size = (
-            process_mesh_dict_2x2["row"].size(),
-            process_mesh_dict_2x2["col"].size(),
-        )
-        in_dim, out_dim = 5, 10
-        kernel_size = 4
-        conv2d = conv.DistributedConv2D(
-            in_dim,
-            out_dim,
-            kernel_size,
-            device=device,
-            spatial_group=process_mesh_dict_2x2["row"],
-            channel_group=process_mesh_dict_2x2["col"],
-            stride=kernel_size,
-            padding=(0,),
-            dilation=1,
-            groups=1,
-            bias=True,
-            parallelism=4,
-            bayesian=False,
-            dtype=torch.float32,
-        ).to(device)
-
-        weights_gathered_as_list = gather_results_as_list(
-            conv2d.weight, process_mesh_dict_2x2
-        )
-
-        for i in range(process_mesh_dict_2x2["model"].size() // row_comm_size):
-            assert torch.allclose(
-                weights_gathered_as_list[i],
-                weights_gathered_as_list[i + col_comm_size],
-                atol=1e-5,
-            )
-
-    def test_conv2d_forward(
-        self, device: torch.device, process_mesh_dict_2x2: dict
-    ) -> None:
-        """Verify initial weights for Conv2d are correctly synchronized."""
-        local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
-        torch.manual_seed(local_rank)  # each process gets a different initial seed
-        row_comm_size, col_comm_size = (
-            process_mesh_dict_2x2["row"].size(),
-            process_mesh_dict_2x2["col"].size(),
-        )
-        in_dim, out_dim = 6, 10
-        kernel_size = 4
-        h, w = 16, 16
-        conv2d = conv.DistributedConv2D(
-            in_dim,
-            out_dim,
-            kernel_size,
-            device=device,
-            spatial_group=process_mesh_dict_2x2["row"],
-            channel_group=process_mesh_dict_2x2["col"],
-            stride=kernel_size,
-            padding=(0,),
-            dilation=1,
-            groups=1,
-            bias=True,
-            parallelism=4,
-            bayesian=False,
-            dtype=torch.float32,
-        )
-
-        weights_gathered_as_list = gather_results_as_list(
-            conv2d.weight, process_mesh_dict_2x2
-        )
-
-        for i in range(process_mesh_dict_2x2["model"].size() // row_comm_size):
-            assert torch.allclose(
-                weights_gathered_as_list[i],
-                weights_gathered_as_list[i + col_comm_size],
-                atol=1e-5,
-            )
-
-        x = torch.randn(4, in_dim // 2, h, w // 2, device=device)
-        y = conv2d(x)
-        y.backward(torch.ones_like(y))
-        assert isinstance(y, torch.Tensor)
-
-
-def _channel_parallel_reference_check(
+def _conv2d_reference_check(
     device: torch.device,
     mesh: dict,
     in_channels: int,
@@ -109,8 +21,9 @@ def _channel_parallel_reference_check(
     width: int,
     batch: int = 2,
 ) -> None:
-    """Compare a channel-parallel ``DistributedConv2D`` against a single-process conv2d.
+    """Compare a distributed ``DistributedConv2D`` against a single-process conv2d.
 
+    Works for any ``row.size()`` (spatial) x ``col.size()`` (channel) mesh.
     Rebuilds the equivalent non-distributed convolution from the sharded weight,
     bias and input, runs both forward and backward, and checks the output plus
     every gradient (input, weight, bias) after gathering the distributed shards.
@@ -191,17 +104,112 @@ def _channel_parallel_reference_check(
     assert torch.allclose(b_grad_global, bias_global.grad, atol=1e-4, rtol=1e-4)
 
 
-class TestConv2dChannelParallel:
-    """Distributed Conv2d with a channel group wider than two ranks."""
+class TestConv2d:
+    def test_param_init_conv2d(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """Verify initial weights for Conv2d are correctly synchronized."""
+        local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
+        torch.manual_seed(local_rank)  # each process gets a different initial seed
+        row_comm_size, col_comm_size = (
+            process_mesh_dict_2x2["row"].size(),
+            process_mesh_dict_2x2["col"].size(),
+        )
+        in_dim, out_dim = 5, 10
+        kernel_size = 4
+        conv2d = conv.DistributedConv2D(
+            in_dim,
+            out_dim,
+            kernel_size,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=kernel_size,
+            padding=(0,),
+            dilation=1,
+            groups=1,
+            bias=True,
+            parallelism=4,
+            bayesian=False,
+            dtype=torch.float32,
+        ).to(device)
+
+        weights_gathered_as_list = gather_results_as_list(
+            conv2d.weight, process_mesh_dict_2x2
+        )
+
+        for i in range(process_mesh_dict_2x2["model"].size() // row_comm_size):
+            assert torch.allclose(
+                weights_gathered_as_list[i],
+                weights_gathered_as_list[i + col_comm_size],
+                atol=1e-5,
+            )
+
+    def test_conv2d_forward(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """2-way spatial x 2-way channel matches a single-process conv2d."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+        )
+
+    def test_requires_stride_equals_kernel(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """Halo-exchange convolutions (stride != kernel_size) are rejected."""
+        conv2d = conv.DistributedConv2D(
+            8,
+            12,
+            4,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=2,
+            padding=(0,),
+            dilation=1,
+            groups=1,
+            bias=True,
+            parallelism=process_mesh_dict_2x2["model"].size(),
+            bayesian=False,
+            dtype=torch.float32,
+        ).to(device)
+        x = torch.randn(2, 4, 16, 8, device=device)
+        with pytest.raises(NotImplementedError):
+            conv2d(x)
+
+
+class TestConv2dParallel:
+    """Distributed Conv2d across arbitrary spatial and channel group sizes."""
 
     @pytest.mark.dist(4)
     def test_forward_backward_1x4(
         self, device: torch.device, process_mesh_dict_1x4: dict
     ) -> None:
         """Pure channel parallelism (4 channel ranks, no spatial split)."""
-        _channel_parallel_reference_check(
+        _conv2d_reference_check(
             device,
             process_mesh_dict_1x4,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+        )
+
+    @pytest.mark.dist(4)
+    def test_forward_backward_4x1(
+        self, device: torch.device, process_mesh_dict_4x1: dict
+    ) -> None:
+        """Pure spatial parallelism (4 spatial ranks, no channel split)."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_4x1,
             in_channels=8,
             out_channels=12,
             kernel_size=4,
@@ -214,7 +222,7 @@ class TestConv2dChannelParallel:
         self, device: torch.device, process_mesh_dict_2x4_rowcol: dict
     ) -> None:
         """Combined 2-way spatial and 4-way channel parallelism."""
-        _channel_parallel_reference_check(
+        _conv2d_reference_check(
             device,
             process_mesh_dict_2x4_rowcol,
             in_channels=8,
@@ -223,29 +231,6 @@ class TestConv2dChannelParallel:
             height=16,
             width=16,
         )
-
-    @pytest.mark.dist(4)
-    def test_channel_group_requires_stride_equals_kernel(
-        self, device: torch.device, process_mesh_dict_1x4: dict
-    ) -> None:
-        """Halo-exchange convolutions are rejected for wide channel groups."""
-        with pytest.raises(NotImplementedError):
-            conv.DistributedConv2D(
-                8,
-                12,
-                4,
-                device=device,
-                spatial_group=process_mesh_dict_1x4["row"],
-                channel_group=process_mesh_dict_1x4["col"],
-                stride=2,
-                padding=(0,),
-                dilation=1,
-                groups=1,
-                bias=True,
-                parallelism=process_mesh_dict_1x4["model"].size(),
-                bayesian=False,
-                dtype=torch.float32,
-            )
 
 
 class TestConv2dTranspose:
