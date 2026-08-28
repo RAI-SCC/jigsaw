@@ -186,15 +186,17 @@ def accumulate_dkv(
         match ring_config.send_op:
             case SendOp.HYBRID_P2P | SendOp.HYBRID_BROADCAST | SendOp.HYBRID_ALLTOALL:
                 # The chunk sits on node `node_idx - step // gpn` (the inter-node
-                # ring runs backwards relative to the forward). HYBRID_P2P also
-                # rotates it intra-node, so its local index is `local_idx + step`;
-                # HYBRID_BROADCAST leaves it put and node-local rank `step % gpn`
-                # was the broadcast source, so `step` is the local index.
+                # ring runs backwards relative to the forward). HYBRID_P2P and
+                # HYBRID_ALLTOALL also rotate it intra-node, so its local index
+                # is `local_idx + step`; HYBRID_BROADCAST leaves it put and
+                # node-local rank `step % gpn` was the broadcast source, so
+                # `step` is the local index.
                 topo = get_hybrid_topology(group, ring_config.gpus_per_node)
                 node_step = step // topo.gpus_per_node
                 local = (
                     topo.local_idx + step
-                    if ring_config.send_op == SendOp.HYBRID_P2P
+                    if ring_config.send_op
+                    in (SendOp.HYBRID_P2P, SendOp.HYBRID_ALLTOALL)
                     else step
                 )
                 global_chunk_idx = topo.rank_at(topo.node_idx - node_step, local)

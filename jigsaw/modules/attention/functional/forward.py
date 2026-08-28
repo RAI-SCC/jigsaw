@@ -102,7 +102,7 @@ def ring_forward(
 ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]:
     """Forward pass for ring attention.
 
-    One loop over ``world_size`` ring steps: the
+    One loop over ``ring_group_size`` ring steps: the
     :class:`~.forward_chunk_provider._ForwardChunkProvider` for
     ``ring_config.send_op`` makes each chunk current (``get``), records it for
     the backward pass (``save_for_backward``), and progresses communication
@@ -127,7 +127,7 @@ def ring_forward(
         Empty tensor used by the communication helpers.
     local_rank : int
         Rank within ``group``.
-    world_size : int
+    ring_group_size : int
         Number of ranks in ``group``.
     ring_config : RingAttentionConfig
         Ring-attention configuration.
@@ -142,14 +142,14 @@ def ring_forward(
     lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype)
 
     provider = build_forward_chunk_provider(
-        ring_config, q, k, v, x, w_qkv, group, empty, local_rank, world_size
+        ring_config, q, k, v, x, w_qkv, group, empty, local_rank, ring_group_size
     )
 
-    for step in range(world_size):
+    for step in range(ring_group_size):
         kj, vj = provider.get(step)
         provider.save_for_backward(step)
         out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
-        provider.advance(step, world_size)
+        provider.advance(step, ring_group_size)
 
     ring_config.wait_offloads()
     out = out.to(q.dtype)
