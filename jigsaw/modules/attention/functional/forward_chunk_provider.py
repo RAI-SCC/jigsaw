@@ -258,35 +258,27 @@ class _BroadcastForwardChunkProvider(_ForwardChunkProvider):
 
 
 # --------------------------------------------------------------------------- #
-# hybrid: intra-node ring + inter-node P2P
+# hybrid: shared intra-node + inter-node plumbing
 # --------------------------------------------------------------------------- #
-class _HybridP2PForwardChunkProvider(_ForwardChunkProvider):
-    """``gpus_per_node`` intra-node ring steps per node round, one inter-node hop each.
+class _HybridForwardChunkProvider(_ForwardChunkProvider):
+    """Shared state for the two hybrid (intra-node + inter-node) forward providers.
 
-    Serves both ``SendOp.HYBRID_P2P`` and ``SendOp.HYBRID_ALLTOALL`` -- the ring
-    logic is identical, only the underlying comm primitive differs (the
-    ``ring_config`` picks ``comm_1d_p2p`` vs ``comm_1d_alltoall`` for the
-    inter-node hop; see :meth:`RingAttentionConfig._p2p_fn`).
-
-    The forward twin of
-    :class:`~.backward_chunk_provider._LocalChunkProviderHybridP2P`. Ring step ``s`` maps
-    to ``divmod(s, gpus_per_node) == (node_step, inner)``; the inter-node send of
-    this rank's original chunk is launched at ``inner == 0`` and consumed at the
-    start of the next round.
+    Both move chunks between nodes with the same inter-node P2P ring -- send to
+    the previous node, receive from the next -- launched once per node round.
+    They differ only in how a chunk travels *within* a node
+    (:class:`_HybridP2PForwardChunkProvider` rotates it one P2P hop per step,
+    :class:`_HybridBroadcastForwardChunkProvider` broadcasts it). The backward
+    twin is :class:`~.backward_chunk_provider._LocalChunkProviderHybrid`.
     """
 
     def __init__(self, *args: object) -> None:
-        """Resolve the hybrid topology and its peer lists."""
+        """Resolve the hybrid topology and the inter-node peer list."""
         super().__init__(*args)  # type: ignore[arg-type]
         self.topo = get_hybrid_topology(self.group, self.config.gpus_per_node)
         self.gpn = self.topo.gpus_per_node
         self.n_nodes = self.topo.n_nodes
-        # Intra-node ring: send to the previous local rank, receive from the next.
         # Inter-node hop: send to the previous node, receive from the next.
-        self._intra_ranks = [self.topo.intra_peer(-1), self.topo.intra_peer(1)]
         self._inter_ranks = [self.topo.inter_peer(-1), self.topo.inter_peer(1)]
-        self._intra_recv_buf: Optional[torch.Tensor] = None
-        self._intra_handle: Optional[dist.Work] = None
         self._inter_recv_buf: Optional[torch.Tensor] = None
         self._inter_handle: Optional[dist.Work] = None
 
@@ -302,6 +294,33 @@ class _HybridP2PForwardChunkProvider(_ForwardChunkProvider):
             tag=node_step,
             empty=self.empty,
         )
+
+
+# --------------------------------------------------------------------------- #
+# hybrid: intra-node ring + inter-node P2P
+# --------------------------------------------------------------------------- #
+class _HybridP2PForwardChunkProvider(_HybridForwardChunkProvider):
+    """``gpus_per_node`` intra-node ring steps per node round, one inter-node hop each.
+
+    Serves both ``SendOp.HYBRID_P2P`` and ``SendOp.HYBRID_ALLTOALL`` -- the ring
+    logic is identical, only the underlying comm primitive differs (the
+    ``ring_config`` picks ``comm_1d_p2p`` vs ``comm_1d_alltoall`` for the
+    inter-node hop; see :meth:`RingAttentionConfig._p2p_fn`).
+
+    The forward twin of
+    :class:`~.backward_chunk_provider._LocalChunkProviderHybridP2P`. Ring step ``s`` maps
+    to ``divmod(s, gpus_per_node) == (node_step, inner)``; the inter-node send of
+    this rank's original chunk is launched at ``inner == 0`` and consumed at the
+    start of the next round.
+    """
+
+    def __init__(self, *args: object) -> None:
+        """Resolve the intra-node peer list on top of the shared hybrid state."""
+        super().__init__(*args)  # type: ignore[arg-type]
+        # Intra-node ring: send to the previous local rank, receive from the next.
+        self._intra_ranks = [self.topo.intra_peer(-1), self.topo.intra_peer(1)]
+        self._intra_recv_buf: Optional[torch.Tensor] = None
+        self._intra_handle: Optional[dist.Work] = None
 
     def _launch_intra(self, inner: int) -> None:
         """Start the intra-node ring send of the chunk currently in hand."""
@@ -372,7 +391,7 @@ class _HybridP2PForwardChunkProvider(_ForwardChunkProvider):
 # --------------------------------------------------------------------------- #
 # hybrid: intra-node broadcast + inter-node P2P
 # --------------------------------------------------------------------------- #
-class _HybridBroadcastForwardChunkProvider(_ForwardChunkProvider):
+class _HybridBroadcastForwardChunkProvider(_HybridForwardChunkProvider):
     """Per-round sweep of ``gpus_per_node`` intra-node broadcasts, one inter-node hop.
 
     The forward twin of
@@ -382,32 +401,12 @@ class _HybridBroadcastForwardChunkProvider(_ForwardChunkProvider):
     """
 
     def __init__(self, *args: object) -> None:
-        """Resolve the hybrid topology and its inter-node peer list."""
+        """Resolve the intra-node broadcast group on top of the shared hybrid state."""
         super().__init__(*args)  # type: ignore[arg-type]
-        self.topo = get_hybrid_topology(self.group, self.config.gpus_per_node)
-        self.gpn = self.topo.gpus_per_node
-        self.n_nodes = self.topo.n_nodes
         self._intranode_group = self.topo.intranode_group
-        # Inter-node hop mirrors _HybridP2PForwardChunkProvider.
-        self._inter_ranks = [self.topo.inter_peer(-1), self.topo.inter_peer(1)]
-        self._inter_recv_buf: Optional[torch.Tensor] = None
-        self._inter_handle: Optional[dist.Work] = None
         # The chunk this rank contributes to the current node round.
         self._own_kv: Optional[torch.Tensor] = None
         self._own_buf: Optional[torch.Tensor] = None
-
-    def _launch_inter(self, node_step: int) -> None:
-        """Start this round's inter-node send of the original local chunk."""
-        buf = torch.empty_like(self.x_j if self.send_x else self.kv_j)
-        self._inter_recv_buf, self._inter_handle = self.config.p2p_fn(
-            data=(self.x.clone() if self.send_x else self.kv.clone()),
-            buffer=buf,
-            send_recv_ranks=self._inter_ranks,
-            group=self.group,
-            async_op=True,
-            tag=node_step,
-            empty=self.empty,
-        )
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Broadcast the chunk for inner step ``inner`` and return its ``(kj, vj)``.

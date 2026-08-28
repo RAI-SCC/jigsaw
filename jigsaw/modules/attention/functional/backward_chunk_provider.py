@@ -458,53 +458,19 @@ class _LocalChunkProvider(_BackwardChunkProvider):
 
 
 class _LocalChunkProviderBroadcast(_LocalChunkProvider):
-    def __init__(
-        self,
-        ring_config: RingAttentionConfig,
-        chunks_to_save: tuple[torch.Tensor, ...],
-        x: torch.Tensor,
-        w_qkv: torch.Tensor,
-        b: int,
-        seq_local: int,
-        h: int,
-        d: int,
-        group: dist.ProcessGroup,
-        empty: torch.Tensor,
-        local_rank: int,
-    ) -> None:
-        """Initialize the object.
+    """Backward broadcast ring: at step ``s`` rank ``s`` fans its chunk to the group.
 
-        Parameters
-        ----------
-        ring_config : RingAttentionConfig
-            Ring-attention configuration controlling communication and saving.
-        chunks_to_save : tuple[torch.Tensor, ...]
-            Saved activation chunks used to reconstruct backward inputs.
-        x : torch.Tensor
-            Input tensor.
-        w_qkv : torch.Tensor
-            Fused query, key, and value projection weights.
-        b : int
-            Batch size for the input tensors.
-        seq_local : int
-            Sequence length owned by the current process.
-        h : int
-            Number of attention heads.
-        d : int
-            Embedding dimension per attention head.
-        group : dist.ProcessGroup
-            Process group used for distributed communication.
-        empty : torch.Tensor
-            Empty tensor used by communication helpers.
-        local_rank : int
-            Rank of the current process.
+    The backward twin of
+    :class:`~.forward_chunk_provider._BroadcastForwardChunkProvider`. The trailing
+    ``local_rank`` positional arg picks which step this rank is the source on.
+    """
 
-        """
-        super().__init__(
-            ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group, empty
-        )
+    def __init__(self, *args: object) -> None:
+        """Size the broadcast recv buffer and record this rank's ring position."""
+        *base_args, local_rank = args
+        super().__init__(*base_args)  # type: ignore[arg-type]
         self._recv_buf = torch.empty_like(
-            x if ring_config.send_in_forward == SendForward.X else chunks_to_save[0]
+            self.x if self.config.send_in_forward == SendForward.X else self.chunk0
         )
         self._handle: Optional[dist.Work] = None
         self.local_rank = local_rank
@@ -650,60 +616,9 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProviderHybrid):
     hops to the next node over the inter-node ring at each node boundary.
     """
 
-    def __init__(
-        self,
-        ring_config: RingAttentionConfig,
-        chunks_to_save: tuple[torch.Tensor, ...],
-        x: torch.Tensor,
-        w_qkv: torch.Tensor,
-        b: int,
-        seq_local: int,
-        h: int,
-        d: int,
-        group: dist.ProcessGroup,
-        empty: torch.Tensor,
-        local_rank: int,
-    ) -> None:
-        """Initialize the object.
-
-        Parameters
-        ----------
-        ring_config : RingAttentionConfig
-            Ring-attention configuration controlling communication and saving.
-        chunks_to_save : tuple[torch.Tensor, ...]
-            Saved activation chunks used to reconstruct backward inputs.
-        x : torch.Tensor
-            Input tensor.
-        w_qkv : torch.Tensor
-            Fused query, key, and value projection weights.
-        b : int
-            Batch size for the input tensors.
-        seq_local : int
-            Sequence length owned by the current process.
-        h : int
-            Number of attention heads.
-        d : int
-            Embedding dimension per attention head.
-        group : dist.ProcessGroup
-            Process group used for distributed communication.
-        empty : torch.Tensor
-            Empty tensor used by communication helpers.
-        local_rank : int
-            Rank of the current process.
-        """
-        super().__init__(
-            ring_config,
-            chunks_to_save,
-            x,
-            w_qkv,
-            b,
-            seq_local,
-            h,
-            d,
-            group,
-            empty,
-            local_rank,
-        )
+    def __init__(self, *args: object) -> None:
+        """Resolve the intra-node peer list on top of the shared hybrid state."""
+        super().__init__(*args)  # type: ignore[arg-type]
         # Intra-node ring: send to the previous local rank, receive from the
         # next -- mirroring the forward.
         self._intra_ranks = [self.topo.intra_peer(-1), self.topo.intra_peer(1)]
@@ -818,60 +733,9 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProviderHybrid):
     straight to the next inter-node hop.
     """
 
-    def __init__(
-        self,
-        ring_config: RingAttentionConfig,
-        chunks_to_save: tuple[torch.Tensor, ...],
-        x: torch.Tensor,
-        w_qkv: torch.Tensor,
-        b: int,
-        seq_local: int,
-        h: int,
-        d: int,
-        group: dist.ProcessGroup,
-        empty: torch.Tensor,
-        local_rank: int,
-    ) -> None:
-        """Initialize the object.
-
-        Parameters
-        ----------
-        ring_config : RingAttentionConfig
-            Ring-attention configuration controlling communication and saving.
-        chunks_to_save : tuple[torch.Tensor, ...]
-            Saved activation chunks used to reconstruct backward inputs.
-        x : torch.Tensor
-            Input tensor.
-        w_qkv : torch.Tensor
-            Fused query, key, and value projection weights.
-        b : int
-            Batch size for the input tensors.
-        seq_local : int
-            Sequence length owned by the current process.
-        h : int
-            Number of attention heads.
-        d : int
-            Embedding dimension per attention head.
-        group : dist.ProcessGroup
-            Process group used for distributed communication.
-        empty : torch.Tensor
-            Empty tensor used by communication helpers.
-        local_rank : int
-            Rank of the current process.
-        """
-        super().__init__(
-            ring_config,
-            chunks_to_save,
-            x,
-            w_qkv,
-            b,
-            seq_local,
-            h,
-            d,
-            group,
-            empty,
-            local_rank,
-        )
+    def __init__(self, *args: object) -> None:
+        """Resolve the intra-node broadcast group on top of the shared hybrid state."""
+        super().__init__(*args)  # type: ignore[arg-type]
         self.intranode_group = self.topo.intranode_group
         self._node_chunk: Optional[torch.Tensor] = None
 
