@@ -4,6 +4,8 @@ Mirrors :class:`jigsaw.modules.conv_transpose.conv_transpose.DistributedConvTran
 for ``F.conv_transpose3d``.
 """
 
+import math
+from collections.abc import Sequence
 from typing import Optional, cast
 
 import numpy as np
@@ -17,6 +19,9 @@ from jigsaw.utils_aggregate import gather_1d_results
 from .config import ConvTranspose3dConfig
 from .functional import ConvTranspose3d
 
+# number of spatial axes of a 3-D transpose convolution, ordered (D, H, W).
+_N_SPATIAL = 3
+
 
 def _triple(x: int | tuple[int, ...]) -> tuple[int, int, int]:
     """Convert an ``int`` or 1-/3-element tuple to a 3-element tuple."""
@@ -27,6 +32,27 @@ def _triple(x: int | tuple[int, ...]) -> tuple[int, int, int]:
     return (x[0], x[1], x[2])
 
 
+def _as_spatial_groups(
+    spatial_group: "dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]]",
+) -> tuple[Optional[dist.ProcessGroup], ...]:
+    """Normalise ``spatial_group`` to a ``(group_d, group_h, group_w)`` tuple.
+
+    A single process group keeps the historical behaviour -- the domain is split
+    along the width (last) axis only. A sequence is taken axis-by-axis, so
+    ``[group_d, group_h, group_w]`` splits several spatial axes; ``None`` (or a
+    group of size 1) marks an axis that is not split.
+    """
+    if isinstance(spatial_group, dist.ProcessGroup):
+        return (None,) * (_N_SPATIAL - 1) + (spatial_group,)
+    groups = tuple(spatial_group)
+    if len(groups) != _N_SPATIAL:
+        raise ValueError(
+            f"spatial_group as a sequence must have {_N_SPATIAL} entries "
+            f"(one per spatial axis, ordered (D, H, W)); got {len(groups)}."
+        )
+    return groups
+
+
 class DistributedConvTranspose3D(torch.nn.Module):
     """Distributed ConvTranspose 3D."""
 
@@ -35,7 +61,8 @@ class DistributedConvTranspose3D(torch.nn.Module):
     parallelism: int
     config: ConvTranspose3dConfig
     bayesian: bool
-    spatial_group: dist.ProcessGroup
+    spatial_group: Optional[dist.ProcessGroup]
+    spatial_groups: tuple[Optional[dist.ProcessGroup], ...]
     channel_group: dist.ProcessGroup
     empty: torch.Tensor
     device: torch.device
@@ -52,7 +79,7 @@ class DistributedConvTranspose3D(torch.nn.Module):
         kernel_size: int | tuple[int, ...],
         # --- distributed (required) ---
         device: torch.device,
-        spatial_group: dist.ProcessGroup,
+        spatial_group: "dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]]",
         channel_group: dist.ProcessGroup,
         # --- core ConvTranspose (optional, pytorch-standard order) ---
         stride: int | tuple[int, ...] = 1,
@@ -82,8 +109,11 @@ class DistributedConvTranspose3D(torch.nn.Module):
             Kernel size.
         device: torch.device
             Device where the computations will be done.
-        spatial_group: dist.ProcessGroup
-            Process group for domain-parallel ranks.
+        spatial_group: dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]]
+            Domain-parallel ranks. A single process group splits the domain
+            along the width axis only (the historical behaviour). A sequence
+            ``[group_d, group_h, group_w]`` splits several spatial axes; ``None``
+            (or a group of size 1) marks an axis that is not split.
         channel_group: dist.ProcessGroup
             Process group for channel-parallel ranks.
         stride: int | tuple[int, ...]
@@ -120,7 +150,15 @@ class DistributedConvTranspose3D(torch.nn.Module):
 
         self.groups = groups
         self.device = device
-        self.spatial_group = spatial_group
+        self.spatial_groups = _as_spatial_groups(spatial_group)
+        # groups that carry a real (>1) split; the parameters are replicated
+        # across their product and their gradients summed back over it.
+        self._spatial_sync_groups = [
+            g for g in self.spatial_groups if g is not None and g.size() > 1
+        ]
+        # representative single group kept for backward compatibility (the
+        # width-axis group, or ``None`` when the width axis is not split).
+        self.spatial_group = self.spatial_groups[-1]
         self.channel_group = channel_group
         self.parallelism = parallelism
         self.in_channels = in_channels
@@ -162,7 +200,7 @@ class DistributedConvTranspose3D(torch.nn.Module):
         self.config = (
             ConvTranspose3dConfig(
                 self.bayesian,
-                self.spatial_group,
+                self.spatial_groups,
                 self.channel_group,
                 self.bias,
                 self.kernel_size,
@@ -173,28 +211,33 @@ class DistributedConvTranspose3D(torch.nn.Module):
             else config
         )
 
-        self.weight.register_post_accumulate_grad_hook(
-            hooks.make_grad_sync_hook(self.spatial_group)
-        )
-        if self.bias is not None:
-            self.bias.register_post_accumulate_grad_hook(
-                hooks.make_grad_sync_hook(self.spatial_group)
+        if self._spatial_sync_groups:
+            self.weight.register_post_accumulate_grad_hook(
+                hooks.make_grad_sync_hook(self._spatial_sync_groups)
             )
+            if self.bias is not None:
+                self.bias.register_post_accumulate_grad_hook(
+                    hooks.make_grad_sync_hook(self._spatial_sync_groups)
+                )
+        # Broadcast the reference parameters from global rank 0 to every spatial
+        # rank. Sequential broadcasts over the per-axis groups (innermost axis
+        # first) propagate rank 0's values across the whole spatial grid.
         for p in self.parameters():
-            dist.broadcast(p.data, group_src=0, group=self.spatial_group)
+            for g in reversed(self._spatial_sync_groups):
+                dist.broadcast(p.data, group_src=0, group=g)
 
         self.convTranspose3d_apply = ConvTranspose3d.apply
 
+    @property
+    def spatial_world_size(self) -> int:
+        """Number of spatial ranks the parameters are replicated across."""
+        return math.prod(g.size() for g in self._spatial_sync_groups)
+
     def get_parameter_count(self) -> int:
         """Return effective number of local parameters for the module."""
-        num_param = (
-            0
-            if self.bias is None
-            else self.bias.numel() // dist.get_world_size(group=self.spatial_group)
-        )
-        return num_param + self.weight.numel() // dist.get_world_size(
-            group=self.spatial_group
-        )
+        replicas = self.spatial_world_size
+        num_param = 0 if self.bias is None else self.bias.numel() // replicas
+        return num_param + self.weight.numel() // replicas
 
     @classmethod
     def convert_to_jigsaw(
@@ -358,7 +401,7 @@ class DistributedConvTranspose3D(torch.nn.Module):
         self.parallelism = to_process_mesh_dict[pm_col_key].size()
         self.config = ConvTranspose3dConfig(
             self.bayesian,
-            self.spatial_group,
+            self.spatial_groups,
             self.channel_group,
             self.bias,
             self.kernel_size,
@@ -450,7 +493,7 @@ class DistributedConvTranspose3D(torch.nn.Module):
             self.padding,
             self.dilation,
             self.in_channels,
-            self.spatial_group,
+            self.spatial_groups,
             self.channel_group,
             self.device,
             self.parallelism,

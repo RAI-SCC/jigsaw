@@ -23,7 +23,7 @@ class ConvTransposeConfig:
     def __init__(
         self,
         bayesian: bool,
-        spatial_group: dist.ProcessGroup,
+        spatial_groups: tuple[dist.ProcessGroup | None, ...],
         channel_group: dist.ProcessGroup,
         bias: Optional[Parameter],
         kernel_size: tuple[int, int],
@@ -35,8 +35,9 @@ class ConvTransposeConfig:
 
         bayesian: bool
             Flag for whether the model is bayesian.
-        spatial_group: dist.ProcessGroup
-            Domain-parallel process group.
+        spatial_groups: tuple[dist.ProcessGroup | None, ...]
+            Per-axis domain-parallel process groups, aligned with ``(H, W)``.
+            ``None`` (or size 1) marks an axis that is not split.
         channel_group: dist.ProcessGroup
             Tensor-parallel process group.
         bias: torch.Tensor | None
@@ -53,7 +54,7 @@ class ConvTransposeConfig:
             bayesian
         )
         self.weight_reshape = self._reshape_weights_selection(bayesian)
-        self.grad_bias = self._grad_bias_selection(spatial_group, bias)
+        self.grad_bias = self._grad_bias_selection(bias)
         # ``stride == kernel_size`` (on every axis) makes each rank's raw output
         # tile the global output with no overlap, so the spatial split needs no
         # communication. Otherwise neighbouring ranks' raw outputs overlap and
@@ -102,9 +103,7 @@ class ConvTransposeConfig:
         """No-op."""
         return w
 
-    def _grad_bias_selection(
-        self, spatial_group: dist.ProcessGroup, bias: Optional[torch.Tensor]
-    ) -> Callable:
+    def _grad_bias_selection(self, bias: Optional[torch.Tensor]) -> Callable:
         """Select the grad-bias reducer; the spatial reduction is done by a hook."""
         if bias is None:
             return self._no_bias
