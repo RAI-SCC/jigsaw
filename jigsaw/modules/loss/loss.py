@@ -230,3 +230,116 @@ class DistributedBCEWithLogitsLoss(torch.nn.Module):
             reduction=self.reduction,
             reduce_groups=self.reduce_groups,
         )
+
+
+class DistributedMSELoss(torch.nn.Module):
+    """Mean-squared-error / L2 loss over a tensor sharded arbitrarily on a mesh."""
+
+    def __init__(
+        self,
+        reduce_groups: _Groups = None,
+        *,
+        reduction: str = "mean",
+    ) -> None:
+        """Initialize the loss.
+
+        Parameters
+        ----------
+        reduce_groups : Optional[Sequence[Optional[dist.ProcessGroup]] | dist.ProcessGroup]
+            Every group across which the input is partitioned.
+        reduction : str
+            ``"none"``, ``"sum"`` or ``"mean"``.
+        """
+        super().__init__()
+        self.reduce_groups = reduce_groups
+        self.reduction = reduction
+
+    def get_parameter_count(self) -> int:
+        """Return ``0``; the loss holds no trainable parameters."""
+        return 0
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Compute the distributed MSE loss for this rank's shard."""
+        return functional.distributed_mse_loss(
+            input,
+            target,
+            reduction=self.reduction,
+            reduce_groups=self.reduce_groups,
+        )
+
+
+class DistributedL1Loss(torch.nn.Module):
+    """Mean-absolute-error / L1 loss over a tensor sharded arbitrarily on a mesh."""
+
+    def __init__(
+        self,
+        reduce_groups: _Groups = None,
+        *,
+        reduction: str = "mean",
+    ) -> None:
+        """Initialize the loss.
+
+        Parameters
+        ----------
+        reduce_groups : Optional[Sequence[Optional[dist.ProcessGroup]] | dist.ProcessGroup]
+            Every group across which the input is partitioned.
+        reduction : str
+            ``"none"``, ``"sum"`` or ``"mean"``.
+        """
+        super().__init__()
+        self.reduce_groups = reduce_groups
+        self.reduction = reduction
+
+    def get_parameter_count(self) -> int:
+        """Return ``0``; the loss holds no trainable parameters."""
+        return 0
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Compute the distributed L1 loss for this rank's shard."""
+        return functional.distributed_l1_loss(
+            input,
+            target,
+            reduction=self.reduction,
+            reduce_groups=self.reduce_groups,
+        )
+
+
+class DistributedSmoothL1Loss(torch.nn.Module):
+    """Smooth-L1 (Huber) loss over a tensor sharded arbitrarily on a mesh."""
+
+    def __init__(
+        self,
+        reduce_groups: _Groups = None,
+        *,
+        beta: float = 1.0,
+        reduction: str = "mean",
+    ) -> None:
+        """Initialize the loss.
+
+        Parameters
+        ----------
+        reduce_groups : Optional[Sequence[Optional[dist.ProcessGroup]] | dist.ProcessGroup]
+            Every group across which the input is partitioned.
+        beta : float
+            Transition point between the quadratic and linear regimes.
+        reduction : str
+            ``"none"``, ``"sum"`` or ``"mean"``.
+        """
+        super().__init__()
+        self.reduce_groups = reduce_groups
+        self.beta = beta
+        self.reduction = reduction
+
+    def get_parameter_count(self) -> int:
+        """Return ``0``; the loss holds no trainable parameters."""
+        return 0
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Compute the distributed smooth-L1 loss for this rank's shard."""
+        return functional.distributed_smooth_l1_loss(
+            input,
+            target,
+            beta=self.beta,
+            reduction=self.reduction,
+            reduce_groups=self.reduce_groups,
+        )
