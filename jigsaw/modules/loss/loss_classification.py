@@ -18,14 +18,13 @@ plain call of the corresponding ``torch.nn.functional`` loss on the local
 tensor.
 """
 
-from typing import Optional, Sequence
+from typing import Optional
 
 import torch
 import torch.distributed as dist
 
-from . import functional
-
-_Groups = Optional[Sequence[Optional[dist.ProcessGroup]] | dist.ProcessGroup]
+from . import functional_classification as fc
+from .common import GroupsArg
 
 
 class DistributedNLLLoss(torch.nn.Module):
@@ -34,7 +33,7 @@ class DistributedNLLLoss(torch.nn.Module):
     def __init__(
         self,
         channel_group: Optional[dist.ProcessGroup] = None,
-        reduce_groups: _Groups = None,
+        reduce_groups: GroupsArg = None,
         *,
         weight: Optional[torch.Tensor] = None,
         ignore_index: int = -100,
@@ -47,7 +46,7 @@ class DistributedNLLLoss(torch.nn.Module):
         ----------
         channel_group : Optional[dist.ProcessGroup]
             Group across which the class dimension ``dim`` is partitioned.
-        reduce_groups : Optional[Sequence[Optional[dist.ProcessGroup]] | dist.ProcessGroup]
+        reduce_groups : GroupsArg
             Groups across which the batch/spatial dimensions are partitioned.
         weight : Optional[torch.Tensor]
             Per-class weight of length ``C_global`` (replicated on every rank).
@@ -72,7 +71,7 @@ class DistributedNLLLoss(torch.nn.Module):
 
     def forward(self, log_probs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute the distributed NLL loss for this rank's shard."""
-        return functional.distributed_nll_loss(
+        return fc.distributed_nll_loss(
             log_probs,
             target,
             weight=self.weight,
@@ -90,7 +89,7 @@ class DistributedCrossEntropyLoss(torch.nn.Module):
     def __init__(
         self,
         channel_group: Optional[dist.ProcessGroup] = None,
-        reduce_groups: _Groups = None,
+        reduce_groups: GroupsArg = None,
         *,
         weight: Optional[torch.Tensor] = None,
         ignore_index: int = -100,
@@ -104,7 +103,7 @@ class DistributedCrossEntropyLoss(torch.nn.Module):
         ----------
         channel_group : Optional[dist.ProcessGroup]
             Group across which the class dimension ``dim`` is partitioned.
-        reduce_groups : Optional[Sequence[Optional[dist.ProcessGroup]] | dist.ProcessGroup]
+        reduce_groups : GroupsArg
             Groups across which the batch/spatial dimensions are partitioned.
         weight : Optional[torch.Tensor]
             Per-class weight of length ``C_global`` (replicated on every rank).
@@ -132,7 +131,7 @@ class DistributedCrossEntropyLoss(torch.nn.Module):
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute the distributed cross-entropy loss for this rank's shard."""
-        return functional.distributed_cross_entropy(
+        return fc.distributed_cross_entropy(
             logits,
             target,
             weight=self.weight,
@@ -150,7 +149,7 @@ class DistributedBCELoss(torch.nn.Module):
 
     def __init__(
         self,
-        reduce_groups: _Groups = None,
+        reduce_groups: GroupsArg = None,
         *,
         weight: Optional[torch.Tensor] = None,
         reduction: str = "mean",
@@ -159,7 +158,7 @@ class DistributedBCELoss(torch.nn.Module):
 
         Parameters
         ----------
-        reduce_groups : Optional[Sequence[Optional[dist.ProcessGroup]] | dist.ProcessGroup]
+        reduce_groups : GroupsArg
             Every group across which the input is partitioned.
         weight : Optional[torch.Tensor]
             Elementwise weight broadcastable to this rank's input shard.
@@ -177,7 +176,7 @@ class DistributedBCELoss(torch.nn.Module):
 
     def forward(self, probs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute the distributed BCE loss for this rank's shard."""
-        return functional.distributed_binary_cross_entropy(
+        return fc.distributed_binary_cross_entropy(
             probs,
             target,
             weight=self.weight,
@@ -191,7 +190,7 @@ class DistributedBCEWithLogitsLoss(torch.nn.Module):
 
     def __init__(
         self,
-        reduce_groups: _Groups = None,
+        reduce_groups: GroupsArg = None,
         *,
         weight: Optional[torch.Tensor] = None,
         pos_weight: Optional[torch.Tensor] = None,
@@ -201,7 +200,7 @@ class DistributedBCEWithLogitsLoss(torch.nn.Module):
 
         Parameters
         ----------
-        reduce_groups : Optional[Sequence[Optional[dist.ProcessGroup]] | dist.ProcessGroup]
+        reduce_groups : GroupsArg
             Every group across which the input is partitioned.
         weight : Optional[torch.Tensor]
             Elementwise weight broadcastable to this rank's input shard.
@@ -222,124 +221,11 @@ class DistributedBCEWithLogitsLoss(torch.nn.Module):
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute the distributed BCE-with-logits loss for this rank's shard."""
-        return functional.distributed_bce_with_logits(
+        return fc.distributed_bce_with_logits(
             logits,
             target,
             weight=self.weight,
             pos_weight=self.pos_weight,
-            reduction=self.reduction,
-            reduce_groups=self.reduce_groups,
-        )
-
-
-class DistributedMSELoss(torch.nn.Module):
-    """Mean-squared-error / L2 loss over a tensor sharded arbitrarily on a mesh."""
-
-    def __init__(
-        self,
-        reduce_groups: _Groups = None,
-        *,
-        reduction: str = "mean",
-    ) -> None:
-        """Initialize the loss.
-
-        Parameters
-        ----------
-        reduce_groups : Optional[Sequence[Optional[dist.ProcessGroup]] | dist.ProcessGroup]
-            Every group across which the input is partitioned.
-        reduction : str
-            ``"none"``, ``"sum"`` or ``"mean"``.
-        """
-        super().__init__()
-        self.reduce_groups = reduce_groups
-        self.reduction = reduction
-
-    def get_parameter_count(self) -> int:
-        """Return ``0``; the loss holds no trainable parameters."""
-        return 0
-
-    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Compute the distributed MSE loss for this rank's shard."""
-        return functional.distributed_mse_loss(
-            input,
-            target,
-            reduction=self.reduction,
-            reduce_groups=self.reduce_groups,
-        )
-
-
-class DistributedL1Loss(torch.nn.Module):
-    """Mean-absolute-error / L1 loss over a tensor sharded arbitrarily on a mesh."""
-
-    def __init__(
-        self,
-        reduce_groups: _Groups = None,
-        *,
-        reduction: str = "mean",
-    ) -> None:
-        """Initialize the loss.
-
-        Parameters
-        ----------
-        reduce_groups : Optional[Sequence[Optional[dist.ProcessGroup]] | dist.ProcessGroup]
-            Every group across which the input is partitioned.
-        reduction : str
-            ``"none"``, ``"sum"`` or ``"mean"``.
-        """
-        super().__init__()
-        self.reduce_groups = reduce_groups
-        self.reduction = reduction
-
-    def get_parameter_count(self) -> int:
-        """Return ``0``; the loss holds no trainable parameters."""
-        return 0
-
-    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Compute the distributed L1 loss for this rank's shard."""
-        return functional.distributed_l1_loss(
-            input,
-            target,
-            reduction=self.reduction,
-            reduce_groups=self.reduce_groups,
-        )
-
-
-class DistributedSmoothL1Loss(torch.nn.Module):
-    """Smooth-L1 (Huber) loss over a tensor sharded arbitrarily on a mesh."""
-
-    def __init__(
-        self,
-        reduce_groups: _Groups = None,
-        *,
-        beta: float = 1.0,
-        reduction: str = "mean",
-    ) -> None:
-        """Initialize the loss.
-
-        Parameters
-        ----------
-        reduce_groups : Optional[Sequence[Optional[dist.ProcessGroup]] | dist.ProcessGroup]
-            Every group across which the input is partitioned.
-        beta : float
-            Transition point between the quadratic and linear regimes.
-        reduction : str
-            ``"none"``, ``"sum"`` or ``"mean"``.
-        """
-        super().__init__()
-        self.reduce_groups = reduce_groups
-        self.beta = beta
-        self.reduction = reduction
-
-    def get_parameter_count(self) -> int:
-        """Return ``0``; the loss holds no trainable parameters."""
-        return 0
-
-    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Compute the distributed smooth-L1 loss for this rank's shard."""
-        return functional.distributed_smooth_l1_loss(
-            input,
-            target,
-            beta=self.beta,
             reduction=self.reduction,
             reduce_groups=self.reduce_groups,
         )

@@ -16,7 +16,8 @@ import torch
 import torch.nn.functional as F
 
 import jigsaw.modules.loss as jloss
-from jigsaw.modules.loss import functional as lossf
+from jigsaw.modules.loss import functional_classification as lossc
+from jigsaw.modules.loss import functional_regression as lossr
 from jigsaw.utils_aggregate import gather_1d_results
 from tests.process_mesh import *  # noqa: F403
 
@@ -78,28 +79,47 @@ def test_functional_matches_torch_without_groups(device: torch.device) -> None:
     target = torch.randint(0, 7, (4, 5), device=device)
 
     for reduction in ("mean", "sum", "none"):
-        got = lossf.distributed_cross_entropy(logits, target, reduction=reduction)
+        got = lossc.distributed_cross_entropy(logits, target, reduction=reduction)
         ref = F.cross_entropy(logits, target, reduction=reduction)
         assert torch.allclose(got, ref, **FTOL)
 
     log_probs = F.log_softmax(logits, dim=1)
-    got = lossf.distributed_nll_loss(log_probs, target)
+    got = lossc.distributed_nll_loss(log_probs, target)
     ref = F.nll_loss(log_probs, target)
     assert torch.allclose(got, ref, **FTOL)
 
     probs = torch.rand(3, 6, device=device).clamp(0.02, 0.98)
     bt = torch.randint(0, 2, (3, 6), device=device).float()
     assert torch.allclose(
-        lossf.distributed_binary_cross_entropy(probs, bt),
+        lossc.distributed_binary_cross_entropy(probs, bt),
         F.binary_cross_entropy(probs, bt),
         **FTOL,
     )
     raw = torch.randn(3, 6, device=device)
     assert torch.allclose(
-        lossf.distributed_bce_with_logits(raw, bt),
+        lossc.distributed_bce_with_logits(raw, bt),
         F.binary_cross_entropy_with_logits(raw, bt),
         **FTOL,
     )
+
+    pred = torch.randn(4, 7, 5, device=device)
+    tgt = torch.randn(4, 7, 5, device=device)
+    for reduction in ("mean", "sum", "none"):
+        assert torch.allclose(
+            lossr.distributed_mse_loss(pred, tgt, reduction=reduction),
+            F.mse_loss(pred, tgt, reduction=reduction),
+            **FTOL,
+        )
+        assert torch.allclose(
+            lossr.distributed_l1_loss(pred, tgt, reduction=reduction),
+            F.l1_loss(pred, tgt, reduction=reduction),
+            **FTOL,
+        )
+        assert torch.allclose(
+            lossr.distributed_smooth_l1_loss(pred, tgt, beta=0.7, reduction=reduction),
+            F.smooth_l1_loss(pred, tgt, beta=0.7, reduction=reduction),
+            **FTOL,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -124,7 +144,7 @@ def test_cross_entropy_forward(
     local_logits = _shard(logits, pmd, {"col": 1, "row": 2})
     local_target = _shard(target, pmd, {"row": 1})
 
-    got = lossf.distributed_cross_entropy(
+    got = lossc.distributed_cross_entropy(
         local_logits,
         local_target,
         reduction=reduction,
@@ -156,7 +176,7 @@ def test_cross_entropy_backward(
     local_logits = _shard(logits, pmd, {"col": 1, "row": 2}).requires_grad_(True)
     local_target = _shard(target, pmd, {"row": 1})
 
-    loss = lossf.distributed_cross_entropy(
+    loss = lossc.distributed_cross_entropy(
         local_logits,
         local_target,
         reduction=reduction,
@@ -194,7 +214,7 @@ def test_cross_entropy_weight(
     local_logits = _shard(logits, pmd, {"col": 1, "row": 2}).requires_grad_(True)
     local_target = _shard(target, pmd, {"row": 1})
 
-    loss = lossf.distributed_cross_entropy(
+    loss = lossc.distributed_cross_entropy(
         local_logits,
         local_target,
         weight=weight,
@@ -228,7 +248,7 @@ def test_cross_entropy_ignore_index(
     local_logits = _shard(logits, pmd, {"col": 1, "row": 2}).requires_grad_(True)
     local_target = _shard(target, pmd, {"row": 1})
 
-    loss = lossf.distributed_cross_entropy(
+    loss = lossc.distributed_cross_entropy(
         local_logits,
         local_target,
         ignore_index=-100,
@@ -265,7 +285,7 @@ def test_cross_entropy_label_smoothing(
     local_logits = _shard(logits, pmd, {"col": 1, "row": 2}).requires_grad_(True)
     local_target = _shard(target, pmd, {"row": 1})
 
-    loss = lossf.distributed_cross_entropy(
+    loss = lossc.distributed_cross_entropy(
         local_logits,
         local_target,
         reduction=reduction,
@@ -302,7 +322,7 @@ def test_cross_entropy_probability_target(
     local_logits = _shard(logits, pmd, {"col": 1, "row": 2}).requires_grad_(True)
     local_target = _shard(target, pmd, {"col": 1, "row": 2})
 
-    loss = lossf.distributed_cross_entropy(
+    loss = lossc.distributed_cross_entropy(
         local_logits,
         local_target,
         channel_group=pmd["col"],
@@ -344,7 +364,7 @@ def test_nll_loss_forward_backward(
     )
     local_target = _shard(target, pmd, {"row": 1})
 
-    loss = lossf.distributed_nll_loss(
+    loss = lossc.distributed_nll_loss(
         local_lp,
         local_target,
         reduction=reduction,
@@ -391,7 +411,7 @@ def test_bce_forward_backward(
     local_probs = _shard(probs, pmd, {"col": 1, "row": 2}).detach().requires_grad_(True)
     local_target = _shard(target, pmd, {"col": 1, "row": 2})
 
-    loss = lossf.distributed_binary_cross_entropy(
+    loss = lossc.distributed_binary_cross_entropy(
         local_probs,
         local_target,
         reduction=reduction,
@@ -436,7 +456,7 @@ def test_bce_with_logits_forward_backward(
     local_target = _shard(target, pmd, {"col": 1, "row": 2})
     local_pw = _shard(pos_weight, pmd, {"col": 0})
 
-    loss = lossf.distributed_bce_with_logits(
+    loss = lossc.distributed_bce_with_logits(
         local_logits,
         local_target,
         pos_weight=local_pw,
@@ -457,11 +477,97 @@ def test_bce_with_logits_forward_backward(
 
 
 # --------------------------------------------------------------------------- #
+# regression losses: l1 / l2 (mse) / smooth-l1
+# --------------------------------------------------------------------------- #
+_REG_LOSSES = {
+    "mse": (lossr.distributed_mse_loss, F.mse_loss),
+    "l1": (lossr.distributed_l1_loss, F.l1_loss),
+    "smooth_l1": (lossr.distributed_smooth_l1_loss, F.smooth_l1_loss),
+}
+
+
+@pytest.mark.dist(4)
+@pytest.mark.parametrize("mesh_name", MESHES_4)
+@pytest.mark.parametrize("loss_name", list(_REG_LOSSES))
+@pytest.mark.parametrize("reduction", ["mean", "sum", "none"])
+def test_regression_loss_forward_backward(
+    request: pytest.FixtureRequest,
+    device: torch.device,
+    mesh_name: str,
+    loss_name: str,
+    reduction: str,
+) -> None:
+    """Distributed L1 / MSE / smooth-L1 match the reference over an arbitrarily split tensor."""
+    pmd = request.getfixturevalue(mesh_name)
+    distributed_fn, ref_fn = _REG_LOSSES[loss_name]
+    n, c, s = 3, 8, 16
+
+    torch.manual_seed(0)
+    pred = torch.randn(n, c, s, device=device)
+    torch.manual_seed(1)
+    target = torch.randn(n, c, s, device=device)
+
+    local_pred = _shard(pred, pmd, {"col": 1, "row": 2}).detach().requires_grad_(True)
+    local_target = _shard(target, pmd, {"col": 1, "row": 2})
+
+    got = distributed_fn(
+        local_pred,
+        local_target,
+        reduction=reduction,
+        reduce_groups=(pmd["col"], pmd["row"]),
+    )
+    ref_pred = pred.detach().clone().requires_grad_(True)
+    ref = ref_fn(ref_pred, target, reduction=reduction)
+
+    if reduction == "none":
+        assert torch.allclose(_gather(got, pmd, [("col", 1), ("row", 2)]), ref, **FTOL)
+        return
+
+    got.backward()
+    ref.backward()
+    assert torch.allclose(got.detach(), ref.detach(), **FTOL)
+    grad = _gather(local_pred.grad, pmd, [("col", 1), ("row", 2)])
+    assert torch.allclose(grad, ref_pred.grad, **FTOL)
+
+
+@pytest.mark.dist(4)
+@pytest.mark.parametrize("mesh_name", MESHES_4)
+def test_regression_module_wrappers(
+    request: pytest.FixtureRequest, device: torch.device, mesh_name: str
+) -> None:
+    """The regression ``nn.Module`` wrappers agree with their torch counterparts."""
+    pmd = request.getfixturevalue(mesh_name)
+    n, c, s = 3, 8, 16
+    groups = (pmd["col"], pmd["row"])
+
+    torch.manual_seed(0)
+    pred = torch.randn(n, c, s, device=device)
+    torch.manual_seed(1)
+    target = torch.randn(n, c, s, device=device)
+
+    local_pred = _shard(pred, pmd, {"col": 1, "row": 2}).detach().requires_grad_(True)
+    local_target = _shard(target, pmd, {"col": 1, "row": 2})
+    ref_pred = pred.detach().clone().requires_grad_(True)
+
+    for distributed_mod, ref_mod in (
+        (jloss.DistributedMSELoss(groups), torch.nn.MSELoss()),
+        (jloss.DistributedL1Loss(groups), torch.nn.L1Loss()),
+        (
+            jloss.DistributedSmoothL1Loss(groups, beta=0.5),
+            torch.nn.SmoothL1Loss(beta=0.5),
+        ),
+    ):
+        got = distributed_mod(local_pred, local_target)
+        ref = ref_mod(ref_pred, target)
+        assert torch.allclose(got.detach(), ref.detach(), **FTOL)
+
+
+# --------------------------------------------------------------------------- #
 # eight ranks: 4-way spatial x 2-way class
 # --------------------------------------------------------------------------- #
 @pytest.mark.dist(8)
 @pytest.mark.parametrize("reduction", ["mean", "sum", "none"])
-@pytest.mark.parametrize("loss_kind", ["cross_entropy", "nll", "bce"])
+@pytest.mark.parametrize("loss_kind", ["cross_entropy", "nll", "bce", "mse", "l1"])
 def test_eightway(
     request: pytest.FixtureRequest,
     device: torch.device,
@@ -476,7 +582,7 @@ def test_eightway(
     if loss_kind == "cross_entropy":
         global_input = _global_logits(device, n, c, s)
         target = _global_targets(device, n, c, s)
-        distributed = lambda x, t: lossf.distributed_cross_entropy(  # noqa: E731
+        distributed = lambda x, t: lossc.distributed_cross_entropy(  # noqa: E731
             x,
             t,
             reduction=reduction,
@@ -489,7 +595,7 @@ def test_eightway(
     elif loss_kind == "nll":
         global_input = F.log_softmax(_global_logits(device, n, c, s), dim=1)
         target = _global_targets(device, n, c, s)
-        distributed = lambda x, t: lossf.distributed_nll_loss(  # noqa: E731
+        distributed = lambda x, t: lossc.distributed_nll_loss(  # noqa: E731
             x,
             t,
             reduction=reduction,
@@ -499,18 +605,35 @@ def test_eightway(
         reference = lambda x, t: F.nll_loss(x, t, reduction=reduction)  # noqa: E731
         input_dims, target_dims = {col: 1, row: 2}, {row: 1}
         none_gather = [(row, 1)]
-    else:  # bce
+    elif loss_kind == "bce":
         torch.manual_seed(0)
         global_input = torch.rand(n, c, s, device=device).clamp(0.02, 0.98)
         torch.manual_seed(1)
         target = torch.randint(0, 2, (n, c, s), device=device).float()
-        distributed = lambda x, t: lossf.distributed_binary_cross_entropy(  # noqa: E731
+        distributed = lambda x, t: lossc.distributed_binary_cross_entropy(  # noqa: E731
             x,
             t,
             reduction=reduction,
             reduce_groups=(pmd[col], pmd[row]),
         )
         reference = lambda x, t: F.binary_cross_entropy(x, t, reduction=reduction)  # noqa: E731
+        input_dims = target_dims = {col: 1, row: 2}
+        none_gather = [(col, 1), (row, 2)]
+    else:  # mse / l1
+        torch.manual_seed(0)
+        global_input = torch.randn(n, c, s, device=device)
+        torch.manual_seed(1)
+        target = torch.randn(n, c, s, device=device)
+        dfn = (
+            lossr.distributed_mse_loss
+            if loss_kind == "mse"
+            else lossr.distributed_l1_loss
+        )
+        rfn = F.mse_loss if loss_kind == "mse" else F.l1_loss
+        distributed = lambda x, t: dfn(  # noqa: E731
+            x, t, reduction=reduction, reduce_groups=(pmd[col], pmd[row])
+        )
+        reference = lambda x, t: rfn(x, t, reduction=reduction)  # noqa: E731
         input_dims = target_dims = {col: 1, row: 2}
         none_gather = [(col, 1), (row, 2)]
 
