@@ -4,7 +4,6 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 import jigsaw.modules.conv as conv
-import jigsaw.modules.conv_transpose as conv_transpose
 from jigsaw.utils_aggregate import gather_1d_results, gather_results_as_list
 from tests.process_mesh import *
 

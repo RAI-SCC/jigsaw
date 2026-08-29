@@ -5,6 +5,8 @@ from .modules import conv as conv
 from .modules import conv1d as conv1d
 from .modules import conv3d as conv3d
 from .modules import conv_transpose as conv_transpose
+from .modules import conv_transpose_1d as conv_transpose_1d
+from .modules import conv_transpose_3d as conv_transpose_3d
 from .modules import linear as linear
 from .modules import normalization as normalization
 from .modules import roll as roll
