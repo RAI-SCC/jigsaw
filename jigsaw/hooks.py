@@ -1,5 +1,6 @@
 """Gradient hook definitions."""
 
+from collections.abc import Sequence
 from typing import Any, Callable
 
 import torch
@@ -9,7 +10,7 @@ from torch.nn.parameter import Parameter
 
 
 def make_grad_sync_hook(
-    group: dist.ProcessGroup,
+    group: "dist.ProcessGroup | Sequence[dist.ProcessGroup]",
     op: Any = dist.ReduceOp.SUM,
     async_op: bool = True,
 ) -> Callable:
@@ -21,19 +22,27 @@ def make_grad_sync_hook(
 
     Otherwise, all_reduction is blocking.
 
+    ``group`` may be a single process group or a sequence of them. A sequence is
+    used when the domain is split along several spatial axes: a SUM all-reduce
+    over each axis group in turn is equivalent to one all-reduce over the whole
+    spatial grid. Multiple groups are always reduced sequentially (blocking), so
+    the in-place ``param.grad`` buffer is never touched by two collectives at
+    once.
+
     Parameters
     ----------
-    group: dist.ProcessGroup
-        Process group where the weights should be synchronized.
+    group: dist.ProcessGroup | Sequence[dist.ProcessGroup]
+        Process group(s) the gradients should be synchronized over.
     op: dist.ReduceOp
         Type of reduction.
     async_op: bool
-        Flag for whether communication is blocking or not.
+        Flag for whether communication is blocking or not (single group only).
 
     Returns
     -------
     hook: Callable
     """
+    groups = [group] if isinstance(group, dist.ProcessGroup) else list(group)
     handles: list[torch.distributed.Work] = []
 
     def _finalize() -> None:
@@ -53,15 +62,16 @@ def make_grad_sync_hook(
         """
         if param.grad is None:
             return
-        if async_op:
+        if async_op and len(groups) == 1:
             if not handles:
                 # first grad of this backward → queue the wait to run when backward finishes
                 Variable._execution_engine.queue_callback(_finalize)
             handles.append(
-                dist.all_reduce(param.grad, op=op, group=group, async_op=True)
+                dist.all_reduce(param.grad, op=op, group=groups[0], async_op=True)
             )
         else:
-            dist.all_reduce(param.grad, op=op, group=group, async_op=False)
+            for g in groups:
+                dist.all_reduce(param.grad, op=op, group=g, async_op=False)
 
     return hook
 

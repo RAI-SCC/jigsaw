@@ -1,6 +1,6 @@
 """Autograd definition for the distributed 1-D convolution.
 
-Mirrors :mod:`jigsaw.modules.conv.functional` for ``F.conv1d``.
+Mirrors :mod:`jigsaw.modules.conv2d.functional` for ``F.conv1d``.
 """
 
 from typing import Any, Optional, Protocol, cast
@@ -39,16 +39,12 @@ class Conv1d(torch.autograd.Function):
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: torch.Tensor,
-        kernel_size: tuple[int],
         stride: tuple[int],
         padding: tuple[int],
         dilation: tuple[int],
         in_channels: int,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
-        device: torch.device,
-        parallelism: int,
-        empty: torch.Tensor,
         bayesian: bool,
         config: Conv1dConfig,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -84,16 +80,12 @@ class Conv1d(torch.autograd.Function):
             x,
             weight,
             bias,
-            kernel_size,
             stride,
             padding,
             dilation,
             in_channels,
             spatial_group,
             channel_group,
-            device,
-            parallelism,
-            empty,
             bayesian,
             config,
         ) = inputs
@@ -134,10 +126,6 @@ class Conv1d(torch.autograd.Function):
         None,
         None,
         None,
-        None,
-        None,
-        None,
-        None,
     ]:
         """Backward pass of the distributed Conv1d.
 
@@ -153,7 +141,7 @@ class Conv1d(torch.autograd.Function):
         x_aug, weight = c.saved_tensors
         config = c.config
 
-        g_b = config.grad_bias(grad_output, c.spatial_group)
+        g_b = config.grad_bias(grad_output)
 
         g_x, g_w = config.dist_conv1d_backward_fn(
             grad_output,
@@ -182,10 +170,6 @@ class Conv1d(torch.autograd.Function):
             None,
             None,
             None,
-            None,
-            None,
-            None,
-            None,
         )
 
     @staticmethod
@@ -195,16 +179,12 @@ class Conv1d(torch.autograd.Function):
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: torch.Tensor,
-        kernel_size: int,
         stride: int,
         padding: int,
         dilation: int,
         in_channels: int,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
-        device: torch.device,
-        parallelism: int,
-        empty: torch.Tensor,
         bayesian: bool,
         config: Conv1dConfig,
     ) -> tuple[torch.Tensor, Optional[int]]:
@@ -213,16 +193,12 @@ class Conv1d(torch.autograd.Function):
             x,
             weight,
             bias,
-            kernel_size,
             stride,
             padding,
             dilation,
             in_channels,
             spatial_group,
             channel_group,
-            device,
-            parallelism,
-            empty,
             bayesian,
             config,
         )

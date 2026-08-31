@@ -6,10 +6,16 @@ before convolving every rank must pull the input positions it is missing from th
 other ranks (:func:`halo_gather`); the backward pass folds the borrowed-position
 gradients back onto their owners (:func:`halo_scatter_add`).
 
-Every function here operates purely on the last axis and treats all leading axes
+The core exchange operates purely on the last axis and treats all leading axes
 opaquely, so the same code serves Conv1d (``(N, C, L)``) and Conv2d
 (``(N, C, H, W)``) -- the caller passes the single set of split-axis conv
 parameters (kernel, stride, padding, dilation along that axis).
+
+:func:`halo_gather` / :func:`halo_scatter_add` additionally accept an ``axis``
+argument: any non-last axis is moved to the last position for the exchange and
+moved back before returning, so a domain that is split along *several* spatial
+axes (height *and* width, or depth/height/width) is handled by calling the
+exchange once per split axis.
 """
 
 import torch
@@ -96,6 +102,38 @@ def halo_gather(
     stride: int,
     padding: int,
     dilation: int,
+    axis: int = -1,
+) -> tuple[torch.Tensor, int]:
+    """Assemble this rank's halo-padded input slice along ``axis``.
+
+    ``axis`` defaults to the last axis; any other axis is moved to the last
+    position for the exchange and moved back before returning, so the same
+    last-axis kernel serves a split along height, width or depth.
+    """
+    ndim = x_full.dim()
+    axis %= ndim
+    if axis == ndim - 1:
+        return _halo_gather_last_axis(
+            x_full, spatial_group, kernel, stride, padding, dilation
+        )
+    x_need, out_local = _halo_gather_last_axis(
+        x_full.movedim(axis, -1).contiguous(),
+        spatial_group,
+        kernel,
+        stride,
+        padding,
+        dilation,
+    )
+    return x_need.movedim(-1, axis).contiguous(), out_local
+
+
+def _halo_gather_last_axis(
+    x_full: torch.Tensor,
+    spatial_group: dist.ProcessGroup,
+    kernel: int,
+    stride: int,
+    padding: int,
+    dilation: int,
 ) -> tuple[torch.Tensor, int]:
     """Assemble this rank's halo-padded input slice along the last axis.
 
@@ -163,6 +201,39 @@ def halo_scatter_add(
     padding: int,
     dilation: int,
     local_in_size: int,
+    axis: int = -1,
+) -> torch.Tensor:
+    """Reverse of :func:`halo_gather` along ``axis`` (defaults to the last axis).
+
+    As in :func:`halo_gather`, a non-last ``axis`` is moved to the last position
+    for the exchange and moved back before returning.
+    """
+    ndim = g_x_need.dim()
+    axis %= ndim
+    if axis == ndim - 1:
+        return _halo_scatter_add_last_axis(
+            g_x_need, spatial_group, kernel, stride, padding, dilation, local_in_size
+        )
+    g_x_local = _halo_scatter_add_last_axis(
+        g_x_need.movedim(axis, -1).contiguous(),
+        spatial_group,
+        kernel,
+        stride,
+        padding,
+        dilation,
+        local_in_size,
+    )
+    return g_x_local.movedim(-1, axis).contiguous()
+
+
+def _halo_scatter_add_last_axis(
+    g_x_need: torch.Tensor,
+    spatial_group: dist.ProcessGroup,
+    kernel: int,
+    stride: int,
+    padding: int,
+    dilation: int,
+    local_in_size: int,
 ) -> torch.Tensor:
     """Reverse of :func:`halo_gather`: fold halo-position grads back to owners.
 
@@ -183,7 +254,13 @@ def halo_scatter_add(
     g_x_local = g_x_need.new_zeros((*g_x_need.shape[:-1], local_in_size))
 
     if group_size == 1:
-        return (g_x_need[..., -lo : -lo + local_in_size]).contiguous()
+        # ``g_x_need`` covers global input positions ``[lo, hi)``; the owned
+        # positions are ``[0, local_in_size)``. Positions of the owned range that
+        # the span does not reach (a ``stride > 1`` tail, or the ``lo < 0``
+        # padding head) carry no gradient and stay zero.
+        lo_c, hi_c = max(lo, 0), min(hi, global_n)
+        g_x_local[..., lo_c:hi_c] = g_x_need[..., lo_c - lo : hi_c - lo]
+        return g_x_local.contiguous()
 
     empty = g_x_need.new_empty((*g_x_need.shape[:-1], 0))
     send_parts: list[torch.Tensor] = []
