@@ -26,7 +26,6 @@ class Conv3dConfig:
     def __init__(
         self,
         bayesian: bool,
-        spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         bias: Parameter | None,
         kernel_size: tuple[int, int, int],
@@ -39,8 +38,6 @@ class Conv3dConfig:
 
         bayesian: bool
             Flag for whether the model is bayesian.
-        spatial_group: dist.ProcessGroup
-            Domain-parallel process group.
         channel_group: dist.ProcessGroup
             Tensor-parallel process group.
         bias: torch.Tensor | None
@@ -64,7 +61,7 @@ class Conv3dConfig:
         self.conv3d_input_fn = self._conv3d_input_fn_selection(bayesian)
         self.conv3d_weight_fn = self._conv3d_weight_fn_selection(bayesian)
         self.weight_reshape = self._reshape_weights_selection(bayesian)
-        self.grad_bias = self._grad_bias_selection(spatial_group, bias)
+        self.grad_bias = self._grad_bias_selection(bias)
         # ``stride == kernel_size`` tiles the domain with no overlap, so the
         # spatial split needs no communication. Otherwise neighbouring output
         # positions share input positions and the spatial ranks exchange halos.
@@ -107,9 +104,7 @@ class Conv3dConfig:
         """No-op."""
         return w
 
-    def _grad_bias_selection(
-        self, spatial_group: dist.ProcessGroup, bias: Optional[torch.Tensor]
-    ) -> Callable:
+    def _grad_bias_selection(self, bias: Optional[torch.Tensor]) -> Callable:
         """Select the grad-bias reducer; the spatial reduction is done by a hook."""
         if bias is None:
             return self._no_bias
@@ -119,10 +114,6 @@ class Conv3dConfig:
         """No-op."""
         return None
 
-    def _sum_grad_bias(
-        self,
-        grad_output: torch.Tensor,
-        spatial_group: Optional[dist.ProcessGroup] = None,
-    ) -> torch.Tensor:
+    def _sum_grad_bias(self, grad_output: torch.Tensor) -> torch.Tensor:
         """Sum ``grad_output`` over batch and spatial axes, leaving the channels."""
         return grad_output.sum(dim=(-5, -3, -2, -1))

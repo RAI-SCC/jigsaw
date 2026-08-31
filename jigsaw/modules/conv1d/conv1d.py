@@ -134,7 +134,6 @@ class DistributedConv1D(torch.nn.Module):
         self.device = device
         self.parallelism = parallelism
         self.dtype = dtype
-        self.empty = torch.empty(0, device=self.device, dtype=self.dtype)
         self.bayesian = bayesian
 
         k = np.sqrt(
@@ -161,7 +160,6 @@ class DistributedConv1D(torch.nn.Module):
         self.config = (
             Conv1dConfig(
                 self.bayesian,
-                self.spatial_group,
                 self.channel_group,
                 self.bias,
                 self.kernel_size,
@@ -356,7 +354,6 @@ class DistributedConv1D(torch.nn.Module):
         self.parallelism = to_process_mesh_dict[pm_col_key].size()
         self.config = Conv1dConfig(
             self.bayesian,
-            self.spatial_group,
             self.channel_group,
             self.bias,
             self.kernel_size,
@@ -441,16 +438,12 @@ class DistributedConv1D(torch.nn.Module):
             x,
             self.weight,
             self.bias,
-            self.kernel_size,
             self.stride,
             self.padding,
             self.dilation,
             self.in_channels,
             self.spatial_group,
             self.channel_group,
-            self.device,
-            self.parallelism,
-            self.empty,
             self.bayesian,
             self.config,
         )
