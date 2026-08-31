@@ -11,7 +11,7 @@ from .config import ConvConfig
 class ConvCtx(Protocol):
     """Protocol for types stored within ctx."""
 
-    x_shape_padded: torch.Size
+    x_full_shape: torch.Size
     stride: int | tuple[int, ...]
     padding: int | tuple[int, ...]
     dilation: int | tuple[int, ...]
@@ -46,8 +46,8 @@ class Conv2d(torch.autograd.Function):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of distributed Conv2d function.
 
-        Returns ``(y, x_aug)`` where ``y`` is this rank's output-channel slice
-        and ``x_aug`` is the gathered full-channel input kept for backward.
+        Returns ``(y, x_full)`` where ``y`` is this rank's output-channel slice
+        and ``x_full`` is the gathered full-channel input kept for backward.
         """
         if any(k != s for k, s in zip(kernel_size, stride)):
             raise NotImplementedError(
@@ -55,7 +55,7 @@ class Conv2d(torch.autograd.Function):
                 "(no halo exchange)."
             )
 
-        y, x_aug = config.dist_conv2d_fn(
+        y, x_full = config.dist_conv2d_fn(
             x,
             weight,
             bias,
@@ -66,7 +66,7 @@ class Conv2d(torch.autograd.Function):
             config=config,
         )
 
-        return y, x_aug
+        return y, x_full
 
     @staticmethod
     def setup_context(
@@ -84,7 +84,7 @@ class Conv2d(torch.autograd.Function):
         inputs : tuple
             All inputs passed to forward (x, weight, bias, kernel_size, ...).
         output : tuple
-            All outputs returned from forward (y, x_aug).
+            All outputs returned from forward (y, x_full).
         """
         # Unpack inputs
         (
@@ -106,18 +106,18 @@ class Conv2d(torch.autograd.Function):
         ) = inputs
 
         # Unpack outputs
-        _, x_aug = output
+        _, x_full = output
 
-        # x_aug carries no gradient of its own; g_x flows through input 0.
-        ctx.mark_non_differentiable(x_aug)
+        # x_full carries no gradient of its own; g_x flows through input 0.
+        ctx.mark_non_differentiable(x_full)
 
         # Save everything needed for backward
-        ctx.save_for_backward(x_aug, weight)
+        ctx.save_for_backward(x_full, weight)
         c = cast(ConvCtx, ctx)
         c.spatial_group = spatial_group
         c.channel_group = channel_group
         c.in_channels_global = in_channels
-        c.x_shape_padded = x_aug.shape
+        c.x_full_shape = x_full.shape
         c.stride = stride
         c.padding = padding
         c.dilation = dilation
@@ -128,7 +128,7 @@ class Conv2d(torch.autograd.Function):
     def backward(
         ctx: torch.autograd.function.FunctionCtx,
         grad_output: torch.Tensor,
-        grad_x_aug: None,  # No gradient for x_aug
+        grad_x_full: None,  # No gradient for x_full
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -151,20 +151,20 @@ class Conv2d(torch.autograd.Function):
         Each rank holds the full-channel grad wrt input for its own
         output-channel slice; summing those across the channel group and keeping
         this rank's channel slice yields ``g_x``. ``g_w`` / ``g_b`` need no
-        channel reduction (spatial ranks are reduced by the parameter hook).
+        channel reduction (the spatial reduction is handled by the parameter hook).
         """
         c = cast(ConvCtx, ctx)
-        x_aug, weight = c.saved_tensors
+        x_full, weight = c.saved_tensors
         stride, padding, dilation = (c.stride, c.padding, c.dilation)
         channel_group = c.channel_group
         config = c.config
 
-        x_shape_padded = c.x_shape_padded
+        x_full_shape = c.x_full_shape
 
         g_b = config.grad_bias(grad_output, c.spatial_group)
 
         g_x = config.conv2d_input_fn(
-            x_shape_padded[int(c.bayesian) :],
+            x_full_shape[int(c.bayesian) :],
             weight,
             grad_output.to(weight.dtype),  # handles autocast
             stride=stride,
@@ -177,7 +177,7 @@ class Conv2d(torch.autograd.Function):
         )
 
         g_w = config.conv2d_weight_fn(
-            x_aug,
+            x_full,
             weight.shape[int(c.bayesian) :],
             grad_output.to(weight.dtype),
             stride=stride,
