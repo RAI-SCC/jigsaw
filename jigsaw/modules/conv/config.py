@@ -26,6 +26,7 @@ class ConvConfig:
         kernel_size: tuple[int, int],
         stride: tuple[int, int],
         device: torch.device,
+        channel_comm: str = "all_gather",
     ):
         """
         Initialize selection strategy for conv.
@@ -44,7 +45,18 @@ class ConvConfig:
             Size of the stride
         device: torch.device
             Device upon which communication occurs
+        channel_comm: str
+            How the channel-parallel group exchanges input slices in the forward
+            pass: ``"all_gather"`` (default, one-shot gather) or ``"ring"``
+            (double-buffered p2p that overlaps comm with compute and lowers the
+            memory peak). See :mod:`jigsaw.modules.conv.distributed_convolutions`.
         """
+        if channel_comm not in dist_conv._CHANNEL_COMM_FNS:
+            raise ValueError(
+                f"channel_comm must be one of "
+                f"{sorted(dist_conv._CHANNEL_COMM_FNS)}, got {channel_comm!r}"
+            )
+        self.channel_comm = channel_comm
         self.conv2d_fn = self._conv2d_fn_selection(bayesian)
         self.conv2d_input_fn = self._conv2d_input_fn_selection(bayesian)
         self.conv2d_weight_fn = self._conv2d_weight_fn_selection(bayesian)

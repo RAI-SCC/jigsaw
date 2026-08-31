@@ -40,6 +40,7 @@ class DistributedConv2D(torch.nn.Module):
     stride: tuple[int, int]
     padding: str | tuple[int, int]
     dilation: tuple[int, int]
+    channel_comm: str
 
     def __init__(
         self,
@@ -61,6 +62,7 @@ class DistributedConv2D(torch.nn.Module):
         parallelism: int = 4,
         bayesian: bool = False,
         dtype: torch.dtype = torch.float32,
+        channel_comm: str = "all_gather",
         config: Optional[ConvConfig] = None,
     ):
         """
@@ -99,6 +101,10 @@ class DistributedConv2D(torch.nn.Module):
             Flag for whether model is vmapped.
         dtype: torch.dtype
             Data type of the convolution.
+        channel_comm: str
+            Channel-parallel forward exchange: ``"all_gather"`` (default) or
+            ``"ring"`` (double-buffered p2p, overlaps comm/compute, lower memory
+            peak). Ignored when ``config`` is supplied.
         config: Optional[ConvConfig]
             Configuration and selection strategy of convolutional layer.
             If None, this will be initialized here.
@@ -117,6 +123,7 @@ class DistributedConv2D(torch.nn.Module):
         else:
             self.padding = _pair(padding)
 
+        self.channel_comm = channel_comm
         self.groups = groups
         self.spatial_group = spatial_group
         self.channel_group = channel_group
@@ -162,6 +169,7 @@ class DistributedConv2D(torch.nn.Module):
                 self.kernel_size,
                 self.stride,
                 self.device,
+                self.channel_comm,
             )
             if config is None
             else config
@@ -357,6 +365,7 @@ class DistributedConv2D(torch.nn.Module):
             self.kernel_size,
             self.stride,
             self.device,
+            self.channel_comm,
         )
 
         from_weight_shape_local = self.weight.shape

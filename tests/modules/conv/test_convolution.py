@@ -20,10 +20,12 @@ def _conv2d_reference_check(
     height: int,
     width: int,
     batch: int = 2,
+    channel_comm: str = "all_gather",
 ) -> None:
     """Compare a distributed ``DistributedConv2D`` against a single-process conv2d.
 
-    Works for any ``row.size()`` (spatial) x ``col.size()`` (channel) mesh.
+    Works for any ``row.size()`` (spatial) x ``col.size()`` (channel) mesh and
+    either channel-parallel exchange strategy (``"all_gather"`` / ``"ring"``).
     Rebuilds the equivalent non-distributed convolution from the sharded weight,
     bias and input, runs both forward and backward, and checks the output plus
     every gradient (input, weight, bias) after gathering the distributed shards.
@@ -52,6 +54,7 @@ def _conv2d_reference_check(
         parallelism=model_group.size(),
         bayesian=False,
         dtype=torch.float32,
+        channel_comm=channel_comm,
     ).to(device)
 
     # --- reconstruct the equivalent global convolution -----------------------
@@ -145,8 +148,9 @@ class TestConv2d:
                 atol=1e-5,
             )
 
+    @pytest.mark.parametrize("channel_comm", ["all_gather", "ring"])
     def test_conv2d_forward(
-        self, device: torch.device, process_mesh_dict_2x2: dict
+        self, device: torch.device, process_mesh_dict_2x2: dict, channel_comm: str
     ) -> None:
         """2-way spatial x 2-way channel matches a single-process conv2d."""
         _conv2d_reference_check(
@@ -157,7 +161,78 @@ class TestConv2d:
             kernel_size=4,
             height=16,
             width=16,
+            channel_comm=channel_comm,
         )
+
+    def test_ring_matches_all_gather(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """The ring channel-exchange matches all-gather up to accumulation order.
+
+        The ring sums one ``conv`` per input-channel slice while all-gather runs
+        a single fused ``conv``, so the two differ only by float reduction order.
+        """
+        row_group, col_group = (
+            process_mesh_dict_2x2["row"],
+            process_mesh_dict_2x2["col"],
+        )
+        model_group = process_mesh_dict_2x2["model"]
+        n_spatial, n_channel = row_group.size(), col_group.size()
+
+        def _build(channel_comm: str) -> torch.nn.Module:
+            torch.manual_seed(1234)  # identical weight init for both variants
+            return conv.DistributedConv2D(
+                8,
+                12,
+                4,
+                device=device,
+                spatial_group=row_group,
+                channel_group=col_group,
+                stride=4,
+                padding=(0,),
+                dilation=1,
+                groups=1,
+                bias=True,
+                parallelism=model_group.size(),
+                bayesian=False,
+                dtype=torch.float32,
+                channel_comm=channel_comm,
+            ).to(device)
+
+        conv_ag = _build("all_gather")
+        conv_ring = _build("ring")
+
+        torch.manual_seed(model_group.rank())
+        x = torch.randn(2, 8 // n_channel, 16, 16 // n_spatial, device=device)
+
+        y_ag = conv_ag(x.clone().requires_grad_(True))
+        y_ring = conv_ring(x.clone().requires_grad_(True))
+        assert torch.allclose(y_ag, y_ring, atol=1e-5, rtol=1e-5)
+
+        y_ag.backward(torch.ones_like(y_ag))
+        y_ring.backward(torch.ones_like(y_ring))
+        assert torch.allclose(
+            conv_ag.weight.grad, conv_ring.weight.grad, atol=1e-5, rtol=1e-5
+        )
+        assert torch.allclose(
+            conv_ag.bias.grad, conv_ring.bias.grad, atol=1e-5, rtol=1e-5
+        )
+
+    def test_unknown_channel_comm_rejected(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """An unrecognised ``channel_comm`` name fails fast at construction."""
+        with pytest.raises(ValueError):
+            conv.DistributedConv2D(
+                8,
+                12,
+                4,
+                device=device,
+                spatial_group=process_mesh_dict_2x2["row"],
+                channel_group=process_mesh_dict_2x2["col"],
+                stride=4,
+                channel_comm="alltoall",
+            ).to(device)
 
     def test_int_args_normalized_to_pairs(
         self, device: torch.device, process_mesh_dict_2x2: dict
@@ -324,8 +399,9 @@ class TestConv2dParallel:
     """Distributed Conv2d across arbitrary spatial and channel group sizes."""
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("channel_comm", ["all_gather", "ring"])
     def test_forward_backward_1x4(
-        self, device: torch.device, process_mesh_dict_1x4: dict
+        self, device: torch.device, process_mesh_dict_1x4: dict, channel_comm: str
     ) -> None:
         """Pure channel parallelism (4 channel ranks, no spatial split)."""
         _conv2d_reference_check(
@@ -336,11 +412,13 @@ class TestConv2dParallel:
             kernel_size=4,
             height=16,
             width=16,
+            channel_comm=channel_comm,
         )
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("channel_comm", ["all_gather", "ring"])
     def test_forward_backward_4x1(
-        self, device: torch.device, process_mesh_dict_4x1: dict
+        self, device: torch.device, process_mesh_dict_4x1: dict, channel_comm: str
     ) -> None:
         """Pure spatial parallelism (4 spatial ranks, no channel split)."""
         _conv2d_reference_check(
@@ -351,11 +429,16 @@ class TestConv2dParallel:
             kernel_size=4,
             height=16,
             width=16,
+            channel_comm=channel_comm,
         )
 
     @pytest.mark.dist(8)
+    @pytest.mark.parametrize("channel_comm", ["all_gather", "ring"])
     def test_forward_backward_2x4(
-        self, device: torch.device, process_mesh_dict_2x4_rowcol: dict
+        self,
+        device: torch.device,
+        process_mesh_dict_2x4_rowcol: dict,
+        channel_comm: str,
     ) -> None:
         """Combined 2-way spatial and 4-way channel parallelism."""
         _conv2d_reference_check(
@@ -366,6 +449,7 @@ class TestConv2dParallel:
             kernel_size=4,
             height=16,
             width=16,
+            channel_comm=channel_comm,
         )
 
 
