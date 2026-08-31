@@ -10,12 +10,37 @@ from tests.process_mesh import *
 
 pytestmark = [pytest.mark.dist_required]
 
-Pair = int | tuple[int, int]
+# Every channel-parallel exchange strategy; "all_to_all" needs a backend with
+# all-to-all support and is skipped on gloo (see _skip_if_unsupported).
+CHANNEL_COMMS = ["all_gather", "ring", "all_to_all"]
 
 
-def _pair(value: Pair) -> tuple[int, int]:
-    """Normalise an ``int`` or 2-tuple to a ``(h, w)`` tuple."""
-    return (value, value) if isinstance(value, int) else tuple(value)
+def _skip_if_unsupported(channel_comm: str) -> None:
+    """Skip when the current backend cannot run ``channel_comm``."""
+    if channel_comm == "all_to_all" and dist.get_backend() == "gloo":
+        pytest.skip("all_to_all channel comm needs a non-gloo backend")
+
+
+def _assert_weight_replicated_across_spatial(
+    weight: torch.Tensor, mesh: dict, atol: float = 1e-5
+) -> None:
+    """Every spatial rank in a channel column must hold the same weight shard.
+
+    Works for any ``row.size()`` x ``col.size()`` mesh. ``gather_results_as_list``
+    returns one tensor per ``model``-group rank, and the row/col mesh lays ranks
+    out row-major, so the shard for ``(spatial_row, channel_col)`` lives at index
+    ``spatial_row * n_channel + channel_col``.
+    """
+    n_spatial, n_channel = mesh["row"].size(), mesh["col"].size()
+    shards = gather_results_as_list(weight, mesh)
+    for channel_col in range(n_channel):
+        reference = shards[channel_col]  # spatial_row == 0
+        for spatial_row in range(1, n_spatial):
+            assert torch.allclose(
+                shards[spatial_row * n_channel + channel_col],
+                reference,
+                atol=atol,
+            )
 
 
 def _conv2d_reference_check(
@@ -30,10 +55,12 @@ def _conv2d_reference_check(
     stride: Pair | None = None,
     padding: Pair = 0,
     dilation: Pair = 1,
+    channel_comm: str = "all_gather",
 ) -> None:
     """Compare a distributed ``DistributedConv2D`` against a single-process conv2d.
 
     Works for any ``row.size()`` (spatial) x ``col.size()`` (channel) mesh and
+    either channel-parallel exchange strategy (``"all_gather"`` / ``"ring"``) and
     for both the no-halo regime (``stride == kernel_size``, the default) and the
     halo regime (any other stride). ``kernel_size`` / ``stride`` / ``padding`` /
     ``dilation`` accept an ``int`` or a ``(h, w)`` tuple, so asymmetric kernels
@@ -70,6 +97,7 @@ def _conv2d_reference_check(
         parallelism=model_group.size(),
         bayesian=False,
         dtype=torch.float32,
+        channel_comm=channel_comm,
     ).to(device)
 
     # --- reconstruct the equivalent global convolution -----------------------
@@ -133,16 +161,17 @@ def _conv2d_reference_check(
 
 
 class TestConv2d:
+    # Every test here builds a 2x2 mesh, so it needs exactly 4 ranks. Without
+    # this marker an 8-rank run would build a mesh over ranks 0-3 only and
+    # deadlock the survivors in the first collective.
+    pytestmark = pytest.mark.dist(4)
+
     def test_param_init_conv2d(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """Verify initial weights for Conv2d are correctly synchronized."""
         local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
         torch.manual_seed(local_rank)  # each process gets a different initial seed
-        row_comm_size, col_comm_size = (
-            process_mesh_dict_2x2["row"].size(),
-            process_mesh_dict_2x2["col"].size(),
-        )
         in_dim, out_dim = 5, 10
         kernel_size = 4
         conv2d = conv.DistributedConv2D(
@@ -162,21 +191,221 @@ class TestConv2d:
             dtype=torch.float32,
         ).to(device)
 
-        weights_gathered_as_list = gather_results_as_list(
-            conv2d.weight, process_mesh_dict_2x2
-        )
+        _assert_weight_replicated_across_spatial(conv2d.weight, process_mesh_dict_2x2)
 
-        for i in range(process_mesh_dict_2x2["model"].size() // row_comm_size):
-            assert torch.allclose(
-                weights_gathered_as_list[i],
-                weights_gathered_as_list[i + col_comm_size],
-                atol=1e-5,
-            )
-
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_conv2d_forward(
-        self, device: torch.device, process_mesh_dict_2x2: dict
+        self, device: torch.device, process_mesh_dict_2x2: dict, channel_comm: str
     ) -> None:
         """2-way spatial x 2-way channel matches a single-process conv2d."""
+        _skip_if_unsupported(channel_comm)
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.parametrize("channel_comm", ["ring", "all_to_all"])
+    def test_streaming_matches_all_gather(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        channel_comm: str,
+    ) -> None:
+        """The streaming exchanges match all-gather up to accumulation order.
+
+        ``ring`` / ``all_to_all`` sum one ``conv`` per input-channel slice while
+        all-gather runs a single fused ``conv``, so the results differ only by
+        float reduction order.
+        """
+        _skip_if_unsupported(channel_comm)
+        row_group, col_group = (
+            process_mesh_dict_2x2["row"],
+            process_mesh_dict_2x2["col"],
+        )
+        model_group = process_mesh_dict_2x2["model"]
+        n_spatial, n_channel = row_group.size(), col_group.size()
+
+        def _build(channel_comm: str) -> torch.nn.Module:
+            torch.manual_seed(1234)  # identical weight init for both variants
+            return conv.DistributedConv2D(
+                8,
+                12,
+                4,
+                device=device,
+                spatial_group=row_group,
+                channel_group=col_group,
+                stride=4,
+                padding=(0,),
+                dilation=1,
+                groups=1,
+                bias=True,
+                parallelism=model_group.size(),
+                bayesian=False,
+                dtype=torch.float32,
+                channel_comm=channel_comm,
+            ).to(device)
+
+        conv_ag = _build("all_gather")
+        conv_stream = _build(channel_comm)
+
+        torch.manual_seed(model_group.rank())
+        x = torch.randn(2, 8 // n_channel, 16, 16 // n_spatial, device=device)
+
+        y_ag = conv_ag(x.clone().requires_grad_(True))
+        y_stream = conv_stream(x.clone().requires_grad_(True))
+        assert torch.allclose(y_ag, y_stream, atol=1e-5, rtol=1e-5)
+
+        y_ag.backward(torch.ones_like(y_ag))
+        y_stream.backward(torch.ones_like(y_stream))
+        assert torch.allclose(
+            conv_ag.weight.grad, conv_stream.weight.grad, atol=1e-5, rtol=1e-5
+        )
+        assert torch.allclose(
+            conv_ag.bias.grad, conv_stream.bias.grad, atol=1e-5, rtol=1e-5
+        )
+
+    def test_channel_comm_auto_defaults_by_device(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """``channel_comm='auto'`` resolves from the device on the config."""
+        conv2d = conv.DistributedConv2D(
+            8,
+            12,
+            4,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=4,
+        ).to(device)
+        expected = "all_to_all" if device.type == "cuda" else "ring"
+        assert conv2d.config.channel_comm == expected
+
+    def test_unknown_channel_comm_rejected(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """An unrecognised ``channel_comm`` name fails fast at construction."""
+        with pytest.raises(ValueError):
+            conv.DistributedConv2D(
+                8,
+                12,
+                4,
+                device=device,
+                spatial_group=process_mesh_dict_2x2["row"],
+                channel_group=process_mesh_dict_2x2["col"],
+                stride=4,
+                channel_comm="alltoall",
+            ).to(device)
+
+    def test_alltoall_rejected_on_gloo(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
+        if dist.get_backend() != "gloo":
+            pytest.skip("only meaningful on the gloo backend")
+        conv2d = conv.DistributedConv2D(
+            8,
+            12,
+            4,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=4,
+            padding=(0,),
+            dilation=1,
+            bias=True,
+            parallelism=process_mesh_dict_2x2["model"].size(),
+            channel_comm="all_to_all",
+        ).to(device)
+        x = torch.randn(2, 4, 16, 8, device=device)
+        with pytest.raises(RuntimeError, match="all-to-all"):
+            conv2d(x)
+
+    def test_int_args_normalized_to_pairs(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """``stride`` / ``padding`` / ``dilation`` given as ``int`` become 2-tuples."""
+        conv2d = conv.DistributedConv2D(
+            8,
+            12,
+            4,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=4,
+            padding=0,
+            dilation=1,
+            groups=1,
+            bias=True,
+            parallelism=process_mesh_dict_2x2["model"].size(),
+            bayesian=False,
+            dtype=torch.float32,
+        ).to(device)
+
+        assert conv2d.kernel_size == (4, 4)
+        assert conv2d.stride == (4, 4)
+        assert conv2d.padding == (0, 0)
+        assert conv2d.dilation == (1, 1)
+
+    def test_int_args_match_tuple_args(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """Passing ints produces the same forward/backward as the tuple form."""
+        row_group, col_group = (
+            process_mesh_dict_2x2["row"],
+            process_mesh_dict_2x2["col"],
+        )
+        model_group = process_mesh_dict_2x2["model"]
+        in_channels, out_channels, kernel_size = 8, 12, 4
+        n_spatial, n_channel = row_group.size(), col_group.size()
+
+        def _build(stride: object, padding: object, dilation: object) -> torch.nn.Module:
+            torch.manual_seed(1234)  # identical weight init for both variants
+            return conv.DistributedConv2D(
+                in_channels,
+                out_channels,
+                kernel_size,
+                device=device,
+                spatial_group=row_group,
+                channel_group=col_group,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=1,
+                bias=True,
+                parallelism=model_group.size(),
+                bayesian=False,
+                dtype=torch.float32,
+            ).to(device)
+
+        conv_int = _build(kernel_size, 0, 1)
+        conv_tuple = _build((kernel_size, kernel_size), (0, 0), (1, 1))
+
+        torch.manual_seed(model_group.rank())
+        x = torch.randn(
+            2, in_channels // n_channel, 16, 16 // n_spatial, device=device
+        )
+
+        y_int = conv_int(x.clone().requires_grad_(True))
+        y_tuple = conv_tuple(x.clone().requires_grad_(True))
+        assert torch.allclose(y_int, y_tuple, atol=1e-6)
+
+        y_int.backward(torch.ones_like(y_int))
+        y_tuple.backward(torch.ones_like(y_tuple))
+        assert torch.allclose(
+            conv_int.weight.grad, conv_tuple.weight.grad, atol=1e-6
+        )
+        assert torch.allclose(conv_int.bias.grad, conv_tuple.bias.grad, atol=1e-6)
+
+    def test_int_args_match_reference_conv2d(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """A module built with int args still matches a single-process conv2d."""
         _conv2d_reference_check(
             device,
             process_mesh_dict_2x2,
@@ -186,6 +415,98 @@ class TestConv2d:
             height=16,
             width=16,
         )
+
+    def test_raw_autograd_fn_requires_tuples(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """The ``Conv2d`` autograd Function itself assumes tuples, not ints.
+
+        Only ``DistributedConv2D`` normalizes via ``_pair``; calling the
+        underlying function with an ``int`` stride trips ``zip(kernel_size,
+        stride)`` in ``Conv2d.forward``.
+        """
+        conv2d = conv.DistributedConv2D(
+            8,
+            12,
+            4,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=4,
+            padding=0,
+            dilation=1,
+            groups=1,
+            bias=True,
+            parallelism=process_mesh_dict_2x2["model"].size(),
+            bayesian=False,
+            dtype=torch.float32,
+        ).to(device)
+        x = torch.randn(2, 4, 16, 8, device=device)
+
+        with pytest.raises(TypeError):
+            conv2d.conv2d_apply(
+                x,
+                conv2d.weight,
+                conv2d.bias,
+                conv2d.kernel_size,
+                4,  # int stride instead of (4, 4)
+                conv2d.padding,
+                conv2d.dilation,
+                conv2d.in_channels,
+                conv2d.spatial_group,
+                conv2d.channel_group,
+                conv2d.device,
+                conv2d.parallelism,
+                conv2d.empty,
+                conv2d.bayesian,
+                conv2d.config,
+            )
+
+    def test_raw_autograd_fn_requires_tuples(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """The ``Conv2d`` autograd Function itself assumes tuples, not ints.
+
+        Only ``DistributedConv2D`` normalizes via ``_pair``; calling the
+        underlying function with an ``int`` stride trips ``zip(kernel_size,
+        stride)`` in ``Conv2d.forward``.
+        """
+        conv2d = conv.DistributedConv2D(
+            8,
+            12,
+            4,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=4,
+            padding=0,
+            dilation=1,
+            groups=1,
+            bias=True,
+            parallelism=process_mesh_dict_2x2["model"].size(),
+            bayesian=False,
+            dtype=torch.float32,
+        ).to(device)
+        x = torch.randn(2, 4, 16, 8, device=device)
+
+        with pytest.raises(TypeError):
+            conv2d.conv2d_apply(
+                x,
+                conv2d.weight,
+                conv2d.bias,
+                conv2d.kernel_size,
+                4,  # int stride instead of (4, 4)
+                conv2d.padding,
+                conv2d.dilation,
+                conv2d.in_channels,
+                conv2d.spatial_group,
+                conv2d.channel_group,
+                conv2d.device,
+                conv2d.parallelism,
+                conv2d.empty,
+                conv2d.bayesian,
+                conv2d.config,
+            )
 
     def test_stride_lt_kernel_halo(
         self, device: torch.device, process_mesh_dict_2x2: dict
@@ -281,10 +602,12 @@ class TestConv2dParallel:
     """Distributed Conv2d across arbitrary spatial and channel group sizes."""
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_forward_backward_1x4(
-        self, device: torch.device, process_mesh_dict_1x4: dict
+        self, device: torch.device, process_mesh_dict_1x4: dict, channel_comm: str
     ) -> None:
         """Pure channel parallelism (4 channel ranks, no spatial split)."""
+        _skip_if_unsupported(channel_comm)
         _conv2d_reference_check(
             device,
             process_mesh_dict_1x4,
@@ -293,13 +616,16 @@ class TestConv2dParallel:
             kernel_size=4,
             height=16,
             width=16,
+            channel_comm=channel_comm,
         )
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_forward_backward_4x1(
-        self, device: torch.device, process_mesh_dict_4x1: dict
+        self, device: torch.device, process_mesh_dict_4x1: dict, channel_comm: str
     ) -> None:
         """Pure spatial parallelism (4 spatial ranks, no channel split)."""
+        _skip_if_unsupported(channel_comm)
         _conv2d_reference_check(
             device,
             process_mesh_dict_4x1,
@@ -308,13 +634,19 @@ class TestConv2dParallel:
             kernel_size=4,
             height=16,
             width=16,
+            channel_comm=channel_comm,
         )
 
     @pytest.mark.dist(8)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_forward_backward_2x4(
-        self, device: torch.device, process_mesh_dict_2x4_rowcol: dict
+        self,
+        device: torch.device,
+        process_mesh_dict_2x4_rowcol: dict,
+        channel_comm: str,
     ) -> None:
         """Combined 2-way spatial and 4-way channel parallelism."""
+        _skip_if_unsupported(channel_comm)
         _conv2d_reference_check(
             device,
             process_mesh_dict_2x4_rowcol,
@@ -323,6 +655,293 @@ class TestConv2dParallel:
             kernel_size=4,
             height=16,
             width=16,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(8)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    def test_forward_backward_4x2(
+        self, device: torch.device, process_mesh_dict_4x2: dict, channel_comm: str
+    ) -> None:
+        """4-way spatial x 2-way channel parallelism."""
+        _skip_if_unsupported(channel_comm)
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_4x2,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(6)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    def test_forward_backward_2x3(
+        self, device: torch.device, process_mesh_dict_2x3: dict, channel_comm: str
+    ) -> None:
+        """Rectangular non-power-of-two mesh: 2-way spatial x 3-way channel."""
+        _skip_if_unsupported(channel_comm)
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x3,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=24,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(6)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    def test_forward_backward_3x2(
+        self, device: torch.device, process_mesh_dict_3x2: dict, channel_comm: str
+    ) -> None:
+        """Rectangular non-power-of-two mesh: 3-way spatial x 2-way channel."""
+        _skip_if_unsupported(channel_comm)
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_3x2,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=24,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(6)
+    def test_param_init_replicated_over_3_spatial_ranks(
+        self, device: torch.device, process_mesh_dict_3x2: dict
+    ) -> None:
+        """Weight init is broadcast across a spatial group larger than two."""
+        torch.manual_seed(dist.get_rank(group=process_mesh_dict_3x2["model"]))
+        conv2d = conv.DistributedConv2D(
+            12,
+            12,
+            4,
+            device=device,
+            spatial_group=process_mesh_dict_3x2["row"],
+            channel_group=process_mesh_dict_3x2["col"],
+            stride=4,
+            padding=(0,),
+            dilation=1,
+            bias=True,
+            parallelism=process_mesh_dict_3x2["model"].size(),
+            bayesian=False,
+            dtype=torch.float32,
+        ).to(device)
+        _assert_weight_replicated_across_spatial(conv2d.weight, process_mesh_dict_3x2)
+
+
+class TestConv2dChannelGroupOne:
+    """``channel_group.size() == 1`` bypasses the custom kernel for native conv2d."""
+
+    @pytest.mark.dist(4)
+    def test_fully_local_allows_arbitrary_hyperparams(
+        self, device: torch.device, process_mesh_dict_4x1x1: dict
+    ) -> None:
+        """No channel *and* no spatial split: any stride / padding / dilation.
+
+        Previously the custom kernel rejected ``stride != kernel_size``
+        unconditionally; with both groups size one it now runs plain autograd
+        ``conv2d`` and must match a single-process reference in fwd and bwd.
+        """
+        mesh = process_mesh_dict_4x1x1
+        row, col = mesh["row"], mesh["col"]
+        assert row.size() == 1 and col.size() == 1
+
+        in_ch, out_ch, k = 6, 8, 3
+        conv2d = conv.DistributedConv2D(
+            in_ch,
+            out_ch,
+            k,
+            device=device,
+            spatial_group=row,
+            channel_group=col,
+            stride=2,
+            padding=1,
+            dilation=2,
+            bias=True,
+            parallelism=mesh["model"].size(),
+            bayesian=False,
+            dtype=torch.float32,
+        ).to(device)
+
+        torch.manual_seed(dist.get_rank())
+        x = torch.randn(2, in_ch, 15, 15, device=device)
+
+        w = conv2d.weight.detach().clone().requires_grad_(True)
+        b = conv2d.bias.detach().clone().requires_grad_(True)
+        x_ref = x.clone().requires_grad_(True)
+        y_ref = F.conv2d(x_ref, w, b, stride=2, padding=1, dilation=2)
+
+        x_dist = x.clone().requires_grad_(True)
+        y = conv2d(x_dist)
+        assert torch.allclose(y, y_ref, atol=1e-5)
+
+        y.backward(torch.ones_like(y))
+        y_ref.backward(torch.ones_like(y_ref))
+        assert torch.allclose(x_dist.grad, x_ref.grad, atol=1e-5)
+        assert torch.allclose(conv2d.weight.grad, w.grad, atol=1e-5)
+        assert torch.allclose(conv2d.bias.grad, b.grad, atol=1e-5)
+
+    @pytest.mark.dist(4)
+    def test_tiling_conv_matches_single_process(
+        self, device: torch.device, process_mesh_dict_4x1: dict
+    ) -> None:
+        """Split spatial group, no channel split: the no-halo path still works."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_4x1,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize(
+        "stride, padding, dilation",
+        [(2, (0,), 1), (4, (1,), 1), (4, (0,), 2)],
+    )
+    def test_split_spatial_rejects_non_tiling(
+        self,
+        device: torch.device,
+        process_mesh_dict_4x1: dict,
+        stride: int,
+        padding: tuple,
+        dilation: int,
+    ) -> None:
+        """A split spatial group needs an exact tiling; anything else is rejected."""
+        mesh = process_mesh_dict_4x1
+        conv2d = conv.DistributedConv2D(
+            8,
+            12,
+            4,
+            device=device,
+            spatial_group=mesh["row"],
+            channel_group=mesh["col"],
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            bias=True,
+            parallelism=mesh["model"].size(),
+            bayesian=False,
+            dtype=torch.float32,
+        ).to(device)
+        x = torch.randn(2, 8, 16, 16 // mesh["row"].size(), device=device)
+        with pytest.raises(NotImplementedError):
+            conv2d(x)
+
+    @pytest.mark.dist(4)
+    def test_halo_1x4(
+        self, device: torch.device, process_mesh_dict_1x4: dict
+    ) -> None:
+        """Halo regime with no spatial split (channel-only, group size 1 path)."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_1x4,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            stride=2,
+            padding=1,
+        )
+
+    @pytest.mark.dist(4)
+    def test_halo_4x1(
+        self, device: torch.device, process_mesh_dict_4x1: dict
+    ) -> None:
+        """Halo regime with 4-way spatial split (real cross-rank exchange)."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_4x1,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=32,
+            width=32,
+            stride=2,
+            padding=1,
+        )
+
+    @pytest.mark.dist(8)
+    def test_forward_backward_2x4(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x4_rowcol: dict,
+        channel_comm: str,
+    ) -> None:
+        """Halo regime combined with 4-way channel parallelism."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x4_rowcol,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            stride=2,
+            padding=1,
+        )
+
+    @pytest.mark.dist(8)
+    def test_halo_2x4_asymmetric_kernel_stride(
+        self, device: torch.device, process_mesh_dict_2x4_rowcol: dict
+    ) -> None:
+        """2x4 mesh, non-square kernel and stride, stride < kernel on both axes."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x4_rowcol,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=(3, 4),
+            height=17,
+            width=16,
+            stride=(2, 3),
+            padding=(1, 2),
+        )
+
+    @pytest.mark.dist(8)
+    def test_halo_2x4_asymmetric_stride_gt_kernel(
+        self, device: torch.device, process_mesh_dict_2x4_rowcol: dict
+    ) -> None:
+        """2x4 mesh, non-square kernel and stride, width stride > kernel."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x4_rowcol,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=(4, 2),
+            height=16,
+            width=18,
+            stride=(2, 3),
+            padding=(1, 0),
+        )
+
+    @pytest.mark.dist(8)
+    def test_halo_2x4_asymmetric_dilation(
+        self, device: torch.device, process_mesh_dict_2x4_rowcol: dict
+    ) -> None:
+        """2x4 mesh, non-square stride and dilation over the halo exchange."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x4_rowcol,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=(3, 3),
+            height=16,
+            width=16,
+            stride=(1, 2),
+            padding=(2, 1),
+            dilation=(2, 1),
         )
 
     @pytest.mark.dist(4)
@@ -430,6 +1049,9 @@ class TestConv2dParallel:
 
 
 class TestConv2dTranspose:
+    # 2x2 mesh only -> needs exactly 4 ranks (see TestConv2d).
+    pytestmark = pytest.mark.dist(4)
+
     def test_param_init_conv2d_transpose(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:

@@ -40,6 +40,7 @@ class DistributedConv2D(torch.nn.Module):
     stride: tuple[int, int]
     padding: str | tuple[int, int]
     dilation: tuple[int, int]
+    channel_comm: str
 
     def __init__(
         self,
@@ -61,6 +62,7 @@ class DistributedConv2D(torch.nn.Module):
         parallelism: int = 4,
         bayesian: bool = False,
         dtype: torch.dtype = torch.float32,
+        channel_comm: str = "auto",
         config: Optional[ConvConfig] = None,
     ):
         """
@@ -99,6 +101,12 @@ class DistributedConv2D(torch.nn.Module):
             Flag for whether model is vmapped.
         dtype: torch.dtype
             Data type of the convolution.
+        channel_comm: str
+            Channel-parallel forward exchange: ``"all_gather"``, ``"ring"``
+            (double-buffered batched p2p, overlaps comm/compute, lower memory
+            peak) or ``"all_to_all"`` (same ring over masked all-to-all hops,
+            NCCL only). ``"auto"`` (default) -> ``"all_to_all"`` on a CUDA
+            ``device``, else ``"ring"``. Ignored when ``config`` is supplied.
         config: Optional[ConvConfig]
             Configuration and selection strategy of convolutional layer.
             If None, this will be initialized here.
@@ -117,6 +125,7 @@ class DistributedConv2D(torch.nn.Module):
         else:
             self.padding = _pair(padding)
 
+        self.channel_comm = channel_comm
         self.groups = groups
         self.spatial_group = spatial_group
         self.channel_group = channel_group
@@ -162,6 +171,7 @@ class DistributedConv2D(torch.nn.Module):
                 self.kernel_size,
                 self.stride,
                 self.device,
+                self.channel_comm,
             )
             if config is None
             else config
@@ -357,6 +367,7 @@ class DistributedConv2D(torch.nn.Module):
             self.kernel_size,
             self.stride,
             self.device,
+            self.channel_comm,
         )
 
         from_weight_shape_local = self.weight.shape
@@ -421,6 +432,55 @@ class DistributedConv2D(torch.nn.Module):
             )
             del global_bias
 
+    def _needs_halo(self) -> bool:
+        """Whether a spatially-split conv would need neighbour halos.
+
+        With ``stride == kernel_size``, no padding and no dilation every output
+        column depends on exactly one spatial rank's input, so the split needs
+        no communication. Anything else does.
+        """
+        zero_pad = self.padding == (0, 0) or self.padding == "valid"
+        return not (
+            self.kernel_size == self.stride and zero_pad and self.dilation == (1, 1)
+        )
+
+    def _forward_local(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass when ``channel_group.size() == 1`` (no channel comm).
+
+        Nothing has to be gathered over the channel dimension, so the custom
+        autograd Function buys nothing: native ``conv2d`` plus the spatial-group
+        gradient hooks on ``weight`` / ``bias`` produce the same result. Spatial
+        splitting still works as long as the convolution tiles exactly
+        (``stride == kernel_size``, no padding / dilation); any other config
+        across a split spatial group would need a halo exchange and is rejected.
+        A group size of one on both axes places no such restriction.
+        """
+        if self.spatial_group.size() > 1 and self._needs_halo():
+            raise NotImplementedError(
+                "Distributed Conv2d across a split spatial group supports only "
+                "stride == kernel_size with no padding or dilation "
+                "(no halo exchange implemented)."
+            )
+        conv2d = self.config.conv2d_fn
+        if self.bias is not None:
+            y = conv2d(
+                x,
+                self.weight,
+                self.bias,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
+            )
+        else:
+            y = conv2d(
+                x,
+                self.weight,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
+            )
+        return cast(torch.Tensor, y)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of distributed convolution.
@@ -439,6 +499,9 @@ class DistributedConv2D(torch.nn.Module):
             B, out_dim are global values.
             in_dim is local value.
         """
+        if self.channel_group.size() == 1:
+            return self._forward_local(x)
+
         cij = self.conv2d_apply(
             x,
             self.weight,

@@ -12,9 +12,29 @@ Two regimes are supported, selected by :class:`~jigsaw.modules.conv.config.ConvC
 Both regimes cooperate with the channel-parallel group through
 :func:`_gather_full_channels`, which works for any group size.
 The spatial split is 1-D, along the last axis (width); height is never split.
+
+The channel-parallel group cooperates through one of three
+interchangeable kernels, selected by ``config.channel_comm``:
+
+* ``"all_gather"`` -- :func:`distributed_conv2d_over_channels_nway` gathers every
+  rank's input-channel slice in one shot. Simple and fast, but its transient
+  memory peak is ``~2 * C_in`` (the gather list plus the concatenated copy).
+* ``"ring"`` -- :func:`distributed_conv2d_over_channels_p2p` circulates the
+  slices one hop at a time with batched ``isend`` / ``irecv``
+  (:func:`jigsaw.comm.comm_1d_p2p`), overlaps each partial convolution with the
+  next transfer and keeps the peak to ``C_in`` plus two slice buffers.
+* ``"all_to_all"`` -- :func:`distributed_conv2d_over_channels_alltoall` runs the
+  same ring schedule but moves each hop with a masked all-to-all
+  (:func:`jigsaw.comm.comm_1d_alltoall`): an empty tensor goes to every rank
+  except the ring neighbour. Needs a backend with all-to-all support (NCCL);
+  gloo has none.
+
+All three work for any channel-group size and return the same ``(y, x_full)``.
+``ConvConfig`` resolves the default: ``"all_to_all"`` on a CUDA device,
+``"ring"`` otherwise.
 """
 
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import torch
 import torch.distributed as dist
@@ -52,7 +72,7 @@ def distributed_conv2d_over_channels_nway(
     padding: str | tuple[int, int],
     dilation: tuple[int, int],
     channel_group: dist.ProcessGroup,
-    conv_func: Callable,
+    conv_func: Callable[..., torch.Tensor],
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Channel-parallel Conv2d for an arbitrary channel-group size.
 
@@ -92,10 +112,11 @@ def conv2d_nway(
     channel group cooperates through
     :func:`distributed_conv2d_over_channels_nway`.
 
-    Returns ``(y, x_full)`` where ``x_full`` is the gathered full-channel input
-    kept for the backward pass.
+    Returns ``(y, x_full)`` where ``x_full`` is the full-channel input kept for
+    the backward pass.
     """
-    return distributed_conv2d_over_channels_nway(
+    over_channels_fn = _CHANNEL_COMM_FNS[config.channel_comm]
+    return over_channels_fn(
         x,
         w,
         b,

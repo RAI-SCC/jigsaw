@@ -68,7 +68,7 @@ class Conv2d(torch.autograd.Function):
             config=config,
         )
 
-        return y, x_aug
+        return y, x_full
 
     @staticmethod
     def setup_context(
@@ -86,7 +86,7 @@ class Conv2d(torch.autograd.Function):
         inputs : tuple
             All inputs passed to forward (x, weight, bias, kernel_size, ...).
         output : tuple
-            All outputs returned from forward (y, x_aug).
+            All outputs returned from forward (y, x_full).
         """
         # Unpack inputs
         (
@@ -108,13 +108,13 @@ class Conv2d(torch.autograd.Function):
         ) = inputs
 
         # Unpack outputs
-        _, x_aug = output
+        _, x_full = output
 
-        # x_aug carries no gradient of its own; g_x flows through input 0.
-        ctx.mark_non_differentiable(x_aug)
+        # x_full carries no gradient of its own; g_x flows through input 0.
+        ctx.mark_non_differentiable(x_full)
 
         # Save everything needed for backward
-        ctx.save_for_backward(x_aug, weight)
+        ctx.save_for_backward(x_full, weight)
         c = cast(ConvCtx, ctx)
         c.spatial_group = spatial_group
         c.channel_group = channel_group
@@ -132,7 +132,7 @@ class Conv2d(torch.autograd.Function):
     def backward(
         ctx: torch.autograd.function.FunctionCtx,
         grad_output: torch.Tensor,
-        grad_x_aug: None,  # No gradient for x_aug
+        grad_x_full: None,  # No gradient for x_full
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
