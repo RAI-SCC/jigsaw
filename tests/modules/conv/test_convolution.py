@@ -159,6 +159,142 @@ class TestConv2d:
             width=16,
         )
 
+    def test_int_args_normalized_to_pairs(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """``stride`` / ``padding`` / ``dilation`` given as ``int`` become 2-tuples."""
+        conv2d = conv.DistributedConv2D(
+            8,
+            12,
+            4,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=4,
+            padding=0,
+            dilation=1,
+            groups=1,
+            bias=True,
+            parallelism=process_mesh_dict_2x2["model"].size(),
+            bayesian=False,
+            dtype=torch.float32,
+        ).to(device)
+
+        assert conv2d.kernel_size == (4, 4)
+        assert conv2d.stride == (4, 4)
+        assert conv2d.padding == (0, 0)
+        assert conv2d.dilation == (1, 1)
+
+    def test_int_args_match_tuple_args(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """Passing ints produces the same forward/backward as the tuple form."""
+        row_group, col_group = (
+            process_mesh_dict_2x2["row"],
+            process_mesh_dict_2x2["col"],
+        )
+        model_group = process_mesh_dict_2x2["model"]
+        in_channels, out_channels, kernel_size = 8, 12, 4
+        n_spatial, n_channel = row_group.size(), col_group.size()
+
+        def _build(stride: object, padding: object, dilation: object) -> torch.nn.Module:
+            torch.manual_seed(1234)  # identical weight init for both variants
+            return conv.DistributedConv2D(
+                in_channels,
+                out_channels,
+                kernel_size,
+                device=device,
+                spatial_group=row_group,
+                channel_group=col_group,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=1,
+                bias=True,
+                parallelism=model_group.size(),
+                bayesian=False,
+                dtype=torch.float32,
+            ).to(device)
+
+        conv_int = _build(kernel_size, 0, 1)
+        conv_tuple = _build((kernel_size, kernel_size), (0, 0), (1, 1))
+
+        torch.manual_seed(model_group.rank())
+        x = torch.randn(
+            2, in_channels // n_channel, 16, 16 // n_spatial, device=device
+        )
+
+        y_int = conv_int(x.clone().requires_grad_(True))
+        y_tuple = conv_tuple(x.clone().requires_grad_(True))
+        assert torch.allclose(y_int, y_tuple, atol=1e-6)
+
+        y_int.backward(torch.ones_like(y_int))
+        y_tuple.backward(torch.ones_like(y_tuple))
+        assert torch.allclose(
+            conv_int.weight.grad, conv_tuple.weight.grad, atol=1e-6
+        )
+        assert torch.allclose(conv_int.bias.grad, conv_tuple.bias.grad, atol=1e-6)
+
+    def test_int_args_match_reference_conv2d(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """A module built with int args still matches a single-process conv2d."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+        )
+
+    def test_raw_autograd_fn_requires_tuples(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """The ``Conv2d`` autograd Function itself assumes tuples, not ints.
+
+        Only ``DistributedConv2D`` normalizes via ``_pair``; calling the
+        underlying function with an ``int`` stride trips ``zip(kernel_size,
+        stride)`` in ``Conv2d.forward``.
+        """
+        conv2d = conv.DistributedConv2D(
+            8,
+            12,
+            4,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=4,
+            padding=0,
+            dilation=1,
+            groups=1,
+            bias=True,
+            parallelism=process_mesh_dict_2x2["model"].size(),
+            bayesian=False,
+            dtype=torch.float32,
+        ).to(device)
+        x = torch.randn(2, 4, 16, 8, device=device)
+
+        with pytest.raises(TypeError):
+            conv2d.conv2d_apply(
+                x,
+                conv2d.weight,
+                conv2d.bias,
+                conv2d.kernel_size,
+                4,  # int stride instead of (4, 4)
+                conv2d.padding,
+                conv2d.dilation,
+                conv2d.in_channels,
+                conv2d.spatial_group,
+                conv2d.channel_group,
+                conv2d.device,
+                conv2d.parallelism,
+                conv2d.empty,
+                conv2d.bayesian,
+                conv2d.config,
+            )
+
     def test_requires_stride_equals_kernel(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
