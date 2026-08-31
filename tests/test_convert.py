@@ -10,7 +10,9 @@ from jigsaw.modules.roll import Roll
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
 from tests.process_mesh import *
 
-pytestmark = [pytest.mark.dist_required]
+# Every test here builds a 2x2 / 2x1x2 mesh, so it needs exactly 4 ranks;
+# without this an 8-rank run would build a mesh over ranks 0-3 and deadlock.
+pytestmark = [pytest.mark.dist_required, pytest.mark.dist(4)]
 
 
 @pytest.mark.parametrize(

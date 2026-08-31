@@ -1,6 +1,6 @@
 """Distributed 1-D convolution implementation.
 
-Mirrors :mod:`jigsaw.modules.conv.distributed_convolutions` for ``F.conv1d``.
+Mirrors :mod:`jigsaw.modules.conv2d.distributed_convolutions_2d` for ``F.conv1d``.
 Input is ``(N, C, L)``; the domain is split along the length axis (the last
 axis) across the spatial group, and the channels are split across the channel
 group.

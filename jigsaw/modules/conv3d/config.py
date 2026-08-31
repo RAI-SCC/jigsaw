@@ -1,6 +1,6 @@
 """Config setup for distributed 3-D convolutions.
 
-Mirrors :class:`jigsaw.modules.conv.config.ConvConfig` for ``F.conv3d``.
+Mirrors :class:`jigsaw.modules.conv2d.config.Conv2dConfig` for ``F.conv3d``.
 """
 
 from typing import Any, Callable, Optional

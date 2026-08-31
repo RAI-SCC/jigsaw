@@ -1,6 +1,6 @@
 """Distributed 3-D convolution implementation.
 
-Mirrors :mod:`jigsaw.modules.conv.distributed_convolutions` for ``F.conv3d``.
+Mirrors :mod:`jigsaw.modules.conv2d.distributed_convolutions_2d` for ``F.conv3d``.
 Input is ``(N, C, D, H, W)``; the domain is split along the width axis (the last
 axis) across the spatial group, and the channels are split across the channel
 group.

@@ -8,10 +8,10 @@ import torch.nn.functional as F
 from torch.nn.grad import conv2d_input, conv2d_weight
 from torch.nn.parameter import Parameter
 
-from . import distributed_convolutions as dist_conv
+from . import distributed_convolutions_2d as dist_conv
 
 
-class ConvConfig:
+class Conv2dConfig:
     """Selection strategy for the convolution kernels used in the backward pass."""
 
     # type hints
@@ -53,7 +53,7 @@ class ConvConfig:
             peak) or ``"all_to_all"`` (same ring over masked all-to-all hops,
             NCCL only). ``"auto"`` (the default) picks ``"all_to_all"`` on a
             CUDA ``device`` and ``"p2p"`` otherwise. See
-            :mod:`jigsaw.modules.conv.distributed_convolutions`.
+            :mod:`jigsaw.modules.conv2d.distributed_convolutions_2d`.
         """
         self.channel_comm = self._resolve_channel_comm(channel_comm, device)
         self.conv2d_fn = self._conv2d_fn_selection(bayesian)

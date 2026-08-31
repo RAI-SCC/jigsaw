@@ -1,6 +1,6 @@
 """Distributed convolution implementation.
 
-Two regimes are supported, selected by :class:`~jigsaw.modules.conv.config.ConvConfig`:
+Two regimes are supported, selected by :class:`~jigsaw.modules.conv2d.config.Conv2dConfig`:
 
 * ``stride == kernel_size`` (and no dilation/padding on the split axis): the
   spatial split needs no communication -- every spatial rank convolves its own
@@ -29,7 +29,7 @@ interchangeable strategies, selected by ``config.channel_comm``:
 In the no-halo regime the strategy is one of
 :data:`_CHANNEL_COMM_FNS`; the halo regime applies the same schedule but
 halo-gathers (and convolves) one channel slab at a time. All strategies work for
-any channel-group size and return the same ``(y, x_full)``. ``ConvConfig``
+any channel-group size and return the same ``(y, x_full)``. ``Conv2dConfig``
 resolves the default: ``"all_to_all"`` on a CUDA device, ``"p2p"`` otherwise.
 """
 

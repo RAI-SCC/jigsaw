@@ -7,7 +7,7 @@ plain ``int`` instead of a ``tuple[int, int]``.
 
 import pytest
 
-from jigsaw.modules.conv.conv import _pair
+from jigsaw.modules.conv2d.conv2d import _pair
 
 
 class TestPair:

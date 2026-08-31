@@ -5,10 +5,10 @@ from typing import Any, Optional, Protocol, cast
 import torch
 import torch.distributed as dist
 
-from .config import ConvConfig
+from .config import Conv2dConfig
 
 
-class ConvCtx(Protocol):
+class Conv2dCtx(Protocol):
     """Protocol for types stored within ctx."""
 
     local_in_width: int
@@ -19,7 +19,7 @@ class ConvCtx(Protocol):
     channel_group: dist.ProcessGroup
     in_channels_global: int
     bayesian: bool
-    config: ConvConfig
+    config: Conv2dConfig
     saved_tensors: tuple[torch.Tensor, torch.Tensor]
 
 
@@ -28,7 +28,7 @@ class Conv2d(torch.autograd.Function):
 
     Handles both the no-halo regime (``stride == kernel_size``) and the halo
     regime (``stride != kernel_size``); the kernels are picked by
-    :class:`~jigsaw.modules.conv.config.ConvConfig`.
+    :class:`~jigsaw.modules.conv2d.config.Conv2dConfig`.
     """
 
     @staticmethod
@@ -47,7 +47,7 @@ class Conv2d(torch.autograd.Function):
         parallelism: int,
         empty: torch.Tensor,
         bayesian: bool,
-        config: ConvConfig,
+        config: Conv2dConfig,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of distributed Conv2d function.
 
@@ -115,7 +115,7 @@ class Conv2d(torch.autograd.Function):
 
         # Save everything needed for backward
         ctx.save_for_backward(x_full, weight)
-        c = cast(ConvCtx, ctx)
+        c = cast(Conv2dCtx, ctx)
         c.spatial_group = spatial_group
         c.channel_group = channel_group
         c.in_channels_global = in_channels
@@ -154,12 +154,12 @@ class Conv2d(torch.autograd.Function):
 
         ``g_b`` is the local ``grad_output`` sum (spatial ranks are reduced by
         the parameter hook). ``g_x`` / ``g_w`` are delegated to the regime-
-        specific kernel picked in :class:`ConvConfig`: in the no-halo regime each
+        specific kernel picked in :class:`Conv2dConfig`: in the no-halo regime each
         rank holds the full-channel grad wrt input for its own output-channel
         slice and only the channel group is reduced; in the halo regime the grad
         is additionally folded back onto the owning spatial ranks.
         """
-        c = cast(ConvCtx, ctx)
+        c = cast(Conv2dCtx, ctx)
         x_full, weight = c.saved_tensors
         config = c.config
 
@@ -216,7 +216,7 @@ class Conv2d(torch.autograd.Function):
         parallelism: int,
         empty: torch.Tensor,
         bayesian: bool,
-        config: ConvConfig,
+        config: Conv2dConfig,
     ) -> tuple[torch.Tensor, Optional[int]]:
         """Handle vmap for Distributed Conv2d."""
         out = Conv2d.apply(

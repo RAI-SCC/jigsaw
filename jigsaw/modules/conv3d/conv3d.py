@@ -1,6 +1,6 @@
 """Module for the distributed 3-D convolution.
 
-Mirrors :class:`jigsaw.modules.conv.conv.DistributedConv2D` for ``F.conv3d``.
+Mirrors :class:`jigsaw.modules.conv2d.conv2d.DistributedConv2D` for ``F.conv3d``.
 """
 
 from typing import Callable, Optional, cast

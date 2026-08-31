@@ -1,6 +1,6 @@
 """Config setup for distributed 1-D convolutions.
 
-Mirrors :class:`jigsaw.modules.conv.config.ConvConfig` for ``F.conv1d``.
+Mirrors :class:`jigsaw.modules.conv2d.config.Conv2dConfig` for ``F.conv1d``.
 """
 
 from typing import Any, Callable, Optional

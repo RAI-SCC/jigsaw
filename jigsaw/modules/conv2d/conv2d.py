@@ -10,7 +10,7 @@ from torch.nn.parameter import Parameter
 from jigsaw import hooks
 from jigsaw.utils_aggregate import gather_1d_results
 
-from .config import ConvConfig
+from .config import Conv2dConfig
 from .functional import Conv2d
 
 
@@ -29,7 +29,7 @@ class DistributedConv2D(torch.nn.Module):
     # type-hints
     bias: Optional[Parameter]
     parallelism: int
-    config: ConvConfig
+    config: Conv2dConfig
     bayesian: bool
     spatial_group: dist.ProcessGroup
     channel_group: dist.ProcessGroup
@@ -63,7 +63,7 @@ class DistributedConv2D(torch.nn.Module):
         bayesian: bool = False,
         dtype: torch.dtype = torch.float32,
         channel_comm: str = "auto",
-        config: Optional[ConvConfig] = None,
+        config: Optional[Conv2dConfig] = None,
     ):
         """
         Distributed 2D Convolution.
@@ -107,7 +107,7 @@ class DistributedConv2D(torch.nn.Module):
             peak) or ``"all_to_all"`` (same ring over masked all-to-all hops,
             NCCL only). ``"auto"`` (default) -> ``"all_to_all"`` on a CUDA
             ``device``, else ``"p2p"``. Ignored when ``config`` is supplied.
-        config: Optional[ConvConfig]
+        config: Optional[Conv2dConfig]
             Configuration and selection strategy of convolutional layer.
             If None, this will be initialized here.
         """
@@ -163,7 +163,7 @@ class DistributedConv2D(torch.nn.Module):
         )
 
         self.config = (
-            ConvConfig(
+            Conv2dConfig(
                 self.bayesian,
                 self.spatial_group,
                 self.channel_group,
@@ -359,7 +359,7 @@ class DistributedConv2D(torch.nn.Module):
     ) -> None:
         """Reshard parameters of weights according to a new process group."""
         self.parallelism = to_process_mesh_dict[pm_col_key].size()
-        self.config = ConvConfig(
+        self.config = Conv2dConfig(
             self.bayesian,
             self.spatial_group,
             self.channel_group,

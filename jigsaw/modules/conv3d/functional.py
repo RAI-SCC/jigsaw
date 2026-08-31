@@ -1,6 +1,6 @@
 """Autograd definition for the distributed 3-D convolution.
 
-Mirrors :mod:`jigsaw.modules.conv.functional` for ``F.conv3d``.
+Mirrors :mod:`jigsaw.modules.conv2d.functional` for ``F.conv3d``.
 """
 
 from typing import Any, Optional, Protocol, cast
