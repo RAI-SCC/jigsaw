@@ -27,6 +27,27 @@ def _single(value: Pair) -> tuple[int]:
     return (value,) if isinstance(value, int) else (value[0],)
 
 
+# (kernel, stride, padding, dilation) along the (split) length axis. Covers the
+# no-halo tiling branch, the halo branch (stride != kernel) and the ``stride ==
+# kernel`` branch with non-trivial padding / dilation that must still route
+# through the halo path. Combos whose global output length is not divisible by
+# an even spatial group are handled by the reference check (it asserts they
+# raise ``NotImplementedError`` rather than returning a wrong result).
+ARBITRARY_CASES = [
+    (2, 2, 0, 1),
+    (3, 2, 1, 1),
+    (2, 3, 1, 1),
+    (3, 1, 1, 1),
+    (3, 1, 2, 2),
+    (4, 2, 0, 1),
+    (2, 2, 1, 1),
+    (3, 3, 0, 2),
+    (6, 6, 0, 1),
+    (3, 2, 0, 1),
+]
+ARBITRARY_IDS = [f"k{k}_s{s}_p{p}_d{d}" for (k, s, p, d) in ARBITRARY_CASES]
+
+
 def _conv1d_reference_check(
     device: torch.device,
     mesh: dict,
@@ -103,6 +124,12 @@ def _conv1d_reference_check(
         dilation=dilation,
     )
 
+    # global output not divisible by the spatial ranks -> unsupported, cleanly.
+    if n_spatial > 1 and y_ref.shape[-1] % n_spatial != 0:
+        with pytest.raises(NotImplementedError):
+            conv(x_local.clone().requires_grad_(True))
+        return
+
     torch.manual_seed(2024)
     grad_global = torch.randn(y_ref.shape, device=device)
     y_ref.backward(grad_global)
@@ -112,10 +139,6 @@ def _conv1d_reference_check(
     y = conv(x_dist)
 
     out_local = out_channels // n_channel
-    assert y_ref.shape[-1] % n_spatial == 0, (
-        f"global output length {y_ref.shape[-1]} not divisible by spatial "
-        f"size {n_spatial}"
-    )
     ol_local = y_ref.shape[-1] // n_spatial
     grad_local = grad_global[
         ...,
@@ -242,6 +265,35 @@ class TestConv1d:
             stride=1,
             padding=2,
             dilation=2,
+        )
+
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
+    )
+    def test_arbitrary_params(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        kernel: int,
+        stride: int,
+        padding: int,
+        dilation: int,
+        channel_comm: str,
+    ) -> None:
+        """2x2 mesh: arbitrary kernel/stride/padding/dilation x channel_comm."""
+        _skip_if_unsupported(channel_comm)
+        _conv1d_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=kernel,
+            length=24,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            channel_comm=channel_comm,
         )
 
     def test_string_padding_rejected_with_halo(
@@ -439,5 +491,95 @@ class TestConv1dParallel:
             length=32,
             stride=2,
             padding=1,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
+    )
+    def test_arbitrary_params_1x4(
+        self,
+        device: torch.device,
+        process_mesh_dict_1x4: dict,
+        kernel: int,
+        stride: int,
+        padding: int,
+        dilation: int,
+        channel_comm: str,
+    ) -> None:
+        """Pure 4-way channel parallelism: every param combo (no spatial split)."""
+        _skip_if_unsupported(channel_comm)
+        _conv1d_reference_check(
+            device,
+            process_mesh_dict_1x4,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=kernel,
+            length=24,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
+    )
+    def test_arbitrary_params_4x1(
+        self,
+        device: torch.device,
+        process_mesh_dict_4x1: dict,
+        kernel: int,
+        stride: int,
+        padding: int,
+        dilation: int,
+        channel_comm: str,
+    ) -> None:
+        """Pure 4-way spatial split with arbitrary params (channel group size 1)."""
+        _skip_if_unsupported(channel_comm)
+        _conv1d_reference_check(
+            device,
+            process_mesh_dict_4x1,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=kernel,
+            length=48,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(8)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
+    )
+    def test_arbitrary_params_2x4(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x4_rowcol: dict,
+        kernel: int,
+        stride: int,
+        padding: int,
+        dilation: int,
+        channel_comm: str,
+    ) -> None:
+        """2-way spatial x 4-way channel with arbitrary params."""
+        _skip_if_unsupported(channel_comm)
+        _conv1d_reference_check(
+            device,
+            process_mesh_dict_2x4_rowcol,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=kernel,
+            length=24,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
             channel_comm=channel_comm,
         )
