@@ -13,8 +13,12 @@ Two regimes are selected by :class:`~jigsaw.modules.conv3d.config.Conv3dConfig`:
 * otherwise: neighbouring output columns share input columns, so each spatial
   rank first pulls the missing width columns from the other ranks with a halo
   exchange, then convolves (:func:`conv3d_halo_nway`). The halo exchange itself
-  is dimension-agnostic and shared with the 1-D/2-D convolutions via
+  is dimension-agnostic and shared with the 1-/2-D convolutions via
   :mod:`jigsaw.modules.spatial_halo`.
+
+Either regime cooperates with the channel-parallel group through the shared
+``config.channel_comm`` strategies
+(:func:`jigsaw.modules.conv_channel_comm.over_channels`).
 """
 
 from typing import Any
@@ -22,31 +26,8 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
+from jigsaw.modules.conv_channel_comm import over_channels
 from jigsaw.modules.spatial_halo import halo_gather, halo_scatter_add
-
-
-# ---------------------------------------------------------------------------
-# channel-parallel helper
-# ---------------------------------------------------------------------------
-def _gather_full_channels(
-    x: torch.Tensor, channel_group: dist.ProcessGroup
-) -> torch.Tensor:
-    """All-gather the channel-parallel input slices into a full-channel tensor.
-
-    Each rank owns a contiguous ``C_in / G`` slice of the input channels; the
-    group all-gathers them and rebuilds ``(..., C_in, D, H, W)``. This rank's own
-    slice is spliced back in so it stays wired into the autograd graph. Group
-    size one is the identity.
-    """
-    group_size = channel_group.size()
-    if group_size == 1:
-        return x
-
-    local_channel_rank = channel_group.rank()
-    slices = [torch.empty_like(x) for _ in range(group_size)]
-    dist.all_gather(slices, x, group=channel_group)
-    slices[local_channel_rank] = x
-    return torch.cat(slices, dim=-4)
 
 
 def _needs_halo(
@@ -69,6 +50,11 @@ def _needs_halo(
     )
 
 
+def _width_padding(padding: tuple[int, int, int]) -> tuple[int, int, int]:
+    """Local-conv padding: depth/height as given, width already materialised."""
+    return (padding[0], padding[1], 0)
+
+
 # ---------------------------------------------------------------------------
 # no-halo regime (stride == kernel_size)
 # ---------------------------------------------------------------------------
@@ -86,7 +72,7 @@ def conv3d_nway(
     """Distributed 3d convolution for the no-halo regime (``stride == kernel``).
 
     Every spatial rank convolves its own width slice independently while the
-    channel group cooperates through the input all-gather.
+    channel group cooperates through ``config.channel_comm``.
 
     Returns ``(y, x_full)`` where ``x_full`` is the gathered full-channel input
     kept for the backward pass.
@@ -96,18 +82,16 @@ def conv3d_nway(
             x, w, b, stride, padding, dilation, spatial_group, channel_group, config
         )
 
-    x_full = _gather_full_channels(x.contiguous(), channel_group)
-
-    if b is not None:
-        y = config.conv3d_fn(
-            x_full, w, b, stride=stride, padding=padding, dilation=dilation
-        )
-    else:
-        y = config.conv3d_fn(
-            x_full, w, stride=stride, padding=padding, dilation=dilation
-        )
-
-    return y, x_full
+    return over_channels(
+        x,
+        w,
+        b,
+        {"stride": stride, "padding": padding, "dilation": dilation},
+        channel_group=channel_group,
+        conv_func=config.conv3d_fn,
+        n_spatial_dims=3,
+        channel_comm=config.channel_comm,
+    )
 
 
 def conv3d_nway_backward(
@@ -182,15 +166,10 @@ def conv3d_nway_backward(
 # halo regime (stride != kernel_size)
 #
 # The halo exchange itself is dimension-agnostic and lives in
-# :mod:`jigsaw.modules.spatial_halo` (shared with the 1-D/2-D convolutions);
-# only the split axis's conv parameters are threaded through here (``*[2]`` --
-# the width).
+# :mod:`jigsaw.modules.spatial_halo` (shared with the 1-/2-D convolutions); only
+# the split axis's conv parameters are threaded through here (``*[2]`` -- the
+# width).
 # ---------------------------------------------------------------------------
-def _width_padding(padding: tuple[int, int, int]) -> tuple[int, int, int]:
-    """Local-conv padding: depth/height as given, width already materialised."""
-    return (padding[0], padding[1], 0)
-
-
 def conv3d_halo_nway(
     x: torch.Tensor,
     w: torch.Tensor,
@@ -204,9 +183,11 @@ def conv3d_halo_nway(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Distributed 3d convolution for the halo regime (``stride != kernel``).
 
-    Gathers the full-channel input, pulls the missing width columns from the
-    other spatial ranks, then runs the local convolution so the result already
-    holds this rank's output-channel *and* output-column slice.
+    Each spatial rank pulls the missing width columns from the other spatial
+    ranks with a halo exchange, then convolves, so the result already holds this
+    rank's output-channel *and* output-column slice. The channel group
+    cooperates through ``config.channel_comm`` exactly as :func:`conv3d_nway`
+    does.
 
     Returns ``(y, x_need)`` where ``x_need`` is the halo-padded full-channel
     input kept for the backward pass.
@@ -217,22 +198,25 @@ def conv3d_halo_nway(
             f"string padding ({padding!r}); pass an explicit (d, h, w) padding."
         )
 
-    x_full = _gather_full_channels(x.contiguous(), channel_group)
-    x_need, _ = halo_gather(
-        x_full, spatial_group, w.shape[-1], stride[2], padding[2], dilation[2]
+    kernel_w = w.shape[-1]
+
+    def halo_fn(t: torch.Tensor) -> torch.Tensor:
+        span, _ = halo_gather(
+            t, spatial_group, kernel_w, stride[2], padding[2], dilation[2]
+        )
+        return span
+
+    return over_channels(
+        x,
+        w,
+        b,
+        {"stride": stride, "padding": _width_padding(padding), "dilation": dilation},
+        channel_group=channel_group,
+        conv_func=config.conv3d_fn,
+        n_spatial_dims=3,
+        channel_comm=config.channel_comm,
+        halo_fn=halo_fn,
     )
-
-    local_padding = _width_padding(padding)
-    if b is not None:
-        y = config.conv3d_fn(
-            x_need, w, b, stride=stride, padding=local_padding, dilation=dilation
-        )
-    else:
-        y = config.conv3d_fn(
-            x_need, w, stride=stride, padding=local_padding, dilation=dilation
-        )
-
-    return y, x_need
 
 
 def conv3d_halo_nway_backward(

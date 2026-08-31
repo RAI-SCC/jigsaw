@@ -9,7 +9,17 @@ from tests.process_mesh import *
 
 pytestmark = [pytest.mark.dist_required]
 
+# Every channel-parallel exchange strategy; "all_to_all" needs a backend with
+# all-to-all support and is skipped on gloo (see _skip_if_unsupported).
+CHANNEL_COMMS = ["all_gather", "p2p", "all_to_all"]
+
 Pair = int | tuple[int]
+
+
+def _skip_if_unsupported(channel_comm: str) -> None:
+    """Skip when the current backend cannot run ``channel_comm``."""
+    if channel_comm == "all_to_all" and dist.get_backend() == "gloo":
+        pytest.skip("all_to_all channel comm needs a non-gloo backend")
 
 
 def _single(value: Pair) -> tuple[int]:
@@ -28,6 +38,7 @@ def _conv1d_reference_check(
     stride: Pair | None = None,
     padding: Pair = 0,
     dilation: Pair = 1,
+    channel_comm: str = "all_gather",
 ) -> None:
     """Compare a distributed ``DistributedConv1D`` against a single-process conv1d.
 
@@ -66,6 +77,7 @@ def _conv1d_reference_check(
         parallelism=model_group.size(),
         bayesian=False,
         dtype=torch.float32,
+        channel_comm=channel_comm,
     ).to(device)
 
     # --- reconstruct the equivalent global convolution -----------------------
@@ -167,10 +179,12 @@ class TestConv1d:
                 weights_gathered[i], weights_gathered[i + col_comm_size], atol=1e-5
             )
 
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_conv1d_forward(
-        self, device: torch.device, process_mesh_dict_2x2: dict
+        self, device: torch.device, process_mesh_dict_2x2: dict, channel_comm: str
     ) -> None:
         """No-halo regime (stride == kernel) matches a single-process conv1d."""
+        _skip_if_unsupported(channel_comm)
         _conv1d_reference_check(
             device,
             process_mesh_dict_2x2,
@@ -178,12 +192,15 @@ class TestConv1d:
             out_channels=12,
             kernel_size=4,
             length=32,
+            channel_comm=channel_comm,
         )
 
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_stride_lt_kernel_halo(
-        self, device: torch.device, process_mesh_dict_2x2: dict
+        self, device: torch.device, process_mesh_dict_2x2: dict, channel_comm: str
     ) -> None:
         """Overlapping windows (stride < kernel_size) match a plain conv1d."""
+        _skip_if_unsupported(channel_comm)
         _conv1d_reference_check(
             device,
             process_mesh_dict_2x2,
@@ -193,6 +210,7 @@ class TestConv1d:
             length=32,
             stride=2,
             padding=1,
+            channel_comm=channel_comm,
         )
 
     def test_stride_gt_kernel_halo(
@@ -250,15 +268,73 @@ class TestConv1d:
         with pytest.raises(NotImplementedError):
             conv(x)
 
+    def test_channel_comm_auto_defaults_by_device(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """``channel_comm='auto'`` resolves from the device on the config."""
+        conv = conv1d.DistributedConv1D(
+            8,
+            12,
+            4,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=4,
+        ).to(device)
+        expected = "all_to_all" if device.type == "cuda" else "p2p"
+        assert conv.config.channel_comm == expected
+
+    def test_unknown_channel_comm_rejected(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """An unrecognised ``channel_comm`` name fails fast at construction."""
+        with pytest.raises(ValueError):
+            conv1d.DistributedConv1D(
+                8,
+                12,
+                4,
+                device=device,
+                spatial_group=process_mesh_dict_2x2["row"],
+                channel_group=process_mesh_dict_2x2["col"],
+                stride=4,
+                channel_comm="alltoall",
+            ).to(device)
+
+    def test_alltoall_rejected_on_gloo(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
+        if dist.get_backend() != "gloo":
+            pytest.skip("only meaningful on the gloo backend")
+        conv = conv1d.DistributedConv1D(
+            8,
+            12,
+            4,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=4,
+            padding=(0,),
+            dilation=1,
+            bias=True,
+            parallelism=process_mesh_dict_2x2["model"].size(),
+            channel_comm="all_to_all",
+        ).to(device)
+        x = torch.randn(2, 4, 16, device=device)
+        with pytest.raises(RuntimeError, match="all-to-all"):
+            conv(x)
+
 
 class TestConv1dParallel:
     """Distributed Conv1d across arbitrary spatial and channel group sizes."""
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_forward_backward_1x4(
-        self, device: torch.device, process_mesh_dict_1x4: dict
+        self, device: torch.device, process_mesh_dict_1x4: dict, channel_comm: str
     ) -> None:
         """Pure channel parallelism (4 channel ranks, no spatial split)."""
+        _skip_if_unsupported(channel_comm)
         _conv1d_reference_check(
             device,
             process_mesh_dict_1x4,
@@ -266,13 +342,16 @@ class TestConv1dParallel:
             out_channels=12,
             kernel_size=4,
             length=32,
+            channel_comm=channel_comm,
         )
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_forward_backward_4x1(
-        self, device: torch.device, process_mesh_dict_4x1: dict
+        self, device: torch.device, process_mesh_dict_4x1: dict, channel_comm: str
     ) -> None:
         """Pure spatial parallelism (4 spatial ranks, no channel split)."""
+        _skip_if_unsupported(channel_comm)
         _conv1d_reference_check(
             device,
             process_mesh_dict_4x1,
@@ -280,13 +359,16 @@ class TestConv1dParallel:
             out_channels=12,
             kernel_size=4,
             length=32,
+            channel_comm=channel_comm,
         )
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_halo_1x4(
-        self, device: torch.device, process_mesh_dict_1x4: dict
+        self, device: torch.device, process_mesh_dict_1x4: dict, channel_comm: str
     ) -> None:
         """Halo regime with no spatial split (channel-only, group size 1 path)."""
+        _skip_if_unsupported(channel_comm)
         _conv1d_reference_check(
             device,
             process_mesh_dict_1x4,
@@ -296,13 +378,16 @@ class TestConv1dParallel:
             length=32,
             stride=2,
             padding=1,
+            channel_comm=channel_comm,
         )
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_halo_4x1(
-        self, device: torch.device, process_mesh_dict_4x1: dict
+        self, device: torch.device, process_mesh_dict_4x1: dict, channel_comm: str
     ) -> None:
         """Halo regime with 4-way spatial split (real cross-rank exchange)."""
+        _skip_if_unsupported(channel_comm)
         _conv1d_reference_check(
             device,
             process_mesh_dict_4x1,
@@ -312,13 +397,19 @@ class TestConv1dParallel:
             length=64,
             stride=2,
             padding=1,
+            channel_comm=channel_comm,
         )
 
     @pytest.mark.dist(8)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_forward_backward_2x4(
-        self, device: torch.device, process_mesh_dict_2x4_rowcol: dict
+        self,
+        device: torch.device,
+        process_mesh_dict_2x4_rowcol: dict,
+        channel_comm: str,
     ) -> None:
         """Combined 2-way spatial and 4-way channel parallelism (no halo)."""
+        _skip_if_unsupported(channel_comm)
         _conv1d_reference_check(
             device,
             process_mesh_dict_2x4_rowcol,
@@ -326,13 +417,19 @@ class TestConv1dParallel:
             out_channels=12,
             kernel_size=4,
             length=32,
+            channel_comm=channel_comm,
         )
 
     @pytest.mark.dist(8)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_halo_2x4(
-        self, device: torch.device, process_mesh_dict_2x4_rowcol: dict
+        self,
+        device: torch.device,
+        process_mesh_dict_2x4_rowcol: dict,
+        channel_comm: str,
     ) -> None:
         """Halo regime combined with 4-way channel parallelism."""
+        _skip_if_unsupported(channel_comm)
         _conv1d_reference_check(
             device,
             process_mesh_dict_2x4_rowcol,
@@ -342,4 +439,5 @@ class TestConv1dParallel:
             length=32,
             stride=2,
             padding=1,
+            channel_comm=channel_comm,
         )

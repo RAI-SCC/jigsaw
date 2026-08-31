@@ -11,6 +11,8 @@ import torch.nn.functional as F
 from torch.nn.grad import conv1d_input, conv1d_weight
 from torch.nn.parameter import Parameter
 
+from jigsaw.modules.conv_channel_comm import resolve_channel_comm
+
 from . import distributed_convolutions_1d as dist_conv
 
 
@@ -30,6 +32,7 @@ class Conv1dConfig:
         kernel_size: tuple[int],
         stride: tuple[int],
         device: torch.device,
+        channel_comm: str = "auto",
     ):
         """
         Initialize selection strategy for conv1d.
@@ -48,7 +51,15 @@ class Conv1dConfig:
             Size of the stride.
         device: torch.device
             Device upon which communication occurs.
+        channel_comm: str
+            How the channel-parallel group exchanges input slices in the forward
+            pass: ``"all_gather"`` (one-shot gather), ``"p2p"`` (double-buffered
+            batched p2p that overlaps comm with compute and lowers the memory
+            peak) or ``"all_to_all"`` (same ring over masked all-to-all hops,
+            NCCL only). ``"auto"`` (the default) picks ``"all_to_all"`` on a
+            CUDA ``device`` and ``"p2p"`` otherwise.
         """
+        self.channel_comm = resolve_channel_comm(channel_comm, device)
         self.conv1d_fn = self._conv1d_fn_selection(bayesian)
         self.conv1d_input_fn = self._conv1d_input_fn_selection(bayesian)
         self.conv1d_weight_fn = self._conv1d_weight_fn_selection(bayesian)

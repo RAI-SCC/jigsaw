@@ -43,6 +43,7 @@ class DistributedConv3D(torch.nn.Module):
     stride: tuple[int, int, int]
     padding: str | tuple[int, int, int]
     dilation: tuple[int, int, int]
+    channel_comm: str
 
     def __init__(
         self,
@@ -64,6 +65,7 @@ class DistributedConv3D(torch.nn.Module):
         parallelism: int = 4,
         bayesian: bool = False,
         dtype: torch.dtype = torch.float32,
+        channel_comm: str = "auto",
         config: Optional[Conv3dConfig] = None,
     ):
         """
@@ -103,6 +105,12 @@ class DistributedConv3D(torch.nn.Module):
             Flag for whether model is vmapped.
         dtype: torch.dtype
             Data type of the convolution.
+        channel_comm: str
+            Channel-parallel forward exchange: ``"all_gather"``, ``"p2p"``
+            (double-buffered batched p2p, overlaps comm/compute, lower memory
+            peak) or ``"all_to_all"`` (same ring over masked all-to-all hops,
+            NCCL only). ``"auto"`` (default) -> ``"all_to_all"`` on a CUDA
+            ``device``, else ``"p2p"``. Ignored when ``config`` is supplied.
         config: Optional[Conv3dConfig]
             Configuration and selection strategy of the convolutional layer.
             If None, this will be initialized here.
@@ -122,6 +130,7 @@ class DistributedConv3D(torch.nn.Module):
             self.padding = _triple(padding)
 
         self.groups = groups
+        self.channel_comm = channel_comm
         self.spatial_group = spatial_group
         self.channel_group = channel_group
         self.device = device
@@ -168,6 +177,7 @@ class DistributedConv3D(torch.nn.Module):
                 self.kernel_size,
                 self.stride,
                 self.device,
+                self.channel_comm,
             )
             if config is None
             else config
@@ -363,6 +373,7 @@ class DistributedConv3D(torch.nn.Module):
             self.kernel_size,
             self.stride,
             self.device,
+            self.channel_comm,
         )
 
         from_weight_shape_local = self.weight.shape
