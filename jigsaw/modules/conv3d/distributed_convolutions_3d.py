@@ -1,6 +1,6 @@
 """Distributed 3-D convolution implementation.
 
-Mirrors :mod:`jigsaw.modules.conv.distributed_convolutions` for ``F.conv3d``.
+Mirrors :mod:`jigsaw.modules.conv2d.distributed_convolutions_2d` for ``F.conv3d``.
 Input is ``(N, C, D, H, W)``; the domain is split across the spatial group(s)
 and the channels are split across the channel group.
 
@@ -15,10 +15,18 @@ Two regimes are selected by :class:`~jigsaw.modules.conv3d.config.Conv3dConfig`:
   split tiles with no overlap, so every spatial rank convolves its own slice
   independently (:func:`conv3d_nway`).
 * otherwise: neighbouring output positions share input positions, so each
-  spatial rank first pulls the missing rows/columns from the other ranks with a
-  halo exchange -- one per split axis -- then convolves
-  (:func:`conv3d_halo_nway`). The halo exchange itself is dimension-agnostic and
-  shared with the 1-D/2-D convolutions via :mod:`jigsaw.modules.spatial_halo`.
+  spatial rank pulls the missing rows/columns from the other ranks with a halo
+  exchange -- one per split axis -- and convolves (:func:`conv3d_halo_nway`).
+  The halo exchange itself is dimension-agnostic and shared with the 1-/2-D
+  convolutions via :mod:`jigsaw.modules.spatial_halo`.
+
+Either regime cooperates with the channel-parallel group through the shared
+``config.channel_comm`` strategies
+(:func:`jigsaw.modules.conv_channel_comm.over_channels`). In the halo regime the
+halo exchange is handed to ``over_channels`` as a ``halo_fn``: the
+``"all_gather"`` strategy applies it once to the gathered full-channel tensor,
+while the streaming (``"p2p"`` / ``"all_to_all"``) strategies apply it to each
+channel slab as the slabs travel around the ring.
 """
 
 from typing import Any, Iterator, Optional
@@ -26,6 +34,7 @@ from typing import Any, Iterator, Optional
 import torch
 import torch.distributed as dist
 
+from jigsaw.modules.conv_channel_comm import over_channels
 from jigsaw.modules.spatial_halo import halo_gather, halo_scatter_add
 
 # spatial axes owned by conv3d, as negative tensor indices: (D, H, W).
@@ -39,30 +48,6 @@ def _split_axes(
     for idx, group in enumerate(spatial_groups):
         if group is not None and group.size() > 1:
             yield idx, _SPATIAL_AXES[idx], group
-
-
-# ---------------------------------------------------------------------------
-# channel-parallel helper
-# ---------------------------------------------------------------------------
-def _gather_full_channels(
-    x: torch.Tensor, channel_group: dist.ProcessGroup
-) -> torch.Tensor:
-    """All-gather the channel-parallel input slices into a full-channel tensor.
-
-    Each rank owns a contiguous ``C_in / G`` slice of the input channels; the
-    group all-gathers them and rebuilds ``(..., C_in, D, H, W)``. This rank's own
-    slice is spliced back in so it stays wired into the autograd graph. Group
-    size one is the identity.
-    """
-    group_size = channel_group.size()
-    if group_size == 1:
-        return x
-
-    local_channel_rank = channel_group.rank()
-    slices = [torch.empty_like(x) for _ in range(group_size)]
-    dist.all_gather(slices, x, group=channel_group)
-    slices[local_channel_rank] = x
-    return torch.cat(slices, dim=-4)
 
 
 def _needs_halo(
@@ -101,7 +86,7 @@ def conv3d_nway(
 
     Every spatial rank convolves its own domain slice independently -- this
     holds for a split along one axis or several -- while the channel group
-    cooperates through the input all-gather.
+    cooperates through ``config.channel_comm``.
 
     Returns ``(y, x_full)`` where ``x_full`` is the gathered full-channel input
     kept for the backward pass.
@@ -111,18 +96,16 @@ def conv3d_nway(
             x, w, b, stride, padding, dilation, spatial_groups, channel_group, config
         )
 
-    x_full = _gather_full_channels(x.contiguous(), channel_group)
-
-    if b is not None:
-        y = config.conv3d_fn(
-            x_full, w, b, stride=stride, padding=padding, dilation=dilation
-        )
-    else:
-        y = config.conv3d_fn(
-            x_full, w, stride=stride, padding=padding, dilation=dilation
-        )
-
-    return y, x_full
+    return over_channels(
+        x,
+        w,
+        b,
+        {"stride": stride, "padding": padding, "dilation": dilation},
+        channel_group=channel_group,
+        conv_func=config.conv3d_fn,
+        n_spatial_dims=3,
+        channel_comm=config.channel_comm,
+    )
 
 
 def conv3d_nway_backward(
@@ -226,9 +209,13 @@ def conv3d_halo_nway(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Distributed 3d convolution for the halo regime (``stride != kernel``).
 
-    Gathers the full-channel input, then for every split spatial axis pulls the
-    missing rows/columns from the other spatial ranks, and runs the local
-    convolution so the result already holds this rank's output-channel *and*
+    Builds a ``halo_fn`` that, for every split spatial axis, pulls the missing
+    rows/columns from the other spatial ranks, and hands it to
+    :func:`~jigsaw.modules.conv_channel_comm.over_channels` together with the
+    channel-parallel work. ``over_channels`` invokes ``halo_fn`` once on the
+    gathered full-channel tensor (``channel_comm="all_gather"``) or once per
+    channel slab as the slabs stream around the ring (``"p2p"`` /
+    ``"all_to_all"``); either way this rank ends with its output-channel *and*
     output-position slice.
 
     Returns ``(y, x_need)`` where ``x_need`` is the halo-padded full-channel
@@ -240,29 +227,34 @@ def conv3d_halo_nway(
             f"string padding ({padding!r}); pass an explicit (d, h, w) padding."
         )
 
-    x_need = _gather_full_channels(x.contiguous(), channel_group)
-    for idx, axis, group in _split_axes(spatial_groups):
-        x_need, _ = halo_gather(
-            x_need,
-            group,
-            w.shape[axis],
-            stride[idx],
-            padding[idx],
-            dilation[idx],
-            axis=axis,
-        )
+    def halo_fn(t: torch.Tensor) -> torch.Tensor:
+        for idx, axis, group in _split_axes(spatial_groups):
+            t, _ = halo_gather(
+                t,
+                group,
+                w.shape[axis],
+                stride[idx],
+                padding[idx],
+                dilation[idx],
+                axis=axis,
+            )
+        return t
 
-    local_padding = _local_padding(padding, spatial_groups)
-    if b is not None:
-        y = config.conv3d_fn(
-            x_need, w, b, stride=stride, padding=local_padding, dilation=dilation
-        )
-    else:
-        y = config.conv3d_fn(
-            x_need, w, stride=stride, padding=local_padding, dilation=dilation
-        )
-
-    return y, x_need
+    return over_channels(
+        x,
+        w,
+        b,
+        {
+            "stride": stride,
+            "padding": _local_padding(padding, spatial_groups),
+            "dilation": dilation,
+        },
+        channel_group=channel_group,
+        conv_func=config.conv3d_fn,
+        n_spatial_dims=3,
+        channel_comm=config.channel_comm,
+        halo_fn=halo_fn,
+    )
 
 
 def conv3d_halo_nway_backward(
@@ -283,9 +275,10 @@ def conv3d_halo_nway_backward(
 
     ``g_w`` comes straight from the halo-padded input and this rank's
     ``grad_output`` (spatial ranks are summed by the parameter hook). ``g_x`` is
-    computed on the halo-padded span, reduced across the channel group, folded
-    back onto the owning spatial ranks (:func:`halo_scatter_add`, once per split
-    axis) and finally sliced to this rank's channel shard.
+    computed on the halo-padded span, folded back onto the owning spatial ranks
+    (:func:`halo_scatter_add`, once per split axis), reduced across the channel
+    group (overlapped with the ``g_w`` compute) and finally sliced to this
+    rank's channel shard.
     """
     local_padding = _local_padding(padding, spatial_groups)
 
@@ -298,21 +291,11 @@ def conv3d_halo_nway_backward(
         dilation=dilation,
     ).contiguous()
 
-    g_x_handle = dist.all_reduce(
-        g_x_need, op=dist.ReduceOp.SUM, group=channel_group, async_op=True
-    )
-
-    g_w = config.conv3d_weight_fn(
-        x_aug,
-        weight.shape[int(bayesian) :],
-        grad_output.to(weight.dtype),
-        stride=stride,
-        padding=local_padding,
-        dilation=dilation,
-    )
-
-    g_x_handle.wait()
-
+    # Fold the halo-borrowed positions back onto their owners *before* the
+    # channel-group reduce. halo_scatter_add (spatial groups) and the all-reduce
+    # (channel group) act on independent group axes and are both linear, so they
+    # commute; folding first shrinks the all-reduce payload from the halo-padded
+    # need-span to this rank's owned span.
     g_x = g_x_need
     for idx, axis, group in reversed(list(_split_axes(spatial_groups))):
         g_x = halo_scatter_add(
@@ -325,6 +308,22 @@ def conv3d_halo_nway_backward(
             local_in_spatial[idx],
             axis=axis,
         )
+    g_x = g_x.contiguous()
+
+    g_x_handle = dist.all_reduce(
+        g_x, op=dist.ReduceOp.SUM, group=channel_group, async_op=True
+    )
+
+    g_w = config.conv3d_weight_fn(
+        x_aug,
+        weight.shape[int(bayesian) :],
+        grad_output.to(weight.dtype),
+        stride=stride,
+        padding=local_padding,
+        dilation=dilation,
+    )
+
+    g_x_handle.wait()
 
     shard = in_channels_global // channel_group.size()
     start = channel_group.rank() * shard

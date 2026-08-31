@@ -1,6 +1,6 @@
 """Autograd definition for the distributed 3-D convolution.
 
-Mirrors :mod:`jigsaw.modules.conv.functional` for ``F.conv3d``.
+Mirrors :mod:`jigsaw.modules.conv2d.functional` for ``F.conv3d``.
 """
 
 from typing import Any, Optional, Protocol, cast
@@ -39,16 +39,12 @@ class Conv3d(torch.autograd.Function):
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: torch.Tensor,
-        kernel_size: tuple[int, int, int],
         stride: tuple[int, int, int],
         padding: tuple[int, int, int],
         dilation: tuple[int, int, int],
         in_channels: int,
         spatial_groups: tuple[dist.ProcessGroup | None, ...],
         channel_group: dist.ProcessGroup,
-        device: torch.device,
-        parallelism: int,
-        empty: torch.Tensor,
         bayesian: bool,
         config: Conv3dConfig,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -85,16 +81,12 @@ class Conv3d(torch.autograd.Function):
             x,
             weight,
             bias,
-            kernel_size,
             stride,
             padding,
             dilation,
             in_channels,
             spatial_groups,
             channel_group,
-            device,
-            parallelism,
-            empty,
             bayesian,
             config,
         ) = inputs
@@ -127,10 +119,6 @@ class Conv3d(torch.autograd.Function):
         torch.Tensor,
         torch.Tensor,
         Optional[torch.Tensor],
-        None,
-        None,
-        None,
-        None,
         None,
         None,
         None,
@@ -183,10 +171,6 @@ class Conv3d(torch.autograd.Function):
             None,
             None,
             None,
-            None,
-            None,
-            None,
-            None,
         )
 
     @staticmethod
@@ -196,16 +180,12 @@ class Conv3d(torch.autograd.Function):
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: torch.Tensor,
-        kernel_size: int,
         stride: int,
         padding: int,
         dilation: int,
         in_channels: int,
         spatial_groups: tuple[dist.ProcessGroup | None, ...],
         channel_group: dist.ProcessGroup,
-        device: torch.device,
-        parallelism: int,
-        empty: torch.Tensor,
         bayesian: bool,
         config: Conv3dConfig,
     ) -> tuple[torch.Tensor, Optional[int]]:
@@ -214,16 +194,12 @@ class Conv3d(torch.autograd.Function):
             x,
             weight,
             bias,
-            kernel_size,
             stride,
             padding,
             dilation,
             in_channels,
             spatial_groups,
             channel_group,
-            device,
-            parallelism,
-            empty,
             bayesian,
             config,
         )

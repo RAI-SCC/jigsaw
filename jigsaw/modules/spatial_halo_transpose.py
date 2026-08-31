@@ -13,15 +13,9 @@ across the group.
 * :func:`transpose_halo_expand` (backward, the reverse): hand every raw-output
   column its gradient, pulled from whichever rank owns that output column.
 
-The core exchange operates purely on the last axis and treats the leading axes
+Every function operates purely on the last axis and treats the leading axes
 opaquely, matching :mod:`jigsaw.modules.spatial_halo`; the uneven, Gloo-safe
 all-to-all is shared from there via :func:`exchange_along_last_axis`.
-
-:func:`transpose_halo_reduce` / :func:`transpose_halo_expand` additionally accept
-an ``axis`` argument: any non-last axis is moved to the last position for the
-exchange and moved back before returning, so a domain that is split along
-*several* spatial axes (height *and* width, or depth/height/width) is handled by
-calling the exchange once per split axis.
 """
 
 import torch
@@ -70,40 +64,6 @@ def produced_output_span(
 
 
 def transpose_halo_reduce(
-    y_raw: torch.Tensor,
-    spatial_group: dist.ProcessGroup,
-    local_in_size: int,
-    kernel: int,
-    stride: int,
-    padding: int,
-    dilation: int,
-    axis: int = -1,
-) -> torch.Tensor:
-    """Fold overlapping raw transpose-conv outputs onto their owner along ``axis``.
-
-    ``axis`` defaults to the last axis; any other axis is moved to the last
-    position for the exchange and moved back before returning, so the same
-    last-axis kernel serves a split along height, width or depth.
-    """
-    ndim = y_raw.dim()
-    axis %= ndim
-    if axis == ndim - 1:
-        return _transpose_halo_reduce_last_axis(
-            y_raw, spatial_group, local_in_size, kernel, stride, padding, dilation
-        )
-    y_local = _transpose_halo_reduce_last_axis(
-        y_raw.movedim(axis, -1).contiguous(),
-        spatial_group,
-        local_in_size,
-        kernel,
-        stride,
-        padding,
-        dilation,
-    )
-    return y_local.movedim(-1, axis).contiguous()
-
-
-def _transpose_halo_reduce_last_axis(
     y_raw: torch.Tensor,
     spatial_group: dist.ProcessGroup,
     local_in_size: int,
@@ -169,39 +129,6 @@ def _transpose_halo_reduce_last_axis(
 
 
 def transpose_halo_expand(
-    grad_local: torch.Tensor,
-    spatial_group: dist.ProcessGroup,
-    local_in_size: int,
-    kernel: int,
-    stride: int,
-    padding: int,
-    dilation: int,
-    axis: int = -1,
-) -> torch.Tensor:
-    """Reverse of :func:`transpose_halo_reduce` along ``axis`` (default last axis).
-
-    As in :func:`transpose_halo_reduce`, a non-last ``axis`` is moved to the last
-    position for the exchange and moved back before returning.
-    """
-    ndim = grad_local.dim()
-    axis %= ndim
-    if axis == ndim - 1:
-        return _transpose_halo_expand_last_axis(
-            grad_local, spatial_group, local_in_size, kernel, stride, padding, dilation
-        )
-    grad_raw = _transpose_halo_expand_last_axis(
-        grad_local.movedim(axis, -1).contiguous(),
-        spatial_group,
-        local_in_size,
-        kernel,
-        stride,
-        padding,
-        dilation,
-    )
-    return grad_raw.movedim(-1, axis).contiguous()
-
-
-def _transpose_halo_expand_last_axis(
     grad_local: torch.Tensor,
     spatial_group: dist.ProcessGroup,
     local_in_size: int,

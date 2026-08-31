@@ -6,13 +6,12 @@ import torch
 
 from jigsaw.modules import (
     attention,
-    conv,
     conv1d,
+    conv2d,
     conv3d,
-    conv_transpose,
-    conv_transpose,
-    conv_transpose_1d,
-    conv_transpose_3d,
+    conv1dtranspose,
+    conv2dtranspose,
+    conv3dtranspose,
     linear,
     roll,
 )
@@ -20,11 +19,11 @@ from jigsaw.modules import (
 mapped_modules: dict[type[torch.nn.Module], Any] = {
     torch.nn.Linear: linear.DistributedXWT,
     torch.nn.Conv1d: conv1d.DistributedConv1D,
-    torch.nn.Conv2d: conv.DistributedConv2D,
+    torch.nn.Conv2d: conv2d.DistributedConv2D,
     torch.nn.Conv3d: conv3d.DistributedConv3D,
-    torch.nn.ConvTranspose1d: conv_transpose_1d.DistributedConvTranspose1D,
-    torch.nn.ConvTranspose2d: conv_transpose.DistributedConvTranspose2D,
-    torch.nn.ConvTranspose3d: conv_transpose_3d.DistributedConvTranspose3D,
+    torch.nn.ConvTranspose1d: conv1dtranspose.DistributedConv1DTranspose,
+    torch.nn.ConvTranspose2d: conv2dtranspose.DistributedConv2DTranspose,
+    torch.nn.ConvTranspose3d: conv3dtranspose.DistributedConv3DTranspose,
     roll.Roll: roll.DistributedRoll,
 }
 container_converters: dict[type[torch.nn.Module], Callable[..., torch.nn.Module]] = {
