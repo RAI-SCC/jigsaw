@@ -14,11 +14,11 @@ from .config import Conv1dTransposeConfig
 class Conv1dTransposeCtx(Protocol):
     """Protocol for the values stashed on ``ctx`` between forward and backward."""
 
-    local_in_length: int
+    local_in_spatial: tuple[int, ...]
     stride: int | tuple[int, ...]
     padding: int | tuple[int, ...]
     dilation: int | tuple[int, ...]
-    spatial_group: dist.ProcessGroup
+    spatial_groups: tuple[dist.ProcessGroup | None, ...]
     channel_group: dist.ProcessGroup
     in_channels_global: int
     bayesian: bool
@@ -43,7 +43,7 @@ class Conv1dTranspose(torch.autograd.Function):
         padding: tuple[int, ...],
         dilation: tuple[int, ...],
         in_channels: int,
-        spatial_group: dist.ProcessGroup,
+        spatial_groups: tuple[dist.ProcessGroup | None, ...],
         channel_group: dist.ProcessGroup,
         bayesian: bool,
         config: Conv1dTransposeConfig,
@@ -61,7 +61,7 @@ class Conv1dTranspose(torch.autograd.Function):
             stride=stride,
             padding=padding,
             dilation=dilation,
-            spatial_group=spatial_group,
+            spatial_groups=spatial_groups,
             channel_group=channel_group,
             config=config,
         )
@@ -83,7 +83,7 @@ class Conv1dTranspose(torch.autograd.Function):
             padding,
             dilation,
             in_channels,
-            spatial_group,
+            spatial_groups,
             channel_group,
             bayesian,
             config,
@@ -96,12 +96,13 @@ class Conv1dTranspose(torch.autograd.Function):
 
         ctx.save_for_backward(x_aug, weight)
         c = cast(Conv1dTransposeCtx, ctx)
-        c.spatial_group = spatial_group
+        c.spatial_groups = spatial_groups
         c.channel_group = channel_group
         c.in_channels_global = in_channels
-        # length of this rank's owned input slice (pre channel-gather); the halo
-        # backward needs it to size the raw-output span it folds grads back onto.
-        c.local_in_length = x.shape[-1]
+        # (l,) size of this rank's owned input slice (pre channel-gather); the
+        # halo backward needs it to size the raw-output span it folds grads back
+        # onto.
+        c.local_in_spatial = tuple(x.shape[-1:])
         c.stride = stride
         c.padding = padding
         c.dilation = dilation
@@ -146,8 +147,8 @@ class Conv1dTranspose(torch.autograd.Function):
             c.padding,
             c.dilation,
             c.in_channels_global,
-            c.local_in_length,
-            c.spatial_group,
+            c.local_in_spatial,
+            c.spatial_groups,
             c.channel_group,
             c.bayesian,
             config,
@@ -178,7 +179,7 @@ class Conv1dTranspose(torch.autograd.Function):
         padding: int,
         dilation: int,
         in_channels: int,
-        spatial_group: dist.ProcessGroup,
+        spatial_groups: tuple[dist.ProcessGroup | None, ...],
         channel_group: dist.ProcessGroup,
         bayesian: bool,
         config: Conv1dTransposeConfig,
@@ -192,7 +193,7 @@ class Conv1dTranspose(torch.autograd.Function):
             padding,
             dilation,
             in_channels,
-            spatial_group,
+            spatial_groups,
             channel_group,
             bayesian,
             config,
