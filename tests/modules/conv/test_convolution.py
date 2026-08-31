@@ -21,6 +21,28 @@ def _skip_if_unsupported(channel_comm: str) -> None:
         pytest.skip("all_to_all channel comm needs a non-gloo backend")
 
 
+def _assert_weight_replicated_across_spatial(
+    weight: torch.Tensor, mesh: dict, atol: float = 1e-5
+) -> None:
+    """Every spatial rank in a channel column must hold the same weight shard.
+
+    Works for any ``row.size()`` x ``col.size()`` mesh. ``gather_results_as_list``
+    returns one tensor per ``model``-group rank, and the row/col mesh lays ranks
+    out row-major, so the shard for ``(spatial_row, channel_col)`` lives at index
+    ``spatial_row * n_channel + channel_col``.
+    """
+    n_spatial, n_channel = mesh["row"].size(), mesh["col"].size()
+    shards = gather_results_as_list(weight, mesh)
+    for channel_col in range(n_channel):
+        reference = shards[channel_col]  # spatial_row == 0
+        for spatial_row in range(1, n_spatial):
+            assert torch.allclose(
+                shards[spatial_row * n_channel + channel_col],
+                reference,
+                atol=atol,
+            )
+
+
 def _conv2d_reference_check(
     device: torch.device,
     mesh: dict,
@@ -43,6 +65,25 @@ def _conv2d_reference_check(
     row_group, col_group = mesh["row"], mesh["col"]
     n_spatial, n_channel = row_group.size(), col_group.size()
     model_group = mesh["model"]
+
+    # The sharding below only makes sense when the channel dims divide evenly
+    # over the channel group and the spatial (width) dim tiles exactly over the
+    # spatial group with ``stride == kernel_size`` and no padding.
+    assert in_channels % n_channel == 0, (
+        f"in_channels={in_channels} not divisible by channel group {n_channel}"
+    )
+    assert out_channels % n_channel == 0, (
+        f"out_channels={out_channels} not divisible by channel group {n_channel}"
+    )
+    assert width % n_spatial == 0, (
+        f"width={width} not divisible by spatial group {n_spatial}"
+    )
+    assert (width // n_spatial) % kernel_size == 0, (
+        f"local width {width // n_spatial} not divisible by kernel_size={kernel_size}"
+    )
+    assert height % kernel_size == 0, (
+        f"height={height} not divisible by kernel_size={kernel_size}"
+    )
 
     torch.manual_seed(model_group.rank())
     x_local = torch.randn(
@@ -118,16 +159,17 @@ def _conv2d_reference_check(
 
 
 class TestConv2d:
+    # Every test here builds a 2x2 mesh, so it needs exactly 4 ranks. Without
+    # this marker an 8-rank run would build a mesh over ranks 0-3 only and
+    # deadlock the survivors in the first collective.
+    pytestmark = pytest.mark.dist(4)
+
     def test_param_init_conv2d(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """Verify initial weights for Conv2d are correctly synchronized."""
         local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
         torch.manual_seed(local_rank)  # each process gets a different initial seed
-        row_comm_size, col_comm_size = (
-            process_mesh_dict_2x2["row"].size(),
-            process_mesh_dict_2x2["col"].size(),
-        )
         in_dim, out_dim = 5, 10
         kernel_size = 4
         conv2d = conv.DistributedConv2D(
@@ -147,16 +189,7 @@ class TestConv2d:
             dtype=torch.float32,
         ).to(device)
 
-        weights_gathered_as_list = gather_results_as_list(
-            conv2d.weight, process_mesh_dict_2x2
-        )
-
-        for i in range(process_mesh_dict_2x2["model"].size() // row_comm_size):
-            assert torch.allclose(
-                weights_gathered_as_list[i],
-                weights_gathered_as_list[i + col_comm_size],
-                atol=1e-5,
-            )
+        _assert_weight_replicated_across_spatial(conv2d.weight, process_mesh_dict_2x2)
 
     @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_conv2d_forward(
@@ -512,6 +545,83 @@ class TestConv2dParallel:
             channel_comm=channel_comm,
         )
 
+    @pytest.mark.dist(8)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    def test_forward_backward_4x2(
+        self, device: torch.device, process_mesh_dict_4x2: dict, channel_comm: str
+    ) -> None:
+        """4-way spatial x 2-way channel parallelism."""
+        _skip_if_unsupported(channel_comm)
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_4x2,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(6)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    def test_forward_backward_2x3(
+        self, device: torch.device, process_mesh_dict_2x3: dict, channel_comm: str
+    ) -> None:
+        """Rectangular non-power-of-two mesh: 2-way spatial x 3-way channel."""
+        _skip_if_unsupported(channel_comm)
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x3,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=24,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(6)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    def test_forward_backward_3x2(
+        self, device: torch.device, process_mesh_dict_3x2: dict, channel_comm: str
+    ) -> None:
+        """Rectangular non-power-of-two mesh: 3-way spatial x 2-way channel."""
+        _skip_if_unsupported(channel_comm)
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_3x2,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=24,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(6)
+    def test_param_init_replicated_over_3_spatial_ranks(
+        self, device: torch.device, process_mesh_dict_3x2: dict
+    ) -> None:
+        """Weight init is broadcast across a spatial group larger than two."""
+        torch.manual_seed(dist.get_rank(group=process_mesh_dict_3x2["model"]))
+        conv2d = conv.DistributedConv2D(
+            12,
+            12,
+            4,
+            device=device,
+            spatial_group=process_mesh_dict_3x2["row"],
+            channel_group=process_mesh_dict_3x2["col"],
+            stride=4,
+            padding=(0,),
+            dilation=1,
+            bias=True,
+            parallelism=process_mesh_dict_3x2["model"].size(),
+            bayesian=False,
+            dtype=torch.float32,
+        ).to(device)
+        _assert_weight_replicated_across_spatial(conv2d.weight, process_mesh_dict_3x2)
+
 
 class TestConv2dChannelGroupOne:
     """``channel_group.size() == 1`` bypasses the custom kernel for native conv2d."""
@@ -616,6 +726,9 @@ class TestConv2dChannelGroupOne:
 
 
 class TestConv2dTranspose:
+    # 2x2 mesh only -> needs exactly 4 ranks (see TestConv2d).
+    pytestmark = pytest.mark.dist(4)
+
     def test_param_init_conv2d_transpose(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
