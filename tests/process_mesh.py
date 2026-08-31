@@ -59,12 +59,138 @@ def make_process_mesh(
     return mesh
 
 
+def make_multi_spatial_mesh(
+    device_type: str,
+    spatial_names: list[str],
+    spatial_sizes: list[int],
+    channel_size: int,
+    channel_name: str = "col",
+    model_name: str = "model",
+) -> dict:
+    """Return a mesh that splits the domain along *several* spatial axes.
+
+    The returned dict has one group per entry of ``spatial_names`` (aligned with
+    the convolution's spatial axes, e.g. ``["sh", "sw"]`` or
+    ``["sd", "sh", "sw"]``), a channel group under ``channel_name`` and a
+    ``model_name`` group spanning every rank (spatial x channel).
+    """
+    shape = tuple([*spatial_sizes, channel_size])
+    names = tuple([*spatial_names, channel_name])
+    nd_mesh = dist.device_mesh.init_device_mesh(
+        device_type=device_type, mesh_shape=shape, mesh_dim_names=names
+    )
+    model_mesh = dist.device_mesh.init_device_mesh(
+        device_type=device_type,
+        mesh_shape=(math.prod(shape),),
+        mesh_dim_names=(model_name,),
+    )
+    mesh = {name: nd_mesh.get_group(name) for name in names}
+    mesh[model_name] = model_mesh.get_group(model_name)
+    return mesh
+
+
 @pytest.fixture(scope="session")
 def process_mesh_dict_2x2(device: torch.Tensor) -> dict:
     """Return process mesh."""
     return make_process_mesh(
         device_type=device.type, mesh_shape=[2, 2], mesh_dim_names=["row", "col"]
     )
+
+
+@pytest.fixture(scope="session")
+def spatial_mesh_2x2_hw(device: torch.Tensor) -> dict:
+    """2-way height x 2-way width split, no channel parallelism (world 4)."""
+    return make_multi_spatial_mesh(device.type, ["sh", "sw"], [2, 2], 1)
+
+
+@pytest.fixture(scope="session")
+def spatial_mesh_3x2_hw(device: torch.Tensor) -> dict:
+    """3-way height x 2-way width split, no channel parallelism (world 6)."""
+    return make_multi_spatial_mesh(device.type, ["sh", "sw"], [3, 2], 1)
+
+
+@pytest.fixture(scope="session")
+def spatial_mesh_1x4_hw(device: torch.Tensor) -> dict:
+    """width-only 4-way split, height not split, no channel parallelism (world 4)."""
+    return make_multi_spatial_mesh(device.type, ["sh", "sw"], [1, 4], 1)
+
+
+@pytest.fixture(scope="session")
+def spatial_mesh_4x1_hw(device: torch.Tensor) -> dict:
+    """height-only 4-way split, width not split, no channel parallelism (world 4)."""
+    return make_multi_spatial_mesh(device.type, ["sh", "sw"], [4, 1], 1)
+
+
+@pytest.fixture(scope="session")
+def spatial_mesh_5x2_hw(device: torch.Tensor) -> dict:
+    """5-way height x 2-way width split, no channel parallelism (world 10)."""
+    return make_multi_spatial_mesh(device.type, ["sh", "sw"], [5, 2], 1)
+
+
+@pytest.fixture(scope="session")
+def spatial_mesh_2x1_hw(device: torch.Tensor) -> dict:
+    """height-only 2-way split, width not split, no channel parallelism (world 2)."""
+    return make_multi_spatial_mesh(device.type, ["sh", "sw"], [2, 1], 1)
+
+
+@pytest.fixture(scope="session")
+def spatial_mesh_2x1_hw_x2c(device: torch.Tensor) -> dict:
+    """2-way height, width not split, 2-way channel (world 4)."""
+    return make_multi_spatial_mesh(device.type, ["sh", "sw"], [2, 1], 2)
+
+
+@pytest.fixture(scope="session")
+def spatial_mesh_2x2_hw_x2c(device: torch.Tensor) -> dict:
+    """2-way height x 2-way width split, 2-way channel parallelism (world 8)."""
+    return make_multi_spatial_mesh(device.type, ["sh", "sw"], [2, 2], 2)
+
+
+@pytest.fixture(scope="session")
+def spatial_mesh_2x2x1_dhw(device: torch.Tensor) -> dict:
+    """conv3d: 2-way depth x 2-way height, width not split (world 4)."""
+    return make_multi_spatial_mesh(device.type, ["sd", "sh", "sw"], [2, 2, 1], 1)
+
+
+@pytest.fixture(scope="session")
+def spatial_mesh_2x1x2_dhw(device: torch.Tensor) -> dict:
+    """conv3d: 2-way depth x 2-way width, height not split (world 4)."""
+    return make_multi_spatial_mesh(device.type, ["sd", "sh", "sw"], [2, 1, 2], 1)
+
+
+@pytest.fixture(scope="session")
+def spatial_mesh_2x2x2_dhw(device: torch.Tensor) -> dict:
+    """conv3d: 2-way depth x 2-way height x 2-way width split (world 8)."""
+    return make_multi_spatial_mesh(device.type, ["sd", "sh", "sw"], [2, 2, 2], 1)
+
+
+@pytest.fixture(scope="session")
+def spatial_mesh_2x2x1_dhw_x2c(device: torch.Tensor) -> dict:
+    """conv3d: 2-way depth x 2-way height split, 2-way channel (world 8)."""
+    return make_multi_spatial_mesh(device.type, ["sd", "sh", "sw"], [2, 2, 1], 2)
+
+
+@pytest.fixture(scope="session")
+def spatial_mesh_2x1x3_dhw(device: torch.Tensor) -> dict:
+    """conv3d: 2-way depth x 3-way width, height not split (world 6)."""
+    return make_multi_spatial_mesh(device.type, ["sd", "sh", "sw"], [2, 1, 3], 1)
+
+
+@pytest.fixture(scope="session")
+def spatial_mesh_2x1x3_dhw_x2c(device: torch.Tensor) -> dict:
+    """conv3d: 2-way depth x 3-way width, height not split, 2-way channel (world 12)."""
+    return make_multi_spatial_mesh(device.type, ["sd", "sh", "sw"], [2, 1, 3], 2)
+
+
+@pytest.fixture(scope="session")
+def spatial_mesh_2x2x3_dhw(device: torch.Tensor) -> dict:
+    """conv3d: 2-way depth x 2-way height x 3-way width split (world 12)."""
+    return make_multi_spatial_mesh(device.type, ["sd", "sh", "sw"], [2, 2, 3], 1)
+
+
+@pytest.fixture(scope="session")
+def spatial_mesh_2x2x3_dhw_x2c(device: torch.Tensor) -> dict:
+    """conv3d: 2-way depth x 2-way height x 3-way width split, 2-way channel (world 24)."""
+    return make_multi_spatial_mesh(device.type, ["sd", "sh", "sw"], [2, 2, 3], 2)
 
 
 @pytest.fixture(scope="session")

@@ -4,6 +4,8 @@ The 1-D and 3-D modules (:class:`jigsaw.modules.conv1d.conv1d.DistributedConv1D`
 :class:`jigsaw.modules.conv3d.conv3d.DistributedConv3D`) mirror this one.
 """
 
+import math
+from collections.abc import Sequence
 from typing import Callable, Optional, cast
 
 import numpy as np
@@ -17,6 +19,9 @@ from jigsaw.utils_aggregate import gather_1d_results
 from .config import Conv2dConfig
 from .functional import Conv2d
 
+# number of spatial axes of a 2-D convolution, ordered (H, W).
+_N_SPATIAL = 2
+
 
 def _pair(x: int | tuple[int, ...]) -> tuple[int, int]:
     """Normalise an ``int`` or 1-/2-element tuple to a 2-element tuple."""
@@ -27,6 +32,27 @@ def _pair(x: int | tuple[int, ...]) -> tuple[int, int]:
     return (x[0], x[1])
 
 
+def _as_spatial_groups(
+    spatial_group: "dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]]",
+) -> tuple[Optional[dist.ProcessGroup], ...]:
+    """Normalise the ``spatial_group`` argument to a ``(group_h, group_w)`` tuple.
+
+    A single process group keeps the historical behaviour -- the domain is split
+    along the width (last) axis only. A sequence is taken axis-by-axis, so
+    ``[group_h, group_w]`` splits both spatial axes; ``None`` (or a group of
+    size 1) marks an axis that is not split.
+    """
+    if isinstance(spatial_group, dist.ProcessGroup):
+        return (None,) * (_N_SPATIAL - 1) + (spatial_group,)
+    groups = tuple(spatial_group)
+    if len(groups) != _N_SPATIAL:
+        raise ValueError(
+            f"spatial_group as a sequence must have {_N_SPATIAL} entries "
+            f"(one per spatial axis, ordered (H, W)); got {len(groups)}."
+        )
+    return groups
+
+
 class DistributedConv2D(torch.nn.Module):
     """Distributed 2-D convolution."""
 
@@ -35,7 +61,8 @@ class DistributedConv2D(torch.nn.Module):
     parallelism: int
     config: Conv2dConfig
     bayesian: bool
-    spatial_group: dist.ProcessGroup
+    spatial_group: Optional[dist.ProcessGroup]
+    spatial_groups: tuple[Optional[dist.ProcessGroup], ...]
     channel_group: dist.ProcessGroup
     empty: torch.Tensor
     device: torch.device
@@ -54,7 +81,7 @@ class DistributedConv2D(torch.nn.Module):
         kernel_size: int | tuple[int, ...],
         # --- distributed (required) ---
         device: torch.device,
-        spatial_group: dist.ProcessGroup,
+        spatial_group: "dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]]",
         channel_group: dist.ProcessGroup,
         # --- core conv (optional, pytorch-standard-order) ---
         stride: int | tuple[int, ...] = 1,
@@ -85,8 +112,11 @@ class DistributedConv2D(torch.nn.Module):
             Kernel size.
         device: torch.device
             Device where the computations will be done.
-        spatial_group: dist.ProcessGroup
-            Process group for domain-parallel ranks.
+        spatial_group: dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]]
+            Domain-parallel ranks. A single process group splits the domain
+            along the width axis only (the historical behaviour). A sequence
+            ``[group_h, group_w]`` splits both spatial axes; ``None`` (or a
+            group of size 1) marks an axis that is not split.
         channel_group: dist.ProcessGroup
             Process group for channel-parallel ranks.
         stride: int | tuple[int, ...]
@@ -132,12 +162,19 @@ class DistributedConv2D(torch.nn.Module):
 
         self.channel_comm = channel_comm
         self.groups = groups
-        self.spatial_group = spatial_group
+        self.spatial_groups = _as_spatial_groups(spatial_group)
+        # groups that carry a real (>1) split; the parameters are replicated
+        # across their product and their gradients summed back over it.
+        self._spatial_sync_groups = [
+            g for g in self.spatial_groups if g is not None and g.size() > 1
+        ]
+        # representative single group kept for backward compatibility (the
+        # width-axis group, or ``None`` when the width axis is not split).
+        self.spatial_group = self.spatial_groups[-1]
         self.channel_group = channel_group
         self.device = device
         self.parallelism = parallelism
         self.dtype = dtype
-        self.empty = torch.empty(0, device=self.device, dtype=self.dtype)
         self.bayesian = bayesian
 
         k = np.sqrt(
@@ -170,7 +207,6 @@ class DistributedConv2D(torch.nn.Module):
         self.config = (
             Conv2dConfig(
                 self.bayesian,
-                self.spatial_group,
                 self.channel_group,
                 self.bias,
                 self.kernel_size,
@@ -182,28 +218,33 @@ class DistributedConv2D(torch.nn.Module):
             else config
         )
 
-        self.weight.register_post_accumulate_grad_hook(
-            hooks.make_grad_sync_hook(self.spatial_group)
-        )
-        if self.bias is not None:
-            self.bias.register_post_accumulate_grad_hook(
-                hooks.make_grad_sync_hook(self.spatial_group)
+        if self._spatial_sync_groups:
+            self.weight.register_post_accumulate_grad_hook(
+                hooks.make_grad_sync_hook(self._spatial_sync_groups)
             )
+            if self.bias is not None:
+                self.bias.register_post_accumulate_grad_hook(
+                    hooks.make_grad_sync_hook(self._spatial_sync_groups)
+                )
+        # Broadcast the reference parameters from global rank 0 to every spatial
+        # rank. Sequential broadcasts over the per-axis groups (innermost axis
+        # first) propagate rank 0's values across the whole spatial grid.
         for p in self.parameters():
-            dist.broadcast(p.data, group_src=0, group=self.spatial_group)
+            for g in reversed(self._spatial_sync_groups):
+                dist.broadcast(p.data, group_src=0, group=g)
 
         self.conv2d_apply = Conv2d.apply
 
+    @property
+    def spatial_world_size(self) -> int:
+        """Number of spatial ranks the parameters are replicated across."""
+        return math.prod(g.size() for g in self._spatial_sync_groups)
+
     def get_parameter_count(self) -> int:
         """Return effective number of local parameters for Distributed Conv2D module."""
-        num_param = (
-            0
-            if self.bias is None
-            else self.bias.numel() // dist.get_world_size(group=self.spatial_group)
-        )
-        return num_param + self.weight.numel() // dist.get_world_size(
-            group=self.spatial_group
-        )
+        replicas = self.spatial_world_size
+        num_param = 0 if self.bias is None else self.bias.numel() // replicas
+        return num_param + self.weight.numel() // replicas
 
     @classmethod
     def convert_to_jigsaw(
@@ -366,7 +407,6 @@ class DistributedConv2D(torch.nn.Module):
         self.parallelism = to_process_mesh_dict[pm_col_key].size()
         self.config = Conv2dConfig(
             self.bayesian,
-            self.spatial_group,
             self.channel_group,
             self.bias,
             self.kernel_size,
@@ -454,17 +494,21 @@ class DistributedConv2D(torch.nn.Module):
 
         Nothing has to be gathered over the channel dimension, so the custom
         autograd Function buys nothing: native ``conv2d`` plus the spatial-group
-        gradient hooks on ``weight`` / ``bias`` produce the same result. Spatial
-        splitting still works as long as the convolution tiles exactly
-        (``stride == kernel_size``, no padding / dilation); any other config
-        across a split spatial group would need a halo exchange and is rejected.
-        A group size of one on both axes places no such restriction.
+        gradient hooks on ``weight`` / ``bias`` produce the same result. This
+        fast path only covers the exact-tiling case: no split spatial axis
+        (any ``stride`` / ``padding`` / ``dilation``), or a split that tiles
+        with no overlap (``stride == kernel_size``, no padding / dilation).
+        Halo-needing splits are handled too, but via ``conv2d_apply`` --
+        ``forward`` routes them there and they should never reach here.
+
+        The guard below is therefore defensive: running native ``conv2d`` on a
+        local shard that needs a halo would silently give wrong values at the
+        shard seams, so turn that into a loud error instead.
         """
-        if self.spatial_group.size() > 1 and self._needs_halo():
+        if self._spatial_sync_groups and self._needs_halo():
             raise NotImplementedError(
-                "Distributed Conv2d across a split spatial group supports only "
-                "stride == kernel_size with no padding or dilation "
-                "(no halo exchange implemented)."
+                "_forward_local reached with a halo-needing spatial split; "
+                "forward() should have routed this through conv2d_apply."
             )
         conv2d = self.config.conv2d_fn
         if self.bias is not None:
@@ -505,9 +549,11 @@ class DistributedConv2D(torch.nn.Module):
         # With no channel split the custom autograd Function buys nothing *unless*
         # a spatially-split conv needs a halo exchange; that case still has to go
         # through ``conv2d_apply`` (``conv2d_halo_nway`` handles a channel group
-        # of one as the identity gather).
+        # of one as the identity gather). ``_spatial_sync_groups`` is non-empty
+        # iff some spatial axis is really split -- checking ``spatial_group``
+        # alone would miss a height-only split (its width group has size 1).
         if self.channel_group.size() == 1 and not (
-            self.spatial_group.size() > 1 and self._needs_halo()
+            self._spatial_sync_groups and self._needs_halo()
         ):
             return self._forward_local(x)
 
@@ -515,16 +561,12 @@ class DistributedConv2D(torch.nn.Module):
             x,
             self.weight,
             self.bias,
-            self.kernel_size,
             self.stride,
             self.padding,
             self.dilation,
             self.in_channels,
-            self.spatial_group,
+            self.spatial_groups,
             self.channel_group,
-            self.device,
-            self.parallelism,
-            self.empty,
             self.bayesian,
             self.config,
         )
