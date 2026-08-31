@@ -12,7 +12,7 @@ pytestmark = [pytest.mark.dist_required]
 
 # Every channel-parallel exchange strategy; "all_to_all" needs a backend with
 # all-to-all support and is skipped on gloo (see _skip_if_unsupported).
-CHANNEL_COMMS = ["all_gather", "ring", "all_to_all"]
+CHANNEL_COMMS = ["all_gather", "p2p", "all_to_all"]
 
 Pair = int | tuple[int, int]
 
@@ -66,15 +66,15 @@ def _conv2d_reference_check(
 ) -> None:
     """Compare a distributed ``DistributedConv2D`` against a single-process conv2d.
 
-    Works for any ``row.size()`` (spatial) x ``col.size()`` (channel) mesh and
-    either channel-parallel exchange strategy (``"all_gather"`` / ``"ring"``) and
-    for both the no-halo regime (``stride == kernel_size``, the default) and the
-    halo regime (any other stride). ``kernel_size`` / ``stride`` / ``padding`` /
-    ``dilation`` accept an ``int`` or a ``(h, w)`` tuple, so asymmetric kernels
-    and strides are covered. Rebuilds the equivalent non-distributed convolution
-    from the sharded weight, bias and input, runs both forward and backward, and
-    checks the output plus every gradient (input, weight, bias) after gathering
-    the distributed shards.
+    Works for any ``row.size()`` (spatial) x ``col.size()`` (channel) mesh, any
+    channel-parallel exchange strategy (``"all_gather"`` / ``"p2p"`` /
+    ``"all_to_all"``) and for both the no-halo regime (``stride == kernel_size``,
+    the default) and the halo regime (any other stride). ``kernel_size`` /
+    ``stride`` / ``padding`` / ``dilation`` accept an ``int`` or a ``(h, w)``
+    tuple, so asymmetric kernels and strides are covered. Rebuilds the equivalent
+    non-distributed convolution from the sharded weight, bias and input, runs
+    both forward and backward, and checks the output plus every gradient (input,
+    weight, bias) after gathering the distributed shards.
     """
     row_group, col_group = mesh["row"], mesh["col"]
     n_spatial, n_channel = row_group.size(), col_group.size()
@@ -217,7 +217,7 @@ class TestConv2d:
             channel_comm=channel_comm,
         )
 
-    @pytest.mark.parametrize("channel_comm", ["ring", "all_to_all"])
+    @pytest.mark.parametrize("channel_comm", ["p2p", "all_to_all"])
     def test_streaming_matches_all_gather(
         self,
         device: torch.device,
@@ -226,7 +226,7 @@ class TestConv2d:
     ) -> None:
         """The streaming exchanges match all-gather up to accumulation order.
 
-        ``ring`` / ``all_to_all`` sum one ``conv`` per input-channel slice while
+        ``p2p`` / ``all_to_all`` sum one ``conv`` per input-channel slice while
         all-gather runs a single fused ``conv``, so the results differ only by
         float reduction order.
         """
@@ -290,7 +290,7 @@ class TestConv2d:
             channel_group=process_mesh_dict_2x2["col"],
             stride=4,
         ).to(device)
-        expected = "all_to_all" if device.type == "cuda" else "ring"
+        expected = "all_to_all" if device.type == "cuda" else "p2p"
         assert conv2d.config.channel_comm == expected
 
     def test_unknown_channel_comm_rejected(
@@ -371,7 +371,9 @@ class TestConv2d:
         in_channels, out_channels, kernel_size = 8, 12, 4
         n_spatial, n_channel = row_group.size(), col_group.size()
 
-        def _build(stride: object, padding: object, dilation: object) -> torch.nn.Module:
+        def _build(
+            stride: object, padding: object, dilation: object
+        ) -> torch.nn.Module:
             torch.manual_seed(1234)  # identical weight init for both variants
             return conv.DistributedConv2D(
                 in_channels,
@@ -394,9 +396,7 @@ class TestConv2d:
         conv_tuple = _build((kernel_size, kernel_size), (0, 0), (1, 1))
 
         torch.manual_seed(model_group.rank())
-        x = torch.randn(
-            2, in_channels // n_channel, 16, 16 // n_spatial, device=device
-        )
+        x = torch.randn(2, in_channels // n_channel, 16, 16 // n_spatial, device=device)
 
         y_int = conv_int(x.clone().requires_grad_(True))
         y_tuple = conv_tuple(x.clone().requires_grad_(True))
@@ -404,9 +404,7 @@ class TestConv2d:
 
         y_int.backward(torch.ones_like(y_int))
         y_tuple.backward(torch.ones_like(y_tuple))
-        assert torch.allclose(
-            conv_int.weight.grad, conv_tuple.weight.grad, atol=1e-6
-        )
+        assert torch.allclose(conv_int.weight.grad, conv_tuple.weight.grad, atol=1e-6)
         assert torch.allclose(conv_int.bias.grad, conv_tuple.bias.grad, atol=1e-6)
 
     def test_int_args_match_reference_conv2d(
@@ -651,9 +649,7 @@ class TestConv2dParallel:
         _assert_weight_replicated_across_spatial(conv2d.weight, process_mesh_dict_3x2)
 
     @pytest.mark.dist(4)
-    def test_halo_1x4(
-        self, device: torch.device, process_mesh_dict_1x4: dict
-    ) -> None:
+    def test_halo_1x4(self, device: torch.device, process_mesh_dict_1x4: dict) -> None:
         """Halo regime with no spatial split (channel-only, group size 1 path)."""
         _conv2d_reference_check(
             device,
@@ -668,9 +664,7 @@ class TestConv2dParallel:
         )
 
     @pytest.mark.dist(4)
-    def test_halo_4x1(
-        self, device: torch.device, process_mesh_dict_4x1: dict
-    ) -> None:
+    def test_halo_4x1(self, device: torch.device, process_mesh_dict_4x1: dict) -> None:
         """Halo regime with 4-way spatial split (real cross-rank exchange)."""
         _conv2d_reference_check(
             device,
@@ -685,10 +679,20 @@ class TestConv2dParallel:
         )
 
     @pytest.mark.dist(8)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_halo_2x4(
-        self, device: torch.device, process_mesh_dict_2x4_rowcol: dict
+        self,
+        device: torch.device,
+        process_mesh_dict_2x4_rowcol: dict,
+        channel_comm: str,
     ) -> None:
-        """Halo regime combined with 4-way channel parallelism."""
+        """Halo regime combined with 4-way channel parallelism, every channel comm.
+
+        Exercises the halo path's channel-parallel exchange: ``"all_gather"``
+        gathers then halo-gathers once, ``"p2p"`` / ``"all_to_all"`` stream and
+        halo-gather one channel slab at a time.
+        """
+        _skip_if_unsupported(channel_comm)
         _conv2d_reference_check(
             device,
             process_mesh_dict_2x4_rowcol,
@@ -699,6 +703,7 @@ class TestConv2dParallel:
             width=16,
             stride=2,
             padding=1,
+            channel_comm=channel_comm,
         )
 
     @pytest.mark.dist(8)

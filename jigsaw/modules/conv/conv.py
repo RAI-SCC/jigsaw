@@ -102,11 +102,11 @@ class DistributedConv2D(torch.nn.Module):
         dtype: torch.dtype
             Data type of the convolution.
         channel_comm: str
-            Channel-parallel forward exchange: ``"all_gather"``, ``"ring"``
+            Channel-parallel forward exchange: ``"all_gather"``, ``"p2p"``
             (double-buffered batched p2p, overlaps comm/compute, lower memory
             peak) or ``"all_to_all"`` (same ring over masked all-to-all hops,
             NCCL only). ``"auto"`` (default) -> ``"all_to_all"`` on a CUDA
-            ``device``, else ``"ring"``. Ignored when ``config`` is supplied.
+            ``device``, else ``"p2p"``. Ignored when ``config`` is supplied.
         config: Optional[ConvConfig]
             Configuration and selection strategy of convolutional layer.
             If None, this will be initialized here.

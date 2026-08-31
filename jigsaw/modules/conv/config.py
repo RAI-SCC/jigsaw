@@ -48,11 +48,11 @@ class ConvConfig:
             Device upon which communication occurs
         channel_comm: str
             How the channel-parallel group exchanges input slices in the forward
-            pass: ``"all_gather"`` (one-shot gather), ``"ring"`` (double-buffered
+            pass: ``"all_gather"`` (one-shot gather), ``"p2p"`` (double-buffered
             batched p2p that overlaps comm with compute and lowers the memory
             peak) or ``"all_to_all"`` (same ring over masked all-to-all hops,
             NCCL only). ``"auto"`` (the default) picks ``"all_to_all"`` on a
-            CUDA ``device`` and ``"ring"`` otherwise. See
+            CUDA ``device`` and ``"p2p"`` otherwise. See
             :mod:`jigsaw.modules.conv.distributed_convolutions`.
         """
         self.channel_comm = self._resolve_channel_comm(channel_comm, device)
@@ -78,10 +78,10 @@ class ConvConfig:
         """Resolve ``"auto"`` from ``device`` and validate the result.
 
         ``"auto"`` -> ``"all_to_all"`` on CUDA (NCCL has a real all-to-all),
-        ``"ring"`` (batched ``isend`` / ``irecv``) everywhere else.
+        ``"p2p"`` (batched ``isend`` / ``irecv``) everywhere else.
         """
         if channel_comm == "auto":
-            channel_comm = "all_to_all" if device.type == "cuda" else "ring"
+            channel_comm = "all_to_all" if device.type == "cuda" else "p2p"
         if channel_comm not in dist_conv._CHANNEL_COMM_FNS:
             raise ValueError(
                 f"channel_comm must be 'auto' or one of "

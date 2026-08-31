@@ -9,29 +9,28 @@ Two regimes are supported, selected by :class:`~jigsaw.modules.conv.config.ConvC
   each spatial rank first pulls the missing input columns from the other ranks
   with a halo exchange, then convolves (:func:`conv2d_halo_nway`).
 
-Both regimes cooperate with the channel-parallel group through
-:func:`_gather_full_channels`, which works for any group size.
 The spatial split is 1-D, along the last axis (width); height is never split.
 
-The channel-parallel group cooperates through one of three
-interchangeable kernels, selected by ``config.channel_comm``:
+Both regimes cooperate with the channel-parallel group through one of three
+interchangeable strategies, selected by ``config.channel_comm``:
 
-* ``"all_gather"`` -- :func:`distributed_conv2d_over_channels_nway` gathers every
-  rank's input-channel slice in one shot. Simple and fast, but its transient
-  memory peak is ``~2 * C_in`` (the gather list plus the concatenated copy).
-* ``"ring"`` -- :func:`distributed_conv2d_over_channels_p2p` circulates the
-  slices one hop at a time with batched ``isend`` / ``irecv``
-  (:func:`jigsaw.comm.comm_1d_p2p`), overlaps each partial convolution with the
-  next transfer and keeps the peak to ``C_in`` plus two slice buffers.
-* ``"all_to_all"`` -- :func:`distributed_conv2d_over_channels_alltoall` runs the
-  same ring schedule but moves each hop with a masked all-to-all
+* ``"all_gather"`` -- gather every rank's input-channel slice in one shot, then
+  run a single fused convolution. Simple and fast, but its transient memory peak
+  is ``~2 * C_in`` (the gather list plus the concatenated copy).
+* ``"p2p"`` -- circulate the slices one hop at a time with batched ``isend`` /
+  ``irecv`` (:func:`jigsaw.comm.comm_1d_p2p`), overlapping each partial
+  convolution with the next transfer, keeping the peak to ``C_in`` plus two
+  slice buffers.
+* ``"all_to_all"`` -- the same ring schedule, each hop a masked all-to-all
   (:func:`jigsaw.comm.comm_1d_alltoall`): an empty tensor goes to every rank
   except the ring neighbour. Needs a backend with all-to-all support (NCCL);
   gloo has none.
 
-All three work for any channel-group size and return the same ``(y, x_full)``.
-``ConvConfig`` resolves the default: ``"all_to_all"`` on a CUDA device,
-``"ring"`` otherwise.
+In the no-halo regime the strategy is one of
+:data:`_CHANNEL_COMM_FNS`; the halo regime applies the same schedule but
+halo-gathers (and convolves) one channel slab at a time. All strategies work for
+any channel-group size and return the same ``(y, x_full)``. ``ConvConfig``
+resolves the default: ``"all_to_all"`` on a CUDA device, ``"p2p"`` otherwise.
 """
 
 from typing import Any, Callable, Optional
@@ -44,6 +43,26 @@ from jigsaw.comm import comm_1d_alltoall, comm_1d_p2p
 # A per-hop transport: ``fn(data, buffer, direction=, group=, async_op=) ->
 # (recv_buffer, wait_handle)``. Satisfied by ``comm_1d_p2p`` / ``comm_1d_alltoall``.
 _HopFn = Callable[..., tuple[torch.Tensor, Optional[dist.Work]]]
+
+# The per-hop transport behind each streaming ``channel_comm``.
+_CHANNEL_HOP_FNS: dict[str, _HopFn] = {
+    "p2p": comm_1d_p2p,
+    "all_to_all": comm_1d_alltoall,
+}
+
+
+def _resolve_channel_hop(channel_comm: str, channel_group: dist.ProcessGroup) -> _HopFn:
+    """Per-hop transport for a streaming ``channel_comm`` (``"p2p"`` / ``"all_to_all"``).
+
+    ``"all_to_all"`` needs a backend with all-to-all support; gloo has none, so it
+    raises there and the caller should fall back to ``"p2p"``.
+    """
+    if channel_comm == "all_to_all" and dist.get_backend(channel_group) == "gloo":
+        raise RuntimeError(
+            "channel_comm='all_to_all' needs a backend with all-to-all support "
+            "(e.g. NCCL); gloo has none. Use channel_comm='p2p' instead."
+        )
+    return _CHANNEL_HOP_FNS[channel_comm]
 
 
 # ---------------------------------------------------------------------------
@@ -113,21 +132,6 @@ def _conv2d_over_channels_p2p(
     hop_fn: _HopFn,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Ring channel-parallel Conv2d; ``hop_fn`` is the per-step transport.
-
-    Instead of ``all_gather``-ing every rank's input-channel slice at once, the
-    slices travel one hop per step (``rank -> rank + 1``). ``hop_fn`` moves one
-    slice one hop and returns ``(recv_buffer, wait_handle)``; it is
-    :func:`jigsaw.comm.comm_1d_p2p` (batched ``isend`` / ``irecv``) or
-    :func:`jigsaw.comm.comm_1d_alltoall` (masked all-to-all). Each rank
-    convolves the slice it currently holds while the next slice is already in
-    flight, so communication overlaps computation. Convolution is linear in the
-    input channels, so ``y`` is the running sum of the per-slice partial
-    convolutions, with the bias folded into the first partial only.
-
-    The transient memory peak drops from ``~2 * C_in`` (the gather list plus the
-    concatenated copy) to ``C_in`` (the reassembled ``x_full``) plus two
-    slice-sized send/recv buffers. ``x_full`` is still assembled and returned so
-    the backward-pass contract is unchanged.
 
     Returns ``(y, x_full)`` where ``x_full`` is the full-channel input,
     reassembled slice by slice, kept for the backward pass.
@@ -203,7 +207,15 @@ def distributed_conv2d_over_channels_p2p(
     the memory characteristics.
     """
     return _conv2d_over_channels_p2p(
-        x, w, b, stride, padding, dilation, channel_group, conv_func, comm_1d_p2p
+        x,
+        w,
+        b,
+        stride,
+        padding,
+        dilation,
+        channel_group,
+        conv_func,
+        _resolve_channel_hop("p2p", channel_group),
     )
 
 
@@ -223,21 +235,24 @@ def distributed_conv2d_over_channels_alltoall(
     :func:`jigsaw.comm.comm_1d_alltoall` as the transport: every hop is a
     ``dist.all_to_all`` in which this rank sends its slice to the ring neighbour
     and an empty tensor to everyone else. Requires a backend with all-to-all
-    support (NCCL); ``gloo`` has none, so this raises there -- use ``"ring"``.
+    support (NCCL); ``gloo`` has none, so this raises there -- use ``"p2p"``.
     """
-    if dist.get_backend(channel_group) == "gloo":
-        raise RuntimeError(
-            "channel_comm='all_to_all' needs a backend with all-to-all support "
-            "(e.g. NCCL); gloo has none. Use channel_comm='ring' instead."
-        )
     return _conv2d_over_channels_p2p(
-        x, w, b, stride, padding, dilation, channel_group, conv_func, comm_1d_alltoall
+        x,
+        w,
+        b,
+        stride,
+        padding,
+        dilation,
+        channel_group,
+        conv_func,
+        _resolve_channel_hop("all_to_all", channel_group),
     )
 
 
 _CHANNEL_COMM_FNS: dict[str, Callable[..., tuple[torch.Tensor, torch.Tensor]]] = {
     "all_gather": distributed_conv2d_over_channels_nway,
-    "ring": distributed_conv2d_over_channels_p2p,
+    "p2p": distributed_conv2d_over_channels_p2p,
     "all_to_all": distributed_conv2d_over_channels_alltoall,
 }
 
@@ -277,7 +292,7 @@ def conv2d_nway(
 
 def conv2d_nway_backward(
     grad_output: torch.Tensor,
-    x_aug: torch.Tensor,
+    x_full: torch.Tensor,
     weight: torch.Tensor,
     stride: tuple[int, int],
     padding: tuple[int, int],
@@ -297,7 +312,7 @@ def conv2d_nway_backward(
     reduced by the parameter hook).
     """
     g_x = config.conv2d_input_fn(
-        x_aug.shape[int(bayesian) :],
+        x_full.shape[int(bayesian) :],
         weight,
         grad_output.to(weight.dtype),  # handles autocast
         stride=stride,
@@ -310,7 +325,7 @@ def conv2d_nway_backward(
     )
 
     g_w = config.conv2d_weight_fn(
-        x_aug,
+        x_full,
         weight.shape[int(bayesian) :],
         grad_output.to(weight.dtype),
         stride=stride,
@@ -382,9 +397,7 @@ def _exchange_along_width(
     """
     lead = template.shape[:-1]
     parts = [p for p, w in zip(send_parts, send_widths) if w > 0]
-    send_cat = (
-        torch.cat(parts, dim=-1) if parts else template.new_empty((*lead, 0))
-    )
+    send_cat = torch.cat(parts, dim=-1) if parts else template.new_empty((*lead, 0))
     send_cat = send_cat.movedim(-1, 0).contiguous()
     recv_cat = template.new_empty((sum(recv_widths), *lead))
 
@@ -537,6 +550,132 @@ def _width_padding(padding: tuple[int, int]) -> tuple[int, int]:
     return (padding[0], 0)
 
 
+def _conv2d_halo_over_channels_nway(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    b: torch.Tensor,
+    stride: tuple[int, int],
+    padding: tuple[int, int],
+    dilation: tuple[int, int],
+    spatial_group: dist.ProcessGroup,
+    channel_group: dist.ProcessGroup,
+    conv_func: Callable[..., torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Halo regime, ``channel_comm="all_gather"``.
+
+    Gather every channel slice up front, halo-gather the width axis once, then run
+    a single fused convolution. Returns ``(y, x_need)`` -- the halo-padded
+    full-channel span kept for the backward pass.
+    """
+    x_full = _gather_full_channels(x.contiguous(), channel_group)
+    x_need, _ = _halo_gather(
+        x_full, spatial_group, w.shape[-1], stride[1], padding[1], dilation[1]
+    )
+
+    local_padding = _width_padding(padding)
+    if b is not None:
+        y = conv_func(
+            x_need, w, b, stride=stride, padding=local_padding, dilation=dilation
+        )
+    else:
+        y = conv_func(
+            x_need, w, stride=stride, padding=local_padding, dilation=dilation
+        )
+
+    return y, x_need
+
+
+def _conv2d_halo_over_channels_p2p(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    b: torch.Tensor,
+    stride: tuple[int, int],
+    padding: tuple[int, int],
+    dilation: tuple[int, int],
+    spatial_group: dist.ProcessGroup,
+    channel_group: dist.ProcessGroup,
+    conv_func: Callable[..., torch.Tensor],
+    hop_fn: _HopFn,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Halo regime, streaming ``channel_comm`` (``"p2p"`` / ``"all_to_all"``).
+
+    Mirrors :func:`_conv2d_over_channels_p2p`: the channel slices travel one hop
+    per step around the ring while each partial convolution overlaps the next
+    transfer. The only difference is that every slab is first halo-gathered along
+    the width axis (:func:`_halo_gather`, a spatial-group exchange) before its
+    partial convolution, so the spatial halo exchange happens once per channel
+    slab rather than once for the whole full-channel tensor.
+
+    Returns ``(y, x_need)`` where ``x_need`` is the halo-padded full-channel span,
+    reassembled slab by slab, kept for the backward pass.
+    """
+    group_size = channel_group.size()
+    rank = channel_group.rank()
+
+    x = x.contiguous()
+    c_in_local = x.shape[-3]
+    c_in_global = w.shape[-3]
+    kernel_w = w.shape[-1]
+    local_padding = _width_padding(padding)
+
+    def _halo(slab: torch.Tensor) -> torch.Tensor:
+        span, _ = _halo_gather(
+            slab, spatial_group, kernel_w, stride[1], padding[1], dilation[1]
+        )
+        return span
+
+    def _conv(span: torch.Tensor, j: int, with_bias: bool) -> torch.Tensor:
+        """Partial convolution of halo-padded channel block ``j`` with its weights."""
+        w_j = w[..., j * c_in_local : (j + 1) * c_in_local, :, :].contiguous()
+        if with_bias and b is not None:
+            return conv_func(
+                span, w_j, b, stride=stride, padding=local_padding, dilation=dilation
+            )
+        return conv_func(
+            span, w_j, stride=stride, padding=local_padding, dilation=dilation
+        )
+
+    own_span = _halo(x)
+    if group_size == 1:
+        return _conv(own_span, rank, with_bias=True), own_span
+
+    x_need = torch.empty(
+        (*own_span.shape[:-3], c_in_global, *own_span.shape[-2:]),
+        dtype=own_span.dtype,
+        device=own_span.device,
+    )
+    x_need[..., rank * c_in_local : (rank + 1) * c_in_local, :, :] = own_span
+
+    buf_a = torch.empty_like(x)
+    buf_b = torch.empty_like(x)
+    recv_buf = buf_a
+
+    # Prime the ring: this rank's own slice sets off while we convolve it.
+    recv_buf, handle = hop_fn(
+        x, recv_buf, direction=1, group=channel_group, async_op=True
+    )
+    y = _conv(own_span, rank, with_bias=True)
+
+    for step in range(1, group_size):
+        if handle is not None:
+            handle.wait()
+        slab, recv_buf = recv_buf, (buf_b if recv_buf is buf_a else buf_a)
+
+        j = (rank - step) % group_size
+
+        # Relay before the halo exchange + partial conv, so they overlap the next hop.
+        if step < group_size - 1:
+            recv_buf, handle = hop_fn(
+                slab, recv_buf, direction=1, group=channel_group, async_op=True
+            )
+
+        span = _halo(slab)
+        x_need[..., j * c_in_local : (j + 1) * c_in_local, :, :] = span
+        y = y + _conv(span, j, with_bias=False)
+
+    return y, x_need
+
+
 def conv2d_halo_nway(
     x: torch.Tensor,
     w: torch.Tensor,
@@ -550,9 +689,15 @@ def conv2d_halo_nway(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Distributed 2d convolution for the halo regime (``stride != kernel``).
 
-    Gathers the full-channel input, pulls the missing width columns from the
-    other spatial ranks, then runs the local convolution so the result already
-    holds this rank's output-channel *and* output-column slice.
+    Cooperates with the channel-parallel group through ``config.channel_comm``
+    exactly as :func:`conv2d_nway` does: ``"all_gather"`` gathers every channel
+    slice up front and runs one fused convolution
+    (:func:`_conv2d_halo_over_channels_nway`); ``"p2p"`` / ``"all_to_all"`` stream
+    the slices around the channel ring, halo-gathering and convolving one slab at
+    a time (:func:`_conv2d_halo_over_channels_p2p`). Either way each spatial rank
+    pulls the missing width columns from the other spatial ranks with a halo
+    exchange, so the result already holds this rank's output-channel *and*
+    output-column slice.
 
     Returns ``(y, x_need)`` where ``x_need`` is the halo-padded full-channel
     input kept for the backward pass.
@@ -563,27 +708,37 @@ def conv2d_halo_nway(
             f"string padding ({padding!r}); pass an explicit (h, w) padding."
         )
 
-    x_full = _gather_full_channels(x.contiguous(), channel_group)
-    x_need, _ = _halo_gather(
-        x_full, spatial_group, w.shape[-1], stride[1], padding[1], dilation[1]
+    if config.channel_comm == "all_gather":
+        return _conv2d_halo_over_channels_nway(
+            x,
+            w,
+            b,
+            stride,
+            padding,
+            dilation,
+            spatial_group,
+            channel_group,
+            config.conv2d_fn,
+        )
+
+    hop_fn = _resolve_channel_hop(config.channel_comm, channel_group)
+    return _conv2d_halo_over_channels_p2p(
+        x,
+        w,
+        b,
+        stride,
+        padding,
+        dilation,
+        spatial_group,
+        channel_group,
+        config.conv2d_fn,
+        hop_fn,
     )
-
-    local_padding = _width_padding(padding)
-    if b is not None:
-        y = config.conv2d_fn(
-            x_need, w, b, stride=stride, padding=local_padding, dilation=dilation
-        )
-    else:
-        y = config.conv2d_fn(
-            x_need, w, stride=stride, padding=local_padding, dilation=dilation
-        )
-
-    return y, x_need
 
 
 def conv2d_halo_nway_backward(
     grad_output: torch.Tensor,
-    x_aug: torch.Tensor,
+    x_full: torch.Tensor,
     weight: torch.Tensor,
     stride: tuple[int, int],
     padding: tuple[int, int],
@@ -606,7 +761,7 @@ def conv2d_halo_nway_backward(
     local_padding = _width_padding(padding)
 
     g_x_need = config.conv2d_input_fn(
-        x_aug.shape[int(bayesian) :],
+        x_full.shape[int(bayesian) :],
         weight,
         grad_output.to(weight.dtype),  # handles autocast
         stride=stride,
@@ -619,7 +774,7 @@ def conv2d_halo_nway_backward(
     )
 
     g_w = config.conv2d_weight_fn(
-        x_aug,
+        x_full,
         weight.shape[int(bayesian) :],
         grad_output.to(weight.dtype),
         stride=stride,
