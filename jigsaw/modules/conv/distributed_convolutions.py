@@ -8,7 +8,7 @@ interchangeable kernels, selected by ``config.channel_comm``:
 * ``"all_gather"`` -- :func:`distributed_conv2d_over_channels_nway` gathers every
   rank's input-channel slice in one shot. Simple and fast, but its transient
   memory peak is ``~2 * C_in`` (the gather list plus the concatenated copy).
-* ``"ring"`` -- :func:`distributed_conv2d_over_channels_ring` circulates the
+* ``"ring"`` -- :func:`distributed_conv2d_over_channels_p2p` circulates the
   slices one hop at a time with batched ``isend`` / ``irecv``
   (:func:`jigsaw.comm.comm_1d_p2p`), overlaps each partial convolution with the
   next transfer and keeps the peak to ``C_in`` plus two slice buffers.
@@ -98,7 +98,7 @@ def distributed_conv2d_over_channels_nway(
     return y, x_full
 
 
-def _conv2d_over_channels_ring(
+def _conv2d_over_channels_p2p(
     x: torch.Tensor,
     w: torch.Tensor,
     b: torch.Tensor,
@@ -209,7 +209,7 @@ def _conv2d_over_channels_ring(
     return y, x_full
 
 
-def distributed_conv2d_over_channels_ring(
+def distributed_conv2d_over_channels_p2p(
     x: torch.Tensor,
     w: torch.Tensor,
     b: torch.Tensor,
@@ -221,12 +221,12 @@ def distributed_conv2d_over_channels_ring(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Channel-parallel Conv2d that streams the input slices around a p2p ring.
 
-    Thin wrapper over :func:`_conv2d_over_channels_ring` with
+    Thin wrapper over :func:`_conv2d_over_channels_p2p` with
     :func:`jigsaw.comm.comm_1d_p2p` (one ``dist.batch_isend_irecv`` per hop) as
-    the transport. See :func:`_conv2d_over_channels_ring` for the schedule and
+    the transport. See :func:`_conv2d_over_channels_p2p` for the schedule and
     the memory characteristics.
     """
-    return _conv2d_over_channels_ring(
+    return _conv2d_over_channels_p2p(
         x, w, b, stride, padding, dilation, channel_group, conv_func, comm_1d_p2p
     )
 
@@ -243,7 +243,7 @@ def distributed_conv2d_over_channels_alltoall(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Channel-parallel Conv2d, ring schedule, each hop a masked all-to-all.
 
-    Thin wrapper over :func:`_conv2d_over_channels_ring` with
+    Thin wrapper over :func:`_conv2d_over_channels_p2p` with
     :func:`jigsaw.comm.comm_1d_alltoall` as the transport: every hop is a
     ``dist.all_to_all`` in which this rank sends its slice to the ring neighbour
     and an empty tensor to everyone else. Requires a backend with all-to-all
@@ -254,14 +254,14 @@ def distributed_conv2d_over_channels_alltoall(
             "channel_comm='all_to_all' needs a backend with all-to-all support "
             "(e.g. NCCL); gloo has none. Use channel_comm='ring' instead."
         )
-    return _conv2d_over_channels_ring(
+    return _conv2d_over_channels_p2p(
         x, w, b, stride, padding, dilation, channel_group, conv_func, comm_1d_alltoall
     )
 
 
 _CHANNEL_COMM_FNS: dict[str, Callable[..., tuple[torch.Tensor, torch.Tensor]]] = {
     "all_gather": distributed_conv2d_over_channels_nway,
-    "ring": distributed_conv2d_over_channels_ring,
+    "ring": distributed_conv2d_over_channels_p2p,
     "all_to_all": distributed_conv2d_over_channels_alltoall,
 }
 
