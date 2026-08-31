@@ -1,6 +1,7 @@
-"""Config setup for distributed transpose convolutions.
+"""Config setup for distributed 1-D transpose convolutions.
 
-Mirrors :class:`jigsaw.modules.conv.config.ConvConfig` for ``F.conv_transpose2d``.
+Mirrors :class:`jigsaw.modules.conv2dtranspose.config.Conv2dTransposeConfig` for
+``F.conv_transpose1d``.
 """
 
 from typing import Any, Callable, Optional
@@ -10,15 +11,15 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-from . import dist_conv_transpose as dist_conv
+from . import distributed_conv1dtranspose as dist_conv
 
 
-class ConvTransposeConfig:
-    """Selection strategy for the transpose-conv kernels used in fwd/bwd."""
+class Conv1dTransposeConfig:
+    """Selection strategy for the 1-D transpose-conv kernels used in fwd/bwd."""
 
     # type hints
-    dist_conv_transpose2d_fn: Callable
-    dist_conv_transpose2d_backward_fn: Callable
+    dist_conv_transpose1d_fn: Callable
+    dist_conv_transpose1d_backward_fn: Callable
 
     def __init__(
         self,
@@ -26,12 +27,12 @@ class ConvTransposeConfig:
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         bias: Optional[Parameter],
-        kernel_size: tuple[int, int],
-        stride: tuple[int, int],
+        kernel_size: tuple[int],
+        stride: tuple[int],
         device: torch.device,
     ):
         """
-        Initialize selection strategy for conv transpose.
+        Initialize selection strategy for conv transpose 1d.
 
         bayesian: bool
             Flag for whether the model is bayesian.
@@ -41,42 +42,41 @@ class ConvTransposeConfig:
             Tensor-parallel process group.
         bias: torch.Tensor | None
             Bias if applicable.
-        kernel_size: tuple[int, int]
+        kernel_size: tuple[int]
             Kernel size of the convolution.
-        stride: tuple[int, int]
+        stride: tuple[int]
             Size of the stride.
         device: torch.device
             Device upon which communication occurs.
         """
-        self.conv_transpose_2d_fn = self._conv_transpose2d_fn_selection(bayesian)
-        self.conv_transpose2d_grad_fn = self._conv_transpose2d_grad_fn_selection(
+        self.conv1dtranspose_fn = self._conv_transpose1d_fn_selection(bayesian)
+        self.conv_transpose1d_grad_fn = self._conv_transpose1d_grad_fn_selection(
             bayesian
         )
         self.weight_reshape = self._reshape_weights_selection(bayesian)
         self.grad_bias = self._grad_bias_selection(spatial_group, bias)
-        # ``stride == kernel_size`` (on every axis) makes each rank's raw output
-        # tile the global output with no overlap, so the spatial split needs no
-        # communication. Otherwise neighbouring ranks' raw outputs overlap and
-        # the spatial ranks exchange halos. One kernel covers every group-size
-        # combination in each regime.
+        # ``stride == kernel_size`` makes each rank's raw output tile the global
+        # output with no overlap, so the spatial split needs no communication.
+        # Otherwise neighbouring ranks' raw outputs overlap and the spatial ranks
+        # exchange halos.
         if all(k == s for k, s in zip(kernel_size, stride)):
-            self.dist_conv_transpose2d_fn = dist_conv.conv_transpose2d_nway
-            self.dist_conv_transpose2d_backward_fn = (
-                dist_conv.conv_transpose2d_nway_backward
+            self.dist_conv_transpose1d_fn = dist_conv.conv_transpose1d_nway
+            self.dist_conv_transpose1d_backward_fn = (
+                dist_conv.conv_transpose1d_nway_backward
             )
         else:
-            self.dist_conv_transpose2d_fn = dist_conv.conv_transpose2d_halo_nway
-            self.dist_conv_transpose2d_backward_fn = (
-                dist_conv.conv_transpose2d_halo_nway_backward
+            self.dist_conv_transpose1d_fn = dist_conv.conv_transpose1d_halo_nway
+            self.dist_conv_transpose1d_backward_fn = (
+                dist_conv.conv_transpose1d_halo_nway_backward
             )
 
-    def _conv_transpose2d_fn_selection(self, bayesian: bool) -> Callable:
+    def _conv_transpose1d_fn_selection(self, bayesian: bool) -> Callable:
         """Select the forward primitive, vmapped when the model is bayesian."""
         if bayesian:
-            return torch.vmap(F.conv_transpose2d)
-        return F.conv_transpose2d
+            return torch.vmap(F.conv_transpose1d)
+        return F.conv_transpose1d
 
-    def _conv_transpose2d_grad_fn_selection(self, bayesian: bool) -> Callable:
+    def _conv_transpose1d_grad_fn_selection(self, bayesian: bool) -> Callable:
         """Select the transpose-conv backward primitive, vmapped if bayesian."""
         if bayesian:
             return torch.vmap(
@@ -119,5 +119,5 @@ class ConvTransposeConfig:
         grad_output: torch.Tensor,
         spatial_group: Optional[dist.ProcessGroup] = None,
     ) -> torch.Tensor:
-        """Sum ``grad_output`` over batch and spatial axes, leaving the channels."""
-        return grad_output.sum(dim=(-4, -2, -1))
+        """Sum ``grad_output`` over batch and length, leaving the channel axis."""
+        return grad_output.sum(dim=(-3, -1))

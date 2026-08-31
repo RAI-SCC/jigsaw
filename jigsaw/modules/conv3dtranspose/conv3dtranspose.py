@@ -1,6 +1,6 @@
 """Module for the distributed 3-D transpose convolution.
 
-Mirrors :class:`jigsaw.modules.conv_transpose.conv_transpose.DistributedConvTranspose2D`
+Mirrors :class:`jigsaw.modules.conv2dtranspose.conv2dtranspose.DistributedConv2DTranspose`
 for ``F.conv_transpose3d``.
 """
 
@@ -14,8 +14,8 @@ from torch.nn.parameter import Parameter
 from jigsaw import hooks
 from jigsaw.utils_aggregate import gather_1d_results
 
-from .config import ConvTranspose3dConfig
-from .functional import ConvTranspose3d
+from .config import Conv3dTransposeConfig
+from .functional import Conv3dTranspose
 
 
 def _triple(x: int | tuple[int, ...]) -> tuple[int, int, int]:
@@ -27,13 +27,13 @@ def _triple(x: int | tuple[int, ...]) -> tuple[int, int, int]:
     return (x[0], x[1], x[2])
 
 
-class DistributedConvTranspose3D(torch.nn.Module):
-    """Distributed ConvTranspose 3D."""
+class DistributedConv3DTranspose(torch.nn.Module):
+    """Distributed Conv3DTranspose."""
 
     # type hints
     bias: Optional[Parameter]
     parallelism: int
-    config: ConvTranspose3dConfig
+    config: Conv3dTransposeConfig
     bayesian: bool
     spatial_group: dist.ProcessGroup
     channel_group: dist.ProcessGroup
@@ -64,7 +64,7 @@ class DistributedConvTranspose3D(torch.nn.Module):
         parallelism: int = 4,
         bayesian: bool = False,
         dtype: torch.dtype = torch.float32,
-        config: Optional[ConvTranspose3dConfig] = None,
+        config: Optional[Conv3dTransposeConfig] = None,
     ):
         """
         Distributed 3D transpose convolution.
@@ -103,7 +103,7 @@ class DistributedConvTranspose3D(torch.nn.Module):
             Flag for whether model is vmapped.
         dtype: torch.dtype
             Data type of the convolution.
-        config: Optional[ConvTranspose3dConfig]
+        config: Optional[Conv3dTransposeConfig]
             Configuration and selection strategy of the conv transpose layer.
             If None, this will be initialized here.
         """
@@ -160,7 +160,7 @@ class DistributedConvTranspose3D(torch.nn.Module):
         self.empty = torch.empty(0, device=self.device, dtype=dtype)
 
         self.config = (
-            ConvTranspose3dConfig(
+            Conv3dTransposeConfig(
                 self.bayesian,
                 self.spatial_group,
                 self.channel_group,
@@ -183,7 +183,7 @@ class DistributedConvTranspose3D(torch.nn.Module):
         for p in self.parameters():
             dist.broadcast(p.data, group_src=0, group=self.spatial_group)
 
-        self.convTranspose3d_apply = ConvTranspose3d.apply
+        self.convTranspose3d_apply = Conv3dTranspose.apply
 
     def get_parameter_count(self) -> int:
         """Return effective number of local parameters for the module."""
@@ -205,7 +205,7 @@ class DistributedConvTranspose3D(torch.nn.Module):
         row_kw: str = "row",
         col_kw: str = "col",
         model_kw: str = "model",
-    ) -> "DistributedConvTranspose3D":
+    ) -> "DistributedConv3DTranspose":
         """
         Convert a ``torch.nn.ConvTranspose3d`` to jigsaw based on the given mesh.
 
@@ -227,7 +227,7 @@ class DistributedConvTranspose3D(torch.nn.Module):
 
         Returns
         -------
-        model: DistributedConvTranspose3D
+        model: DistributedConv3DTranspose
             The jigsaw layer, carrying the weights and bias of the input layer.
         """
         assert model.out_channels % process_mesh_dict[col_kw].size() == 0, (
@@ -356,7 +356,7 @@ class DistributedConvTranspose3D(torch.nn.Module):
     ) -> None:
         """Reshard the (channel-sharded) weight and bias onto a new process mesh."""
         self.parallelism = to_process_mesh_dict[pm_col_key].size()
-        self.config = ConvTranspose3dConfig(
+        self.config = Conv3dTransposeConfig(
             self.bayesian,
             self.spatial_group,
             self.channel_group,

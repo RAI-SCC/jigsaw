@@ -6,7 +6,7 @@ the channel group and the domain is split along the width axis (the last axis)
 across the spatial group.
 
 Two regimes are selected by
-:class:`~jigsaw.modules.conv_transpose.config.ConvTransposeConfig`:
+:class:`~jigsaw.modules.conv2dtranspose.config.Conv2dTransposeConfig`:
 
 * ``stride == kernel_size`` (and no dilation/padding on the split axis): every
   spatial rank's raw output tiles the global output with no overlap, so no
@@ -141,11 +141,11 @@ def conv_transpose2d_nway(
     x_full = _gather_full_channels(x.contiguous(), channel_group)
 
     if b is not None:
-        y = config.conv_transpose_2d_fn(
+        y = config.conv2dtranspose_fn(
             x_full, w, b, stride=stride, padding=padding, dilation=dilation
         )
     else:
-        y = config.conv_transpose_2d_fn(
+        y = config.conv2dtranspose_fn(
             x_full, w, stride=stride, padding=padding, dilation=dilation
         )
 
@@ -236,14 +236,14 @@ def conv_transpose2d_halo_nway(
     """
     if not isinstance(padding, tuple):
         raise NotImplementedError(
-            "Distributed ConvTranspose2d with stride != kernel_size does not "
+            "Distributed Conv2dTranspose with stride != kernel_size does not "
             f"support string padding ({padding!r}); pass an explicit (h, w) "
             "padding."
         )
 
     x_full = _gather_full_channels(x.contiguous(), channel_group)
 
-    y_raw = config.conv_transpose_2d_fn(
+    y_raw = config.conv2dtranspose_fn(
         x_full,
         w,
         stride=stride,

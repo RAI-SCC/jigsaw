@@ -10,8 +10,8 @@ from torch.nn.parameter import Parameter
 from jigsaw import hooks
 from jigsaw.utils_aggregate import gather_1d_results
 
-from .config import ConvTransposeConfig
-from .functional import ConvTranspose2d
+from .config import Conv2dTransposeConfig
+from .functional import Conv2dTranspose
 
 
 def _pair(x: int | tuple[int, ...]) -> tuple[int, int]:
@@ -23,13 +23,13 @@ def _pair(x: int | tuple[int, ...]) -> tuple[int, int]:
     return (x[0], x[1])
 
 
-class DistributedConvTranspose2D(torch.nn.Module):
-    """Distributed ConvTranspose 2D."""
+class DistributedConv2DTranspose(torch.nn.Module):
+    """Distributed Conv2DTranspose."""
 
     # type hints
     bias: Optional[Parameter]
     parallelism: int
-    config: ConvTransposeConfig
+    config: Conv2dTransposeConfig
     bayesian: bool
     spatial_group: dist.ProcessGroup
     channel_group: dist.ProcessGroup
@@ -60,7 +60,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
         parallelism: int = 4,
         bayesian: bool = False,
         dtype: torch.dtype = torch.float32,
-        config: Optional[ConvTransposeConfig] = None,
+        config: Optional[Conv2dTransposeConfig] = None,
     ):
         """
         Distributed ConvTranspose2D.
@@ -98,7 +98,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
             Flag for whether model is vmapped.
         dtype: torch.dtype
             Data type of the convolution.
-        config: Optional[ConvTransposeConfig]
+        config: Optional[Conv2dTransposeConfig]
             Configuration and selection strategy of conv transpose layer.
             If None, this will be initialized here.
         """
@@ -153,7 +153,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
         self.empty = torch.empty(0, device=self.device, dtype=dtype)
 
         self.config = (
-            ConvTransposeConfig(
+            Conv2dTransposeConfig(
                 self.bayesian,
                 self.spatial_group,
                 self.channel_group,
@@ -176,7 +176,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
         for p in self.parameters():
             dist.broadcast(p.data, group_src=0, group=self.spatial_group)
 
-        self.convTranspose2d_apply = ConvTranspose2d.apply
+        self.convTranspose2d_apply = Conv2dTranspose.apply
 
     def get_parameter_count(self) -> int:
         """Return effective number of local parameters for distributed model."""
@@ -198,7 +198,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
         row_kw: str = "row",
         col_kw: str = "col",
         model_kw: str = "model",
-    ) -> "DistributedConvTranspose2D":
+    ) -> "DistributedConv2DTranspose":
         """
         Convert torch.nn.ConvTranspose2D to jigsaw based on given process mesh.
 
@@ -220,7 +220,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
 
         Returns
         -------
-        model: jigsaw.convolutions.DistributedConvTranspose2D
+        model: jigsaw.convolutions.DistributedConv2DTranspose
             Instance of jigsaw distributed ConvTranspose layer.
             Jigsaw layer contains weights and biases given from torch.nn.ConvTranspose2d layer.
         """
@@ -350,7 +350,7 @@ class DistributedConvTranspose2D(torch.nn.Module):
     ) -> None:
         """Reshard parameters of weights according to a new process group."""
         self.parallelism = to_process_mesh_dict[pm_col_key].size()
-        self.config = ConvTransposeConfig(
+        self.config = Conv2dTransposeConfig(
             self.bayesian,
             self.spatial_group,
             self.channel_group,

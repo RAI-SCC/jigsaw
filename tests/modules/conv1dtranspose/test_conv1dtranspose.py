@@ -3,7 +3,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-import jigsaw.modules.conv_transpose_1d as conv_transpose_1d
+import jigsaw.modules.conv1dtranspose as conv1dtranspose
 from jigsaw.utils_aggregate import gather_1d_results, gather_results_as_list
 from tests.process_mesh import *
 
@@ -48,7 +48,7 @@ def _conv1d_transpose_reference_check(
     padding: Pair = 0,
     dilation: Pair = 1,
 ) -> None:
-    """Compare ``DistributedConvTranspose1D`` against a single-process op.
+    """Compare ``DistributedConv1DTranspose`` against a single-process op.
 
     Works for any ``row.size()`` (spatial) x ``col.size()`` (channel) mesh and for
     both the no-halo regime (``stride == kernel_size``, the default) and the halo
@@ -74,7 +74,7 @@ def _conv1d_transpose_reference_check(
         batch, in_channels // n_channel, length // n_spatial, device=device
     )
 
-    conv = conv_transpose_1d.DistributedConvTranspose1D(
+    conv = conv1dtranspose.DistributedConv1DTranspose(
         in_channels,
         out_channels,
         kernel_size,
@@ -165,7 +165,7 @@ class TestConv1dTranspose:
             process_mesh_dict_2x2["row"].size(),
             process_mesh_dict_2x2["col"].size(),
         )
-        conv = conv_transpose_1d.DistributedConvTranspose1D(
+        conv = conv1dtranspose.DistributedConv1DTranspose(
             6,
             12,
             4,
@@ -217,7 +217,7 @@ class TestConv1dTranspose:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """String padding is not supported once a halo exchange is needed."""
-        conv = conv_transpose_1d.DistributedConvTranspose1D(
+        conv = conv1dtranspose.DistributedConv1DTranspose(
             8,
             12,
             4,

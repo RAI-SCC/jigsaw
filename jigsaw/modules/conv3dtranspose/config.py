@@ -1,6 +1,6 @@
 """Config setup for distributed 3-D transpose convolutions.
 
-Mirrors :class:`jigsaw.modules.conv_transpose.config.ConvTransposeConfig` for
+Mirrors :class:`jigsaw.modules.conv2dtranspose.config.Conv2dTransposeConfig` for
 ``F.conv_transpose3d``.
 """
 
@@ -11,10 +11,10 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-from . import dist_conv_transpose_3d as dist_conv
+from . import distributed_conv3dtranspose as dist_conv
 
 
-class ConvTranspose3dConfig:
+class Conv3dTransposeConfig:
     """Selection strategy for the 3-D transpose-conv kernels used in fwd/bwd."""
 
     # type hints
@@ -49,7 +49,7 @@ class ConvTranspose3dConfig:
         device: torch.device
             Device upon which communication occurs.
         """
-        self.conv_transpose_3d_fn = self._conv_transpose3d_fn_selection(bayesian)
+        self.conv3dtranspose_fn = self._conv_transpose3d_fn_selection(bayesian)
         self.conv_transpose3d_grad_fn = self._conv_transpose3d_grad_fn_selection(
             bayesian
         )

@@ -1,20 +1,20 @@
-"""Distributed 3-D transpose-convolution implementation.
+"""Distributed 1-D transpose-convolution implementation.
 
-Mirrors :mod:`jigsaw.modules.conv_transpose.dist_conv_transpose` for
-``F.conv_transpose3d``. Input is ``(N, C, D, H, W)``; the channels are split
-across the channel group and the domain is split along the width axis (the last
-axis) across the spatial group.
+Mirrors :mod:`jigsaw.modules.conv2dtranspose.distributed_conv2dtranspose` for
+``F.conv_transpose1d``. Input is ``(N, C, L)``; the channels are split across the
+channel group and the domain is split along the length axis (the last axis)
+across the spatial group.
 
 Two regimes are selected by
-:class:`~jigsaw.modules.conv_transpose_3d.config.ConvTranspose3dConfig`:
+:class:`~jigsaw.modules.conv1dtranspose.config.Conv1dTransposeConfig`:
 
-* ``stride == kernel_size`` (and no dilation/padding on the split axis): every
-  spatial rank's raw output tiles the global output with no overlap, so no
-  spatial communication is needed (:func:`conv_transpose3d_nway`).
+* ``stride == kernel_size`` (and no dilation/padding): every spatial rank's raw
+  output tiles the global output with no overlap, so no spatial communication is
+  needed (:func:`conv_transpose1d_nway`).
 * otherwise: neighbouring ranks' raw outputs overlap and must be summed, then
   cropped and re-sharded -- a "transpose halo" exchange
-  (:func:`conv_transpose3d_halo_nway`). That exchange is dimension-agnostic and
-  shared with the 1-D/2-D transpose convs via
+  (:func:`conv_transpose1d_halo_nway`). That exchange is dimension-agnostic and
+  shared with the 2-D/3-D transpose convs via
   :mod:`jigsaw.modules.spatial_halo_transpose`.
 
 Both regimes cooperate with the channel-parallel group through
@@ -41,9 +41,9 @@ def _gather_full_channels(
     """All-gather the channel-parallel input slices into a full-channel tensor.
 
     Each rank owns a contiguous ``C_in / G`` slice of the input channels; the
-    group all-gathers them and rebuilds ``(..., C_in, D, H, W)``. This rank's own
-    slice is spliced back in so it stays wired into the autograd graph. Group
-    size one is the identity.
+    group all-gathers them and rebuilds ``(..., C_in, L)``. This rank's own slice
+    is spliced back in so it stays wired into the autograd graph. Group size one
+    is the identity.
     """
     group_size = channel_group.size()
     if group_size == 1:
@@ -53,20 +53,20 @@ def _gather_full_channels(
     slices = [torch.empty_like(x) for _ in range(group_size)]
     dist.all_gather(slices, x, group=channel_group)
     slices[local_channel_rank] = x
-    return torch.cat(slices, dim=-4)
+    return torch.cat(slices, dim=-2)
 
 
 def _grad_input_weight(
     grad_output: torch.Tensor,
     x_full: torch.Tensor,
     weight: torch.Tensor,
-    stride: tuple[int, int, int],
-    padding: tuple[int, int, int],
-    dilation: tuple[int, int, int],
+    stride: tuple[int],
+    padding: tuple[int],
+    dilation: tuple[int],
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Local ``grad_input`` / ``grad_weight`` for a transpose convolution."""
-    g_x, g_w, _ = config.conv_transpose3d_grad_fn(
+    g_x, g_w, _ = config.conv_transpose1d_grad_fn(
         grad_output.to(weight.dtype),  # handles autocast
         x_full,
         weight,
@@ -75,7 +75,7 @@ def _grad_input_weight(
         list(padding),
         list(dilation),
         True,  # transposed
-        [0, 0, 0],  # output_padding
+        [0],  # output_padding
         1,  # groups
         [True, True, False],  # (grad_input, grad_weight, grad_bias)
     )
@@ -88,80 +88,78 @@ def _channel_shard(
     """Keep this rank's contiguous input-channel slice of a full-channel grad."""
     shard = in_channels_global // channel_group.size()
     start = channel_group.rank() * shard
-    return g_x[..., start : start + shard, :, :, :]
+    return g_x[..., start : start + shard, :]
 
 
 def _needs_halo(
     spatial_group: dist.ProcessGroup,
-    padding: str | tuple[int, int, int],
-    dilation: tuple[int, int, int],
+    padding: str | tuple[int],
+    dilation: tuple[int],
 ) -> bool:
     """Whether a nominally no-halo call (``stride == kernel``) still needs a halo.
 
-    ``stride == kernel_size`` only tiles the split (width) axis with no overlap
-    when it also has zero padding and unit dilation. With a real spatial split
-    and either of those non-trivial, the raw local outputs overlap / are cropped
-    and the halo path is required.
+    ``stride == kernel_size`` only tiles the length axis with no overlap when it
+    also has zero padding and unit dilation. With a real spatial split and either
+    of those non-trivial, the raw local outputs overlap / are cropped and the
+    halo path is required.
     """
     return (
         spatial_group.size() > 1
         and isinstance(padding, tuple)
-        and (padding[2] != 0 or dilation[2] != 1)
+        and (padding[0] != 0 or dilation[0] != 1)
     )
 
 
 # ---------------------------------------------------------------------------
 # no-halo regime (stride == kernel_size)
 # ---------------------------------------------------------------------------
-def conv_transpose3d_nway(
+def conv_transpose1d_nway(
     x: torch.Tensor,
     w: torch.Tensor,
     b: torch.Tensor,
-    stride: tuple[int, int, int],
-    padding: str | tuple[int, int, int],
-    dilation: tuple[int, int, int],
+    stride: tuple[int],
+    padding: str | tuple[int],
+    dilation: tuple[int],
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Distributed transpose conv for the no-halo regime (``stride == kernel``).
 
-    Every spatial rank transpose-convolves its own width slice independently
-    while the channel group cooperates through the input all-gather. The split
-    axis carries no padding/dilation so the raw outputs tile the global output
-    exactly.
+    Every spatial rank transpose-convolves its own length slice independently
+    while the channel group cooperates through the input all-gather.
 
     Returns ``(y, x_full)`` where ``x_full`` is the gathered full-channel input
     kept for the backward pass.
     """
     if _needs_halo(spatial_group, padding, dilation):
-        return conv_transpose3d_halo_nway(
+        return conv_transpose1d_halo_nway(
             x, w, b, stride, padding, dilation, spatial_group, channel_group, config
         )
 
     x_full = _gather_full_channels(x.contiguous(), channel_group)
 
     if b is not None:
-        y = config.conv_transpose_3d_fn(
+        y = config.conv1dtranspose_fn(
             x_full, w, b, stride=stride, padding=padding, dilation=dilation
         )
     else:
-        y = config.conv_transpose_3d_fn(
+        y = config.conv1dtranspose_fn(
             x_full, w, stride=stride, padding=padding, dilation=dilation
         )
 
     return y, x_full
 
 
-def conv_transpose3d_nway_backward(
+def conv_transpose1d_nway_backward(
     grad_output: torch.Tensor,
     x_aug: torch.Tensor,
     weight: torch.Tensor,
-    stride: tuple[int, int, int],
-    padding: tuple[int, int, int],
-    dilation: tuple[int, int, int],
+    stride: tuple[int],
+    padding: tuple[int],
+    dilation: tuple[int],
     in_channels_global: int,
-    local_in_width: int,
+    local_in_length: int,
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     bayesian: bool,
@@ -175,7 +173,7 @@ def conv_transpose3d_nway_backward(
     reduced by the parameter hook).
     """
     if _needs_halo(spatial_group, padding, dilation):
-        return conv_transpose3d_halo_nway_backward(
+        return conv_transpose1d_halo_nway_backward(
             grad_output,
             x_aug,
             weight,
@@ -183,7 +181,7 @@ def conv_transpose3d_nway_backward(
             padding,
             dilation,
             in_channels_global,
-            local_in_width,
+            local_in_length,
             spatial_group,
             channel_group,
             bayesian,
@@ -204,77 +202,63 @@ def conv_transpose3d_nway_backward(
 
 # ---------------------------------------------------------------------------
 # halo regime (stride != kernel_size)
-#
-# The transpose halo exchange is dimension-agnostic and lives in
-# :mod:`jigsaw.modules.spatial_halo_transpose`; only the split axis's conv
-# parameters are threaded through here (``*[2]`` -- the width).
 # ---------------------------------------------------------------------------
-def _width_padding(padding: tuple[int, int, int]) -> tuple[int, int, int]:
-    """Local-conv padding: depth/height as given, width folded into the halo."""
-    return (padding[0], padding[1], 0)
-
-
-def conv_transpose3d_halo_nway(
+def conv_transpose1d_halo_nway(
     x: torch.Tensor,
     w: torch.Tensor,
     b: torch.Tensor,
-    stride: tuple[int, int, int],
-    padding: str | tuple[int, int, int],
-    dilation: tuple[int, int, int],
+    stride: tuple[int],
+    padding: str | tuple[int],
+    dilation: tuple[int],
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Distributed transpose conv for the halo regime (``stride != kernel``).
 
-    Gathers the full-channel input, transpose-convolves the local width slice
-    with no split-axis padding, then folds the overlapping raw outputs onto their
-    owning ranks (:func:`transpose_halo_reduce`) and adds the bias afterwards so
-    overlapped columns are not double-counted.
+    Gathers the full-channel input, transpose-convolves the local length slice
+    with no padding, then folds the overlapping raw outputs onto their owning
+    ranks (:func:`transpose_halo_reduce`) and adds the bias afterwards so
+    overlapped positions are not double-counted.
 
     Returns ``(y, x_full)`` where ``x_full`` is the gathered full-channel input
     kept for the backward pass.
     """
     if not isinstance(padding, tuple):
         raise NotImplementedError(
-            "Distributed ConvTranspose3d with stride != kernel_size does not "
-            f"support string padding ({padding!r}); pass an explicit "
-            "(d, h, w) padding."
+            "Distributed Conv1dTranspose with stride != kernel_size does not "
+            f"support string padding ({padding!r}); pass an explicit padding."
         )
 
     x_full = _gather_full_channels(x.contiguous(), channel_group)
 
-    y_raw = config.conv_transpose_3d_fn(
-        x_full,
-        w,
-        stride=stride,
-        padding=_width_padding(padding),
-        dilation=dilation,
+    y_raw = config.conv1dtranspose_fn(
+        x_full, w, stride=stride, padding=0, dilation=dilation
     )
     y = transpose_halo_reduce(
         y_raw,
         spatial_group,
         x_full.shape[-1],
         w.shape[-1],
-        stride[2],
-        padding[2],
-        dilation[2],
+        stride[0],
+        padding[0],
+        dilation[0],
     )
     if b is not None:
-        y = y + b[:, None, None, None]
+        y = y + b[:, None]
 
     return y, x_full
 
 
-def conv_transpose3d_halo_nway_backward(
+def conv_transpose1d_halo_nway_backward(
     grad_output: torch.Tensor,
     x_aug: torch.Tensor,
     weight: torch.Tensor,
-    stride: tuple[int, int, int],
-    padding: tuple[int, int, int],
-    dilation: tuple[int, int, int],
+    stride: tuple[int],
+    padding: tuple[int],
+    dilation: tuple[int],
     in_channels_global: int,
-    local_in_width: int,
+    local_in_length: int,
     spatial_group: dist.ProcessGroup,
     channel_group: dist.ProcessGroup,
     bayesian: bool,
@@ -293,13 +277,13 @@ def conv_transpose3d_halo_nway_backward(
         spatial_group,
         x_aug.shape[-1],
         weight.shape[-1],
-        stride[2],
-        padding[2],
-        dilation[2],
+        stride[0],
+        padding[0],
+        dilation[0],
     )
 
     g_x, g_w = _grad_input_weight(
-        grad_raw, x_aug, weight, stride, _width_padding(padding), dilation, config
+        grad_raw, x_aug, weight, stride, (0,), dilation, config
     )
     g_x = g_x.contiguous()
     g_x_handle = dist.all_reduce(
