@@ -19,6 +19,8 @@ interchangeable kernels, selected by ``config.channel_comm``:
   gloo has none.
 
 All three work for any channel-group size and return the same ``(y, x_full)``.
+``ConvConfig`` resolves the default: ``"all_to_all"`` on a CUDA device,
+``"ring"`` otherwise.
 """
 
 from typing import Any, Callable, Optional
@@ -279,15 +281,14 @@ def conv2d_nway(
     Requires ``stride == kernel_size``, so the spatial split needs no halo
     exchange: every spatial rank convolves its own domain slice independently
     while the channel group cooperates through the kernel named by
-    ``config.channel_comm`` (``"all_gather"`` by default, ``"ring"`` for the
-    memory-lean overlapped p2p variant, or ``"all_to_all"`` for the same ring
-    over masked all-to-all hops).
+    ``config.channel_comm`` -- ``"all_gather"`` (one-shot gather), ``"ring"``
+    (memory-lean overlapped p2p) or ``"all_to_all"`` (same ring over masked
+    all-to-all hops). ``ConvConfig`` resolves the default from the device.
 
     Returns ``(y, x_full)`` where ``x_full`` is the full-channel input kept for
     the backward pass.
     """
-    channel_comm = getattr(config, "channel_comm", "all_gather")
-    over_channels_fn = _CHANNEL_COMM_FNS[channel_comm]
+    over_channels_fn = _CHANNEL_COMM_FNS[config.channel_comm]
     return over_channels_fn(
         x,
         w,

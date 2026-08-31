@@ -235,6 +235,22 @@ class TestConv2d:
             conv_ag.bias.grad, conv_stream.bias.grad, atol=1e-5, rtol=1e-5
         )
 
+    def test_channel_comm_auto_defaults_by_device(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """``channel_comm='auto'`` resolves from the device on the config."""
+        conv2d = conv.DistributedConv2D(
+            8,
+            12,
+            4,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=4,
+        ).to(device)
+        expected = "all_to_all" if device.type == "cuda" else "ring"
+        assert conv2d.config.channel_comm == expected
+
     def test_unknown_channel_comm_rejected(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
