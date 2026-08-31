@@ -849,6 +849,40 @@ class TestConv2dParallel:
             padding=1,
         )
 
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("padding", [(3, 1), (1, 3), (3, 3), (0, 1)])
+    def test_halo_4x1_padding_split_over_width_only(
+        self,
+        device: torch.device,
+        process_mesh_dict_4x1: dict,
+        padding: tuple[int, int],
+    ) -> None:
+        """4-way spatial (width) split with ``pad_h != pad_w``.
+
+        The spatial split is along width only, so the local convolution keeps the
+        *full* height padding on every rank while the width padding is
+        materialised only at the two global edges: rank 0 gets ``pad_w`` zero
+        columns on its left, rank 3 gets ``pad_w`` on its right, ranks 1 and 2
+        get none. Parity with a single-process ``F.conv2d(..., padding=padding)``
+        pins that distribution down -- a wrong local padding (``pad_w`` on every
+        rank, or the edge columns dropped) breaks the output and the gradients.
+
+        ``kernel_size=3, stride=1`` is used because a 4-way width split with
+        ``stride=2`` forces the global output width to be divisible by 4, which
+        rules out odd ``pad_w`` (``_needed_input_span`` raises).
+        """
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_4x1,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=3,
+            height=16,
+            width=16,
+            stride=1,
+            padding=padding,
+        )
+
     @pytest.mark.dist(8)
     @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_halo_2x4(
