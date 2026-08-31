@@ -9,12 +9,22 @@ from tests.process_mesh import *
 
 pytestmark = [pytest.mark.dist_required]
 
+# Every channel-parallel exchange strategy; "all_to_all" needs a backend with
+# all-to-all support and is skipped on gloo (see _skip_if_unsupported).
+CHANNEL_COMMS = ["all_gather", "p2p", "all_to_all"]
+
 Triple = int | tuple[int, int, int]
 
 
 def _triple(value: Triple) -> tuple[int, int, int]:
     """Normalise an ``int`` or 3-tuple to a ``(d, h, w)`` tuple."""
     return (value, value, value) if isinstance(value, int) else tuple(value)
+
+
+def _skip_if_unsupported(channel_comm: str) -> None:
+    """Skip when the current backend cannot run ``channel_comm``."""
+    if channel_comm == "all_to_all" and dist.get_backend() == "gloo":
+        pytest.skip("all_to_all channel comm needs a non-gloo backend")
 
 
 # (kernel, stride, padding, dilation) -- each entry is an int or a (d, h, w)
@@ -53,6 +63,7 @@ def _conv3d_reference_check(
     stride: Triple | None = None,
     padding: Triple = 0,
     dilation: Triple = 1,
+    channel_comm: str = "all_gather",
 ) -> None:
     """Compare a distributed ``DistributedConv3D`` against a single-process conv3d.
 
@@ -101,6 +112,7 @@ def _conv3d_reference_check(
         parallelism=model_group.size(),
         bayesian=False,
         dtype=torch.float32,
+        channel_comm=channel_comm,
     ).to(device)
 
     # --- reconstruct the equivalent global convolution ---------------------
@@ -169,6 +181,11 @@ def _conv3d_reference_check(
 
 
 class TestConv3d:
+    # Every test here builds a 2x2 mesh, so it needs exactly 4 ranks. Without
+    # this marker an 8-rank run would build a mesh over ranks 0-3 only and
+    # deadlock the survivors in the first collective.
+    pytestmark = pytest.mark.dist(4)
+
     def test_param_init(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
@@ -202,6 +219,7 @@ class TestConv3d:
                 weights_gathered[i], weights_gathered[i + col_comm_size], atol=1e-5
             )
 
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     @pytest.mark.parametrize(
         ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
     )
@@ -213,8 +231,10 @@ class TestConv3d:
         stride: Triple,
         padding: Triple,
         dilation: Triple,
+        channel_comm: str,
     ) -> None:
         """2x2 mesh: arbitrary kernel/stride/padding/dilation, incl. asymmetric."""
+        _skip_if_unsupported(channel_comm)
         _conv3d_reference_check(
             device,
             process_mesh_dict_2x2,
@@ -227,6 +247,7 @@ class TestConv3d:
             stride=stride,
             padding=padding,
             dilation=dilation,
+            channel_comm=channel_comm,
         )
 
     def test_halo_stride_eq_kernel_padding(
@@ -289,11 +310,68 @@ class TestConv3d:
         with pytest.raises(NotImplementedError):
             conv(x)
 
+    def test_channel_comm_auto_defaults_by_device(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """``channel_comm='auto'`` resolves from the device on the config."""
+        conv = conv3d.DistributedConv3D(
+            8,
+            12,
+            2,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=2,
+        ).to(device)
+        expected = "all_to_all" if device.type == "cuda" else "p2p"
+        assert conv.config.channel_comm == expected
+
+    def test_unknown_channel_comm_rejected(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """An unrecognised ``channel_comm`` name fails fast at construction."""
+        with pytest.raises(ValueError):
+            conv3d.DistributedConv3D(
+                8,
+                12,
+                2,
+                device=device,
+                spatial_group=process_mesh_dict_2x2["row"],
+                channel_group=process_mesh_dict_2x2["col"],
+                stride=2,
+                channel_comm="alltoall",
+            ).to(device)
+
+    def test_alltoall_rejected_on_gloo(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
+        if dist.get_backend() != "gloo":
+            pytest.skip("only meaningful on the gloo backend")
+        conv = conv3d.DistributedConv3D(
+            8,
+            12,
+            2,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=2,
+            padding=(0,),
+            dilation=1,
+            bias=True,
+            parallelism=process_mesh_dict_2x2["model"].size(),
+            channel_comm="all_to_all",
+        ).to(device)
+        x = torch.randn(2, 4, 6, 6, 8, device=device)
+        with pytest.raises(RuntimeError, match="all-to-all"):
+            conv(x)
+
 
 class TestConv3dParallel:
     """Distributed Conv3d across arbitrary spatial and channel group sizes."""
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     @pytest.mark.parametrize(
         ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
     )
@@ -305,8 +383,10 @@ class TestConv3dParallel:
         stride: Triple,
         padding: Triple,
         dilation: Triple,
+        channel_comm: str,
     ) -> None:
         """Pure channel parallelism: every param combo works (no spatial split)."""
+        _skip_if_unsupported(channel_comm)
         _conv3d_reference_check(
             device,
             process_mesh_dict_1x4,
@@ -319,9 +399,11 @@ class TestConv3dParallel:
             stride=stride,
             padding=padding,
             dilation=dilation,
+            channel_comm=channel_comm,
         )
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     @pytest.mark.parametrize(
         ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
     )
@@ -333,8 +415,10 @@ class TestConv3dParallel:
         stride: Triple,
         padding: Triple,
         dilation: Triple,
+        channel_comm: str,
     ) -> None:
         """Pure 4-way spatial split with arbitrary params (real halo exchange)."""
+        _skip_if_unsupported(channel_comm)
         _conv3d_reference_check(
             device,
             process_mesh_dict_4x1,
@@ -347,9 +431,11 @@ class TestConv3dParallel:
             stride=stride,
             padding=padding,
             dilation=dilation,
+            channel_comm=channel_comm,
         )
 
     @pytest.mark.dist(8)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     @pytest.mark.parametrize(
         ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
     )
@@ -361,8 +447,10 @@ class TestConv3dParallel:
         stride: Triple,
         padding: Triple,
         dilation: Triple,
+        channel_comm: str,
     ) -> None:
         """2-way spatial x 4-way channel with arbitrary params."""
+        _skip_if_unsupported(channel_comm)
         _conv3d_reference_check(
             device,
             process_mesh_dict_2x4_rowcol,
@@ -375,4 +463,5 @@ class TestConv3dParallel:
             stride=stride,
             padding=padding,
             dilation=dilation,
+            channel_comm=channel_comm,
         )

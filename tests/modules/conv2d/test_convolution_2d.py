@@ -3,7 +3,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-import jigsaw.modules.conv as conv
+import jigsaw.modules.conv2d as conv2d
 import jigsaw.modules.conv_transpose as conv_transpose
 from jigsaw.utils_aggregate import gather_1d_results, gather_results_as_list
 from tests.process_mesh import *
@@ -89,7 +89,7 @@ def _conv2d_reference_check(
         batch, in_channels // n_channel, height, width // n_spatial, device=device
     )
 
-    conv2d = conv.DistributedConv2D(
+    conv = conv2d.DistributedConv2D(
         in_channels,
         out_channels,
         kernel_size,
@@ -109,10 +109,10 @@ def _conv2d_reference_check(
 
     # --- reconstruct the equivalent global convolution -----------------------
     weight_global = gather_1d_results(
-        conv2d.weight.detach(), mesh, dim=0, pm_key="col"
+        conv.weight.detach(), mesh, dim=0, pm_key="col"
     ).clone()
     bias_global = gather_1d_results(
-        conv2d.bias.detach(), mesh, dim=0, pm_key="col"
+        conv.bias.detach(), mesh, dim=0, pm_key="col"
     ).clone()
     x_global = gather_1d_results(x_local, mesh, dim=-3, pm_key="col")
     x_global = gather_1d_results(x_global, mesh, dim=-1, pm_key="row").clone()
@@ -136,7 +136,7 @@ def _conv2d_reference_check(
 
     # --- distributed forward / backward on this rank's shard ----------------
     x_dist = x_local.clone().requires_grad_(True)
-    y = conv2d(x_dist)
+    y = conv(x_dist)
 
     out_local = out_channels // n_channel
     assert y_ref.shape[-1] % n_spatial == 0, (
@@ -158,8 +158,8 @@ def _conv2d_reference_check(
 
     y_global = _to_global(y.detach(), -3)
     x_grad_global = _to_global(x_dist.grad, -3)
-    w_grad_global = gather_1d_results(conv2d.weight.grad, mesh, dim=0, pm_key="col")
-    b_grad_global = gather_1d_results(conv2d.bias.grad, mesh, dim=0, pm_key="col")
+    w_grad_global = gather_1d_results(conv.weight.grad, mesh, dim=0, pm_key="col")
+    b_grad_global = gather_1d_results(conv.bias.grad, mesh, dim=0, pm_key="col")
 
     assert torch.allclose(y_global, y_ref, atol=1e-4, rtol=1e-4)
     assert torch.allclose(x_grad_global, x_global.grad, atol=1e-4, rtol=1e-4)
@@ -221,7 +221,7 @@ def _conv2d_optimizer_parity_check(
     dilation = _pair(dilation)
 
     torch.manual_seed(model_group.rank())
-    dist_conv = conv.DistributedConv2D(
+    dist_conv = conv2d.DistributedConv2D(
         in_channels,
         out_channels,
         kernel_size,
@@ -352,7 +352,7 @@ class TestConv2d:
         torch.manual_seed(local_rank)  # each process gets a different initial seed
         in_dim, out_dim = 5, 10
         kernel_size = 4
-        conv2d = conv.DistributedConv2D(
+        conv = conv2d.DistributedConv2D(
             in_dim,
             out_dim,
             kernel_size,
@@ -369,7 +369,7 @@ class TestConv2d:
             dtype=torch.float32,
         ).to(device)
 
-        _assert_weight_replicated_across_spatial(conv2d.weight, process_mesh_dict_2x2)
+        _assert_weight_replicated_across_spatial(conv.weight, process_mesh_dict_2x2)
 
     @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_conv2d_forward(
@@ -411,7 +411,7 @@ class TestConv2d:
 
         def _build(channel_comm: str) -> torch.nn.Module:
             torch.manual_seed(1234)  # identical weight init for both variants
-            return conv.DistributedConv2D(
+            return conv2d.DistributedConv2D(
                 8,
                 12,
                 4,
@@ -452,7 +452,7 @@ class TestConv2d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """``channel_comm='auto'`` resolves from the device on the config."""
-        conv2d = conv.DistributedConv2D(
+        conv = conv2d.DistributedConv2D(
             8,
             12,
             4,
@@ -462,14 +462,14 @@ class TestConv2d:
             stride=4,
         ).to(device)
         expected = "all_to_all" if device.type == "cuda" else "p2p"
-        assert conv2d.config.channel_comm == expected
+        assert conv.config.channel_comm == expected
 
     def test_unknown_channel_comm_rejected(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """An unrecognised ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
-            conv.DistributedConv2D(
+            conv2d.DistributedConv2D(
                 8,
                 12,
                 4,
@@ -486,7 +486,7 @@ class TestConv2d:
         """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
         if dist.get_backend() != "gloo":
             pytest.skip("only meaningful on the gloo backend")
-        conv2d = conv.DistributedConv2D(
+        conv = conv2d.DistributedConv2D(
             8,
             12,
             4,
@@ -502,13 +502,13 @@ class TestConv2d:
         ).to(device)
         x = torch.randn(2, 4, 16, 8, device=device)
         with pytest.raises(RuntimeError, match="all-to-all"):
-            conv2d(x)
+            conv(x)
 
     def test_int_args_normalized_to_pairs(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """``stride`` / ``padding`` / ``dilation`` given as ``int`` become 2-tuples."""
-        conv2d = conv.DistributedConv2D(
+        conv = conv2d.DistributedConv2D(
             8,
             12,
             4,
@@ -525,10 +525,10 @@ class TestConv2d:
             dtype=torch.float32,
         ).to(device)
 
-        assert conv2d.kernel_size == (4, 4)
-        assert conv2d.stride == (4, 4)
-        assert conv2d.padding == (0, 0)
-        assert conv2d.dilation == (1, 1)
+        assert conv.kernel_size == (4, 4)
+        assert conv.stride == (4, 4)
+        assert conv.padding == (0, 0)
+        assert conv.dilation == (1, 1)
 
     def test_int_args_match_tuple_args(
         self, device: torch.device, process_mesh_dict_2x2: dict
@@ -546,7 +546,7 @@ class TestConv2d:
             stride: object, padding: object, dilation: object
         ) -> torch.nn.Module:
             torch.manual_seed(1234)  # identical weight init for both variants
-            return conv.DistributedConv2D(
+            return conv2d.DistributedConv2D(
                 in_channels,
                 out_channels,
                 kernel_size,
@@ -661,7 +661,7 @@ class TestConv2d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """String padding is not supported once a halo exchange is needed."""
-        conv2d = conv.DistributedConv2D(
+        conv = conv2d.DistributedConv2D(
             8,
             12,
             4,
@@ -679,7 +679,7 @@ class TestConv2d:
         ).to(device)
         x = torch.randn(2, 4, 16, 8, device=device)
         with pytest.raises(NotImplementedError):
-            conv2d(x)
+            conv(x)
 
 
 class TestConv2dParallel:
@@ -802,7 +802,7 @@ class TestConv2dParallel:
     ) -> None:
         """Weight init is broadcast across a spatial group larger than two."""
         torch.manual_seed(dist.get_rank(group=process_mesh_dict_3x2["model"]))
-        conv2d = conv.DistributedConv2D(
+        conv = conv2d.DistributedConv2D(
             12,
             12,
             4,
@@ -817,7 +817,7 @@ class TestConv2dParallel:
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
-        _assert_weight_replicated_across_spatial(conv2d.weight, process_mesh_dict_3x2)
+        _assert_weight_replicated_across_spatial(conv.weight, process_mesh_dict_3x2)
 
     @pytest.mark.dist(4)
     def test_halo_1x4(self, device: torch.device, process_mesh_dict_1x4: dict) -> None:
@@ -982,7 +982,7 @@ class TestConv2dChannelGroupOne:
         assert row.size() == 1 and col.size() == 1
 
         in_ch, out_ch, k = 6, 8, 3
-        conv2d = conv.DistributedConv2D(
+        conv = conv2d.DistributedConv2D(
             in_ch,
             out_ch,
             k,
@@ -1001,20 +1001,20 @@ class TestConv2dChannelGroupOne:
         torch.manual_seed(dist.get_rank())
         x = torch.randn(2, in_ch, 15, 15, device=device)
 
-        w = conv2d.weight.detach().clone().requires_grad_(True)
-        b = conv2d.bias.detach().clone().requires_grad_(True)
+        w = conv.weight.detach().clone().requires_grad_(True)
+        b = conv.bias.detach().clone().requires_grad_(True)
         x_ref = x.clone().requires_grad_(True)
         y_ref = F.conv2d(x_ref, w, b, stride=2, padding=1, dilation=2)
 
         x_dist = x.clone().requires_grad_(True)
-        y = conv2d(x_dist)
+        y = conv(x_dist)
         assert torch.allclose(y, y_ref, atol=1e-5)
 
         y.backward(torch.ones_like(y))
         y_ref.backward(torch.ones_like(y_ref))
         assert torch.allclose(x_dist.grad, x_ref.grad, atol=1e-5)
-        assert torch.allclose(conv2d.weight.grad, w.grad, atol=1e-5)
-        assert torch.allclose(conv2d.bias.grad, b.grad, atol=1e-5)
+        assert torch.allclose(conv.weight.grad, w.grad, atol=1e-5)
+        assert torch.allclose(conv.bias.grad, b.grad, atol=1e-5)
 
     @pytest.mark.dist(4)
     def test_tiling_conv_matches_single_process(

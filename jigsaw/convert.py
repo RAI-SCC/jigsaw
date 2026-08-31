@@ -6,8 +6,8 @@ import torch
 
 from jigsaw.modules import (
     attention,
-    conv,
     conv1d,
+    conv2d,
     conv3d,
     conv_transpose,
     linear,
@@ -17,7 +17,7 @@ from jigsaw.modules import (
 mapped_modules: dict[type[torch.nn.Module], Any] = {
     torch.nn.Linear: linear.DistributedXWT,
     torch.nn.Conv1d: conv1d.DistributedConv1D,
-    torch.nn.Conv2d: conv.DistributedConv2D,
+    torch.nn.Conv2d: conv2d.DistributedConv2D,
     torch.nn.Conv3d: conv3d.DistributedConv3D,
     torch.nn.ConvTranspose2d: conv_transpose.DistributedConvTranspose2D,
     roll.Roll: roll.DistributedRoll,

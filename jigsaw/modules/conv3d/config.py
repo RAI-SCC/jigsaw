@@ -1,6 +1,6 @@
 """Config setup for distributed 3-D convolutions.
 
-Mirrors :class:`jigsaw.modules.conv.config.ConvConfig` for ``F.conv3d``.
+Mirrors :class:`jigsaw.modules.conv2d.config.Conv2dConfig` for ``F.conv3d``.
 """
 
 from typing import Any, Callable, Optional
@@ -10,6 +10,8 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.grad import conv3d_input, conv3d_weight
 from torch.nn.parameter import Parameter
+
+from jigsaw.modules.conv_channel_comm import resolve_channel_comm
 
 from . import distributed_convolutions_3d as dist_conv
 
@@ -30,6 +32,7 @@ class Conv3dConfig:
         kernel_size: tuple[int, int, int],
         stride: tuple[int, int, int],
         device: torch.device,
+        channel_comm: str = "auto",
     ):
         """
         Initialize selection strategy for conv3d.
@@ -48,7 +51,15 @@ class Conv3dConfig:
             Size of the stride.
         device: torch.device
             Device upon which communication occurs.
+        channel_comm: str
+            How the channel-parallel group exchanges input slices in the forward
+            pass: ``"all_gather"`` (one-shot gather), ``"p2p"`` (double-buffered
+            batched p2p that overlaps comm with compute and lowers the memory
+            peak) or ``"all_to_all"`` (same ring over masked all-to-all hops,
+            NCCL only). ``"auto"`` (the default) picks ``"all_to_all"`` on a
+            CUDA ``device`` and ``"p2p"`` otherwise.
         """
+        self.channel_comm = resolve_channel_comm(channel_comm, device)
         self.conv3d_fn = self._conv3d_fn_selection(bayesian)
         self.conv3d_input_fn = self._conv3d_input_fn_selection(bayesian)
         self.conv3d_weight_fn = self._conv3d_weight_fn_selection(bayesian)
