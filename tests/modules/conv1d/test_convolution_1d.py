@@ -129,6 +129,11 @@ def _conv1d_reference_check(
 
 
 class TestConv1d:
+    # Every test here builds a 2x2 mesh, so it needs exactly 4 ranks. Without
+    # this marker an 8-rank run would build a mesh over ranks 0-3 only and
+    # deadlock the survivors in the first collective.
+    pytestmark = pytest.mark.dist(4)
+
     def test_param_init_conv1d(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
