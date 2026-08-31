@@ -2,24 +2,35 @@
 
 Only the no-halo case (``stride == kernel_size``) is supported: every spatial
 rank convolves its own domain slice independently, so the spatial split needs no
-communication. The channel-parallel group cooperates through one of two
+communication. The channel-parallel group cooperates through one of three
 interchangeable kernels, selected by ``config.channel_comm``:
 
 * ``"all_gather"`` -- :func:`distributed_conv2d_over_channels_nway` gathers every
   rank's input-channel slice in one shot. Simple and fast, but its transient
   memory peak is ``~2 * C_in`` (the gather list plus the concatenated copy).
 * ``"ring"`` -- :func:`distributed_conv2d_over_channels_ring` circulates the
-  slices one hop at a time with double-buffered ``isend`` / ``irecv``, overlaps
-  each partial convolution with the next transfer and keeps the peak to
-  ``C_in`` plus two slice buffers.
+  slices one hop at a time with batched ``isend`` / ``irecv``
+  (:func:`jigsaw.comm.comm_1d_p2p`), overlaps each partial convolution with the
+  next transfer and keeps the peak to ``C_in`` plus two slice buffers.
+* ``"all_to_all"`` -- :func:`distributed_conv2d_over_channels_alltoall` runs the
+  same ring schedule but moves each hop with a masked all-to-all
+  (:func:`jigsaw.comm.comm_1d_alltoall`): an empty tensor goes to every rank
+  except the ring neighbour. Needs a backend with all-to-all support (NCCL);
+  gloo has none.
 
-Both work for any channel-group size and return the same ``(y, x_full)``.
+All three work for any channel-group size and return the same ``(y, x_full)``.
 """
 
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import torch
 import torch.distributed as dist
+
+from jigsaw.comm import comm_1d_alltoall, comm_1d_p2p
+
+# A per-hop transport: ``fn(data, buffer, direction=, group=, async_op=) ->
+# (recv_buffer, wait_handle)``. Satisfied by ``comm_1d_p2p`` / ``comm_1d_alltoall``.
+_HopFn = Callable[..., tuple[torch.Tensor, Optional[dist.Work]]]
 
 
 def distributed_conv2d_over_channels_nway(
@@ -85,7 +96,7 @@ def distributed_conv2d_over_channels_nway(
     return y, x_full
 
 
-def distributed_conv2d_over_channels_ring(
+def _conv2d_over_channels_ring(
     x: torch.Tensor,
     w: torch.Tensor,
     b: torch.Tensor,
@@ -94,17 +105,19 @@ def distributed_conv2d_over_channels_ring(
     dilation: tuple[int, int],
     channel_group: dist.ProcessGroup,
     conv_func: Callable[..., torch.Tensor],
+    hop_fn: _HopFn,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Channel-parallel Conv2d that streams the input slices around a ring.
+    """Ring channel-parallel Conv2d; ``hop_fn`` is the per-step transport.
 
-    Functionally identical to :func:`distributed_conv2d_over_channels_nway` but
-    memory- and overlap-friendly: instead of ``all_gather``-ing every rank's
-    input-channel slice at once, the slices travel one hop per step
-    (``rank -> rank + 1``) through double-buffered ``isend`` / ``irecv``. Each
-    rank convolves the slice it currently holds while the next slice is already
-    in flight, so communication overlaps computation. Convolution is linear in
-    the input channels, so ``y`` is just the running sum of the per-slice
-    partial convolutions, with the bias folded into the first partial only.
+    Instead of ``all_gather``-ing every rank's input-channel slice at once, the
+    slices travel one hop per step (``rank -> rank + 1``). ``hop_fn`` moves one
+    slice one hop and returns ``(recv_buffer, wait_handle)``; it is
+    :func:`jigsaw.comm.comm_1d_p2p` (batched ``isend`` / ``irecv``) or
+    :func:`jigsaw.comm.comm_1d_alltoall` (masked all-to-all). Each rank
+    convolves the slice it currently holds while the next slice is already in
+    flight, so communication overlaps computation. Convolution is linear in the
+    input channels, so ``y`` is the running sum of the per-slice partial
+    convolutions, with the bias folded into the first partial only.
 
     The transient memory peak drops from ``~2 * C_in`` (the gather list plus the
     concatenated copy) to ``C_in`` (the reassembled ``x_full``) plus two
@@ -131,6 +144,8 @@ def distributed_conv2d_over_channels_ring(
         Channel-parallel process group.
     conv_func : Callable
         Convolution primitive (``F.conv2d`` or a vmapped variant).
+    hop_fn : Callable
+        Per-hop transport, ``comm_1d_p2p`` or ``comm_1d_alltoall``.
 
     Returns
     -------
@@ -163,50 +178,89 @@ def distributed_conv2d_over_channels_ring(
     )
     x_full[..., rank * c_in_local : (rank + 1) * c_in_local, :, :] = x
 
-    send_to = (rank + 1) % group_size
-    recv_from = (rank - 1) % group_size
-
-    def _exchange(
-        send_slab: torch.Tensor, recv_slab: torch.Tensor
-    ) -> tuple[dist.Work, dist.Work]:
-        """Post one ring hop; even/odd ordering keeps the Gloo rendezvous safe."""
-        if rank % 2 == 0:
-            send = dist.isend(send_slab, group_dst=send_to, group=channel_group)
-            recv = dist.irecv(recv_slab, group_src=recv_from, group=channel_group)
-        else:
-            recv = dist.irecv(recv_slab, group_src=recv_from, group=channel_group)
-            send = dist.isend(send_slab, group_dst=send_to, group=channel_group)
-        assert send is not None and recv is not None
-        return send, recv
-
     buf_a = torch.empty_like(x)
     buf_b = torch.empty_like(x)
     recv_buf = buf_a
 
-    # Prime the ring: this rank's own slice starts its trip while we convolve it.
-    send, recv = _exchange(x, recv_buf)
+    # Prime the ring: this rank's own slice sets off while we convolve it.
+    recv_buf, handle = hop_fn(
+        x, recv_buf, direction=1, group=channel_group, async_op=True
+    )
     y = _conv(x, rank, with_bias=True)
 
     for step in range(1, group_size):
-        send.wait()
-        recv.wait()
+        if handle is not None:
+            handle.wait()
         slab, recv_buf = recv_buf, (buf_b if recv_buf is buf_a else buf_a)
 
         j = (rank - step) % group_size
         x_full[..., j * c_in_local : (j + 1) * c_in_local, :, :] = slab
 
-        # Launch the next hop before convolving, so this partial overlaps it.
+        # Relay before convolving, so this partial overlaps the next hop.
         if step < group_size - 1:
-            send, recv = _exchange(slab, recv_buf)
+            recv_buf, handle = hop_fn(
+                slab, recv_buf, direction=1, group=channel_group, async_op=True
+            )
 
         y = y + _conv(slab, j, with_bias=False)
 
     return y, x_full
 
 
+def distributed_conv2d_over_channels_ring(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    b: torch.Tensor,
+    stride: tuple[int, int],
+    padding: str | tuple[int, int],
+    dilation: tuple[int, int],
+    channel_group: dist.ProcessGroup,
+    conv_func: Callable[..., torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Channel-parallel Conv2d that streams the input slices around a p2p ring.
+
+    Thin wrapper over :func:`_conv2d_over_channels_ring` with
+    :func:`jigsaw.comm.comm_1d_p2p` (one ``dist.batch_isend_irecv`` per hop) as
+    the transport. See :func:`_conv2d_over_channels_ring` for the schedule and
+    the memory characteristics.
+    """
+    return _conv2d_over_channels_ring(
+        x, w, b, stride, padding, dilation, channel_group, conv_func, comm_1d_p2p
+    )
+
+
+def distributed_conv2d_over_channels_alltoall(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    b: torch.Tensor,
+    stride: tuple[int, int],
+    padding: str | tuple[int, int],
+    dilation: tuple[int, int],
+    channel_group: dist.ProcessGroup,
+    conv_func: Callable[..., torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Channel-parallel Conv2d, ring schedule, each hop a masked all-to-all.
+
+    Thin wrapper over :func:`_conv2d_over_channels_ring` with
+    :func:`jigsaw.comm.comm_1d_alltoall` as the transport: every hop is a
+    ``dist.all_to_all`` in which this rank sends its slice to the ring neighbour
+    and an empty tensor to everyone else. Requires a backend with all-to-all
+    support (NCCL); ``gloo`` has none, so this raises there -- use ``"ring"``.
+    """
+    if dist.get_backend(channel_group) == "gloo":
+        raise RuntimeError(
+            "channel_comm='all_to_all' needs a backend with all-to-all support "
+            "(e.g. NCCL); gloo has none. Use channel_comm='ring' instead."
+        )
+    return _conv2d_over_channels_ring(
+        x, w, b, stride, padding, dilation, channel_group, conv_func, comm_1d_alltoall
+    )
+
+
 _CHANNEL_COMM_FNS: dict[str, Callable[..., tuple[torch.Tensor, torch.Tensor]]] = {
     "all_gather": distributed_conv2d_over_channels_nway,
     "ring": distributed_conv2d_over_channels_ring,
+    "all_to_all": distributed_conv2d_over_channels_alltoall,
 }
 
 
@@ -225,8 +279,9 @@ def conv2d_nway(
     Requires ``stride == kernel_size``, so the spatial split needs no halo
     exchange: every spatial rank convolves its own domain slice independently
     while the channel group cooperates through the kernel named by
-    ``config.channel_comm`` (``"all_gather"`` by default, or ``"ring"`` for the
-    memory-lean overlapped variant).
+    ``config.channel_comm`` (``"all_gather"`` by default, ``"ring"`` for the
+    memory-lean overlapped p2p variant, or ``"all_to_all"`` for the same ring
+    over masked all-to-all hops).
 
     Returns ``(y, x_full)`` where ``x_full`` is the full-channel input kept for
     the backward pass.

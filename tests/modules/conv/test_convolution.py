@@ -10,6 +10,16 @@ from tests.process_mesh import *
 
 pytestmark = [pytest.mark.dist_required]
 
+# Every channel-parallel exchange strategy; "all_to_all" needs a backend with
+# all-to-all support and is skipped on gloo (see _skip_if_unsupported).
+CHANNEL_COMMS = ["all_gather", "ring", "all_to_all"]
+
+
+def _skip_if_unsupported(channel_comm: str) -> None:
+    """Skip when the current backend cannot run ``channel_comm``."""
+    if channel_comm == "all_to_all" and dist.get_backend() == "gloo":
+        pytest.skip("all_to_all channel comm needs a non-gloo backend")
+
 
 def _conv2d_reference_check(
     device: torch.device,
@@ -148,11 +158,12 @@ class TestConv2d:
                 atol=1e-5,
             )
 
-    @pytest.mark.parametrize("channel_comm", ["all_gather", "ring"])
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_conv2d_forward(
         self, device: torch.device, process_mesh_dict_2x2: dict, channel_comm: str
     ) -> None:
         """2-way spatial x 2-way channel matches a single-process conv2d."""
+        _skip_if_unsupported(channel_comm)
         _conv2d_reference_check(
             device,
             process_mesh_dict_2x2,
@@ -164,14 +175,20 @@ class TestConv2d:
             channel_comm=channel_comm,
         )
 
-    def test_ring_matches_all_gather(
-        self, device: torch.device, process_mesh_dict_2x2: dict
+    @pytest.mark.parametrize("channel_comm", ["ring", "all_to_all"])
+    def test_streaming_matches_all_gather(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        channel_comm: str,
     ) -> None:
-        """The ring channel-exchange matches all-gather up to accumulation order.
+        """The streaming exchanges match all-gather up to accumulation order.
 
-        The ring sums one ``conv`` per input-channel slice while all-gather runs
-        a single fused ``conv``, so the two differ only by float reduction order.
+        ``ring`` / ``all_to_all`` sum one ``conv`` per input-channel slice while
+        all-gather runs a single fused ``conv``, so the results differ only by
+        float reduction order.
         """
+        _skip_if_unsupported(channel_comm)
         row_group, col_group = (
             process_mesh_dict_2x2["row"],
             process_mesh_dict_2x2["col"],
@@ -200,22 +217,22 @@ class TestConv2d:
             ).to(device)
 
         conv_ag = _build("all_gather")
-        conv_ring = _build("ring")
+        conv_stream = _build(channel_comm)
 
         torch.manual_seed(model_group.rank())
         x = torch.randn(2, 8 // n_channel, 16, 16 // n_spatial, device=device)
 
         y_ag = conv_ag(x.clone().requires_grad_(True))
-        y_ring = conv_ring(x.clone().requires_grad_(True))
-        assert torch.allclose(y_ag, y_ring, atol=1e-5, rtol=1e-5)
+        y_stream = conv_stream(x.clone().requires_grad_(True))
+        assert torch.allclose(y_ag, y_stream, atol=1e-5, rtol=1e-5)
 
         y_ag.backward(torch.ones_like(y_ag))
-        y_ring.backward(torch.ones_like(y_ring))
+        y_stream.backward(torch.ones_like(y_stream))
         assert torch.allclose(
-            conv_ag.weight.grad, conv_ring.weight.grad, atol=1e-5, rtol=1e-5
+            conv_ag.weight.grad, conv_stream.weight.grad, atol=1e-5, rtol=1e-5
         )
         assert torch.allclose(
-            conv_ag.bias.grad, conv_ring.bias.grad, atol=1e-5, rtol=1e-5
+            conv_ag.bias.grad, conv_stream.bias.grad, atol=1e-5, rtol=1e-5
         )
 
     def test_unknown_channel_comm_rejected(
@@ -233,6 +250,30 @@ class TestConv2d:
                 stride=4,
                 channel_comm="alltoall",
             ).to(device)
+
+    def test_alltoall_rejected_on_gloo(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
+        if dist.get_backend() != "gloo":
+            pytest.skip("only meaningful on the gloo backend")
+        conv2d = conv.DistributedConv2D(
+            8,
+            12,
+            4,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=4,
+            padding=(0,),
+            dilation=1,
+            bias=True,
+            parallelism=process_mesh_dict_2x2["model"].size(),
+            channel_comm="all_to_all",
+        ).to(device)
+        x = torch.randn(2, 4, 16, 8, device=device)
+        with pytest.raises(RuntimeError, match="all-to-all"):
+            conv2d(x)
 
     def test_int_args_normalized_to_pairs(
         self, device: torch.device, process_mesh_dict_2x2: dict
@@ -399,11 +440,12 @@ class TestConv2dParallel:
     """Distributed Conv2d across arbitrary spatial and channel group sizes."""
 
     @pytest.mark.dist(4)
-    @pytest.mark.parametrize("channel_comm", ["all_gather", "ring"])
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_forward_backward_1x4(
         self, device: torch.device, process_mesh_dict_1x4: dict, channel_comm: str
     ) -> None:
         """Pure channel parallelism (4 channel ranks, no spatial split)."""
+        _skip_if_unsupported(channel_comm)
         _conv2d_reference_check(
             device,
             process_mesh_dict_1x4,
@@ -416,11 +458,12 @@ class TestConv2dParallel:
         )
 
     @pytest.mark.dist(4)
-    @pytest.mark.parametrize("channel_comm", ["all_gather", "ring"])
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_forward_backward_4x1(
         self, device: torch.device, process_mesh_dict_4x1: dict, channel_comm: str
     ) -> None:
         """Pure spatial parallelism (4 spatial ranks, no channel split)."""
+        _skip_if_unsupported(channel_comm)
         _conv2d_reference_check(
             device,
             process_mesh_dict_4x1,
@@ -433,7 +476,7 @@ class TestConv2dParallel:
         )
 
     @pytest.mark.dist(8)
-    @pytest.mark.parametrize("channel_comm", ["all_gather", "ring"])
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     def test_forward_backward_2x4(
         self,
         device: torch.device,
@@ -441,6 +484,7 @@ class TestConv2dParallel:
         channel_comm: str,
     ) -> None:
         """Combined 2-way spatial and 4-way channel parallelism."""
+        _skip_if_unsupported(channel_comm)
         _conv2d_reference_check(
             device,
             process_mesh_dict_2x4_rowcol,

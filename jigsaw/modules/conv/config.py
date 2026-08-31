@@ -47,9 +47,11 @@ class ConvConfig:
             Device upon which communication occurs
         channel_comm: str
             How the channel-parallel group exchanges input slices in the forward
-            pass: ``"all_gather"`` (default, one-shot gather) or ``"ring"``
-            (double-buffered p2p that overlaps comm with compute and lowers the
-            memory peak). See :mod:`jigsaw.modules.conv.distributed_convolutions`.
+            pass: ``"all_gather"`` (default, one-shot gather), ``"ring"``
+            (double-buffered batched p2p that overlaps comm with compute and
+            lowers the memory peak) or ``"all_to_all"`` (same ring over masked
+            all-to-all hops, NCCL only). See
+            :mod:`jigsaw.modules.conv.distributed_convolutions`.
         """
         if channel_comm not in dist_conv._CHANNEL_COMM_FNS:
             raise ValueError(
