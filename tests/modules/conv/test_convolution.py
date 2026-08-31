@@ -167,6 +167,177 @@ def _conv2d_reference_check(
     assert torch.allclose(b_grad_global, bias_global.grad, atol=1e-4, rtol=1e-4)
 
 
+# ``lr`` is kept small and ``iters`` short so float drift between the distributed
+# (spatial-summed) gradient and the single-process one does not blow past the
+# tolerances; momentum is the interesting case because it *accumulates* any
+# drift, so a broken grad-sync hook diverges within a step or two.
+_OPTIMIZERS = {
+    "sgd": lambda params: torch.optim.SGD(params, lr=0.05),
+    "sgd_momentum": lambda params: torch.optim.SGD(params, lr=0.05, momentum=0.9),
+}
+
+
+def _conv2d_optimizer_parity_check(
+    device: torch.device,
+    mesh: dict,
+    in_channels: int,
+    out_channels: int,
+    kernel_size: Pair,
+    height: int,
+    width: int,
+    *,
+    optimizer: str = "sgd_momentum",
+    iters: int = 4,
+    batch: int = 2,
+    stride: Pair | None = None,
+    padding: Pair = 0,
+    dilation: Pair = 1,
+    channel_comm: str = "all_gather",
+) -> None:
+    """Run ``iters`` train steps of a ``DistributedConv2D`` and an equal
+    single-process ``conv2d`` and assert they never drift apart.
+
+    Both start from the same weights (the distributed shards, gathered) and the
+    same optimizer. Every step feeds the same global input, sharded to this rank
+    for the distributed module and whole for the reference, and the same
+    ``grad_output``. After each step this checks, in order:
+
+    * the weight / bias **gradients** gathered from the shards equal the
+      reference's -- i.e. the ``register_post_accumulate_grad_hook`` really did
+      sum the per-spatial-rank partial gradients (a missing or double hook shows
+      up here as a 1/n or 2x gradient);
+    * the forward output matches;
+    * the weight / bias **values** match after ``optimizer.step()``; and
+    * the weight shard is still replicated bit-for-bit across the spatial group,
+      so the next iteration starts from a consistent state.
+    """
+    row_group, col_group = mesh["row"], mesh["col"]
+    n_spatial, n_channel = row_group.size(), col_group.size()
+    model_group = mesh["model"]
+
+    kernel_size = _pair(kernel_size)
+    stride = kernel_size if stride is None else _pair(stride)
+    padding = _pair(padding)
+    dilation = _pair(dilation)
+
+    torch.manual_seed(model_group.rank())
+    dist_conv = conv.DistributedConv2D(
+        in_channels,
+        out_channels,
+        kernel_size,
+        device=device,
+        spatial_group=row_group,
+        channel_group=col_group,
+        stride=stride,
+        padding=padding,
+        dilation=dilation,
+        groups=1,
+        bias=True,
+        parallelism=model_group.size(),
+        bayesian=False,
+        dtype=torch.float32,
+        channel_comm=channel_comm,
+    ).to(device)
+
+    # Single-process reference, seeded from the gathered initial shards.
+    ref_weight = torch.nn.Parameter(
+        gather_1d_results(dist_conv.weight.detach(), mesh, dim=0, pm_key="col").clone()
+    )
+    ref_bias = torch.nn.Parameter(
+        gather_1d_results(dist_conv.bias.detach(), mesh, dim=0, pm_key="col").clone()
+    )
+
+    make_opt = _OPTIMIZERS[optimizer]
+    opt_dist = make_opt(list(dist_conv.parameters()))
+    opt_ref = make_opt([ref_weight, ref_bias])
+
+    cr, rr = col_group.rank(), row_group.rank()
+    cin_local = in_channels // n_channel
+    cout_local = out_channels // n_channel
+    win_local = width // n_spatial
+
+    def _to_global(t: torch.Tensor, channel_dim: int) -> torch.Tensor:
+        t = gather_1d_results(t, mesh, dim=channel_dim, pm_key="col")
+        return gather_1d_results(t, mesh, dim=-1, pm_key="row")
+
+    for it in range(iters):
+        torch.manual_seed(4096 + it)
+        x_global = torch.randn(batch, in_channels, height, width, device=device)
+
+        opt_ref.zero_grad()
+        x_ref = x_global.clone().requires_grad_(True)
+        y_ref = F.conv2d(
+            x_ref,
+            ref_weight,
+            ref_bias,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+        )
+        torch.manual_seed(8192 + it)
+        grad_global = torch.randn_like(y_ref)
+        y_ref.backward(grad_global)
+
+        ow_global = y_ref.shape[-1]
+        assert ow_global % n_spatial == 0, (
+            f"output width {ow_global} not divisible by spatial size {n_spatial}"
+        )
+        ow_local = ow_global // n_spatial
+
+        x_local = (
+            x_global[
+                :,
+                cr * cin_local : (cr + 1) * cin_local,
+                :,
+                rr * win_local : (rr + 1) * win_local,
+            ]
+            .clone()
+            .requires_grad_(True)
+        )
+        grad_local = grad_global[
+            :,
+            cr * cout_local : (cr + 1) * cout_local,
+            :,
+            rr * ow_local : (rr + 1) * ow_local,
+        ].contiguous()
+
+        opt_dist.zero_grad()
+        y = dist_conv(x_local)
+        assert y.shape == (batch, cout_local, y_ref.shape[-2], ow_local)
+        y.backward(grad_local)
+
+        # (1) gradients: the spatial-group grad-sync hook must reconstruct the
+        # single-process gradient exactly.
+        w_grad = gather_1d_results(dist_conv.weight.grad, mesh, dim=0, pm_key="col")
+        b_grad = gather_1d_results(dist_conv.bias.grad, mesh, dim=0, pm_key="col")
+        assert torch.allclose(w_grad, ref_weight.grad, atol=1e-4, rtol=1e-4), (
+            f"iter {it}: weight-grad drift (grad-sync hook wrong?)"
+        )
+        assert torch.allclose(b_grad, ref_bias.grad, atol=1e-4, rtol=1e-4), (
+            f"iter {it}: bias-grad drift (grad-sync hook wrong?)"
+        )
+
+        # (2) forward output.
+        y_global = _to_global(y.detach(), -3)
+        assert torch.allclose(y_global, y_ref.detach(), atol=1e-4, rtol=1e-4), (
+            f"iter {it}: forward drift"
+        )
+
+        opt_ref.step()
+        opt_dist.step()
+
+        # (3) parameters after the step, and (4) spatial replication is intact.
+        _assert_weight_replicated_across_spatial(dist_conv.weight, mesh)
+        w_now = gather_1d_results(dist_conv.weight.detach(), mesh, dim=0, pm_key="col")
+        b_now = gather_1d_results(dist_conv.bias.detach(), mesh, dim=0, pm_key="col")
+        assert torch.allclose(w_now, ref_weight.detach(), atol=2e-4, rtol=2e-4), (
+            f"iter {it}: weight drift after optimizer step"
+        )
+        assert torch.allclose(b_now, ref_bias.detach(), atol=2e-4, rtol=2e-4), (
+            f"iter {it}: bias drift after optimizer step"
+        )
+
+
 class TestConv2d:
     # Every test here builds a 2x2 mesh, so it needs exactly 4 ranks. Without
     # this marker an 8-rank run would build a mesh over ranks 0-3 only and
@@ -842,6 +1013,177 @@ class TestConv2dChannelGroupOne:
             width=16,
             stride=2,
             padding=1,
+        )
+
+
+class TestConv2dOptimizerParity:
+    """Multiple forward/backward/``optimizer.step`` iterations stay in lock-step
+    with a single-process ``conv2d``.
+
+    A single backward already checks the gradient (see ``TestConv2dParallel``);
+    these run several *training steps* so a wrong
+    ``register_post_accumulate_grad_hook`` -- one that fails to sum the
+    per-spatial-rank partial gradients, sums them twice, or lets the optimizer
+    step before the async all-reduce lands -- shows up as the weight shards
+    drifting apart or away from the reference within a step or two (momentum
+    makes any drift compound).
+    """
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("optimizer", list(_OPTIMIZERS))
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    def test_multi_iter_2x2(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        optimizer: str,
+        channel_comm: str,
+    ) -> None:
+        """2-way spatial x 2-way channel, no-halo, every channel comm."""
+        _skip_if_unsupported(channel_comm)
+        _conv2d_optimizer_parity_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            optimizer=optimizer,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("optimizer", list(_OPTIMIZERS))
+    def test_multi_iter_halo_2x2(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        optimizer: str,
+    ) -> None:
+        """Halo regime (stride < kernel): grads are summed over the spatial group
+        from the halo-padded backward every step."""
+        _conv2d_optimizer_parity_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            stride=2,
+            padding=1,
+            optimizer=optimizer,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("optimizer", list(_OPTIMIZERS))
+    def test_multi_iter_pure_spatial_4x1(
+        self,
+        device: torch.device,
+        process_mesh_dict_4x1: dict,
+        optimizer: str,
+    ) -> None:
+        """4-way spatial, no channel split: the hook is the *only* thing summing
+        weight/bias grads across the four spatial ranks, so a no-op hook drops
+        the gathered gradient to ~1/4 of the reference on the first step."""
+        _conv2d_optimizer_parity_check(
+            device,
+            process_mesh_dict_4x1,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            optimizer=optimizer,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("optimizer", list(_OPTIMIZERS))
+    def test_multi_iter_pure_spatial_halo_4x1(
+        self,
+        device: torch.device,
+        process_mesh_dict_4x1: dict,
+        optimizer: str,
+    ) -> None:
+        """4-way spatial, no channel split, halo regime (routed through
+        ``conv2d_apply`` / ``conv2d_halo_nway``)."""
+        _conv2d_optimizer_parity_check(
+            device,
+            process_mesh_dict_4x1,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=32,
+            width=32,
+            stride=2,
+            padding=1,
+            optimizer=optimizer,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    def test_multi_iter_pure_channel_1x4(
+        self,
+        device: torch.device,
+        process_mesh_dict_1x4: dict,
+        channel_comm: str,
+    ) -> None:
+        """4-way channel, no spatial split: each rank owns a disjoint output-channel
+        shard, so the hook must *not* touch (no double-reduce) the weight grad."""
+        _skip_if_unsupported(channel_comm)
+        _conv2d_optimizer_parity_check(
+            device,
+            process_mesh_dict_1x4,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(6)
+    @pytest.mark.parametrize("optimizer", list(_OPTIMIZERS))
+    def test_multi_iter_3x2(
+        self,
+        device: torch.device,
+        process_mesh_dict_3x2: dict,
+        optimizer: str,
+    ) -> None:
+        """3-way spatial x 2-way channel: spatial group larger than two."""
+        _conv2d_optimizer_parity_check(
+            device,
+            process_mesh_dict_3x2,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=24,
+            optimizer=optimizer,
+        )
+
+    @pytest.mark.dist(8)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    def test_multi_iter_halo_2x4(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x4_rowcol: dict,
+        channel_comm: str,
+    ) -> None:
+        """2-way spatial x 4-way channel, halo regime, every channel comm."""
+        _skip_if_unsupported(channel_comm)
+        _conv2d_optimizer_parity_check(
+            device,
+            process_mesh_dict_2x4_rowcol,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            stride=2,
+            padding=1,
+            channel_comm=channel_comm,
         )
 
 
