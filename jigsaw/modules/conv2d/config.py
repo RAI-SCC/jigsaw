@@ -1,4 +1,8 @@
-"""Config setup for distributed convolutions."""
+"""Config setup for distributed 2-D convolutions.
+
+The 1-D and 3-D configs (:class:`jigsaw.modules.conv1d.config.Conv1dConfig`,
+:class:`jigsaw.modules.conv3d.config.Conv3dConfig`) mirror this one.
+"""
 
 from typing import Any, Callable, Optional
 
@@ -14,7 +18,7 @@ from . import distributed_convolutions_2d as dist_conv
 
 
 class Conv2dConfig:
-    """Selection strategy for the convolution kernels used in the backward pass."""
+    """Selection strategy for the 2-D convolution kernels used in fwd/bwd."""
 
     # type hints
     dist_conv2d_fn: Callable
@@ -32,7 +36,7 @@ class Conv2dConfig:
         channel_comm: str = "auto",
     ):
         """
-        Initialize selection strategy for conv.
+        Initialize selection strategy for conv2d.
 
         bayesian: bool
             Flag for whether the model is bayesian.
@@ -41,21 +45,20 @@ class Conv2dConfig:
         channel_group: dist.ProcessGroup
             Tensor-parallel process group.
         bias: torch.Tensor | None
-            Bias if applicable
-        kernel_size: Tuple[int, int]
-            Kernel size of the convolution
-        stride: Tuple[int, int]
-            Size of the stride
+            Bias if applicable.
+        kernel_size: tuple[int, int]
+            Kernel size of the convolution.
+        stride: tuple[int, int]
+            Size of the stride.
         device: torch.device
-            Device upon which communication occurs
+            Device upon which communication occurs.
         channel_comm: str
             How the channel-parallel group exchanges input slices in the forward
             pass: ``"all_gather"`` (one-shot gather), ``"p2p"`` (double-buffered
             batched p2p that overlaps comm with compute and lowers the memory
             peak) or ``"all_to_all"`` (same ring over masked all-to-all hops,
             NCCL only). ``"auto"`` (the default) picks ``"all_to_all"`` on a
-            CUDA ``device`` and ``"p2p"`` otherwise. See
-            :mod:`jigsaw.modules.conv2d.distributed_convolutions_2d`.
+            CUDA ``device`` and ``"p2p"`` otherwise.
         """
         self.channel_comm = resolve_channel_comm(channel_comm, device)
         self.conv2d_fn = self._conv2d_fn_selection(bayesian)
@@ -63,11 +66,9 @@ class Conv2dConfig:
         self.conv2d_weight_fn = self._conv2d_weight_fn_selection(bayesian)
         self.weight_reshape = self._reshape_weights_selection(bayesian)
         self.grad_bias = self._grad_bias_selection(spatial_group, bias)
-        # ``stride == kernel_size`` (on every axis) tiles the domain with no
-        # overlap, so the spatial split needs no communication. Otherwise
-        # neighbouring output columns share input columns and the spatial ranks
-        # exchange halos. One kernel covers every group-size combination in each
-        # regime.
+        # ``stride == kernel_size`` tiles the domain with no overlap, so the
+        # spatial split needs no communication. Otherwise neighbouring output
+        # positions share input positions and the spatial ranks exchange halos.
         if all(k == s for k, s in zip(kernel_size, stride)):
             self.dist_conv2d_fn = dist_conv.conv2d_nway
             self.dist_conv2d_backward_fn = dist_conv.conv2d_nway_backward
@@ -76,101 +77,32 @@ class Conv2dConfig:
             self.dist_conv2d_backward_fn = dist_conv.conv2d_halo_nway_backward
 
     def _conv2d_fn_selection(self, bayesian: bool) -> Callable:
-        """
-        Selector function for forward pass.
-
-        Wraps the forward call in a vmap if necessary.
-
-        Parameters
-        ----------
-        bayesian: bool
-            Flag for whether model should be bayesian.
-
-        Returns
-        -------
-        Callable
-        """
+        """Select the forward primitive, vmapped when the model is bayesian."""
         if bayesian:
             return torch.vmap(F.conv2d)
-        else:
-            return F.conv2d
+        return F.conv2d
 
     def _conv2d_input_fn_selection(self, bayesian: bool) -> Callable:
-        """
-        Selector function for backward pass.
-
-        Wraps the backward grad_input calculation in a vmap if necessary.
-
-        Parameters
-        ----------
-        bayesian: bool
-            Flag for whether model should be bayesian.
-
-        Returns
-        -------
-        Callable
-        """
+        """Select the grad-input primitive, vmapped when the model is bayesian."""
         if bayesian:
             return torch.vmap(conv2d_input, in_dims=(None, 0, 0))
-        else:
-            return conv2d_input
+        return conv2d_input
 
     def _conv2d_weight_fn_selection(self, bayesian: bool) -> Callable:
-        """
-        Selector function for backward pass.
-
-        Wraps the backward grad_weight calculation in a vmap if necessary.
-
-        Parameters
-        ----------
-        bayesian: bool
-            Flag for whether model should be bayesian.
-
-        Returns
-        -------
-        Callable
-        """
+        """Select the grad-weight primitive, vmapped when the model is bayesian."""
         if bayesian:
             return torch.vmap(conv2d_weight, in_dims=(0, None, 0))
-        else:
-            return conv2d_weight
+        return conv2d_weight
 
     def _reshape_weights_selection(self, bayesian: bool) -> Callable:
-        """
-        Selector function for reshaping the weights.
-
-        Parameters
-        ----------
-        bayesian: bool
-            Flag for whether the model is Bayesian.
-
-        Returns
-        -------
-        reshape_weights: Callable
-        """
+        """Select the weight-reshape helper (a no-op unless bayesian)."""
         if bayesian:
             return self._reshape_weights
-        else:
-            return self._no_reshape_weights
+        return self._no_reshape_weights
 
     def _reshape_weights(self, w: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        """
-        Reshape weights as necessary for vmapped model.
-
-        Parameters
-        ----------
-        w: torch.Tensor
-            Convolution model weights.
-        x: torch.Tensor
-            data.
-
-        Returns
-        -------
-        w: torch.Tensor
-            Reshaped weights.
-        """
-        w = w.expand(x.shape[0], *w.shape)
-        return w
+        """Broadcast the weights over the vmap (batch) dimension."""
+        return w.expand(x.shape[0], *w.shape)
 
     def _no_reshape_weights(self, w: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         """No-op."""
@@ -179,74 +111,19 @@ class Conv2dConfig:
     def _grad_bias_selection(
         self, spatial_group: dist.ProcessGroup, bias: Optional[torch.Tensor]
     ) -> Callable:
-        """
-        Selector function for grad bias reduction.
-
-        Grad of bias needs to be all-reduced to synchronize across spatial process.
-
-        Parameters
-        ----------
-        spatial_group: dist.ProcessGroup
-            Domain-parallel process group.
-        bias: Optional[torch.Tensor]
-            Bias tensor.
-
-        Returns
-        -------
-        Callable
-        """
+        """Select the grad-bias reducer; the spatial reduction is done by a hook."""
         if bias is None:
             return self._no_bias
-        elif spatial_group.size() == 2:
-            return self._no_reduce_grad_bias
-        else:
-            return self._reduce_bias_over_spatial_group
+        return self._sum_grad_bias
 
     def _no_bias(self, *args: Any, **kwargs: Any) -> None:
         """No-op."""
         return None
 
-    def _no_reduce_grad_bias(
+    def _sum_grad_bias(
         self,
         grad_output: torch.Tensor,
         spatial_group: Optional[dist.ProcessGroup] = None,
     ) -> torch.Tensor:
-        """
-        Sum grad_output to get grad_bias.
-
-        Parameters
-        ----------
-        grad_output: torch.Tensor
-            Gradient wrt output.
-        spatial_group: dist.ProcessGroup
-            Process group for domain-parallel ranks.
-
-        Returns
-        -------
-        grad_bias: torch.Tensor
-            Gradient wrt bias.
-        """
+        """Sum ``grad_output`` over batch and spatial axes, leaving the channels."""
         return grad_output.sum(dim=(-4, -2, -1))
-
-    def _reduce_bias_over_spatial_group(
-        self,
-        grad_output: torch.Tensor,
-        spatial_group: Optional[dist.ProcessGroup] = None,
-    ) -> torch.Tensor:
-        """
-        Sum grad_output to get grad_bias.
-
-        Parameters
-        ----------
-        grad_output: torch.Tensor
-            Gradient wrt output.
-        spatial_group: dist.ProcessGroup
-            Process group for domain-parallel ranks.
-
-        Returns
-        -------
-        grad_bias: torch.Tensor
-            Gradient wrt bias.
-        """
-        grad_b = grad_output.sum(dim=(-4, -2, -1))
-        return grad_b

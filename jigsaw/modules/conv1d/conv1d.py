@@ -18,14 +18,14 @@ from .functional import Conv1d
 
 
 def _single(x: int | tuple[int, ...]) -> tuple[int]:
-    """Normalise an ``int`` or length-1 tuple to a 1-element tuple."""
+    """Normalise an ``int`` or 1-element tuple to a 1-element tuple."""
     if isinstance(x, int):
         return (x,)
     return (x[0],)
 
 
 class DistributedConv1D(torch.nn.Module):
-    """Distributed 1D Convolution."""
+    """Distributed 1-D convolution."""
 
     # type-hints
     bias: Optional[Parameter]
@@ -69,7 +69,7 @@ class DistributedConv1D(torch.nn.Module):
         """
         Distributed 1D Convolution.
 
-        input shape of forward pass: (N, Cin, Lin) or (Cin, Lin)
+        input shape of forward pass: (N, Cin, Lin)
         output shape of forward pass: (N, Cout, Lout)
 
         Parameters

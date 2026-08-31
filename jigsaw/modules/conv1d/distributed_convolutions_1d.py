@@ -7,13 +7,14 @@ group.
 
 Two regimes are selected by :class:`~jigsaw.modules.conv1d.config.Conv1dConfig`:
 
-* ``stride == kernel_size``: the length split tiles with no overlap, so every
-  spatial rank convolves its own slice independently (:func:`conv1d_nway`).
-* ``stride != kernel_size``: neighbouring output positions share input
-  positions, so each spatial rank first pulls the missing length positions from
-  the other ranks with a halo exchange, then convolves
-  (:func:`conv1d_halo_nway`). The halo exchange itself is dimension-agnostic and
-  shared with the 2-/3-D convolutions via :mod:`jigsaw.modules.spatial_halo`.
+* ``stride == kernel_size`` (and no dilation/padding on the split axis): the
+  length split tiles with no overlap, so every spatial rank convolves its own
+  slice independently (:func:`conv1d_nway`).
+* otherwise: neighbouring output positions share input positions, so each
+  spatial rank first pulls the missing length positions from the other ranks
+  with a halo exchange, then convolves (:func:`conv1d_halo_nway`). The halo
+  exchange itself is dimension-agnostic and shared with the 2-/3-D convolutions
+  via :mod:`jigsaw.modules.spatial_halo`.
 
 Either regime cooperates with the channel-parallel group through the shared
 ``config.channel_comm`` strategies

@@ -27,7 +27,7 @@ def _triple(x: int | tuple[int, ...]) -> tuple[int, int, int]:
 
 
 class DistributedConv3D(torch.nn.Module):
-    """Distributed 3D Convolution."""
+    """Distributed 3-D convolution."""
 
     # type-hints
     bias: Optional[Parameter]

@@ -1,4 +1,8 @@
-"""Modules for distributed convolutions."""
+"""Module for the distributed 2-D convolution.
+
+The 1-D and 3-D modules (:class:`jigsaw.modules.conv1d.conv1d.DistributedConv1D`,
+:class:`jigsaw.modules.conv3d.conv3d.DistributedConv3D`) mirror this one.
+"""
 
 from typing import Callable, Optional, cast
 
@@ -15,7 +19,7 @@ from .functional import Conv2d
 
 
 def _pair(x: int | tuple[int, ...]) -> tuple[int, int]:
-    """Convert different types to 2-element tuple."""
+    """Normalise an ``int`` or 1-/2-element tuple to a 2-element tuple."""
     if isinstance(x, int):
         return (x, x)
     if len(x) == 1:
@@ -24,7 +28,7 @@ def _pair(x: int | tuple[int, ...]) -> tuple[int, int]:
 
 
 class DistributedConv2D(torch.nn.Module):
-    """Distributed 2D Convolution."""
+    """Distributed 2-D convolution."""
 
     # type-hints
     bias: Optional[Parameter]
@@ -68,18 +72,18 @@ class DistributedConv2D(torch.nn.Module):
         """
         Distributed 2D Convolution.
 
-        input shape of forward pass: (N, Cin, Lin) or (Cin, Lin)
-        output shape of forward pass: (N, Cout, Lout)
+        input shape of forward pass: (N, Cin, Hin, Win)
+        output shape of forward pass: (N, Cout, Hout, Wout)
 
         Parameters
         ----------
         in_channels: int
             Number of in_channels globally.
         out_channels: int
-            Number of in_channels globally.
+            Number of out_channels globally.
         kernel_size: int | tuple[int, ...]
             Kernel size.
-        device: torch.Device
+        device: torch.device
             Device where the computations will be done.
         spatial_group: dist.ProcessGroup
             Process group for domain-parallel ranks.
@@ -88,9 +92,10 @@ class DistributedConv2D(torch.nn.Module):
         stride: int | tuple[int, ...]
             Stride in the convolution.
         padding: str | tuple[int, ...]
-            Padding. Not yet implemented.
+            Padding. String padding is unsupported once a halo exchange is
+            needed (``stride != kernel_size``).
         dilation: int | tuple[int, ...]
-            Dilation. Not yet implemented.
+            Dilation.
         groups: int
             Number of groups. Not yet implemented.
         bias: bool
@@ -108,7 +113,7 @@ class DistributedConv2D(torch.nn.Module):
             NCCL only). ``"auto"`` (default) -> ``"all_to_all"`` on a CUDA
             ``device``, else ``"p2p"``. Ignored when ``config`` is supplied.
         config: Optional[Conv2dConfig]
-            Configuration and selection strategy of convolutional layer.
+            Configuration and selection strategy of the convolutional layer.
             If None, this will be initialized here.
         """
         super().__init__()
@@ -483,21 +488,19 @@ class DistributedConv2D(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass of distributed convolution.
+        Forward pass of the distributed 2-D convolution.
 
         Parameters
         ----------
         x : torch.Tensor
-            Local input tensor of shape (B, x_in, in_dim).
-        model_group : dist.ProcessGroup, optional
-            Process group for an individual model-parallel instance.
+            Local input tensor of shape
+            ``(N, Cin / n_channel, Hin, Win / n_spatial)``.
 
         Returns
         -------
-        Cij: torch.Tensor
-            Local output tensor of shape (B, out_dim, in_dim).
-            B, out_dim are global values.
-            in_dim is local value.
+        torch.Tensor
+            Local output tensor of shape
+            ``(N, Cout / n_channel, Hout, Wout / n_spatial)``.
         """
         # With no channel split the custom autograd Function buys nothing *unless*
         # a spatially-split conv needs a halo exchange; that case still has to go
@@ -508,7 +511,7 @@ class DistributedConv2D(torch.nn.Module):
         ):
             return self._forward_local(x)
 
-        cij = self.conv2d_apply(
+        out = self.conv2d_apply(
             x,
             self.weight,
             self.bias,
@@ -526,4 +529,4 @@ class DistributedConv2D(torch.nn.Module):
             self.config,
         )
 
-        return cast(torch.Tensor, cij[0])
+        return cast(torch.Tensor, out[0])

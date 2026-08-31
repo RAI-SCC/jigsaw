@@ -1,4 +1,8 @@
-"""Autograd definition for convolutional layers."""
+"""Autograd definition for the distributed 2-D convolution.
+
+The 1-D and 3-D autograd functions (:mod:`jigsaw.modules.conv1d.functional`,
+:mod:`jigsaw.modules.conv3d.functional`) mirror this one.
+"""
 
 from typing import Any, Optional, Protocol, cast
 
@@ -9,7 +13,7 @@ from .config import Conv2dConfig
 
 
 class Conv2dCtx(Protocol):
-    """Protocol for types stored within ctx."""
+    """Protocol for the values stashed on ``ctx`` between forward and backward."""
 
     local_in_width: int
     stride: int | tuple[int, ...]
@@ -24,7 +28,7 @@ class Conv2dCtx(Protocol):
 
 
 class Conv2d(torch.autograd.Function):
-    """Autograd function for distributed 2D convolution.
+    """Autograd function for distributed 2-D convolution.
 
     Handles both the no-halo regime (``stride == kernel_size``) and the halo
     regime (``stride != kernel_size``); the kernels are picked by
@@ -49,14 +53,14 @@ class Conv2d(torch.autograd.Function):
         bayesian: bool,
         config: Conv2dConfig,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass of distributed Conv2d function.
+        """Forward pass of the distributed Conv2d function.
 
-        Returns ``(y, x_full)`` where ``y`` is this rank's output-channel (and,
-        in the halo regime, output-column) slice and ``x_full`` is the input kept
-        for backward: the gathered full-channel input in the no-halo regime, or
+        Returns ``(y, x_aug)`` where ``y`` is this rank's output-channel (and, in
+        the halo regime, output-column) slice and ``x_aug`` is the input kept for
+        backward: the gathered full-channel input in the no-halo regime, or
         additionally halo-padded along the width axis in the halo regime.
         """
-        y, x_full = config.dist_conv2d_fn(
+        y, x_aug = config.dist_conv2d_fn(
             x,
             weight,
             bias,
@@ -68,7 +72,7 @@ class Conv2d(torch.autograd.Function):
             config=config,
         )
 
-        return y, x_full
+        return y, x_aug
 
     @staticmethod
     def setup_context(
@@ -76,19 +80,7 @@ class Conv2d(torch.autograd.Function):
         inputs: Any,
         output: tuple[torch.Tensor, torch.Tensor],
     ) -> None:
-        """
-        Set up context for backward pass.
-
-        Parameters
-        ----------
-        ctx : context object
-            Context to save information for backward.
-        inputs : tuple
-            All inputs passed to forward (x, weight, bias, kernel_size, ...).
-        output : tuple
-            All outputs returned from forward (y, x_full).
-        """
-        # Unpack inputs
+        """Stash tensors and metadata needed for the backward pass."""
         (
             x,
             weight,
@@ -107,14 +99,12 @@ class Conv2d(torch.autograd.Function):
             config,
         ) = inputs
 
-        # Unpack outputs
-        _, x_full = output
+        _, x_aug = output
 
-        # x_full carries no gradient of its own; g_x flows through input 0.
-        ctx.mark_non_differentiable(x_full)
+        # x_aug carries no gradient of its own; g_x flows through input 0.
+        ctx.mark_non_differentiable(x_aug)
 
-        # Save everything needed for backward
-        ctx.save_for_backward(x_full, weight)
+        ctx.save_for_backward(x_aug, weight)
         c = cast(Conv2dCtx, ctx)
         c.spatial_group = spatial_group
         c.channel_group = channel_group
@@ -132,7 +122,7 @@ class Conv2d(torch.autograd.Function):
     def backward(
         ctx: torch.autograd.function.FunctionCtx,
         grad_output: torch.Tensor,
-        grad_x_full: None,  # No gradient for x_full
+        grad_x_aug: None,  # No gradient for x_aug
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -154,20 +144,21 @@ class Conv2d(torch.autograd.Function):
 
         ``g_b`` is the local ``grad_output`` sum (spatial ranks are reduced by
         the parameter hook). ``g_x`` / ``g_w`` are delegated to the regime-
-        specific kernel picked in :class:`Conv2dConfig`: in the no-halo regime each
-        rank holds the full-channel grad wrt input for its own output-channel
-        slice and only the channel group is reduced; in the halo regime the grad
-        is additionally folded back onto the owning spatial ranks.
+        specific kernel picked in :class:`Conv2dConfig`: in the no-halo regime
+        each rank holds the full-channel grad wrt input for its own
+        output-channel slice and only the channel group is reduced; in the halo
+        regime the grad is additionally folded back onto the owning spatial
+        ranks.
         """
         c = cast(Conv2dCtx, ctx)
-        x_full, weight = c.saved_tensors
+        x_aug, weight = c.saved_tensors
         config = c.config
 
         g_b = config.grad_bias(grad_output, c.spatial_group)
 
         g_x, g_w = config.dist_conv2d_backward_fn(
             grad_output,
-            x_full,
+            x_aug,
             weight,
             c.stride,
             c.padding,
@@ -218,7 +209,7 @@ class Conv2d(torch.autograd.Function):
         bayesian: bool,
         config: Conv2dConfig,
     ) -> tuple[torch.Tensor, Optional[int]]:
-        """Handle vmap for Distributed Conv2d."""
+        """Handle vmap for the distributed Conv2d."""
         out = Conv2d.apply(
             x,
             weight,
