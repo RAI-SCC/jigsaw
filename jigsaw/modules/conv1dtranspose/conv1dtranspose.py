@@ -19,7 +19,7 @@ from .functional import Conv1dTranspose
 
 
 def _single(x: int | tuple[int, ...]) -> tuple[int]:
-    """Normalise an ``int`` or length-1 tuple to a 1-element tuple."""
+    """Normalise an ``int`` or 1-element tuple to a 1-element tuple."""
     if isinstance(x, int):
         return (x,)
     return (x[0],)
@@ -41,6 +41,7 @@ class DistributedConv1DTranspose(torch.nn.Module):
     stride: tuple[int]
     padding: str | tuple[int]
     dilation: tuple[int]
+    channel_comm: str
 
     def __init__(
         self,
@@ -62,6 +63,7 @@ class DistributedConv1DTranspose(torch.nn.Module):
         parallelism: int = 4,
         bayesian: bool = False,
         dtype: torch.dtype = torch.float32,
+        channel_comm: str = "auto",
         config: Optional[Conv1dTransposeConfig] = None,
     ):
         """
@@ -101,6 +103,12 @@ class DistributedConv1DTranspose(torch.nn.Module):
             Flag for whether model is vmapped.
         dtype: torch.dtype
             Data type of the convolution.
+        channel_comm: str
+            Channel-parallel forward exchange: ``"all_gather"``, ``"p2p"``
+            (double-buffered batched p2p, overlaps comm/compute, lower memory
+            peak) or ``"all_to_all"`` (same ring over masked all-to-all hops,
+            NCCL only). ``"auto"`` (default) -> ``"all_to_all"`` on a CUDA
+            ``device``, else ``"p2p"``. Ignored when ``config`` is supplied.
         config: Optional[Conv1dTransposeConfig]
             Configuration and selection strategy of the conv transpose layer.
             If None, this will be initialized here.
@@ -117,6 +125,7 @@ class DistributedConv1DTranspose(torch.nn.Module):
             self.padding = _single(padding)
 
         self.groups = groups
+        self.channel_comm = channel_comm
         self.device = device
         self.spatial_group = spatial_group
         self.channel_group = channel_group
@@ -124,6 +133,7 @@ class DistributedConv1DTranspose(torch.nn.Module):
         self.in_channels = in_channels
         # Output channels are sharded across the channel-parallel group.
         self.out_channels = out_channels // channel_group.size()
+        self.dtype = dtype
         self.bayesian = bayesian
 
         # Initialize
@@ -147,17 +157,16 @@ class DistributedConv1DTranspose(torch.nn.Module):
             if bias
             else None
         )
-        self.empty = torch.empty(0, device=self.device, dtype=dtype)
 
         self.config = (
             Conv1dTransposeConfig(
                 self.bayesian,
-                self.spatial_group,
                 self.channel_group,
                 self.bias,
                 self.kernel_size,
                 self.stride,
                 self.device,
+                self.channel_comm,
             )
             if config is None
             else config
@@ -348,12 +357,12 @@ class DistributedConv1DTranspose(torch.nn.Module):
         self.parallelism = to_process_mesh_dict[pm_col_key].size()
         self.config = Conv1dTransposeConfig(
             self.bayesian,
-            self.spatial_group,
             self.channel_group,
             self.bias,
             self.kernel_size,
             self.stride,
             self.device,
+            self.channel_comm,
         )
 
         from_weight_shape_local = self.weight.shape
@@ -434,16 +443,12 @@ class DistributedConv1DTranspose(torch.nn.Module):
             x,
             self.weight,
             self.bias,
-            self.kernel_size,
             self.stride,
             self.padding,
             self.dilation,
             self.in_channels,
             self.spatial_group,
             self.channel_group,
-            self.device,
-            self.parallelism,
-            self.empty,
             self.bayesian,
             self.config,
         )

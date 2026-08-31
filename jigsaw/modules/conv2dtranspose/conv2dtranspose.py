@@ -1,4 +1,10 @@
-"""Module definition of ConvTranspositions."""
+"""Module for the distributed 2-D transpose convolution.
+
+The 1-D and 3-D transpose modules
+(:class:`jigsaw.modules.conv1dtranspose.conv1dtranspose.DistributedConv1DTranspose`,
+:class:`jigsaw.modules.conv3dtranspose.conv3dtranspose.DistributedConv3DTranspose`)
+mirror this one for ``F.conv_transpose1d`` / ``F.conv_transpose3d``.
+"""
 
 from typing import Optional, cast
 
@@ -15,7 +21,7 @@ from .functional import Conv2dTranspose
 
 
 def _pair(x: int | tuple[int, ...]) -> tuple[int, int]:
-    """Convert different types to 2-element tuple."""
+    """Normalise an ``int`` or 1-/2-element tuple to a 2-element tuple."""
     if isinstance(x, int):
         return (x, x)
     if len(x) == 1:
@@ -39,13 +45,14 @@ class DistributedConv2DTranspose(torch.nn.Module):
     stride: tuple[int, int]
     padding: str | tuple[int, int]
     dilation: tuple[int, int]
+    channel_comm: str
 
     def __init__(
         self,
         # --- core ConvTranspose (required) ---
         in_channels: int,
         out_channels: int,
-        kernel_size: tuple[int, ...],
+        kernel_size: int | tuple[int, ...],
         # --- distributed (required) ---
         device: torch.device,
         spatial_group: dist.ProcessGroup,
@@ -53,30 +60,31 @@ class DistributedConv2DTranspose(torch.nn.Module):
         # --- core ConvTranspose (optional, pytorch-standard order) ---
         stride: int | tuple[int, ...] = 1,
         padding: str | tuple[int, ...] = (0,),
-        dilation: tuple[int, ...] = (1,),
+        dilation: int | tuple[int, ...] = 1,
         groups: int = 1,
         bias: bool = True,
         # --- distributed (optional) ---
         parallelism: int = 4,
         bayesian: bool = False,
         dtype: torch.dtype = torch.float32,
+        channel_comm: str = "auto",
         config: Optional[Conv2dTransposeConfig] = None,
     ):
         """
-        Distributed ConvTranspose2D.
+        Distributed 2D transpose convolution.
 
-        input shape of forward pass: (N, Cin, Lin) or (S, N, Cin, Lin)
-        output shape of forward pass: (N, Cout, Lout) or (S, N, Cout, Lout)
+        input shape of forward pass: (N, Cin, Hin, Win)
+        output shape of forward pass: (N, Cout, Hout, Wout)
 
         Parameters
         ----------
         in_channels: int
             Number of in_channels globally.
         out_channels: int
-            Number of in_channels globally.
+            Number of out_channels globally.
         kernel_size: int | tuple[int, ...]
             Kernel size.
-        device: torch.Device
+        device: torch.device
             Device where the computations will be done.
         spatial_group: dist.ProcessGroup
             Process group for domain-parallel ranks.
@@ -84,10 +92,11 @@ class DistributedConv2DTranspose(torch.nn.Module):
             Process group for channel-parallel ranks.
         stride: int | tuple[int, ...]
             Stride in the convolution.
-        padding: int | tuple[int, ...]
-            Padding. Not yet implemented.
+        padding: str | tuple[int, ...]
+            Padding. String padding is unsupported once a halo exchange is
+            needed (``stride != kernel_size``).
         dilation: int | tuple[int, ...]
-            Dilation. Not yet implemented.
+            Dilation.
         groups: int
             Number of groups. Not yet implemented.
         bias: bool
@@ -98,8 +107,14 @@ class DistributedConv2DTranspose(torch.nn.Module):
             Flag for whether model is vmapped.
         dtype: torch.dtype
             Data type of the convolution.
+        channel_comm: str
+            Channel-parallel forward exchange: ``"all_gather"``, ``"p2p"``
+            (double-buffered batched p2p, overlaps comm/compute, lower memory
+            peak) or ``"all_to_all"`` (same ring over masked all-to-all hops,
+            NCCL only). ``"auto"`` (default) -> ``"all_to_all"`` on a CUDA
+            ``device``, else ``"p2p"``. Ignored when ``config`` is supplied.
         config: Optional[Conv2dTransposeConfig]
-            Configuration and selection strategy of conv transpose layer.
+            Configuration and selection strategy of the conv transpose layer.
             If None, this will be initialized here.
         """
         super().__init__()
@@ -114,6 +129,7 @@ class DistributedConv2DTranspose(torch.nn.Module):
             self.padding = _pair(padding)
 
         self.groups = groups
+        self.channel_comm = channel_comm
         self.device = device
         self.spatial_group = spatial_group
         self.channel_group = channel_group
@@ -121,6 +137,7 @@ class DistributedConv2DTranspose(torch.nn.Module):
         self.in_channels = in_channels
         # Output channels are sharded across the channel-parallel group.
         self.out_channels = out_channels // channel_group.size()
+        self.dtype = dtype
         self.bayesian = bayesian
 
         # Initialize
@@ -150,17 +167,16 @@ class DistributedConv2DTranspose(torch.nn.Module):
             if bias
             else None
         )
-        self.empty = torch.empty(0, device=self.device, dtype=dtype)
 
         self.config = (
             Conv2dTransposeConfig(
                 self.bayesian,
-                self.spatial_group,
                 self.channel_group,
                 self.bias,
                 self.kernel_size,
                 self.stride,
                 self.device,
+                self.channel_comm,
             )
             if config is None
             else config
@@ -179,7 +195,7 @@ class DistributedConv2DTranspose(torch.nn.Module):
         self.convTranspose2d_apply = Conv2dTranspose.apply
 
     def get_parameter_count(self) -> int:
-        """Return effective number of local parameters for distributed model."""
+        """Return effective number of local parameters for the module."""
         num_param = (
             0
             if self.bias is None
@@ -200,14 +216,14 @@ class DistributedConv2DTranspose(torch.nn.Module):
         model_kw: str = "model",
     ) -> "DistributedConv2DTranspose":
         """
-        Convert torch.nn.ConvTranspose2D to jigsaw based on given process mesh.
+        Convert a ``torch.nn.ConvTranspose2d`` to jigsaw based on the given mesh.
 
         Parameters
         ----------
         model: torch.nn.ConvTranspose2d
-            Instance of convTranspose2d class that should be converted to jigsaw linear.
+            Instance to convert.
         process_mesh_dict: dict
-            Process mesh dict that comtains row, column, and model process groups.
+            Process mesh dict containing row, column, and model process groups.
         device: torch.device
             Device upon which computations will occur.
         row_kw: str
@@ -215,14 +231,13 @@ class DistributedConv2DTranspose(torch.nn.Module):
         col_kw: str
             Key for accessing col process groups.
         model_kw: str
-            Key for accessing model process groups.
-            Model process group should contain the Union of the row and column groups.
+            Key for accessing model process groups. Should contain the union of
+            the row and column groups.
 
         Returns
         -------
-        model: jigsaw.convolutions.DistributedConv2DTranspose
-            Instance of jigsaw distributed ConvTranspose layer.
-            Jigsaw layer contains weights and biases given from torch.nn.ConvTranspose2d layer.
+        model: DistributedConv2DTranspose
+            The jigsaw layer, carrying the weights and bias of the input layer.
         """
         assert model.out_channels % process_mesh_dict[col_kw].size() == 0, (
             "out_channels is not divisible by process mesh cols"
@@ -231,12 +246,12 @@ class DistributedConv2DTranspose(torch.nn.Module):
         instance = cls(
             in_channels=model.in_channels,
             out_channels=model.out_channels,
-            kernel_size=model.kernel_size,
-            stride=model.stride,
-            padding=model.padding,
-            dilation=model.dilation,
+            kernel_size=cast(tuple[int, ...], model.kernel_size),
+            stride=cast(tuple[int, ...], model.stride),
+            padding=cast(tuple[int, ...], model.padding),
+            dilation=cast(tuple[int, ...], model.dilation),
             groups=model.groups,
-            bias=True if model.bias is not None else False,
+            bias=model.bias is not None,
             spatial_group=process_mesh_dict[row_kw],
             channel_group=process_mesh_dict[col_kw],
             device=device,
@@ -259,9 +274,11 @@ class DistributedConv2DTranspose(torch.nn.Module):
             instance.bias, torch.Tensor
         ):
             bias_size = model.out_channels // process_mesh_dict[col_kw].size()
-            instance.bias.data = model.bias.data[
-                out_rank * bias_size : (out_rank + 1) * bias_size
-            ].clone()
+            instance.bias.data = (
+                model.bias.data[out_rank * bias_size : (out_rank + 1) * bias_size]
+                .clone()
+                .to(device)
+            )
         return instance
 
     def convert_to_torch(
@@ -272,32 +289,33 @@ class DistributedConv2DTranspose(torch.nn.Module):
         model_kw: str = "model",
     ) -> torch.nn.ConvTranspose2d:
         """
-        Convert jigsaw transpose convolution layer to torch.
+        Convert this jigsaw transpose conv layer back to a ``torch.nn.ConvTranspose2d``.
 
         Parameters
         ----------
         process_mesh_dict: dict
-            Process mesh dict that comtains row, column, and model process groups.
+            Process mesh dict containing row, column, and model process groups.
         row_kw: str
             Key for accessing row process groups.
         col_kw: str
             Key for accessing col process groups.
         model_kw: str
             Key for accessing model process groups.
-            Model process group should contain the Union of the row and column groups.
         """
         weights, bias = self.merge_weights(process_mesh_dict, col_kw)
         convtranspose2d = torch.nn.ConvTranspose2d(
-            in_channels=weights.shape[0],
-            out_channels=weights.shape[1] * self.groups,
+            in_channels=cast(int, weights.shape[0]),
+            out_channels=cast(int, weights.shape[1] * self.groups),
             kernel_size=cast(tuple[int, int], self.kernel_size),
-            padding=cast(tuple[int, int], self.padding),  # not supported
-            dilation=cast(tuple[int, int], self.dilation),  # not supported
-            groups=self.groups,  # not supported
-            bias=True if bias is not None else False,
+            stride=cast(tuple[int, int], self.stride),
+            padding=cast(tuple[int, int], self.padding),
+            dilation=cast(tuple[int, int], self.dilation),
+            groups=self.groups,
+            bias=bias is not None,
             padding_mode="zeros",  # hard-coded
         )
-        convtranspose2d.weights.data = weights
+        assert isinstance(weights, torch.Tensor)
+        convtranspose2d.weight.data = weights
         if isinstance(convtranspose2d.bias, torch.Tensor) and isinstance(
             bias, torch.Tensor
         ):
@@ -311,29 +329,25 @@ class DistributedConv2DTranspose(torch.nn.Module):
         col_kw: str = "col",
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        Merge weights from jigsaw model.
-
-        Parameters will be merged in a way such that they can be transplanted into a
-        torch.nn.ConvTranspose2D layer natively.
+        Merge the channel-sharded weights (and bias) into global tensors.
 
         Parameters
         ----------
         process_mesh_dict: dict
-            Process mesh dict that comtains row, column, and model process groups
+            Process mesh dict containing row, column, and model process groups.
         col_kw: str
-            Key for accessing col process groups
+            Key for accessing col process groups.
 
         Returns
         -------
         global_weights: torch.Tensor
             Merged weights.
-        global_bias: Union[torch.Tensor, None]
+        global_bias: Optional[torch.Tensor]
             Merged bias, if it exists.
         """
         global_weights = gather_1d_results(
             self.weight, process_mesh_dict, dim=1, pm_key=col_kw
         )
-
         global_bias = (
             gather_1d_results(self.bias, process_mesh_dict, dim=0, pm_key=col_kw)
             if self.bias is not None
@@ -347,17 +361,18 @@ class DistributedConv2DTranspose(torch.nn.Module):
         to_process_mesh_dict: dict,
         pm_row_key: str = "row",
         pm_col_key: str = "col",
+        pm_model_key: str = "model",
     ) -> None:
-        """Reshard parameters of weights according to a new process group."""
+        """Reshard the (channel-sharded) weight and bias onto a new process mesh."""
         self.parallelism = to_process_mesh_dict[pm_col_key].size()
         self.config = Conv2dTransposeConfig(
             self.bayesian,
-            self.spatial_group,
             self.channel_group,
             self.bias,
             self.kernel_size,
             self.stride,
             self.device,
+            self.channel_comm,
         )
 
         from_weight_shape_local = self.weight.shape
@@ -373,10 +388,9 @@ class DistributedConv2DTranspose(torch.nn.Module):
         )
 
         assert weight_shape_global[1] % to_process_mesh_dict[pm_col_key].size() == 0, (
-            f"global weight shape[1] is {weight_shape_global[1]} which is not divisible by {to_process_mesh_dict[pm_col_key].size()}"
+            f"global weight shape[1] is {weight_shape_global[1]} which is not "
+            f"divisible by {to_process_mesh_dict[pm_col_key].size()}"
         )
-
-        # gather
         global_weights, global_bias = self.merge_weights(
             from_process_mesh_dict, pm_col_key
         )
@@ -390,9 +404,9 @@ class DistributedConv2DTranspose(torch.nn.Module):
                 bias_shape_global // to_process_mesh_dict[pm_col_key].size()
             )
             assert bias_shape_global % to_process_mesh_dict[pm_col_key].size() == 0, (
-                f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh_dict[pm_col_key].size()}"
+                f"global bias shape is {bias_shape_global} which is not "
+                f"divisible by {to_process_mesh_dict[pm_col_key].size()}"
             )
-
             global_bias = gather_1d_results(
                 self.bias, from_process_mesh_dict, dim=0, pm_key=pm_col_key
             )
@@ -406,7 +420,6 @@ class DistributedConv2DTranspose(torch.nn.Module):
                 :, col_rank * col_shard_size : (col_rank + 1) * col_shard_size, ...
             ].contiguous()
         )
-
         del global_weights
 
         if isinstance(global_bias, torch.Tensor):
@@ -423,38 +436,32 @@ class DistributedConv2DTranspose(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass of linear layer (XWT) distributed across two processes.
+        Forward pass of the distributed 2-D transpose convolution.
 
         Parameters
         ----------
         x : torch.Tensor
-            Local input tensor of shape (B, x_in, in_dim).
-        model_group : dist.ProcessGroup, optional
-            Process group for an individual model-parallel instance.
+            Local input tensor of shape
+            ``(N, Cin / n_channel, Hin, Win / n_spatial)``.
 
         Returns
         -------
-        Cij: torch.Tensor
-            Local output tensor of shape (B, out_dim, in_dim).
-            B, out_dim are global values.
-            in_dim is local value.
+        torch.Tensor
+            Local output tensor of shape
+            ``(N, Cout / n_channel, Hout, Wout / n_spatial)``.
         """
-        cij = self.convTranspose2d_apply(
+        out = self.convTranspose2d_apply(
             x,
             self.weight,
             self.bias,
-            self.kernel_size,
             self.stride,
             self.padding,
             self.dilation,
             self.in_channels,
             self.spatial_group,
             self.channel_group,
-            self.device,
-            self.parallelism,
-            self.empty,
             self.bayesian,
             self.config,
         )
-        cij_ = cast(torch.Tensor, cij[0])
-        return cij_
+
+        return cast(torch.Tensor, out[0])

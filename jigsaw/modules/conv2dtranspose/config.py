@@ -1,6 +1,9 @@
-"""Config setup for distributed transpose convolutions.
+"""Config setup for distributed 2-D transpose convolutions.
 
-Mirrors :class:`jigsaw.modules.conv.config.ConvConfig` for ``F.conv_transpose2d``.
+The 1-D and 3-D transpose configs
+(:class:`jigsaw.modules.conv1dtranspose.config.Conv1dTransposeConfig`,
+:class:`jigsaw.modules.conv3dtranspose.config.Conv3dTransposeConfig`) mirror this
+one for ``F.conv_transpose1d`` / ``F.conv_transpose3d``.
 """
 
 from typing import Any, Callable, Optional
@@ -10,11 +13,13 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
+from jigsaw.modules.conv_channel_comm import resolve_channel_comm
+
 from . import distributed_conv2dtranspose as dist_conv
 
 
 class Conv2dTransposeConfig:
-    """Selection strategy for the transpose-conv kernels used in fwd/bwd."""
+    """Selection strategy for the 2-D transpose-conv kernels used in fwd/bwd."""
 
     # type hints
     dist_conv_transpose2d_fn: Callable
@@ -23,20 +28,18 @@ class Conv2dTransposeConfig:
     def __init__(
         self,
         bayesian: bool,
-        spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         bias: Optional[Parameter],
         kernel_size: tuple[int, int],
         stride: tuple[int, int],
         device: torch.device,
+        channel_comm: str = "auto",
     ):
         """
-        Initialize selection strategy for conv transpose.
+        Initialize selection strategy for conv transpose 2d.
 
         bayesian: bool
             Flag for whether the model is bayesian.
-        spatial_group: dist.ProcessGroup
-            Domain-parallel process group.
         channel_group: dist.ProcessGroup
             Tensor-parallel process group.
         bias: torch.Tensor | None
@@ -47,18 +50,25 @@ class Conv2dTransposeConfig:
             Size of the stride.
         device: torch.device
             Device upon which communication occurs.
+        channel_comm: str
+            How the channel-parallel group exchanges input slices in the forward
+            pass: ``"all_gather"`` (one-shot gather), ``"p2p"`` (double-buffered
+            batched p2p that overlaps comm with compute and lowers the memory
+            peak) or ``"all_to_all"`` (same ring over masked all-to-all hops,
+            NCCL only). ``"auto"`` (the default) picks ``"all_to_all"`` on a
+            CUDA ``device`` and ``"p2p"`` otherwise.
         """
+        self.channel_comm = resolve_channel_comm(channel_comm, device)
         self.conv2dtranspose_fn = self._conv_transpose2d_fn_selection(bayesian)
         self.conv_transpose2d_grad_fn = self._conv_transpose2d_grad_fn_selection(
             bayesian
         )
         self.weight_reshape = self._reshape_weights_selection(bayesian)
-        self.grad_bias = self._grad_bias_selection(spatial_group, bias)
-        # ``stride == kernel_size`` (on every axis) makes each rank's raw output
-        # tile the global output with no overlap, so the spatial split needs no
-        # communication. Otherwise neighbouring ranks' raw outputs overlap and
-        # the spatial ranks exchange halos. One kernel covers every group-size
-        # combination in each regime.
+        self.grad_bias = self._grad_bias_selection(bias)
+        # ``stride == kernel_size`` makes each rank's raw output tile the global
+        # output with no overlap, so the spatial split needs no communication.
+        # Otherwise neighbouring ranks' raw outputs overlap and the spatial ranks
+        # exchange halos.
         if all(k == s for k, s in zip(kernel_size, stride)):
             self.dist_conv_transpose2d_fn = dist_conv.conv_transpose2d_nway
             self.dist_conv_transpose2d_backward_fn = (
@@ -96,15 +106,11 @@ class Conv2dTransposeConfig:
         """Broadcast the weights over the vmap (batch) dimension."""
         return w.expand(x.shape[0], *w.shape)
 
-    def _no_reshape_weights(
-        self, w: torch.Tensor, *args: Any, **kwargs: Any
-    ) -> torch.Tensor:
+    def _no_reshape_weights(self, w: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         """No-op."""
         return w
 
-    def _grad_bias_selection(
-        self, spatial_group: dist.ProcessGroup, bias: Optional[torch.Tensor]
-    ) -> Callable:
+    def _grad_bias_selection(self, bias: Optional[torch.Tensor]) -> Callable:
         """Select the grad-bias reducer; the spatial reduction is done by a hook."""
         if bias is None:
             return self._no_bias
@@ -114,10 +120,6 @@ class Conv2dTransposeConfig:
         """No-op."""
         return None
 
-    def _sum_grad_bias(
-        self,
-        grad_output: torch.Tensor,
-        spatial_group: Optional[dist.ProcessGroup] = None,
-    ) -> torch.Tensor:
+    def _sum_grad_bias(self, grad_output: torch.Tensor) -> torch.Tensor:
         """Sum ``grad_output`` over batch and spatial axes, leaving the channels."""
         return grad_output.sum(dim=(-4, -2, -1))

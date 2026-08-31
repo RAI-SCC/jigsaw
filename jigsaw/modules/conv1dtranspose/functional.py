@@ -39,16 +39,12 @@ class Conv1dTranspose(torch.autograd.Function):
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: torch.Tensor,
-        kernel_size: tuple[int, ...],
         stride: tuple[int, ...],
         padding: tuple[int, ...],
         dilation: tuple[int, ...],
         in_channels: int,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
-        device: torch.device,
-        parallelism: int,
-        empty: torch.Tensor,
         bayesian: bool,
         config: Conv1dTransposeConfig,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -83,16 +79,12 @@ class Conv1dTranspose(torch.autograd.Function):
             x,
             weight,
             bias,
-            kernel_size,
             stride,
             padding,
             dilation,
             in_channels,
             spatial_group,
             channel_group,
-            device,
-            parallelism,
-            empty,
             bayesian,
             config,
         ) = inputs
@@ -133,10 +125,6 @@ class Conv1dTranspose(torch.autograd.Function):
         None,
         None,
         None,
-        None,
-        None,
-        None,
-        None,
     ]:
         """Backward pass of the distributed Conv1dTranspose.
 
@@ -148,7 +136,7 @@ class Conv1dTranspose(torch.autograd.Function):
         x_aug, weight = c.saved_tensors
         config = c.config
 
-        g_b = config.grad_bias(grad_output, c.spatial_group)
+        g_b = config.grad_bias(grad_output)
 
         g_x, g_w = config.dist_conv_transpose1d_backward_fn(
             grad_output,
@@ -177,10 +165,6 @@ class Conv1dTranspose(torch.autograd.Function):
             None,
             None,
             None,
-            None,
-            None,
-            None,
-            None,
         )
 
     @staticmethod
@@ -190,16 +174,12 @@ class Conv1dTranspose(torch.autograd.Function):
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: torch.Tensor,
-        kernel_size: int,
         stride: int,
         padding: int,
         dilation: int,
         in_channels: int,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
-        device: torch.device,
-        parallelism: int,
-        empty: torch.Tensor,
         bayesian: bool,
         config: Conv1dTransposeConfig,
     ) -> tuple[torch.Tensor, Optional[int]]:
@@ -208,16 +188,12 @@ class Conv1dTranspose(torch.autograd.Function):
             x,
             weight,
             bias,
-            kernel_size,
             stride,
             padding,
             dilation,
             in_channels,
             spatial_group,
             channel_group,
-            device,
-            parallelism,
-            empty,
             bayesian,
             config,
         )
