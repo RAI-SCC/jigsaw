@@ -497,6 +497,108 @@ class TestConv2dParallel:
         )
 
 
+class TestConv2dChannelGroupOne:
+    """``channel_group.size() == 1`` bypasses the custom kernel for native conv2d."""
+
+    @pytest.mark.dist(4)
+    def test_fully_local_allows_arbitrary_hyperparams(
+        self, device: torch.device, process_mesh_dict_4x1x1: dict
+    ) -> None:
+        """No channel *and* no spatial split: any stride / padding / dilation.
+
+        Previously the custom kernel rejected ``stride != kernel_size``
+        unconditionally; with both groups size one it now runs plain autograd
+        ``conv2d`` and must match a single-process reference in fwd and bwd.
+        """
+        mesh = process_mesh_dict_4x1x1
+        row, col = mesh["row"], mesh["col"]
+        assert row.size() == 1 and col.size() == 1
+
+        in_ch, out_ch, k = 6, 8, 3
+        conv2d = conv.DistributedConv2D(
+            in_ch,
+            out_ch,
+            k,
+            device=device,
+            spatial_group=row,
+            channel_group=col,
+            stride=2,
+            padding=1,
+            dilation=2,
+            bias=True,
+            parallelism=mesh["model"].size(),
+            bayesian=False,
+            dtype=torch.float32,
+        ).to(device)
+
+        torch.manual_seed(dist.get_rank())
+        x = torch.randn(2, in_ch, 15, 15, device=device)
+
+        w = conv2d.weight.detach().clone().requires_grad_(True)
+        b = conv2d.bias.detach().clone().requires_grad_(True)
+        x_ref = x.clone().requires_grad_(True)
+        y_ref = F.conv2d(x_ref, w, b, stride=2, padding=1, dilation=2)
+
+        x_dist = x.clone().requires_grad_(True)
+        y = conv2d(x_dist)
+        assert torch.allclose(y, y_ref, atol=1e-5)
+
+        y.backward(torch.ones_like(y))
+        y_ref.backward(torch.ones_like(y_ref))
+        assert torch.allclose(x_dist.grad, x_ref.grad, atol=1e-5)
+        assert torch.allclose(conv2d.weight.grad, w.grad, atol=1e-5)
+        assert torch.allclose(conv2d.bias.grad, b.grad, atol=1e-5)
+
+    @pytest.mark.dist(4)
+    def test_tiling_conv_matches_single_process(
+        self, device: torch.device, process_mesh_dict_4x1: dict
+    ) -> None:
+        """Split spatial group, no channel split: the no-halo path still works."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_4x1,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize(
+        "stride, padding, dilation",
+        [(2, (0,), 1), (4, (1,), 1), (4, (0,), 2)],
+    )
+    def test_split_spatial_rejects_non_tiling(
+        self,
+        device: torch.device,
+        process_mesh_dict_4x1: dict,
+        stride: int,
+        padding: tuple,
+        dilation: int,
+    ) -> None:
+        """A split spatial group needs an exact tiling; anything else is rejected."""
+        mesh = process_mesh_dict_4x1
+        conv2d = conv.DistributedConv2D(
+            8,
+            12,
+            4,
+            device=device,
+            spatial_group=mesh["row"],
+            channel_group=mesh["col"],
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            bias=True,
+            parallelism=mesh["model"].size(),
+            bayesian=False,
+            dtype=torch.float32,
+        ).to(device)
+        x = torch.randn(2, 8, 16, 16 // mesh["row"].size(), device=device)
+        with pytest.raises(NotImplementedError):
+            conv2d(x)
+
+
 class TestConv2dTranspose:
     def test_param_init_conv2d_transpose(
         self, device: torch.device, process_mesh_dict_2x2: dict
