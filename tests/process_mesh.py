@@ -18,6 +18,18 @@ def make_process_mesh(
     if -1 in mesh_shape:
         index = mesh_shape.index(-1)
         mesh_shape[index] = world_size // -torch.prod(torch.tensor(mesh_shape)).item()
+
+    # ``init_device_mesh`` happily builds a mesh that only spans the first
+    # ``prod(mesh_shape)`` ranks when the world is larger; the ranks left out
+    # then blow up in ``get_group`` while the rest block forever in the first
+    # collective. Fail loudly and identically on every rank instead.
+    mesh_numel = math.prod(mesh_shape)
+    assert mesh_numel == world_size, (
+        f"mesh_shape {mesh_shape} needs exactly {mesh_numel} ranks but the world "
+        f"has {world_size}; launch with -np {mesh_numel} or mark the test "
+        f"@pytest.mark.dist({mesh_numel})."
+    )
+
     row_col_mesh = dist.device_mesh.init_device_mesh(
         device_type=device_type,
         mesh_shape=tuple(mesh_shape),
@@ -68,6 +80,22 @@ def process_mesh_dict_1x4(device: torch.Tensor) -> dict:
     """Return process mesh."""
     return make_process_mesh(
         device_type=device.type, mesh_shape=[1, 4], mesh_dim_names=["row", "col"]
+    )
+
+
+@pytest.fixture(scope="session")
+def process_mesh_dict_2x3(device: torch.Tensor) -> dict:
+    """Return a 2 (spatial) x 3 (channel) process mesh (needs 6 ranks)."""
+    return make_process_mesh(
+        device_type=device.type, mesh_shape=[2, 3], mesh_dim_names=["row", "col"]
+    )
+
+
+@pytest.fixture(scope="session")
+def process_mesh_dict_3x2(device: torch.Tensor) -> dict:
+    """Return a 3 (spatial) x 2 (channel) process mesh (needs 6 ranks)."""
+    return make_process_mesh(
+        device_type=device.type, mesh_shape=[3, 2], mesh_dim_names=["row", "col"]
     )
 
 
@@ -128,4 +156,14 @@ def process_mesh_dict_2x4(device: torch.Tensor) -> dict:
         device_type=device.type,
         mesh_shape=[2, 4],
         mesh_dim_names=["internode", "intranode"],
+    )
+
+
+@pytest.fixture(scope="session")
+def process_mesh_dict_2x4_rowcol(device: torch.Tensor) -> dict:
+    """Return a 2 (spatial) x 4 (channel) process mesh keyed as row/col."""
+    return make_process_mesh(
+        device_type=device.type,
+        mesh_shape=[2, 4],
+        mesh_dim_names=["row", "col"],
     )
