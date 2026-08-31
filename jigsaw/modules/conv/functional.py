@@ -68,7 +68,7 @@ class Conv2d(torch.autograd.Function):
             config=config,
         )
 
-        return y, x_full
+        return y, x_aug
 
     @staticmethod
     def setup_context(

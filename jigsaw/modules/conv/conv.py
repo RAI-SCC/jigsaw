@@ -499,7 +499,13 @@ class DistributedConv2D(torch.nn.Module):
             B, out_dim are global values.
             in_dim is local value.
         """
-        if self.channel_group.size() == 1:
+        # With no channel split the custom autograd Function buys nothing *unless*
+        # a spatially-split conv needs a halo exchange; that case still has to go
+        # through ``conv2d_apply`` (``conv2d_halo_nway`` handles a channel group
+        # of one as the identity gather).
+        if self.channel_group.size() == 1 and not (
+            self.spatial_group.size() > 1 and self._needs_halo()
+        ):
             return self._forward_local(x)
 
         cij = self.conv2d_apply(
