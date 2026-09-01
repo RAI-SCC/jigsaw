@@ -1,3 +1,3 @@
-"""Expose the distributed 3-D convolution to the public interface."""
+"""Back-compat shim: the distributed 3-D convolution now lives in ``jigsaw.modules.conv``."""
 
-from .conv3d import DistributedConv3D as DistributedConv3D
+from jigsaw.modules.conv import DistributedConv3D as DistributedConv3D
