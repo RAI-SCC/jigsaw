@@ -477,6 +477,61 @@ class DistributedConv2DTranspose(torch.nn.Module):
             )
             del global_bias
 
+    def _needs_halo(self) -> bool:
+        """Whether a spatially-split transpose conv would need neighbour halos.
+
+        With ``stride == kernel_size``, no padding and no dilation every spatial
+        rank's raw output tiles the global output with no overlap, so the split
+        needs no communication. Anything else does.
+        """
+        zero_pad = self.padding == (0, 0) or self.padding == "valid"
+        return not (
+            self.kernel_size == self.stride and zero_pad and self.dilation == (1, 1)
+        )
+
+    def _forward_local(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass when ``channel_group.size() == 1`` (no channel comm).
+
+        Nothing has to be gathered over the channel dimension, so the custom
+        autograd Function buys nothing: native ``conv_transpose2d`` plus the
+        spatial-group gradient hooks on ``weight`` / ``bias`` produce the same
+        result. This fast path only covers the exact-tiling case: no split
+        spatial axis (any ``stride`` / ``padding`` / ``dilation``), or a split
+        whose raw outputs tile with no overlap (``stride == kernel_size``, no
+        padding / dilation). Halo-needing splits are handled too, but via
+        ``convTranspose2d_apply`` -- ``forward`` routes them there and they
+        should never reach here.
+
+        The guard below is therefore defensive: running native
+        ``conv_transpose2d`` on a local shard that needs a halo would silently
+        give wrong values at the shard seams, so turn that into a loud error
+        instead.
+        """
+        if self._spatial_sync_groups and self._needs_halo():
+            raise NotImplementedError(
+                "_forward_local reached with a halo-needing spatial split; "
+                "forward() should have routed this through convTranspose2d_apply."
+            )
+        conv_transpose2d = self.config.conv2dtranspose_fn
+        if self.bias is not None:
+            y = conv_transpose2d(
+                x,
+                self.weight,
+                self.bias,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
+            )
+        else:
+            y = conv_transpose2d(
+                x,
+                self.weight,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
+            )
+        return cast(torch.Tensor, y)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of the distributed 2-D transpose convolution.
@@ -493,6 +548,18 @@ class DistributedConv2DTranspose(torch.nn.Module):
             Local output tensor of shape
             ``(N, Cout / n_channel, Hout, Wout / n_spatial)``.
         """
+        # With no channel split the custom autograd Function buys nothing *unless*
+        # a spatially-split transpose conv needs a halo exchange; that case still
+        # has to go through ``convTranspose2d_apply`` (the halo kernel handles a
+        # channel group of one as the identity gather). ``_spatial_sync_groups``
+        # is non-empty iff some spatial axis is really split -- checking
+        # ``spatial_group`` alone would miss a height-only split (its width group
+        # has size 1).
+        if self.channel_group.size() == 1 and not (
+            self._spatial_sync_groups and self._needs_halo()
+        ):
+            return self._forward_local(x)
+
         out = self.convTranspose2d_apply(
             x,
             self.weight,

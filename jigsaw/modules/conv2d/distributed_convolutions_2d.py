@@ -3,9 +3,9 @@
 The 1-D and 3-D implementations
 (:mod:`jigsaw.modules.conv1d.distributed_convolutions_1d`,
 :mod:`jigsaw.modules.conv3d.distributed_convolutions_3d`) mirror this one.
-Input is ``(N, C, H, W)``; the domain is split along the width axis (the last
-axis) across the spatial group, and the channels are split across the channel
-group.
+Input is ``(N, C, H, W)``; the domain is split across the spatial group(s) (the
+width axis only by default, optionally height *and* width) and the channels are
+split across the channel group.
 
 Two regimes are selected by :class:`~jigsaw.modules.conv2d.config.Conv2dConfig`:
 

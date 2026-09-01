@@ -186,6 +186,34 @@ def _conv3d_transpose_multi_spatial_reference_check(
 class TestConv3dTransposeMultiSpatial:
     """Distributed Conv3dTranspose with the domain split along several spatial axes."""
 
+    @pytest.mark.dist(2)
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"), MULTI_CASES_3D, ids=MULTI_IDS_3D
+    )
+    def test_d_split_only_arbitrary_params(
+        self,
+        device: torch.device,
+        spatial_mesh_2x1x1_dhw: dict,
+        kernel: Triple,
+        stride: Triple,
+        padding: Triple,
+        dilation: Triple,
+    ) -> None:
+        """Only one of the three axes split: 2 (depth), height/width not split."""
+        _conv3d_transpose_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x1x1_dhw,
+            in_channels=6,
+            out_channels=12,
+            kernel_size=kernel,
+            depth=16,
+            height=8,
+            width=8,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+        )
+
     @pytest.mark.dist(4)
     @pytest.mark.parametrize(
         ("kernel", "stride", "padding", "dilation"), MULTI_CASES_3D, ids=MULTI_IDS_3D

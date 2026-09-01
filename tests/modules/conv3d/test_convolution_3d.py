@@ -842,6 +842,36 @@ class TestConv3dSpatialGridSweep:
     so the domain shards evenly on every axis.
     """
 
+    @pytest.mark.dist(2)
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"),
+        GRID_SWEEP_CASES_3D,
+        ids=GRID_SWEEP_IDS_3D,
+    )
+    def test_split_2x1x1(
+        self,
+        device: torch.device,
+        spatial_mesh_2x1x1_dhw: dict,
+        kernel: Triple,
+        stride: Triple,
+        padding: Triple,
+        dilation: Triple,
+    ) -> None:
+        """Only one of the three axes split: 2 (depth), height/width not split."""
+        _conv3d_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x1x1_dhw,
+            in_channels=6,
+            out_channels=12,
+            kernel_size=kernel,
+            depth=16,
+            height=16,
+            width=24,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+        )
+
     @pytest.mark.dist(4)
     @pytest.mark.parametrize(
         ("kernel", "stride", "padding", "dilation"),

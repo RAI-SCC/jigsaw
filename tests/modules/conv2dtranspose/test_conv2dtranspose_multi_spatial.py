@@ -279,6 +279,38 @@ class TestConv2dTransposeMultiSpatial:
             dilation=2,
         )
 
+    @pytest.mark.dist(2)
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"), MULTI_CASES_2D, ids=MULTI_IDS_2D
+    )
+    def test_one_axis_split_no_channel(
+        self,
+        device: torch.device,
+        spatial_mesh_2x1_hw: dict,
+        kernel: Pair,
+        stride: Pair,
+        padding: Pair,
+        dilation: Pair,
+    ) -> None:
+        """Only the height axis split (width group size 1), no channel split.
+
+        Exercises the degenerate ``spatial_groups`` grid ``(group_h, size-1)``
+        across every kernel/stride/padding/dilation combo, including the
+        ``channel_group.size() == 1`` ``_forward_local`` fast path.
+        """
+        _conv2d_transpose_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x1_hw,
+            in_channels=6,
+            out_channels=12,
+            kernel_size=kernel,
+            height=24,
+            width=12,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+        )
+
     @pytest.mark.dist(4)
     def test_one_axis_split_plus_channel(
         self, device: torch.device, spatial_mesh_2x1_hw_x2c: dict

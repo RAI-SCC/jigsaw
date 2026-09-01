@@ -7,10 +7,10 @@ import torch
 from jigsaw.modules import (
     attention,
     conv1d,
-    conv2d,
-    conv3d,
     conv1dtranspose,
+    conv2d,
     conv2dtranspose,
+    conv3d,
     conv3dtranspose,
     linear,
     roll,

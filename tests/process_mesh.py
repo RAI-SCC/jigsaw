@@ -146,6 +146,12 @@ def spatial_mesh_2x2_hw_x2c(device: torch.Tensor) -> dict:
 
 
 @pytest.fixture(scope="session")
+def spatial_mesh_2x1x1_dhw(device: torch.Tensor) -> dict:
+    """conv3d: depth-only 2-way split, height and width not split (world 2)."""
+    return make_multi_spatial_mesh(device.type, ["sd", "sh", "sw"], [2, 1, 1], 1)
+
+
+@pytest.fixture(scope="session")
 def spatial_mesh_2x2x1_dhw(device: torch.Tensor) -> dict:
     """conv3d: 2-way depth x 2-way height, width not split (world 4)."""
     return make_multi_spatial_mesh(device.type, ["sd", "sh", "sw"], [2, 2, 1], 1)
