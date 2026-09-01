@@ -3,13 +3,23 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-import jigsaw.modules.conv2dtranspose as conv2dtranspose
+import jigsaw.modules.convolution as convolution
 from jigsaw.utils_aggregate import gather_1d_results, gather_results_as_list
 from tests.process_mesh import *
 
 pytestmark = [pytest.mark.dist_required]
 
+# Every channel-parallel exchange strategy; "all_to_all" needs a backend with
+# all-to-all support and is skipped on gloo (see _skip_if_unsupported).
+CHANNEL_COMMS = ["all_gather", "p2p", "all_to_all"]
+
 Pair = int | tuple[int, int]
+
+
+def _skip_if_unsupported(channel_comm: str) -> None:
+    """Skip when the current backend cannot run ``channel_comm``."""
+    if channel_comm == "all_to_all" and dist.get_backend() == "gloo":
+        pytest.skip("all_to_all channel comm needs a non-gloo backend")
 
 
 def _pair(value: Pair) -> tuple[int, int]:
@@ -34,7 +44,9 @@ ARBITRARY_CASES = [
     ((3, 3), (3, 3), (0, 0), (1, 2)),
     (3, 2, 1, 1),
 ]
-ARBITRARY_IDS = [f"k{k}_s{s}_p{p}_d{d}".replace(" ", "") for (k, s, p, d) in ARBITRARY_CASES]
+ARBITRARY_IDS = [
+    f"k{k}_s{s}_p{p}_d{d}".replace(" ", "") for (k, s, p, d) in ARBITRARY_CASES
+]
 
 
 def _conv2d_transpose_reference_check(
@@ -49,6 +61,7 @@ def _conv2d_transpose_reference_check(
     stride: Pair | None = None,
     padding: Pair = 0,
     dilation: Pair = 1,
+    channel_comm: str = "all_gather",
 ) -> None:
     """Compare ``DistributedConv2DTranspose`` against a single-process conv_transpose2d.
 
@@ -77,7 +90,7 @@ def _conv2d_transpose_reference_check(
         batch, in_channels // n_channel, height, width // n_spatial, device=device
     )
 
-    conv = conv2dtranspose.DistributedConv2DTranspose(
+    conv = convolution.DistributedConv2DTranspose(
         in_channels,
         out_channels,
         kernel_size,
@@ -89,9 +102,9 @@ def _conv2d_transpose_reference_check(
         dilation=dilation,
         groups=1,
         bias=True,
-        parallelism=model_group.size(),
         bayesian=False,
         dtype=torch.float32,
+        channel_comm=channel_comm,
     ).to(device)
 
     # --- reconstruct the equivalent global transpose convolution -----------
@@ -159,6 +172,11 @@ def _conv2d_transpose_reference_check(
 
 
 class TestConv2dTranspose:
+    # Every test here builds a 2x2 mesh, so it needs exactly 4 ranks. Without
+    # this marker an 8-rank run would build a mesh over ranks 0-3 only and
+    # deadlock the survivors in the first collective.
+    pytestmark = pytest.mark.dist(4)
+
     def test_param_init(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
@@ -169,7 +187,7 @@ class TestConv2dTranspose:
             process_mesh_dict_2x2["row"].size(),
             process_mesh_dict_2x2["col"].size(),
         )
-        conv = conv2dtranspose.DistributedConv2DTranspose(
+        conv = convolution.DistributedConv2DTranspose(
             6,
             12,
             4,
@@ -181,7 +199,6 @@ class TestConv2dTranspose:
             dilation=1,
             groups=1,
             bias=True,
-            parallelism=4,
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -192,6 +209,7 @@ class TestConv2dTranspose:
                 weights_gathered[i], weights_gathered[i + col_comm_size], atol=1e-5
             )
 
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     @pytest.mark.parametrize(
         ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
     )
@@ -203,8 +221,10 @@ class TestConv2dTranspose:
         stride: Pair,
         padding: Pair,
         dilation: Pair,
+        channel_comm: str,
     ) -> None:
-        """2x2 mesh: arbitrary kernel/stride/padding/dilation, incl. asymmetric."""
+        """2x2 mesh: arbitrary kernel/stride/padding/dilation x channel_comm."""
+        _skip_if_unsupported(channel_comm)
         _conv2d_transpose_reference_check(
             device,
             process_mesh_dict_2x2,
@@ -216,13 +236,69 @@ class TestConv2dTranspose:
             stride=stride,
             padding=padding,
             dilation=dilation,
+            channel_comm=channel_comm,
         )
+
+    def test_channel_comm_auto_defaults_by_device(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """``channel_comm='auto'`` resolves from the device on the config."""
+        conv = convolution.DistributedConv2DTranspose(
+            8,
+            12,
+            4,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=4,
+        ).to(device)
+        expected = "all_to_all" if device.type == "cuda" else "p2p"
+        assert conv.config.channel_comm == expected
+
+    def test_unknown_channel_comm_rejected(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """An unrecognised ``channel_comm`` name fails fast at construction."""
+        with pytest.raises(ValueError):
+            convolution.DistributedConv2DTranspose(
+                8,
+                12,
+                4,
+                device=device,
+                spatial_group=process_mesh_dict_2x2["row"],
+                channel_group=process_mesh_dict_2x2["col"],
+                stride=4,
+                channel_comm="alltoall",
+            ).to(device)
+
+    def test_alltoall_rejected_on_gloo(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
+        if dist.get_backend() != "gloo":
+            pytest.skip("only meaningful on the gloo backend")
+        conv = convolution.DistributedConv2DTranspose(
+            8,
+            12,
+            4,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=4,
+            padding=(0,),
+            dilation=1,
+            bias=True,
+            channel_comm="all_to_all",
+        ).to(device)
+        x = torch.randn(2, 4, 16, 16, device=device)
+        with pytest.raises(RuntimeError, match="all-to-all"):
+            conv(x)
 
     def test_string_padding_rejected_with_halo(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """String padding is not supported once a halo exchange is needed."""
-        conv = conv2dtranspose.DistributedConv2DTranspose(
+        conv = convolution.DistributedConv2DTranspose(
             8,
             12,
             4,
@@ -234,7 +310,6 @@ class TestConv2dTranspose:
             dilation=1,
             groups=1,
             bias=True,
-            parallelism=process_mesh_dict_2x2["model"].size(),
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -247,6 +322,7 @@ class TestConv2dTransposeParallel:
     """DistributedConvTranspose2d across arbitrary spatial and channel sizes."""
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     @pytest.mark.parametrize(
         ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
     )
@@ -258,8 +334,10 @@ class TestConv2dTransposeParallel:
         stride: Pair,
         padding: Pair,
         dilation: Pair,
+        channel_comm: str,
     ) -> None:
         """Pure channel parallelism: every param combo works (no spatial split)."""
+        _skip_if_unsupported(channel_comm)
         _conv2d_transpose_reference_check(
             device,
             process_mesh_dict_1x4,
@@ -271,9 +349,11 @@ class TestConv2dTransposeParallel:
             stride=stride,
             padding=padding,
             dilation=dilation,
+            channel_comm=channel_comm,
         )
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     @pytest.mark.parametrize(
         ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
     )
@@ -285,8 +365,14 @@ class TestConv2dTransposeParallel:
         stride: Pair,
         padding: Pair,
         dilation: Pair,
+        channel_comm: str,
     ) -> None:
-        """Pure 4-way spatial split with arbitrary params (real halo exchange)."""
+        """Pure 4-way spatial split with arbitrary params (real halo exchange).
+
+        The channel group has size 1 here, so ``channel_comm`` exercises the
+        single-rank short-circuit of each strategy.
+        """
+        _skip_if_unsupported(channel_comm)
         _conv2d_transpose_reference_check(
             device,
             process_mesh_dict_4x1,
@@ -298,9 +384,11 @@ class TestConv2dTransposeParallel:
             stride=stride,
             padding=padding,
             dilation=dilation,
+            channel_comm=channel_comm,
         )
 
     @pytest.mark.dist(8)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
     @pytest.mark.parametrize(
         ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
     )
@@ -312,8 +400,10 @@ class TestConv2dTransposeParallel:
         stride: Pair,
         padding: Pair,
         dilation: Pair,
+        channel_comm: str,
     ) -> None:
-        """2-way spatial x 4-way channel with arbitrary params."""
+        """2-way spatial x 4-way channel with arbitrary params x channel_comm."""
+        _skip_if_unsupported(channel_comm)
         _conv2d_transpose_reference_check(
             device,
             process_mesh_dict_2x4_rowcol,
@@ -325,4 +415,5 @@ class TestConv2dTransposeParallel:
             stride=stride,
             padding=padding,
             dilation=dilation,
+            channel_comm=channel_comm,
         )

@@ -3,7 +3,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-import jigsaw.modules.conv1d as conv1d
+import jigsaw.modules.convolution as convolution
 from jigsaw.utils_aggregate import gather_1d_results, gather_results_as_list
 from tests.process_mesh import *
 
@@ -60,6 +60,7 @@ def _conv1d_reference_check(
     padding: Pair = 0,
     dilation: Pair = 1,
     channel_comm: str = "all_gather",
+    spatial_group_as_sequence: bool = False,
 ) -> None:
     """Compare a distributed ``DistributedConv1D`` against a single-process conv1d.
 
@@ -69,6 +70,10 @@ def _conv1d_reference_check(
     convolution from the sharded weight, bias and input, runs forward and
     backward on both, and checks the output plus every gradient (input, weight,
     bias) after gathering the distributed shards.
+
+    ``spatial_group_as_sequence`` passes the domain group as a 1-element list
+    ``[row_group]`` instead of a bare group, exercising the plural
+    ``spatial_groups`` code path (the two forms must be equivalent for 1-D).
     """
     row_group, col_group = mesh["row"], mesh["col"]
     n_spatial, n_channel = row_group.size(), col_group.size()
@@ -83,19 +88,18 @@ def _conv1d_reference_check(
         batch, in_channels // n_channel, length // n_spatial, device=device
     )
 
-    conv = conv1d.DistributedConv1D(
+    conv = convolution.DistributedConv1D(
         in_channels,
         out_channels,
         kernel_size,
         device=device,
-        spatial_group=row_group,
+        spatial_group=[row_group] if spatial_group_as_sequence else row_group,
         channel_group=col_group,
         stride=stride,
         padding=padding,
         dilation=dilation,
         groups=1,
         bias=True,
-        parallelism=model_group.size(),
         bayesian=False,
         dtype=torch.float32,
         channel_comm=channel_comm,
@@ -179,7 +183,7 @@ class TestConv1d:
             process_mesh_dict_2x2["row"].size(),
             process_mesh_dict_2x2["col"].size(),
         )
-        conv = conv1d.DistributedConv1D(
+        conv = convolution.DistributedConv1D(
             5,
             10,
             4,
@@ -191,7 +195,6 @@ class TestConv1d:
             dilation=1,
             groups=1,
             bias=True,
-            parallelism=4,
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -300,7 +303,7 @@ class TestConv1d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """String padding is not supported once a halo exchange is needed."""
-        conv = conv1d.DistributedConv1D(
+        conv = convolution.DistributedConv1D(
             8,
             12,
             4,
@@ -312,7 +315,6 @@ class TestConv1d:
             dilation=1,
             groups=1,
             bias=True,
-            parallelism=process_mesh_dict_2x2["model"].size(),
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -324,7 +326,7 @@ class TestConv1d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """``channel_comm='auto'`` resolves from the device on the config."""
-        conv = conv1d.DistributedConv1D(
+        conv = convolution.DistributedConv1D(
             8,
             12,
             4,
@@ -341,7 +343,7 @@ class TestConv1d:
     ) -> None:
         """An unrecognised ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
-            conv1d.DistributedConv1D(
+            convolution.DistributedConv1D(
                 8,
                 12,
                 4,
@@ -358,7 +360,7 @@ class TestConv1d:
         """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
         if dist.get_backend() != "gloo":
             pytest.skip("only meaningful on the gloo backend")
-        conv = conv1d.DistributedConv1D(
+        conv = convolution.DistributedConv1D(
             8,
             12,
             4,
@@ -369,7 +371,6 @@ class TestConv1d:
             padding=(0,),
             dilation=1,
             bias=True,
-            parallelism=process_mesh_dict_2x2["model"].size(),
             channel_comm="all_to_all",
         ).to(device)
         x = torch.randn(2, 4, 16, device=device)
@@ -582,4 +583,99 @@ class TestConv1dParallel:
             padding=padding,
             dilation=dilation,
             channel_comm=channel_comm,
+        )
+
+
+class TestConv1dSpatialGroupsSequence:
+    """The ``spatial_group=[group_l]`` sequence form must match the bare form.
+
+    1-D has a single spatial axis, so the plural ``spatial_groups`` API only ever
+    carries one entry; these cases pin that it behaves identically to passing a
+    bare group across every mesh shape and kernel/stride/padding/dilation combo.
+    """
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize(
+        "mesh_fx", ["process_mesh_dict_2x2", "process_mesh_dict_4x1"]
+    )
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
+    )
+    def test_sequence_form_matches_bare(
+        self,
+        request: pytest.FixtureRequest,
+        device: torch.device,
+        mesh_fx: str,
+        kernel: int,
+        stride: int,
+        padding: int,
+        dilation: int,
+        channel_comm: str,
+    ) -> None:
+        """2x2 (spatial+channel) and 4x1 (pure spatial): sequence form parity."""
+        _skip_if_unsupported(channel_comm)
+        _conv1d_reference_check(
+            device,
+            request.getfixturevalue(mesh_fx),
+            in_channels=8,
+            out_channels=12,
+            kernel_size=kernel,
+            length=48,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            channel_comm=channel_comm,
+            spatial_group_as_sequence=True,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    def test_sequence_form_pure_channel(
+        self, device: torch.device, process_mesh_dict_1x4: dict, channel_comm: str
+    ) -> None:
+        """1x4: no spatial split, ``spatial_groups`` is ``(group_size_1,)``."""
+        _skip_if_unsupported(channel_comm)
+        _conv1d_reference_check(
+            device,
+            process_mesh_dict_1x4,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=3,
+            length=32,
+            stride=2,
+            padding=1,
+            channel_comm=channel_comm,
+            spatial_group_as_sequence=True,
+        )
+
+    @pytest.mark.dist(8)
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"), ARBITRARY_CASES, ids=ARBITRARY_IDS
+    )
+    def test_sequence_form_2x4(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x4_rowcol: dict,
+        kernel: int,
+        stride: int,
+        padding: int,
+        dilation: int,
+        channel_comm: str,
+    ) -> None:
+        """2-way spatial x 4-way channel, sequence form, arbitrary params."""
+        _skip_if_unsupported(channel_comm)
+        _conv1d_reference_check(
+            device,
+            process_mesh_dict_2x4_rowcol,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=kernel,
+            length=24,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            channel_comm=channel_comm,
+            spatial_group_as_sequence=True,
         )

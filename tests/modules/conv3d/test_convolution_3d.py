@@ -3,7 +3,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-import jigsaw.modules.conv3d as conv3d
+import jigsaw.modules.convolution as convolution
 from jigsaw.utils_aggregate import gather_1d_results, gather_results_as_list
 from tests.process_mesh import *
 
@@ -97,7 +97,7 @@ def _conv3d_reference_check(
         device=device,
     )
 
-    conv = conv3d.DistributedConv3D(
+    conv = convolution.DistributedConv3D(
         in_channels,
         out_channels,
         kernel_size,
@@ -109,7 +109,6 @@ def _conv3d_reference_check(
         dilation=dilation,
         groups=1,
         bias=True,
-        parallelism=model_group.size(),
         bayesian=False,
         dtype=torch.float32,
         channel_comm=channel_comm,
@@ -196,7 +195,7 @@ class TestConv3d:
             process_mesh_dict_2x2["row"].size(),
             process_mesh_dict_2x2["col"].size(),
         )
-        conv = conv3d.DistributedConv3D(
+        conv = convolution.DistributedConv3D(
             6,
             12,
             2,
@@ -208,7 +207,6 @@ class TestConv3d:
             dilation=1,
             groups=1,
             bias=True,
-            parallelism=4,
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -290,7 +288,7 @@ class TestConv3d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """String padding is not supported once a halo exchange is needed."""
-        conv = conv3d.DistributedConv3D(
+        conv = convolution.DistributedConv3D(
             8,
             12,
             3,
@@ -302,7 +300,6 @@ class TestConv3d:
             dilation=1,
             groups=1,
             bias=True,
-            parallelism=process_mesh_dict_2x2["model"].size(),
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -314,7 +311,7 @@ class TestConv3d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """``channel_comm='auto'`` resolves from the device on the config."""
-        conv = conv3d.DistributedConv3D(
+        conv = convolution.DistributedConv3D(
             8,
             12,
             2,
@@ -331,7 +328,7 @@ class TestConv3d:
     ) -> None:
         """An unrecognised ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
-            conv3d.DistributedConv3D(
+            convolution.DistributedConv3D(
                 8,
                 12,
                 2,
@@ -348,7 +345,7 @@ class TestConv3d:
         """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
         if dist.get_backend() != "gloo":
             pytest.skip("only meaningful on the gloo backend")
-        conv = conv3d.DistributedConv3D(
+        conv = convolution.DistributedConv3D(
             8,
             12,
             2,
@@ -359,7 +356,6 @@ class TestConv3d:
             padding=(0,),
             dilation=1,
             bias=True,
-            parallelism=process_mesh_dict_2x2["model"].size(),
             channel_comm="all_to_all",
         ).to(device)
         x = torch.randn(2, 4, 6, 6, 8, device=device)
@@ -521,7 +517,7 @@ def _conv3d_multi_spatial_reference_check(
         device=device,
     )
 
-    conv = conv3d.DistributedConv3D(
+    conv = convolution.DistributedConv3D(
         in_channels,
         out_channels,
         kernel_size,
@@ -533,7 +529,6 @@ def _conv3d_multi_spatial_reference_check(
         dilation=dilation,
         groups=1,
         bias=True,
-        parallelism=model_group.size(),
         bayesian=False,
         dtype=torch.float32,
     ).to(device)
@@ -792,7 +787,7 @@ class TestConv3dMultiSpatial:
     ) -> None:
         """A spatial_group sequence must have one entry per spatial axis."""
         with pytest.raises(ValueError):
-            conv3d.DistributedConv3D(
+            convolution.DistributedConv3D(
                 6,
                 12,
                 2,
@@ -803,7 +798,6 @@ class TestConv3dMultiSpatial:
                 ],
                 channel_group=spatial_mesh_2x2x1_dhw["col"],
                 stride=2,
-                parallelism=spatial_mesh_2x2x1_dhw["model"].size(),
             ).to(device)
 
 
@@ -841,6 +835,36 @@ class TestConv3dSpatialGridSweep:
     silently wrong. ``depth`` / ``height`` / ``width`` are multiples of the grid
     so the domain shards evenly on every axis.
     """
+
+    @pytest.mark.dist(2)
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"),
+        GRID_SWEEP_CASES_3D,
+        ids=GRID_SWEEP_IDS_3D,
+    )
+    def test_split_2x1x1(
+        self,
+        device: torch.device,
+        spatial_mesh_2x1x1_dhw: dict,
+        kernel: Triple,
+        stride: Triple,
+        padding: Triple,
+        dilation: Triple,
+    ) -> None:
+        """Only one of the three axes split: 2 (depth), height/width not split."""
+        _conv3d_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x1x1_dhw,
+            in_channels=6,
+            out_channels=12,
+            kernel_size=kernel,
+            depth=16,
+            height=16,
+            width=24,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+        )
 
     @pytest.mark.dist(4)
     @pytest.mark.parametrize(

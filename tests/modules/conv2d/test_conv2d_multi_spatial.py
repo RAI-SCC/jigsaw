@@ -9,7 +9,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-import jigsaw.modules.conv2d as conv2d
+import jigsaw.modules.convolution as convolution
 from jigsaw.utils_aggregate import gather_1d_results
 from tests.process_mesh import *  # noqa: F401,F403
 
@@ -87,7 +87,7 @@ def _conv2d_multi_spatial_reference_check(
         device=device,
     )
 
-    dist_conv = conv2d.DistributedConv2D(
+    dist_conv = convolution.DistributedConv2D(
         in_channels,
         out_channels,
         kernel_size,
@@ -99,7 +99,6 @@ def _conv2d_multi_spatial_reference_check(
         dilation=dilation,
         groups=1,
         bias=True,
-        parallelism=model_group.size(),
         bayesian=False,
         dtype=torch.float32,
     ).to(device)
@@ -360,7 +359,7 @@ class TestConv2dMultiSpatial:
     ) -> None:
         """A spatial_group sequence must have one entry per spatial axis."""
         with pytest.raises(ValueError):
-            conv2d.DistributedConv2D(
+            convolution.DistributedConv2D(
                 6,
                 12,
                 4,
@@ -368,7 +367,6 @@ class TestConv2dMultiSpatial:
                 spatial_group=[spatial_mesh_2x2_hw["sw"]],
                 channel_group=spatial_mesh_2x2_hw["col"],
                 stride=4,
-                parallelism=spatial_mesh_2x2_hw["model"].size(),
             ).to(device)
 
 
