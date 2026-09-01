@@ -1,8 +1,13 @@
-"""Autograd definition for the distributed 2-D transpose convolution.
+"""Autograd definition for the distributed N-D transpose convolution.
 
-The 1-D and 3-D transpose autograd functions
-(:mod:`jigsaw.modules.conv1dtranspose.functional`,
-:mod:`jigsaw.modules.conv3dtranspose.functional`) mirror this one.
+One :class:`ConvTransposeNd` autograd Function serves ``F.conv_transpose1d`` /
+``F.conv_transpose2d`` / ``F.conv_transpose3d``; the spatial rank is carried by
+``config.n_spatial`` (the length of the normalised ``kernel_size``). The
+1-/2-/3-D modules pick their dimension by constructing a
+:class:`~jigsaw.modules.conv_transpose.config.ConvTransposeNdConfig` of the
+matching arity.
+
+The transpose analogue of :mod:`jigsaw.modules.conv.functional`.
 """
 
 from typing import Any, Optional, Protocol, cast
@@ -10,10 +15,10 @@ from typing import Any, Optional, Protocol, cast
 import torch
 import torch.distributed as dist
 
-from .config import Conv2dTransposeConfig
+from .config import ConvTransposeNdConfig
 
 
-class Conv2dTransposeCtx(Protocol):
+class ConvTransposeNdCtx(Protocol):
     """Protocol for the values stashed on ``ctx`` between forward and backward."""
 
     local_in_spatial: tuple[int, ...]
@@ -24,16 +29,16 @@ class Conv2dTransposeCtx(Protocol):
     channel_group: dist.ProcessGroup
     in_channels_global: int
     bayesian: bool
-    config: Conv2dTransposeConfig
+    config: ConvTransposeNdConfig
     saved_tensors: tuple[torch.Tensor, torch.Tensor]
 
 
-class Conv2dTranspose(torch.autograd.Function):
-    """Autograd function for the distributed 2-D transpose convolution.
+class ConvTransposeNd(torch.autograd.Function):
+    """Autograd function for the distributed N-D transpose convolution.
 
     Handles both the no-halo regime (``stride == kernel_size``) and the halo
     regime (``stride != kernel_size``); the kernels are picked by
-    :class:`~jigsaw.modules.conv2dtranspose.config.Conv2dTransposeConfig`.
+    :class:`~jigsaw.modules.conv_transpose.config.ConvTransposeNdConfig`.
     """
 
     @staticmethod
@@ -48,15 +53,15 @@ class Conv2dTranspose(torch.autograd.Function):
         spatial_groups: tuple[dist.ProcessGroup | None, ...],
         channel_group: dist.ProcessGroup,
         bayesian: bool,
-        config: Conv2dTransposeConfig,
+        config: ConvTransposeNdConfig,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass of the distributed Conv2dTranspose function.
+        """Forward pass of the distributed ConvTransposeNd function.
 
-        Returns ``(y, x_aug)`` where ``y`` is this rank's output-channel (and, in
-        the halo regime, output-position) slice and ``x_aug`` is the gathered
+        Returns ``(y, x_aug)`` where ``y`` is this rank's output-channel (and,
+        in the halo regime, output-position) slice and ``x_aug`` is the gathered
         full-channel input kept for the backward pass.
         """
-        y, x_aug = config.dist_conv_transpose2d_fn(
+        y, x_aug = config.dist_conv_transpose_fn(
             x,
             weight,
             bias,
@@ -97,14 +102,14 @@ class Conv2dTranspose(torch.autograd.Function):
         ctx.mark_non_differentiable(x_aug)
 
         ctx.save_for_backward(x_aug, weight)
-        c = cast(Conv2dTransposeCtx, ctx)
+        c = cast(ConvTransposeNdCtx, ctx)
         c.spatial_groups = spatial_groups
         c.channel_group = channel_group
         c.in_channels_global = in_channels
-        # (h, w) sizes of this rank's owned input slice (pre channel-gather); the
-        # halo backward needs them to size the raw-output span it folds grads
-        # back onto.
-        c.local_in_spatial = tuple(x.shape[-2:])
+        # spatial sizes of this rank's owned input slice (pre channel-gather);
+        # the halo backward needs them to size the raw-output span it folds
+        # grads back onto.
+        c.local_in_spatial = tuple(x.shape[-config.n_spatial :])
         c.stride = stride
         c.padding = padding
         c.dilation = dilation
@@ -129,22 +134,23 @@ class Conv2dTranspose(torch.autograd.Function):
         None,
         None,
     ]:
-        """Backward pass of the distributed Conv2dTranspose.
+        """Backward pass of the distributed ConvTransposeNd.
 
         ``g_b`` is the local ``grad_output`` sum (spatial ranks are reduced by
         the parameter hook). ``g_x`` / ``g_w`` are delegated to the regime-
-        specific kernel picked in :class:`Conv2dTransposeConfig`: each rank holds
-        the full-channel grad wrt input for its own output-channel slice, which
-        is reduced across the channel group; the halo regime additionally folds
-        the grad back onto the owning spatial ranks.
+        specific kernel picked in :class:`ConvTransposeNdConfig`: in the no-halo
+        regime each rank holds the full-channel grad wrt input for its own
+        output-channel slice and only the channel group is reduced; in the halo
+        regime the grad is additionally folded back onto the owning spatial
+        ranks.
         """
-        c = cast(Conv2dTransposeCtx, ctx)
+        c = cast(ConvTransposeNdCtx, ctx)
         x_aug, weight = c.saved_tensors
         config = c.config
 
         g_b = config.grad_bias(grad_output)
 
-        g_x, g_w = config.dist_conv_transpose2d_backward_fn(
+        g_x, g_w = config.dist_conv_transpose_backward_fn(
             grad_output,
             x_aug,
             weight,
@@ -187,10 +193,10 @@ class Conv2dTranspose(torch.autograd.Function):
         spatial_groups: tuple[dist.ProcessGroup | None, ...],
         channel_group: dist.ProcessGroup,
         bayesian: bool,
-        config: Conv2dTransposeConfig,
+        config: ConvTransposeNdConfig,
     ) -> tuple[torch.Tensor, Optional[int]]:
-        """Handle vmap for the distributed Conv2dTranspose."""
-        out = Conv2dTranspose.apply(
+        """Handle vmap for the distributed ConvTransposeNd."""
+        out = ConvTransposeNd.apply(
             x,
             weight,
             bias,

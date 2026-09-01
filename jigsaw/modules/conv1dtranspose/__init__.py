@@ -1,5 +1,5 @@
-"""Expose the distributed 1-D transpose convolution to the public interface."""
+"""Back-compat shim: the distributed 1-D transpose convolution now lives in ``jigsaw.modules.conv_transpose``."""
 
-from .conv1dtranspose import (
+from jigsaw.modules.conv_transpose import (
     DistributedConv1DTranspose as DistributedConv1DTranspose,
 )
