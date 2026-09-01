@@ -3,7 +3,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-import jigsaw.modules.conv1d as conv1d
+import jigsaw.modules.convolution as convolution
 from jigsaw.utils_aggregate import gather_1d_results, gather_results_as_list
 from tests.process_mesh import *
 
@@ -88,7 +88,7 @@ def _conv1d_reference_check(
         batch, in_channels // n_channel, length // n_spatial, device=device
     )
 
-    conv = conv1d.DistributedConv1D(
+    conv = convolution.DistributedConv1D(
         in_channels,
         out_channels,
         kernel_size,
@@ -184,7 +184,7 @@ class TestConv1d:
             process_mesh_dict_2x2["row"].size(),
             process_mesh_dict_2x2["col"].size(),
         )
-        conv = conv1d.DistributedConv1D(
+        conv = convolution.DistributedConv1D(
             5,
             10,
             4,
@@ -305,7 +305,7 @@ class TestConv1d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """String padding is not supported once a halo exchange is needed."""
-        conv = conv1d.DistributedConv1D(
+        conv = convolution.DistributedConv1D(
             8,
             12,
             4,
@@ -329,7 +329,7 @@ class TestConv1d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """``channel_comm='auto'`` resolves from the device on the config."""
-        conv = conv1d.DistributedConv1D(
+        conv = convolution.DistributedConv1D(
             8,
             12,
             4,
@@ -346,7 +346,7 @@ class TestConv1d:
     ) -> None:
         """An unrecognised ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
-            conv1d.DistributedConv1D(
+            convolution.DistributedConv1D(
                 8,
                 12,
                 4,
@@ -363,7 +363,7 @@ class TestConv1d:
         """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
         if dist.get_backend() != "gloo":
             pytest.skip("only meaningful on the gloo backend")
-        conv = conv1d.DistributedConv1D(
+        conv = convolution.DistributedConv1D(
             8,
             12,
             4,

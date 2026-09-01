@@ -3,7 +3,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-import jigsaw.modules.conv3dtranspose as conv3dtranspose
+import jigsaw.modules.convolution as convolution
 from jigsaw.utils_aggregate import gather_1d_results, gather_results_as_list
 from tests.process_mesh import *
 
@@ -96,7 +96,7 @@ def _conv3d_transpose_reference_check(
         device=device,
     )
 
-    conv = conv3dtranspose.DistributedConv3DTranspose(
+    conv = convolution.DistributedConv3DTranspose(
         in_channels,
         out_channels,
         kernel_size,
@@ -195,7 +195,7 @@ class TestConv3dTranspose:
             process_mesh_dict_2x2["row"].size(),
             process_mesh_dict_2x2["col"].size(),
         )
-        conv = conv3dtranspose.DistributedConv3DTranspose(
+        conv = convolution.DistributedConv3DTranspose(
             6,
             12,
             2,
@@ -253,7 +253,7 @@ class TestConv3dTranspose:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """``channel_comm='auto'`` resolves from the device on the config."""
-        conv = conv3dtranspose.DistributedConv3DTranspose(
+        conv = convolution.DistributedConv3DTranspose(
             8,
             12,
             2,
@@ -270,7 +270,7 @@ class TestConv3dTranspose:
     ) -> None:
         """An unrecognised ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
-            conv3dtranspose.DistributedConv3DTranspose(
+            convolution.DistributedConv3DTranspose(
                 8,
                 12,
                 2,
@@ -287,7 +287,7 @@ class TestConv3dTranspose:
         """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
         if dist.get_backend() != "gloo":
             pytest.skip("only meaningful on the gloo backend")
-        conv = conv3dtranspose.DistributedConv3DTranspose(
+        conv = convolution.DistributedConv3DTranspose(
             8,
             12,
             2,
@@ -309,7 +309,7 @@ class TestConv3dTranspose:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """String padding is not supported once a halo exchange is needed."""
-        conv = conv3dtranspose.DistributedConv3DTranspose(
+        conv = convolution.DistributedConv3DTranspose(
             8,
             12,
             3,

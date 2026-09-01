@@ -3,7 +3,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-import jigsaw.modules.conv3d as conv3d
+import jigsaw.modules.convolution as convolution
 from jigsaw.utils_aggregate import gather_1d_results, gather_results_as_list
 from tests.process_mesh import *
 
@@ -97,7 +97,7 @@ def _conv3d_reference_check(
         device=device,
     )
 
-    conv = conv3d.DistributedConv3D(
+    conv = convolution.DistributedConv3D(
         in_channels,
         out_channels,
         kernel_size,
@@ -196,7 +196,7 @@ class TestConv3d:
             process_mesh_dict_2x2["row"].size(),
             process_mesh_dict_2x2["col"].size(),
         )
-        conv = conv3d.DistributedConv3D(
+        conv = convolution.DistributedConv3D(
             6,
             12,
             2,
@@ -290,7 +290,7 @@ class TestConv3d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """String padding is not supported once a halo exchange is needed."""
-        conv = conv3d.DistributedConv3D(
+        conv = convolution.DistributedConv3D(
             8,
             12,
             3,
@@ -314,7 +314,7 @@ class TestConv3d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """``channel_comm='auto'`` resolves from the device on the config."""
-        conv = conv3d.DistributedConv3D(
+        conv = convolution.DistributedConv3D(
             8,
             12,
             2,
@@ -331,7 +331,7 @@ class TestConv3d:
     ) -> None:
         """An unrecognised ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
-            conv3d.DistributedConv3D(
+            convolution.DistributedConv3D(
                 8,
                 12,
                 2,
@@ -348,7 +348,7 @@ class TestConv3d:
         """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
         if dist.get_backend() != "gloo":
             pytest.skip("only meaningful on the gloo backend")
-        conv = conv3d.DistributedConv3D(
+        conv = convolution.DistributedConv3D(
             8,
             12,
             2,
@@ -521,7 +521,7 @@ def _conv3d_multi_spatial_reference_check(
         device=device,
     )
 
-    conv = conv3d.DistributedConv3D(
+    conv = convolution.DistributedConv3D(
         in_channels,
         out_channels,
         kernel_size,
@@ -792,7 +792,7 @@ class TestConv3dMultiSpatial:
     ) -> None:
         """A spatial_group sequence must have one entry per spatial axis."""
         with pytest.raises(ValueError):
-            conv3d.DistributedConv3D(
+            convolution.DistributedConv3D(
                 6,
                 12,
                 2,

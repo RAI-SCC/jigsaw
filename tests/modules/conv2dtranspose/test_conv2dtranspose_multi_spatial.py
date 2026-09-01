@@ -9,7 +9,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-import jigsaw.modules.conv2dtranspose as conv2dtranspose
+import jigsaw.modules.convolution as convolution
 from jigsaw.utils_aggregate import gather_1d_results
 from tests.process_mesh import *  # noqa: F401,F403
 
@@ -84,7 +84,7 @@ def _conv2d_transpose_multi_spatial_reference_check(
         device=device,
     )
 
-    conv = conv2dtranspose.DistributedConv2DTranspose(
+    conv = convolution.DistributedConv2DTranspose(
         in_channels,
         out_channels,
         kernel_size,
