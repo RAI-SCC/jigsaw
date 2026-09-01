@@ -5,8 +5,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=4
 #SBATCH --account='hai_1302'
-#SBATCH --output='logs/%x_%j-16-8192-32768.out'
-#SBATCH --error='logs/%x_%j-16-8192-32768.err'
+#SBATCH --output='logs/%x_%j-1-ALL-refactored.out'
+#SBATCH --error='logs/%x_%j-1-ALL-refactored.err'
 
 # activate your venv
 cd ~/jigsaw
@@ -28,4 +28,4 @@ export MASTER_ADDR=$master_addr
 echo "MASTER_ADDR="$MASTER_ADDR
 
 # Added the -u flag for unbuffered execution
-srun python -u MatMul/scaling/scaling_run.py
+srun python -u scaling_scripts/scaling_matmul.py
