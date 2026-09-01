@@ -3,7 +3,7 @@
 One :class:`ConvNd` autograd Function serves ``F.conv1d`` / ``F.conv2d`` /
 ``F.conv3d``; the spatial rank is carried by ``config.n_spatial`` (the length of
 the normalised ``kernel_size``). The 1-/2-/3-D modules pick their dimension by
-constructing a :class:`~jigsaw.modules.conv.config.ConvNdConfig` of the matching
+constructing a :class:`~jigsaw.modules.convolution.conv.config.ConvNdConfig` of the matching
 arity.
 """
 
@@ -35,7 +35,7 @@ class ConvNd(torch.autograd.Function):
 
     Handles both the no-halo regime (``stride == kernel_size``) and the halo
     regime (``stride != kernel_size``); the kernels are picked by
-    :class:`~jigsaw.modules.conv.config.ConvNdConfig`.
+    :class:`~jigsaw.modules.convolution.conv.config.ConvNdConfig`.
     """
 
     @staticmethod

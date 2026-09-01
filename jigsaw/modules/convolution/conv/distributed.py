@@ -10,7 +10,7 @@ aligned with the trailing spatial axes, where an entry is ``None`` (or a group
 of size 1) when that axis is not split. The default (a single group) splits the
 last (width) axis only.
 
-Two regimes are selected by :class:`~jigsaw.modules.conv.config.ConvNdConfig`:
+Two regimes are selected by :class:`~jigsaw.modules.convolution.conv.config.ConvNdConfig`:
 
 * ``stride == kernel_size`` (and no dilation/padding on the split axes): the
   spatial split needs no communication -- every spatial rank convolves its own
@@ -19,10 +19,10 @@ Two regimes are selected by :class:`~jigsaw.modules.conv.config.ConvNdConfig`:
   positions, so each spatial rank pulls the missing rows/columns from the other
   ranks with a halo exchange -- one per split axis -- and convolves
   (:func:`conv_halo_nway`). The halo exchange is dimension-agnostic and lives in
-  :mod:`jigsaw.modules.spatial_halo`.
+  :mod:`jigsaw.modules.convolution.conv.halo`.
 
 Both regimes cooperate with the channel-parallel group through
-:func:`jigsaw.modules.conv_channel_comm.over_channels`, which supports every
+:func:`jigsaw.modules.convolution.conv.channel_comm.over_channels`, which supports every
 ``channel_comm`` strategy and any group size. In the halo regime the halo
 exchange is handed to ``over_channels`` as a ``halo_fn``: the ``"all_gather"``
 strategy applies it once to the gathered full-channel tensor, while the
@@ -35,14 +35,14 @@ from typing import Any, Optional
 import torch
 import torch.distributed as dist
 
-from jigsaw.modules.conv.spatial_split import (
+from ..common.spatial_split import (
     _channel_shard,
     _local_padding,
     _needs_halo,
     _split_axes,
 )
-from jigsaw.modules.conv_channel_comm import over_channels
-from jigsaw.modules.spatial_halo import halo_gather, halo_scatter_add
+from .channel_comm import over_channels
+from .halo import halo_gather, halo_scatter_add
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +63,7 @@ def conv_nway(
 
     Every spatial rank convolves its own domain slice independently -- this
     holds for a split along one axis or several -- while the channel group
-    cooperates through :func:`jigsaw.modules.conv_channel_comm.over_channels`.
+    cooperates through :func:`jigsaw.modules.convolution.conv.channel_comm.over_channels`.
 
     Returns ``(y, x_full)`` where ``x_full`` is the gathered full-channel input
     kept for the backward pass.
@@ -153,7 +153,7 @@ def conv_nway_backward(
 # halo regime (stride != kernel_size)
 #
 # The halo exchange itself is dimension-agnostic and lives in
-# :mod:`jigsaw.modules.spatial_halo`. One halo exchange is run per split axis;
+# :mod:`jigsaw.modules.convolution.conv.halo`. One halo exchange is run per split axis;
 # the split axis's conv parameters are indexed out of the per-axis tuples by
 # ``spatial_idx``.
 # ---------------------------------------------------------------------------
@@ -172,7 +172,7 @@ def conv_halo_nway(
 
     Builds a ``halo_fn`` that, for every split spatial axis, pulls the missing
     rows/columns from the other spatial ranks, and hands it to
-    :func:`~jigsaw.modules.conv_channel_comm.over_channels` together with the
+    :func:`~jigsaw.modules.convolution.conv.channel_comm.over_channels` together with the
     channel-parallel work. ``over_channels`` invokes ``halo_fn`` once on the
     gathered full-channel tensor (``channel_comm="all_gather"``) or once per
     channel slab as the slabs stream around the ring (``"p2p"`` /

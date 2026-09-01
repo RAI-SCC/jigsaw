@@ -4,10 +4,10 @@ One :class:`ConvTransposeNd` autograd Function serves ``F.conv_transpose1d`` /
 ``F.conv_transpose2d`` / ``F.conv_transpose3d``; the spatial rank is carried by
 ``config.n_spatial`` (the length of the normalised ``kernel_size``). The
 1-/2-/3-D modules pick their dimension by constructing a
-:class:`~jigsaw.modules.conv_transpose.config.ConvTransposeNdConfig` of the
+:class:`~jigsaw.modules.convolution.conv_transpose.config.ConvTransposeNdConfig` of the
 matching arity.
 
-The transpose analogue of :mod:`jigsaw.modules.conv.functional`.
+The transpose analogue of :mod:`jigsaw.modules.convolution.conv.functional`.
 """
 
 from typing import Any, Optional, Protocol, cast
@@ -38,7 +38,7 @@ class ConvTransposeNd(torch.autograd.Function):
 
     Handles both the no-halo regime (``stride == kernel_size``) and the halo
     regime (``stride != kernel_size``); the kernels are picked by
-    :class:`~jigsaw.modules.conv_transpose.config.ConvTransposeNdConfig`.
+    :class:`~jigsaw.modules.convolution.conv_transpose.config.ConvTransposeNdConfig`.
     """
 
     @staticmethod

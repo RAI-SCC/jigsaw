@@ -1,10 +1,10 @@
-"""Channel-parallel input exchange shared by the distributed 1/2/3-D transpose convs.
+"""Channel-parallel input exchange for the distributed 1/2/3-D transpose convs.
 
-The transpose analogue of :mod:`jigsaw.modules.conv_channel_comm`. Each rank owns
-a contiguous ``C_in / G`` slice of the input channels and the matching slice of
-the weight's *output* channels (the weight still carries every input channel, on
-its leading axis). Three interchangeable strategies reassemble the full-channel
-input and produce this rank's output-channel slice, selected by
+The transpose analogue of :mod:`jigsaw.modules.convolution.conv.channel_comm`.
+Each rank owns a contiguous ``C_in / G`` slice of the input channels and the
+matching slice of the weight's *output* channels (the weight still carries every
+input channel, on its leading axis). Three interchangeable strategies reassemble
+the full-channel input and produce this rank's output-channel slice, selected by
 ``config.channel_comm``:
 
 * ``"all_gather"`` -- gather every rank's input-channel slice in one shot, then
@@ -26,8 +26,8 @@ passed as a ``post_fn`` applied to the accumulated output rather than a
 once after the channel sum matches folding each slab. The bias is likewise added
 after ``post_fn`` so overlapped positions are not double-counted.
 
-:func:`jigsaw.modules.conv_channel_comm.resolve_channel_comm` turns the
-user-facing ``"auto"`` into a concrete name.
+:func:`jigsaw.modules.convolution.common.channel_comm.resolve_channel_comm` turns
+the user-facing ``"auto"`` into a concrete name.
 """
 
 from typing import Any, Callable, Optional
@@ -35,7 +35,7 @@ from typing import Any, Callable, Optional
 import torch
 import torch.distributed as dist
 
-from jigsaw.modules.conv_channel_comm import (
+from ..common.channel_comm import (
     _HopFn,
     _in_channel_block,
     _resolve_channel_hop,

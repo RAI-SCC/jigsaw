@@ -1,10 +1,13 @@
-"""Config setup for the distributed N-D convolution.
+"""Config setup for the distributed N-D transpose convolution.
 
-One :class:`ConvNdConfig` serves ``F.conv1d`` / ``F.conv2d`` / ``F.conv3d``; the
-spatial rank is inferred from ``len(kernel_size)`` and selects the native
-primitives (``F.conv{n}d``, ``torch.nn.grad.conv{n}d_input`` /
-``conv{n}d_weight``). The regime split (no-halo vs halo) and every other
-selection rule are dimension-independent.
+One :class:`ConvTransposeNdConfig` serves ``F.conv_transpose1d`` /
+``F.conv_transpose2d`` / ``F.conv_transpose3d``; the spatial rank is inferred from
+``len(kernel_size)`` and selects the native forward primitive. The grad-input /
+grad-weight primitive (``torch.ops.aten.convolution_backward``) and every other
+selection rule (the no-halo vs halo regime split, the grad-bias reduction, the
+bayesian vmapping) are dimension-independent.
+
+The transpose analogue of :class:`jigsaw.modules.convolution.conv.config.ConvNdConfig`.
 """
 
 from typing import Any, Callable, Optional
@@ -12,33 +15,22 @@ from typing import Any, Callable, Optional
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from torch.nn.grad import (
-    conv1d_input,
-    conv1d_weight,
-    conv2d_input,
-    conv2d_weight,
-    conv3d_input,
-    conv3d_weight,
-)
 from torch.nn.parameter import Parameter
 
-from jigsaw.modules.conv_channel_comm import resolve_channel_comm
-
+from ..common.channel_comm import resolve_channel_comm
 from . import distributed as dist_conv
 
-# native primitives indexed by ``n_spatial - 1``.
-_CONV_FN = (F.conv1d, F.conv2d, F.conv3d)
-_CONV_INPUT_FN = (conv1d_input, conv2d_input, conv3d_input)
-_CONV_WEIGHT_FN = (conv1d_weight, conv2d_weight, conv3d_weight)
+# native forward primitives indexed by ``n_spatial - 1``.
+_CONV_TRANSPOSE_FN = (F.conv_transpose1d, F.conv_transpose2d, F.conv_transpose3d)
 
 
-class ConvNdConfig:
-    """Selection strategy for the N-D convolution kernels used in fwd/bwd."""
+class ConvTransposeNdConfig:
+    """Selection strategy for the N-D transpose-conv kernels used in fwd/bwd."""
 
     # type hints
     n_spatial: int
-    dist_conv_fn: Callable
-    dist_conv_backward_fn: Callable
+    dist_conv_transpose_fn: Callable
+    dist_conv_transpose_backward_fn: Callable
 
     def __init__(
         self,
@@ -51,7 +43,7 @@ class ConvNdConfig:
         channel_comm: str = "auto",
     ):
         """
-        Initialize selection strategy for the N-D convolution.
+        Initialize selection strategy for the N-D transpose convolution.
 
         bayesian: bool
             Flag for whether the model is bayesian.
@@ -75,41 +67,46 @@ class ConvNdConfig:
         """
         self.n_spatial = len(kernel_size)
         self.channel_comm = resolve_channel_comm(channel_comm, device)
-        self.conv_fn = self._conv_fn_selection(bayesian)
-        self.conv_input_fn = self._conv_input_fn_selection(bayesian)
-        self.conv_weight_fn = self._conv_weight_fn_selection(bayesian)
+        self.conv_transpose_fn = self._conv_transpose_fn_selection(bayesian)
+        self.conv_transpose_grad_fn = self._conv_transpose_grad_fn_selection(bayesian)
         self.weight_reshape = self._reshape_weights_selection(bayesian)
         self.grad_bias = self._grad_bias_selection(bias)
-        # ``stride == kernel_size`` tiles the domain with no overlap, so the
-        # spatial split needs no communication. Otherwise neighbouring output
-        # positions share input positions and the spatial ranks exchange halos.
+        # ``stride == kernel_size`` makes each rank's raw output tile the global
+        # output with no overlap, so the spatial split needs no communication.
+        # Otherwise neighbouring ranks' raw outputs overlap and the spatial ranks
+        # exchange halos.
         if all(k == s for k, s in zip(kernel_size, stride)):
-            self.dist_conv_fn = dist_conv.conv_nway
-            self.dist_conv_backward_fn = dist_conv.conv_nway_backward
+            self.dist_conv_transpose_fn = dist_conv.conv_transpose_nway
+            self.dist_conv_transpose_backward_fn = (
+                dist_conv.conv_transpose_nway_backward
+            )
         else:
-            self.dist_conv_fn = dist_conv.conv_halo_nway
-            self.dist_conv_backward_fn = dist_conv.conv_halo_nway_backward
+            self.dist_conv_transpose_fn = dist_conv.conv_transpose_halo_nway
+            self.dist_conv_transpose_backward_fn = (
+                dist_conv.conv_transpose_halo_nway_backward
+            )
 
-    def _conv_fn_selection(self, bayesian: bool) -> Callable:
+    def _conv_transpose_fn_selection(self, bayesian: bool) -> Callable:
         """Select the forward primitive, vmapped when the model is bayesian."""
-        conv = _CONV_FN[self.n_spatial - 1]
+        conv_transpose = _CONV_TRANSPOSE_FN[self.n_spatial - 1]
         if bayesian:
-            return torch.vmap(conv)
-        return conv
+            return torch.vmap(conv_transpose)
+        return conv_transpose
 
-    def _conv_input_fn_selection(self, bayesian: bool) -> Callable:
-        """Select the grad-input primitive, vmapped when the model is bayesian."""
-        conv_input = _CONV_INPUT_FN[self.n_spatial - 1]
-        if bayesian:
-            return torch.vmap(conv_input, in_dims=(None, 0, 0))
-        return conv_input
+    def _conv_transpose_grad_fn_selection(self, bayesian: bool) -> Callable:
+        """Select the transpose-conv backward primitive, vmapped if bayesian.
 
-    def _conv_weight_fn_selection(self, bayesian: bool) -> Callable:
-        """Select the grad-weight primitive, vmapped when the model is bayesian."""
-        conv_weight = _CONV_WEIGHT_FN[self.n_spatial - 1]
+        ``torch.ops.aten.convolution_backward`` is dimension-independent -- the
+        spatial rank rides along in the ``stride`` / ``padding`` / ``dilation``
+        lists -- so the same op serves every spatial rank.
+        """
         if bayesian:
-            return torch.vmap(conv_weight, in_dims=(0, None, 0))
-        return conv_weight
+            return torch.vmap(
+                torch.ops.aten.convolution_backward,
+                in_dims=(0, 0, 0, None, None, None, None, None, None, None, None),
+                out_dims=(0, 0, None),  # type: ignore[arg-type]
+            )
+        return torch.ops.aten.convolution_backward
 
     def _reshape_weights_selection(self, bayesian: bool) -> Callable:
         """Select the weight-reshape helper (a no-op unless bayesian)."""

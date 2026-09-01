@@ -1,7 +1,7 @@
 """Concrete distributed 1-/2-/3-D convolutions.
 
 Each class only pins ``_n_spatial``; every behaviour lives in
-:class:`jigsaw.modules.conv.base._DistributedConvNd` (mirroring how
+:class:`jigsaw.modules.convolution.conv.base._DistributedConvNd` (mirroring how
 ``torch.nn.Conv{1,2,3}d`` only normalise their tuple args on top of
 ``_ConvNd``).
 """

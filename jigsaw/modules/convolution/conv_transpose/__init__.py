@@ -2,8 +2,10 @@
 
 ``base`` holds the dimension-independent module (``_ConvTransposeNd``-style),
 ``functional`` / ``config`` / ``distributed`` the autograd Function, kernel
-selection and distributed kernels, and ``conv`` the three thin concrete
-classes.
+selection and distributed kernels, ``channel_comm`` / ``halo`` the
+channel-parallel and spatial-split communication, and ``conv`` the three thin
+concrete classes. Pieces identical to the plain-conv case live in
+:mod:`jigsaw.modules.convolution.common`.
 """
 
 from .base import _DistributedConvTransposeNd as _DistributedConvTransposeNd

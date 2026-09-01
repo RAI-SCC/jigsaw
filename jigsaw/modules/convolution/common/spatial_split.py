@@ -1,7 +1,7 @@
 """Spatial-split bookkeeping shared by the distributed conv / conv-transpose kernels.
 
-Both :mod:`jigsaw.modules.conv.distributed` and
-:mod:`jigsaw.modules.conv_transpose.distributed` describe their domain split with
+Both :mod:`jigsaw.modules.convolution.conv.distributed` and
+:mod:`jigsaw.modules.convolution.conv_transpose.distributed` describe their domain split with
 ``spatial_groups`` -- an ``n_spatial``-tuple aligned with the trailing spatial
 axes, an entry ``None`` (or a size-1 group) where that axis is not split -- and
 share the same helpers for walking it, deciding whether a halo exchange is

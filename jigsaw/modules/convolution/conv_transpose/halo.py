@@ -14,8 +14,9 @@ across the group.
   column its gradient, pulled from whichever rank owns that output column.
 
 The core exchange operates purely on the last axis and treats the leading axes
-opaquely, matching :mod:`jigsaw.modules.spatial_halo`; the uneven, Gloo-safe
-all-to-all is shared from there via :func:`exchange_along_last_axis`.
+opaquely, matching :mod:`jigsaw.modules.convolution.conv.halo`; the uneven,
+Gloo-safe all-to-all (:func:`exchange_along_last_axis`) is shared by both via
+:mod:`jigsaw.modules.convolution.common.halo`.
 
 :func:`transpose_halo_reduce` / :func:`transpose_halo_expand` additionally accept
 an ``axis`` argument: any non-last axis is moved to the last position for the
@@ -27,7 +28,7 @@ calling the exchange once per split axis.
 import torch
 import torch.distributed as dist
 
-from jigsaw.modules.spatial_halo import exchange_along_last_axis
+from ..common.halo import exchange_along_last_axis
 
 
 def produced_output_span(

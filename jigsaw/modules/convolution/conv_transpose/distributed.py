@@ -11,7 +11,7 @@ of size 1) when that axis is not split. The default (a single group) splits the
 last (width) axis only.
 
 Two regimes are selected by
-:class:`~jigsaw.modules.conv_transpose.config.ConvTransposeNdConfig`:
+:class:`~jigsaw.modules.convolution.conv_transpose.config.ConvTransposeNdConfig`:
 
 * ``stride == kernel_size`` (and no dilation/padding on the split axes): every
   spatial rank's raw output tiles the global output with no overlap, so the
@@ -19,10 +19,10 @@ Two regimes are selected by
 * ``stride != kernel_size``: neighbouring ranks' raw outputs overlap and must be
   summed, then cropped and re-sharded -- a "transpose halo" exchange
   (:func:`conv_transpose_halo_nway`), run once per split axis. That exchange is
-  dimension-agnostic and lives in :mod:`jigsaw.modules.spatial_halo_transpose`.
+  dimension-agnostic and lives in :mod:`jigsaw.modules.convolution.conv_transpose.halo`.
 
 Both regimes cooperate with the channel-parallel group through
-:func:`jigsaw.modules.conv_transpose_channel_comm.over_channels_transpose`, which
+:func:`jigsaw.modules.convolution.conv_transpose.channel_comm.over_channels_transpose`, which
 supports every ``channel_comm`` strategy and any group size. In the halo regime
 the per-axis transpose-halo reduce is handed to ``over_channels_transpose`` as a
 ``post_fn``: the ``"all_gather"`` strategy applies it once to the fused output,
@@ -35,17 +35,14 @@ from typing import Any, Optional
 import torch
 import torch.distributed as dist
 
-from jigsaw.modules.conv.spatial_split import (
+from ..common.spatial_split import (
     _channel_shard,
     _local_padding,
     _needs_halo,
     _split_axes,
 )
-from jigsaw.modules.conv_transpose_channel_comm import over_channels_transpose
-from jigsaw.modules.spatial_halo_transpose import (
-    transpose_halo_expand,
-    transpose_halo_reduce,
-)
+from .channel_comm import over_channels_transpose
+from .halo import transpose_halo_expand, transpose_halo_reduce
 
 
 def _grad_input_weight(
@@ -172,7 +169,7 @@ def conv_transpose_nway_backward(
 # halo regime (stride != kernel_size)
 #
 # The transpose halo exchange is dimension-agnostic and lives in
-# :mod:`jigsaw.modules.spatial_halo_transpose`. One exchange is run per split
+# :mod:`jigsaw.modules.convolution.conv_transpose.halo`. One exchange is run per split
 # axis; the split axis's conv parameters are indexed out of the per-axis tuples
 # by ``spatial_idx``.
 # ---------------------------------------------------------------------------
