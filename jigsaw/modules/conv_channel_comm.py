@@ -45,6 +45,9 @@ HaloFn = Callable[[torch.Tensor], torch.Tensor]
 
 # A per-hop transport: ``fn(data, buffer, direction=, group=, async_op=) ->
 # (recv_buffer, wait_handle)``. Satisfied by ``comm_1d_p2p`` / ``comm_1d_alltoall``.
+# ``_HopFn`` / ``_CHANNEL_HOP_FNS`` / ``_resolve_channel_hop`` / ``_in_channel_block``
+# and ``gather_full_channels`` are reused verbatim by
+# :mod:`jigsaw.modules.conv_transpose_channel_comm`.
 _HopFn = Callable[..., tuple[torch.Tensor, Optional[dist.Work]]]
 
 # The per-hop transport behind each streaming ``channel_comm``.

@@ -35,8 +35,12 @@ from typing import Any, Callable, Optional
 import torch
 import torch.distributed as dist
 
-from jigsaw.comm import comm_1d_alltoall, comm_1d_p2p
-from jigsaw.modules.conv_channel_comm import gather_full_channels
+from jigsaw.modules.conv_channel_comm import (
+    _HopFn,
+    _in_channel_block,
+    _resolve_channel_hop,
+    gather_full_channels,
+)
 
 # A transpose-conv primitive:
 # ``fn(x, w[, b], stride=, padding=, dilation=) -> y``.
@@ -46,41 +50,14 @@ ConvTransposeFn = Callable[..., torch.Tensor]
 # reduce: ``fn(y_raw) -> y``.
 PostFn = Callable[[torch.Tensor], torch.Tensor]
 
-# A per-hop transport: ``fn(data, buffer, direction=, group=, async_op=) ->
-# (recv_buffer, wait_handle)``. Satisfied by ``comm_1d_p2p`` / ``comm_1d_alltoall``.
-_HopFn = Callable[..., tuple[torch.Tensor, Optional[dist.Work]]]
-
-# The per-hop transport behind each streaming ``channel_comm``.
-_CHANNEL_HOP_FNS: dict[str, _HopFn] = {
-    "p2p": comm_1d_p2p,
-    "all_to_all": comm_1d_alltoall,
-}
-
-
-def _resolve_channel_hop(channel_comm: str, channel_group: dist.ProcessGroup) -> _HopFn:
-    """Per-hop transport for a streaming ``channel_comm`` (``"p2p"`` / ``"all_to_all"``).
-
-    ``"all_to_all"`` needs a backend with all-to-all support; gloo has none, so it
-    raises there -- pass ``"p2p"`` instead.
-    """
-    if channel_comm == "all_to_all" and dist.get_backend(channel_group) == "gloo":
-        raise RuntimeError(
-            "channel_comm='all_to_all' needs a backend with all-to-all support "
-            "(e.g. NCCL); gloo has none. Use channel_comm='p2p' instead."
-        )
-    return _CHANNEL_HOP_FNS[channel_comm]
+# ``_HopFn`` (per-hop transport type), ``_resolve_channel_hop`` (streaming
+# ``channel_comm`` -> transport) and ``_in_channel_block`` (weight input-channel
+# slice) are identical to the plain-conv versions and imported from there.
 
 
 def _bias_view(b: torch.Tensor, n_spatial_dims: int) -> torch.Tensor:
     """Reshape a ``(C_out,)`` bias to broadcast over the spatial axes."""
     return b.view((-1,) + (1,) * n_spatial_dims)
-
-
-def _in_channel_block(
-    w: torch.Tensor, in_dim: int, block: int, width: int
-) -> torch.Tensor:
-    """Contiguous ``width``-wide input-channel block ``block`` of the weight."""
-    return w.narrow(in_dim, block * width, width).contiguous()
 
 
 def _over_channels_all_gather(

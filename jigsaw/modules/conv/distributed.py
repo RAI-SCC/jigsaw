@@ -30,58 +30,19 @@ streaming (``"p2p"`` / ``"all_to_all"``) strategies apply it to each channel
 slab as the slabs travel around the ring, overlapping it with the next hop.
 """
 
-from typing import Any, Iterator, Optional
+from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
 
+from jigsaw.modules.conv.spatial_split import (
+    _channel_shard,
+    _local_padding,
+    _needs_halo,
+    _split_axes,
+)
 from jigsaw.modules.conv_channel_comm import over_channels
 from jigsaw.modules.spatial_halo import halo_gather, halo_scatter_add
-
-
-def _split_axes(
-    spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
-) -> Iterator[tuple[int, int, dist.ProcessGroup]]:
-    """Yield ``(spatial_idx, tensor_axis, group)`` for the axes actually split.
-
-    ``spatial_groups`` is aligned with the trailing spatial axes, so spatial
-    index ``idx`` maps to tensor axis ``idx - len(spatial_groups)`` (e.g. the
-    2-D ``(H, W)`` groups map to axes ``-2`` and ``-1``).
-    """
-    n = len(spatial_groups)
-    for idx, group in enumerate(spatial_groups):
-        if group is not None and group.size() > 1:
-            yield idx, idx - n, group
-
-
-def _needs_halo(
-    spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
-    padding: str | tuple[int, ...],
-    dilation: tuple[int, ...],
-) -> bool:
-    """Whether a nominally no-halo call (``stride == kernel``) still needs a halo.
-
-    ``stride == kernel_size`` only tiles a split axis with no overlap when it
-    also has zero padding and unit dilation. If *any* split axis has non-trivial
-    padding or dilation, the local slices' interior edges would be wrongly
-    zero-padded / their windows would overlap, so the halo path is required.
-    """
-    return isinstance(padding, tuple) and any(
-        padding[idx] != 0 or dilation[idx] != 1
-        for idx, _, _ in _split_axes(spatial_groups)
-    )
-
-
-def _channel_shard(
-    g_x: torch.Tensor, in_channels_global: int, channel_group: dist.ProcessGroup, n: int
-) -> torch.Tensor:
-    """Keep this rank's contiguous input-channel slice of a full-channel grad.
-
-    The input-channel axis sits at ``-(n_spatial + 1)``.
-    """
-    shard = in_channels_global // channel_group.size()
-    start = channel_group.rank() * shard
-    return g_x.narrow(-(n + 1), start, shard)
 
 
 # ---------------------------------------------------------------------------
@@ -196,16 +157,6 @@ def conv_nway_backward(
 # the split axis's conv parameters are indexed out of the per-axis tuples by
 # ``spatial_idx``.
 # ---------------------------------------------------------------------------
-def _local_padding(
-    padding: tuple[int, ...],
-    spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
-) -> tuple[int, ...]:
-    """Local-conv padding: split axes are 0 (materialised into the halo), else given."""
-    split = {axis for _, axis, _ in _split_axes(spatial_groups)}
-    n = len(padding)
-    return tuple(0 if (idx - n) in split else pad for idx, pad in enumerate(padding))
-
-
 def conv_halo_nway(
     x: torch.Tensor,
     w: torch.Tensor,
