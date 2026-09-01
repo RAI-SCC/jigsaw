@@ -276,7 +276,6 @@ def test_conv_weight_merging(
         local_bias_after, to_pm_dict, dim=0, pm_key="col"
     )
     assert torch.allclose(gathered_weights_before, gathered_weights_after)
-    assert conv_layer.parallelism == to_pm_dict["col"].size()
     assert torch.allclose(gathered_bias_before, gathered_bias_after)
 
 
@@ -353,5 +352,4 @@ def test_conv2dtranspose_weight_merging(
     )
 
     assert torch.allclose(gathered_weights_before, gathered_weights_after)
-    assert conv_layer.parallelism == to_pm_dict["col"].size()
     assert torch.allclose(gathered_bias_before, gathered_bias_after)

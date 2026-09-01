@@ -100,7 +100,6 @@ def _conv2d_reference_check(
         dilation=dilation,
         groups=1,
         bias=True,
-        parallelism=model_group.size(),
         bayesian=False,
         dtype=torch.float32,
         channel_comm=channel_comm,
@@ -232,7 +231,6 @@ def _conv2d_optimizer_parity_check(
         dilation=dilation,
         groups=1,
         bias=True,
-        parallelism=model_group.size(),
         bayesian=False,
         dtype=torch.float32,
         channel_comm=channel_comm,
@@ -363,7 +361,6 @@ class TestConv2d:
             dilation=1,
             groups=1,
             bias=True,
-            parallelism=4,
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -422,7 +419,6 @@ class TestConv2d:
                 dilation=1,
                 groups=1,
                 bias=True,
-                parallelism=model_group.size(),
                 bayesian=False,
                 dtype=torch.float32,
                 channel_comm=channel_comm,
@@ -496,7 +492,6 @@ class TestConv2d:
             padding=(0,),
             dilation=1,
             bias=True,
-            parallelism=process_mesh_dict_2x2["model"].size(),
             channel_comm="all_to_all",
         ).to(device)
         x = torch.randn(2, 4, 16, 8, device=device)
@@ -519,7 +514,6 @@ class TestConv2d:
             dilation=1,
             groups=1,
             bias=True,
-            parallelism=process_mesh_dict_2x2["model"].size(),
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -557,7 +551,6 @@ class TestConv2d:
                 dilation=dilation,
                 groups=1,
                 bias=True,
-                parallelism=model_group.size(),
                 bayesian=False,
                 dtype=torch.float32,
             ).to(device)
@@ -672,7 +665,6 @@ class TestConv2d:
             dilation=1,
             groups=1,
             bias=True,
-            parallelism=process_mesh_dict_2x2["model"].size(),
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -812,7 +804,6 @@ class TestConv2dParallel:
             padding=(0,),
             dilation=1,
             bias=True,
-            parallelism=process_mesh_dict_3x2["model"].size(),
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -992,7 +983,6 @@ class TestConv2dChannelGroupOne:
             padding=1,
             dilation=2,
             bias=True,
-            parallelism=mesh["model"].size(),
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -1248,7 +1238,6 @@ class TestConv2dTranspose:
             dilation=1,
             groups=1,
             bias=True,
-            parallelism=4,
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -1290,7 +1279,6 @@ class TestConv2dTranspose:
             dilation=1,
             groups=1,
             bias=True,
-            parallelism=4,
             bayesian=False,
             dtype=torch.float32,
         ).to(device)

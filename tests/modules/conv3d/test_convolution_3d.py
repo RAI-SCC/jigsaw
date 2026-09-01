@@ -109,7 +109,6 @@ def _conv3d_reference_check(
         dilation=dilation,
         groups=1,
         bias=True,
-        parallelism=model_group.size(),
         bayesian=False,
         dtype=torch.float32,
         channel_comm=channel_comm,
@@ -208,7 +207,6 @@ class TestConv3d:
             dilation=1,
             groups=1,
             bias=True,
-            parallelism=4,
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -302,7 +300,6 @@ class TestConv3d:
             dilation=1,
             groups=1,
             bias=True,
-            parallelism=process_mesh_dict_2x2["model"].size(),
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -359,7 +356,6 @@ class TestConv3d:
             padding=(0,),
             dilation=1,
             bias=True,
-            parallelism=process_mesh_dict_2x2["model"].size(),
             channel_comm="all_to_all",
         ).to(device)
         x = torch.randn(2, 4, 6, 6, 8, device=device)
@@ -533,7 +529,6 @@ def _conv3d_multi_spatial_reference_check(
         dilation=dilation,
         groups=1,
         bias=True,
-        parallelism=model_group.size(),
         bayesian=False,
         dtype=torch.float32,
     ).to(device)
@@ -803,7 +798,6 @@ class TestConv3dMultiSpatial:
                 ],
                 channel_group=spatial_mesh_2x2x1_dhw["col"],
                 stride=2,
-                parallelism=spatial_mesh_2x2x1_dhw["model"].size(),
             ).to(device)
 
 

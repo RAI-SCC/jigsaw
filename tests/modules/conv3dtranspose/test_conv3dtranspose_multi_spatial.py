@@ -103,7 +103,6 @@ def _conv3d_transpose_multi_spatial_reference_check(
         dilation=dilation,
         groups=1,
         bias=True,
-        parallelism=model_group.size(),
         bayesian=False,
         dtype=torch.float32,
         channel_comm=channel_comm,

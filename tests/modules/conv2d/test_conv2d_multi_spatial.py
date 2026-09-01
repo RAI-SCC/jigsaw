@@ -99,7 +99,6 @@ def _conv2d_multi_spatial_reference_check(
         dilation=dilation,
         groups=1,
         bias=True,
-        parallelism=model_group.size(),
         bayesian=False,
         dtype=torch.float32,
     ).to(device)
@@ -368,7 +367,6 @@ class TestConv2dMultiSpatial:
                 spatial_group=[spatial_mesh_2x2_hw["sw"]],
                 channel_group=spatial_mesh_2x2_hw["col"],
                 stride=4,
-                parallelism=spatial_mesh_2x2_hw["model"].size(),
             ).to(device)
 
 

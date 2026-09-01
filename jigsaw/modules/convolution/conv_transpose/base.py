@@ -46,7 +46,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
 
     # type-hints
     bias: Optional[Parameter]
-    parallelism: int
     config: ConvTransposeNdConfig
     bayesian: bool
     spatial_group: Optional[dist.ProcessGroup]
@@ -76,7 +75,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         groups: int = 1,
         bias: bool = True,
         # --- distributed (optional) ---
-        parallelism: int = 4,
         bayesian: bool = False,
         dtype: torch.dtype = torch.float32,
         channel_comm: str = "auto",
@@ -116,8 +114,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             Number of groups. Not yet implemented.
         bias: bool
             Flag for whether bias is present.
-        parallelism: int
-            Size of model-parallel groups.
         bayesian: bool
             Flag for whether model is vmapped.
         dtype: torch.dtype
@@ -161,7 +157,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         self.spatial_group = self.spatial_groups[-1]
         self.channel_group = channel_group
         self.device = device
-        self.parallelism = parallelism
         self.dtype = dtype
         self.bayesian = bayesian
 
@@ -278,7 +273,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             spatial_group=process_mesh_dict[row_kw],
             channel_group=process_mesh_dict[col_kw],
             device=device,
-            parallelism=process_mesh_dict[model_kw].size(),
             bayesian=False,  # TODO
             dtype=model.weight.dtype,
         )
@@ -387,7 +381,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         pm_model_key: str = "model",
     ) -> None:
         """Reshard the (channel-sharded) weight and bias onto a new process mesh."""
-        self.parallelism = to_process_mesh_dict[pm_col_key].size()
         self.config = ConvTransposeNdConfig(
             self.bayesian,
             self.channel_group,
