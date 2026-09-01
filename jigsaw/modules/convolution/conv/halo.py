@@ -1,10 +1,12 @@
-"""Spatial halo exchange shared by the distributed 1-D and 2-D convolutions.
+"""Input-side spatial halo exchange for the distributed N-D convolution.
 
 The domain is split along a tensor's last axis across a ``spatial_group``. When
 ``stride != kernel_size`` neighbouring output positions share input positions, so
 before convolving every rank must pull the input positions it is missing from the
 other ranks (:func:`halo_gather`); the backward pass folds the borrowed-position
-gradients back onto their owners (:func:`halo_scatter_add`).
+gradients back onto their owners (:func:`halo_scatter_add`). The uneven, Gloo-safe
+all-to-all underneath (:func:`exchange_along_last_axis`) is shared with the
+transpose halo via :mod:`jigsaw.modules.convolution.common.halo`.
 
 The core exchange operates purely on the last axis and treats all leading axes
 opaquely, so the same code serves Conv1d (``(N, C, L)``) and Conv2d
@@ -20,6 +22,8 @@ exchange once per split axis.
 
 import torch
 import torch.distributed as dist
+
+from ..common.halo import exchange_along_last_axis
 
 
 def needed_input_span(
@@ -57,42 +61,6 @@ def needed_input_span(
     lo = rank * out_local * stride - padding
     need_size = (out_local - 1) * stride + extent
     return lo, lo + need_size, need_size, out_local
-
-
-def exchange_along_last_axis(
-    spatial_group: dist.ProcessGroup,
-    template: torch.Tensor,
-    send_parts: list[torch.Tensor],
-    send_sizes: list[int],
-    recv_sizes: list[int],
-) -> list[torch.Tensor]:
-    """Uneven all-to-all of last-axis slices, in spatial-rank order.
-
-    ``send_parts[p]`` (size ``send_sizes[p]`` along the last axis, possibly zero)
-    goes to rank ``p``; the returned list holds what every rank sent back, split
-    to ``recv_sizes``. Implemented with ``all_to_all_single`` (uneven split
-    sizes, Gloo-compatible) by moving the last axis to the front.
-    """
-    lead = template.shape[:-1]
-    parts = [p for p, n in zip(send_parts, send_sizes) if n > 0]
-    send_cat = torch.cat(parts, dim=-1) if parts else template.new_empty((*lead, 0))
-    send_cat = send_cat.movedim(-1, 0).contiguous()
-    recv_cat = template.new_empty((sum(recv_sizes), *lead))
-
-    dist.all_to_all_single(
-        recv_cat,
-        send_cat,
-        output_split_sizes=list(recv_sizes),
-        input_split_sizes=list(send_sizes),
-        group=spatial_group,
-    )
-
-    recv_cat = recv_cat.movedim(0, -1)
-    out, off = [], 0
-    for size in recv_sizes:
-        out.append(recv_cat[..., off : off + size])
-        off += size
-    return out
 
 
 def halo_gather(

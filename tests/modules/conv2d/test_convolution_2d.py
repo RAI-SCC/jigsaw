@@ -3,8 +3,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-import jigsaw.modules.conv2d as conv2d
-import jigsaw.modules.conv_transpose as conv_transpose
+import jigsaw.modules.convolution as convolution
 from jigsaw.utils_aggregate import gather_1d_results, gather_results_as_list
 from tests.process_mesh import *
 
@@ -89,7 +88,7 @@ def _conv2d_reference_check(
         batch, in_channels // n_channel, height, width // n_spatial, device=device
     )
 
-    conv = conv2d.DistributedConv2D(
+    conv = convolution.DistributedConv2D(
         in_channels,
         out_channels,
         kernel_size,
@@ -101,7 +100,6 @@ def _conv2d_reference_check(
         dilation=dilation,
         groups=1,
         bias=True,
-        parallelism=model_group.size(),
         bayesian=False,
         dtype=torch.float32,
         channel_comm=channel_comm,
@@ -221,7 +219,7 @@ def _conv2d_optimizer_parity_check(
     dilation = _pair(dilation)
 
     torch.manual_seed(model_group.rank())
-    dist_conv = conv2d.DistributedConv2D(
+    dist_conv = convolution.DistributedConv2D(
         in_channels,
         out_channels,
         kernel_size,
@@ -233,7 +231,6 @@ def _conv2d_optimizer_parity_check(
         dilation=dilation,
         groups=1,
         bias=True,
-        parallelism=model_group.size(),
         bayesian=False,
         dtype=torch.float32,
         channel_comm=channel_comm,
@@ -352,7 +349,7 @@ class TestConv2d:
         torch.manual_seed(local_rank)  # each process gets a different initial seed
         in_dim, out_dim = 5, 10
         kernel_size = 4
-        conv = conv2d.DistributedConv2D(
+        conv = convolution.DistributedConv2D(
             in_dim,
             out_dim,
             kernel_size,
@@ -364,7 +361,6 @@ class TestConv2d:
             dilation=1,
             groups=1,
             bias=True,
-            parallelism=4,
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -411,7 +407,7 @@ class TestConv2d:
 
         def _build(channel_comm: str) -> torch.nn.Module:
             torch.manual_seed(1234)  # identical weight init for both variants
-            return conv2d.DistributedConv2D(
+            return convolution.DistributedConv2D(
                 8,
                 12,
                 4,
@@ -423,7 +419,6 @@ class TestConv2d:
                 dilation=1,
                 groups=1,
                 bias=True,
-                parallelism=model_group.size(),
                 bayesian=False,
                 dtype=torch.float32,
                 channel_comm=channel_comm,
@@ -452,7 +447,7 @@ class TestConv2d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """``channel_comm='auto'`` resolves from the device on the config."""
-        conv = conv2d.DistributedConv2D(
+        conv = convolution.DistributedConv2D(
             8,
             12,
             4,
@@ -469,7 +464,7 @@ class TestConv2d:
     ) -> None:
         """An unrecognised ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
-            conv2d.DistributedConv2D(
+            convolution.DistributedConv2D(
                 8,
                 12,
                 4,
@@ -486,7 +481,7 @@ class TestConv2d:
         """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
         if dist.get_backend() != "gloo":
             pytest.skip("only meaningful on the gloo backend")
-        conv = conv2d.DistributedConv2D(
+        conv = convolution.DistributedConv2D(
             8,
             12,
             4,
@@ -497,7 +492,6 @@ class TestConv2d:
             padding=(0,),
             dilation=1,
             bias=True,
-            parallelism=process_mesh_dict_2x2["model"].size(),
             channel_comm="all_to_all",
         ).to(device)
         x = torch.randn(2, 4, 16, 8, device=device)
@@ -508,7 +502,7 @@ class TestConv2d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """``stride`` / ``padding`` / ``dilation`` given as ``int`` become 2-tuples."""
-        conv = conv2d.DistributedConv2D(
+        conv = convolution.DistributedConv2D(
             8,
             12,
             4,
@@ -520,7 +514,6 @@ class TestConv2d:
             dilation=1,
             groups=1,
             bias=True,
-            parallelism=process_mesh_dict_2x2["model"].size(),
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -546,7 +539,7 @@ class TestConv2d:
             stride: object, padding: object, dilation: object
         ) -> torch.nn.Module:
             torch.manual_seed(1234)  # identical weight init for both variants
-            return conv2d.DistributedConv2D(
+            return convolution.DistributedConv2D(
                 in_channels,
                 out_channels,
                 kernel_size,
@@ -558,7 +551,6 @@ class TestConv2d:
                 dilation=dilation,
                 groups=1,
                 bias=True,
-                parallelism=model_group.size(),
                 bayesian=False,
                 dtype=torch.float32,
             ).to(device)
@@ -661,7 +653,7 @@ class TestConv2d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """String padding is not supported once a halo exchange is needed."""
-        conv = conv2d.DistributedConv2D(
+        conv = convolution.DistributedConv2D(
             8,
             12,
             4,
@@ -673,7 +665,6 @@ class TestConv2d:
             dilation=1,
             groups=1,
             bias=True,
-            parallelism=process_mesh_dict_2x2["model"].size(),
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -802,7 +793,7 @@ class TestConv2dParallel:
     ) -> None:
         """Weight init is broadcast across a spatial group larger than two."""
         torch.manual_seed(dist.get_rank(group=process_mesh_dict_3x2["model"]))
-        conv = conv2d.DistributedConv2D(
+        conv = convolution.DistributedConv2D(
             12,
             12,
             4,
@@ -813,7 +804,6 @@ class TestConv2dParallel:
             padding=(0,),
             dilation=1,
             bias=True,
-            parallelism=process_mesh_dict_3x2["model"].size(),
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -982,7 +972,7 @@ class TestConv2dChannelGroupOne:
         assert row.size() == 1 and col.size() == 1
 
         in_ch, out_ch, k = 6, 8, 3
-        conv = conv2d.DistributedConv2D(
+        conv = convolution.DistributedConv2D(
             in_ch,
             out_ch,
             k,
@@ -993,7 +983,6 @@ class TestConv2dChannelGroupOne:
             padding=1,
             dilation=2,
             bias=True,
-            parallelism=mesh["model"].size(),
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -1237,7 +1226,7 @@ class TestConv2dTranspose:
         )
         in_dim, out_dim = 6, 10
         kernel_size = 4
-        conv2d = conv_transpose.DistributedConvTranspose2D(
+        conv2d = convolution.DistributedConv2DTranspose(
             in_dim,
             out_dim,
             kernel_size,
@@ -1249,7 +1238,6 @@ class TestConv2dTranspose:
             dilation=1,
             groups=1,
             bias=True,
-            parallelism=4,
             bayesian=False,
             dtype=torch.float32,
         ).to(device)
@@ -1279,7 +1267,7 @@ class TestConv2dTranspose:
         kernel_size = 4
         h, w = 16, 16
 
-        conv2d = conv_transpose.DistributedConvTranspose2D(
+        conv2d = convolution.DistributedConv2DTranspose(
             in_dim,
             out_dim,
             kernel_size,
@@ -1291,7 +1279,6 @@ class TestConv2dTranspose:
             dilation=1,
             groups=1,
             bias=True,
-            parallelism=4,
             bayesian=False,
             dtype=torch.float32,
         ).to(device)

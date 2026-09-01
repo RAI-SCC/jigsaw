@@ -1,11 +1,22 @@
-"""Module for the distributed 3-D convolution.
+"""Shared base for the distributed 1-/2-/3-D transpose convolutions.
 
-Mirrors :class:`jigsaw.modules.conv2d.conv2d.DistributedConv2D` for ``F.conv3d``.
+Mirrors PyTorch's ``torch.nn.modules.conv._ConvTransposeNd`` ->
+``ConvTranspose{1,2,3}d`` layering: :class:`_DistributedConvTransposeNd` holds
+every dimension-independent piece (parameter init, spatial/channel process-group
+bookkeeping, gradient sync, weight merge/reshard, torch <-> jigsaw conversion,
+the ``forward`` fast-path routing) and the concrete classes in
+:mod:`jigsaw.modules.convolution.conv_transpose.conv` only pin ``_n_spatial``.
+
+The transpose analogue of :mod:`jigsaw.modules.convolution.conv.base`. The one structural
+difference: the transpose weight is ``(in_channels, out_channels // groups,
+*kernel_size)`` -- its input-channel axis leads and the channel-parallel group
+shards the *output* channels on axis 1 (the plain conv shards output channels on
+axis 0).
 """
 
 import math
 from collections.abc import Sequence
-from typing import Callable, Optional, cast
+from typing import Any, Callable, Optional, cast
 
 import numpy as np
 import torch
@@ -15,66 +26,41 @@ from torch.nn.parameter import Parameter
 from jigsaw import hooks
 from jigsaw.utils_aggregate import gather_1d_results
 
-from .config import Conv3dConfig
-from .functional import Conv3d
+from ..common.arg_norm import _as_spatial_groups, _ntuple
+from .config import ConvTransposeNdConfig
+from .functional import ConvTransposeNd
 
-# number of spatial axes of a 3-D convolution, ordered (D, H, W).
-_N_SPATIAL = 3
-
-
-def _triple(x: int | tuple[int, ...]) -> tuple[int, int, int]:
-    """Normalise an ``int`` or 1-/3-element tuple to a 3-element tuple."""
-    if isinstance(x, int):
-        return (x, x, x)
-    if len(x) == 1:
-        return (x[0], x[0], x[0])
-    return (x[0], x[1], x[2])
+# concrete torch transpose-conv class per spatial rank, for ``convert_to_torch``.
+_TORCH_CONV_TRANSPOSE_CLS = {
+    1: torch.nn.ConvTranspose1d,
+    2: torch.nn.ConvTranspose2d,
+    3: torch.nn.ConvTranspose3d,
+}
 
 
-def _as_spatial_groups(
-    spatial_group: "dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]]",
-) -> tuple[Optional[dist.ProcessGroup], ...]:
-    """Normalise the ``spatial_group`` argument to a ``(group_d, group_h, group_w)`` tuple.
+class _DistributedConvTransposeNd(torch.nn.Module):
+    """Distributed N-D transpose convolution; concrete subclasses set ``_n_spatial``."""
 
-    A single process group keeps the historical behaviour -- the domain is split
-    along the width (last) axis only. A sequence is taken axis-by-axis, so
-    ``[group_d, group_h, group_w]`` splits all three spatial axes; ``None`` (or a
-    group of size 1) marks an axis that is not split.
-    """
-    if isinstance(spatial_group, dist.ProcessGroup):
-        return (None,) * (_N_SPATIAL - 1) + (spatial_group,)
-    groups = tuple(spatial_group)
-    if len(groups) != _N_SPATIAL:
-        raise ValueError(
-            f"spatial_group as a sequence must have {_N_SPATIAL} entries "
-            f"(one per spatial axis, ordered (D, H, W)); got {len(groups)}."
-        )
-    return groups
-
-
-class DistributedConv3D(torch.nn.Module):
-    """Distributed 3-D convolution."""
+    # spatial rank (1, 2 or 3); pinned by the concrete subclass.
+    _n_spatial: int
 
     # type-hints
     bias: Optional[Parameter]
-    parallelism: int
-    config: Conv3dConfig
+    config: ConvTransposeNdConfig
     bayesian: bool
     spatial_group: Optional[dist.ProcessGroup]
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...]
     channel_group: dist.ProcessGroup
-    empty: torch.Tensor
     device: torch.device
-    conv3d_apply: Callable[..., torch.Tensor]
-    kernel_size: tuple[int, int, int]
-    stride: tuple[int, int, int]
-    padding: str | tuple[int, int, int]
-    dilation: tuple[int, int, int]
+    kernel_size: tuple[int, ...]
+    stride: tuple[int, ...]
+    padding: str | tuple[int, ...]
+    dilation: tuple[int, ...]
     channel_comm: str
 
     def __init__(
         self,
-        # --- core conv (required) ---
+        # --- core ConvTranspose (required) ---
         in_channels: int,
         out_channels: int,
         kernel_size: int | tuple[int, ...],
@@ -82,24 +68,23 @@ class DistributedConv3D(torch.nn.Module):
         device: torch.device,
         spatial_group: "dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]]",
         channel_group: dist.ProcessGroup,
-        # --- core conv (optional, pytorch-standard-order) ---
+        # --- core ConvTranspose (optional, pytorch-standard-order) ---
         stride: int | tuple[int, ...] = 1,
         padding: str | tuple[int, ...] = (0,),
         dilation: int | tuple[int, ...] = 1,
         groups: int = 1,
         bias: bool = True,
         # --- distributed (optional) ---
-        parallelism: int = 4,
         bayesian: bool = False,
         dtype: torch.dtype = torch.float32,
         channel_comm: str = "auto",
-        config: Optional[Conv3dConfig] = None,
+        config: Optional[ConvTransposeNdConfig] = None,
     ):
         """
-        Distributed 3D Convolution.
+        Distributed N-D transpose convolution.
 
-        input shape of forward pass: (N, Cin, Din, Hin, Win)
-        output shape of forward pass: (N, Cout, Dout, Hout, Wout)
+        input shape of forward pass: ``(N, Cin, *spatial)``
+        output shape of forward pass: ``(N, Cout, *spatial')``
 
         Parameters
         ----------
@@ -113,8 +98,8 @@ class DistributedConv3D(torch.nn.Module):
             Device where the computations will be done.
         spatial_group: dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]]
             Domain-parallel ranks. A single process group splits the domain
-            along the width axis only (the historical behaviour). A sequence
-            ``[group_d, group_h, group_w]`` splits several spatial axes;
+            along the last (width) axis only (the historical behaviour). A
+            sequence is taken axis-by-axis and may split several spatial axes;
             ``None`` (or a group of size 1) marks an axis that is not split.
         channel_group: dist.ProcessGroup
             Process group for channel-parallel ranks.
@@ -129,8 +114,6 @@ class DistributedConv3D(torch.nn.Module):
             Number of groups. Not yet implemented.
         bias: bool
             Flag for whether bias is present.
-        parallelism: int
-            Size of model-parallel groups.
         bayesian: bool
             Flag for whether model is vmapped.
         dtype: torch.dtype
@@ -141,58 +124,49 @@ class DistributedConv3D(torch.nn.Module):
             peak) or ``"all_to_all"`` (same ring over masked all-to-all hops,
             NCCL only). ``"auto"`` (default) -> ``"all_to_all"`` on a CUDA
             ``device``, else ``"p2p"``. Ignored when ``config`` is supplied.
-        config: Optional[Conv3dConfig]
-            Configuration and selection strategy of the convolutional layer.
+        config: Optional[ConvTransposeNdConfig]
+            Configuration and selection strategy of the transpose conv layer.
             If None, this will be initialized here.
         """
         super().__init__()
+        to_ntuple = _ntuple(self._n_spatial)
+
         self.in_channels = in_channels
         # Output channels are sharded across the channel-parallel group.
         self.out_channels = out_channels // channel_group.size()
 
-        self.kernel_size = _triple(kernel_size)
-        self.stride = _triple(stride)
-        self.dilation = _triple(dilation)
+        self.kernel_size = to_ntuple(kernel_size)
+        self.stride = to_ntuple(stride)
+        self.dilation = to_ntuple(dilation)
 
         if isinstance(padding, str):
             self.padding = padding
         else:
-            self.padding = _triple(padding)
+            self.padding = to_ntuple(padding)
 
-        self.channel_comm = channel_comm
         self.groups = groups
-        self.spatial_groups = _as_spatial_groups(spatial_group)
+        self.channel_comm = channel_comm
+        self.spatial_groups = _as_spatial_groups(spatial_group, self._n_spatial)
         # groups that carry a real (>1) split; the parameters are replicated
         # across their product and their gradients summed back over it.
         self._spatial_sync_groups = [
             g for g in self.spatial_groups if g is not None and g.size() > 1
         ]
         # representative single group kept for backward compatibility (the
-        # width-axis group, or ``None`` when the width axis is not split).
+        # innermost / width-axis group, or ``None`` when it is not split).
         self.spatial_group = self.spatial_groups[-1]
         self.channel_group = channel_group
         self.device = device
-        self.parallelism = parallelism
         self.dtype = dtype
         self.bayesian = bayesian
 
         k = np.sqrt(
-            1
-            / (
-                self.in_channels
-                * channel_group.size()
-                * self.kernel_size[0]
-                * self.kernel_size[1]
-                * self.kernel_size[2]
-            )
+            self.groups
+            / (self.out_channels * channel_group.size() * math.prod(self.kernel_size))
         )
         self.weight = torch.nn.parameter.Parameter(
             torch.zeros(
-                self.out_channels,
-                self.in_channels,
-                self.kernel_size[0],
-                self.kernel_size[1],
-                self.kernel_size[2],
+                self.in_channels, self.out_channels // self.groups, *self.kernel_size
             )
             .uniform_(-k, k)
             .to(device)
@@ -206,7 +180,7 @@ class DistributedConv3D(torch.nn.Module):
         )
 
         self.config = (
-            Conv3dConfig(
+            ConvTransposeNdConfig(
                 self.bayesian,
                 self.channel_group,
                 self.bias,
@@ -234,7 +208,9 @@ class DistributedConv3D(torch.nn.Module):
             for g in reversed(self._spatial_sync_groups):
                 dist.broadcast(p.data, group_src=0, group=g)
 
-        self.conv3d_apply = Conv3d.apply
+        self._conv_apply: Callable[..., tuple[torch.Tensor, torch.Tensor]] = (
+            ConvTransposeNd.apply
+        )
 
     @property
     def spatial_world_size(self) -> int:
@@ -250,19 +226,19 @@ class DistributedConv3D(torch.nn.Module):
     @classmethod
     def convert_to_jigsaw(
         cls,
-        model: torch.nn.Conv3d,
+        model: torch.nn.modules.conv._ConvTransposeNd,
         process_mesh_dict: dict,
         device: torch.device,
         row_kw: str = "row",
         col_kw: str = "col",
         model_kw: str = "model",
-    ) -> "DistributedConv3D":
+    ) -> "_DistributedConvTransposeNd":
         """
-        Convert a ``torch.nn.Conv3d`` to jigsaw based on the given process mesh.
+        Convert a ``torch.nn.ConvTranspose{1,2,3}d`` to jigsaw based on the mesh.
 
         Parameters
         ----------
-        model: torch.nn.Conv3d
+        model: torch.nn.ConvTranspose1d | ConvTranspose2d | ConvTranspose3d
             Instance to convert.
         process_mesh_dict: dict
             Process mesh dict containing row, column, and model process groups.
@@ -278,11 +254,11 @@ class DistributedConv3D(torch.nn.Module):
 
         Returns
         -------
-        model: DistributedConv3D
+        model: _DistributedConvTransposeNd
             The jigsaw layer, carrying the weights and bias of the input layer.
         """
-        assert model.in_channels % process_mesh_dict[col_kw].size() == 0, (
-            "in_channels is not divisible by process mesh cols"
+        assert model.out_channels % process_mesh_dict[col_kw].size() == 0, (
+            "out_channels is not divisible by process mesh cols"
         )
 
         instance = cls(
@@ -297,17 +273,16 @@ class DistributedConv3D(torch.nn.Module):
             spatial_group=process_mesh_dict[row_kw],
             channel_group=process_mesh_dict[col_kw],
             device=device,
-            parallelism=process_mesh_dict[model_kw].size(),
             bayesian=False,  # TODO
             dtype=model.weight.dtype,
         )
         # Map weights — clone so the original graph is detached. The channel
-        # group shards the weight's *output* channel axis (dim 0).
+        # group shards the weight's *output* channel axis (dim 1).
         out_rank = process_mesh_dict[col_kw].rank()
-        out_shard = model.weight.shape[0] // process_mesh_dict[col_kw].size()
+        out_shard = model.weight.shape[1] // process_mesh_dict[col_kw].size()
 
         instance.weight.data = (
-            model.weight.data[out_rank * out_shard : (out_rank + 1) * out_shard]
+            model.weight.data[:, out_rank * out_shard : (out_rank + 1) * out_shard]
             .clone()
             .to(device)
         )
@@ -329,9 +304,9 @@ class DistributedConv3D(torch.nn.Module):
         row_kw: str = "row",
         col_kw: str = "col",
         model_kw: str = "model",
-    ) -> torch.nn.Conv3d:
+    ) -> torch.nn.modules.conv._ConvTransposeNd:
         """
-        Convert this jigsaw conv3d layer back to a ``torch.nn.Conv3d``.
+        Convert this jigsaw layer back to a ``torch.nn.ConvTranspose{1,2,3}d``.
 
         Parameters
         ----------
@@ -345,24 +320,25 @@ class DistributedConv3D(torch.nn.Module):
             Key for accessing model process groups.
         """
         weights, bias = self.merge_weights(process_mesh_dict, col_kw)
-        conv3d = torch.nn.Conv3d(
-            in_channels=cast(int, weights.shape[1]),
-            out_channels=cast(int, weights.shape[0]),
-            kernel_size=cast(tuple[int, int, int], self.kernel_size),
-            stride=cast(tuple[int, int, int], self.stride),
-            padding=cast(tuple[int, int, int], self.padding),
-            dilation=cast(tuple[int, int, int], self.dilation),
+        torch_cls: Any = _TORCH_CONV_TRANSPOSE_CLS[self._n_spatial]
+        conv: torch.nn.modules.conv._ConvTransposeNd = torch_cls(
+            in_channels=weights.shape[0],
+            out_channels=weights.shape[1] * self.groups,
+            kernel_size=self.kernel_size,
+            stride=self.stride,
+            padding=self.padding,
+            dilation=self.dilation,
             groups=self.groups,
             bias=bias is not None,
             padding_mode="zeros",  # hard-coded
         )
         assert isinstance(weights, torch.Tensor)
-        conv3d.weight.data = weights
+        conv.weight.data = weights
         if bias is not None:
-            assert conv3d.bias is not None
-            conv3d.bias.data = bias
+            assert conv.bias is not None
+            conv.bias.data = bias
 
-        return conv3d
+        return conv
 
     def merge_weights(
         self,
@@ -387,7 +363,7 @@ class DistributedConv3D(torch.nn.Module):
             Merged bias, if it exists.
         """
         global_weights = gather_1d_results(
-            self.weight, process_mesh_dict, dim=0, pm_key=col_kw
+            self.weight, process_mesh_dict, dim=1, pm_key=col_kw
         )
         global_bias = (
             gather_1d_results(self.bias, process_mesh_dict, dim=0, pm_key=col_kw)
@@ -405,8 +381,7 @@ class DistributedConv3D(torch.nn.Module):
         pm_model_key: str = "model",
     ) -> None:
         """Reshard the (channel-sharded) weight and bias onto a new process mesh."""
-        self.parallelism = to_process_mesh_dict[pm_col_key].size()
-        self.config = Conv3dConfig(
+        self.config = ConvTransposeNdConfig(
             self.bayesian,
             self.channel_group,
             self.bias,
@@ -418,16 +393,18 @@ class DistributedConv3D(torch.nn.Module):
 
         from_weight_shape_local = self.weight.shape
         weight_shape_global = (
-            from_weight_shape_local[0] * from_process_mesh_dict[pm_col_key].size(),
-            *from_weight_shape_local[1:],
+            from_weight_shape_local[0],
+            from_weight_shape_local[1] * from_process_mesh_dict[pm_col_key].size(),
+            *from_weight_shape_local[2:],
         )
         to_weight_shape_local = (
-            weight_shape_global[0] // to_process_mesh_dict[pm_col_key].size(),
-            *weight_shape_global[1:],
+            weight_shape_global[0],
+            weight_shape_global[1] // to_process_mesh_dict[pm_col_key].size(),
+            *weight_shape_global[2:],
         )
 
-        assert weight_shape_global[0] % to_process_mesh_dict[pm_col_key].size() == 0, (
-            f"global weight shape[0] is {weight_shape_global[0]} which is not "
+        assert weight_shape_global[1] % to_process_mesh_dict[pm_col_key].size() == 0, (
+            f"global weight shape[1] is {weight_shape_global[1]} which is not "
             f"divisible by {to_process_mesh_dict[pm_col_key].size()}"
         )
         global_weights, global_bias = self.merge_weights(
@@ -452,20 +429,20 @@ class DistributedConv3D(torch.nn.Module):
 
         col_rank, col_shard_size = (
             to_process_mesh_dict[pm_col_key].rank(),
-            to_weight_shape_local[0],
+            to_weight_shape_local[1],
         )
         self.weight = torch.nn.Parameter(
             global_weights[
-                col_rank * col_shard_size : (col_rank + 1) * col_shard_size, ...
+                :, col_rank * col_shard_size : (col_rank + 1) * col_shard_size, ...
             ].contiguous()
         )
         del global_weights
 
-        col_rank, col_shard_size = (
-            to_process_mesh_dict[pm_col_key].rank(),
-            to_bias_shape_local,
-        )
         if isinstance(global_bias, torch.Tensor):
+            col_rank, col_shard_size = (
+                to_process_mesh_dict[pm_col_key].rank(),
+                to_bias_shape_local,
+            )
             self.bias = torch.nn.Parameter(
                 global_bias[
                     col_rank * col_shard_size : (col_rank + 1) * col_shard_size
@@ -473,33 +450,99 @@ class DistributedConv3D(torch.nn.Module):
             )
             del global_bias
 
+    def _needs_halo(self) -> bool:
+        """Whether a spatially-split transpose conv would need neighbour halos.
+
+        With ``stride == kernel_size``, no padding and no dilation every spatial
+        rank's raw output tiles the global output with no overlap, so the split
+        needs no communication. Anything else does.
+        """
+        zero = (0,) * self._n_spatial
+        unit = (1,) * self._n_spatial
+        zero_pad = self.padding == zero or self.padding == "valid"
+        return not (
+            self.kernel_size == self.stride and zero_pad and self.dilation == unit
+        )
+
+    def _forward_local(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass when ``channel_group.size() == 1`` (no channel comm).
+
+        Nothing has to be gathered over the channel dimension, so the custom
+        autograd Function buys nothing: native ``conv_transpose{1,2,3}d`` plus
+        the spatial-group gradient hooks on ``weight`` / ``bias`` produce the
+        same result. This fast path only covers the exact-tiling case: no split
+        spatial axis (any ``stride`` / ``padding`` / ``dilation``), or a split
+        whose raw outputs tile with no overlap (``stride == kernel_size``, no
+        padding / dilation). Halo-needing splits are handled too, but via
+        ``_conv_apply`` -- ``forward`` routes them there and they should never
+        reach here.
+
+        The guard below is therefore defensive: running native
+        ``conv_transpose`` on a local shard that needs a halo would silently
+        give wrong values at the shard seams, so turn that into a loud error
+        instead.
+        """
+        if self._spatial_sync_groups and self._needs_halo():
+            raise NotImplementedError(
+                "_forward_local reached with a halo-needing spatial split; "
+                "forward() should have routed this through _conv_apply."
+            )
+        conv_transpose = self.config.conv_transpose_fn
+        if self.bias is not None:
+            y = conv_transpose(
+                x,
+                self.weight,
+                self.bias,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
+            )
+        else:
+            y = conv_transpose(
+                x,
+                self.weight,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
+            )
+        return cast(torch.Tensor, y)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass of the distributed 3-D convolution.
+        Forward pass of the distributed N-D transpose convolution.
 
         Parameters
         ----------
         x : torch.Tensor
-            Local input tensor of shape
-            ``(N, Cin / n_channel, Din, Hin, Win / n_spatial)``.
+            Local input tensor of shape ``(N, Cin / n_channel, *spatial / n_spatial)``.
 
         Returns
         -------
         torch.Tensor
             Local output tensor of shape
-            ``(N, Cout / n_channel, Dout, Hout, Wout / n_spatial)``.
+            ``(N, Cout / n_channel, *spatial' / n_spatial)``.
         """
-        out = self.conv3d_apply(
+        # With no channel split the custom autograd Function buys nothing *unless*
+        # a spatially-split transpose conv needs a halo exchange; that case still
+        # has to go through ``_conv_apply`` (the halo kernel handles a channel
+        # group of one as the identity gather). ``_spatial_sync_groups`` is
+        # non-empty iff some spatial axis is really split -- checking
+        # ``spatial_group`` alone would miss a non-innermost-only split (its
+        # width group has size 1).
+        if self.channel_group.size() == 1 and not (
+            self._spatial_sync_groups and self._needs_halo()
+        ):
+            return self._forward_local(x)
+
+        out = self._conv_apply(
             x,
             self.weight,
             self.bias,
             self.stride,
             self.padding,
             self.dilation,
-            self.in_channels,
             self.spatial_groups,
             self.channel_group,
-            self.bayesian,
             self.config,
         )
 

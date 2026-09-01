@@ -1,7 +1,10 @@
-"""Config setup for distributed 2-D convolutions.
+"""Config setup for the distributed N-D convolution.
 
-The 1-D and 3-D configs (:class:`jigsaw.modules.conv1d.config.Conv1dConfig`,
-:class:`jigsaw.modules.conv3d.config.Conv3dConfig`) mirror this one.
+One :class:`ConvNdConfig` serves ``F.conv1d`` / ``F.conv2d`` / ``F.conv3d``; the
+spatial rank is inferred from ``len(kernel_size)`` and selects the native
+primitives (``F.conv{n}d``, ``torch.nn.grad.conv{n}d_input`` /
+``conv{n}d_weight``). The regime split (no-halo vs halo) and every other
+selection rule are dimension-independent.
 """
 
 from typing import Any, Callable, Optional
@@ -9,33 +12,45 @@ from typing import Any, Callable, Optional
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from torch.nn.grad import conv2d_input, conv2d_weight
+from torch.nn.grad import (
+    conv1d_input,
+    conv1d_weight,
+    conv2d_input,
+    conv2d_weight,
+    conv3d_input,
+    conv3d_weight,
+)
 from torch.nn.parameter import Parameter
 
-from jigsaw.modules.conv_channel_comm import resolve_channel_comm
+from ..common.channel_comm import resolve_channel_comm
+from . import distributed as dist_conv
 
-from . import distributed_convolutions_2d as dist_conv
+# native primitives indexed by ``n_spatial - 1``.
+_CONV_FN = (F.conv1d, F.conv2d, F.conv3d)
+_CONV_INPUT_FN = (conv1d_input, conv2d_input, conv3d_input)
+_CONV_WEIGHT_FN = (conv1d_weight, conv2d_weight, conv3d_weight)
 
 
-class Conv2dConfig:
-    """Selection strategy for the 2-D convolution kernels used in fwd/bwd."""
+class ConvNdConfig:
+    """Selection strategy for the N-D convolution kernels used in fwd/bwd."""
 
     # type hints
-    dist_conv2d_fn: Callable
-    dist_conv2d_backward_fn: Callable
+    n_spatial: int
+    dist_conv_fn: Callable
+    dist_conv_backward_fn: Callable
 
     def __init__(
         self,
         bayesian: bool,
         channel_group: dist.ProcessGroup,
         bias: Parameter | None,
-        kernel_size: tuple[int, int],
-        stride: tuple[int, int],
+        kernel_size: tuple[int, ...],
+        stride: tuple[int, ...],
         device: torch.device,
         channel_comm: str = "auto",
     ):
         """
-        Initialize selection strategy for conv2d.
+        Initialize selection strategy for the N-D convolution.
 
         bayesian: bool
             Flag for whether the model is bayesian.
@@ -43,9 +58,9 @@ class Conv2dConfig:
             Tensor-parallel process group.
         bias: torch.Tensor | None
             Bias if applicable.
-        kernel_size: tuple[int, int]
-            Kernel size of the convolution.
-        stride: tuple[int, int]
+        kernel_size: tuple[int, ...]
+            Kernel size of the convolution; its length is the spatial rank.
+        stride: tuple[int, ...]
             Size of the stride.
         device: torch.device
             Device upon which communication occurs.
@@ -57,39 +72,43 @@ class Conv2dConfig:
             NCCL only). ``"auto"`` (the default) picks ``"all_to_all"`` on a
             CUDA ``device`` and ``"p2p"`` otherwise.
         """
+        self.n_spatial = len(kernel_size)
         self.channel_comm = resolve_channel_comm(channel_comm, device)
-        self.conv2d_fn = self._conv2d_fn_selection(bayesian)
-        self.conv2d_input_fn = self._conv2d_input_fn_selection(bayesian)
-        self.conv2d_weight_fn = self._conv2d_weight_fn_selection(bayesian)
+        self.conv_fn = self._conv_fn_selection(bayesian)
+        self.conv_input_fn = self._conv_input_fn_selection(bayesian)
+        self.conv_weight_fn = self._conv_weight_fn_selection(bayesian)
         self.weight_reshape = self._reshape_weights_selection(bayesian)
         self.grad_bias = self._grad_bias_selection(bias)
         # ``stride == kernel_size`` tiles the domain with no overlap, so the
         # spatial split needs no communication. Otherwise neighbouring output
         # positions share input positions and the spatial ranks exchange halos.
         if all(k == s for k, s in zip(kernel_size, stride)):
-            self.dist_conv2d_fn = dist_conv.conv2d_nway
-            self.dist_conv2d_backward_fn = dist_conv.conv2d_nway_backward
+            self.dist_conv_fn = dist_conv.conv_nway
+            self.dist_conv_backward_fn = dist_conv.conv_nway_backward
         else:
-            self.dist_conv2d_fn = dist_conv.conv2d_halo_nway
-            self.dist_conv2d_backward_fn = dist_conv.conv2d_halo_nway_backward
+            self.dist_conv_fn = dist_conv.conv_halo_nway
+            self.dist_conv_backward_fn = dist_conv.conv_halo_nway_backward
 
-    def _conv2d_fn_selection(self, bayesian: bool) -> Callable:
+    def _conv_fn_selection(self, bayesian: bool) -> Callable:
         """Select the forward primitive, vmapped when the model is bayesian."""
+        conv = _CONV_FN[self.n_spatial - 1]
         if bayesian:
-            return torch.vmap(F.conv2d)
-        return F.conv2d
+            return torch.vmap(conv)
+        return conv
 
-    def _conv2d_input_fn_selection(self, bayesian: bool) -> Callable:
+    def _conv_input_fn_selection(self, bayesian: bool) -> Callable:
         """Select the grad-input primitive, vmapped when the model is bayesian."""
+        conv_input = _CONV_INPUT_FN[self.n_spatial - 1]
         if bayesian:
-            return torch.vmap(conv2d_input, in_dims=(None, 0, 0))
-        return conv2d_input
+            return torch.vmap(conv_input, in_dims=(None, 0, 0))
+        return conv_input
 
-    def _conv2d_weight_fn_selection(self, bayesian: bool) -> Callable:
+    def _conv_weight_fn_selection(self, bayesian: bool) -> Callable:
         """Select the grad-weight primitive, vmapped when the model is bayesian."""
+        conv_weight = _CONV_WEIGHT_FN[self.n_spatial - 1]
         if bayesian:
-            return torch.vmap(conv2d_weight, in_dims=(0, None, 0))
-        return conv2d_weight
+            return torch.vmap(conv_weight, in_dims=(0, None, 0))
+        return conv_weight
 
     def _reshape_weights_selection(self, bayesian: bool) -> Callable:
         """Select the weight-reshape helper (a no-op unless bayesian)."""
@@ -116,5 +135,11 @@ class Conv2dConfig:
         return None
 
     def _sum_grad_bias(self, grad_output: torch.Tensor) -> torch.Tensor:
-        """Sum ``grad_output`` over batch and spatial axes, leaving the channels."""
-        return grad_output.sum(dim=(-4, -2, -1))
+        """Sum ``grad_output`` over batch and spatial axes, leaving the channels.
+
+        Negative axes so the vmap (bayesian) leading axis is left untouched:
+        ``(N, C, *spatial)`` sums the batch axis at ``-(n_spatial + 2)`` and the
+        trailing ``n_spatial`` spatial axes, leaving the channel axis.
+        """
+        n = self.n_spatial
+        return grad_output.sum(dim=(-(n + 2), *range(-n, 0)))

@@ -1,101 +1,75 @@
-"""Distributed 2-D convolution implementation.
+"""Distributed N-D convolution implementation.
 
-The 1-D and 3-D implementations
-(:mod:`jigsaw.modules.conv1d.distributed_convolutions_1d`,
-:mod:`jigsaw.modules.conv3d.distributed_convolutions_3d`) mirror this one.
-Input is ``(N, C, H, W)``; the domain is split along the width axis (the last
-axis) across the spatial group, and the channels are split across the channel
+One module serves ``F.conv1d`` / ``F.conv2d`` / ``F.conv3d``. Input is
+``(N, C, *spatial)`` with ``len(spatial) == config.n_spatial``; the domain is
+split across the spatial group(s) and the channels are split across the channel
 group.
 
-Two regimes are selected by :class:`~jigsaw.modules.conv2d.config.Conv2dConfig`:
+The spatial split is described by ``spatial_groups``: an ``n_spatial``-tuple
+aligned with the trailing spatial axes, where an entry is ``None`` (or a group
+of size 1) when that axis is not split. The default (a single group) splits the
+last (width) axis only.
 
-* ``stride == kernel_size`` (and no dilation/padding on the split axis): the
+Two regimes are selected by :class:`~jigsaw.modules.convolution.conv.config.ConvNdConfig`:
+
+* ``stride == kernel_size`` (and no dilation/padding on the split axes): the
   spatial split needs no communication -- every spatial rank convolves its own
-  domain slice independently (:func:`conv2d_nway`).
-* ``stride != kernel_size``: neighbouring output columns share input columns, so
-  each spatial rank pulls the missing input columns from the other ranks with a
-  halo exchange and convolves (:func:`conv2d_halo_nway`).
+  domain slice independently (:func:`conv_nway`).
+* ``stride != kernel_size``: neighbouring output positions share input
+  positions, so each spatial rank pulls the missing rows/columns from the other
+  ranks with a halo exchange -- one per split axis -- and convolves
+  (:func:`conv_halo_nway`). The halo exchange is dimension-agnostic and lives in
+  :mod:`jigsaw.modules.convolution.conv.halo`.
 
 Both regimes cooperate with the channel-parallel group through
-:func:`jigsaw.modules.conv_channel_comm.over_channels`, which supports every
+:func:`jigsaw.modules.convolution.conv.channel_comm.over_channels`, which supports every
 ``channel_comm`` strategy and any group size. In the halo regime the halo
 exchange is handed to ``over_channels`` as a ``halo_fn``: the ``"all_gather"``
 strategy applies it once to the gathered full-channel tensor, while the
-streaming (``"p2p"`` / ``"all_to_all"``) strategies apply it to each
-channel slab as the slabs travel around the ring, overlapping it with the
-next hop.
-
-The spatial split can be 1-D (along the width axis only, the default) or 2-D
-(height *and* width). It is described by ``spatial_groups``: a 2-tuple
-``(group_h, group_w)`` aligned with the ``(H, W)`` axes, where an entry is
-``None`` (or a group of size 1) when that axis is not split. The halo regime
-runs one halo exchange per split axis (:func:`jigsaw.modules.spatial_halo`).
+streaming (``"p2p"`` / ``"all_to_all"``) strategies apply it to each channel
+slab as the slabs travel around the ring, overlapping it with the next hop.
 """
 
-from typing import Any, Iterator, Optional
+from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
 
-from jigsaw.modules.conv_channel_comm import over_channels
-from jigsaw.modules.spatial_halo import halo_gather, halo_scatter_add
-
-# spatial axes owned by conv2d, as negative tensor indices: (H, W).
-_SPATIAL_AXES = (-2, -1)
-
-
-def _split_axes(
-    spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
-) -> Iterator[tuple[int, int, dist.ProcessGroup]]:
-    """Yield ``(spatial_idx, tensor_axis, group)`` for the axes actually split."""
-    for idx, group in enumerate(spatial_groups):
-        if group is not None and group.size() > 1:
-            yield idx, _SPATIAL_AXES[idx], group
-
-
-def _needs_halo(
-    spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
-    padding: str | tuple[int, int],
-    dilation: tuple[int, int],
-) -> bool:
-    """Whether a nominally no-halo call (``stride == kernel``) still needs a halo.
-
-    ``stride == kernel_size`` only tiles a split axis with no overlap when it
-    also has zero padding and unit dilation. If *any* split axis has non-trivial
-    padding or dilation, the local slices' interior edges would be wrongly
-    zero-padded / their windows would overlap, so the halo path is required.
-    """
-    return isinstance(padding, tuple) and any(
-        padding[idx] != 0 or dilation[idx] != 1
-        for idx, _, _ in _split_axes(spatial_groups)
-    )
+from ..common.spatial_split import (
+    _channel_shard,
+    _local_padding,
+    _needs_halo,
+    _split_axes,
+)
+from .channel_comm import over_channels
+from .halo import halo_gather, halo_scatter_add
 
 
 # ---------------------------------------------------------------------------
 # no-halo regime (stride == kernel_size)
 # ---------------------------------------------------------------------------
-def conv2d_nway(
+def conv_nway(
     x: torch.Tensor,
     w: torch.Tensor,
     b: torch.Tensor,
-    stride: tuple[int, int],
-    padding: str | tuple[int, int],
-    dilation: tuple[int, int],
+    stride: tuple[int, ...],
+    padding: str | tuple[int, ...],
+    dilation: tuple[int, ...],
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Distributed 2d convolution for the no-halo regime (``stride == kernel``).
+    """Distributed N-D convolution for the no-halo regime (``stride == kernel``).
 
     Every spatial rank convolves its own domain slice independently -- this
     holds for a split along one axis or several -- while the channel group
-    cooperates through :func:`distributed_conv2d_over_channels_nway`.
+    cooperates through :func:`jigsaw.modules.convolution.conv.channel_comm.over_channels`.
 
     Returns ``(y, x_full)`` where ``x_full`` is the gathered full-channel input
     kept for the backward pass.
     """
     if _needs_halo(spatial_groups, padding, dilation):
-        return conv2d_halo_nway(
+        return conv_halo_nway(
             x, w, b, stride, padding, dilation, spatial_groups, channel_group, config
         )
 
@@ -105,20 +79,19 @@ def conv2d_nway(
         b,
         {"stride": stride, "padding": padding, "dilation": dilation},
         channel_group=channel_group,
-        conv_func=config.conv2d_fn,
-        n_spatial_dims=2,
+        conv_func=config.conv_fn,
+        n_spatial_dims=config.n_spatial,
         channel_comm=config.channel_comm,
     )
 
 
-def conv2d_nway_backward(
+def conv_nway_backward(
     grad_output: torch.Tensor,
     x_aug: torch.Tensor,
     weight: torch.Tensor,
-    stride: tuple[int, int],
-    padding: tuple[int, int],
-    dilation: tuple[int, int],
-    in_channels_global: int,
+    stride: tuple[int, ...],
+    padding: tuple[int, ...],
+    dilation: tuple[int, ...],
     local_in_spatial: tuple[int, ...],
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
     channel_group: dist.ProcessGroup,
@@ -133,14 +106,13 @@ def conv2d_nway_backward(
     reduced by the parameter hook).
     """
     if _needs_halo(spatial_groups, padding, dilation):
-        return conv2d_halo_nway_backward(
+        return conv_halo_nway_backward(
             grad_output,
             x_aug,
             weight,
             stride,
             padding,
             dilation,
-            in_channels_global,
             local_in_spatial,
             spatial_groups,
             channel_group,
@@ -148,7 +120,7 @@ def conv2d_nway_backward(
             config,
         )
 
-    g_x = config.conv2d_input_fn(
+    g_x = config.conv_input_fn(
         x_aug.shape[int(bayesian) :],
         weight,
         grad_output.to(weight.dtype),  # handles autocast
@@ -161,7 +133,7 @@ def conv2d_nway_backward(
         g_x, op=dist.ReduceOp.SUM, group=channel_group, async_op=True
     )
 
-    g_w = config.conv2d_weight_fn(
+    g_w = config.conv_weight_fn(
         x_aug,
         weight.shape[int(bayesian) :],
         grad_output.to(weight.dtype),
@@ -172,49 +144,33 @@ def conv2d_nway_backward(
 
     g_x_handle.wait()
 
-    shard = in_channels_global // channel_group.size()
-    start = channel_group.rank() * shard
-    g_x = g_x[..., start : start + shard, :, :]
-
-    return g_x, g_w
+    return _channel_shard(g_x, channel_group, config.n_spatial), g_w
 
 
 # ---------------------------------------------------------------------------
 # halo regime (stride != kernel_size)
 #
 # The halo exchange itself is dimension-agnostic and lives in
-# :mod:`jigsaw.modules.spatial_halo` (shared with the 1-D convolution). One halo
-# exchange is run per split axis; the split axis's conv parameters are indexed
-# out of the ``(h, w)`` tuples by ``spatial_idx``.
+# :mod:`jigsaw.modules.convolution.conv.halo`. One halo exchange is run per split axis;
+# the split axis's conv parameters are indexed out of the per-axis tuples by
+# ``spatial_idx``.
 # ---------------------------------------------------------------------------
-def _local_padding(
-    padding: tuple[int, int],
-    spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
-) -> tuple[int, int]:
-    """Local-conv padding: split axes are 0 (materialised into the halo), else given."""
-    split = {axis for _, axis, _ in _split_axes(spatial_groups)}
-    local = [
-        0 if _SPATIAL_AXES[idx] in split else pad for idx, pad in enumerate(padding)
-    ]
-    return (local[0], local[1])
-
-
-def conv2d_halo_nway(
+def conv_halo_nway(
     x: torch.Tensor,
     w: torch.Tensor,
     b: torch.Tensor,
-    stride: tuple[int, int],
-    padding: str | tuple[int, int],
-    dilation: tuple[int, int],
+    stride: tuple[int, ...],
+    padding: str | tuple[int, ...],
+    dilation: tuple[int, ...],
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Distributed 2d convolution for the halo regime (``stride != kernel``).
+    """Distributed N-D convolution for the halo regime (``stride != kernel``).
 
     Builds a ``halo_fn`` that, for every split spatial axis, pulls the missing
     rows/columns from the other spatial ranks, and hands it to
-    :func:`~jigsaw.modules.conv_channel_comm.over_channels` together with the
+    :func:`~jigsaw.modules.convolution.conv.channel_comm.over_channels` together with the
     channel-parallel work. ``over_channels`` invokes ``halo_fn`` once on the
     gathered full-channel tensor (``channel_comm="all_gather"``) or once per
     channel slab as the slabs stream around the ring (``"p2p"`` /
@@ -226,8 +182,8 @@ def conv2d_halo_nway(
     """
     if not isinstance(padding, tuple):
         raise NotImplementedError(
-            "Distributed Conv2d with stride != kernel_size does not support "
-            f"string padding ({padding!r}); pass an explicit (h, w) padding."
+            "Distributed ConvNd with stride != kernel_size does not support "
+            f"string padding ({padding!r}); pass an explicit per-axis padding."
         )
 
     def halo_fn(t: torch.Tensor) -> torch.Tensor:
@@ -253,21 +209,20 @@ def conv2d_halo_nway(
             "dilation": dilation,
         },
         channel_group=channel_group,
-        conv_func=config.conv2d_fn,
-        n_spatial_dims=2,
+        conv_func=config.conv_fn,
+        n_spatial_dims=config.n_spatial,
         channel_comm=config.channel_comm,
         halo_fn=halo_fn,
     )
 
 
-def conv2d_halo_nway_backward(
+def conv_halo_nway_backward(
     grad_output: torch.Tensor,
     x_aug: torch.Tensor,
     weight: torch.Tensor,
-    stride: tuple[int, int],
-    padding: tuple[int, int],
-    dilation: tuple[int, int],
-    in_channels_global: int,
+    stride: tuple[int, ...],
+    padding: tuple[int, ...],
+    dilation: tuple[int, ...],
     local_in_spatial: tuple[int, ...],
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
     channel_group: dist.ProcessGroup,
@@ -285,7 +240,7 @@ def conv2d_halo_nway_backward(
     """
     local_padding = _local_padding(padding, spatial_groups)
 
-    g_x_need = config.conv2d_input_fn(
+    g_x_need = config.conv_input_fn(
         x_aug.shape[int(bayesian) :],
         weight,
         grad_output.to(weight.dtype),  # handles autocast
@@ -317,7 +272,7 @@ def conv2d_halo_nway_backward(
         g_x, op=dist.ReduceOp.SUM, group=channel_group, async_op=True
     )
 
-    g_w = config.conv2d_weight_fn(
+    g_w = config.conv_weight_fn(
         x_aug,
         weight.shape[int(bayesian) :],
         grad_output.to(weight.dtype),
@@ -328,8 +283,4 @@ def conv2d_halo_nway_backward(
 
     g_x_handle.wait()
 
-    shard = in_channels_global // channel_group.size()
-    start = channel_group.rank() * shard
-    g_x = g_x[..., start : start + shard, :, :]
-
-    return g_x, g_w
+    return _channel_shard(g_x, channel_group, config.n_spatial), g_w

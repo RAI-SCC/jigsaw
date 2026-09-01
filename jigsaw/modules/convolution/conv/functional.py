@@ -1,6 +1,10 @@
-"""Autograd definition for the distributed 1-D convolution.
+"""Autograd definition for the distributed N-D convolution.
 
-Mirrors :mod:`jigsaw.modules.conv2d.functional` for ``F.conv1d``.
+One :class:`ConvNd` autograd Function serves ``F.conv1d`` / ``F.conv2d`` /
+``F.conv3d``; the spatial rank is carried by ``config.n_spatial`` (the length of
+the normalised ``kernel_size``). The 1-/2-/3-D modules pick their dimension by
+constructing a :class:`~jigsaw.modules.convolution.conv.config.ConvNdConfig` of the matching
+arity.
 """
 
 from typing import Any, Optional, Protocol, cast
@@ -8,30 +12,29 @@ from typing import Any, Optional, Protocol, cast
 import torch
 import torch.distributed as dist
 
-from .config import Conv1dConfig
+from .config import ConvNdConfig
 
 
-class Conv1dCtx(Protocol):
+class ConvNdCtx(Protocol):
     """Protocol for the values stashed on ``ctx`` between forward and backward."""
 
-    local_in_length: int
+    local_in_spatial: tuple[int, ...]
     stride: int | tuple[int, ...]
     padding: int | tuple[int, ...]
     dilation: int | tuple[int, ...]
-    spatial_group: dist.ProcessGroup
+    spatial_groups: tuple[dist.ProcessGroup | None, ...]
     channel_group: dist.ProcessGroup
-    in_channels_global: int
     bayesian: bool
-    config: Conv1dConfig
+    config: ConvNdConfig
     saved_tensors: tuple[torch.Tensor, torch.Tensor]
 
 
-class Conv1d(torch.autograd.Function):
-    """Autograd function for distributed 1-D convolution.
+class ConvNd(torch.autograd.Function):
+    """Autograd function for the distributed N-D convolution.
 
     Handles both the no-halo regime (``stride == kernel_size``) and the halo
     regime (``stride != kernel_size``); the kernels are picked by
-    :class:`~jigsaw.modules.conv1d.config.Conv1dConfig`.
+    :class:`~jigsaw.modules.convolution.conv.config.ConvNdConfig`.
     """
 
     @staticmethod
@@ -39,30 +42,30 @@ class Conv1d(torch.autograd.Function):
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: torch.Tensor,
-        stride: tuple[int],
-        padding: tuple[int],
-        dilation: tuple[int],
-        in_channels: int,
-        spatial_group: dist.ProcessGroup,
+        stride: tuple[int, ...],
+        padding: tuple[int, ...],
+        dilation: tuple[int, ...],
+        spatial_groups: tuple[dist.ProcessGroup | None, ...],
         channel_group: dist.ProcessGroup,
         bayesian: bool,
-        config: Conv1dConfig,
+        config: ConvNdConfig,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass of the distributed Conv1d function.
+        """Forward pass of the distributed ConvNd function.
 
-        Returns ``(y, x_aug)`` where ``y`` is this rank's output-channel (and, in
-        the halo regime, output-position) slice and ``x_aug`` is the input kept
-        for backward: the gathered full-channel input in the no-halo regime, or
-        additionally halo-padded along the length axis in the halo regime.
+        Returns ``(y, x_aug)`` where ``y`` is this rank's output-channel (and,
+        in the halo regime, output-position) slice and ``x_aug`` is the input
+        kept for backward: the gathered full-channel input in the no-halo
+        regime, or additionally halo-padded along every split spatial axis in
+        the halo regime.
         """
-        y, x_aug = config.dist_conv1d_fn(
+        y, x_aug = config.dist_conv_fn(
             x,
             weight,
             bias,
             stride=stride,
             padding=padding,
             dilation=dilation,
-            spatial_group=spatial_group,
+            spatial_groups=spatial_groups,
             channel_group=channel_group,
             config=config,
         )
@@ -83,8 +86,7 @@ class Conv1d(torch.autograd.Function):
             stride,
             padding,
             dilation,
-            in_channels,
-            spatial_group,
+            spatial_groups,
             channel_group,
             bayesian,
             config,
@@ -96,13 +98,13 @@ class Conv1d(torch.autograd.Function):
         ctx.mark_non_differentiable(x_aug)
 
         ctx.save_for_backward(x_aug, weight)
-        c = cast(Conv1dCtx, ctx)
-        c.spatial_group = spatial_group
+        c = cast(ConvNdCtx, ctx)
+        c.spatial_groups = spatial_groups
         c.channel_group = channel_group
-        c.in_channels_global = in_channels
-        # length of this rank's owned input slice (pre channel-gather, pre halo);
-        # the halo backward needs it to fold halo-position grads back to owners.
-        c.local_in_length = x.shape[-1]
+        # spatial sizes of this rank's owned input slice (pre channel-gather,
+        # pre halo); the halo backward needs them to fold borrowed grads to
+        # owners.
+        c.local_in_spatial = tuple(x.shape[-config.n_spatial :])
         c.stride = stride
         c.padding = padding
         c.dilation = dilation
@@ -125,34 +127,32 @@ class Conv1d(torch.autograd.Function):
         None,
         None,
         None,
-        None,
     ]:
-        """Backward pass of the distributed Conv1d.
+        """Backward pass of the distributed ConvNd.
 
         ``g_b`` is the local ``grad_output`` sum (spatial ranks are reduced by
         the parameter hook). ``g_x`` / ``g_w`` are delegated to the regime-
-        specific kernel picked in :class:`Conv1dConfig`: in the no-halo regime
+        specific kernel picked in :class:`ConvNdConfig`: in the no-halo regime
         each rank holds the full-channel grad wrt input for its own
         output-channel slice and only the channel group is reduced; in the halo
         regime the grad is additionally folded back onto the owning spatial
         ranks.
         """
-        c = cast(Conv1dCtx, ctx)
+        c = cast(ConvNdCtx, ctx)
         x_aug, weight = c.saved_tensors
         config = c.config
 
         g_b = config.grad_bias(grad_output)
 
-        g_x, g_w = config.dist_conv1d_backward_fn(
+        g_x, g_w = config.dist_conv_backward_fn(
             grad_output,
             x_aug,
             weight,
             c.stride,
             c.padding,
             c.dilation,
-            c.in_channels_global,
-            c.local_in_length,
-            c.spatial_group,
+            c.local_in_spatial,
+            c.spatial_groups,
             c.channel_group,
             c.bayesian,
             config,
@@ -162,7 +162,6 @@ class Conv1d(torch.autograd.Function):
             g_x,
             g_w,
             g_b,
-            None,
             None,
             None,
             None,
@@ -182,22 +181,20 @@ class Conv1d(torch.autograd.Function):
         stride: int,
         padding: int,
         dilation: int,
-        in_channels: int,
-        spatial_group: dist.ProcessGroup,
+        spatial_groups: tuple[dist.ProcessGroup | None, ...],
         channel_group: dist.ProcessGroup,
         bayesian: bool,
-        config: Conv1dConfig,
+        config: ConvNdConfig,
     ) -> tuple[torch.Tensor, Optional[int]]:
-        """Handle vmap for the distributed Conv1d."""
-        out = Conv1d.apply(
+        """Handle vmap for the distributed ConvNd."""
+        out = ConvNd.apply(
             x,
             weight,
             bias,
             stride,
             padding,
             dilation,
-            in_channels,
-            spatial_group,
+            spatial_groups,
             channel_group,
             bayesian,
             config,
