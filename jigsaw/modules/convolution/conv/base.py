@@ -20,51 +20,12 @@ from torch.nn.parameter import Parameter
 from jigsaw import hooks
 from jigsaw.utils_aggregate import gather_1d_results
 
+from ..common.arg_norm import _as_spatial_groups, _ntuple
 from .config import ConvNdConfig
 from .functional import ConvNd
 
 # concrete torch conv class per spatial rank, for ``convert_to_torch``.
 _TORCH_CONV_CLS = {1: torch.nn.Conv1d, 2: torch.nn.Conv2d, 3: torch.nn.Conv3d}
-
-
-def _ntuple(n: int) -> Callable[[int | tuple[int, ...]], tuple[int, ...]]:
-    """Return a parser that normalises an ``int`` / short tuple to an ``n``-tuple.
-
-    An ``int`` or a length-1 tuple is broadcast to every axis; a longer tuple is
-    taken axis-by-axis (and indexes past ``n`` are dropped). A tuple shorter than
-    ``n`` but longer than 1 raises ``IndexError`` -- it is under-specified.
-    """
-
-    def parse(x: int | tuple[int, ...]) -> tuple[int, ...]:
-        if isinstance(x, int):
-            return (x,) * n
-        if len(x) == 1:
-            return (x[0],) * n
-        return tuple(x[i] for i in range(n))
-
-    return parse
-
-
-def _as_spatial_groups(
-    spatial_group: "dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]]",
-    n_spatial: int,
-) -> tuple[Optional[dist.ProcessGroup], ...]:
-    """Normalise ``spatial_group`` to an ``n_spatial``-tuple aligned with the axes.
-
-    A single process group keeps the historical behaviour -- the domain is split
-    along the last (width) axis only. A sequence is taken axis-by-axis, so a
-    full-length sequence splits several spatial axes; ``None`` (or a group of
-    size 1) marks an axis that is not split.
-    """
-    if isinstance(spatial_group, dist.ProcessGroup):
-        return (None,) * (n_spatial - 1) + (spatial_group,)
-    groups = tuple(spatial_group)
-    if len(groups) != n_spatial:
-        raise ValueError(
-            f"spatial_group as a sequence must have {n_spatial} entries "
-            f"(one per spatial axis, innermost last); got {len(groups)}."
-        )
-    return groups
 
 
 class _DistributedConvNd(torch.nn.Module):

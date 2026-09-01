@@ -3,13 +3,13 @@
 These do not need a distributed environment: ``_pair`` is the pure helper that
 lets ``DistributedConv2DTranspose`` accept ``stride`` / ``padding`` / ``dilation``
 as a plain ``int`` instead of a ``tuple[int, int]``. It is the shared
-``_ntuple(2)`` from :mod:`jigsaw.modules.convolution.conv_transpose.base` -- the
+``_ntuple(2)`` from :mod:`jigsaw.modules.convolution.common.arg_norm` -- the
 mirror of ``tests/modules/conv2d/test_conv2d_arg_normalization.py``.
 """
 
 import pytest
 
-from jigsaw.modules.convolution.conv_transpose.base import _ntuple
+from jigsaw.modules.convolution.common.arg_norm import _ntuple
 
 _pair = _ntuple(2)
 
