@@ -569,7 +569,6 @@ class _DistributedConvNd(torch.nn.Module):
             self.stride,
             self.padding,
             self.dilation,
-            self.in_channels,
             self.spatial_groups,
             self.channel_group,
             self.bayesian,

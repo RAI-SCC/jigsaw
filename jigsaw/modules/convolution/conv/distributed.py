@@ -92,7 +92,6 @@ def conv_nway_backward(
     stride: tuple[int, ...],
     padding: tuple[int, ...],
     dilation: tuple[int, ...],
-    in_channels_global: int,
     local_in_spatial: tuple[int, ...],
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
     channel_group: dist.ProcessGroup,
@@ -114,7 +113,6 @@ def conv_nway_backward(
             stride,
             padding,
             dilation,
-            in_channels_global,
             local_in_spatial,
             spatial_groups,
             channel_group,
@@ -146,7 +144,7 @@ def conv_nway_backward(
 
     g_x_handle.wait()
 
-    return _channel_shard(g_x, in_channels_global, channel_group, config.n_spatial), g_w
+    return _channel_shard(g_x, channel_group, config.n_spatial), g_w
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +223,6 @@ def conv_halo_nway_backward(
     stride: tuple[int, ...],
     padding: tuple[int, ...],
     dilation: tuple[int, ...],
-    in_channels_global: int,
     local_in_spatial: tuple[int, ...],
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
     channel_group: dist.ProcessGroup,
@@ -286,4 +283,4 @@ def conv_halo_nway_backward(
 
     g_x_handle.wait()
 
-    return _channel_shard(g_x, in_channels_global, channel_group, config.n_spatial), g_w
+    return _channel_shard(g_x, channel_group, config.n_spatial), g_w

@@ -123,11 +123,9 @@ def conv_transpose_nway_backward(
     stride: tuple[int, ...],
     padding: tuple[int, ...],
     dilation: tuple[int, ...],
-    in_channels_global: int,
     local_in_spatial: tuple[int, ...],
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
     channel_group: dist.ProcessGroup,
-    bayesian: bool,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Backward for the no-halo regime.
@@ -145,11 +143,9 @@ def conv_transpose_nway_backward(
             stride,
             padding,
             dilation,
-            in_channels_global,
             local_in_spatial,
             spatial_groups,
             channel_group,
-            bayesian,
             config,
         )
 
@@ -162,7 +158,7 @@ def conv_transpose_nway_backward(
     )
     g_x_handle.wait()
 
-    return _channel_shard(g_x, in_channels_global, channel_group, config.n_spatial), g_w
+    return _channel_shard(g_x, channel_group, config.n_spatial), g_w
 
 
 # ---------------------------------------------------------------------------
@@ -243,11 +239,9 @@ def conv_transpose_halo_nway_backward(
     stride: tuple[int, ...],
     padding: tuple[int, ...],
     dilation: tuple[int, ...],
-    in_channels_global: int,
     local_in_spatial: tuple[int, ...],
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
     channel_group: dist.ProcessGroup,
-    bayesian: bool,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Backward for the halo regime.
@@ -287,4 +281,4 @@ def conv_transpose_halo_nway_backward(
     )
     g_x_handle.wait()
 
-    return _channel_shard(g_x, in_channels_global, channel_group, config.n_spatial), g_w
+    return _channel_shard(g_x, channel_group, config.n_spatial), g_w

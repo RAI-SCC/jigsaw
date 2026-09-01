@@ -27,8 +27,6 @@ class ConvTransposeNdCtx(Protocol):
     dilation: int | tuple[int, ...]
     spatial_groups: tuple[dist.ProcessGroup | None, ...]
     channel_group: dist.ProcessGroup
-    in_channels_global: int
-    bayesian: bool
     config: ConvTransposeNdConfig
     saved_tensors: tuple[torch.Tensor, torch.Tensor]
 
@@ -49,10 +47,8 @@ class ConvTransposeNd(torch.autograd.Function):
         stride: tuple[int, ...],
         padding: tuple[int, ...],
         dilation: tuple[int, ...],
-        in_channels: int,
         spatial_groups: tuple[dist.ProcessGroup | None, ...],
         channel_group: dist.ProcessGroup,
-        bayesian: bool,
         config: ConvTransposeNdConfig,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of the distributed ConvTransposeNd function.
@@ -89,10 +85,8 @@ class ConvTransposeNd(torch.autograd.Function):
             stride,
             padding,
             dilation,
-            in_channels,
             spatial_groups,
             channel_group,
-            bayesian,
             config,
         ) = inputs
 
@@ -105,7 +99,6 @@ class ConvTransposeNd(torch.autograd.Function):
         c = cast(ConvTransposeNdCtx, ctx)
         c.spatial_groups = spatial_groups
         c.channel_group = channel_group
-        c.in_channels_global = in_channels
         # spatial sizes of this rank's owned input slice (pre channel-gather);
         # the halo backward needs them to size the raw-output span it folds
         # grads back onto.
@@ -113,7 +106,6 @@ class ConvTransposeNd(torch.autograd.Function):
         c.stride = stride
         c.padding = padding
         c.dilation = dilation
-        c.bayesian = bayesian
         c.config = config
 
     @staticmethod
@@ -125,8 +117,6 @@ class ConvTransposeNd(torch.autograd.Function):
         torch.Tensor,
         torch.Tensor,
         Optional[torch.Tensor],
-        None,
-        None,
         None,
         None,
         None,
@@ -157,11 +147,9 @@ class ConvTransposeNd(torch.autograd.Function):
             c.stride,
             c.padding,
             c.dilation,
-            c.in_channels_global,
             c.local_in_spatial,
             c.spatial_groups,
             c.channel_group,
-            c.bayesian,
             config,
         )
 
@@ -169,8 +157,6 @@ class ConvTransposeNd(torch.autograd.Function):
             g_x,
             g_w,
             g_b,
-            None,
-            None,
             None,
             None,
             None,
@@ -189,10 +175,8 @@ class ConvTransposeNd(torch.autograd.Function):
         stride: int,
         padding: int,
         dilation: int,
-        in_channels: int,
         spatial_groups: tuple[dist.ProcessGroup | None, ...],
         channel_group: dist.ProcessGroup,
-        bayesian: bool,
         config: ConvTransposeNdConfig,
     ) -> tuple[torch.Tensor, Optional[int]]:
         """Handle vmap for the distributed ConvTransposeNd."""
@@ -203,10 +187,8 @@ class ConvTransposeNd(torch.autograd.Function):
             stride,
             padding,
             dilation,
-            in_channels,
             spatial_groups,
             channel_group,
-            bayesian,
             config,
         )
 

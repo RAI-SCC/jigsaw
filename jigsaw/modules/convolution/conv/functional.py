@@ -24,7 +24,6 @@ class ConvNdCtx(Protocol):
     dilation: int | tuple[int, ...]
     spatial_groups: tuple[dist.ProcessGroup | None, ...]
     channel_group: dist.ProcessGroup
-    in_channels_global: int
     bayesian: bool
     config: ConvNdConfig
     saved_tensors: tuple[torch.Tensor, torch.Tensor]
@@ -46,7 +45,6 @@ class ConvNd(torch.autograd.Function):
         stride: tuple[int, ...],
         padding: tuple[int, ...],
         dilation: tuple[int, ...],
-        in_channels: int,
         spatial_groups: tuple[dist.ProcessGroup | None, ...],
         channel_group: dist.ProcessGroup,
         bayesian: bool,
@@ -88,7 +86,6 @@ class ConvNd(torch.autograd.Function):
             stride,
             padding,
             dilation,
-            in_channels,
             spatial_groups,
             channel_group,
             bayesian,
@@ -104,7 +101,6 @@ class ConvNd(torch.autograd.Function):
         c = cast(ConvNdCtx, ctx)
         c.spatial_groups = spatial_groups
         c.channel_group = channel_group
-        c.in_channels_global = in_channels
         # spatial sizes of this rank's owned input slice (pre channel-gather,
         # pre halo); the halo backward needs them to fold borrowed grads to
         # owners.
@@ -124,7 +120,6 @@ class ConvNd(torch.autograd.Function):
         torch.Tensor,
         torch.Tensor,
         Optional[torch.Tensor],
-        None,
         None,
         None,
         None,
@@ -156,7 +151,6 @@ class ConvNd(torch.autograd.Function):
             c.stride,
             c.padding,
             c.dilation,
-            c.in_channels_global,
             c.local_in_spatial,
             c.spatial_groups,
             c.channel_group,
@@ -168,7 +162,6 @@ class ConvNd(torch.autograd.Function):
             g_x,
             g_w,
             g_b,
-            None,
             None,
             None,
             None,
@@ -188,7 +181,6 @@ class ConvNd(torch.autograd.Function):
         stride: int,
         padding: int,
         dilation: int,
-        in_channels: int,
         spatial_groups: tuple[dist.ProcessGroup | None, ...],
         channel_group: dist.ProcessGroup,
         bayesian: bool,
@@ -202,7 +194,6 @@ class ConvNd(torch.autograd.Function):
             stride,
             padding,
             dilation,
-            in_channels,
             spatial_groups,
             channel_group,
             bayesian,

@@ -587,10 +587,8 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             self.stride,
             self.padding,
             self.dilation,
-            self.in_channels,
             self.spatial_groups,
             self.channel_group,
-            self.bayesian,
             self.config,
         )
 

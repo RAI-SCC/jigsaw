@@ -49,13 +49,14 @@ def _needs_halo(
 
 
 def _channel_shard(
-    g_x: torch.Tensor, in_channels_global: int, channel_group: dist.ProcessGroup, n: int
+    g_x: torch.Tensor, channel_group: dist.ProcessGroup, n: int
 ) -> torch.Tensor:
     """Keep this rank's contiguous input-channel slice of a full-channel grad.
 
-    The input-channel axis sits at ``-(n_spatial + 1)``.
+    ``g_x`` carries every input channel on axis ``-(n_spatial + 1)``; the group
+    splits that axis evenly and this rank keeps its own block.
     """
-    shard = in_channels_global // channel_group.size()
+    shard = g_x.shape[-(n + 1)] // channel_group.size()
     start = channel_group.rank() * shard
     return g_x.narrow(-(n + 1), start, shard)
 
