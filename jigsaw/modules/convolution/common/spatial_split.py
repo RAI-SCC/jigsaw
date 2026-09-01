@@ -48,17 +48,32 @@ def _needs_halo(
     )
 
 
-def _channel_shard(
+def _reduce_scatter_channels(
     g_x: torch.Tensor, channel_group: dist.ProcessGroup, n: int
-) -> torch.Tensor:
-    """Keep this rank's contiguous input-channel slice of a full-channel grad.
+) -> tuple[torch.Tensor, Optional[dist.Work]]:
+    """Sum a full-channel grad across the channel group, keeping this rank's shard.
 
-    ``g_x`` carries every input channel on axis ``-(n_spatial + 1)``; the group
-    splits that axis evenly and this rank keeps its own block.
+    ``g_x`` carries every input channel on axis ``-(n + 1)``; the channel group
+    splits that axis evenly and this rank keeps its own block of the summed grad.
+
+    Uses ``reduce_scatter`` rather than ``all_reduce`` + slice: an ``all_reduce``
+    is a ``reduce_scatter`` followed by an ``all_gather`` whose result would be
+    sliced away here, so this moves half the channel-group bytes. The scatter is
+    launched with ``async_op=True``; wait on the returned handle (when it is not
+    ``None``) before reading the tensor, so the caller can overlap it with the
+    grad-weight compute. Group size one is the identity.
     """
-    shard = g_x.shape[-(n + 1)] // channel_group.size()
-    start = channel_group.rank() * shard
-    return g_x.narrow(-(n + 1), start, shard)
+    group_size = channel_group.size()
+    if group_size == 1:
+        return g_x.contiguous(), None
+
+    channel_dim = -(n + 1)
+    src = g_x.movedim(channel_dim, 0).contiguous()
+    shard = src.new_empty((src.shape[0] // group_size, *src.shape[1:]))
+    handle = dist.reduce_scatter_tensor(
+        shard, src, op=dist.ReduceOp.SUM, group=channel_group, async_op=True
+    )
+    return shard.movedim(0, channel_dim), handle
 
 
 def _local_padding(

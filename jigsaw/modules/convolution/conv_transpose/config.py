@@ -29,6 +29,7 @@ class ConvTransposeNdConfig:
 
     # type hints
     n_spatial: int
+    bayesian: bool
     dist_conv_transpose_fn: Callable
     dist_conv_transpose_backward_fn: Callable
 
@@ -66,6 +67,7 @@ class ConvTransposeNdConfig:
             CUDA ``device`` and ``"p2p"`` otherwise.
         """
         self.n_spatial = len(kernel_size)
+        self.bayesian = bayesian
         self.channel_comm = resolve_channel_comm(channel_comm, device)
         self.conv_transpose_fn = self._conv_transpose_fn_selection(bayesian)
         self.conv_transpose_grad_fn = self._conv_transpose_grad_fn_selection(bayesian)

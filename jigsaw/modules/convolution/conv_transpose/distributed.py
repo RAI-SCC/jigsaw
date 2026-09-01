@@ -36,9 +36,9 @@ import torch
 import torch.distributed as dist
 
 from ..common.spatial_split import (
-    _channel_shard,
     _local_padding,
     _needs_halo,
+    _reduce_scatter_channels,
     _split_axes,
 )
 from .channel_comm import over_channels_transpose
@@ -53,11 +53,15 @@ def _grad_input_weight(
     padding: tuple[int, ...],
     dilation: tuple[int, ...],
     config: Any,
+    output_mask: tuple[bool, bool, bool] = (True, True, False),
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Local ``grad_input`` / ``grad_weight`` for a transpose convolution.
 
     ``torch.ops.aten.convolution_backward`` returns both at once; ``grad_bias``
     is handled separately (the spatial reduction is a parameter hook).
+    ``output_mask`` selects which grads to actually compute -- a masked-off entry
+    comes back as ``None`` -- so the caller can split the two into separate
+    passes and overlap the second with the channel-group reduce of the first.
     """
     g_x, g_w, _ = config.conv_transpose_grad_fn(
         grad_output.to(weight.dtype),  # handles autocast
@@ -70,8 +74,51 @@ def _grad_input_weight(
         True,  # transposed
         [0] * config.n_spatial,  # output_padding
         1,  # groups
-        [True, True, False],  # (grad_input, grad_weight, grad_bias)
+        list(output_mask),  # (grad_input, grad_weight, grad_bias)
     )
+    return g_x, g_w
+
+
+def _grad_input_weight_reduced(
+    grad_output: torch.Tensor,
+    x_full: torch.Tensor,
+    weight: torch.Tensor,
+    stride: tuple[int, ...],
+    padding: tuple[int, ...],
+    dilation: tuple[int, ...],
+    channel_group: dist.ProcessGroup,
+    config: Any,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Local ``grad_input`` / ``grad_weight`` with ``grad_input`` reduced over channels.
+
+    ``grad_input`` needs a channel-group sum (each rank holds the grad for its own
+    output-channel slice); ``grad_weight`` does not (the spatial reduction is a
+    parameter hook). When the channel group is real -- and the op is not vmapped,
+    where a masked ``convolution_backward`` output cannot be stacked -- the two
+    grads are computed in separate passes so the grad-weight pass overlaps the
+    channel-group reduce-scatter of grad_input; otherwise a single fused pass
+    feeds the reduce.
+    """
+    if channel_group.size() > 1 and not config.bayesian:
+        g_x, _ = _grad_input_weight(
+            grad_output, x_full, weight, stride, padding, dilation, config,
+            output_mask=(True, False, False),
+        )
+        g_x, handle = _reduce_scatter_channels(g_x, channel_group, config.n_spatial)
+        _, g_w = _grad_input_weight(
+            grad_output, x_full, weight, stride, padding, dilation, config,
+            output_mask=(False, True, False),
+        )
+        if handle is not None:
+            handle.wait()
+        return g_x, g_w
+
+    g_x, g_w = _grad_input_weight(
+        grad_output, x_full, weight, stride, padding, dilation, config
+    )
+    g_x, handle = _reduce_scatter_channels(g_x, channel_group, config.n_spatial)
+    if handle is not None:
+        handle.wait()
     return g_x, g_w
 
 
@@ -149,16 +196,9 @@ def conv_transpose_nway_backward(
             config,
         )
 
-    g_x, g_w = _grad_input_weight(
-        grad_output, x_aug, weight, stride, padding, dilation, config
+    return _grad_input_weight_reduced(
+        grad_output, x_aug, weight, stride, padding, dilation, channel_group, config
     )
-    g_x = g_x.contiguous()
-    g_x_handle = dist.all_reduce(
-        g_x, op=dist.ReduceOp.SUM, group=channel_group, async_op=True
-    )
-    g_x_handle.wait()
-
-    return _channel_shard(g_x, channel_group, config.n_spatial), g_w
 
 
 # ---------------------------------------------------------------------------
@@ -249,9 +289,8 @@ def conv_transpose_halo_nway_backward(
     ``grad_output`` (this rank's output shard) is expanded back to the raw local
     output span (:func:`transpose_halo_expand`, once per split axis), then the
     local transpose-conv backward gives the full-channel ``g_x`` and the local
-    ``g_w``. ``g_x`` is reduced across the channel group and sliced to this
-    rank's channel shard; ``g_w`` is reduced across spatial ranks by the
-    parameter hook.
+    ``g_w``. ``g_x`` is reduce-scattered across the channel group to this rank's
+    channel shard; ``g_w`` is reduced across spatial ranks by the parameter hook.
     """
     grad_raw = grad_output
     for idx, axis, group in reversed(list(_split_axes(spatial_groups))):
@@ -266,19 +305,13 @@ def conv_transpose_halo_nway_backward(
             axis=axis,
         )
 
-    g_x, g_w = _grad_input_weight(
+    return _grad_input_weight_reduced(
         grad_raw,
         x_aug,
         weight,
         stride,
         _local_padding(padding, spatial_groups),
         dilation,
+        channel_group,
         config,
     )
-    g_x = g_x.contiguous()
-    g_x_handle = dist.all_reduce(
-        g_x, op=dist.ReduceOp.SUM, group=channel_group, async_op=True
-    )
-    g_x_handle.wait()
-
-    return _channel_shard(g_x, channel_group, config.n_spatial), g_w

@@ -36,9 +36,9 @@ import torch
 import torch.distributed as dist
 
 from ..common.spatial_split import (
-    _channel_shard,
     _local_padding,
     _needs_halo,
+    _reduce_scatter_channels,
     _split_axes,
 )
 from .channel_comm import over_channels
@@ -127,11 +127,9 @@ def conv_nway_backward(
         stride=stride,
         padding=padding,
         dilation=dilation,
-    ).contiguous()
-
-    g_x_handle = dist.all_reduce(
-        g_x, op=dist.ReduceOp.SUM, group=channel_group, async_op=True
     )
+
+    g_x, g_x_handle = _reduce_scatter_channels(g_x, channel_group, config.n_spatial)
 
     g_w = config.conv_weight_fn(
         x_aug,
@@ -142,9 +140,10 @@ def conv_nway_backward(
         dilation=dilation,
     )
 
-    g_x_handle.wait()
+    if g_x_handle is not None:
+        g_x_handle.wait()
 
-    return _channel_shard(g_x, channel_group, config.n_spatial), g_w
+    return g_x, g_w
 
 
 # ---------------------------------------------------------------------------
@@ -232,11 +231,12 @@ def conv_halo_nway_backward(
     """Backward for the halo regime.
 
     ``g_w`` comes straight from the halo-padded input and this rank's
-    ``grad_output`` (spatial ranks are summed by the parameter hook). ``g_x`` is
-    computed on the halo-padded span, folded back onto the owning spatial ranks
-    (:func:`halo_scatter_add`, once per split axis), reduced across the channel
-    group (overlapped with the ``g_w`` compute) and finally sliced to this
-    rank's channel shard.
+    ``grad_output`` (spatial ranks are summed by the parameter hook); it depends
+    on nothing the halo exchange produces, so it is enqueued first and runs
+    alongside the halo exchange rather than after it. ``g_x`` is computed on the
+    halo-padded span, folded back onto the owning spatial ranks
+    (:func:`halo_scatter_add`, once per split axis), reduced+scattered across the
+    channel group and returned as this rank's channel shard.
     """
     local_padding = _local_padding(padding, spatial_groups)
 
@@ -249,10 +249,21 @@ def conv_halo_nway_backward(
         dilation=dilation,
     ).contiguous()
 
+    # Enqueue grad-weight before the (spatial-group) halo exchange below so the
+    # two overlap instead of running back to back.
+    g_w = config.conv_weight_fn(
+        x_aug,
+        weight.shape[int(bayesian) :],
+        grad_output.to(weight.dtype),
+        stride=stride,
+        padding=local_padding,
+        dilation=dilation,
+    )
+
     # Fold the halo-borrowed positions back onto their owners *before* the
-    # channel-group reduce. halo_scatter_add (spatial groups) and the all-reduce
+    # channel-group reduce. halo_scatter_add (spatial groups) and the reduce
     # (channel group) act on independent group axes and are both linear, so they
-    # commute; folding first shrinks the all-reduce payload from the halo-padded
+    # commute; folding first shrinks the reduce payload from the halo-padded
     # need-span to this rank's owned span.
     g_x = g_x_need
     for idx, axis, group in reversed(list(_split_axes(spatial_groups))):
@@ -266,21 +277,10 @@ def conv_halo_nway_backward(
             local_in_spatial[idx],
             axis=axis,
         )
-    g_x = g_x.contiguous()
 
-    g_x_handle = dist.all_reduce(
-        g_x, op=dist.ReduceOp.SUM, group=channel_group, async_op=True
-    )
+    g_x, g_x_handle = _reduce_scatter_channels(g_x, channel_group, config.n_spatial)
 
-    g_w = config.conv_weight_fn(
-        x_aug,
-        weight.shape[int(bayesian) :],
-        grad_output.to(weight.dtype),
-        stride=stride,
-        padding=local_padding,
-        dilation=dilation,
-    )
+    if g_x_handle is not None:
+        g_x_handle.wait()
 
-    g_x_handle.wait()
-
-    return _channel_shard(g_x, channel_group, config.n_spatial), g_w
+    return g_x, g_w
