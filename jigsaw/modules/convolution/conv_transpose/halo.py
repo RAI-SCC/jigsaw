@@ -2,7 +2,7 @@
 
 The transpose convolution is a scatter: every input position spreads its
 contribution over ``dilation * (kernel - 1) + 1`` output positions, so when the
-domain is split along a tensor's last axis each spatial rank produces a *raw*
+domain is split along a tensor's spatial axis each spatial rank produces a *raw*
 local output that is wider than its input slice and whose edges **overlap** the
 neighbouring ranks' raw outputs. The globally correct output is the sum of every
 rank's placed raw output, cropped to the global output size and re-sharded evenly
@@ -13,22 +13,18 @@ across the group.
 * :func:`transpose_halo_expand` (backward, the reverse): hand every raw-output
   column its gradient, pulled from whichever rank owns that output column.
 
-The core exchange operates purely on the last axis and treats the leading axes
-opaquely, matching :mod:`jigsaw.modules.convolution.conv.halo`; the uneven,
-Gloo-safe all-to-all (:func:`exchange_along_last_axis`) is shared by both via
-:mod:`jigsaw.modules.convolution.common.halo`.
-
-:func:`transpose_halo_reduce` / :func:`transpose_halo_expand` additionally accept
-an ``axis`` argument: any non-last axis is moved to the last position for the
-exchange and moved back before returning, so a domain that is split along
-*several* spatial axes (height *and* width, or depth/height/width) is handled by
-calling the exchange once per split axis.
+Both routines take an ``axis`` argument and operate on that axis directly,
+matching :mod:`jigsaw.modules.convolution.conv.halo`; the uneven, Gloo-safe
+all-to-all (:func:`exchange_along_axis`) is shared by both via
+:mod:`jigsaw.modules.convolution.common.halo`. A domain split along *several*
+spatial axes (height *and* width, or depth/height/width) is handled by calling
+the exchange once per split axis.
 """
 
 import torch
 import torch.distributed as dist
 
-from ..common.halo import exchange_along_last_axis
+from ..common.halo import exchange_along_axis
 
 
 def produced_output_span(
@@ -80,48 +76,17 @@ def transpose_halo_reduce(
     dilation: int,
     axis: int = -1,
 ) -> torch.Tensor:
-    """Fold overlapping raw transpose-conv outputs onto their owner along ``axis``.
-
-    ``axis`` defaults to the last axis; any other axis is moved to the last
-    position for the exchange and moved back before returning, so the same
-    last-axis kernel serves a split along height, width or depth.
-    """
-    ndim = y_raw.dim()
-    axis %= ndim
-    if axis == ndim - 1:
-        return _transpose_halo_reduce_last_axis(
-            y_raw, spatial_group, local_in_size, kernel, stride, padding, dilation
-        )
-    y_local = _transpose_halo_reduce_last_axis(
-        y_raw.movedim(axis, -1).contiguous(),
-        spatial_group,
-        local_in_size,
-        kernel,
-        stride,
-        padding,
-        dilation,
-    )
-    return y_local.movedim(-1, axis).contiguous()
-
-
-def _transpose_halo_reduce_last_axis(
-    y_raw: torch.Tensor,
-    spatial_group: dist.ProcessGroup,
-    local_in_size: int,
-    kernel: int,
-    stride: int,
-    padding: int,
-    dilation: int,
-) -> torch.Tensor:
     """Fold overlapping raw transpose-conv outputs onto their owning rank.
 
-    ``y_raw`` is this rank's raw local output (width ``wloc`` along the last
-    axis). Every rank sends the parts of its raw span that fall in each peer's
-    output shard and receives + **sums** the parts of its own shard that the
-    peers produced. Columns outside ``[0, global_out)`` are dropped.
+    ``y_raw`` is this rank's raw local output (width ``wloc`` along ``axis``).
+    Every rank sends the parts of its raw span that fall in each peer's output
+    shard and receives + **sums** the parts of its own shard that the peers
+    produced. Columns outside ``[0, global_out)`` are dropped. Operates on
+    ``axis`` directly -- no whole-tensor transpose.
 
-    Returns this rank's output shard, ``out_local`` wide along the last axis.
+    Returns this rank's output shard, ``out_local`` wide along ``axis``.
     """
+    axis %= y_raw.dim()
     group_size = spatial_group.size()
     rank = spatial_group.rank()
 
@@ -129,14 +94,21 @@ def _transpose_halo_reduce_last_axis(
         rank, group_size, local_in_size, kernel, stride, padding, dilation
     )
     keep_lo = rank * out_local
-    y_local = y_raw.new_zeros((*y_raw.shape[:-1], out_local))
+    local_shape = list(y_raw.shape)
+    local_shape[axis] = out_local
+    y_local = y_raw.new_zeros(local_shape)
 
     if group_size == 1:
         lo_c, hi_c = max(base, 0), min(base + wloc, global_out)
-        y_local[..., lo_c:hi_c] += y_raw[..., lo_c - base : hi_c - base]
+        if hi_c > lo_c:
+            y_local.narrow(axis, lo_c, hi_c - lo_c).add_(
+                y_raw.narrow(axis, lo_c - base, hi_c - lo_c)
+            )
         return y_local.contiguous()
 
-    empty = y_raw.new_empty((*y_raw.shape[:-1], 0))
+    empty_shape = list(y_raw.shape)
+    empty_shape[axis] = 0
+    empty = y_raw.new_empty(empty_shape)
     send_parts: list[torch.Tensor] = []
     send_sizes: list[int] = []
     recv_sizes: list[int] = []
@@ -147,7 +119,7 @@ def _transpose_halo_reduce_last_axis(
         s0 = max(base, peer_keep_lo, 0)
         sn = max(min(base + wloc, peer_keep_lo + out_local, global_out) - s0, 0)
         send_sizes.append(sn)
-        send_parts.append(y_raw[..., s0 - base : s0 - base + sn] if sn > 0 else empty)
+        send_parts.append(y_raw.narrow(axis, s0 - base, sn) if sn > 0 else empty)
         # part of my output shard that peer's raw span produced -> receive and sum
         peer_base, peer_wloc, _, _ = produced_output_span(
             peer, group_size, local_in_size, kernel, stride, padding, dilation
@@ -158,13 +130,13 @@ def _transpose_halo_reduce_last_axis(
         )
         recv_start.append(r0)
 
-    recv = exchange_along_last_axis(
-        spatial_group, y_raw, send_parts, send_sizes, recv_sizes
+    recv = exchange_along_axis(
+        spatial_group, y_raw, send_parts, send_sizes, recv_sizes, axis
     )
     for peer in range(group_size):
         if recv_sizes[peer] > 0:
             off = recv_start[peer] - keep_lo
-            y_local[..., off : off + recv_sizes[peer]] += recv[peer]
+            y_local.narrow(axis, off, recv_sizes[peer]).add_(recv[peer])
 
     return y_local.contiguous()
 
@@ -179,49 +151,19 @@ def transpose_halo_expand(
     dilation: int,
     axis: int = -1,
 ) -> torch.Tensor:
-    """Reverse of :func:`transpose_halo_reduce` along ``axis`` (default last axis).
-
-    As in :func:`transpose_halo_reduce`, a non-last ``axis`` is moved to the last
-    position for the exchange and moved back before returning.
-    """
-    ndim = grad_local.dim()
-    axis %= ndim
-    if axis == ndim - 1:
-        return _transpose_halo_expand_last_axis(
-            grad_local, spatial_group, local_in_size, kernel, stride, padding, dilation
-        )
-    grad_raw = _transpose_halo_expand_last_axis(
-        grad_local.movedim(axis, -1).contiguous(),
-        spatial_group,
-        local_in_size,
-        kernel,
-        stride,
-        padding,
-        dilation,
-    )
-    return grad_raw.movedim(-1, axis).contiguous()
-
-
-def _transpose_halo_expand_last_axis(
-    grad_local: torch.Tensor,
-    spatial_group: dist.ProcessGroup,
-    local_in_size: int,
-    kernel: int,
-    stride: int,
-    padding: int,
-    dilation: int,
-) -> torch.Tensor:
     """Reverse of :func:`transpose_halo_reduce`: grad wrt the raw local output.
 
     ``grad_local`` is the grad wrt this rank's output shard. Every raw-output
     column belongs to exactly one rank's shard, so this is a plain uneven
     all-to-all (no summation): each rank pulls the gradient for every column of
     its raw span from whichever rank owns that output column. Columns outside
-    ``[0, global_out)`` stay zero.
+    ``[0, global_out)`` stay zero. Operates on ``axis`` directly -- no
+    whole-tensor transpose.
 
-    Returns the grad wrt this rank's raw local output, ``wloc`` wide along the
-    last axis.
+    Returns the grad wrt this rank's raw local output, ``wloc`` wide along
+    ``axis``.
     """
+    axis %= grad_local.dim()
     group_size = spatial_group.size()
     rank = spatial_group.rank()
 
@@ -229,14 +171,21 @@ def _transpose_halo_expand_last_axis(
         rank, group_size, local_in_size, kernel, stride, padding, dilation
     )
     keep_lo = rank * out_local
-    grad_raw = grad_local.new_zeros((*grad_local.shape[:-1], wloc))
+    raw_shape = list(grad_local.shape)
+    raw_shape[axis] = wloc
+    grad_raw = grad_local.new_zeros(raw_shape)
 
     if group_size == 1:
         lo_c, hi_c = max(base, 0), min(base + wloc, global_out)
-        grad_raw[..., lo_c - base : hi_c - base] = grad_local[..., lo_c:hi_c]
+        if hi_c > lo_c:
+            grad_raw.narrow(axis, lo_c - base, hi_c - lo_c).copy_(
+                grad_local.narrow(axis, lo_c, hi_c - lo_c)
+            )
         return grad_raw.contiguous()
 
-    empty = grad_local.new_empty((*grad_local.shape[:-1], 0))
+    empty_shape = list(grad_local.shape)
+    empty_shape[axis] = 0
+    empty = grad_local.new_empty(empty_shape)
     send_parts: list[torch.Tensor] = []
     send_sizes: list[int] = []
     recv_sizes: list[int] = []
@@ -250,7 +199,7 @@ def _transpose_halo_expand_last_axis(
         sn = max(min(keep_lo + out_local, peer_base + peer_wloc, global_out) - s0, 0)
         send_sizes.append(sn)
         send_parts.append(
-            grad_local[..., s0 - keep_lo : s0 - keep_lo + sn] if sn > 0 else empty
+            grad_local.narrow(axis, s0 - keep_lo, sn) if sn > 0 else empty
         )
         # part of my raw span that peer owns -> receive
         peer_keep_lo = peer * out_local
@@ -260,12 +209,12 @@ def _transpose_halo_expand_last_axis(
         )
         recv_start.append(r0)
 
-    recv = exchange_along_last_axis(
-        spatial_group, grad_local, send_parts, send_sizes, recv_sizes
+    recv = exchange_along_axis(
+        spatial_group, grad_local, send_parts, send_sizes, recv_sizes, axis
     )
     for peer in range(group_size):
         if recv_sizes[peer] > 0:
             off = recv_start[peer] - base
-            grad_raw[..., off : off + recv_sizes[peer]] = recv[peer]
+            grad_raw.narrow(axis, off, recv_sizes[peer]).copy_(recv[peer])
 
     return grad_raw.contiguous()
