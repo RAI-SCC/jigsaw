@@ -13,7 +13,7 @@ def set_all_seeds(seed: int = 0) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def init_cuda() -> tuple[str, int, int, int]:
+def init_cuda() -> tuple[torch.device, int, int, int]:
     """
     Initialize DistributedDataParallel.
 
@@ -31,7 +31,7 @@ def init_cuda() -> tuple[str, int, int, int]:
 
     print(f"Rank {rank}: world_size {world_size}, slurm_localid {slurm_localid}")
     # Initialize GPUs and dataloaders
-    device = f"cuda:{slurm_localid}"
+    device = torch.device(f"cuda:{slurm_localid}")
     torch.cuda.set_device(slurm_localid)
 
     # Initialize DistributedDataParallel.

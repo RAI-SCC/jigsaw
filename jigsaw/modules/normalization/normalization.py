@@ -60,6 +60,28 @@ class DistributedGroupNorm(torch.nn.Module):
         bias=True,
         channel_group: Optional[dist.ProcessGroup] = None,
     ):
+        """Initialize the object.
+
+        Parameters
+        ----------
+        num_local_groups : Any
+            Number of normalization groups local to each rank.
+        num_channels : Any
+            Number of channels normalized by the layer.
+        eps : Any
+            Numerical stability epsilon.
+        affine : Any
+            Whether the normalization layer has learnable affine parameters.
+        device : Any
+            Device on which tensors and communication are placed.
+        dtype : Any
+            Data type used for tensor values.
+        bias : Any
+            Optional bias parameter.
+        channel_group : Optional[dist.ProcessGroup]
+            Process group used for channel or tensor parallelism.
+
+        """
         super().__init__()
 
         self.num_local_groups = num_local_groups
@@ -131,6 +153,16 @@ class DistributedSoftMax(torch.nn.Module):
     """Distributed Softmax operation."""
 
     def __init__(self, group: dist.ProcessGroup, dim: int = -1):
+        """Initialize the object.
+
+        Parameters
+        ----------
+        group : dist.ProcessGroup
+            Process group used for distributed communication.
+        dim : int
+            Dimension along which the operation is applied.
+
+        """
         super().__init__()
         self.dim = dim
         self.group = group

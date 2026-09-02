@@ -6,12 +6,13 @@ import sys
 import numpy as np
 import torch
 import torch.distributed as dist
+import gc
 
 from jigsaw import  utils
-from jigsaw.modules.attention import config
+from jigsaw.modules.attention import config, attention
 
 _default_layer_config: dict[str, int] = {
-    "x_features": 256,
+    "x_features": 2048,
     "batch_size": 1,
     "heads": 8,
     "n_global": 512,
@@ -19,6 +20,13 @@ _default_layer_config: dict[str, int] = {
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the scaling run.
+
+    Returns
+    -------
+    argparse.Namespace
+        Result returned by the operation.
+    """
     parser = argparse.ArgumentParser(
         description="Scale ring attention experiments with flexible configuration"
     )
@@ -81,7 +89,6 @@ def make_process_mesh(
             mesh_dim_names=tuple(["model"]),
         )
     else:  #
-        print(f"mesh shape! {mesh_shape[:-2]}")
         model_mesh = dist.device_mesh.init_device_mesh(
             device_type=device_type,
             mesh_shape=tuple(
@@ -103,7 +110,7 @@ def training_loop(
     mesh_dict: dict[str, dist.ProcessGroup],
     device: torch.device,
     local_rank: int,
-    ring_config: functional.RingAttentionConfig,
+    ring_config: config.RingAttentionConfig,
     layer_config: dict = _default_layer_config,
     steps: int = 10,
     epochs: int = 3,
@@ -115,19 +122,21 @@ def training_loop(
     torch.manual_seed(local_rank)
 
     # define stripped down attention calculation
-    ring_attention = attention_ring.Ring(
-        x_features=x_features,
+    ring_attention = attention.DistributedAttention(
+        in_dim=x_features,
         embed_dim=embed_dim,
-        output_dim=embed_dim,
+        out_dim=embed_dim,
         heads=heads,
         dropout_p=0.0,
         local_rank=local_rank,
         device=device,
-        parallelism=mesh_dict["model"].size(),
-        spatial_group=mesh_dict["model"],
+        spatial_group=mesh_dict["row"],
+        channel_group=mesh_dict["col"],
         bayesian=False,
+        qk_norm=False,
+        ring_attention=True,
         dtype=torch.bfloat16,
-        ring_config=ring_config,
+        config=ring_config,
     )
 
     n_epochs = epochs
@@ -144,13 +153,6 @@ def training_loop(
             requires_grad=True,
             dtype=torch.bfloat16,
         ) / (x_features**0.5)
-        qkv = torch.matmul(x, w_qkv.mT)
-        q, k, v = [
-            t.detach().requires_grad_(True)
-            for t in qkv.reshape(
-                batch_size, n_global // mesh_dict["model"].size(), 3, heads, embed_dim
-            ).permute(2, 0, 3, 1, 4)
-        ]
 
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
@@ -158,42 +160,66 @@ def training_loop(
         train_one_epoch(
             ring_attention,
             x,
-            q,
-            k,
-            v,
-            w_qkv,
-            steps=steps,
+            steps=steps
         )
         end.record()
         torch.cuda.synchronize()
+        del x
 
         epoch_times[epoch] = start.elapsed_time(end) / 1000 / 60
 
     return epoch_times
 
-
-def train_one_epoch(model: torch.nn.Module, x, q, k, v, w_qkv, steps: int = 10):
+# @torch.no_grad()
+def train_one_epoch(model: torch.nn.Module, x: torch.Tensor, steps: int = 5):
     # X has shape [B, Nlocal, d//2]
+    """Train the model for one epoch.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Model whose parameters are processed.
+    x : torch.Tensor
+        Input tensor.
+    steps : int
+        Number of ring or training steps.
+
+    """
     for _ in range(steps):
-        output = model(x.detach(), q, k, v, w_qkv, None)
+        output = model(x.detach())
         output.sum().backward()
 
 
-def ref_training_loop(mesh_dict, layer_config, n_epochs, n_steps=10):
+def ref_training_loop(mesh_dict, device, n_epochs, n_steps=10):
+    """Run the reference training loop.
+
+    Parameters
+    ----------
+    mesh_dict : Any
+        Process mesh mapping parallel dimensions to process groups.
+    device : Any
+        Device on which tensors and communication are placed.
+    n_epochs : Any
+        Number of training epochs.
+    n_steps : Any
+        Number of training steps.
+
+    """
     epoch_times = np.zeros(n_epochs)
     # define baseline model
-
-    model_baseline = attention_ring.RingBaseline(
-        x_features=x_features,
+    model_baseline = attention.DistributedAttention(
+        in_dim=x_features,
         embed_dim=embed_dim,
-        output_dim=embed_dim,
+        out_dim=embed_dim,
         heads=heads,
-        dropout=0.0,
+        dropout_p=0.0,
         local_rank=local_rank,
         device=device,
-        parallelism=mesh_dict["model"].size(),
-        spatial_group=mesh_dict["model"],
+        spatial_group=mesh_dict["row"],
+        channel_group=mesh_dict["col"],
         bayesian=False,
+        qk_norm=False,
+        ring_attention=False,
         dtype=torch.bfloat16,
     )
 
@@ -206,18 +232,11 @@ def ref_training_loop(mesh_dict, layer_config, n_epochs, n_steps=10):
             requires_grad=True,
             dtype=torch.bfloat16,
         ) / (x_features**0.5)
-        qkv = torch.matmul(x, w_qkv.mT)
-        q, k, v = [
-            t.detach().requires_grad_(True)
-            for t in qkv.reshape(batch_size, n_global, 3, heads, embed_dim).permute(
-                2, 0, 3, 1, 4
-            )
-        ]
 
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        train_one_epoch(model_baseline, x, q, k, v, w_qkv, steps=n_steps)
+        train_one_epoch(model_baseline, x, steps=n_steps)
         end.record()
         torch.cuda.synchronize()
 
@@ -233,7 +252,7 @@ if __name__ == "__main__":
     args = parse_args()
 
     device, localid, local_rank, world_size = utils.init_cuda()
-    mesh_dict = make_process_mesh("nccl")
+    mesh_dict = make_process_mesh("nccl", mesh_shape=[world_size, 1])
 
     # Process layer configuration overrides in the same way
     layer_config = _default_layer_config.copy()
@@ -271,26 +290,19 @@ if __name__ == "__main__":
     n_global = layer_config.get("n_global", _default_layer_config["n_global"])
     embed_dim = layer_config.get("embed_dim", x_features // heads)
 
-    w_qkv = torch.randn(
-        3 * embed_dim * heads,
-        x_features,
-        device=device,
-        requires_grad=True,
-        dtype=torch.bfloat16,
-    )
     ## Run the reference training loop to get baseline epoch times
     ref_epoch_time = ref_training_loop(
         mesh_dict,
-        layer_config,
+        device,
         epochs,
         steps,
     )
 
     # Set all possible configuration options here
     enum_fields = {
+        "send_op": config.SendOp,
         "send_in_forward": config.SendForward,
         "save_for_backward": config.SaveBackward,
-        # "send_forward_op": ring_attn_fns.SendForwardOp,
         "save_scope": config.SaveScope,
         "send_backward": config.SendBackward,
         "offload": config.Offload,
@@ -299,14 +311,14 @@ if __name__ == "__main__":
     ring_config = config.RingAttentionConfig(
         device=device,
         send_in_forward=config.SendForward.X,
+        # send_op=config.SendOp.HYBRID,
         save_for_backward=config.SaveBackward.X,
-        send_forward_op=config.SendForwardOp.SENDRECV,
         save_scope=config.SaveScope.GLOBAL,
         send_backward=config.SendBackward.GATHER_DKV,
-        offload=configs.Offload.DISABLED,
+        offload=config.Offload.DISABLED,
     )
 
-    for combo in itertools.product(*[e for e in enum_fields.values()]):
+    for i, combo in enumerate(itertools.product(*enum_fields.values())):
         ring_config = config.RingAttentionConfig(
             **dict(zip(enum_fields.keys(), combo)),
             device=device,
@@ -330,5 +342,4 @@ if __name__ == "__main__":
             ref_time = np.average(ref_epoch_time[1:])
             # print(f"Average ref time is {ref_time}")
             print(f"Config: {ring_config} - Speedup {ref_time / parallel_time}")
-
     dist.destroy_process_group()

@@ -63,6 +63,7 @@ def test_xwt_forward(device: torch.device, process_mesh_dict_2x2: dict) -> None:
 def test_xwt_forward_2(device: torch.device, process_mesh_dict_2x1x2: dict) -> None:
     """Test single forward pass of a linear layer."""
     local_rank = dist.get_rank(group=process_mesh_dict_2x1x2["model"])
+    print(f"keys {process_mesh_dict_2x1x2.keys()}")
     torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
 
     # global

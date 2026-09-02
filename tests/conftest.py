@@ -18,6 +18,14 @@ mpi_rank = comm.Get_rank()
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register project-specific pytest command-line options.
+
+    Parameters
+    ----------
+    parser : pytest.Parser
+        Argument parser to configure.
+
+    """
     parser.addoption(
         "--device",
         help="Device to run tests on (cpu or cuda)",
@@ -39,6 +47,16 @@ def pytest_configure(config):
         sys.stdout = open(os.devnull, "w")
         sys.stderr = open(os.devnull, "w")
 
+    # The reference-comparison tests check a distributed op against a
+    # single-process ``F.*`` result with ~1e-4 tolerances. On Ampere+ GPUs cuDNN
+    # / cuBLAS run fp32 convs and matmuls in TF32 by default (~1e-3 relative
+    # error), and which kernel a call lands on depends on its shape -- so the
+    # sharded path and the whole-tensor reference disagree well past 1e-4 even
+    # though the maths is identical. There is no TF32 on CPU, which is why the
+    # same tests pass there. Force true fp32 so the tolerances mean something.
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
     warnings.filterwarnings("ignore", category=DeprecationWarning, module="torch")
     warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 
@@ -59,6 +77,14 @@ def pytest_configure(config):
 
 def pytest_runtest_setup(item: pytest.Item) -> None:
     # Check if the test has the 'dist' marker or the 'gpu' marker, and skip if the conditions are not met
+    """Apply test-specific skip conditions before execution.
+
+    Parameters
+    ----------
+    item : pytest.Item
+        Test item being configured.
+
+    """
     gpu_marker = item.get_closest_marker("gpu")
     if gpu_marker and (
         not torch.cuda.is_available()
@@ -101,6 +127,18 @@ def dist_env(device: torch.device) -> Generator[None, None, None]:
 
 @pytest.fixture(scope="session")
 def device(request: Any) -> torch.device:
+    """Return the device selected for the test session.
+
+    Parameters
+    ----------
+    request : Any
+        Pytest request object providing test configuration.
+
+    Returns
+    -------
+    torch.device
+        Result returned by the operation.
+    """
     device = request.config.getoption("--device")
     torch.set_default_device("cpu")
     if device == "cpu" or not torch.cuda.is_available():
@@ -114,6 +152,7 @@ def device(request: Any) -> torch.device:
 
 @pytest.fixture(autouse=False)
 def cuda_cleanup():
+    """Release CUDA resources after a test."""
     yield
     torch.cuda.synchronize()
     torch.cuda.empty_cache()

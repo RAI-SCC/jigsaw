@@ -14,6 +14,14 @@ class NVLinkActivationOffloader:
     """
 
     def __init__(self, device: torch.device) -> None:
+        """Initialize the object.
+
+        Parameters
+        ----------
+        device : torch.device
+            Device on which tensors and communication are placed.
+
+        """
         self.device = device
         self.d2h_stream = torch.cuda.Stream(device)
         self.h2d_stream = torch.cuda.Stream(device)

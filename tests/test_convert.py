@@ -10,7 +10,9 @@ from jigsaw.modules.roll import Roll
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
 from tests.process_mesh import *
 
-pytestmark = [pytest.mark.dist_required]
+# Every test here builds a 2x2 / 2x1x2 mesh, so it needs exactly 4 ranks;
+# without this an 8-rank run would build a mesh over ranks 0-3 and deadlock.
+pytestmark = [pytest.mark.dist_required, pytest.mark.dist(4)]
 
 
 @pytest.mark.parametrize(
@@ -150,6 +152,18 @@ def test_convert_mlp(
 
     class MLP(torch.nn.Module):
         def __init__(self, in_features: int, hidden_dim: int, out_features: int):
+            """Initialize the object.
+
+            Parameters
+            ----------
+            in_features : int
+                Number of input features.
+            hidden_dim : int
+                Hidden feature dimension.
+            out_features : int
+                Number of output features.
+
+            """
             super().__init__()
             self.linear1 = torch.nn.Linear(
                 in_features=in_features,
@@ -166,6 +180,18 @@ def test_convert_mlp(
             )
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Run the module forward pass.
+
+            Parameters
+            ----------
+            x : torch.Tensor
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Result returned by the operation.
+            """
             x = self.linear1(x)
             x = self.activation(x)
             x = self.linear2(x)
@@ -302,6 +328,16 @@ def test_attention(device: torch.device, process_mesh_dict_2x1x2: dict) -> None:
 
     class Attention(torch.nn.Module):
         def __init__(self, embed_dim: int, heads: int):
+            """Initialize the object.
+
+            Parameters
+            ----------
+            embed_dim : int
+                Global embedding dimension.
+            heads : int
+                Number of attention heads.
+
+            """
             super().__init__()
             self.q = torch.nn.Linear(
                 in_features=embed_dim,
@@ -327,6 +363,18 @@ def test_attention(device: torch.device, process_mesh_dict_2x1x2: dict) -> None:
             self.num_heads = heads
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Run the module forward pass.
+
+            Parameters
+            ----------
+            x : torch.Tensor
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Result returned by the operation.
+            """
             q, k, v = self.q(x), self.k(x), self.v(x)
 
             q = q.reshape(
@@ -359,7 +407,6 @@ def test_attention(device: torch.device, process_mesh_dict_2x1x2: dict) -> None:
             return values
 
     transformer = Attention(embed_dim, heads)
-    print("Attention")
     # copy weights
     q_weight = transformer.q.weight.clone()
     x_global = torch.randn(1, x_seq, embed_dim, device=device)
@@ -530,7 +577,6 @@ def test_jigsaw_transformer(
         dist_head_cat_grad, process_mesh_dict_2x1x2, pm_key="col", dim=-1
     )
 
-    print("transformer")
     assert ref_forward is not None
     assert ref_qkv_w is not None
     assert ref_qkv_grad is not None
@@ -631,7 +677,6 @@ def test_jigsaw_conv2d(device: torch.device, process_mesh_dict_2x2: dict) -> Non
     assert isinstance(dist_d_x, torch.Tensor)
     dist_d_x = gather_1d_results(dist_d_x, process_mesh_dict_2x2, dim=1, pm_key="col")
     dist_d_x = gather_1d_results(dist_d_x, process_mesh_dict_2x2, dim=-1, pm_key="row")
-    print(f"conv2d {dist_d_x.sum()}")
     assert ref_forward is not None
     assert ref_conv_weights is not None
     assert ref_d_w is not None
@@ -642,7 +687,6 @@ def test_jigsaw_conv2d(device: torch.device, process_mesh_dict_2x2: dict) -> Non
     assert torch.allclose(ref_conv_weights, dist_w, atol=1e-5), "weights do not match"
     assert torch.allclose(ref_d_w, dist_d_w, atol=1e-4), "weight grad does not match"
     assert torch.allclose(ref_d_x, dist_d_x, atol=1e-4), "weight grad does not match"
-    print(f"R{torch.distributed.get_rank()} made it to this assertion")
 
 
 def test_jigsaw_conv2dtranspose(
@@ -654,7 +698,6 @@ def test_jigsaw_conv2dtranspose(
     out_channels = 32
     kernel_size = 4
     h, w = 100, 100
-    print("conv2dtranspose")
     torch.use_deterministic_algorithms(True)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
