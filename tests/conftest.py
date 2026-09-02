@@ -47,6 +47,16 @@ def pytest_configure(config):
         sys.stdout = open(os.devnull, "w")
         sys.stderr = open(os.devnull, "w")
 
+    # The reference-comparison tests check a distributed op against a
+    # single-process ``F.*`` result with ~1e-4 tolerances. On Ampere+ GPUs cuDNN
+    # / cuBLAS run fp32 convs and matmuls in TF32 by default (~1e-3 relative
+    # error), and which kernel a call lands on depends on its shape -- so the
+    # sharded path and the whole-tensor reference disagree well past 1e-4 even
+    # though the maths is identical. There is no TF32 on CPU, which is why the
+    # same tests pass there. Force true fp32 so the tolerances mean something.
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
     warnings.filterwarnings("ignore", category=DeprecationWarning, module="torch")
     warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 

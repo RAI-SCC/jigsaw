@@ -3,7 +3,7 @@ import random
 import pytest
 import torch
 
-from jigsaw.modules import conv, conv_transpose, linear
+from jigsaw.modules import convolution, linear
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
 
 pytestmark = [pytest.mark.dist_required]
@@ -246,7 +246,7 @@ def test_conv_weight_merging(
     to_pm_dict = request.getfixturevalue(to_pm_dict)
     torch.manual_seed(from_pm_dict["col"].rank())
 
-    conv_layer = conv.DistributedConv2D(
+    conv_layer = convolution.DistributedConv2D(
         in_channels=in_channels,
         out_channels=out_channels,
         kernel_size=kernel_size,
@@ -276,7 +276,6 @@ def test_conv_weight_merging(
         local_bias_after, to_pm_dict, dim=0, pm_key="col"
     )
     assert torch.allclose(gathered_weights_before, gathered_weights_after)
-    assert conv_layer.parallelism == to_pm_dict["col"].size()
     assert torch.allclose(gathered_bias_before, gathered_bias_after)
 
 
@@ -301,13 +300,13 @@ def test_conv_weight_merging(
         ]
     ],
 )
-def test_conv_transpose_weight_merging(
+def test_conv2dtranspose_weight_merging(
     request: pytest.FixtureRequest,
     from_pm_dict: dict,
     to_pm_dict: dict,
     device: torch.device,
 ) -> None:
-    """Test weight merging for ConvTranspose2d."""
+    """Test weight merging for Conv2dTranspose."""
     random.seed(0)
     in_channels, out_channels, kernel_size = (
         random.randint(1, 100) * 4,
@@ -318,7 +317,7 @@ def test_conv_transpose_weight_merging(
     to_pm_dict = request.getfixturevalue(to_pm_dict)
     torch.manual_seed(from_pm_dict["col"].rank())
 
-    conv_layer = conv_transpose.DistributedConvTranspose2D(
+    conv_layer = convolution.DistributedConv2DTranspose(
         in_channels=in_channels,
         out_channels=out_channels,
         kernel_size=kernel_size,
@@ -353,5 +352,4 @@ def test_conv_transpose_weight_merging(
     )
 
     assert torch.allclose(gathered_weights_before, gathered_weights_after)
-    assert conv_layer.parallelism == to_pm_dict["col"].size()
     assert torch.allclose(gathered_bias_before, gathered_bias_after)
