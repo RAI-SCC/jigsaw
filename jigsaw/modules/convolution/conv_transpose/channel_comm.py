@@ -57,7 +57,7 @@ PostFn = Callable[[torch.Tensor], torch.Tensor]
 
 def _bias_view(b: torch.Tensor, n_spatial_dims: int) -> torch.Tensor:
     """Reshape a ``(C_out,)`` bias to broadcast over the spatial axes."""
-    return b.view((-1,) + (1,) * n_spatial_dims)
+    return b.view(*b.shape[:-1], 1, b.shape[-1], *((1,) * n_spatial_dims))
 
 
 def _over_channels_all_gather(
