@@ -21,13 +21,16 @@ and the venv-overlay / mpi4py build steps.
 ## Usage
 
 ```bash
-# interactive, one process
+# interactive, one process (login shell or an salloc allocation)
 JIGSAW_SITE=horeka scripts/run.sh python -c "import transformer_engine; print('ok')"
 
-# distributed, under srun (one task per GPU)
+# distributed, under srun (one task per GPU) - works both as a direct
+# `srun ...` from a login shell and as an `srun ...` step inside an salloc
+# allocation or an sbatch script; run.sh derives MASTER_ADDR/PORT from the
+# allocation either way
 JIGSAW_SITE=horeka srun --account=... --partition=accelerated-h100 \
     --nodes=1 --ntasks-per-node=4 --gres=gpu:4 \
-    scripts/run.sh python -m your_script --transformer-engine
+    scripts/run.sh python -m your_script --attn-backend te
 
 # batch
 cp scripts/train.sbatch.example experiments/train.sbatch  # then edit + sbatch

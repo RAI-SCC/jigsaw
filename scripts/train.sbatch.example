@@ -22,5 +22,5 @@ export JIGSAW_SITE=horeka          # scripts/sites/<name>.env
 # One task per GPU. run.sh derives MASTER_ADDR/MASTER_PORT from the allocation
 # and jigsaw reads SLURM_PROCID / SLURM_NTASKS / SLURM_LOCALID.
 srun --mpi=pmix scripts/run.sh python -m your_training_module \
-    --transformer-engine \
+    --attn-backend te \
     --config configs/run.yaml
