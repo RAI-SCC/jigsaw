@@ -561,7 +561,7 @@ class XTW(torch.autograd.Function):
             Index of vmapped dimension in output (0 if batched, None if not).
         """
         x = x.contiguous()
-        out = XWT.apply(x, w, b, local_rank, device, config, model_group, bayesian)
+        out = XTW.apply(x, w, b, local_rank, device, config, model_group, bayesian)
 
         # out has vmapped dimension at dim 0
         return out, 0

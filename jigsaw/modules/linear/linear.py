@@ -273,7 +273,7 @@ class DistributedXWT(torch.nn.Module):
             device=self.device,
             dtype=self.dtype,
         )
-        linear.weights.data = weights
+        linear.weight.data = weights
         if isinstance(linear.bias, Parameter) and isinstance(bias, torch.Tensor):
             linear.bias.data = bias
 
@@ -388,9 +388,7 @@ class DistributedXWT(torch.nn.Module):
         )
         del global_weights
 
-        if isinstance(global_bias, torch.Tensor) and isinstance(
-            global_bias, torch.Tensor
-        ):
+        if self.bias is not None and isinstance(global_bias, torch.Tensor):
             col_shard_size = to_bias_shape_local
             self.bias = torch.nn.Parameter(
                 global_bias[

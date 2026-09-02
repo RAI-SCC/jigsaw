@@ -2903,3 +2903,48 @@ def x_transpose_w_eightway(
     cij = cij0 + cij1 + cij2 + cij3
 
     return cij
+
+
+def fused_xw_xtw_eightway(
+    grad_output: torch.Tensor,
+    weight: torch.Tensor,
+    input: torch.Tensor,
+    local_rank: int,
+    device: torch.device,
+    model_group: dist.ProcessGroup,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Fused calculation of grad_input and grad_weight in the backward pass of a linear layer.
+
+    Computes ``grad_input = grad_output @ weight`` (as in :func:`xw_eightway`) and
+    ``grad_weight = grad_output.mT @ input`` (as in :func:`x_transpose_w_eightway`)
+    across eight processes using the ``all_to_all`` collective. Each of the two
+    collective kernels already overlaps its own communication with computation
+    internally; this wrapper composes them so the ``all_to_all`` backend exposes
+    the same fused entry point as the point-to-point backends.
+
+    Parameters
+    ----------
+    grad_output: torch.Tensor
+        Output with respect to the gradient.
+    weight: torch.Tensor
+        Model weights.
+    input: torch.Tensor
+        Model input.
+    local_rank: int
+        Local model rank.
+    device: torch.device
+        Device upon which computations occur.
+    model_group: dist.ProcessGroup
+        Process group of the domain- and tensor-parallel group of this linear layer.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+    Gradient with respect to the input and gradient of the weights.
+    """
+    grad_input = xw_eightway(grad_output, weight, local_rank, device, model_group)
+    grad_weight = x_transpose_w_eightway(
+        grad_output, input, local_rank, device, model_group
+    )
+    return grad_input, grad_weight
