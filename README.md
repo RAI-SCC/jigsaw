@@ -16,13 +16,18 @@ pip install -e .[dev]
 
 ### Option B: containerized (enables TransformerEngine)
 Running inside an NGC PyTorch container is optional. It gives a matched
-CUDA/NCCL stack and a working `transformer_engine`, so `DistributedAttention`'s
-fused path (`transformer_engine=True`) is available; without it that path falls
-back to Torch SDPA with a warning.
+CUDA/NCCL stack and a working `transformer_engine`, which unlocks the `te`
+attention backend (`DistributedAttention(attn_backend="te")`); outside a
+container that choice warns and falls back to `sdpa`.
+
+`attn_backend` selects the attention core — `te`, `sdpa` (default, PyTorch
+flash/​math SDPA) or `math` (unfused reference). `ring` (sequence-parallel
+attention) is a **separate** switch that composes with any backend: `ring=True`
+still runs its inner per-chunk attention through the chosen core.
 
 The container is also useful without TE — a pinned CUDA/NCCL stack for
-reproducible scaling and parameter studies — in which case no `--attn-backend`
-flag is needed.
+reproducible scaling and parameter studies — in which case the defaults
+(`attn_backend="sdpa"`, `ring=False`) need no flags.
 
 The repo ships the portable parts — the image recipe
 ([`containers/README.md`](containers/README.md)) and a cluster-agnostic launcher

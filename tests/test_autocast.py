@@ -57,7 +57,7 @@ def test_autocast_attention(process_mesh_dict_2x2: dict, device) -> None:
         device=device,
         spatial_group=process_mesh_dict["row"],
         channel_group=process_mesh_dict["col"],
-        ring_attention=False,
+        ring=False,
     )
 
     mse_loss = torch.nn.MSELoss()

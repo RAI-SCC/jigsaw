@@ -11,6 +11,7 @@ from jigsaw import hooks
 from jigsaw.modules import linear
 
 from . import config as attention_config
+from .config import AttnBackend
 from .functional.functional import RingAttentionFunction
 
 try:
@@ -57,8 +58,29 @@ try:
 
         @staticmethod
         def setup_context(ctx: Any, inputs: tuple, output: torch.Tensor) -> None:
-            """No context is needed; gradients flow through ``attn`` itself."""
-            return None
+            """Save q/k/v and ``attn`` so :meth:`backward` can recompute.
+
+            A custom ``autograd.Function`` is a graph boundary, so the graph
+            ``attn(q, k, v)` would build internally is discarded -- backward has
+            to rebuild it.
+            """
+            q, k, v, attn = inputs
+            ctx.save_for_backward(q, k, v)
+            ctx.attn = attn
+
+        @staticmethod
+        def backward(  # type: ignore[override]
+            ctx: Any, grad_out: torch.Tensor
+        ) -> tuple[Optional[torch.Tensor], ...]:
+            """Recompute the TE forward under grad and pull out dq/dk/dv."""
+            q, k, v = ctx.saved_tensors
+            with torch.enable_grad():
+                qd, kd, vd = (t.detach().requires_grad_(True) for t in (q, k, v))
+                out = ctx.attn(qd, kd, vd)
+                grads = torch.autograd.grad(
+                    out, (qd, kd, vd), grad_out, retain_graph=False
+                )
+            return grads[0], grads[1], grads[2], None
 
         @staticmethod
         def vmap(
@@ -115,8 +137,8 @@ class DistributedAttention(torch.nn.Module):
         channel_group: dist.ProcessGroup,
         bayesian: bool = False,
         qk_norm: bool = False,
-        ring_attention: bool = False,
-        transformer_engine: bool = False,
+        ring: bool = False,
+        attn_backend: AttnBackend | str = AttnBackend.SDPA,
         dtype: torch.dtype = torch.float32,
         config: Optional[attention_config.RingAttentionConfig] = None,
     ):
@@ -130,6 +152,13 @@ class DistributedAttention(torch.nn.Module):
             global embedding dimension
         output_dim: int
             global
+        ring: bool
+            Run ring (sequence-parallel) attention over ``spatial_group``. A
+            separate switch from ``attn_backend``: the ring's inner per-chunk
+            attention still uses the chosen backend.
+        attn_backend: AttnBackend | str
+            Attention core implementation -- ``"te"``, ``"sdpa"`` (default) or
+            ``"math"``. See :class:`.config.AttnBackend`.
         """
         super().__init__()
         self.local_rank = local_rank
@@ -142,9 +171,22 @@ class DistributedAttention(torch.nn.Module):
         self.qk_norm = qk_norm
         self.dtype = dtype
         self.dropout_p = dropout_p
-        self.ring_attention = ring_attention
-        self.te = transformer_engine
-        
+        self.ring = ring
+
+        attn_backend = AttnBackend(attn_backend)
+        if attn_backend == AttnBackend.TE and not JIGSAW_TE_AVAILABLE:
+            warnings.warn(
+                "attn_backend='te' but transformer_engine is unavailable; "
+                "falling back to 'sdpa'. Install it or update your container."
+            )
+            attn_backend = AttnBackend.SDPA
+        self.attn_backend = attn_backend
+        self.te = attn_backend == AttnBackend.TE
+        # Only the non-ring TE core consumes/produces a bshd tensor; the ring
+        # core (te_core included) works in the ring's bhsd convention and
+        # transposes internally, so forward() keeps the bhsd rearrange for it.
+        self._te_bshd = self.te and not ring
+
         self.heads = heads // self.channel_group.size()
         self.scale = (embed_dim // heads) ** -0.5
         self.empty = torch.empty(0, device=device)
@@ -153,27 +195,23 @@ class DistributedAttention(torch.nn.Module):
             "heads is not divisible by channel group size"
         )
 
-        if self.ring_attention:
+        if self.ring:
             assert spatial_group.size() > 1, (
                 "Cannot perform ring attention if spatial size is 1."
             )
-
-        if self.ring_attention:
             self.attn_core = self._ring_attn_core
-        elif self.te:
-            if not JIGSAW_TE_AVAILABLE:
-                warnings.warn("Transformer engine is not available. Install it or update your container.")
-                self.attn_core = self._attn_core
-            else:
-                self.attn_core = self._transformer_attn_core
-                self.attn = te.DotProductAttention(
-                    num_attention_heads=self.heads,
-                    kv_channels=embed_dim // heads,
-                    num_gqa_groups=self.heads,
-                    # attention_dropout=self.dropout_p,
-                    qkv_format="bshd",
-                    attn_mask_type="no_mask",
-                )
+        elif attn_backend == AttnBackend.TE:
+            self.attn_core = self._transformer_attn_core
+            self.attn = te.DotProductAttention(
+                num_attention_heads=self.heads,
+                kv_channels=embed_dim // heads,
+                num_gqa_groups=self.heads,
+                # attention_dropout=self.dropout_p,
+                qkv_format="bshd",
+                attn_mask_type="no_mask",
+            )
+        elif attn_backend == AttnBackend.MATH:
+            self.attn_core = self._attn_core_math
         else:
             self.attn_core = self._attn_core
 
@@ -227,8 +265,10 @@ class DistributedAttention(torch.nn.Module):
         self.scale = (embed_dim // heads) ** -0.5
 
         self.config = (
-            attention_config.RingAttentionConfig(device=device)
-            if ring_attention and config is None
+            attention_config.RingAttentionConfig(
+                device=device, attn_backend=self.attn_backend
+            )
+            if ring and config is None
             else config
         )
 
@@ -265,6 +305,23 @@ class DistributedAttention(torch.nn.Module):
                 torch.nn.attention.SDPBackend.MATH,
             ]
         ):
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, is_causal=False, dropout_p=self.dropout_p
+            )
+        return out
+
+    def _attn_core_math(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        **kwargs: torch.Tensor,
+    ) -> torch.Tensor:
+        """Unfused ``softmax(QK^T)V`` reference core (``attn_backend='math'``).
+
+        Forces the MATH SDPA backend, so it runs for any shape / dtype / device.
+        """
+        with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.MATH]):
             out = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, is_causal=False, dropout_p=self.dropout_p
             )
@@ -354,7 +411,7 @@ class DistributedAttention(torch.nn.Module):
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.qkv(x)
         
-        if not self.te:
+        if not self._te_bshd:
             qkv = rearrange(
                 qkv, "... n s (three h d) -> three ... n h s d", three=3, h=self.heads
             )
@@ -373,7 +430,7 @@ class DistributedAttention(torch.nn.Module):
 
         out = self.attn_core(q, k, v, x=x)
         # out has shape [batch, local_heads, local_sequence length, head_dim]
-        if not self.te:
+        if not self._te_bshd:
             out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous().to(self.dtype)
             
         out = cast(torch.Tensor, self.head_concat(out))
@@ -524,6 +581,7 @@ class Attention(torch.nn.Module):
         col_kw: str = "col",
         model_kw: str = "model",
         ring: bool = True,
+        attn_backend: AttnBackend | str = AttnBackend.SDPA,
         **kwargs: Any,
     ) -> "DistributedAttention":
         """
@@ -552,6 +610,9 @@ class Attention(torch.nn.Module):
             Boolean flag for whether ring attention should be computed on the "row" dimension.
             If not, the "row" dimension will simply perform attention in parallel over the different
             domains. This is useful for, domain-parallel i.e., Windowed attention.
+        attn_backend: AttnBackend | str
+            Attention core implementation (``"te"`` / ``"sdpa"`` / ``"math"``);
+            forwarded to :class:`DistributedAttention`. Composes with ``ring``.
         kwargs: Any
             Additional inputs.
         """
@@ -590,7 +651,8 @@ class Attention(torch.nn.Module):
             channel_group=process_mesh_dict[col_kw],
             bayesian=False,
             qk_norm=attention.qk_norm,
-            ring_attention=ring,
+            ring=ring,
+            attn_backend=attn_backend,
             dtype=attention.dtype,
         )
 

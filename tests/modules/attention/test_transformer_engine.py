@@ -42,8 +42,9 @@ def test_transformer_engine_attention_forward_backward(device: torch.device) -> 
     for t in (q, k, v):
         t.requires_grad_(True)
 
+    # te.DotProductAttention(qkv_format="bshd") returns (b, s, h*d).
     out = TransformerEngineAttention.apply(q, k, v, attn)
-    assert out.shape == (batch, seq, heads, head_dim)
+    assert out.shape == (batch, seq, heads * head_dim)
 
     out.sum().backward()
     assert q.grad is not None and k.grad is not None and v.grad is not None
@@ -53,5 +54,5 @@ def test_transformer_engine_attention_forward_backward(device: torch.device) -> 
         k.detach().transpose(1, 2),
         v.detach().transpose(1, 2),
         is_causal=False,
-    ).transpose(1, 2)
+    ).transpose(1, 2).reshape(batch, seq, heads * head_dim)
     torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)

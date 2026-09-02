@@ -134,7 +134,7 @@ def training_loop(
         channel_group=mesh_dict["col"],
         bayesian=False,
         qk_norm=False,
-        ring_attention=True,
+        ring=True,
         dtype=torch.bfloat16,
         config=ring_config,
     )
@@ -219,7 +219,7 @@ def ref_training_loop(mesh_dict, device, n_epochs, n_steps=10):
         channel_group=mesh_dict["col"],
         bayesian=False,
         qk_norm=False,
-        ring_attention=False,
+        ring=False,
         dtype=torch.bfloat16,
     )
 

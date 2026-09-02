@@ -59,6 +59,27 @@ class SendOp(Enum):
     HYBRID_ALLTOALL = 5
 
 
+class AttnBackend(str, Enum):
+    """Attention core implementation.
+
+    Applies to both the plain :class:`~..attention.DistributedAttention` core and
+    the ring's per-chunk inner attention.
+
+    - ``TE``: TransformerEngine fused (cuDNN) kernels. CUDA + ``transformer_engine``
+      only; the ring uses :mod:`.functional.te_core`.
+    - ``SDPA``: PyTorch scaled-dot-product attention -- the flash kernel on CUDA
+      (with a math fallback), the math kernel on CPU. Default.
+    - ``MATH``: the unfused ``softmax(QK^T)V`` reference. Any device/shape/dtype.
+
+    ``ring`` is a separate switch (see ``DistributedAttention``); it composes with
+    every backend here.
+    """
+
+    TE = "te"
+    SDPA = "sdpa"
+    MATH = "math"
+
+
 # --------------------------------------------------------------------------- #
 # attention cores
 # --------------------------------------------------------------------------- #
@@ -183,26 +204,61 @@ def _select_offloader(
             raise ValueError(f"unhandled offload option {other}")
 
 
-def _select_attn_core_forward_fn(device: torch.device) -> AttnCoreFn:
-    """Pick the attention forward kernel for ``device``."""
-    match device.type:
-        case "cuda":
-            return _attn_core_flash
-        case "cpu":
+def _te_core_or_raise() -> None:
+    """Guard: the TE fused-attention core needs ``transformer_engine`` + CUDA."""
+    from .functional.te_core import TE_CORE_AVAILABLE
+
+    if not TE_CORE_AVAILABLE:
+        raise RuntimeError(
+            "attn_backend=te needs transformer_engine (run inside the container)."
+        )
+
+
+def _select_attn_core_forward_fn(
+    device: torch.device, attn_backend: AttnBackend = AttnBackend.SDPA
+) -> AttnCoreFn:
+    """Pick the ring inner-attention forward core for ``device`` / ``attn_backend``.
+
+    ``SDPA`` keeps the historical device-based pick (flash on CUDA, math on CPU).
+    """
+    match AttnBackend(attn_backend):
+        case AttnBackend.TE:
+            _te_core_or_raise()
+            from .functional.te_core import te_attn_forward
+
+            return te_attn_forward
+        case AttnBackend.MATH:
             return _attn_core_math
-        case other:
-            raise ValueError(f"no attention forward core for device '{other}'")
+        case AttnBackend.SDPA:
+            match device.type:
+                case "cuda":
+                    return _attn_core_flash
+                case "cpu":
+                    return _attn_core_math
+                case other:
+                    raise ValueError(f"no attention forward core for device '{other}'")
 
 
-def _select_attn_core_backward_fn(device: torch.device) -> AttnCoreFn:
-    """Pick the attention backward kernel for ``device``."""
-    match device.type:
-        case "cuda":
-            return _attn_core_flash_backward
-        case "cpu":
+def _select_attn_core_backward_fn(
+    device: torch.device, attn_backend: AttnBackend = AttnBackend.SDPA
+) -> AttnCoreFn:
+    """Pick the ring inner-attention backward core for ``device`` / ``attn_backend``."""
+    match AttnBackend(attn_backend):
+        case AttnBackend.TE:
+            _te_core_or_raise()
+            from .functional.te_core import te_attn_backward
+
+            return te_attn_backward
+        case AttnBackend.MATH:
             return _attn_core_math_backward
-        case other:
-            raise ValueError(f"no attention backward core for device '{other}'")
+        case AttnBackend.SDPA:
+            match device.type:
+                case "cuda":
+                    return _attn_core_flash_backward
+                case "cpu":
+                    return _attn_core_math_backward
+                case other:
+                    raise ValueError(f"no attention backward core for device '{other}'")
 
 
 def _select_p2p_fn(send_op: SendOp) -> CommFn:
@@ -353,6 +409,7 @@ class RingAttentionConfig:
         send_backward: SendBackward = SendBackward.SEND_DKV,
         offload: Offload = Offload.DISABLED,
         gpus_per_node: int = 4,
+        attn_backend: AttnBackend = AttnBackend.SDPA,
     ):
         """Initialize the object.
 
@@ -374,6 +431,10 @@ class RingAttentionConfig:
             Activation offloading policy.
         gpus_per_node : int
             Number of ranks assigned to each node for hybrid communication.
+        attn_backend : AttnBackend
+            Inner per-chunk attention core. ``SDPA`` (default) keeps the
+            device-based pick (flash on CUDA, math on CPU); ``TE`` uses the
+            TransformerEngine fused core; ``MATH`` the unfused reference.
 
         """
         if gpus_per_node <= 0:
@@ -386,13 +447,18 @@ class RingAttentionConfig:
         self.offload = offload
         self.gpus_per_node = gpus_per_node
         self.device = device
+        self.attn_backend = AttnBackend(attn_backend)
 
         # Resolve every policy to its concrete callable, once.
         self.offloader = _select_offloader(offload, device)
         self.p2p_fn = _select_p2p_fn(send_op)
         self.send_op_fn = _select_send_op_fn(send_op)
-        self.attn_core_forward_fn = _select_attn_core_forward_fn(device)
-        self.attn_core_backward_fn = _select_attn_core_backward_fn(device)
+        self.attn_core_forward_fn = _select_attn_core_forward_fn(
+            device, self.attn_backend
+        )
+        self.attn_core_backward_fn = _select_attn_core_backward_fn(
+            device, self.attn_backend
+        )
         self.forward_send_fn = _select_forward_send_fn(
             send_op, send_in_forward, self.send_op_fn
         )
@@ -415,5 +481,6 @@ class RingAttentionConfig:
             f"save_for_backward={self.save_for_backward.name}, "
             f"save_scope={self.save_scope.name}, "
             f"send_backward={self.send_backward.name}, "
-            f"offload={self.offload.name})"
+            f"offload={self.offload.name}, "
+            f"attn_backend={self.attn_backend.name})"
         )

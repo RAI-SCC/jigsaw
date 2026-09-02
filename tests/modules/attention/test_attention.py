@@ -27,7 +27,7 @@ def test_init_attention(device: torch.device, process_mesh_dict_2x2: dict) -> No
         channel_group=process_mesh_dict_2x2["col"],
         bayesian=False,
         qk_norm=False,
-        ring_attention=False,
+        ring=False,
     )
 
     assert isinstance(model, attention.DistributedAttention)
@@ -64,7 +64,7 @@ def test_attention_sync(device: torch.device, process_mesh_dict_2x2: dict) -> No
         channel_group=process_mesh_dict_2x2["col"],
         bayesian=False,
         qk_norm=False,
-        ring_attention=False,
+        ring=False,
     )
     batch, local_seq_len = 10, 14
     local_channels = in_dim // process_mesh_dict_2x2["col"].size()

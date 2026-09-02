@@ -1,10 +1,12 @@
 # scripts/ — container launcher
 
 Running jigsaw in a container is **optional**. It buys you a matching
-CUDA/NCCL/cuDNN stack and, most usefully, a working
-[TransformerEngine](../jigsaw/modules/attention/attention.py) so the fused
-attention path (`transformer_engine=True`) is available. Without a container
-that path degrades to Torch SDPA with a warning.
+CUDA/NCCL/cuDNN stack and a working
+[TransformerEngine](../jigsaw/modules/attention/attention.py), which unlocks the
+`te` attention backend (`attn_backend="te"` on `DistributedAttention`, or
+`--attn-backend te` in scripts that expose it). Outside a container that choice
+warns and falls back to `sdpa`. `ring` attention is a separate switch and works
+with every backend.
 
 ## What lives here vs. what you supply
 
