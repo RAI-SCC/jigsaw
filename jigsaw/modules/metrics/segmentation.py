@@ -20,7 +20,7 @@ from typing import Optional, Sequence
 import torch
 import torch.distributed as dist
 
-from .common import GroupsArg, _active, _normalize_groups, distributed_argmax
+from ..loss.common import GroupsArg, _active, _normalize_groups, distributed_argmax
 
 
 @torch.no_grad()

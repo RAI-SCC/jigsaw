@@ -23,8 +23,8 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 
-from . import functional_classification as fc
-from .common import GroupsArg
+from ..common import GroupsArg
+from . import functional as fc
 
 
 class DistributedNLLLoss(torch.nn.Module):

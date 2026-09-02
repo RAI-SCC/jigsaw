@@ -10,8 +10,9 @@ compared against a plain single-process computation on the global tensors.
 import pytest
 import torch
 
-import jigsaw.modules.loss as jloss
-from jigsaw.modules.loss import metrics_segmentation as seg
+import jigsaw.modules.metrics as jmetrics
+from jigsaw.modules.loss import distributed_argmax
+from jigsaw.modules.metrics import segmentation as seg
 from jigsaw.utils_aggregate import gather_1d_results
 from tests.process_mesh import *  # noqa: F403
 
@@ -123,7 +124,7 @@ def test_distributed_argmax(
     logits = _global_logits(device)
     local = _shard(logits, pmd, {"col": 1, "row": 2})
 
-    got = jloss.distributed_argmax(local, dim=1, group=pmd["col"])
+    got = distributed_argmax(local, dim=1, group=pmd["col"])
     got = _gather(got, pmd, [("row", 1)])
     assert torch.equal(got, logits.argmax(dim=1))
 
@@ -292,7 +293,7 @@ def test_metric_module_accumulation(
 ) -> None:
     """``DistributedSegmentationMetrics`` accumulates to the all-batch reference."""
     pmd = request.getfixturevalue(mesh_name)
-    metric = jloss.DistributedSegmentationMetrics(
+    metric = jmetrics.DistributedSegmentationMetrics(
         C, channel_group=pmd["col"], reduce_groups=(pmd["row"],), ignore_index=255
     )
 

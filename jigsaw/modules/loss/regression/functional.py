@@ -11,7 +11,7 @@ and the backward pass are entirely local.
 import torch
 import torch.nn.functional as F
 
-from .common import Groups, GroupsArg, _normalize_groups, reduce_loss
+from ..common import Groups, GroupsArg, _normalize_groups, reduce_loss
 
 
 def _reduce_elementwise(

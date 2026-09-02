@@ -10,8 +10,8 @@ corresponding ``torch.nn.functional`` loss on the local tensor.
 
 import torch
 
-from . import functional_regression as fr
-from .common import GroupsArg
+from ..common import GroupsArg
+from . import functional as fr
 
 
 class DistributedMSELoss(torch.nn.Module):

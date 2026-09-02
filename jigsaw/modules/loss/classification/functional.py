@@ -12,7 +12,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from .common import (
+from ..common import (
     GroupsArg,
     _DistributedLogSoftmax,
     _group_rank,

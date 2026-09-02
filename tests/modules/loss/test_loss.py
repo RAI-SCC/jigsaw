@@ -16,8 +16,8 @@ import torch
 import torch.nn.functional as F
 
 import jigsaw.modules.loss as jloss
-from jigsaw.modules.loss import functional_classification as lossc
-from jigsaw.modules.loss import functional_regression as lossr
+from jigsaw.modules.loss import classification as lossc
+from jigsaw.modules.loss import regression as lossr
 from jigsaw.utils_aggregate import gather_1d_results
 from tests.process_mesh import *  # noqa: F403
 
