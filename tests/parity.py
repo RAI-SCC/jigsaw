@@ -6,7 +6,7 @@ tensors, then split the input and the upstream gradient across the process mesh,
 distributed module, gather its results back and compare -- output, input gradient,
 parameter values and parameter gradients in one call.
 
-Two jigsaw-specific points shape the design:
+Two design-shaping points:
 
 * Backward is driven with an explicit upstream gradient rather than a loss. jigsaw's
   weight-gradient all-reduce (``jigsaw.hooks.make_grad_sync_hook``) is a ``ReduceOp.SUM``
