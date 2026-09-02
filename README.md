@@ -14,6 +14,20 @@ The dev environment (necessary for running tests) can be installed with
 pip install -e .[dev]
 ```
 
+### Option B: containerized (enables TransformerEngine)
+Running inside an NGC PyTorch container is optional. It gives a matched
+CUDA/NCCL stack and a working `transformer_engine`, so `DistributedAttention`'s
+fused path (`transformer_engine=True`) is available; without it that path falls
+back to Torch SDPA with a warning.
+
+The repo ships the portable parts — the image recipe
+([`containers/README.md`](containers/README.md)) and a cluster-agnostic launcher
+([`scripts/README.md`](scripts/README.md)). You supply the per-cluster pieces:
+the image, a `scripts/sites/<cluster>.env` preset, and your batch script.
+```
+JIGSAW_SITE=horeka scripts/run.sh python -m your_script --transformer-engine
+```
+
 ## Usage
 _jigsaw_ is designed to follow the interface of PyTorch. The model must be defined exclusively via _jigsaw_ layers. i.e.
 ```

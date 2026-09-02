@@ -1,4 +1,5 @@
 import gc
+import importlib.util
 import os
 import sys
 import warnings
@@ -62,6 +63,9 @@ def pytest_configure(config):
 
     config.addinivalue_line("markers", "no_dist_env: skip the dist_env autouse fixture")
     config.addinivalue_line("markers", "gpu_required: test requires GPU")
+    config.addinivalue_line(
+        "markers", "te_required: test requires transformer_engine (container path)"
+    )
     config.addinivalue_line(
         "markers", "dist_required: test requires distributed environment"
     )
@@ -167,6 +171,7 @@ def pytest_collection_modifyitems(config, items):
         or os.environ.get("RANK") is not None
         or mpi_size > 1
     )
+    has_te = importlib.util.find_spec("transformer_engine") is not None
 
     for item in items:
         if item.get_closest_marker("gpu_required") and not has_gpu:
@@ -174,4 +179,8 @@ def pytest_collection_modifyitems(config, items):
         if item.get_closest_marker("dist_required") and not is_distributed:
             item.add_marker(
                 pytest.mark.skip(reason="Not running in distributed environment")
+            )
+        if item.get_closest_marker("te_required") and not has_te:
+            item.add_marker(
+                pytest.mark.skip(reason="transformer_engine not installed")
             )
