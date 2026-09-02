@@ -22,6 +22,53 @@ class LinearCtx(Protocol):
     b: Optional[Parameter]
 
 
+def _setup_linear_ctx(
+    ctx: torch.autograd.function.FunctionCtx, inputs: Any
+) -> None:
+    """
+    Populate ``ctx`` for the distributed linear autograd Functions.
+
+    Shared by :class:`XWT`, :class:`XW` and :class:`XTW`; their ``setup_context``
+    hooks differ in nothing but this bookkeeping. Runs once per forward call, so
+    the extra function call is not on any per-element hot path.
+
+    ctx: FunctionCtx
+    inputs: tuple(x, w, b, local_rank, device, config, model_group, bayesian)
+    """
+    x, w, b, local_rank, device, config, model_group, bayesian = inputs
+    ctx.save_for_backward(x, w, b)
+    c = cast(LinearCtx, ctx)
+    c.local_rank = local_rank
+    c.device = device
+    c.config = config
+    c.model_group = model_group
+    c.b = b
+    c.bayesian = bayesian
+
+
+def _linear_vmap(
+    fn: Any,
+    x: torch.Tensor,
+    w: torch.Tensor,
+    b: Optional[torch.Tensor],
+    local_rank: int,
+    device: torch.device,
+    config: LinearConfig,
+    model_group: dist.ProcessGroup,
+    bayesian: bool,
+) -> tuple[torch.Tensor, Optional[int]]:
+    """
+    Shared ``vmap`` rule for the distributed linear autograd Functions.
+
+    Makes the (possibly batched) input contiguous, re-applies ``fn`` -- which
+    already broadcasts over the leading vmapped dimension -- and reports that the
+    vmapped dimension of the output sits at position 0.
+    """
+    x = x.contiguous()
+    out = fn(x, w, b, local_rank, device, config, model_group, bayesian)
+    return out, 0
+
+
 class XWT(torch.autograd.Function):
     """Autograd function for batched matrix-matrix (XWT) multiplication distributed across n processes."""
 
@@ -89,14 +136,7 @@ class XWT(torch.autograd.Function):
         inputs: tuple(x, w, b, local_rank, device, config, model_group, bayesian)
         output: xwt
         """
-        x, w, b, local_rank, device, config, model_group, bayesian = inputs
-        ctx.save_for_backward(x, w, b)
-        c = cast(LinearCtx, ctx)
-        c.local_rank = local_rank
-        c.device = device
-        c.config = config
-        c.model_group = model_group
-        c.bayesian = bayesian
+        _setup_linear_ctx(ctx, inputs)
 
     @staticmethod
     def backward(
@@ -170,45 +210,10 @@ class XWT(torch.autograd.Function):
         model_group: dist.ProcessGroup,
         bayesian: bool,
     ) -> tuple[torch.Tensor, Optional[int]]:
-        """
-        Define XWT behavior under torch.vmap.
-
-        Parameters
-        ----------
-        info:
-            Metadata object with info.batch_size (size of vmapped dimension).
-        in_dims:
-            Tuple of Optional[int] describing which dimension of each input
-            is vmapped over. Structure matches (x, w, b, rank, device, config, model_group, spatial_group, bayesian).
-        x: torch.Tensor
-            Possibly batched input.
-        w: torch.Tensor
-            Possibly shared or batched weights.
-        b: torch.Tensor | None
-            Possibly shared or batched bias.
-        local_rank: int
-            Local rank.
-        device: torch.device
-            Device where computation occurs.
-        config: LinearConfig
-            Instance of selection class with function pointers based on specific config.
-        model_group: dist.ProcessGroup
-            Domain- and tensor-parallel process group.
-        bayesian: bool
-            Flag to see whether model is bayesian.
-
-        Returns
-        -------
-        output : Tensor
-            Batched output with vmapped dimension in front.
-        out_dim : Optional[int]
-            Index of vmapped dimension in output (0 if batched, None if not).
-        """
-        x = x.contiguous()
-        out = XWT.apply(x, w, b, local_rank, device, config, model_group, bayesian)
-
-        # out has vmapped dimension at dim 0
-        return out, 0
+        """Define XWT behavior under torch.vmap (see :func:`_linear_vmap`)."""
+        return _linear_vmap(
+            XWT.apply, x, w, b, local_rank, device, config, model_group, bayesian
+        )
 
 
 class XW(torch.autograd.Function):
@@ -272,15 +277,7 @@ class XW(torch.autograd.Function):
         inputs: tuple(x, w, b, local_rank, device, parallelism, model_group)
         output: xwt
         """
-        x, w, b, local_rank, device, config, model_group, bayesian = inputs
-        ctx.save_for_backward(x, w, b)
-        c = cast(LinearCtx, ctx)
-        c.local_rank = local_rank
-        c.device = device
-        c.config = config
-        c.model_group = model_group
-        c.b = b
-        c.bayesian = bayesian
+        _setup_linear_ctx(ctx, inputs)
 
     @staticmethod
     def backward(
@@ -344,49 +341,14 @@ class XW(torch.autograd.Function):
         b: Optional[torch.Tensor],
         local_rank: int,
         device: torch.device,
-        config: int,
+        config: LinearConfig,
         model_group: dist.ProcessGroup,
         bayesian: bool,
     ) -> tuple[torch.Tensor, Optional[int]]:
-        """
-        Define XW behavior under torch.vmap.
-
-        Parameters
-        ----------
-        info:
-            Metadata object with info.batch_size (size of vmapped dimension).
-        in_dims:
-            Tuple of Optional[int] describing which dimension of each input
-            is vmapped over. Structure matches (x, w, b, local_rank, device, parallelism, model_group).
-        x : Tensor
-            Batched input.
-        w : Tensor
-            Batched weights.
-        b : Tensor or None
-            Batched bias.
-        local_rank : int
-            Local model rank
-        device : torch.device
-            Device to perform computation on.
-        config: LinearConfig
-            Instance of LinearConfig class.
-        model_group : dist.ProcessGroup, optional
-            Process group for an individual model-parallel instance.
-        bayesian : bool
-            Flag to indicate if the model is bayesian.
-
-        Returns
-        -------
-        output : Tensor
-            Batched output with vmapped dimension in front.
-        out_dim : Optional[int]
-            Index of vmapped dimension in output (0 if batched, None if not).
-        """
-        x = x.contiguous()
-        out = XW.apply(x, w, b, local_rank, device, config, model_group, bayesian)
-
-        # out has vmapped dimension at dim 0
-        return out, 0
+        """Define XW behavior under torch.vmap (see :func:`_linear_vmap`)."""
+        return _linear_vmap(
+            XW.apply, x, w, b, local_rank, device, config, model_group, bayesian
+        )
 
 
 class XTW(torch.autograd.Function):
@@ -450,15 +412,7 @@ class XTW(torch.autograd.Function):
         inputs: tuple(x, w, b, local_rank, device, parallelism, model_group)
         output: xwt
         """
-        x, w, b, local_rank, device, config, model_group, bayesian = inputs
-        ctx.save_for_backward(x, w, b)
-        c = cast(LinearCtx, ctx)
-        c.local_rank = local_rank
-        c.device = device
-        c.config = config
-        c.model_group = model_group
-        c.b = b
-        c.bayesian = bayesian
+        _setup_linear_ctx(ctx, inputs)
 
     @staticmethod
     def backward(
@@ -522,46 +476,11 @@ class XTW(torch.autograd.Function):
         b: Optional[torch.Tensor],
         local_rank: int,
         device: torch.device,
-        config: int,
+        config: LinearConfig,
         model_group: dist.ProcessGroup,
         bayesian: bool,
     ) -> tuple[torch.Tensor, Optional[int]]:
-        """
-        Define XW behavior under torch.vmap.
-
-        Parameters
-        ----------
-        info:
-            Metadata object with info.batch_size (size of vmapped dimension).
-        in_dims:
-            Tuple of Optional[int] describing which dimension of each input
-            is vmapped over. Structure matches (x, w, b, local_rank, device, parallelism, model_group).
-        x : Tensor
-            Batched input.
-        w : Tensor
-            Batched weights.
-        b : Tensor or None
-            Batched bias.
-        local_rank : int
-            Local model rank
-        device : torch.device
-            Device to perform computation on.
-        config: LinearConfig
-            Instance of LinearConfig class.
-        model_group : dist.ProcessGroup, optional
-            Process group for an individual model-parallel instance.
-        bayesian : bool
-            Flag to indicate if the model is bayesian.
-
-        Returns
-        -------
-        output : Tensor
-            Batched output with vmapped dimension in front.
-        out_dim : Optional[int]
-            Index of vmapped dimension in output (0 if batched, None if not).
-        """
-        x = x.contiguous()
-        out = XTW.apply(x, w, b, local_rank, device, config, model_group, bayesian)
-
-        # out has vmapped dimension at dim 0
-        return out, 0
+        """Define XTW behavior under torch.vmap (see :func:`_linear_vmap`)."""
+        return _linear_vmap(
+            XTW.apply, x, w, b, local_rank, device, config, model_group, bayesian
+        )
