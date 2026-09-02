@@ -60,6 +60,7 @@ def _conv2d_multi_spatial_reference_check(
     stride: Pair | None = None,
     padding: Pair = 0,
     dilation: Pair = 1,
+    groups: int = 1,
 ) -> None:
     """Compare a ``DistributedConv2D`` split along H *and* W to a plain conv2d.
 
@@ -97,7 +98,7 @@ def _conv2d_multi_spatial_reference_check(
         stride=stride,
         padding=padding,
         dilation=dilation,
-        groups=1,
+        groups=groups,
         bias=True,
         bayesian=False,
         dtype=torch.float32,
@@ -147,6 +148,7 @@ def _conv2d_multi_spatial_reference_check(
         stride=stride,
         padding=padding,
         dilation=dilation,
+        groups=groups,
     )
 
     assert y_ref.shape[-2] % nh == 0 and y_ref.shape[-1] % nw == 0, (
@@ -606,4 +608,68 @@ class TestConv2dSpatialGridSweep:
             stride=stride,
             padding=padding,
             dilation=dilation,
+        )
+
+
+class TestConv2dMultiSpatialGroups:
+    """Grouped conv with the domain split along H *and* W.
+
+    The halo exchange runs per split axis and is unaffected by ``groups``; the
+    channel-parallel work still collapses to a plain local grouped conv whenever
+    ``groups`` is a multiple of ``col.size()``.
+    """
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [1, 2, 4, 8])
+    def test_hw_split_no_halo(
+        self, device: torch.device, spatial_mesh_2x2_hw: dict, groups: int
+    ) -> None:
+        """2x2 H/W split, no channel split: any ``groups`` dividing the channels."""
+        _conv2d_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x2_hw,
+            in_channels=8,
+            out_channels=16,
+            kernel_size=4,
+            height=16,
+            width=16,
+            groups=groups,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [2, 4])
+    def test_hw_split_halo(
+        self, device: torch.device, spatial_mesh_2x2_hw: dict, groups: int
+    ) -> None:
+        """2x2 H/W split, grouped conv, halo regime on both split axes."""
+        _conv2d_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x2_hw,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            stride=2,
+            padding=1,
+            groups=groups,
+        )
+
+    @pytest.mark.dist(8)
+    @pytest.mark.parametrize("groups", [2, 4])
+    def test_hw_split_plus_channel_halo(
+        self, device: torch.device, spatial_mesh_2x2_hw_x2c: dict, groups: int
+    ) -> None:
+        """2x2 H/W split + 2-way channel split, channel-local grouped conv, halo."""
+        _conv2d_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x2_hw_x2c,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            stride=2,
+            padding=1,
+            groups=groups,
         )

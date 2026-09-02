@@ -59,6 +59,7 @@ def _conv1d_reference_check(
     stride: Pair | None = None,
     padding: Pair = 0,
     dilation: Pair = 1,
+    groups: int = 1,
     channel_comm: str = "all_gather",
     spatial_group_as_sequence: bool = False,
 ) -> None:
@@ -98,7 +99,7 @@ def _conv1d_reference_check(
         stride=stride,
         padding=padding,
         dilation=dilation,
-        groups=1,
+        groups=groups,
         bias=True,
         bayesian=False,
         dtype=torch.float32,
@@ -126,6 +127,7 @@ def _conv1d_reference_check(
         stride=stride,
         padding=padding,
         dilation=dilation,
+        groups=groups,
     )
 
     # global output not divisible by the spatial ranks -> unsupported, cleanly.
@@ -679,3 +681,103 @@ class TestConv1dSpatialGroupsSequence:
             channel_comm=channel_comm,
             spatial_group_as_sequence=True,
         )
+
+
+class TestConv1dGroups:
+    """Grouped 1-D convolution across spatial / channel group sizes.
+
+    ``groups`` a multiple of ``col.size()`` -> every channel-parallel rank owns
+    whole conv-groups and runs a plain grouped conv1d on its channel shard with
+    no channel-group communication. ``groups == 1`` keeps the full-channel-gather
+    path; ``1 < groups`` not divisible by ``col.size()`` is rejected.
+    """
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [1, 2, 4])
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    def test_2x2_no_halo(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        groups: int,
+        channel_comm: str,
+    ) -> None:
+        """2-way spatial x 2-way channel, ``stride == kernel``."""
+        _skip_if_unsupported(channel_comm)
+        _conv1d_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            length=32,
+            groups=groups,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [2, 4])
+    def test_2x2_halo(
+        self, device: torch.device, process_mesh_dict_2x2: dict, groups: int
+    ) -> None:
+        """Channel-local grouped conv1d through the halo path (stride < kernel)."""
+        _conv1d_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            length=32,
+            stride=2,
+            padding=1,
+            groups=groups,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [1, 2, 3, 4, 6, 12])
+    def test_pure_spatial_4x1(
+        self, device: torch.device, process_mesh_dict_4x1: dict, groups: int
+    ) -> None:
+        """No channel split: any ``groups`` dividing the channel counts."""
+        _conv1d_reference_check(
+            device,
+            process_mesh_dict_4x1,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=4,
+            length=32,
+            groups=groups,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [1, 4, 12])
+    def test_pure_channel_1x4(
+        self, device: torch.device, process_mesh_dict_1x4: dict, groups: int
+    ) -> None:
+        """4-way channel split: ``groups`` 1 (gather) or a multiple of 4 (local)."""
+        _conv1d_reference_check(
+            device,
+            process_mesh_dict_1x4,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=4,
+            length=16,
+            groups=groups,
+        )
+
+    @pytest.mark.dist(4)
+    def test_incompatible_groups_rejected(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """An odd ``groups`` on a real channel group fails fast at construction."""
+        with pytest.raises(NotImplementedError):
+            convolution.DistributedConv1D(
+                18,
+                18,
+                4,
+                device=device,
+                spatial_group=process_mesh_dict_2x2["row"],
+                channel_group=process_mesh_dict_2x2["col"],
+                stride=4,
+                groups=3,
+            ).to(device)

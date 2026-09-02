@@ -45,6 +45,21 @@ from .channel_comm import over_channels
 from .halo import halo_gather, halo_scatter_add
 
 
+def _channel_reduce_grad_input(
+    g_x: torch.Tensor, channel_group: dist.ProcessGroup, config: Any
+) -> tuple[torch.Tensor, Optional[dist.Work]]:
+    """Sum the grad wrt input across the channel group, keeping this rank's shard.
+
+    In the ``channel_local`` regime (every rank owns whole conv-groups) the
+    forward did no channel exchange, so ``g_x`` is already this rank's complete
+    channel shard and no reduction is needed. Otherwise this is the
+    :func:`_reduce_scatter_channels` over the full-channel grad.
+    """
+    if config.channel_local:
+        return g_x.contiguous(), None
+    return _reduce_scatter_channels(g_x, channel_group, config.n_spatial)
+
+
 # ---------------------------------------------------------------------------
 # no-halo regime (stride == kernel_size)
 # ---------------------------------------------------------------------------
@@ -77,11 +92,17 @@ def conv_nway(
         x,
         w,
         b,
-        {"stride": stride, "padding": padding, "dilation": dilation},
+        {
+            "stride": stride,
+            "padding": padding,
+            "dilation": dilation,
+            "groups": config.groups_local,
+        },
         channel_group=channel_group,
         conv_func=config.conv_fn,
         n_spatial_dims=config.n_spatial,
         channel_comm=config.channel_comm,
+        local=config.channel_local,
     )
 
 
@@ -127,9 +148,10 @@ def conv_nway_backward(
         stride=stride,
         padding=padding,
         dilation=dilation,
+        groups=config.groups_local,
     )
 
-    g_x, g_x_handle = _reduce_scatter_channels(g_x, channel_group, config.n_spatial)
+    g_x, g_x_handle = _channel_reduce_grad_input(g_x, channel_group, config)
 
     g_w = config.conv_weight_fn(
         x_aug,
@@ -138,6 +160,7 @@ def conv_nway_backward(
         stride=stride,
         padding=padding,
         dilation=dilation,
+        groups=config.groups_local,
     )
 
     if g_x_handle is not None:
@@ -206,12 +229,14 @@ def conv_halo_nway(
             "stride": stride,
             "padding": _local_padding(padding, spatial_groups),
             "dilation": dilation,
+            "groups": config.groups_local,
         },
         channel_group=channel_group,
         conv_func=config.conv_fn,
         n_spatial_dims=config.n_spatial,
         channel_comm=config.channel_comm,
         halo_fn=halo_fn,
+        local=config.channel_local,
     )
 
 
@@ -247,6 +272,7 @@ def conv_halo_nway_backward(
         stride=stride,
         padding=local_padding,
         dilation=dilation,
+        groups=config.groups_local,
     ).contiguous()
 
     # Enqueue grad-weight before the (spatial-group) halo exchange below so the
@@ -258,6 +284,7 @@ def conv_halo_nway_backward(
         stride=stride,
         padding=local_padding,
         dilation=dilation,
+        groups=config.groups_local,
     )
 
     # Fold the halo-borrowed positions back onto their owners *before* the
@@ -278,7 +305,7 @@ def conv_halo_nway_backward(
             axis=axis,
         )
 
-    g_x, g_x_handle = _reduce_scatter_channels(g_x, channel_group, config.n_spatial)
+    g_x, g_x_handle = _channel_reduce_grad_input(g_x, channel_group, config)
 
     if g_x_handle is not None:
         g_x_handle.wait()

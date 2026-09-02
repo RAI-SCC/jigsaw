@@ -61,19 +61,21 @@ def _conv2d_reference_check(
     stride: Pair | None = None,
     padding: Pair = 0,
     dilation: Pair = 1,
+    groups: int = 1,
     channel_comm: str = "all_gather",
 ) -> None:
     """Compare a distributed ``DistributedConv2D`` against a single-process conv2d.
 
     Works for any ``row.size()`` (spatial) x ``col.size()`` (channel) mesh, any
     channel-parallel exchange strategy (``"all_gather"`` / ``"p2p"`` /
-    ``"all_to_all"``) and for both the no-halo regime (``stride == kernel_size``,
-    the default) and the halo regime (any other stride). ``kernel_size`` /
-    ``stride`` / ``padding`` / ``dilation`` accept an ``int`` or a ``(h, w)``
-    tuple, so asymmetric kernels and strides are covered. Rebuilds the equivalent
-    non-distributed convolution from the sharded weight, bias and input, runs
-    both forward and backward, and checks the output plus every gradient (input,
-    weight, bias) after gathering the distributed shards.
+    ``"all_to_all"``), any ``groups`` compatible with the channel group (``1`` or
+    a multiple of ``col.size()``) and for both the no-halo regime
+    (``stride == kernel_size``, the default) and the halo regime (any other
+    stride). ``kernel_size`` / ``stride`` / ``padding`` / ``dilation`` accept an
+    ``int`` or a ``(h, w)`` tuple, so asymmetric kernels and strides are covered.
+    Rebuilds the equivalent non-distributed convolution from the sharded weight,
+    bias and input, runs both forward and backward, and checks the output plus
+    every gradient (input, weight, bias) after gathering the distributed shards.
     """
     row_group, col_group = mesh["row"], mesh["col"]
     n_spatial, n_channel = row_group.size(), col_group.size()
@@ -98,7 +100,7 @@ def _conv2d_reference_check(
         stride=stride,
         padding=padding,
         dilation=dilation,
-        groups=1,
+        groups=groups,
         bias=True,
         bayesian=False,
         dtype=torch.float32,
@@ -106,6 +108,8 @@ def _conv2d_reference_check(
     ).to(device)
 
     # --- reconstruct the equivalent global convolution -----------------------
+    # The channel group always shards the plain-conv weight's output-channel
+    # axis (dim 0), grouped or not.
     weight_global = gather_1d_results(
         conv.weight.detach(), mesh, dim=0, pm_key="col"
     ).clone()
@@ -126,6 +130,7 @@ def _conv2d_reference_check(
         stride=stride,
         padding=padding,
         dilation=dilation,
+        groups=groups,
     )
 
     torch.manual_seed(2024)
@@ -190,6 +195,7 @@ def _conv2d_optimizer_parity_check(
     stride: Pair | None = None,
     padding: Pair = 0,
     dilation: Pair = 1,
+    groups: int = 1,
     channel_comm: str = "all_gather",
 ) -> None:
     """Run ``iters`` train steps of a ``DistributedConv2D`` and an equal
@@ -229,7 +235,7 @@ def _conv2d_optimizer_parity_check(
         stride=stride,
         padding=padding,
         dilation=dilation,
-        groups=1,
+        groups=groups,
         bias=True,
         bayesian=False,
         dtype=torch.float32,
@@ -270,6 +276,7 @@ def _conv2d_optimizer_parity_check(
             stride=stride,
             padding=padding,
             dilation=dilation,
+            groups=groups,
         )
         torch.manual_seed(8192 + it)
         grad_global = torch.randn_like(y_ref)
@@ -1036,6 +1043,203 @@ class TestConv2dChannelGroupOne:
             width=16,
             stride=2,
             padding=1,
+        )
+
+
+class TestConv2dGroups:
+    """Grouped convolution (``groups > 1``) across spatial / channel group sizes.
+
+    A grouped conv only mixes channels within a group, so once the
+    channel-parallel group (``col``) owns whole conv-groups -- ``groups`` a
+    multiple of ``col.size()`` -- every rank runs a plain grouped conv on its own
+    channel shard with no channel-group communication. ``groups == 1`` keeps the
+    historical full-channel-gather path; ``1 < groups`` not divisible by
+    ``col.size()`` is rejected at construction.
+    """
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [1, 2, 4])
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    def test_2x2_no_halo(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        groups: int,
+        channel_comm: str,
+    ) -> None:
+        """2-way spatial x 2-way channel: groups 1 (gather) and 2, 4 (channel-local)."""
+        _skip_if_unsupported(channel_comm)
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            groups=groups,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [2, 4])
+    def test_2x2_halo(
+        self, device: torch.device, process_mesh_dict_2x2: dict, groups: int
+    ) -> None:
+        """Channel-local grouped conv through the halo path (stride < kernel)."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            stride=2,
+            padding=1,
+            groups=groups,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [1, 2, 3, 4, 6, 12])
+    def test_pure_spatial_4x1(
+        self, device: torch.device, process_mesh_dict_4x1: dict, groups: int
+    ) -> None:
+        """No channel split (``col.size() == 1``): any ``groups`` dividing channels."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_4x1,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            groups=groups,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [2, 4])
+    def test_pure_spatial_4x1_halo(
+        self, device: torch.device, process_mesh_dict_4x1: dict, groups: int
+    ) -> None:
+        """4-way spatial split, grouped conv, halo regime (real cross-rank exchange)."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_4x1,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=32,
+            width=32,
+            stride=2,
+            padding=1,
+            groups=groups,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [1, 4, 12])
+    def test_pure_channel_1x4(
+        self, device: torch.device, process_mesh_dict_1x4: dict, groups: int
+    ) -> None:
+        """4-way channel split: ``groups`` 1 (gather) or a multiple of 4 (local)."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_1x4,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            groups=groups,
+        )
+
+    @pytest.mark.dist(8)
+    @pytest.mark.parametrize("groups", [4, 8])
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    def test_2x4_no_halo(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x4_rowcol: dict,
+        groups: int,
+        channel_comm: str,
+    ) -> None:
+        """2-way spatial x 4-way channel, channel-local grouped conv."""
+        _skip_if_unsupported(channel_comm)
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x4_rowcol,
+            in_channels=8,
+            out_channels=16,
+            kernel_size=4,
+            height=16,
+            width=16,
+            groups=groups,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(8)
+    @pytest.mark.parametrize("groups", [4, 8])
+    def test_2x4_halo(
+        self, device: torch.device, process_mesh_dict_2x4_rowcol: dict, groups: int
+    ) -> None:
+        """2-way spatial x 4-way channel, channel-local grouped conv, halo regime."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x4_rowcol,
+            in_channels=8,
+            out_channels=16,
+            kernel_size=4,
+            height=16,
+            width=16,
+            stride=2,
+            padding=1,
+            groups=groups,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [3, 9])
+    def test_incompatible_groups_rejected(
+        self, device: torch.device, process_mesh_dict_2x2: dict, groups: int
+    ) -> None:
+        """``1 < groups`` not a multiple of ``col.size()`` fails fast at construction.
+
+        ``col.size() == 2`` here, so an odd ``groups`` that still divides the
+        channel counts (18 is 2 * 9, 9 = 3 * 3) can only mean several channel
+        ranks share one conv-group -- unsupported.
+        """
+        with pytest.raises(NotImplementedError):
+            convolution.DistributedConv2D(
+                18,
+                18,
+                4,
+                device=device,
+                spatial_group=process_mesh_dict_2x2["row"],
+                channel_group=process_mesh_dict_2x2["col"],
+                stride=4,
+                groups=groups,
+            ).to(device)
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("optimizer", list(_OPTIMIZERS))
+    def test_optimizer_parity_2x2(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        optimizer: str,
+    ) -> None:
+        """Several train steps of a channel-local grouped conv stay in lock-step
+        with a single-process grouped ``conv2d`` (the spatial grad-sync hook still
+        has to sum the per-spatial-rank partial weight gradients)."""
+        _conv2d_optimizer_parity_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            groups=2,
+            optimizer=optimizer,
         )
 
 
