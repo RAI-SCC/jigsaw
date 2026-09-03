@@ -8,7 +8,6 @@ from jigsaw.modules.attention import Attention, DistributedAttention
 from jigsaw.modules.linear import DistributedXWT
 from jigsaw.modules.roll import Roll
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
-from tests.process_mesh import *
 
 # Every test here builds a 2x2 / 2x1x2 mesh, so it needs exactly 4 ranks;
 # without this an 8-rank run would build a mesh over ranks 0-3 and deadlock.
