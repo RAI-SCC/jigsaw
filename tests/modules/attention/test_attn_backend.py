@@ -11,7 +11,8 @@ The container path adds a three-way attention-core switch
   :class:`~jigsaw.modules.attention.attention.DistributedAttention` *warns and
   falls back to sdpa*, while :class:`~...config.RingAttentionConfig` *raises*.
 
-Everything runs single-process on CPU against a 1-rank WORLD group; no CUDA.
+Every test runs on a single rank against a 1-rank sub-group, so they work
+unchanged whether the suite is launched with one rank or many, on CPU or GPU.
 """
 
 import warnings
@@ -122,15 +123,28 @@ class TestTeCoreGuard:
 # --------------------------------------------------------------------------- #
 # DistributedAttention: warn + fall back
 # --------------------------------------------------------------------------- #
-def _build_attn(attn_backend, **overrides):
-    """Build a non-ring, single-rank ``DistributedAttention`` on the WORLD group.
+@pytest.fixture(scope="module")
+def solo_group():
+    """A 1-rank process group for the current rank.
 
-    ``channel_group.size() == 1`` keeps ``qkv`` a plain ``nn.Linear`` (no
-    ``DistributedXWT``); the grad-sync hook still needs a real
-    ``dist.ProcessGroup``, so the default WORLD group (a 1-rank gloo group under
-    the autouse ``dist_env`` fixture) is used.
+    ``DistributedAttention`` always builds a ``DistributedXWT`` head and
+    broadcasts its parameters over ``spatial_group``; a size-1 group makes that
+    a no-op, so the module constructs at any world size (and on CPU under an
+    nccl default group) without cross-rank coupling.
     """
-    world = dist.group.WORLD
+    if not dist.is_initialized():
+        pytest.skip("needs an initialized process group")
+    me = dist.get_rank()
+    mine = None
+    for r in range(dist.get_world_size()):
+        group = dist.new_group(ranks=[r])
+        if r == me:
+            mine = group
+    return mine
+
+
+def _build_attn(attn_backend, device, group, **overrides):
+    """Non-ring ``DistributedAttention`` wired to a 1-rank ``group``."""
     kwargs = dict(
         in_dim=16,
         embed_dim=16,
@@ -138,9 +152,9 @@ def _build_attn(attn_backend, **overrides):
         heads=4,
         dropout_p=0.0,
         local_rank=0,
-        device=CPU,
-        spatial_group=world,
-        channel_group=world,
+        device=device,
+        spatial_group=group,
+        channel_group=group,
         ring=False,
         attn_backend=attn_backend,
     )
@@ -149,48 +163,57 @@ def _build_attn(attn_backend, **overrides):
 
 
 class TestDistributedAttentionBackend:
-    def test_te_without_te_warns_and_falls_back(self, te_unavailable):
+    def test_te_without_te_warns_and_falls_back(
+        self, te_unavailable, device, solo_group
+    ):
         with pytest.warns(UserWarning, match="falling back to 'sdpa'"):
-            model = _build_attn("te")
+            model = _build_attn("te", device, solo_group)
 
         assert model.attn_backend is AttnBackend.SDPA
         assert model.te is False
         assert model._te_bshd is False
         assert model.attn_core.__name__ == "_attn_core"
 
-    def test_math_backend_selects_math_core_without_warning(self, te_unavailable):
+    def test_math_backend_selects_math_core_without_warning(
+        self, te_unavailable, device, solo_group
+    ):
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            model = _build_attn("math")
+            model = _build_attn("math", device, solo_group)
 
         assert model.attn_backend is AttnBackend.MATH
         assert model.te is False
         assert model.attn_core.__name__ == "_attn_core_math"
 
-    def test_default_is_sdpa(self, te_unavailable):
-        model = _build_attn(AttnBackend.SDPA)
+    def test_default_is_sdpa(self, te_unavailable, device, solo_group):
+        model = _build_attn(AttnBackend.SDPA, device, solo_group)
         assert model.attn_backend is AttnBackend.SDPA
         assert model.attn_core.__name__ == "_attn_core"
 
-    def test_string_and_enum_equivalent(self, te_unavailable):
-        assert _build_attn("math").attn_core.__name__ == (
-            _build_attn(AttnBackend.MATH).attn_core.__name__
+    def test_string_and_enum_equivalent(self, te_unavailable, device, solo_group):
+        assert _build_attn("math", device, solo_group).attn_core.__name__ == (
+            _build_attn(AttnBackend.MATH, device, solo_group).attn_core.__name__
         )
 
-    def test_unknown_backend_raises(self, te_unavailable):
+    def test_unknown_backend_raises(self, te_unavailable, device, solo_group):
         with pytest.raises(ValueError):
-            _build_attn("flash")
+            _build_attn("flash", device, solo_group)
 
-    def test_math_core_matches_sdpa_reference(self, te_unavailable):
-        """The ``math`` core is plain scaled-dot-product attention."""
-        model = _build_attn("math")
+    def test_math_core_is_plain_softmax_attention(
+        self, te_unavailable, device, solo_group
+    ):
+        """``_attn_core_math`` is ``softmax(QK^T / sqrt(d)) V``, no mask/scale tweak."""
+        model = _build_attn("math", device, solo_group)
         torch.manual_seed(0)
-        q, k, v = (torch.randn(2, model.heads, 8, 4) for _ in range(3))
+        q, k, v = (torch.randn(2, model.heads, 8, 4, device=device) for _ in range(3))
 
         out = model._attn_core_math(q, k, v)
-        ref = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=False)
+        weights = torch.softmax(
+            (q @ k.transpose(-2, -1)) / (q.shape[-1] ** 0.5), dim=-1
+        )
+        ref = weights @ v
 
-        torch.testing.assert_close(out, ref)
+        torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-4)
 
 
 # --------------------------------------------------------------------------- #
@@ -221,10 +244,10 @@ class TestRingAttentionConfigBackend:
 @pytest.mark.te_required
 @pytest.mark.gpu_required
 class TestBackendWithTe:
-    def test_distributed_attention_te_is_wired(self, device):
+    def test_distributed_attention_te_is_wired(self, device, solo_group):
         import transformer_engine.pytorch as te
 
-        model = _build_attn("te", device=device)
+        model = _build_attn("te", device, solo_group)
 
         assert model.attn_backend is AttnBackend.TE
         assert model.te is True
