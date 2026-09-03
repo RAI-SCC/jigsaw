@@ -5,6 +5,7 @@ import torch.nn.functional as F
 
 import jigsaw.modules.convolution as convolution
 from jigsaw.utils_aggregate import gather_1d_results, gather_results_as_list
+from tests.parity import assert_close
 from tests.process_mesh import *
 
 pytestmark = [pytest.mark.dist_required]
@@ -159,10 +160,24 @@ def _conv2d_reference_check(
     w_grad_global = gather_1d_results(conv.weight.grad, mesh, dim=0, pm_key="col")
     b_grad_global = gather_1d_results(conv.bias.grad, mesh, dim=0, pm_key="col")
 
-    assert torch.allclose(y_global, y_ref, atol=1e-4, rtol=1e-4)
-    assert torch.allclose(x_grad_global, x_global.grad, atol=1e-4, rtol=1e-4)
-    assert torch.allclose(w_grad_global, weight_global.grad, atol=1e-4, rtol=1e-4)
-    assert torch.allclose(b_grad_global, bias_global.grad, atol=1e-4, rtol=1e-4)
+    # Collective-safe: every rank reaches the same verdict, so a mismatch on a
+    # subset of ranks fails the job instead of hanging the rest in the next gather.
+    assert_close("output", y_global, y_ref, 1e-4, 1e-4, device, model_group)
+    assert_close(
+        "input grad", x_grad_global, x_global.grad, 1e-4, 1e-4, device, model_group
+    )
+    assert_close(
+        "weight grad",
+        w_grad_global,
+        weight_global.grad,
+        1e-4,
+        1e-4,
+        device,
+        model_group,
+    )
+    assert_close(
+        "bias grad", b_grad_global, bias_global.grad, 1e-4, 1e-4, device, model_group
+    )
 
 
 # ``lr`` is kept small and ``iters`` short so float drift between the distributed

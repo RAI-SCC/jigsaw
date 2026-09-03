@@ -56,8 +56,16 @@ PostFn = Callable[[torch.Tensor], torch.Tensor]
 
 
 def _bias_view(b: torch.Tensor, n_spatial_dims: int) -> torch.Tensor:
-    """Reshape a ``(C_out,)`` bias to broadcast over the spatial axes."""
-    return b.view((-1,) + (1,) * n_spatial_dims)
+    """Reshape the bias to broadcast against the conv output.
+
+    ``b`` is the raw bias parameter -- ``(C_out,)`` normally, or ``(S, C_out)``
+    under ``vmap``. Its channel axis has to land at ``-(n_spatial_dims + 1)`` of
+    the output: a singleton batch axis ahead of it, ``n_spatial_dims`` singleton
+    spatial axes behind, and any leading ``vmap`` axis kept untouched -- the
+    mirror of :meth:`ConvTransposeNdConfig._sum_grad_bias`. A plain ``(-1, 1,
+    ..., 1)`` view would fold the ``vmap`` axis into the channels instead.
+    """
+    return b.view(*b.shape[:-1], 1, b.shape[-1], *((1,) * n_spatial_dims))
 
 
 def _over_channels_all_gather(
