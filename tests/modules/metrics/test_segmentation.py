@@ -5,6 +5,11 @@ every rank; the class dimension ``C`` is sharded across ``col`` and the spatial
 dimension ``H`` across ``row``.  Hence ``channel_group == col`` and
 ``reduce_groups == (row,)``.  The distributed confusion matrix / metrics are
 compared against a plain single-process computation on the global tensors.
+
+Boolean and float comparisons run through ``tests.parity`` (``all_ranks_ok`` /
+``assert_close``) so a mismatch on a subset of ranks fails the job instead of
+hanging the rest in the next collective, matching the linear / attention /
+normalization suites.
 """
 
 import pytest
@@ -14,7 +19,7 @@ import jigsaw.modules.metrics as jmetrics
 from jigsaw.modules.loss import distributed_argmax
 from jigsaw.modules.metrics import segmentation as seg
 from jigsaw.utils_aggregate import gather_1d_results
-from tests.process_mesh import *  # noqa: F403
+from tests.parity import all_ranks_ok, assert_close
 
 pytestmark = [pytest.mark.dist_required]
 
@@ -111,238 +116,276 @@ def _ref_metrics(cm: torch.Tensor) -> dict:
     }
 
 
+def _assert_metrics_match(
+    got: dict, ref: dict, device: torch.device, model_group: object
+) -> None:
+    """Every derived metric agrees with the single-process reference.
+
+    ``allclose`` with ``equal_nan`` (absent classes yield ``nan``) rather than
+    ``assert_close``, but still reduced across the model group so one rank's
+    disagreement fails the job rather than hanging it.
+    """
+    for key, ref_val in ref.items():
+        ok = torch.allclose(got[key].double(), ref_val, atol=1e-9, equal_nan=True)
+        assert all_ranks_ok(ok, device, model_group), key
+
+
 # --------------------------------------------------------------------------- #
 # distributed arg-max over a sharded class dimension
 # --------------------------------------------------------------------------- #
-@pytest.mark.dist(4)
-@pytest.mark.parametrize("mesh_name", MESHES_4)
-def test_distributed_argmax(
-    request: pytest.FixtureRequest, device: torch.device, mesh_name: str
-) -> None:
-    """Global arg-max over a class dim split across ``col`` matches ``torch.argmax``."""
-    pmd = request.getfixturevalue(mesh_name)
-    logits = _global_logits(device)
-    local = _shard(logits, pmd, {"col": 1, "row": 2})
+class TestDistributedArgmax:
+    pytestmark = pytest.mark.dist(4)
 
-    got = distributed_argmax(local, dim=1, group=pmd["col"])
-    got = _gather(got, pmd, [("row", 1)])
-    assert torch.equal(got, logits.argmax(dim=1))
+    @pytest.mark.parametrize("mesh_name", MESHES_4)
+    def test_distributed_argmax(
+        self, request: pytest.FixtureRequest, device: torch.device, mesh_name: str
+    ) -> None:
+        """Global arg-max over a class dim split across ``col`` matches ``torch.argmax``."""
+        pmd = request.getfixturevalue(mesh_name)
+        logits = _global_logits(device)
+        local = _shard(logits, pmd, {"col": 1, "row": 2})
+
+        got = distributed_argmax(local, dim=1, group=pmd["col"])
+        got = _gather(got, pmd, [("row", 1)])
+        assert all_ranks_ok(
+            torch.equal(got, logits.argmax(dim=1)), device, pmd["model"]
+        )
 
 
 # --------------------------------------------------------------------------- #
 # confusion matrix
 # --------------------------------------------------------------------------- #
-@pytest.mark.dist(4)
-@pytest.mark.parametrize("mesh_name", MESHES_4)
-def test_confusion_matrix_from_logits(
-    request: pytest.FixtureRequest, device: torch.device, mesh_name: str
-) -> None:
-    """Distributed confusion matrix (logits input) matches the single-process one."""
-    pmd = request.getfixturevalue(mesh_name)
-    logits = _global_logits(device)
-    target = _global_target(device)
+class TestConfusionMatrix:
+    pytestmark = pytest.mark.dist(4)
 
-    cm = seg.distributed_confusion_matrix(
-        _shard(logits, pmd, {"col": 1, "row": 2}),
-        _shard(target, pmd, {"row": 1}),
-        C,
-        channel_group=pmd["col"],
-        reduce_groups=(pmd["row"],),
-    )
-    assert torch.equal(cm, _ref_confusion(logits, target, C))
-    assert int(cm.sum()) == N * H * W
+    @pytest.mark.parametrize("mesh_name", MESHES_4)
+    def test_confusion_matrix_from_logits(
+        self, request: pytest.FixtureRequest, device: torch.device, mesh_name: str
+    ) -> None:
+        """Distributed confusion matrix (logits input) matches the single-process one."""
+        pmd = request.getfixturevalue(mesh_name)
+        logits = _global_logits(device)
+        target = _global_target(device)
 
+        cm = seg.distributed_confusion_matrix(
+            _shard(logits, pmd, {"col": 1, "row": 2}),
+            _shard(target, pmd, {"row": 1}),
+            C,
+            channel_group=pmd["col"],
+            reduce_groups=(pmd["row"],),
+        )
+        assert all_ranks_ok(
+            torch.equal(cm, _ref_confusion(logits, target, C)), device, pmd["model"]
+        )
+        assert all_ranks_ok(int(cm.sum()) == N * H * W, device, pmd["model"])
 
-@pytest.mark.dist(4)
-@pytest.mark.parametrize("mesh_name", MESHES_4)
-def test_confusion_matrix_ignore_index(
-    request: pytest.FixtureRequest, device: torch.device, mesh_name: str
-) -> None:
-    """``ignore_index`` pixels are dropped from the matrix."""
-    pmd = request.getfixturevalue(mesh_name)
-    logits = _global_logits(device)
-    target = _global_target(device)
-    target[:, ::3, :] = 255  # void band
+    @pytest.mark.parametrize("mesh_name", MESHES_4)
+    def test_confusion_matrix_ignore_index(
+        self, request: pytest.FixtureRequest, device: torch.device, mesh_name: str
+    ) -> None:
+        """``ignore_index`` pixels are dropped from the matrix."""
+        pmd = request.getfixturevalue(mesh_name)
+        logits = _global_logits(device)
+        target = _global_target(device)
+        target[:, ::3, :] = 255  # void band
 
-    cm = seg.distributed_confusion_matrix(
-        _shard(logits, pmd, {"col": 1, "row": 2}),
-        _shard(target, pmd, {"row": 1}),
-        C,
-        ignore_index=255,
-        channel_group=pmd["col"],
-        reduce_groups=(pmd["row"],),
-    )
-    assert torch.equal(cm, _ref_confusion(logits, target, C, ignore_index=255))
-    assert int(cm.sum()) == int((target != 255).sum())
+        cm = seg.distributed_confusion_matrix(
+            _shard(logits, pmd, {"col": 1, "row": 2}),
+            _shard(target, pmd, {"row": 1}),
+            C,
+            ignore_index=255,
+            channel_group=pmd["col"],
+            reduce_groups=(pmd["row"],),
+        )
+        assert all_ranks_ok(
+            torch.equal(cm, _ref_confusion(logits, target, C, ignore_index=255)),
+            device,
+            pmd["model"],
+        )
+        assert all_ranks_ok(
+            int(cm.sum()) == int((target != 255).sum()), device, pmd["model"]
+        )
 
+    @pytest.mark.parametrize("mesh_name", MESHES_4)
+    def test_confusion_matrix_from_indices(
+        self, request: pytest.FixtureRequest, device: torch.device, mesh_name: str
+    ) -> None:
+        """Pre-arg-maxed global class indices are accepted directly."""
+        pmd = request.getfixturevalue(mesh_name)
+        logits = _global_logits(device)
+        target = _global_target(device)
+        pred = logits.argmax(dim=1)
 
-@pytest.mark.dist(4)
-@pytest.mark.parametrize("mesh_name", MESHES_4)
-def test_confusion_matrix_from_indices(
-    request: pytest.FixtureRequest, device: torch.device, mesh_name: str
-) -> None:
-    """Pre-arg-maxed global class indices are accepted directly."""
-    pmd = request.getfixturevalue(mesh_name)
-    logits = _global_logits(device)
-    target = _global_target(device)
-    pred = logits.argmax(dim=1)
-
-    cm = seg.distributed_confusion_matrix(
-        _shard(pred, pmd, {"row": 1}),
-        _shard(target, pmd, {"row": 1}),
-        C,
-        reduce_groups=(pmd["row"],),
-    )
-    assert torch.equal(cm, _ref_confusion(logits, target, C))
+        cm = seg.distributed_confusion_matrix(
+            _shard(pred, pmd, {"row": 1}),
+            _shard(target, pmd, {"row": 1}),
+            C,
+            reduce_groups=(pmd["row"],),
+        )
+        assert all_ranks_ok(
+            torch.equal(cm, _ref_confusion(logits, target, C)), device, pmd["model"]
+        )
 
 
 # --------------------------------------------------------------------------- #
 # metrics derived from the confusion matrix
 # --------------------------------------------------------------------------- #
-@pytest.mark.dist(4)
-@pytest.mark.parametrize("mesh_name", MESHES_4)
-def test_segmentation_metrics(
-    request: pytest.FixtureRequest, device: torch.device, mesh_name: str
-) -> None:
-    """Every derived metric matches a straight single-process computation."""
-    pmd = request.getfixturevalue(mesh_name)
-    logits = _global_logits(device)
-    target = _global_target(device)
+class TestSegmentationMetrics:
+    pytestmark = pytest.mark.dist(4)
 
-    cm = seg.distributed_confusion_matrix(
-        _shard(logits, pmd, {"col": 1, "row": 2}),
-        _shard(target, pmd, {"row": 1}),
-        C,
-        channel_group=pmd["col"],
-        reduce_groups=(pmd["row"],),
-    )
-    got = seg.confusion_to_metrics(cm)
-    ref = _ref_metrics(_ref_confusion(logits, target, C))
+    @pytest.mark.parametrize("mesh_name", MESHES_4)
+    def test_segmentation_metrics(
+        self, request: pytest.FixtureRequest, device: torch.device, mesh_name: str
+    ) -> None:
+        """Every derived metric matches a straight single-process computation."""
+        pmd = request.getfixturevalue(mesh_name)
+        logits = _global_logits(device)
+        target = _global_target(device)
 
-    for key, ref_val in ref.items():
-        assert torch.allclose(got[key].double(), ref_val, atol=1e-9, equal_nan=True), (
-            key
+        cm = seg.distributed_confusion_matrix(
+            _shard(logits, pmd, {"col": 1, "row": 2}),
+            _shard(target, pmd, {"row": 1}),
+            C,
+            channel_group=pmd["col"],
+            reduce_groups=(pmd["row"],),
+        )
+        got = seg.confusion_to_metrics(cm)
+        ref = _ref_metrics(_ref_confusion(logits, target, C))
+        _assert_metrics_match(got, ref, device, pmd["model"])
+
+    @pytest.mark.parametrize("mesh_name", MESHES_4)
+    def test_segmentation_metrics_exclude_class(
+        self, request: pytest.FixtureRequest, device: torch.device, mesh_name: str
+    ) -> None:
+        """``exclude`` zeroes class rows/columns before deriving the metrics."""
+        pmd = request.getfixturevalue(mesh_name)
+        logits = _global_logits(device)
+        target = _global_target(device)
+
+        cm = seg.distributed_confusion_matrix(
+            _shard(logits, pmd, {"col": 1, "row": 2}),
+            _shard(target, pmd, {"row": 1}),
+            C,
+            channel_group=pmd["col"],
+            reduce_groups=(pmd["row"],),
+        )
+        got = seg.confusion_to_metrics(cm, exclude=[0, 3])
+
+        ref_cm = _ref_confusion(logits, target, C).clone()
+        ref_cm[[0, 3], :] = 0
+        ref_cm[:, [0, 3]] = 0
+        ref = _ref_metrics(ref_cm)
+        _assert_metrics_match(got, ref, device, pmd["model"])
+        assert all_ranks_ok(
+            bool(
+                torch.isnan(got["per_class_iou"][0])
+                and torch.isnan(got["per_class_iou"][3])
+            ),
+            device,
+            pmd["model"],
         )
 
+    @pytest.mark.parametrize("mesh_name", MESHES_4)
+    def test_absent_class_is_nan(
+        self, request: pytest.FixtureRequest, device: torch.device, mesh_name: str
+    ) -> None:
+        """A class that appears in neither prediction nor target yields ``nan`` per-class IoU."""
+        pmd = request.getfixturevalue(mesh_name)
+        logits = _global_logits(device)
+        target = _global_target(device, seed=7)
+        # class 0 never occurs as a target and is never the arg-max
+        target[target == 0] = 1
+        logits[:, 0] = -1e4
 
-@pytest.mark.dist(4)
-@pytest.mark.parametrize("mesh_name", MESHES_4)
-def test_segmentation_metrics_exclude_class(
-    request: pytest.FixtureRequest, device: torch.device, mesh_name: str
-) -> None:
-    """``exclude`` zeroes class rows/columns before deriving the metrics."""
-    pmd = request.getfixturevalue(mesh_name)
-    logits = _global_logits(device)
-    target = _global_target(device)
-
-    cm = seg.distributed_confusion_matrix(
-        _shard(logits, pmd, {"col": 1, "row": 2}),
-        _shard(target, pmd, {"row": 1}),
-        C,
-        channel_group=pmd["col"],
-        reduce_groups=(pmd["row"],),
-    )
-    got = seg.confusion_to_metrics(cm, exclude=[0, 3])
-
-    ref_cm = _ref_confusion(logits, target, C).clone()
-    ref_cm[[0, 3], :] = 0
-    ref_cm[:, [0, 3]] = 0
-    ref = _ref_metrics(ref_cm)
-    for key, ref_val in ref.items():
-        assert torch.allclose(got[key].double(), ref_val, atol=1e-9, equal_nan=True), (
-            key
+        cm = seg.distributed_confusion_matrix(
+            _shard(logits, pmd, {"col": 1, "row": 2}),
+            _shard(target, pmd, {"row": 1}),
+            C,
+            channel_group=pmd["col"],
+            reduce_groups=(pmd["row"],),
         )
-    assert torch.isnan(got["per_class_iou"][0]) and torch.isnan(got["per_class_iou"][3])
+        got = seg.confusion_to_metrics(cm)
+        ref = _ref_metrics(_ref_confusion(logits, target, C))
 
-
-@pytest.mark.dist(4)
-@pytest.mark.parametrize("mesh_name", MESHES_4)
-def test_absent_class_is_nan(
-    request: pytest.FixtureRequest, device: torch.device, mesh_name: str
-) -> None:
-    """A class that appears in neither prediction nor target yields ``nan`` per-class IoU."""
-    pmd = request.getfixturevalue(mesh_name)
-    logits = _global_logits(device)
-    target = _global_target(device, seed=7)
-    # class 0 never occurs as a target and is never the arg-max
-    target[target == 0] = 1
-    logits[:, 0] = -1e4
-
-    cm = seg.distributed_confusion_matrix(
-        _shard(logits, pmd, {"col": 1, "row": 2}),
-        _shard(target, pmd, {"row": 1}),
-        C,
-        channel_group=pmd["col"],
-        reduce_groups=(pmd["row"],),
-    )
-    got = seg.confusion_to_metrics(cm)
-    ref = _ref_metrics(_ref_confusion(logits, target, C))
-
-    assert torch.isnan(got["per_class_iou"][0])
-    assert not torch.isnan(got["mean_iou"])
-    assert torch.allclose(got["mean_iou"].double(), ref["mean_iou"], atol=1e-9)
+        assert all_ranks_ok(
+            bool(torch.isnan(got["per_class_iou"][0])), device, pmd["model"]
+        )
+        assert all_ranks_ok(
+            bool(not torch.isnan(got["mean_iou"])), device, pmd["model"]
+        )
+        assert_close(
+            "mean_iou",
+            got["mean_iou"].double(),
+            ref["mean_iou"],
+            1e-9,
+            1e-5,
+            device,
+            pmd["model"],
+        )
 
 
 # --------------------------------------------------------------------------- #
 # stateful module
 # --------------------------------------------------------------------------- #
-@pytest.mark.dist(4)
-@pytest.mark.parametrize("mesh_name", MESHES_4)
-def test_metric_module_accumulation(
-    request: pytest.FixtureRequest, device: torch.device, mesh_name: str
-) -> None:
-    """``DistributedSegmentationMetrics`` accumulates to the all-batch reference."""
-    pmd = request.getfixturevalue(mesh_name)
-    metric = jmetrics.DistributedSegmentationMetrics(
-        C, channel_group=pmd["col"], reduce_groups=(pmd["row"],), ignore_index=255
-    )
+class TestMetricModule:
+    pytestmark = pytest.mark.dist(4)
 
-    ref_cm = torch.zeros(C, C, dtype=torch.int64, device=device)
-    for step in range(3):
-        logits = _global_logits(device) + step
-        target = _global_target(device, seed=step)
-        target[:, step, :] = 255
-
-        metric.update(
-            _shard(logits, pmd, {"col": 1, "row": 2}),
-            _shard(target, pmd, {"row": 1}),
-        )
-        ref_cm += _ref_confusion(logits, target, C, ignore_index=255)
-
-    assert torch.equal(metric.confusion, ref_cm)
-    got = metric.compute()
-    ref = _ref_metrics(ref_cm)
-    for key, ref_val in ref.items():
-        assert torch.allclose(got[key].double(), ref_val, atol=1e-9, equal_nan=True), (
-            key
+    @pytest.mark.parametrize("mesh_name", MESHES_4)
+    def test_metric_module_accumulation(
+        self, request: pytest.FixtureRequest, device: torch.device, mesh_name: str
+    ) -> None:
+        """``DistributedSegmentationMetrics`` accumulates to the all-batch reference."""
+        pmd = request.getfixturevalue(mesh_name)
+        metric = jmetrics.DistributedSegmentationMetrics(
+            C, channel_group=pmd["col"], reduce_groups=(pmd["row"],), ignore_index=255
         )
 
-    metric.reset()
-    assert int(metric.confusion.sum()) == 0
+        ref_cm = torch.zeros(C, C, dtype=torch.int64, device=device)
+        for step in range(3):
+            logits = _global_logits(device) + step
+            target = _global_target(device, seed=step)
+            target[:, step, :] = 255
+
+            metric.update(
+                _shard(logits, pmd, {"col": 1, "row": 2}),
+                _shard(target, pmd, {"row": 1}),
+            )
+            ref_cm += _ref_confusion(logits, target, C, ignore_index=255)
+
+        assert all_ranks_ok(torch.equal(metric.confusion, ref_cm), device, pmd["model"])
+        got = metric.compute()
+        ref = _ref_metrics(ref_cm)
+        _assert_metrics_match(got, ref, device, pmd["model"])
+
+        metric.reset()
+        assert all_ranks_ok(int(metric.confusion.sum()) == 0, device, pmd["model"])
 
 
 # --------------------------------------------------------------------------- #
 # eight ranks
 # --------------------------------------------------------------------------- #
-@pytest.mark.dist(8)
-def test_eightway_metrics(request: pytest.FixtureRequest, device: torch.device) -> None:
-    """Confusion matrix and metrics stay at parity on an eight-rank ``4 x 2`` mesh."""
-    pmd = request.getfixturevalue("process_mesh_dict_4x2")
-    logits = _global_logits(device)
-    target = _global_target(device)
+class TestEightWay:
+    pytestmark = pytest.mark.dist(8)
 
-    cm = seg.distributed_confusion_matrix(
-        _shard(logits, pmd, {"col": 1, "row": 2}),
-        _shard(target, pmd, {"row": 1}),
-        C,
-        channel_group=pmd["col"],
-        reduce_groups=(pmd["row"],),
-    )
-    assert torch.equal(cm, _ref_confusion(logits, target, C))
+    def test_eightway_metrics(
+        self, request: pytest.FixtureRequest, device: torch.device
+    ) -> None:
+        """Confusion matrix and metrics stay at parity on an eight-rank ``4 x 2`` mesh."""
+        pmd = request.getfixturevalue("process_mesh_dict_4x2")
+        logits = _global_logits(device)
+        target = _global_target(device)
 
-    got = seg.confusion_to_metrics(cm)
-    ref = _ref_metrics(_ref_confusion(logits, target, C))
-    for key, ref_val in ref.items():
-        assert torch.allclose(got[key].double(), ref_val, atol=1e-9, equal_nan=True), (
-            key
+        cm = seg.distributed_confusion_matrix(
+            _shard(logits, pmd, {"col": 1, "row": 2}),
+            _shard(target, pmd, {"row": 1}),
+            C,
+            channel_group=pmd["col"],
+            reduce_groups=(pmd["row"],),
         )
+        assert all_ranks_ok(
+            torch.equal(cm, _ref_confusion(logits, target, C)), device, pmd["model"]
+        )
+
+        got = seg.confusion_to_metrics(cm)
+        ref = _ref_metrics(_ref_confusion(logits, target, C))
+        _assert_metrics_match(got, ref, device, pmd["model"])
