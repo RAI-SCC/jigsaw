@@ -105,9 +105,9 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
             )
 
 
-@pytest.fixture(autouse=True, scope="session")
-def dist_env(device: torch.device) -> Generator[None, None, None]:
-    """Initialize the distributed process group once for the entire test session."""
+@pytest.fixture(scope="session")
+def _dist_session(device: torch.device) -> Generator[None, None, None]:
+    """Initialize the shared process group once for the whole test session."""
     if device.type == "cuda":
         torch.cuda.set_device(device)
         assert dist.is_nccl_available()
@@ -127,6 +127,22 @@ def dist_env(device: torch.device) -> Generator[None, None, None]:
         raise RuntimeError("Process group initialization failed.")
     yield None
     dist.destroy_process_group()
+
+
+@pytest.fixture(autouse=True)
+def dist_env(request: pytest.FixtureRequest) -> Generator[None, None, None]:
+    """Per-test gate for the shared process group.
+
+    Tests marked ``no_dist_env`` run without it -- they manage their own group
+    (e.g. the hybrid ``cpu:gloo,cuda:nccl`` backend in ``test_gloo_nccl.py``),
+    and a pre-existing default group would make that a double init. Every other
+    test pulls in the session-scoped :func:`_dist_session`.
+    """
+    if request.node.get_closest_marker("no_dist_env"):
+        yield
+        return
+    request.getfixturevalue("_dist_session")
+    yield
 
 
 @pytest.fixture(scope="session")
@@ -181,6 +197,4 @@ def pytest_collection_modifyitems(config, items):
                 pytest.mark.skip(reason="Not running in distributed environment")
             )
         if item.get_closest_marker("te_required") and not has_te:
-            item.add_marker(
-                pytest.mark.skip(reason="transformer_engine not installed")
-            )
+            item.add_marker(pytest.mark.skip(reason="transformer_engine not installed"))

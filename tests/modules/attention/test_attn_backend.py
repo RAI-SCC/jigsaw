@@ -230,7 +230,56 @@ class TestBackendWithTe:
         assert model.te is True
         assert isinstance(model.attn, te.DotProductAttention)
 
-    def test_te_core_available_flag_is_true(self):
+    def test_availability_flags_are_true(self):
+        from jigsaw.modules.attention.attention import JIGSAW_TE_AVAILABLE
         from jigsaw.modules.attention.functional.te_core import TE_CORE_AVAILABLE
 
+        assert JIGSAW_TE_AVAILABLE is True
         assert TE_CORE_AVAILABLE is True
+
+    def test_te_attn_forward_backward_matches_sdpa(self, device):
+        """``TransformerEngineAttention`` runs fwd/bwd and tracks SDPA in bf16.
+
+        Ported from the standalone ``test_transformer_engine.py`` so the numeric
+        check survives that file's removal on ``refactor/tests``.
+        """
+        import transformer_engine.pytorch as te
+
+        from jigsaw.modules.attention.attention import TransformerEngineAttention
+
+        batch, seq, heads, head_dim = 2, 16, 4, 32
+        attn = te.DotProductAttention(
+            num_attention_heads=heads,
+            kv_channels=head_dim,
+            num_gqa_groups=heads,
+            qkv_format="bshd",
+            attn_mask_type="no_mask",
+        )
+
+        torch.manual_seed(0)
+        q, k, v = (
+            torch.randn(
+                batch, seq, heads, head_dim, device=device, dtype=torch.bfloat16
+            )
+            for _ in range(3)
+        )
+        for t in (q, k, v):
+            t.requires_grad_(True)
+
+        out = TransformerEngineAttention.apply(q, k, v, attn)
+        assert out.shape == (batch, seq, heads * head_dim)
+
+        out.sum().backward()
+        assert q.grad is not None and k.grad is not None and v.grad is not None
+
+        ref = (
+            torch.nn.functional.scaled_dot_product_attention(
+                q.detach().transpose(1, 2),
+                k.detach().transpose(1, 2),
+                v.detach().transpose(1, 2),
+                is_causal=False,
+            )
+            .transpose(1, 2)
+            .reshape(batch, seq, heads * head_dim)
+        )
+        torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)
