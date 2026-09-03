@@ -5,8 +5,35 @@ import jigsaw.modules.attention as attention
 from jigsaw.utils_aggregate import (
     gather_1d_results_list,
 )
+from tests.parity import all_ranks_ok, assert_close
 
 pytestmark = [pytest.mark.dist_required]
+
+
+def _assert_qkv_replication(
+    weights: list[torch.Tensor], device: torch.device, model_group: object
+) -> None:
+    """qkv shards agree across the spatial (row) group and differ across the channel (col) group.
+
+    ``weights`` is one shard per model-group rank; with a row-major 2x2 mesh rank
+    ``r`` is ``(row, col) = divmod(r, 2)``, so index 0 and 2 share a channel column
+    (must match after the spatial grad-sync) and 0 and 1 do not (must differ).
+    Routed through the parity helpers so a mismatch on a subset of ranks fails the
+    job instead of hanging the rest in the next collective.
+    """
+    assert_close(
+        "qkv replicated across spatial group",
+        weights[0],
+        weights[2],
+        1e-8,
+        1e-5,
+        device,
+        model_group,
+    )
+    differ = not torch.allclose(weights[0], weights[1])
+    assert all_ranks_ok(differ, device, model_group), (
+        "qkv shards must differ across the channel group"
+    )
 
 
 class TestDistributedAttention:
@@ -36,8 +63,7 @@ class TestDistributedAttention:
         weights = gather_1d_results_list(
             model.qkv.weight, process_mesh_dict=process_mesh_dict_2x2, pm_key="model"
         )
-        assert torch.allclose(weights[0], weights[2])
-        assert not torch.allclose(weights[0], weights[1])
+        _assert_qkv_replication(weights, device, process_mesh_dict_2x2["model"])
 
     @pytest.mark.dist(4)
     def test_attention_sync(
@@ -84,5 +110,4 @@ class TestDistributedAttention:
         weights = gather_1d_results_list(
             model.qkv.weight, process_mesh_dict=process_mesh_dict_2x2, pm_key="model"
         )
-        assert torch.allclose(weights[0], weights[2])
-        assert not torch.allclose(weights[0], weights[1])
+        _assert_qkv_replication(weights, device, process_mesh_dict_2x2["model"])
