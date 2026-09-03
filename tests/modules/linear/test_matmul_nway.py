@@ -28,8 +28,8 @@ CPU_IMPLS = [
 # (kernel-name suffix, mesh fixture), each pinned to the rank count it needs.
 WAYS = [
     pytest.param(
-        ("twoway", "process_mesh_dict_2x1x2"),
-        marks=pytest.mark.dist(4),
+        ("twoway", "process_mesh_dict_1x2"),
+        marks=pytest.mark.dist(2),
         id="twoway",
     ),
     pytest.param(
@@ -81,96 +81,96 @@ def _randn(shapes, device: torch.device):
     return [torch.randn(*shape, device=device) for shape in shapes]
 
 
-@pytest.mark.parametrize("cpu_impl", CPU_IMPLS)
-@pytest.mark.parametrize("way", WAYS)
-def test_xwt(
-    way, cpu_impl, device: torch.device, request: pytest.FixtureRequest
-) -> None:
-    """XWT (``x @ w.mT``) across the model group."""
-    suffix, mesh_name = way
-    mesh = request.getfixturevalue(mesh_name)
-    rank = mesh["model"].rank()
-    torch.manual_seed(42 + rank)
+class TestMatmulNway:
+    """XWT / XW / XTW / fused kernels across 2, 4 and 8 ranks."""
 
-    x, w = _randn(SHAPES[suffix]["xwt"], device)
-    x_all = gather_results(x, process_mesh_dict=mesh)
-    w_all = gather_results(w, process_mesh_dict=mesh)
+    @pytest.mark.parametrize("cpu_impl", CPU_IMPLS)
+    @pytest.mark.parametrize("way", WAYS)
+    def test_xwt(
+        self, way, cpu_impl, device: torch.device, request: pytest.FixtureRequest
+    ) -> None:
+        """XWT (``x @ w.mT``) across the model group."""
+        suffix, mesh_name = way
+        mesh = request.getfixturevalue(mesh_name)
+        rank = mesh["model"].rank()
+        torch.manual_seed(42 + rank)
 
-    result = getattr(_impl(device, cpu_impl), f"xw_transpose_{suffix}")(
-        x, w, rank, device, model_group=mesh["model"]
-    )
-    result = gather_results(result, process_mesh_dict=mesh)
+        x, w = _randn(SHAPES[suffix]["xwt"], device)
+        x_all = gather_results(x, process_mesh_dict=mesh)
+        w_all = gather_results(w, process_mesh_dict=mesh)
 
-    assert torch.allclose(x_all @ w_all.mT, result, atol=1e-5)
+        result = getattr(_impl(device, cpu_impl), f"xw_transpose_{suffix}")(
+            x, w, rank, device, model_group=mesh["model"]
+        )
+        result = gather_results(result, process_mesh_dict=mesh)
 
+        assert torch.allclose(x_all @ w_all.mT, result, atol=1e-5)
 
-@pytest.mark.parametrize("cpu_impl", CPU_IMPLS)
-@pytest.mark.parametrize("way", WAYS)
-def test_xw(
-    way, cpu_impl, device: torch.device, request: pytest.FixtureRequest
-) -> None:
-    """XW (``x @ w``) across the model group."""
-    suffix, mesh_name = way
-    mesh = request.getfixturevalue(mesh_name)
-    rank = mesh["model"].rank()
-    torch.manual_seed(42 + rank)
+    @pytest.mark.parametrize("cpu_impl", CPU_IMPLS)
+    @pytest.mark.parametrize("way", WAYS)
+    def test_xw(
+        self, way, cpu_impl, device: torch.device, request: pytest.FixtureRequest
+    ) -> None:
+        """XW (``x @ w``) across the model group."""
+        suffix, mesh_name = way
+        mesh = request.getfixturevalue(mesh_name)
+        rank = mesh["model"].rank()
+        torch.manual_seed(42 + rank)
 
-    x, w = _randn(SHAPES[suffix]["xw"], device)
-    x_all = gather_results(x, process_mesh_dict=mesh)
-    w_all = gather_results(w, process_mesh_dict=mesh)
+        x, w = _randn(SHAPES[suffix]["xw"], device)
+        x_all = gather_results(x, process_mesh_dict=mesh)
+        w_all = gather_results(w, process_mesh_dict=mesh)
 
-    result = getattr(_impl(device, cpu_impl), f"xw_{suffix}")(
-        x, w, rank, device, model_group=mesh["model"]
-    )
-    result = gather_results(result, process_mesh_dict=mesh)
+        result = getattr(_impl(device, cpu_impl), f"xw_{suffix}")(
+            x, w, rank, device, model_group=mesh["model"]
+        )
+        result = gather_results(result, process_mesh_dict=mesh)
 
-    assert torch.allclose(x_all @ w_all, result, atol=1e-5)
+        assert torch.allclose(x_all @ w_all, result, atol=1e-5)
 
+    @pytest.mark.parametrize("cpu_impl", CPU_IMPLS)
+    @pytest.mark.parametrize("way", WAYS)
+    def test_xtw(
+        self, way, cpu_impl, device: torch.device, request: pytest.FixtureRequest
+    ) -> None:
+        """XTW (``x.mT @ w``) across the model group."""
+        suffix, mesh_name = way
+        mesh = request.getfixturevalue(mesh_name)
+        rank = mesh["model"].rank()
+        torch.manual_seed(42 + rank)
 
-@pytest.mark.parametrize("cpu_impl", CPU_IMPLS)
-@pytest.mark.parametrize("way", WAYS)
-def test_xtw(
-    way, cpu_impl, device: torch.device, request: pytest.FixtureRequest
-) -> None:
-    """XTW (``x.mT @ w``) across the model group."""
-    suffix, mesh_name = way
-    mesh = request.getfixturevalue(mesh_name)
-    rank = mesh["model"].rank()
-    torch.manual_seed(42 + rank)
+        x, w = _randn(SHAPES[suffix]["xtw"], device)
+        x_all = gather_results(x, process_mesh_dict=mesh)
+        w_all = gather_results(w, process_mesh_dict=mesh)
 
-    x, w = _randn(SHAPES[suffix]["xtw"], device)
-    x_all = gather_results(x, process_mesh_dict=mesh)
-    w_all = gather_results(w, process_mesh_dict=mesh)
+        result = getattr(_impl(device, cpu_impl), f"x_transpose_w_{suffix}")(
+            x, w, rank, device, model_group=mesh["model"]
+        )
+        result = gather_results(result, process_mesh_dict=mesh)
 
-    result = getattr(_impl(device, cpu_impl), f"x_transpose_w_{suffix}")(
-        x, w, rank, device, model_group=mesh["model"]
-    )
-    result = gather_results(result, process_mesh_dict=mesh)
+        assert torch.allclose(x_all.mT @ w_all, result, atol=1e-5)
 
-    assert torch.allclose(x_all.mT @ w_all, result, atol=1e-5)
+    @pytest.mark.parametrize("cpu_impl", CPU_IMPLS)
+    @pytest.mark.parametrize("way", WAYS)
+    def test_fused_xw_xtw(
+        self, way, cpu_impl, device: torch.device, request: pytest.FixtureRequest
+    ) -> None:
+        """Fused kernel returning both ``x @ w1`` and ``x.mT @ w2``."""
+        suffix, mesh_name = way
+        mesh = request.getfixturevalue(mesh_name)
+        rank = mesh["model"].rank()
+        torch.manual_seed(42 + rank)
 
+        x, w1, w2 = _randn(SHAPES[suffix]["fused"], device)
+        x_all = gather_results(x, process_mesh_dict=mesh)
+        w1_all = gather_results(w1, process_mesh_dict=mesh)
+        w2_all = gather_results(w2, process_mesh_dict=mesh)
 
-@pytest.mark.parametrize("cpu_impl", CPU_IMPLS)
-@pytest.mark.parametrize("way", WAYS)
-def test_fused_xw_xtw(
-    way, cpu_impl, device: torch.device, request: pytest.FixtureRequest
-) -> None:
-    """Fused kernel returning both ``x @ w1`` and ``x.mT @ w2``."""
-    suffix, mesh_name = way
-    mesh = request.getfixturevalue(mesh_name)
-    rank = mesh["model"].rank()
-    torch.manual_seed(42 + rank)
+        result_xw, result_xtw = getattr(
+            _impl(device, cpu_impl), f"fused_xw_xtw_{suffix}"
+        )(x, w1, w2, rank, device, model_group=mesh["model"])
+        result_xw = gather_results(result_xw, process_mesh_dict=mesh)
+        result_xtw = gather_results(result_xtw, process_mesh_dict=mesh)
 
-    x, w1, w2 = _randn(SHAPES[suffix]["fused"], device)
-    x_all = gather_results(x, process_mesh_dict=mesh)
-    w1_all = gather_results(w1, process_mesh_dict=mesh)
-    w2_all = gather_results(w2, process_mesh_dict=mesh)
-
-    result_xw, result_xtw = getattr(_impl(device, cpu_impl), f"fused_xw_xtw_{suffix}")(
-        x, w1, w2, rank, device, model_group=mesh["model"]
-    )
-    result_xw = gather_results(result_xw, process_mesh_dict=mesh)
-    result_xtw = gather_results(result_xtw, process_mesh_dict=mesh)
-
-    assert torch.allclose(x_all @ w1_all, result_xw, atol=1e-5)
-    assert torch.allclose(x_all.mT @ w2_all, result_xtw, atol=1e-5)
+        assert torch.allclose(x_all @ w1_all, result_xw, atol=1e-5)
+        assert torch.allclose(x_all.mT @ w2_all, result_xtw, atol=1e-5)
