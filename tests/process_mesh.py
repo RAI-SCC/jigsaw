@@ -272,6 +272,16 @@ def process_mesh_dict_4x2(device: torch.Tensor) -> dict:
 
 
 @pytest.fixture(scope="session")
+def process_mesh_dict_1x2(device: torch.Tensor) -> dict:
+    """1 (spatial) x 2 (channel) mesh -- a bare 2-rank model group, no replicas."""
+    return make_process_mesh(
+        device_type=device.type,
+        mesh_shape=[1, 2],
+        mesh_dim_names=["row", "col"],
+    )
+
+
+@pytest.fixture(scope="session")
 def process_mesh_dict_1x1(device: torch.Tensor) -> dict:
     """Return process mesh."""
     return make_process_mesh(
