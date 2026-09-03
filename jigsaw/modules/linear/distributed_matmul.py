@@ -2903,3 +2903,751 @@ def x_transpose_w_eightway(
     cij = cij0 + cij1 + cij2 + cij3
 
     return cij
+
+
+def fused_xw_xtw_eightway(
+    grad_output: torch.Tensor,
+    weight: torch.Tensor,
+    input: torch.Tensor,
+    local_rank: int,
+    device: torch.device,
+    model_group: dist.ProcessGroup,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Fused calculation of grad_input and grad_weight in the backward pass of a linear layer.
+
+    Computes ``grad_input = grad_output @ weight`` (as in :func:`xw_eightway`) and
+    ``grad_weight = grad_output.mT @ input`` (as in :func:`x_transpose_w_eightway`)
+    across eight processes using the ``all_to_all`` collective. Rather than running
+    the two collective kernels back to back, this hand-merged kernel posts the
+    ``all_to_all`` exchanges of *both* operations up front, so the communication of
+    one overlaps the computation of the other. The per-rank exchange patterns and
+    the multi-stream compute schedules are lifted verbatim from the two standalone
+    kernels; only the interleaving is new.
+
+    Parameters
+    ----------
+    grad_output: torch.Tensor
+        Output with respect to the gradient.
+    weight: torch.Tensor
+        Model weights.
+    input: torch.Tensor
+        Model input.
+    local_rank: int
+        Local model rank.
+    device: torch.device
+        Device upon which computations occur.
+    model_group: dist.ProcessGroup
+        Process group of the domain- and tensor-parallel group of this linear layer.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+    Gradient with respect to the input and gradient of the weights.
+    """
+    mod = local_rank % 8
+    empty = get_empty(device, torch.float32)
+
+    # ---- grad_input = grad_output @ weight setup (see xw_eightway) ----
+    xw_streams: list[torch.cuda.Stream] = [torch.cuda.Stream() for _ in range(2)]
+    w0 = get_preallocated_buffer(
+        cast(
+            torch.Size,
+            (*weight.shape[:-2], weight.shape[-2] * 2, weight.shape[-1]),
+        ),
+        dtype=weight.dtype,
+        local_rank=local_rank,
+        device=device,
+        index=1,
+    )
+    w1 = get_preallocated_buffer(
+        cast(
+            torch.Size,
+            (*weight.shape[:-2], weight.shape[-2] * 2, weight.shape[-1]),
+        ),
+        dtype=weight.dtype,
+        local_rank=local_rank,
+        device=device,
+        index=2,
+    )
+    split_size = w0.shape[-2] // 2
+
+    # ---- grad_weight = grad_output.mT @ input setup (see x_transpose_w_eightway) ----
+    xtw_streamz: list[torch.cuda.Stream] = [torch.cuda.Stream() for _ in range(4)]
+    xt0, xt1 = torch.split(grad_output.mT, grad_output.shape[-1] // 2, dim=-2)
+    xt0, xt1 = xt0.contiguous(), xt1.contiguous()
+    xt_shape = xt0.shape
+
+    match mod:
+        case 0:
+            xw_x_send = [empty, grad_output, empty, empty, empty, empty, empty, empty]
+            xw_x_recv = [
+                empty,
+                get_preallocated_buffer(
+                    grad_output.shape, grad_output.dtype, local_rank, device, 0
+                ),
+                empty,
+                empty,
+                empty,
+                empty,
+                empty,
+                empty,
+            ]
+            xw_w_send = [empty, empty, weight, empty, weight, empty, weight, empty]
+            xw_w_recv = [
+                empty,
+                empty,
+                w0[..., split_size:, :].contiguous(),
+                empty,
+                w1[..., :split_size, :].contiguous(),
+                empty,
+                w1[..., split_size:, :].contiguous(),
+                empty,
+            ]
+            xtw_x_send = [empty, xt0, xt1, xt1, empty, empty, empty, empty]
+            xtw_x_recv = [
+                empty,
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 0
+                ),
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 1
+                ),
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 2
+                ),
+                empty,
+            ]
+            xtw_w_send = [empty, empty, input, empty, input, empty, input, empty]
+            xtw_w_recv = [
+                empty,
+                empty,
+                get_preallocated_buffer(
+                    input.shape, grad_output.dtype, local_rank, device, 3
+                ),
+                empty,
+                get_preallocated_buffer(
+                    input.shape, grad_output.dtype, local_rank, device, 4
+                ),
+                empty,
+                get_preallocated_buffer(
+                    input.shape, grad_output.dtype, local_rank, device, 5
+                ),
+                empty,
+            ]
+        case 1:
+            xw_x_send = [grad_output, empty, empty, empty, empty, empty, empty, empty]
+            xw_x_recv = [
+                get_preallocated_buffer(
+                    grad_output.shape, grad_output.dtype, local_rank, device, 0
+                ),
+                empty,
+                empty,
+                empty,
+                empty,
+                empty,
+                empty,
+                empty,
+            ]
+            xw_w_send = [empty, empty, empty, weight, empty, weight, empty, weight]
+            xw_w_recv = [
+                empty,
+                empty,
+                empty,
+                w1[..., split_size:, :].contiguous(),
+                empty,
+                w0[..., :split_size, :].contiguous(),
+                empty,
+                w0[..., split_size:, :].contiguous(),
+            ]
+            xtw_x_send = [empty, empty, empty, empty, xt0, xt0, xt1, xt1]
+            xtw_x_recv = [
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 0
+                ),
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 1
+                ),
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 2
+                ),
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 3
+                ),
+                empty,
+            ]
+            xtw_w_send = [empty, empty, empty, input, empty, input, empty, input]
+            xtw_w_recv = [
+                empty,
+                empty,
+                empty,
+                get_preallocated_buffer(
+                    input.shape, input.dtype, local_rank, device, 4
+                ),
+                empty,
+                get_preallocated_buffer(
+                    input.shape, input.dtype, local_rank, device, 5
+                ),
+                empty,
+                get_preallocated_buffer(
+                    input.shape, input.dtype, local_rank, device, 6
+                ),
+            ]
+        case 2:
+            xw_x_send = [empty, empty, empty, grad_output, empty, empty, empty, empty]
+            xw_x_recv = [
+                empty,
+                empty,
+                empty,
+                get_preallocated_buffer(
+                    grad_output.shape, grad_output.dtype, local_rank, device, 0
+                ),
+                empty,
+                empty,
+                empty,
+                empty,
+            ]
+            xw_w_send = [weight, empty, empty, empty, weight, empty, weight, empty]
+            xw_w_recv = [
+                w0[..., :split_size, :].contiguous(),
+                empty,
+                empty,
+                empty,
+                w1[..., :split_size, :].contiguous(),
+                empty,
+                w1[..., split_size:, :].contiguous(),
+                empty,
+            ]
+            xtw_x_send = [xt0, xt0, empty, xt1, empty, empty, empty, empty]
+            xtw_x_recv = [
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 0
+                ),
+                empty,
+                empty,
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 1
+                ),
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 2
+                ),
+                empty,
+            ]
+            xtw_w_send = [input, empty, empty, empty, input, empty, input, empty]
+            xtw_w_recv = [
+                get_preallocated_buffer(
+                    input.shape, grad_output.dtype, local_rank, device, 3
+                ),
+                empty,
+                empty,
+                empty,
+                get_preallocated_buffer(
+                    input.shape, grad_output.dtype, local_rank, device, 4
+                ),
+                empty,
+                get_preallocated_buffer(
+                    input.shape, grad_output.dtype, local_rank, device, 5
+                ),
+                empty,
+            ]
+        case 3:
+            xw_x_send = [empty, empty, grad_output, empty, empty, empty, empty, empty]
+            xw_x_recv = [
+                empty,
+                empty,
+                get_preallocated_buffer(
+                    grad_output.shape, grad_output.dtype, local_rank, device, 0
+                ),
+                empty,
+                empty,
+                empty,
+                empty,
+                empty,
+            ]
+            xw_w_send = [empty, weight, empty, empty, empty, weight, empty, weight]
+            xw_w_recv = [
+                empty,
+                w1[..., :split_size, :],
+                empty,
+                empty,
+                empty,
+                w0[..., :split_size, :],
+                empty,
+                w0[..., split_size:, :],
+            ]
+            xtw_x_send = [empty, empty, empty, empty, xt0, xt0, xt1, xt1]
+            xtw_x_recv = [
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 0
+                ),
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 1
+                ),
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 2
+                ),
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 3
+                ),
+                empty,
+            ]
+            xtw_w_send = [empty, input, empty, empty, empty, input, empty, input]
+            xtw_w_recv = [
+                empty,
+                get_preallocated_buffer(
+                    input.shape, input.dtype, local_rank, device, 4
+                ),
+                empty,
+                empty,
+                empty,
+                get_preallocated_buffer(
+                    input.shape, input.dtype, local_rank, device, 5
+                ),
+                empty,
+                get_preallocated_buffer(
+                    input.shape, input.dtype, local_rank, device, 6
+                ),
+            ]
+        case 4:
+            xw_x_send = [empty, empty, empty, empty, empty, grad_output, empty, empty]
+            xw_x_recv = [
+                empty,
+                empty,
+                empty,
+                empty,
+                empty,
+                get_preallocated_buffer(
+                    grad_output.shape, grad_output.dtype, local_rank, device, 0
+                ),
+                empty,
+                empty,
+            ]
+            xw_w_send = [weight, empty, weight, empty, empty, empty, weight, empty]
+            xw_w_recv = [
+                w0[..., :split_size, :],
+                empty,
+                w0[..., split_size:, :],
+                empty,
+                empty,
+                empty,
+                w1[..., split_size:, :],
+                empty,
+            ]
+            xtw_x_send = [xt0, xt0, xt1, xt1, empty, empty, empty, empty]
+            xtw_x_recv = [
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 0
+                ),
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 1
+                ),
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 2
+                ),
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 3
+                ),
+            ]
+            xtw_w_send = [input, empty, input, empty, empty, empty, input, empty]
+            xtw_w_recv = [
+                get_preallocated_buffer(
+                    input.shape, grad_output.dtype, local_rank, device, 4
+                ),
+                empty,
+                get_preallocated_buffer(
+                    input.shape, grad_output.dtype, local_rank, device, 5
+                ),
+                empty,
+                empty,
+                empty,
+                get_preallocated_buffer(
+                    input.shape, grad_output.dtype, local_rank, device, 6
+                ),
+                empty,
+            ]
+        case 5:
+            xw_x_send = [empty, empty, empty, empty, grad_output, empty, empty, empty]
+            xw_x_recv = [
+                empty,
+                empty,
+                empty,
+                empty,
+                get_preallocated_buffer(
+                    grad_output.shape, grad_output.dtype, local_rank, device, 0
+                ),
+                empty,
+                empty,
+                empty,
+            ]
+            xw_w_send = [empty, weight, empty, weight, empty, empty, empty, weight]
+            xw_w_recv = [
+                empty,
+                w1[..., :split_size, :],
+                empty,
+                w1[..., split_size:, :],
+                empty,
+                empty,
+                empty,
+                w0[..., split_size:, :],
+            ]
+            xtw_x_send = [empty, empty, empty, empty, xt0, empty, xt1, xt1]
+            xtw_x_recv = [
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 0
+                ),
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 1
+                ),
+                empty,
+                empty,
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 2
+                ),
+            ]
+            xtw_w_send = [empty, input, empty, input, empty, empty, empty, input]
+            xtw_w_recv = [
+                empty,
+                get_preallocated_buffer(
+                    input.shape, input.dtype, local_rank, device, 3
+                ),
+                empty,
+                get_preallocated_buffer(
+                    input.shape, input.dtype, local_rank, device, 4
+                ),
+                empty,
+                empty,
+                empty,
+                get_preallocated_buffer(
+                    input.shape, input.dtype, local_rank, device, 5
+                ),
+            ]
+        case 6:
+            xw_x_send = [empty, empty, empty, empty, empty, empty, empty, grad_output]
+            xw_x_recv = [
+                empty,
+                empty,
+                empty,
+                empty,
+                empty,
+                empty,
+                empty,
+                get_preallocated_buffer(
+                    grad_output.shape, grad_output.dtype, local_rank, device, 0
+                ),
+            ]
+            xw_w_send = [weight, empty, weight, empty, weight, empty, empty, empty]
+            xw_w_recv = [
+                w0[..., :split_size, :],
+                empty,
+                w0[..., split_size:, :],
+                empty,
+                w1[..., :split_size, :],
+                empty,
+                empty,
+                empty,
+            ]
+            xtw_x_send = [xt0, xt0, xt1, xt1, empty, empty, empty, empty]
+            xtw_x_recv = [
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 0
+                ),
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 1
+                ),
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 2
+                ),
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 3
+                ),
+            ]
+            xtw_w_send = [input, empty, input, empty, input, empty, empty, empty]
+            xtw_w_recv = [
+                get_preallocated_buffer(
+                    input.shape, grad_output.dtype, local_rank, device, 4
+                ),
+                empty,
+                get_preallocated_buffer(
+                    input.shape, grad_output.dtype, local_rank, device, 5
+                ),
+                empty,
+                get_preallocated_buffer(
+                    input.shape, grad_output.dtype, local_rank, device, 6
+                ),
+                empty,
+                empty,
+                empty,
+            ]
+        case 7:
+            xw_x_send = [empty, empty, empty, empty, empty, empty, grad_output, empty]
+            xw_x_recv = [
+                empty,
+                empty,
+                empty,
+                empty,
+                empty,
+                empty,
+                get_preallocated_buffer(
+                    grad_output.shape, grad_output.dtype, local_rank, device, 0
+                ),
+                empty,
+            ]
+            xw_w_send = [empty, weight, empty, weight, empty, weight, empty, empty]
+            xw_w_recv = [
+                empty,
+                w1[..., :split_size, :],
+                empty,
+                w1[..., split_size:, :],
+                empty,
+                w0[..., :split_size, :],
+                empty,
+                empty,
+            ]
+            xtw_x_send = [empty, empty, empty, empty, xt0, xt0, xt1, empty]
+            xtw_x_recv = [
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 0
+                ),
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 1
+                ),
+                empty,
+                get_preallocated_buffer(
+                    xt_shape, grad_output.dtype, local_rank, device, 2
+                ),
+                empty,
+                empty,
+            ]
+            xtw_w_send = [empty, input, empty, input, empty, input, empty, empty]
+            xtw_w_recv = [
+                empty,
+                get_preallocated_buffer(
+                    input.shape, input.dtype, local_rank, device, 3
+                ),
+                empty,
+                get_preallocated_buffer(
+                    input.shape, input.dtype, local_rank, device, 4
+                ),
+                empty,
+                get_preallocated_buffer(
+                    input.shape, input.dtype, local_rank, device, 5
+                ),
+                empty,
+                empty,
+            ]
+
+    # Post the exchanges of both operations up front. NCCL serialises the four
+    # collectives on its stream in submission order, so ``xw_w_handle`` still
+    # completes first and waiting on a later handle transitively covers the
+    # earlier ones -- the standalone kernels rely on the same ordering.
+    xw_w_handle = dist.all_to_all(
+        xw_w_recv, xw_w_send, group=model_group, async_op=True
+    )
+    xw_x_handle = dist.all_to_all(
+        xw_x_recv, xw_x_send, group=model_group, async_op=True
+    )
+    xtw_x_handle = dist.all_to_all(
+        xtw_x_recv, xtw_x_send, group=model_group, async_op=True
+    )
+    xtw_w_handle = dist.all_to_all(
+        xtw_w_recv, xtw_w_send, group=model_group, async_op=True
+    )
+
+    # Local slice of ``weight`` that this rank keeps for its own ``grad_input``
+    # contribution (disjoint from the slices filled by ``xw_w_handle``).
+    match mod:
+        case 0:
+            w0[..., :split_size, :].copy_(weight)
+        case 1:
+            w1[..., :split_size, :].copy_(weight)
+        case 2:
+            w0[..., split_size:, :].copy_(weight)
+        case 3:
+            w0[..., split_size:, :].copy_(weight)
+        case 4:
+            w1[..., :split_size, :].copy_(weight)
+        case 5:
+            w0[..., :split_size, :].copy_(weight)
+        case 6:
+            w1[..., split_size:, :].copy_(weight)
+        case 7:
+            w0[..., split_size:, :].copy_(weight)
+
+    # ---- grad_input (XW) computation ----
+    with torch.cuda.stream(xw_streams[0]):
+        xw_w_handle.wait()
+        gi_cij0 = torch.matmul(grad_output, w0)
+    match mod:
+        case 0:
+            with torch.cuda.stream(xw_streams[1]):
+                xw_w_handle.wait()
+                xw_x_handle.wait()
+                gi_cij1 = torch.matmul(xw_x_recv[1], w1)
+        case 1:
+            with torch.cuda.stream(xw_streams[1]):
+                xw_w_handle.wait()
+                xw_x_handle.wait()
+                gi_cij1 = torch.matmul(xw_x_recv[0], w1)
+        case 2:
+            with torch.cuda.stream(xw_streams[1]):
+                xw_w_handle.wait()
+                xw_x_handle.wait()
+                gi_cij1 = torch.matmul(xw_x_recv[3], w1)
+        case 3:
+            with torch.cuda.stream(xw_streams[1]):
+                xw_w_handle.wait()
+                xw_x_handle.wait()
+                gi_cij1 = torch.matmul(xw_x_recv[2], w1)
+        case 4:
+            with torch.cuda.stream(xw_streams[1]):
+                xw_w_handle.wait()
+                xw_x_handle.wait()
+                gi_cij1 = torch.matmul(xw_x_recv[5], w1)
+        case 5:
+            with torch.cuda.stream(xw_streams[1]):
+                xw_w_handle.wait()
+                xw_x_handle.wait()
+                gi_cij1 = torch.matmul(xw_x_recv[4], w1)
+        case 6:
+            with torch.cuda.stream(xw_streams[1]):
+                xw_w_handle.wait()
+                xw_x_handle.wait()
+                gi_cij1 = torch.matmul(xw_x_recv[7], w1)
+        case 7:
+            with torch.cuda.stream(xw_streams[1]):
+                xw_w_handle.wait()
+                xw_x_handle.wait()
+                gi_cij1 = torch.matmul(xw_x_recv[6], w1)
+
+    for s in xw_streams:
+        s.synchronize()
+
+    grad_input = gi_cij0 + gi_cij1
+
+    # ---- grad_weight (XtW) computation ----
+    match mod:
+        case 0:
+            with torch.cuda.stream(xtw_streamz[0]):
+                xtw_x_handle.wait()
+                gw_cij0 = torch.matmul(xt0, input)
+        case 1:
+            with torch.cuda.stream(xtw_streamz[0]):
+                xtw_x_handle.wait()
+                gw_cij0 = torch.matmul(xtw_x_recv[0], input)
+        case 2:
+            with torch.cuda.stream(xtw_streamz[0]):
+                xtw_x_handle.wait()
+                gw_cij0 = torch.matmul(xt1, input)
+        case 3:
+            with torch.cuda.stream(xtw_streamz[0]):
+                xtw_x_handle.wait()
+                gw_cij0 = torch.matmul(xtw_x_recv[2], input)
+        case 4:
+            with torch.cuda.stream(xtw_streamz[0]):
+                xtw_x_handle.wait()
+                gw_cij0 = torch.matmul(xtw_x_recv[5], input)
+        case 5:
+            with torch.cuda.stream(xtw_streamz[0]):
+                xtw_x_handle.wait()
+                gw_cij0 = torch.matmul(xt0, input)
+        case 6:
+            with torch.cuda.stream(xtw_streamz[0]):
+                xtw_x_handle.wait()
+                gw_cij0 = torch.matmul(xtw_x_recv[7], input)
+        case 7:
+            with torch.cuda.stream(xtw_streamz[0]):
+                xtw_x_handle.wait()
+                gw_cij0 = torch.matmul(xt1, input)
+
+    for stream in xtw_streamz[1:]:
+        with torch.cuda.stream(stream):
+            xtw_w_handle.wait()
+
+    match mod:
+        case 0:
+            with torch.cuda.stream(xtw_streamz[1]):
+                gw_cij1 = torch.matmul(xtw_x_recv[2], xtw_w_recv[2])
+            with torch.cuda.stream(xtw_streamz[2]):
+                gw_cij2 = torch.matmul(xtw_x_recv[4], xtw_w_recv[4])
+            with torch.cuda.stream(xtw_streamz[3]):
+                gw_cij3 = torch.matmul(xtw_x_recv[6], xtw_w_recv[6])
+        case 1:
+            with torch.cuda.stream(xtw_streamz[1]):
+                gw_cij1 = torch.matmul(xtw_x_recv[2], xtw_w_recv[3])
+            with torch.cuda.stream(xtw_streamz[2]):
+                gw_cij2 = torch.matmul(xtw_x_recv[4], xtw_w_recv[5])
+            with torch.cuda.stream(xtw_streamz[3]):
+                gw_cij3 = torch.matmul(xtw_x_recv[6], xtw_w_recv[7])
+        case 2:
+            with torch.cuda.stream(xtw_streamz[1]):
+                gw_cij1 = torch.matmul(xtw_x_recv[0], xtw_w_recv[0])
+            with torch.cuda.stream(xtw_streamz[2]):
+                gw_cij2 = torch.matmul(xtw_x_recv[4], xtw_w_recv[4])
+            with torch.cuda.stream(xtw_streamz[3]):
+                gw_cij3 = torch.matmul(xtw_x_recv[6], xtw_w_recv[6])
+        case 3:
+            with torch.cuda.stream(xtw_streamz[1]):
+                gw_cij1 = torch.matmul(xtw_x_recv[0], xtw_w_recv[1])
+            with torch.cuda.stream(xtw_streamz[2]):
+                gw_cij2 = torch.matmul(xtw_x_recv[4], xtw_w_recv[5])
+            with torch.cuda.stream(xtw_streamz[3]):
+                gw_cij3 = torch.matmul(xtw_x_recv[6], xtw_w_recv[7])
+        case 4:
+            with torch.cuda.stream(xtw_streamz[1]):
+                gw_cij1 = torch.matmul(xtw_x_recv[1], xtw_w_recv[0])
+            with torch.cuda.stream(xtw_streamz[2]):
+                gw_cij2 = torch.matmul(xtw_x_recv[3], xtw_w_recv[2])
+            with torch.cuda.stream(xtw_streamz[3]):
+                gw_cij3 = torch.matmul(xtw_x_recv[7], xtw_w_recv[6])
+        case 5:
+            with torch.cuda.stream(xtw_streamz[1]):
+                gw_cij1 = torch.matmul(xtw_x_recv[1], xtw_w_recv[1])
+            with torch.cuda.stream(xtw_streamz[2]):
+                gw_cij2 = torch.matmul(xtw_x_recv[3], xtw_w_recv[3])
+            with torch.cuda.stream(xtw_streamz[3]):
+                gw_cij3 = torch.matmul(xtw_x_recv[7], xtw_w_recv[7])
+        case 6:
+            with torch.cuda.stream(xtw_streamz[1]):
+                gw_cij1 = torch.matmul(xtw_x_recv[1], xtw_w_recv[0])
+            with torch.cuda.stream(xtw_streamz[2]):
+                gw_cij2 = torch.matmul(xtw_x_recv[3], xtw_w_recv[2])
+            with torch.cuda.stream(xtw_streamz[3]):
+                gw_cij3 = torch.matmul(xtw_x_recv[5], xtw_w_recv[4])
+        case 7:
+            with torch.cuda.stream(xtw_streamz[1]):
+                gw_cij1 = torch.matmul(xtw_x_recv[1], xtw_w_recv[1])
+            with torch.cuda.stream(xtw_streamz[2]):
+                gw_cij2 = torch.matmul(xtw_x_recv[3], xtw_w_recv[3])
+            with torch.cuda.stream(xtw_streamz[3]):
+                gw_cij3 = torch.matmul(xtw_x_recv[5], xtw_w_recv[5])
+
+    for s in xtw_streamz:
+        s.synchronize()
+
+    grad_weight = gw_cij0 + gw_cij1 + gw_cij2 + gw_cij3
+
+    return grad_input, grad_weight
