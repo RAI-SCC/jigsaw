@@ -7,7 +7,7 @@ from jigsaw.modules.attention.functional import backward, forward, functional
 from jigsaw.utils_aggregate import (
     gather_1d_results,
 )
-from tests.process_mesh import *
+
 pytestmark = [pytest.mark.dist_required]
 
 

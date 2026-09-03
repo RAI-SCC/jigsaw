@@ -6,7 +6,6 @@ import torch.nn.functional as F
 import jigsaw.modules.convolution as convolution
 from jigsaw.utils_aggregate import gather_1d_results, gather_results_as_list
 from tests.parity import assert_close
-from tests.process_mesh import *
 
 pytestmark = [pytest.mark.dist_required]
 

@@ -21,7 +21,6 @@ import torch
 import jigsaw.convert as convert
 import jigsaw.modules.convolution as convolution
 from tests.parity import REPLICATED, ShardSpec, _all_gather_uneven, check_parity
-from tests.process_mesh import *  # noqa: F401,F403
 
 pytestmark = [pytest.mark.dist_required, pytest.mark.dist(4)]
 

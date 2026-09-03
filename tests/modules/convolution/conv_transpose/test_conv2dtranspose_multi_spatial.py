@@ -12,7 +12,6 @@ import torch.nn.functional as F
 import jigsaw.modules.convolution as convolution
 from jigsaw.utils_aggregate import gather_1d_results
 from tests.parity import assert_close
-from tests.process_mesh import *  # noqa: F401,F403
 
 pytestmark = [pytest.mark.dist_required]
 

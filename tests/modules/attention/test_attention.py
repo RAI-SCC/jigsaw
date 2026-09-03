@@ -5,7 +5,6 @@ import jigsaw.modules.attention as attention
 from jigsaw.utils_aggregate import (
     gather_1d_results_list,
 )
-from tests.process_mesh import *
 
 pytestmark = [pytest.mark.dist_required]
 
