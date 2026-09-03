@@ -3,6 +3,7 @@ import torch
 
 from jigsaw.modules import roll
 from jigsaw.utils_aggregate import gather_1d_results
+from tests.parity import assert_close
 
 pytestmark = [pytest.mark.gpu_required, pytest.mark.dist_required]
 
@@ -34,7 +35,15 @@ class TestDistributedRoll:
             dist_forward, process_mesh_dict_2x2, pm_key="row", dim=-2
         )
 
-        assert torch.allclose(ref_roll, y_gathered, atol=1e-4)
+        assert_close(
+            "roll forward",
+            y_gathered,
+            ref_roll,
+            1e-4,
+            1e-5,
+            device,
+            process_mesh_dict_2x2["model"],
+        )
 
         roll_jigsaw = roll.DistributedRoll(
             shifts=(-(x // 2), -(y // 2)),
@@ -45,7 +54,15 @@ class TestDistributedRoll:
             dtype=torch.float32,
         )
         roll_around = roll_jigsaw(dist_forward)
-        assert torch.allclose(roll_around, x_data)
+        assert_close(
+            "roll round-trip",
+            roll_around,
+            x_data,
+            1e-8,
+            1e-5,
+            device,
+            process_mesh_dict_2x2["model"],
+        )
 
     @pytest.mark.dist(8)
     def test_dist_roll_init_8(
@@ -74,7 +91,15 @@ class TestDistributedRoll:
         y_gathered = gather_1d_results(
             dist_forward, process_mesh_dict_4x2, pm_key="row", dim=-2
         )
-        assert torch.allclose(ref_roll, y_gathered, atol=1e-4)
+        assert_close(
+            "roll forward",
+            y_gathered,
+            ref_roll,
+            1e-4,
+            1e-5,
+            device,
+            process_mesh_dict_4x2["model"],
+        )
 
         roll_jigsaw = roll.DistributedRoll(
             shifts=(-x, -y),
@@ -85,4 +110,12 @@ class TestDistributedRoll:
             dtype=torch.float32,
         )
         roll_around = roll_jigsaw(dist_forward)
-        assert torch.allclose(roll_around, x_data)
+        assert_close(
+            "roll round-trip",
+            roll_around,
+            x_data,
+            1e-8,
+            1e-5,
+            device,
+            process_mesh_dict_4x2["model"],
+        )

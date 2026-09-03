@@ -7,6 +7,7 @@ from jigsaw.modules.linear.linear import (
     DistributedMatMulXWT,
 )
 from jigsaw.utils_aggregate import gather_results
+from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
 
@@ -37,7 +38,9 @@ class TestDistributedMatMul:
         )
 
         y_ref = ref_a @ ref_b.mT
-        assert torch.allclose(y_gathered, y_ref, atol=1e-5)
+        assert_close(
+            "xwt", y_gathered, y_ref, 1e-5, 1e-5, device, process_mesh_dict["model"]
+        )
 
     def test_xw(self, process_mesh_dict_2x2, device):
         process_mesh_dict = process_mesh_dict_2x2
@@ -60,7 +63,9 @@ class TestDistributedMatMul:
         )
 
         y_ref = ref_a @ ref_b
-        assert torch.allclose(y_gathered, y_ref, atol=1e-5)
+        assert_close(
+            "xw", y_gathered, y_ref, 1e-5, 1e-5, device, process_mesh_dict["model"]
+        )
 
     def test_xtw(self, process_mesh_dict_2x2, device):
         process_mesh_dict = process_mesh_dict_2x2
@@ -83,4 +88,6 @@ class TestDistributedMatMul:
         )
 
         y_ref = ref_a.mT @ ref_b
-        assert torch.allclose(y_gathered, y_ref, atol=1e-5)
+        assert_close(
+            "xtw", y_gathered, y_ref, 1e-5, 1e-5, device, process_mesh_dict["model"]
+        )

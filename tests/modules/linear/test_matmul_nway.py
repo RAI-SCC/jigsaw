@@ -15,6 +15,7 @@ import jigsaw.modules.linear.distributed_matmul as dist_mm
 import jigsaw.modules.linear.distributed_matmul_batchedp2p as dist_mm_batchedp2p
 import jigsaw.modules.linear.distributed_matmul_p2p as dist_mm_p2p
 from jigsaw.utils_aggregate import gather_results
+from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
 
@@ -104,7 +105,7 @@ class TestMatmulNway:
         )
         result = gather_results(result, process_mesh_dict=mesh)
 
-        assert torch.allclose(x_all @ w_all.mT, result, atol=1e-5)
+        assert_close("xwt", result, x_all @ w_all.mT, 1e-5, 1e-5, device, mesh["model"])
 
     @pytest.mark.parametrize("cpu_impl", CPU_IMPLS)
     @pytest.mark.parametrize("way", WAYS)
@@ -126,7 +127,7 @@ class TestMatmulNway:
         )
         result = gather_results(result, process_mesh_dict=mesh)
 
-        assert torch.allclose(x_all @ w_all, result, atol=1e-5)
+        assert_close("xw", result, x_all @ w_all, 1e-5, 1e-5, device, mesh["model"])
 
     @pytest.mark.parametrize("cpu_impl", CPU_IMPLS)
     @pytest.mark.parametrize("way", WAYS)
@@ -148,7 +149,7 @@ class TestMatmulNway:
         )
         result = gather_results(result, process_mesh_dict=mesh)
 
-        assert torch.allclose(x_all.mT @ w_all, result, atol=1e-5)
+        assert_close("xtw", result, x_all.mT @ w_all, 1e-5, 1e-5, device, mesh["model"])
 
     @pytest.mark.parametrize("cpu_impl", CPU_IMPLS)
     @pytest.mark.parametrize("way", WAYS)
@@ -172,5 +173,15 @@ class TestMatmulNway:
         result_xw = gather_results(result_xw, process_mesh_dict=mesh)
         result_xtw = gather_results(result_xtw, process_mesh_dict=mesh)
 
-        assert torch.allclose(x_all @ w1_all, result_xw, atol=1e-5)
-        assert torch.allclose(x_all.mT @ w2_all, result_xtw, atol=1e-5)
+        assert_close(
+            "fused xw", result_xw, x_all @ w1_all, 1e-5, 1e-5, device, mesh["model"]
+        )
+        assert_close(
+            "fused xtw",
+            result_xtw,
+            x_all.mT @ w2_all,
+            1e-5,
+            1e-5,
+            device,
+            mesh["model"],
+        )

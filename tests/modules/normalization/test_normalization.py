@@ -6,6 +6,7 @@ from jigsaw.utils_aggregate import (
     gather_1d_results,
     gather_results,
 )
+from tests.parity import assert_close
 
 pytestmark = [pytest.mark.gpu_required, pytest.mark.dist_required]
 
@@ -70,7 +71,15 @@ class TestDistributedLayerNorm:
         forward_ref = ref_layer_norm(x_gathered)
         forward_dist = gather_results(forward_dist, process_mesh_dict)
 
-        assert torch.allclose(forward_dist, forward_ref, atol=1e-3)
+        assert_close(
+            "forward",
+            forward_dist,
+            forward_ref,
+            1e-3,
+            1e-5,
+            device,
+            process_mesh_dict["model"],
+        )
 
         x_dist = x.detach().clone().requires_grad_(True)
         x_ref = x_gathered.detach().clone().requires_grad_(True)
@@ -110,6 +119,25 @@ class TestDistributedLayerNorm:
         assert isinstance(ref_ln.weight.grad, torch.Tensor)
         assert isinstance(ref_ln.bias.grad, torch.Tensor)
 
-        assert torch.allclose(grad_x_gathered, x_ref.grad, atol=1e-3)
-        assert torch.allclose(grad_w_gathered, ref_ln.weight.grad, atol=1e-3)
-        assert torch.allclose(grad_b_gathered, ref_ln.bias.grad, atol=1e-3)
+        model_group = process_mesh_dict["model"]
+        assert_close(
+            "input grad", grad_x_gathered, x_ref.grad, 1e-3, 1e-5, device, model_group
+        )
+        assert_close(
+            "weight grad",
+            grad_w_gathered,
+            ref_ln.weight.grad,
+            1e-3,
+            1e-5,
+            device,
+            model_group,
+        )
+        assert_close(
+            "bias grad",
+            grad_b_gathered,
+            ref_ln.bias.grad,
+            1e-3,
+            1e-5,
+            device,
+            model_group,
+        )

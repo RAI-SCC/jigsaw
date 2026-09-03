@@ -9,6 +9,7 @@ from jigsaw.utils_aggregate import (
     gather_1d_results_list,
     gather_results,
 )
+from tests.parity import all_ranks_ok, assert_close
 
 pytestmark = [pytest.mark.dist_required]
 
@@ -59,7 +60,15 @@ class TestForward:
             pm_key_col="col",
             pm_key_model="model",
         )
-        assert torch.allclose(y_gathered, y_ref, atol=1e-5)
+        assert_close(
+            "output",
+            y_gathered,
+            y_ref,
+            1e-5,
+            1e-5,
+            device,
+            process_mesh_dict_2x2["model"],
+        )
 
     @pytest.mark.dist(4)
     def test_xwt_forward_2(
@@ -102,7 +111,15 @@ class TestForward:
         y_ref = ref_linlayer(x_gathered)
 
         y_gathered = gather_results(y, process_mesh_dict=process_mesh_dict_2x1x2)
-        assert torch.allclose(y_gathered, y_ref, atol=1e-5)
+        assert_close(
+            "output",
+            y_gathered,
+            y_ref,
+            1e-5,
+            1e-5,
+            device,
+            process_mesh_dict_2x1x2["model"],
+        )
 
     @pytest.mark.dist(4)
     def test_xwt_bias_init(
@@ -131,11 +148,30 @@ class TestForward:
         b_gathered = gather_1d_results_list(
             linlayer.bias.data, process_mesh_dict=process_mesh_dict_2x2
         )
-        assert torch.allclose(b_gathered[0], b_gathered[2], atol=1e-5)
-        assert torch.allclose(b_gathered[1], b_gathered[3], atol=1e-5)
-        assert not torch.allclose(
-            b_gathered[0], b_gathered[1], atol=1e-5
-        )  # ranks that are part of the same model group should have different biases.
+        model_group = process_mesh_dict_2x2["model"]
+        assert_close(
+            "bias row replica 0/2",
+            b_gathered[0],
+            b_gathered[2],
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
+        assert_close(
+            "bias row replica 1/3",
+            b_gathered[1],
+            b_gathered[3],
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
+        # ranks that are part of the same model group should have different biases.
+        differ = not torch.allclose(b_gathered[0], b_gathered[1], atol=1e-5)
+        assert all_ranks_ok(differ, device, model_group), (
+            "bias must differ across the model group"
+        )
 
     @pytest.mark.dist(4)
     def test_xwt_forward_bias(
@@ -183,7 +219,15 @@ class TestForward:
         assert isinstance(y_ref, torch.Tensor)
 
         y_gathered = gather_results(y, process_mesh_dict=process_mesh_dict_2x2)
-        assert torch.allclose(y_gathered, y_ref, atol=1e-5)
+        assert_close(
+            "output",
+            y_gathered,
+            y_ref,
+            1e-5,
+            1e-5,
+            device,
+            process_mesh_dict_2x2["model"],
+        )
 
 
 class TestBackward:
@@ -269,10 +313,35 @@ class TestBackward:
         assert isinstance(ref_linlayer.weight.grad, torch.Tensor)
         assert isinstance(x_gathered.grad, torch.Tensor)
 
-        assert torch.allclose(y_gathered, ref_y, atol=1e-5)
-        assert torch.allclose(w_gathered, ref_linlayer.weight, atol=1e-5)
-        assert torch.allclose(w_grad_gathered, ref_linlayer.weight.grad, atol=1e-5)
-        assert torch.allclose(x_grad_gathered, x_gathered.grad, atol=1e-5)
+        model_group = process_mesh_dict_2x2["model"]
+        assert_close("output", y_gathered, ref_y, 1e-5, 1e-5, device, model_group)
+        assert_close(
+            "weight value",
+            w_gathered,
+            ref_linlayer.weight,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
+        assert_close(
+            "weight grad",
+            w_grad_gathered,
+            ref_linlayer.weight.grad,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
+        assert_close(
+            "input grad",
+            x_grad_gathered,
+            x_gathered.grad,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
 
     @pytest.mark.dist(4)
     def test_xwt_backward_sum(
@@ -350,9 +419,26 @@ class TestBackward:
         assert isinstance(ref_y, torch.Tensor)
         assert isinstance(ref_linlayer.weight.grad, torch.Tensor)
         assert isinstance(x_gathered.grad, torch.Tensor)
-        assert torch.allclose(y_gathered, ref_y, atol=1e-5)
-        assert torch.allclose(w_grad_gathered, ref_linlayer.weight.grad, atol=1e-5)
-        assert torch.allclose(x_grad_gathered, x_gathered.grad, atol=1e-5)
+        model_group = process_mesh_dict_2x2["model"]
+        assert_close("output", y_gathered, ref_y, 1e-5, 1e-5, device, model_group)
+        assert_close(
+            "weight grad",
+            w_grad_gathered,
+            ref_linlayer.weight.grad,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
+        assert_close(
+            "input grad",
+            x_grad_gathered,
+            x_gathered.grad,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
 
     @pytest.mark.dist(4)
     def test_xwt_backward_bias(
@@ -455,12 +541,53 @@ class TestBackward:
         assert isinstance(ref_linlayer.bias.grad, torch.Tensor)
         assert isinstance(x_gathered.grad, torch.Tensor)
 
-        assert torch.allclose(y_gathered, ref_y, atol=1e-5)
-        assert torch.allclose(w_gathered, ref_linlayer.weight, atol=1e-5)
-        assert torch.allclose(b_gathered, ref_linlayer.bias, atol=1e-5)
-        assert torch.allclose(w_grad_gathered, ref_linlayer.weight.grad, atol=1e-5)
-        assert torch.allclose(b_grad_gathered, ref_linlayer.bias.grad, atol=1e-5)
-        assert torch.allclose(x_grad_gathered, x_gathered.grad, atol=1e-5)
+        model_group = process_mesh_dict_2x2["model"]
+        assert_close("output", y_gathered, ref_y, 1e-5, 1e-5, device, model_group)
+        assert_close(
+            "weight value",
+            w_gathered,
+            ref_linlayer.weight,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
+        assert_close(
+            "bias value",
+            b_gathered,
+            ref_linlayer.bias,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
+        assert_close(
+            "weight grad",
+            w_grad_gathered,
+            ref_linlayer.weight.grad,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
+        assert_close(
+            "bias grad",
+            b_grad_gathered,
+            ref_linlayer.bias.grad,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
+        assert_close(
+            "input grad",
+            x_grad_gathered,
+            x_gathered.grad,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
 
     @pytest.mark.dist(4)
     def test_xwt_backward_2(
@@ -564,17 +691,58 @@ class TestBackward:
         assert isinstance(ref_linlayer.weight, torch.Tensor)
         assert isinstance(ref_linlayer.weight.grad, torch.Tensor)
 
-        assert torch.allclose(y_gathered, ref_y, atol=1e-5)
-        assert torch.allclose(w_gathered, ref_linlayer.weight, atol=1e-5)
-        assert torch.allclose(w_grad_gathered, ref_linlayer.weight.grad, atol=1e-5)
+        model_group = process_mesh_dict_2x1x2["model"]
+        assert_close("output", y_gathered, ref_y, 1e-5, 1e-5, device, model_group)
+        assert_close(
+            "weight value",
+            w_gathered,
+            ref_linlayer.weight,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
+        assert_close(
+            "weight grad",
+            w_grad_gathered,
+            ref_linlayer.weight.grad,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
 
         if linlayer.bias is not None:
             assert isinstance(ref_linlayer.bias, torch.Tensor)
             assert isinstance(ref_linlayer.bias.grad, torch.Tensor)
 
-            assert torch.allclose(b_gathered, ref_linlayer.bias, atol=1e-5)
-            assert torch.allclose(b_grad_gathered, ref_linlayer.bias.grad, atol=1e-5)
-        assert torch.allclose(x_grad_gathered, x_gathered.grad, atol=1e-5)
+            assert_close(
+                "bias value",
+                b_gathered,
+                ref_linlayer.bias,
+                1e-5,
+                1e-5,
+                device,
+                model_group,
+            )
+            assert_close(
+                "bias grad",
+                b_grad_gathered,
+                ref_linlayer.bias.grad,
+                1e-5,
+                1e-5,
+                device,
+                model_group,
+            )
+        assert_close(
+            "input grad",
+            x_grad_gathered,
+            x_gathered.grad,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
 
     @pytest.mark.dist(4)
     def test_xwt_backward_dtp(
@@ -698,7 +866,7 @@ class TestBackward:
             process_mesh_dict=process_mesh_dict_2x2,
             dim=-1,
             pm_key="col",
-        )
+        ).squeeze(0)  # drop the leading dim added for gather_1d_results
 
         x_grad_gathered = gather_1d_results(
             x_in.grad, process_mesh_dict=process_mesh_dict_2x2, dim=-1, pm_key="col"
@@ -717,10 +885,35 @@ class TestBackward:
         assert isinstance(w_grad_gathered, torch.Tensor)
         assert isinstance(x_gathered.grad, torch.Tensor)
 
-        assert torch.allclose(y_gathered, ref_y, atol=1e-4)
-        assert torch.allclose(w_gathered, ref_linlayer.weight, atol=1e-4)
-        assert torch.allclose(w_grad_gathered, ref_linlayer.weight.grad, atol=1e-4)
-        assert torch.allclose(x_grad_gathered, x_gathered.grad, atol=1e-4)
+        model_group = process_mesh_dict_2x2["model"]
+        assert_close("output", y_gathered, ref_y, 1e-4, 1e-5, device, model_group)
+        assert_close(
+            "weight value",
+            w_gathered,
+            ref_linlayer.weight,
+            1e-4,
+            1e-5,
+            device,
+            model_group,
+        )
+        assert_close(
+            "weight grad",
+            w_grad_gathered,
+            ref_linlayer.weight.grad,
+            1e-4,
+            1e-5,
+            device,
+            model_group,
+        )
+        assert_close(
+            "input grad",
+            x_grad_gathered,
+            x_gathered.grad,
+            1e-4,
+            1e-5,
+            device,
+            model_group,
+        )
 
         if linlayer.bias is not None:
             assert isinstance(linlayer.bias, torch.Tensor)
@@ -744,10 +937,25 @@ class TestBackward:
                 process_mesh_dict=process_mesh_dict_2x2,
                 pm_key="col",
                 dim=-1,
+            ).squeeze(0)  # drop the leading dim added for gather_1d_results
+            assert_close(
+                "bias value",
+                b_gathered,
+                ref_linlayer.bias,
+                1e-3,
+                1e-5,
+                device,
+                model_group,
             )
-            b_grad_gathered = b_grad_gathered
-            assert torch.allclose(b_gathered, ref_linlayer.bias, atol=1e-3)
-            assert torch.allclose(b_grad_gathered, ref_linlayer.bias.grad, atol=1e-3)
+            assert_close(
+                "bias grad",
+                b_grad_gathered,
+                ref_linlayer.bias.grad,
+                1e-3,
+                1e-5,
+                device,
+                model_group,
+            )
 
     @pytest.mark.dist(8)
     def test_xwt_backward_sum_8(
@@ -824,6 +1032,23 @@ class TestBackward:
         assert isinstance(ref_y, torch.Tensor)
         assert isinstance(ref_linlayer.weight.grad, torch.Tensor)
         assert isinstance(x_gathered.grad, torch.Tensor)
-        assert torch.allclose(y_gathered, ref_y, atol=1e-5)
-        assert torch.allclose(w_grad_gathered, ref_linlayer.weight.grad, atol=1e-5)
-        assert torch.allclose(x_grad_gathered, x_gathered.grad, atol=1e-5)
+        model_group = process_mesh_dict_4x2["model"]
+        assert_close("output", y_gathered, ref_y, 1e-5, 1e-5, device, model_group)
+        assert_close(
+            "weight grad",
+            w_grad_gathered,
+            ref_linlayer.weight.grad,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
+        assert_close(
+            "input grad",
+            x_grad_gathered,
+            x_gathered.grad,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
