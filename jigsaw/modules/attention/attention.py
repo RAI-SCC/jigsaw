@@ -1,4 +1,5 @@
 """Distributed attention modules."""
+import warnings
 
 from typing import Any, Optional, cast
 
@@ -11,6 +12,88 @@ from jigsaw.modules import linear
 
 from . import config as attention_config
 from .functional.functional import RingAttentionFunction
+
+try:
+    import transformer_engine.pytorch as te
+
+
+    class TransformerEngineAttention(torch.autograd.Function):
+        """Autograd wrapper around ``te.DotProductAttention`` that supports ``torch.vmap``.
+
+        ``transformer_engine``'s fused attention kernels are opaque C++/CUDA extensions
+        that do not register a batching rule, so calling them inside ``torch.vmap``
+        (as ``torch_blue`` does for Bayesian sampling) fails.
+
+        By routing the call through a custom ``autograd.Function`` with a ``vmap``
+        staticmethod we get full control over what happens under vmap: we simply fold the
+        vmapped (samples) dimension into the batch dimension, run the kernel once as a
+        *normal, un-vmapped* forward, then unfold the result. Outside of vmap the function
+        is a thin pass-through to ``attn``.
+        """
+
+        @staticmethod
+        def forward(
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            attn: "te.DotProductAttention",
+        ) -> torch.Tensor:
+            """Run TE dot-product attention.
+
+            Parameters
+            ----------
+            q, k, v: torch.Tensor
+                Query/key/value tensors in ``bshd`` format
+                (``[batch, seq, heads, head_dim]``).
+            attn: te.DotProductAttention
+                The transformer-engine attention module to call.
+
+            Returns
+            -------
+            torch.Tensor
+                Attention output in ``bshd`` format.
+            """
+            return attn(q, k, v)
+
+        @staticmethod
+        def setup_context(ctx: Any, inputs: tuple, output: torch.Tensor) -> None:
+            """No context is needed; gradients flow through ``attn`` itself."""
+            return None
+
+        @staticmethod
+        def vmap(
+            info: Any,
+            in_dims: tuple[Optional[int], ...],
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            attn: "te.DotProductAttention",
+        ) -> tuple[torch.Tensor, int]:
+
+            q_bdim, k_bdim, v_bdim = in_dims[0], in_dims[1], in_dims[2]
+
+            # Move the vmapped dimension to the front for each tensor.
+            q = q.movedim(q_bdim, 0) if q_bdim is not None else q.expand(info.batch_size, *q.shape)
+            k = k.movedim(k_bdim, 0) if k_bdim is not None else k.expand(info.batch_size, *k.shape)
+            v = v.movedim(v_bdim, 0) if v_bdim is not None else v.expand(info.batch_size, *v.shape)
+
+            samples = q.shape[0]
+            # q/k/v now have shape [samples, batch, seq, heads, head_dim].
+            # Fold samples into the batch dimension so TE sees a plain bshd tensor.
+            q = q.flatten(0, 1)
+            k = k.flatten(0, 1)
+            v = v.flatten(0, 1)
+
+            out = attn(q, k, v)
+
+            # Unfold the samples dimension back out to the front.
+            out = out.unflatten(0, (samples, -1))
+            return out, 0
+
+    JIGSAW_TE_AVAILABLE=True
+except ModuleNotFoundError:
+    JIGSAW_TE_AVAILABLE=False
+    
 
 
 class DistributedAttention(torch.nn.Module):
@@ -33,6 +116,7 @@ class DistributedAttention(torch.nn.Module):
         bayesian: bool = False,
         qk_norm: bool = False,
         ring_attention: bool = False,
+        transformer_engine: bool = False,
         dtype: torch.dtype = torch.float32,
         config: Optional[attention_config.RingAttentionConfig] = None,
     ):
@@ -59,6 +143,11 @@ class DistributedAttention(torch.nn.Module):
         self.dtype = dtype
         self.dropout_p = dropout_p
         self.ring_attention = ring_attention
+        self.te = transformer_engine
+        
+        self.heads = heads // self.channel_group.size()
+        self.scale = (embed_dim // heads) ** -0.5
+        self.empty = torch.empty(0, device=device)
 
         assert heads % self.channel_group.size() == 0, (
             "heads is not divisible by channel group size"
@@ -69,9 +158,24 @@ class DistributedAttention(torch.nn.Module):
                 "Cannot perform ring attention if spatial size is 1."
             )
 
-        self.attn_core = (
-            self._ring_attn_core if self.ring_attention else self._attn_core
-        )
+        if self.ring_attention:
+            self.attn_core = self._ring_attn_core
+        elif self.te:
+            if not JIGSAW_TE_AVAILABLE:
+                warnings.warn("Transformer engine is not available. Install it or update your container.")
+                self.attn_core = self._attn_core
+            else:
+                self.attn_core = self._transformer_attn_core
+                self.attn = te.DotProductAttention(
+                    num_attention_heads=self.heads,
+                    kv_channels=embed_dim // heads,
+                    num_gqa_groups=self.heads,
+                    # attention_dropout=self.dropout_p,
+                    qkv_format="bshd",
+                    attn_mask_type="no_mask",
+                )
+        else:
+            self.attn_core = self._attn_core
 
         if channel_group.size() == 1:
             self.qkv = torch.nn.Linear(
@@ -166,6 +270,36 @@ class DistributedAttention(torch.nn.Module):
             )
         return out
 
+    def _transformer_attn_core(
+            self,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            **kwargs: torch.Tensor,
+        ) -> torch.Tensor:
+            """
+            Attention computation.
+    
+            Parameters
+            ----------
+            q: torch.Tensor
+                Query tensor.
+            k: torch.Tensor
+                Keys tensor.
+            v: torch.Tensor
+                Values tensor.
+            kwargs:
+                Additional optional parameters.
+    
+            Returns
+            -------
+            out: torch.Tensor
+                Output of attention computation.
+    
+            """
+            out = TransformerEngineAttention.apply(q, k, v, self.attn)
+            return out
+        
     def _ring_attn_core(
         self,
         q: torch.Tensor,
@@ -219,10 +353,16 @@ class DistributedAttention(torch.nn.Module):
         """
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.qkv(x)
-        qkv = rearrange(
-            qkv, "... n i (three h d) -> three ... n h i d", three=3, h=self.heads
-        )
-
+        
+        if not self.te:
+            qkv = rearrange(
+                qkv, "... n s (three h d) -> three ... n h s d", three=3, h=self.heads
+            )
+        else:
+            qkv = rearrange(
+                qkv, "... n s (three h d) -> three ... n s h d", three=3, h=self.heads
+            )
+            
         if self.qk_norm:
             q, k, v = qkv.unbind(0)
             q = self.q_norm(q).to(torch.bfloat16)
@@ -233,7 +373,9 @@ class DistributedAttention(torch.nn.Module):
 
         out = self.attn_core(q, k, v, x=x)
         # out has shape [batch, local_heads, local_sequence length, head_dim]
-        out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous().to(self.dtype)
+        if not self.te:
+            out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous().to(self.dtype)
+            
         out = cast(torch.Tensor, self.head_concat(out))
         # Output: [n_batch, seq_length, output_dim]
         return out

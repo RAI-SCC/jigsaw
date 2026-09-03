@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 import jigsaw.modules.convolution as convolution
 from jigsaw.utils_aggregate import gather_1d_results
-from tests.process_mesh import *  # noqa: F401,F403
+from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
 
@@ -173,13 +173,27 @@ def _conv3d_transpose_multi_spatial_reference_check(
     w_grad_global = gather_1d_results(conv.weight.grad, mesh, dim=1, pm_key="col")
     b_grad_global = gather_1d_results(conv.bias.grad, mesh, dim=0, pm_key="col")
 
-    assert torch.allclose(y_global, y_ref, atol=1e-4, rtol=1e-4)
-    assert torch.allclose(x_grad_global, x_global.grad, atol=1e-4, rtol=1e-4)
+    # Collective-safe: every rank reaches the same verdict, so a mismatch on a
+    # subset of ranks fails the job instead of hanging the rest in the next gather.
+    assert_close("output", y_global, y_ref, 1e-4, 1e-4, device, model_group)
+    assert_close(
+        "input grad", x_grad_global, x_global.grad, 1e-4, 1e-4, device, model_group
+    )
     # The parameter grads reduce over every output position; across a big volume
     # the distributed partial sums land in a different float32 order than the
     # single-process reference, so allow ~1e-3 there.
-    assert torch.allclose(w_grad_global, weight_global.grad, atol=1e-3, rtol=1e-3)
-    assert torch.allclose(b_grad_global, bias_global.grad, atol=1e-3, rtol=1e-3)
+    assert_close(
+        "weight grad",
+        w_grad_global,
+        weight_global.grad,
+        1e-3,
+        1e-3,
+        device,
+        model_group,
+    )
+    assert_close(
+        "bias grad", b_grad_global, bias_global.grad, 1e-3, 1e-3, device, model_group
+    )
 
 
 class TestConv3dTransposeMultiSpatial:

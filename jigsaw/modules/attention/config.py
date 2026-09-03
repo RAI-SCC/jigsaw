@@ -65,7 +65,25 @@ class SendOp(Enum):
 def _attn_core_flash(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale: float, dropout_p: float
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Flash attention forward pass. Returns (out, logsumexp)."""
+    """Flash attention forward pass. Returns (out, logsumexp).
+
+    Calling convention for the two undocumented
+    ``torch.ops.aten._scaled_dot_product_flash_attention{,_backward}`` ops,
+    worked out against a naive ``softmax(q @ k.mT * scale) @ v`` autograd
+    reference and ``F.scaled_dot_product_attention``:
+
+    * ``q``/``k``/``v``/``out``/``grad_out`` are ``(B, H, S, d)`` -- heads
+      *before* sequence -- and contiguous. The public ``(B, S, H, d)`` layout
+      must be transposed first (ring attention already works in ``(B, H, S, d)``).
+    * forward returns ``(out, logsumexp, *rng_and_debug)``; keep the first two.
+      ``logsumexp`` is ``(B, H, S)`` and is fed back into backward unchanged.
+    * ``max_q`` / ``max_k`` (backward) are the query / key sequence lengths.
+    * ``philox_seed`` / ``philox_offset`` (backward) are the dropout RNG state;
+      with ``dropout_p == 0`` any same-device int64 tensors work, hence zeros.
+    * ``cum_seq_q`` / ``cum_seq_k`` (backward) are for nested/ragged batches
+      only and stay ``None`` here.
+    * backward returns ``(dq, dk, dv)`` in the same ``(B, H, S, d)`` layout.
+    """
     q, k, v = [x.to(torch.float16) for x in (q, k, v)]
     out, logsumexp, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
         q,
@@ -106,7 +124,11 @@ def _attn_core_flash_backward(
     max_q: float,
     max_k: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Backward call to flash attention. Returns (dq, dk, dv)."""
+    """Backward call to flash attention. Returns (dq, dk, dv).
+
+    See :func:`_attn_core_flash` for the ``(B, H, S, d)`` layout and the meaning
+    of ``max_q`` / ``max_k`` / ``philox_*`` / ``cum_seq_*``.
+    """
     dq, dk, dv = torch.ops.aten._scaled_dot_product_flash_attention_backward(
         grad_out,
         q,

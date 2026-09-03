@@ -20,7 +20,6 @@ from jigsaw.modules.convolution.common.channel_comm import (
     gather_full_channels,
     resolve_channel_comm,
 )
-from tests.process_mesh import *  # noqa: F401,F403
 
 
 class TestResolveChannelComm:
