@@ -105,9 +105,25 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
             )
 
 
-@pytest.fixture(scope="session")
-def _dist_session(device: torch.device) -> Generator[None, None, None]:
-    """Initialize the shared process group once for the whole test session."""
+@pytest.fixture(autouse=True, scope="session")
+def dist_env(
+    request: pytest.FixtureRequest, device: torch.device
+) -> Generator[None, None, None]:
+    """Initialize the shared process group once for the whole test session.
+
+    Stays session-scoped and autouse so it runs before the session-scoped
+    ``process_mesh_dict_*`` fixtures, which need the default group. When *every*
+    selected test is marked ``no_dist_env`` -- e.g. running ``test_gloo_nccl.py``
+    on its own, which brings up its own ``cpu:gloo,cuda:nccl`` group -- the
+    shared group is not created, so that is not a double init.
+    """
+    items = request.session.items
+    if items and all(
+        item.get_closest_marker("no_dist_env") is not None for item in items
+    ):
+        yield None
+        return
+
     if device.type == "cuda":
         torch.cuda.set_device(device)
         assert dist.is_nccl_available()
@@ -127,22 +143,6 @@ def _dist_session(device: torch.device) -> Generator[None, None, None]:
         raise RuntimeError("Process group initialization failed.")
     yield None
     dist.destroy_process_group()
-
-
-@pytest.fixture(autouse=True)
-def dist_env(request: pytest.FixtureRequest) -> Generator[None, None, None]:
-    """Per-test gate for the shared process group.
-
-    Tests marked ``no_dist_env`` run without it -- they manage their own group
-    (e.g. the hybrid ``cpu:gloo,cuda:nccl`` backend in ``test_gloo_nccl.py``),
-    and a pre-existing default group would make that a double init. Every other
-    test pulls in the session-scoped :func:`_dist_session`.
-    """
-    if request.node.get_closest_marker("no_dist_env"):
-        yield
-        return
-    request.getfixturevalue("_dist_session")
-    yield
 
 
 @pytest.fixture(scope="session")
