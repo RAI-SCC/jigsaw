@@ -278,7 +278,7 @@ class LinearConfig:
         if device.type == "cuda":
             match parallelism:
                 case 1:
-                    return lambda x, w: x.mT @ w
+                    return lambda x, w, *args, **kwargs: x.mT @ w
                 case 2:
                     return dist_mm.x_transpose_w_twoway
                 case 4:
@@ -290,7 +290,7 @@ class LinearConfig:
         elif device.type == "cpu":
             match parallelism:
                 case 1:
-                    return lambda x, w: x.mT @ w
+                    return lambda x, w, *args, **kwargs: x.mT @ w
                 case 2:
                     return dist_mm_p2p.x_transpose_w_twoway
                 case 4:
@@ -327,6 +327,8 @@ class LinearConfig:
                     return dist_mm.fused_xw_xtw_twoway
                 case 4:
                     return dist_mm.fused_xw_xtw_fourway
+                case 8:
+                    return dist_mm.fused_xw_xtw_eightway
                 case _:
                     raise ValueError(f"Unsupported parallelism: {parallelism}")
         elif device.type == "cpu":
