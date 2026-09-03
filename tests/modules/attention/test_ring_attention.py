@@ -7,6 +7,7 @@ from jigsaw.modules.attention.functional import backward, forward, functional
 from jigsaw.utils_aggregate import (
     gather_1d_results,
 )
+from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
 
@@ -284,12 +285,19 @@ class TestRingAttention:
 
         out_core.backward(torch.ones_like(out_core))
         atol = 1e-2 if dtype == torch.bfloat16 else 1e-3
+        ring_group = process_mesh_dict["row"]
         # dq_ref: results from calling torch.nn.SDPA
         # q_ref2: results from calling forward-backward core functionality
         # from ring_config.attn_core_forward_fn
-        assert torch.allclose(dq_ref, q_ref2.grad, atol=atol)
-        assert torch.allclose(dk_ref, k_ref2.grad, atol=atol)
-        assert torch.allclose(dv_ref, v_ref2.grad, atol=atol)
+        assert_close(
+            "dq core vs sdpa", q_ref2.grad, dq_ref, atol, 1e-5, device, ring_group
+        )
+        assert_close(
+            "dk core vs sdpa", k_ref2.grad, dk_ref, atol, 1e-5, device, ring_group
+        )
+        assert_close(
+            "dv core vs sdpa", v_ref2.grad, dv_ref, atol, 1e-5, device, ring_group
+        )
 
         # gather
         dq_full = gather_1d_results(dq_local, process_mesh_dict, dim=2)
@@ -297,31 +305,44 @@ class TestRingAttention:
         dv_full = gather_1d_results(dv_local, process_mesh_dict, dim=2)
 
         # dq_local, dq_full: results from true ring attention
-        assert torch.allclose(out_full, out_ref, atol=atol)
-        assert torch.allclose(dq_full, dq_ref.to(dq_full.dtype), atol=atol)
-        assert torch.allclose(dk_full, dk_ref.to(dk_full.dtype), atol=atol)
-        assert torch.allclose(dv_full, dv_ref.to(dv_full.dtype), atol=atol)
+        assert_close("output", out_full, out_ref, atol, 1e-5, device, ring_group)
+        assert_close(
+            "dq", dq_full, dq_ref.to(dq_full.dtype), atol, 1e-5, device, ring_group
+        )
+        assert_close(
+            "dk", dk_full, dk_ref.to(dk_full.dtype), atol, 1e-5, device, ring_group
+        )
+        assert_close(
+            "dv", dv_full, dv_ref.to(dv_full.dtype), atol, 1e-5, device, ring_group
+        )
 
-        assert torch.allclose(
+        local_slice = slice(local_rank * n_local, (local_rank + 1) * n_local)
+        assert_close(
+            "dq local shard",
             dq_local,
-            dq_ref[:, :, (local_rank * n_local) : (local_rank + 1) * n_local].to(
-                dq_local.dtype
-            ),
-            atol=atol,
+            dq_ref[:, :, local_slice].to(dq_local.dtype),
+            atol,
+            1e-5,
+            device,
+            ring_group,
         )
-        assert torch.allclose(
+        assert_close(
+            "dk local shard",
             dk_local,
-            dk_ref[:, :, (local_rank * n_local) : (local_rank + 1) * n_local].to(
-                dk_local.dtype
-            ),
-            atol=atol,
+            dk_ref[:, :, local_slice].to(dk_local.dtype),
+            atol,
+            1e-5,
+            device,
+            ring_group,
         )
-        assert torch.allclose(
+        assert_close(
+            "dv local shard",
             dv_local,
-            dv_ref[:, :, (local_rank * n_local) : (local_rank + 1) * n_local].to(
-                dv_local.dtype
-            ),
-            atol=atol,
+            dv_ref[:, :, local_slice].to(dv_local.dtype),
+            atol,
+            1e-5,
+            device,
+            ring_group,
         )
 
 
@@ -607,13 +628,20 @@ def test_ring_hybrid(
 
         out_core.backward(torch.ones_like(out_core))
         atol = 1e-2 if dtype == torch.bfloat16 else 1e-3
+        ring_group = process_mesh_dict["model"]
         # dq_ref: results from calling torch.nn.SDPA
         # q_ref2: results from calling forward-backward core functionality
         # from ring_config.attn_core_forward_fn
 
-        assert torch.allclose(dq_ref, q_ref2.grad, atol=atol)
-        assert torch.allclose(dk_ref, k_ref2.grad, atol=atol)
-        assert torch.allclose(dv_ref, v_ref2.grad, atol=atol)
+        assert_close(
+            "dq core vs sdpa", q_ref2.grad, dq_ref, atol, 1e-5, device, ring_group
+        )
+        assert_close(
+            "dk core vs sdpa", k_ref2.grad, dk_ref, atol, 1e-5, device, ring_group
+        )
+        assert_close(
+            "dv core vs sdpa", v_ref2.grad, dv_ref, atol, 1e-5, device, ring_group
+        )
 
         # gather
         dq_full = gather_1d_results(dq_local, process_mesh_dict, dim=2)
@@ -621,31 +649,52 @@ def test_ring_hybrid(
         dv_full = gather_1d_results(dv_local, process_mesh_dict, dim=2)
 
         # dq_local, dq_full: results from true ring attention
-        assert torch.allclose(out_full, out_ref, atol=atol)
-        assert torch.allclose(dq_full.sum(), dq_ref.to(dq_full.dtype).sum())
-        assert torch.allclose(dq_full, dq_ref.to(dq_full.dtype), atol=atol)
+        assert_close("output", out_full, out_ref, atol, 1e-5, device, ring_group)
+        assert_close(
+            "dq sum",
+            dq_full.sum(),
+            dq_ref.to(dq_full.dtype).sum(),
+            1e-8,
+            1e-5,
+            device,
+            ring_group,
+        )
+        assert_close(
+            "dq", dq_full, dq_ref.to(dq_full.dtype), atol, 1e-5, device, ring_group
+        )
         # assert torch.allclose(dk_full.sum(), dk_ref.to(dk_full.dtype).sum())
-        assert torch.allclose(dk_full, dk_ref.to(dk_full.dtype), atol=atol)
-        assert torch.allclose(dv_full, dv_ref.to(dv_full.dtype), atol=atol)
+        assert_close(
+            "dk", dk_full, dk_ref.to(dk_full.dtype), atol, 1e-5, device, ring_group
+        )
+        assert_close(
+            "dv", dv_full, dv_ref.to(dv_full.dtype), atol, 1e-5, device, ring_group
+        )
 
-        assert torch.allclose(
+        local_slice = slice(local_rank * n_local, (local_rank + 1) * n_local)
+        assert_close(
+            "dq local shard",
             dq_local,
-            dq_ref[:, :, (local_rank * n_local) : (local_rank + 1) * n_local].to(
-                dq_local.dtype
-            ),
-            atol=atol,
+            dq_ref[:, :, local_slice].to(dq_local.dtype),
+            atol,
+            1e-5,
+            device,
+            ring_group,
         )
-        assert torch.allclose(
+        assert_close(
+            "dk local shard",
             dk_local,
-            dk_ref[:, :, (local_rank * n_local) : (local_rank + 1) * n_local].to(
-                dk_local.dtype
-            ),
-            atol=atol,
+            dk_ref[:, :, local_slice].to(dk_local.dtype),
+            atol,
+            1e-5,
+            device,
+            ring_group,
         )
-        assert torch.allclose(
+        assert_close(
+            "dv local shard",
             dv_local,
-            dv_ref[:, :, (local_rank * n_local) : (local_rank + 1) * n_local].to(
-                dv_local.dtype
-            ),
-            atol=atol,
+            dv_ref[:, :, local_slice].to(dv_local.dtype),
+            atol,
+            1e-5,
+            device,
+            ring_group,
         )

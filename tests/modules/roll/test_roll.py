@@ -5,7 +5,7 @@ from jigsaw.modules import roll
 from jigsaw.utils_aggregate import gather_1d_results
 from tests.parity import assert_close
 
-pytestmark = [pytest.mark.gpu_required, pytest.mark.dist_required]
+pytestmark = [pytest.mark.dist_required]
 
 
 class TestDistributedRoll:
