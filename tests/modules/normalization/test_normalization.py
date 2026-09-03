@@ -8,10 +8,14 @@ from jigsaw.utils_aggregate import (
 )
 from tests.parity import assert_close
 
-pytestmark = [pytest.mark.gpu_required, pytest.mark.dist_required]
+pytestmark = [pytest.mark.dist_required]
 
 
 class TestDistributedLayerNorm:
+    # Every mesh below spans exactly 4 ranks; without this an N != 4 run would
+    # trip the world-size assertion in ``make_process_mesh``.
+    pytestmark = pytest.mark.dist(4)
+
     @pytest.mark.parametrize(
         "process_mesh_dict",
         [
