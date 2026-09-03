@@ -62,6 +62,7 @@ def _conv3d_transpose_reference_check(
     stride: Triple | None = None,
     padding: Triple = 0,
     dilation: Triple = 1,
+    groups: int = 1,
     channel_comm: str = "all_gather",
 ) -> None:
     """Compare ``DistributedConv3DTranspose`` against a single-process op.
@@ -106,7 +107,7 @@ def _conv3d_transpose_reference_check(
         stride=stride,
         padding=padding,
         dilation=dilation,
-        groups=1,
+        groups=groups,
         bias=True,
         bayesian=False,
         dtype=torch.float32,
@@ -114,9 +115,13 @@ def _conv3d_transpose_reference_check(
     ).to(device)
 
     # --- reconstruct the equivalent global transpose convolution -----------
-    # weight is (C_in, C_out // groups, kD, kH, kW): the channel group shards dim 1.
+    # weight is (C_in, C_out // groups, kD, kH, kW). The gather regime
+    # (groups == 1) shards the output-channel axis (dim 1); the channel-local
+    # regime (groups a multiple of col.size()) shards the input-channel axis
+    # (dim 0) instead.
+    weight_dim = 0 if conv._channel_local else 1
     weight_global = gather_1d_results(
-        conv.weight.detach(), mesh, dim=1, pm_key="col"
+        conv.weight.detach(), mesh, dim=weight_dim, pm_key="col"
     ).clone()
     bias_global = gather_1d_results(
         conv.bias.detach(), mesh, dim=0, pm_key="col"
@@ -135,6 +140,7 @@ def _conv3d_transpose_reference_check(
         stride=stride,
         padding=padding,
         dilation=dilation,
+        groups=groups,
     )
 
     # global output not divisible by the spatial ranks -> unsupported, cleanly.
@@ -169,7 +175,9 @@ def _conv3d_transpose_reference_check(
 
     y_global = _to_global(y.detach(), -4)
     x_grad_global = _to_global(x_dist.grad, -4)
-    w_grad_global = gather_1d_results(conv.weight.grad, mesh, dim=1, pm_key="col")
+    w_grad_global = gather_1d_results(
+        conv.weight.grad, mesh, dim=weight_dim, pm_key="col"
+    )
     b_grad_global = gather_1d_results(conv.bias.grad, mesh, dim=0, pm_key="col")
 
     # Collective-safe: every rank reaches the same verdict, so a mismatch on a
@@ -442,3 +450,192 @@ class TestConv3dTransposeParallel:
             dilation=dilation,
             channel_comm=channel_comm,
         )
+
+
+class TestConv3dTransposeGroups:
+    """Grouped 3-D transpose convolution across spatial / channel group sizes.
+
+    ``groups`` a multiple of ``col.size()`` -> every rank owns whole conv-groups
+    and runs a plain grouped transpose conv3d on its channel shard with no
+    channel-group communication (the weight is then sharded on its input-channel
+    axis 0, not the output axis 1). ``groups == 1`` keeps the full-channel-gather
+    path; ``1 < groups`` not divisible by ``col.size()`` is rejected.
+    """
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [1, 2, 4])
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    def test_2x2_no_halo(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        groups: int,
+        channel_comm: str,
+    ) -> None:
+        """2-way spatial x 2-way channel, ``stride == kernel``."""
+        _skip_if_unsupported(channel_comm)
+        _conv3d_transpose_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=2,
+            depth=8,
+            height=8,
+            width=16,
+            groups=groups,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [2, 4])
+    def test_2x2_halo(
+        self, device: torch.device, process_mesh_dict_2x2: dict, groups: int
+    ) -> None:
+        """Channel-local grouped transpose conv3d through the halo path."""
+        _conv3d_transpose_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=3,
+            depth=8,
+            height=8,
+            width=16,
+            stride=2,
+            padding=1,
+            groups=groups,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"),
+        [
+            ((2, 3, 5), (2, 2, 3), (0, 1, 1), 1),
+            ((3, 3, 3), (3, 3, 3), (0, 0, 0), (1, 1, 2)),
+        ],
+        ids=["asymmetric", "dilated"],
+    )
+    def test_2x2_arbitrary_params(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        kernel: Triple,
+        stride: Triple,
+        padding: Triple,
+        dilation: Triple,
+    ) -> None:
+        """Channel-local grouped transpose conv3d with asymmetric / dilated params."""
+        _conv3d_transpose_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=kernel,
+            depth=8,
+            height=8,
+            width=16,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=2,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [1, 2, 3, 4, 6, 12])
+    def test_pure_spatial_4x1(
+        self, device: torch.device, process_mesh_dict_4x1: dict, groups: int
+    ) -> None:
+        """No channel split: any ``groups`` dividing the channel counts."""
+        _conv3d_transpose_reference_check(
+            device,
+            process_mesh_dict_4x1,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=2,
+            depth=8,
+            height=8,
+            width=16,
+            groups=groups,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [2, 4])
+    def test_pure_spatial_4x1_halo(
+        self, device: torch.device, process_mesh_dict_4x1: dict, groups: int
+    ) -> None:
+        """4-way spatial split, grouped transpose conv3d, halo regime."""
+        _conv3d_transpose_reference_check(
+            device,
+            process_mesh_dict_4x1,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=3,
+            depth=8,
+            height=8,
+            width=32,
+            stride=2,
+            padding=1,
+            groups=groups,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [1, 4, 12])
+    def test_pure_channel_1x4(
+        self, device: torch.device, process_mesh_dict_1x4: dict, groups: int
+    ) -> None:
+        """4-way channel split: ``groups`` 1 (gather) or a multiple of 4 (local)."""
+        _conv3d_transpose_reference_check(
+            device,
+            process_mesh_dict_1x4,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=2,
+            depth=4,
+            height=4,
+            width=8,
+            groups=groups,
+        )
+
+    @pytest.mark.dist(8)
+    @pytest.mark.parametrize("groups", [4, 8])
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    def test_2x4(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x4_rowcol: dict,
+        groups: int,
+        channel_comm: str,
+    ) -> None:
+        """2-way spatial x 4-way channel, channel-local grouped transpose conv3d."""
+        _skip_if_unsupported(channel_comm)
+        _conv3d_transpose_reference_check(
+            device,
+            process_mesh_dict_2x4_rowcol,
+            in_channels=8,
+            out_channels=16,
+            kernel_size=2,
+            depth=8,
+            height=8,
+            width=16,
+            groups=groups,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [3, 9])
+    def test_incompatible_groups_rejected(
+        self, device: torch.device, process_mesh_dict_2x2: dict, groups: int
+    ) -> None:
+        """``1 < groups`` not a multiple of ``col.size()`` fails at construction."""
+        with pytest.raises(NotImplementedError):
+            convolution.DistributedConv3DTranspose(
+                18,
+                18,
+                2,
+                device=device,
+                spatial_group=process_mesh_dict_2x2["row"],
+                channel_group=process_mesh_dict_2x2["col"],
+                stride=2,
+                groups=groups,
+            ).to(device)
