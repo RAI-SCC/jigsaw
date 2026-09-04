@@ -131,6 +131,16 @@ class _RedundantAllReduce(torch.autograd.Function):
         """Pass the gradient straight through."""
         return grad_output, None
 
+    @staticmethod
+    def vmap(
+        info: Any,
+        in_dims: tuple[Optional[int], ...],
+        x: torch.Tensor,
+        groups: Groups,
+    ) -> tuple[torch.Tensor, Optional[int]]:
+        """Vmap rule: the reduction is over ranks, so batching is transparent."""
+        return _RedundantAllReduce.apply(x, groups), in_dims[0]
+
 
 def redundant_all_reduce(x: torch.Tensor, groups: GroupsArg) -> torch.Tensor:
     """Differentiably sum ``x`` across ``groups`` (see :class:`_RedundantAllReduce`)."""

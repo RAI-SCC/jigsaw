@@ -6,7 +6,7 @@ The class dimension (``dim``, ``1`` by convention) may be sharded across
 primitives and the collective-communication rationale.
 """
 
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
@@ -221,14 +221,54 @@ class _ChannelParallelCrossEntropy(torch.autograd.Function):
         dim = ctx.dim  # type: ignore[attr-defined]
         eps = ctx.label_smoothing  # type: ignore[attr-defined]
 
-        onehot = torch.zeros_like(softmax)
-        onehot.scatter_(dim, local_idx, local_hit.unsqueeze(dim).to(softmax.dtype))
+        onehot = torch.zeros_like(softmax).scatter(
+            dim, local_idx, local_hit.unsqueeze(dim).to(softmax.dtype)
+        )
 
         grad_logits = softmax - (1.0 - eps) * onehot
         if eps != 0.0:
             grad_logits = grad_logits - eps / ctx.n_global  # type: ignore[attr-defined]
         grad_logits = grad_logits * (grad_per_element * elem_weight).unsqueeze(dim)
         return grad_logits, None, None, None, None, None, None
+
+    @staticmethod
+    def vmap(
+        info: Any,
+        in_dims: tuple[Optional[int], ...],
+        logits: torch.Tensor,
+        local_idx: torch.Tensor,
+        local_hit: torch.Tensor,
+        elem_weight: torch.Tensor,
+        label_smoothing: float,
+        dim: int,
+        channel_group: Optional[dist.ProcessGroup],
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[int, int]]:
+        """Vmap rule: front-load every batched argument and shift the class dim.
+
+        The class collectives act on the class dimension alone, so a batched
+        call is just the unbatched op with one extra leading dimension.
+        """
+
+        def _front(t: torch.Tensor, bdim: Optional[int]) -> torch.Tensor:
+            if bdim is None:
+                return t.expand(info.batch_size, *t.shape)
+            return t.movedim(bdim, 0)
+
+        logits, local_idx, local_hit, elem_weight = (
+            _front(t, bdim)
+            for t, bdim in zip((logits, local_idx, local_hit, elem_weight), in_dims[:4])
+        )
+        class_dim = dim + 1 if dim >= 0 else dim
+        out = _ChannelParallelCrossEntropy.apply(
+            logits,
+            local_idx,
+            local_hit,
+            elem_weight,
+            label_smoothing,
+            class_dim,
+            channel_group,
+        )
+        return out, (0, 0)
 
 
 def distributed_cross_entropy(

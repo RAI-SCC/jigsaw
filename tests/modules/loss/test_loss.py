@@ -136,6 +136,41 @@ class TestFunctionalNoGroups:
                 **FTOL,
             )
 
+    @pytest.mark.parametrize("label_smoothing", [0.0, 0.1])
+    def test_vmap_grad_matches_loop_without_groups(
+        self, device: torch.device, label_smoothing: float
+    ) -> None:
+        """``vmap(grad(...))`` over the ungrouped losses matches a Python loop.
+
+        Batches over a leading axis so each slice keeps its ``[N, C, S]`` shape;
+        no groups means no collectives, so this is safe on every rank.
+        """
+        from torch.func import grad, vmap
+
+        e, n, c, s = 3, 4, 6, 5
+        torch.manual_seed(device.index or 0)
+        logits = torch.randn(e, n, c, s, device=device, dtype=torch.double)
+        target = torch.randint(0, c, (e, n, s), device=device)
+
+        def ce(lg: torch.Tensor, tg: torch.Tensor) -> torch.Tensor:
+            return lossc.distributed_cross_entropy(
+                lg, tg, reduction="mean", label_smoothing=label_smoothing
+            )
+
+        got = vmap(grad(ce))(logits, target)
+        ref = torch.stack([grad(ce)(logits[i], target[i]) for i in range(e)])
+        assert torch.allclose(got, ref, atol=1e-10)
+
+        pred = torch.randn(e, n, c, device=device, dtype=torch.double)
+        cont = torch.randn(e, n, c, device=device, dtype=torch.double)
+
+        def mse(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+            return lossr.distributed_mse_loss(a, b, reduction="mean")
+
+        got = vmap(grad(mse))(pred, cont)
+        ref = torch.stack([grad(mse)(pred[i], cont[i]) for i in range(e)])
+        assert torch.allclose(got, ref, atol=1e-10)
+
 
 # --------------------------------------------------------------------------- #
 # cross entropy
