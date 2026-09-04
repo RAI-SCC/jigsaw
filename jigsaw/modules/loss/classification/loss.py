@@ -16,6 +16,10 @@ the input is sharded over.
 With ``channel_group=None`` and ``reduce_groups=()`` every module reduces to a
 plain call of the corresponding ``torch.nn.functional`` loss on the local
 tensor.
+
+As in ``torch.nn``'s own weighted losses, ``weight`` / ``pos_weight`` are
+registered as buffers, so they move with :meth:`~torch.nn.Module.to` /
+:meth:`~torch.nn.Module.cuda` and appear in the module ``state_dict``.
 """
 
 from typing import Optional
@@ -60,7 +64,8 @@ class DistributedNLLLoss(torch.nn.Module):
         super().__init__()
         self.channel_group = channel_group
         self.reduce_groups = reduce_groups
-        self.weight = weight
+        self.register_buffer("weight", weight)
+        self.weight: Optional[torch.Tensor]
         self.ignore_index = ignore_index
         self.reduction = reduction
         self.dim = dim
@@ -119,7 +124,8 @@ class DistributedCrossEntropyLoss(torch.nn.Module):
         super().__init__()
         self.channel_group = channel_group
         self.reduce_groups = reduce_groups
-        self.weight = weight
+        self.register_buffer("weight", weight)
+        self.weight: Optional[torch.Tensor]
         self.ignore_index = ignore_index
         self.reduction = reduction
         self.label_smoothing = label_smoothing
@@ -167,7 +173,8 @@ class DistributedBCELoss(torch.nn.Module):
         """
         super().__init__()
         self.reduce_groups = reduce_groups
-        self.weight = weight
+        self.register_buffer("weight", weight)
+        self.weight: Optional[torch.Tensor]
         self.reduction = reduction
 
     def get_parameter_count(self) -> int:
@@ -211,8 +218,10 @@ class DistributedBCEWithLogitsLoss(torch.nn.Module):
         """
         super().__init__()
         self.reduce_groups = reduce_groups
-        self.weight = weight
-        self.pos_weight = pos_weight
+        self.register_buffer("weight", weight)
+        self.register_buffer("pos_weight", pos_weight)
+        self.weight: Optional[torch.Tensor]
+        self.pos_weight: Optional[torch.Tensor]
         self.reduction = reduction
 
     def get_parameter_count(self) -> int:
