@@ -16,19 +16,11 @@ two matmuls of the same size) = ``6 n^3``.
 from __future__ import annotations
 
 import argparse
-import gc
-from dataclasses import asdict
 from pathlib import Path
 
 import torch
 
-from benchmarks.harness import fingerprint, timing
-from benchmarks.harness.result import (
-    SCHEMA_VERSION,
-    params_key,
-    summary_markdown,
-    write_run,
-)
+from benchmarks.harness.driver import run_grid
 
 _DTYPES = {
     "bfloat16": torch.bfloat16,
@@ -37,24 +29,27 @@ _DTYPES = {
 }
 
 
-def _build(device: torch.device, n: int, dtype: str):
-    """Return ``(step, reset, flops)`` for an ``n x n`` matmul in ``dtype``."""
-    dt = _DTYPES[dtype]
-    a = torch.randn(n, n, device=device, dtype=dt, requires_grad=True)
-    b = torch.randn(n, n, device=device, dtype=dt, requires_grad=True)
+def _builder(device: torch.device):
+    def build(params: dict):
+        dt = _DTYPES[params["dtype"]]
+        n = params["n"]
+        a = torch.randn(n, n, device=device, dtype=dt, requires_grad=True)
+        b = torch.randn(n, n, device=device, dtype=dt, requires_grad=True)
 
-    def step() -> None:
-        (a @ b).sum().backward()
+        def step() -> None:
+            (a @ b).sum().backward()
 
-    def reset() -> None:
-        a.grad = None
-        b.grad = None
+        def reset() -> None:
+            a.grad = None
+            b.grad = None
 
-    return step, reset, 6 * n**3
+        return step, reset, 6 * n**3, None
+
+    return build
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the matmul grid, write a run file, print the summary + compare hint."""
+    """Run the matmul grid and write a run file."""
     ap = argparse.ArgumentParser(
         prog="python -m benchmarks run calibration_matmul",
         description=__doc__,
@@ -87,67 +82,17 @@ def main(argv: list[str] | None = None) -> int:
         "min_block_ms": args.min_block_ms,
         "time_budget_s": args.time_budget_s,
     }
-    fp = fingerprint.collect(world_size=1)
-    hwk = fingerprint.hw_key(fp)
-    meta = {
-        "schema": SCHEMA_VERSION,
-        "hw_key": hwk,
-        "case_file": "calibration_matmul",
-        "knobs": knobs,
-        "fingerprint": fp,
-    }
-
-    print(f"device={device.type}  gpu={fp.get('gpu_name')}  hw_key={hwk}")
-    rows: list[dict] = []
-    gc.collect()
-    gc.disable()
-    for dtype in args.dtypes:
-        for n in args.sizes:
-            step, reset, flops = _build(device, n, dtype)
-            clk0 = fingerprint.read_clocks()
-            st = timing.benchmark(
-                step,
-                device=device,
-                reset=reset,
-                flops=lambda flops=flops: flops,
-                min_block_ms=args.min_block_ms,
-                time_budget_s=args.time_budget_s,
-            )
-            clk1 = fingerprint.read_clocks()
-            del step, reset
-            if device.type == "cuda":
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
-            gc.collect()
-            gc.disable()
-
-            rows.append(
-                {
-                    "case": "calibration_matmul",
-                    "params": {"n": n, "dtype": dtype},
-                    "stats": asdict(st),
-                    "knobs": knobs,
-                    "clocks_start": clk0,
-                    "clocks_end": clk1,
-                }
-            )
-            iqr_pct = (
-                100 * (st.p75_ms - st.p25_ms) / st.median_ms if st.median_ms else 0
-            )
-            tf = f"{st.tflops:7.1f} TFLOP/s" if st.tflops else ""
-            print(
-                f"  {params_key(rows[-1]['params']):<22} "
-                f"{st.median_ms:9.3f} ms  {tf}  IQR {iqr_pct:4.1f}%"
-                f"{'' if st.converged else '  (no converge)'}"
-            )
-    gc.enable()
-
-    ts = fp["timestamp"].replace(":", "").replace("-", "").replace("+0000", "Z")
-    path = args.out / f"{ts}-{hwk}-calibration_matmul.jsonl"
-    write_run(path, meta, rows)
-    print("\n" + summary_markdown(rows))
-    print(f"\nwrote {path}")
-    print(f"compare: python -m benchmarks compare {path}")
+    combos = [{"n": n, "dtype": d} for d in args.dtypes for n in args.sizes]
+    run_grid(
+        case="calibration_matmul",
+        combos=combos,
+        build=_builder(device),
+        device=device,
+        knobs=knobs,
+        out_dir=args.out,
+        min_block_ms=args.min_block_ms,
+        time_budget_s=args.time_budget_s,
+    )
     return 0
 
 

@@ -6,7 +6,9 @@ A run file is JSONL: the first line is ``{"_meta": ...}`` (fingerprint + knobs +
     {
         "case": str,
         "params": {...},
-        "stats": {...},
+        "status": "ok" | "skipped",
+        "reason": str,  # only when skipped
+        "stats": {...},  # empty when skipped
         "knobs": {...},
         "clocks_start": {...} | null,
         "clocks_end": {...} | null,

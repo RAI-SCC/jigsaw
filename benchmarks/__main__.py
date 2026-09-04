@@ -7,6 +7,8 @@ import sys
 
 _CASES = {
     "calibration_matmul": "benchmarks.cases.calibration_matmul",
+    "distributed_matmul": "benchmarks.cases.distributed_matmul",
+    "distributed_conv": "benchmarks.cases.distributed_conv",
 }
 
 _USAGE = """usage:

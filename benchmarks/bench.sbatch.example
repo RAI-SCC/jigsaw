@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+#
+# Batch template for a benchmark run. Copy it, fill in the site-specific SBATCH
+# directives, submit with `sbatch`. Keep your copy under experiments/ (gitignored)
+# or outside the repo.
+#
+#SBATCH --job-name=jigsaw-bench
+#SBATCH --account=hk-project-XXXX
+#SBATCH --partition=accelerated-h100
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=16
+#SBATCH --time=00:30:00
+#SBATCH --output=slurm-%j.out
+
+set -euo pipefail
+
+export JIGSAW_SITE=horeka
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Optional: pin the clocks for tighter cross-run reproducibility (needs
+# permission; harmless warning if denied). Undo with `-rgc` / `-rmc` after.
+# srun --ntasks-per-node=1 nvidia-smi -pm 1
+# srun --ntasks-per-node=1 nvidia-smi -lgc 1980   # e.g. H100 base SM clock
+
+# --- calibration: one task, sanity-check the machine ------------------------
+srun --ntasks=1 --gres=gpu:1 scripts/run.sh \
+    python -m benchmarks run calibration_matmul \
+    --sizes 4096 8192 16384 --dtypes bfloat16 float32 \
+    --out "$REPO/benchmarks/results"
+
+# --- distributed cases: one task per GPU -----------------------------------
+srun --mpi=pmix scripts/run.sh \
+    python -m benchmarks run distributed_matmul \
+    --mesh 2x2 --variants xw xwt --sizes 4096 8192 --dtypes bfloat16 \
+    --out "$REPO/benchmarks/results"
+
+srun --mpi=pmix scripts/run.sh \
+    python -m benchmarks run distributed_conv \
+    --mesh 1x4 --dim 3 --in-channels 256 --out-channels 256 --spatial 64 \
+    --groups 1 4 --channel-comm all_gather p2p \
+    --out "$REPO/benchmarks/results"
+
+# --- regression check against the committed baseline ----------------------
+for f in "$REPO"/benchmarks/results/*.jsonl; do
+    scripts/run.sh python -m benchmarks compare "$f" || true
+done

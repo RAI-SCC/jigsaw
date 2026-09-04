@@ -27,10 +27,16 @@ def compare_rows(
     new_rows: list[dict], base_rows: list[dict], tol: float = 0.08
 ) -> list[dict]:
     """Match rows by ``(case, params)`` and classify each new/base median ratio."""
-    base = {(r["case"], params_key(r["params"])): r for r in base_rows}
+    base = {
+        (r["case"], params_key(r["params"])): r
+        for r in base_rows
+        if r.get("status", "ok") == "ok"
+    }
     seen: set = set()
     out: list[dict] = []
     for r in new_rows:
+        if r.get("status", "ok") != "ok":
+            continue
         key = (r["case"], params_key(r["params"]))
         seen.add(key)
         b = base.get(key)
