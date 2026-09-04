@@ -6,23 +6,9 @@ import torch
 import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
+from jigsaw.autocast import cast_to_autocast_dtype
+
 from .config import LinearConfig
-
-
-def _autocast_bias(
-    b: Optional[torch.Tensor], device_type: str
-) -> Optional[torch.Tensor]:
-    """Cast the bias to the active autocast dtype.
-
-    The distributed matmul emits the autocast dtype, so ``out.add(b)`` with an
-    fp32 ``b`` would promote the result back to fp32 -- losing the autocast dtype
-    on the layer's output. Casting ``b`` keeps the output in the autocast dtype,
-    matching stock ``nn.Linear`` under AMP; backward still reconciles grads to
-    ``weight.dtype``.
-    """
-    if b is not None and torch.is_autocast_enabled(device_type):
-        return b.to(torch.get_autocast_dtype(device_type))
-    return b
 
 
 class LinearCtx(Protocol):
@@ -130,11 +116,10 @@ class XWT(torch.autograd.Function):
             Local output tensor of shape (B, out_dim, in_dim) or (S, B, out_dim, in_dim).
         """
         w = config.reshape_weights(w)
-        if torch.is_autocast_enabled(device.type):
-            dtype = torch.get_autocast_dtype(device.type)
-            x = x.to(dtype)
-            w = w.to(dtype)
-        b = _autocast_bias(b, device.type)
+        # Opt into autocast: this Function hides the inner matmul from autocast's
+        # op-level policy. ``XWT`` casts x/w here (its kernel does not); casting
+        # the bias too keeps ``add_bias`` from promoting the output back to fp32.
+        x, w, b = cast_to_autocast_dtype(x, w, b)
         xwt = config.mm_kernels[0](x, w, local_rank, device, model_group)
         xwt = config.add_bias(xwt, b)
 
@@ -278,7 +263,9 @@ class XW(torch.autograd.Function):
             Local output tensor of shape (B, x_in, out_dim) or (S, B, x_in, out_dim).
         """
         w = config.reshape_weights(w)
-        b = _autocast_bias(b, device.type)
+        # Cast the bias to the autocast dtype (the kernel casts x/w itself) so
+        # ``add_bias`` does not promote the output back to fp32 under autocast.
+        (b,) = cast_to_autocast_dtype(b)
         xw = config.mm_kernels[1](x, w, local_rank, device, model_group)
         xw = config.add_bias(xw, b)
         xw = cast(torch.Tensor, xw)
@@ -414,7 +401,9 @@ class XTW(torch.autograd.Function):
             Local output tensor of shape (B, x_in, out_dim) or (S, B, x_in, out_dim).
         """
         w = config.reshape_weights(w)
-        b = _autocast_bias(b, device.type)
+        # Cast the bias to the autocast dtype (the kernel casts x/w itself) so
+        # ``add_bias`` does not promote the output back to fp32 under autocast.
+        (b,) = cast_to_autocast_dtype(b)
         xtw = config.mm_kernels[2](x, w, local_rank, device, model_group)
         xtw = config.add_bias(xtw, b)
         xtw = cast(torch.Tensor, xtw)

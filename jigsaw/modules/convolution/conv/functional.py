@@ -12,7 +12,8 @@ from typing import Any, Optional, Protocol, cast
 import torch
 import torch.distributed as dist
 
-from ..common.autocast import cast_forward_inputs
+from jigsaw.autocast import cast_to_autocast_dtype
+
 from .config import ConvNdConfig
 
 
@@ -59,7 +60,10 @@ class ConvNd(torch.autograd.Function):
         regime, or additionally halo-padded along every split spatial axis in
         the halo regime.
         """
-        x, weight, bias = cast_forward_inputs(x, weight, bias)
+        # Opt into autocast: this Function hides the inner ``F.conv*`` from
+        # autocast's op-level policy, and the kernels size their channel-gather /
+        # halo buffers from these tensors before the conv runs.
+        x, weight, bias = cast_to_autocast_dtype(x, weight, bias)
         y, x_aug = config.dist_conv_fn(
             x,
             weight,

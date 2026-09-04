@@ -15,7 +15,8 @@ from typing import Any, Optional, Protocol, cast
 import torch
 import torch.distributed as dist
 
-from ..common.autocast import cast_forward_inputs
+from jigsaw.autocast import cast_to_autocast_dtype
+
 from .config import ConvTransposeNdConfig
 
 
@@ -58,7 +59,10 @@ class ConvTransposeNd(torch.autograd.Function):
         in the halo regime, output-position) slice and ``x_aug`` is the gathered
         full-channel input kept for the backward pass.
         """
-        x, weight, bias = cast_forward_inputs(x, weight, bias)
+        # Opt into autocast: this Function hides the inner ``F.conv_transpose*``
+        # from autocast's op-level policy, and the kernels size their
+        # channel-gather / halo buffers from these tensors before the conv runs.
+        x, weight, bias = cast_to_autocast_dtype(x, weight, bias)
         y, x_aug = config.dist_conv_transpose_fn(
             x,
             weight,
