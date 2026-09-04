@@ -328,17 +328,35 @@ def _conv2d_optimizer_parity_check(
         # single-process gradient exactly.
         w_grad = gather_1d_results(dist_conv.weight.grad, mesh, dim=0, pm_key="col")
         b_grad = gather_1d_results(dist_conv.bias.grad, mesh, dim=0, pm_key="col")
-        assert torch.allclose(w_grad, ref_weight.grad, atol=1e-4, rtol=1e-4), (
-            f"iter {it}: weight-grad drift (grad-sync hook wrong?)"
+        assert_close(
+            f"iter {it}: weight grad (grad-sync hook wrong?)",
+            w_grad,
+            ref_weight.grad,
+            1e-4,
+            1e-4,
+            device,
+            model_group,
         )
-        assert torch.allclose(b_grad, ref_bias.grad, atol=1e-4, rtol=1e-4), (
-            f"iter {it}: bias-grad drift (grad-sync hook wrong?)"
+        assert_close(
+            f"iter {it}: bias grad (grad-sync hook wrong?)",
+            b_grad,
+            ref_bias.grad,
+            1e-4,
+            1e-4,
+            device,
+            model_group,
         )
 
         # (2) forward output.
         y_global = _to_global(y.detach(), -3)
-        assert torch.allclose(y_global, y_ref.detach(), atol=1e-4, rtol=1e-4), (
-            f"iter {it}: forward drift"
+        assert_close(
+            f"iter {it}: forward",
+            y_global,
+            y_ref.detach(),
+            1e-4,
+            1e-4,
+            device,
+            model_group,
         )
 
         opt_ref.step()
@@ -348,11 +366,23 @@ def _conv2d_optimizer_parity_check(
         _assert_weight_replicated_across_spatial(dist_conv.weight, mesh)
         w_now = gather_1d_results(dist_conv.weight.detach(), mesh, dim=0, pm_key="col")
         b_now = gather_1d_results(dist_conv.bias.detach(), mesh, dim=0, pm_key="col")
-        assert torch.allclose(w_now, ref_weight.detach(), atol=2e-4, rtol=2e-4), (
-            f"iter {it}: weight drift after optimizer step"
+        assert_close(
+            f"iter {it}: weight value after optimizer step",
+            w_now,
+            ref_weight.detach(),
+            2e-4,
+            2e-4,
+            device,
+            model_group,
         )
-        assert torch.allclose(b_now, ref_bias.detach(), atol=2e-4, rtol=2e-4), (
-            f"iter {it}: bias drift after optimizer step"
+        assert_close(
+            f"iter {it}: bias value after optimizer step",
+            b_now,
+            ref_bias.detach(),
+            2e-4,
+            2e-4,
+            device,
+            model_group,
         )
 
 
