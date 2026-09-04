@@ -35,6 +35,7 @@ from typing import Any, Optional
 import torch
 import torch.distributed as dist
 
+from ..common.channel_comm import conv_group_blocks
 from ..common.spatial_split import (
     _local_padding,
     _needs_halo,
@@ -43,6 +44,80 @@ from ..common.spatial_split import (
 )
 from .channel_comm import over_channels_transpose
 from .halo import transpose_halo_expand, transpose_halo_reduce
+
+
+def _group_blocks(config: Any) -> Optional[list[tuple[int, int, int, int]]]:
+    """Per-conv-group channel blocks for the ``channel_grouped`` regime, else ``None``."""
+    if not config.channel_grouped:
+        return None
+    return conv_group_blocks(
+        config.out_channels,
+        config.in_channels,
+        config.groups,
+        config.channel_rank,
+        config.channel_size,
+    )
+
+
+def _grouped_grad_input_weight(
+    grad_output: torch.Tensor,
+    x_full: torch.Tensor,
+    weight: torch.Tensor,
+    stride: tuple[int, ...],
+    padding: tuple[int, ...],
+    dilation: tuple[int, ...],
+    config: Any,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``channel_grouped`` backward: full-channel ``g_x`` and local ``g_w``, group by group.
+
+    The transpose analogue of
+    :func:`jigsaw.modules.convolution.conv.distributed._grouped_conv_grads`:
+    ``1 < groups`` is not a multiple of the channel-parallel group size, so this
+    rank's output-channel shard is differentiated one conv-group at a time. Per
+    group, the plain (``groups=1``) transpose-conv backward runs on that group's
+    full input-channel slice ``[in_lo:in_hi]`` (weight axis 0 / ``x_full`` channel
+    axis) and this rank's local output-channel slice ``[out_lo:out_hi]`` (weight
+    axis 1 / ``grad_output`` channel axis). ``g_x`` comes back shaped like
+    ``x_full`` with the untouched input-channel slices at zero -- the caller
+    reduce-scatters it over the channel group. ``g_w`` is this rank's local weight.
+    """
+    n = config.n_spatial
+    channel_dim = -(n + 1)
+    in_dim = -(n + 2)
+    g_x = x_full.new_zeros(x_full.shape)
+    g_w = weight.new_zeros(weight.shape)
+    blocks = _group_blocks(config)
+    assert blocks is not None  # only called in the channel_grouped regime
+    for out_lo, out_hi, in_lo, in_hi in blocks:
+        xg = x_full.narrow(channel_dim, in_lo, in_hi - in_lo).contiguous()
+        go = (
+            grad_output.narrow(channel_dim, out_lo, out_hi - out_lo)
+            .to(weight.dtype)
+            .contiguous()
+        )
+        wg = (
+            weight.narrow(in_dim, in_lo, in_hi - in_lo)
+            .narrow(channel_dim, out_lo, out_hi - out_lo)
+            .contiguous()
+        )
+        g_xg, g_wg, _ = config.conv_transpose_grad_fn(
+            go,
+            xg,
+            wg,
+            None,  # bias_sizes -- grad_bias handled separately
+            list(stride),
+            list(padding),
+            list(dilation),
+            True,  # transposed
+            [0] * n,  # output_padding
+            1,  # groups
+            [True, True, False],  # (grad_input, grad_weight, grad_bias)
+        )
+        g_x.narrow(channel_dim, in_lo, in_hi - in_lo).copy_(g_xg)
+        g_w.narrow(in_dim, in_lo, in_hi - in_lo).narrow(
+            channel_dim, out_lo, out_hi - out_lo
+        ).copy_(g_wg)
+    return g_x, g_w
 
 
 def _grad_input_weight(
@@ -116,6 +191,15 @@ def _grad_input_weight_reduced(
     computed in separate passes so the grad-weight pass overlaps the
     reduce-scatter of grad_input; otherwise a single fused pass feeds the reduce.
     """
+    if config.channel_grouped:
+        g_x, g_w = _grouped_grad_input_weight(
+            grad_output, x_full, weight, stride, padding, dilation, config
+        )
+        g_x, handle = _channel_reduce_grad_input(g_x, channel_group, config)
+        if handle is not None:
+            handle.wait()
+        return g_x, g_w
+
     reduce_pending = channel_group.size() > 1 and not config.channel_local
     if reduce_pending and not config.bayesian:
         g_x, _ = _grad_input_weight(
@@ -196,6 +280,7 @@ def conv_transpose_nway(
         n_spatial_dims=config.n_spatial,
         channel_comm=config.channel_comm,
         local=config.channel_local,
+        group_blocks=_group_blocks(config),
     )
 
 
@@ -307,6 +392,7 @@ def conv_transpose_halo_nway(
         channel_comm=config.channel_comm,
         post_fn=post_fn,
         local=config.channel_local,
+        group_blocks=_group_blocks(config),
     )
 
 

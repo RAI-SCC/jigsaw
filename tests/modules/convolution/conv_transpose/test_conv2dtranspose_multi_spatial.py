@@ -480,15 +480,20 @@ class TestConv2dTransposeMultiSpatialGroups:
         )
 
     @pytest.mark.dist(4)
-    @pytest.mark.parametrize("groups", [3, 9])
-    def test_incompatible_groups_rejected(
+    @pytest.mark.parametrize("groups", [5, 7])
+    def test_indivisible_groups_rejected(
         self, device: torch.device, spatial_mesh_2x1_hw_x2c: dict, groups: int
     ) -> None:
-        """``1 < groups`` not a multiple of ``col.size()`` fails at construction."""
-        with pytest.raises(NotImplementedError):
+        """``groups`` not dividing the channel counts fails fast at construction.
+
+        (``1 < groups`` not a multiple of ``col.size()`` -- e.g. ``groups=3``
+        with a 2-way channel group -- is now the supported channel-grouped
+        regime, so it is no longer rejected.)
+        """
+        with pytest.raises(ValueError):
             convolution.DistributedConv2DTranspose(
-                18,
-                18,
+                12,
+                12,
                 4,
                 device=device,
                 spatial_group=[

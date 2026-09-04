@@ -142,11 +142,20 @@ class _DistributedConvNd(torch.nn.Module):
         self.groups = groups
         # ``channel_local``: every channel-parallel rank owns whole conv-groups,
         # so the conv runs on this rank's channel shard with ``groups_local``
-        # groups and no channel-group communication. ``groups == 1`` with a real
-        # channel group keeps the historical full-channel-gather path.
-        self._channel_local, self._groups_local = resolve_conv_groups(
-            groups, in_channels, out_channels, channel_group.size()
+        # groups and no channel-group communication. ``channel_grouped``:
+        # ``1 < groups`` not a multiple of ``G`` -- a conv-group's channels
+        # straddle rank boundaries, handled by the full-channel gather running
+        # one plain conv per conv-group. ``groups == 1`` with a real channel
+        # group keeps the historical single-fused-conv gather path.
+        self._channel_local, self._channel_grouped, self._groups_local = (
+            resolve_conv_groups(groups, in_channels, out_channels, channel_group.size())
         )
+        if bayesian and self._channel_grouped:
+            raise NotImplementedError(
+                "bayesian=True is not supported for a grouped convolution whose "
+                f"groups ({groups}) is not a multiple of the channel-parallel "
+                f"group size ({channel_group.size()})."
+            )
         self.channel_comm = channel_comm
         self.spatial_groups = _as_spatial_groups(spatial_group, self._n_spatial)
         # groups that carry a real (>1) split; the parameters are replicated
@@ -193,6 +202,8 @@ class _DistributedConvNd(torch.nn.Module):
                 self.device,
                 self.channel_comm,
                 self.groups,
+                in_channels,
+                out_channels,
             )
             if config is None
             else config
@@ -387,6 +398,12 @@ class _DistributedConvNd(torch.nn.Module):
         pm_model_key: str = "model",
     ) -> None:
         """Reshard the (channel-sharded) weight and bias onto a new process mesh."""
+        from_weight_shape_local = self.weight.shape
+        weight_shape_global = (
+            from_weight_shape_local[0] * from_process_mesh_dict[pm_col_key].size(),
+            *from_weight_shape_local[1:],
+        )
+
         self.config = ConvNdConfig(
             self.bayesian,
             self.channel_group,
@@ -396,12 +413,8 @@ class _DistributedConvNd(torch.nn.Module):
             self.device,
             self.channel_comm,
             self.groups,
-        )
-
-        from_weight_shape_local = self.weight.shape
-        weight_shape_global = (
-            from_weight_shape_local[0] * from_process_mesh_dict[pm_col_key].size(),
-            *from_weight_shape_local[1:],
+            self.in_channels,
+            weight_shape_global[0],
         )
         to_weight_shape_local = (
             weight_shape_global[0] // to_process_mesh_dict[pm_col_key].size(),

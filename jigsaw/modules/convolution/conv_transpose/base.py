@@ -27,7 +27,7 @@ from jigsaw import hooks
 from jigsaw.utils_aggregate import gather_1d_results
 
 from ..common.arg_norm import _as_spatial_groups, _ntuple
-from ..common.channel_comm import resolve_conv_groups
+from ..common.channel_comm import conv_group_blocks, resolve_conv_groups
 from .config import ConvTransposeNdConfig
 from .functional import ConvTransposeNd
 
@@ -152,11 +152,21 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         self.groups = groups
         # ``channel_local``: every channel-parallel rank owns whole conv-groups,
         # so the transpose conv runs on this rank's channel shard with
-        # ``groups_local`` groups and no channel-group communication. ``groups ==
-        # 1`` with a real channel group keeps the full-channel-gather path.
-        self._channel_local, self._groups_local = resolve_conv_groups(
-            groups, in_channels, out_channels, channel_group.size()
+        # ``groups_local`` groups and no channel-group communication.
+        # ``channel_grouped``: ``1 < groups`` not a multiple of ``G`` -- a
+        # conv-group's channels straddle rank boundaries, handled by the
+        # full-channel gather running one plain transpose conv per conv-group.
+        # ``groups == 1`` with a real channel group keeps the single-fused-conv
+        # gather path.
+        self._channel_local, self._channel_grouped, self._groups_local = (
+            resolve_conv_groups(groups, in_channels, out_channels, channel_group.size())
         )
+        if bayesian and self._channel_grouped:
+            raise NotImplementedError(
+                "bayesian=True is not supported for a grouped transpose "
+                f"convolution whose groups ({groups}) is not a multiple of the "
+                f"channel-parallel group size ({channel_group.size()})."
+            )
         self.channel_comm = channel_comm
         self.spatial_groups = _as_spatial_groups(spatial_group, self._n_spatial)
         # groups that carry a real (>1) split; the parameters are replicated
@@ -181,16 +191,30 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         # channel group shards the output-channel axis 1. In the channel-local
         # regime each rank instead owns whole conv-groups, so it holds only its
         # own input-channel shard (axis 0 -> ``C_in / G``) and the matching
-        # ``C_out / groups`` output-per-group slots.
+        # ``C_out / groups`` output-per-group slots. The channel-grouped regime
+        # (uneven ``groups``) keeps every input channel on axis 0 and this rank's
+        # ``C_out / G`` output-channel shard on axis 1 -- a *dense* layout whose
+        # cross-conv-group entries stay zero (masked below; the per-group kernels
+        # never touch them).
         w_in = (
             self.in_channels // channel_group.size()
             if self._channel_local
             else self.in_channels
         )
         w_out = self.out_channels // self._groups_local
-        self.weight = torch.nn.parameter.Parameter(
-            torch.zeros(w_in, w_out, *self.kernel_size).uniform_(-k, k).to(device)
-        )
+        weight = torch.zeros(w_in, w_out, *self.kernel_size).uniform_(-k, k)
+        if self._channel_grouped:
+            mask = torch.zeros(w_in, w_out)
+            for out_lo, out_hi, in_lo, in_hi in conv_group_blocks(
+                out_channels,
+                in_channels,
+                groups,
+                channel_group.rank(),
+                channel_group.size(),
+            ):
+                mask[in_lo:in_hi, out_lo:out_hi] = 1.0
+            weight *= mask.view(w_in, w_out, *([1] * len(self.kernel_size)))
+        self.weight = torch.nn.parameter.Parameter(weight.to(device))
         self.bias = (
             torch.nn.parameter.Parameter(
                 torch.zeros(self.out_channels).uniform_(-k, k).to(device)
@@ -209,6 +233,8 @@ class _DistributedConvTransposeNd(torch.nn.Module):
                 self.device,
                 self.channel_comm,
                 self.groups,
+                in_channels,
+                out_channels,
             )
             if config is None
             else config
@@ -281,6 +307,19 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         assert model.out_channels % process_mesh_dict[col_kw].size() == 0, (
             "out_channels is not divisible by process mesh cols"
         )
+        _, channel_grouped, _ = resolve_conv_groups(
+            model.groups,
+            model.in_channels,
+            model.out_channels,
+            process_mesh_dict[col_kw].size(),
+        )
+        if channel_grouped:
+            raise NotImplementedError(
+                "convert_to_jigsaw does not support a grouped transpose "
+                "convolution whose groups is not a multiple of the "
+                "channel-parallel group size (the channel-grouped weight layout "
+                "is dense, not block-sparse like torch's grouped weight)."
+            )
 
         instance = cls(
             in_channels=model.in_channels,
@@ -385,6 +424,13 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         global_bias: Optional[torch.Tensor]
             Merged bias, if it exists.
         """
+        if self._channel_grouped:
+            raise NotImplementedError(
+                "merge_weights does not support a grouped transpose convolution "
+                "whose groups is not a multiple of the channel-parallel group "
+                "size (the channel-grouped weight layout is dense, not "
+                "block-sparse like torch's grouped weight)."
+            )
         # Gather regime shards the weight output-channel axis (dim 1);
         # channel-local regime shards the input-channel axis (dim 0).
         global_weights = gather_1d_results(
@@ -414,6 +460,13 @@ class _DistributedConvTransposeNd(torch.nn.Module):
                 "reshard_parameters does not yet support a grouped transpose "
                 "convolution whose channel group owns whole conv-groups."
             )
+        from_weight_shape_local = self.weight.shape
+        weight_shape_global = (
+            from_weight_shape_local[0],
+            from_weight_shape_local[1] * from_process_mesh_dict[pm_col_key].size(),
+            *from_weight_shape_local[2:],
+        )
+
         self.config = ConvTransposeNdConfig(
             self.bayesian,
             self.channel_group,
@@ -423,13 +476,8 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             self.device,
             self.channel_comm,
             self.groups,
-        )
-
-        from_weight_shape_local = self.weight.shape
-        weight_shape_global = (
-            from_weight_shape_local[0],
-            from_weight_shape_local[1] * from_process_mesh_dict[pm_col_key].size(),
-            *from_weight_shape_local[2:],
+            weight_shape_global[0],
+            weight_shape_global[1] * self.groups,
         )
         to_weight_shape_local = (
             weight_shape_global[0],
