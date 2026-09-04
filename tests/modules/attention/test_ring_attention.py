@@ -362,7 +362,7 @@ def test_ring_forward_backward_te(
 ) -> None:
     """Ring forward/backward with the TransformerEngine inner core vs full SDPA.
 
-    Exercises :mod:`jigsaw.modules.attention.functional.te_core` inside the ring:
+    Exercises :mod:`jigsaw.modules.attention.functional.cores.te` inside the ring:
     ``fused_attn_fwd`` supplies the per-chunk ``(out, lse)`` for the online-softmax
     merge and ``fused_attn_bwd`` recomputes ``dQ/dK/dV`` from the saved *global*
     ``out`` / ``lse``.
@@ -378,7 +378,8 @@ def test_ring_forward_backward_te(
         offload=config.Offload.DISABLED,
         attn_backend=config.AttnBackend.TE,
     )
-    assert ring_config.attn_core_forward_fn.__name__ == "te_attn_forward"
+    assert ring_config.attn_core_forward_fn.__name__ == "forward"
+    assert ring_config.attn_core_forward_fn.__module__.endswith("functional.cores.te")
 
     local_rank = dist.get_rank(group=process_mesh_dict["row"])
     world_size = dist.get_world_size(group=process_mesh_dict["row"])

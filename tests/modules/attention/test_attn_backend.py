@@ -22,7 +22,6 @@ import torch
 import torch.distributed as dist
 
 from jigsaw.modules.attention import attention
-from jigsaw.modules.attention import config as attn_config
 from jigsaw.modules.attention.config import (
     AttnBackend,
     RingAttentionConfig,
@@ -30,6 +29,8 @@ from jigsaw.modules.attention.config import (
     _select_attn_core_forward_fn,
     _te_core_or_raise,
 )
+from jigsaw.modules.attention.functional.cores import math as math_core
+from jigsaw.modules.attention.functional.cores import sdpa as sdpa_core
 
 CPU = torch.device("cpu")
 
@@ -39,7 +40,7 @@ def te_unavailable(monkeypatch):
     """Force every TE-availability flag off, regardless of the environment."""
     monkeypatch.setattr(attention, "JIGSAW_TE_AVAILABLE", False)
     monkeypatch.setattr(
-        "jigsaw.modules.attention.functional.te_core.TE_CORE_AVAILABLE", False
+        "jigsaw.modules.attention.functional.cores.te.TE_CORE_AVAILABLE", False
     )
 
 
@@ -82,14 +83,13 @@ class TestSelectRingCore:
         assert select(CPU, "math") is select(torch.device("cuda"), "math")
 
     def test_sdpa_picks_by_device(self):
-        assert _select_attn_core_forward_fn(CPU, "sdpa") is attn_config._attn_core_math
+        assert _select_attn_core_forward_fn(CPU, "sdpa") is math_core.forward
         assert (
             _select_attn_core_forward_fn(torch.device("cuda"), "sdpa")
-            is attn_config._attn_core_flash
+            is sdpa_core.forward
         )
         assert (
-            _select_attn_core_backward_fn(CPU, "sdpa")
-            is attn_config._attn_core_math_backward
+            _select_attn_core_backward_fn(CPU, "sdpa") is math_core.backward
         )
 
     def test_string_and_enum_arg_agree(self):
@@ -115,7 +115,7 @@ class TestTeCoreGuard:
 
     def test_noop_when_available(self, monkeypatch):
         monkeypatch.setattr(
-            "jigsaw.modules.attention.functional.te_core.TE_CORE_AVAILABLE", True
+            "jigsaw.modules.attention.functional.cores.te.TE_CORE_AVAILABLE", True
         )
         assert _te_core_or_raise() is None
 
@@ -228,8 +228,8 @@ class TestRingAttentionConfigBackend:
     def test_math_backend_wires_math_core_and_repr(self):
         cfg = RingAttentionConfig(device=CPU, attn_backend="math")
         assert cfg.attn_backend is AttnBackend.MATH
-        assert cfg.attn_core_forward_fn is attn_config._attn_core_math
-        assert cfg.attn_core_backward_fn is attn_config._attn_core_math_backward
+        assert cfg.attn_core_forward_fn is math_core.forward
+        assert cfg.attn_core_backward_fn is math_core.backward
         assert "attn_backend=MATH" in repr(cfg)
 
     def test_te_backend_raises_without_te(self, te_unavailable):
@@ -255,7 +255,7 @@ class TestBackendWithTe:
 
     def test_availability_flags_are_true(self):
         from jigsaw.modules.attention.attention import JIGSAW_TE_AVAILABLE
-        from jigsaw.modules.attention.functional.te_core import TE_CORE_AVAILABLE
+        from jigsaw.modules.attention.functional.cores.te import TE_CORE_AVAILABLE
 
         assert JIGSAW_TE_AVAILABLE is True
         assert TE_CORE_AVAILABLE is True

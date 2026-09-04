@@ -1,8 +1,8 @@
 """TransformerEngine fused-attention core for the ring inner step.
 
-The ring's online-softmax merge (:func:`.forward._attend_step`) needs a per-chunk
+The ring's online-softmax merge (:func:`..forward._attend_step`) needs a per-chunk
 log-sum-exp from every inner attention call, and its backward
-(:func:`.backward.ring_backward`) recomputes ``dQ/dK/dV`` from the *global* output
+(:func:`..backward.ring_backward`) recomputes ``dQ/dK/dV`` from the *global* output
 and LSE. ``te.DotProductAttention`` returns only the output, so this module drives
 TransformerEngine's cuDNN fused-attention kernels directly via
 ``fused_attn_fwd`` / ``fused_attn_bwd``, whose ``aux_ctx_tensors[0]`` is the
@@ -88,7 +88,7 @@ def _fused_attn_backend(
     return backend
 
 
-def te_attn_forward(
+def forward(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -140,7 +140,7 @@ def te_attn_forward(
     return out.transpose(1, 2).contiguous(), lse
 
 
-def te_attn_backward(
+def backward(
     grad_out: torch.Tensor,
     q: torch.Tensor,
     k: torch.Tensor,

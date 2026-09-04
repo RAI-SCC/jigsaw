@@ -66,7 +66,7 @@ class AttnBackend(str, Enum):
     the ring's per-chunk inner attention.
 
     - ``TE``: TransformerEngine fused (cuDNN) kernels. CUDA + ``transformer_engine``
-      only; the ring uses :mod:`.functional.te_core`.
+      only; the ring uses :mod:`.functional.cores.te`.
     - ``SDPA``: PyTorch scaled-dot-product attention -- the flash kernel on CUDA
       (with a math fallback), the math kernel on CPU. Default.
     - ``MATH``: the unfused ``softmax(QK^T)V`` reference. Any device/shape/dtype.
@@ -81,127 +81,12 @@ class AttnBackend(str, Enum):
 
 
 # --------------------------------------------------------------------------- #
-# attention cores
-# --------------------------------------------------------------------------- #
-def _attn_core_flash(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale: float, dropout_p: float
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Flash attention forward pass. Returns (out, logsumexp).
-
-    Calling convention for the two undocumented
-    ``torch.ops.aten._scaled_dot_product_flash_attention{,_backward}`` ops,
-    worked out against a naive ``softmax(q @ k.mT * scale) @ v`` autograd
-    reference and ``F.scaled_dot_product_attention``:
-
-    * ``q``/``k``/``v``/``out``/``grad_out`` are ``(B, H, S, d)`` -- heads
-      *before* sequence -- and contiguous. The public ``(B, S, H, d)`` layout
-      must be transposed first (ring attention already works in ``(B, H, S, d)``).
-    * forward returns ``(out, logsumexp, *rng_and_debug)``; keep the first two.
-      ``logsumexp`` is ``(B, H, S)`` and is fed back into backward unchanged.
-    * ``max_q`` / ``max_k`` (backward) are the query / key sequence lengths.
-    * ``philox_seed`` / ``philox_offset`` (backward) are the dropout RNG state;
-      with ``dropout_p == 0`` any same-device int64 tensors work, hence zeros.
-    * ``cum_seq_q`` / ``cum_seq_k`` (backward) are for nested/ragged batches
-      only and stay ``None`` here.
-    * backward returns ``(dq, dk, dv)`` in the same ``(B, H, S, d)`` layout.
-    """
-    q, k, v = [x.to(torch.float16) for x in (q, k, v)]
-    out, logsumexp, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
-        q,
-        k,
-        v,
-        dropout_p=dropout_p,
-        is_causal=False,
-        scale=scale,
-        return_debug_mask=False,
-    )
-
-    return out, logsumexp
-
-
-def _attn_core_math(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    scale: Optional[float] = 0.0,
-    dropout_p: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Vanilla attention forward pass. Returns (out, logsumexp)."""
-    scale = scale or (q.size(-1) ** -0.5)
-    scores = (q @ k.mT) * scale
-    logsumexp = scores.logsumexp(dim=-1)  # (B, H, Sq)
-    out = torch.softmax(scores, dim=-1) @ v
-    return out, logsumexp
-
-
-def _attn_core_flash_backward(
-    grad_out: torch.Tensor,
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    out: torch.Tensor,
-    logsumexp: torch.Tensor,
-    scale: float,
-    max_q: float,
-    max_k: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Backward call to flash attention. Returns (dq, dk, dv).
-
-    See :func:`_attn_core_flash` for the ``(B, H, S, d)`` layout and the meaning
-    of ``max_q`` / ``max_k`` / ``philox_*`` / ``cum_seq_*``.
-    """
-    dq, dk, dv = torch.ops.aten._scaled_dot_product_flash_attention_backward(
-        grad_out,
-        q,
-        k,
-        v,
-        out,
-        logsumexp,
-        dropout_p=0.0,
-        is_causal=False,
-        scale=scale,
-        cum_seq_q=None,
-        cum_seq_k=None,
-        max_q=max_q,
-        max_k=max_k,
-        philox_seed=torch.zeros(1, dtype=torch.long, device=q.device),
-        philox_offset=torch.zeros(1, dtype=torch.long, device=q.device),
-    )
-    return dq, dk, dv
-
-
-def _attn_core_math_backward(
-    grad_out: torch.Tensor,
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    out: torch.Tensor,
-    logsumexp: torch.Tensor,
-    scale: float,
-    *args: Any,
-    **kwargs: Any,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Vanilla attention backward pass using saved (global) LSE. Returns (dq, dk, dv)."""
-    attn = (q @ k.mT) * scale  # (B, H, Sq, Sk)
-    p = torch.exp(attn - logsumexp.unsqueeze(-1))  # global norm via saved lse
-
-    dv = p.mT @ grad_out
-
-    dp = grad_out @ v.mT
-    d = (grad_out * out).sum(dim=-1, keepdim=True)  # GLOBAL row-sum, from saved out
-    d_attn = p * (dp - d) * scale
-
-    dq = d_attn @ k
-    dk = d_attn.mT @ q
-    return dq, dk, dv
-
-
-# --------------------------------------------------------------------------- #
 # policy -> callable resolution
 #
 # Every `RingAttentionConfig` attribute that holds a strategy-specific callable
 # is produced by one `_select_*` function here, so the forward/backward code
-# only ever calls `config.<thing>()` and never branches on a raw enum.
+# only ever calls `config.<thing>()` and never branches on a raw enum. The
+# attention cores themselves live in `functional/cores/{sdpa,math,te}.py`.
 # --------------------------------------------------------------------------- #
 CommFn = Callable[..., Any]
 AttnCoreFn = Callable[..., Any]
@@ -228,7 +113,7 @@ def _select_offloader(
 
 def _te_core_or_raise() -> None:
     """Guard: the TE fused-attention core needs ``transformer_engine`` + CUDA."""
-    from .functional.te_core import TE_CORE_AVAILABLE
+    from .functional.cores.te import TE_CORE_AVAILABLE
 
     if not TE_CORE_AVAILABLE:
         raise RuntimeError(
@@ -242,21 +127,25 @@ def _select_attn_core_forward_fn(
     """Pick the ring inner-attention forward core for ``device`` / ``attn_backend``.
 
     ``SDPA`` keeps the historical device-based pick (flash on CUDA, math on CPU).
+    Cores live in :mod:`.functional.cores`; each exposes ``forward`` / ``backward``.
     """
+    from .functional.cores import math as math_core
+    from .functional.cores import sdpa as sdpa_core
+
     match AttnBackend(attn_backend):
         case AttnBackend.TE:
             _te_core_or_raise()
-            from .functional.te_core import te_attn_forward
+            from .functional.cores import te as te_core
 
-            return te_attn_forward
+            return te_core.forward
         case AttnBackend.MATH:
-            return _attn_core_math
+            return math_core.forward
         case AttnBackend.SDPA:
             match device.type:
                 case "cuda":
-                    return _attn_core_flash
+                    return sdpa_core.forward
                 case "cpu":
-                    return _attn_core_math
+                    return math_core.forward
                 case other:
                     raise ValueError(f"no attention forward core for device '{other}'")
 
@@ -265,20 +154,23 @@ def _select_attn_core_backward_fn(
     device: torch.device, attn_backend: AttnBackend = AttnBackend.SDPA
 ) -> AttnCoreFn:
     """Pick the ring inner-attention backward core for ``device`` / ``attn_backend``."""
+    from .functional.cores import math as math_core
+    from .functional.cores import sdpa as sdpa_core
+
     match AttnBackend(attn_backend):
         case AttnBackend.TE:
             _te_core_or_raise()
-            from .functional.te_core import te_attn_backward
+            from .functional.cores import te as te_core
 
-            return te_attn_backward
+            return te_core.backward
         case AttnBackend.MATH:
-            return _attn_core_math_backward
+            return math_core.backward
         case AttnBackend.SDPA:
             match device.type:
                 case "cuda":
-                    return _attn_core_flash_backward
+                    return sdpa_core.backward
                 case "cpu":
-                    return _attn_core_math_backward
+                    return math_core.backward
                 case other:
                     raise ValueError(f"no attention backward core for device '{other}'")
 

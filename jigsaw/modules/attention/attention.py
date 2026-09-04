@@ -176,8 +176,9 @@ class DistributedAttention(torch.nn.Module):
         self.attn_backend = self._resolve_backend(AttnBackend(attn_backend))
         self.te = self.attn_backend == AttnBackend.TE
         # Only the non-ring TE core consumes/produces a bshd tensor; the ring
-        # core (te_core included) works in the ring's bhsd convention and
-        # transposes internally, so forward() keeps the bhsd rearrange for it.
+        # cores (functional.cores.te included) work in the ring's bhsd
+        # convention and transpose internally, so forward() keeps the bhsd
+        # rearrange for it.
         self._te_bshd = self.te and not ring
 
         self.heads = heads // self.channel_group.size()
