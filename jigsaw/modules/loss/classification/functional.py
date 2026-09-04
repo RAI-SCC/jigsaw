@@ -14,6 +14,7 @@ import torch.nn.functional as F
 
 from ..common import (
     GroupsArg,
+    _active,
     _DistributedLogSoftmax,
     _group_rank,
     _group_size,
@@ -129,6 +130,107 @@ def distributed_nll_loss(
     return reduce_loss(nll, elem_weight, reduction, groups)
 
 
+class _ChannelParallelCrossEntropy(torch.autograd.Function):
+    """Fused cross-entropy over a class dimension sharded across ``channel_group``.
+
+    Evaluates the loss straight from the logits -- the full ``log_softmax``
+    tensor is never formed.  Forward issues a single MAX all-reduce (numerical
+    stability) and a single SUM all-reduce that carries ``sum_exp``, the gathered
+    target-logit contribution and, when ``label_smoothing`` is on, the class sum
+    of the shifted logits.  The backward is the closed form
+    ``softmax - (1 - eps) * onehot - eps / C_global`` scaled by the incoming
+    gradient and the per-element weight, and needs no collective.
+
+    ``local_idx`` / ``local_hit`` / ``elem_weight`` carry no gradient and are
+    precomputed by the caller from ``target`` / ``weight`` / ``ignore_index``.
+    """
+
+    @staticmethod
+    def forward(
+        logits: torch.Tensor,
+        local_idx: torch.Tensor,
+        local_hit: torch.Tensor,
+        elem_weight: torch.Tensor,
+        label_smoothing: float,
+        dim: int,
+        channel_group: Optional[dist.ProcessGroup],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return ``(per_element_loss, softmax)``; ``softmax`` feeds the backward."""
+        n_global = logits.shape[dim] * _group_size(channel_group)
+
+        shift = logits.amax(dim=dim, keepdim=True)
+        if _active(channel_group):
+            dist.all_reduce(shift, op=dist.ReduceOp.MAX, group=channel_group)
+        shifted = logits - shift
+        exp_shifted = shifted.exp()
+
+        packed = [
+            exp_shifted.sum(dim=dim),
+            torch.where(
+                local_hit,
+                shifted.gather(dim, local_idx).squeeze(dim),
+                shifted.new_zeros(()),
+            ),
+        ]
+        if label_smoothing != 0.0:
+            packed.append(shifted.sum(dim=dim))
+        stacked = torch.stack(packed, dim=-1)
+        if _active(channel_group):
+            dist.all_reduce(stacked, op=dist.ReduceOp.SUM, group=channel_group)
+
+        sum_exp = stacked[..., 0]
+        shifted_target = stacked[..., 1]
+        log_sum_exp = sum_exp.log()
+        nll = log_sum_exp - shifted_target
+
+        if label_smoothing == 0.0:
+            per_element = nll * elem_weight
+        else:
+            eps = label_smoothing
+            smooth = log_sum_exp - stacked[..., 2] / n_global
+            per_element = ((1.0 - eps) * nll + eps * smooth) * elem_weight
+
+        softmax = exp_shifted / sum_exp.unsqueeze(dim)
+        return per_element, softmax
+
+    @staticmethod
+    def setup_context(
+        ctx: torch.autograd.function.FunctionCtx,
+        inputs: tuple,
+        output: tuple[torch.Tensor, torch.Tensor],
+    ) -> None:
+        """Save ``softmax`` and the target bookkeeping for the local backward."""
+        _, local_idx, local_hit, elem_weight, label_smoothing, dim, channel_group = (
+            inputs
+        )
+        _, softmax = output
+        ctx.dim = dim  # type: ignore[attr-defined]
+        ctx.label_smoothing = label_smoothing  # type: ignore[attr-defined]
+        ctx.n_global = softmax.shape[dim] * _group_size(channel_group)  # type: ignore[attr-defined]
+        ctx.mark_non_differentiable(softmax)
+        ctx.save_for_backward(softmax, local_idx, local_hit, elem_weight)
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_per_element: torch.Tensor,
+        _grad_softmax: Optional[torch.Tensor],
+    ) -> tuple[Optional[torch.Tensor], ...]:
+        """``grad_logits = grad * weight * (softmax - (1 - eps) onehot - eps / C)``."""
+        softmax, local_idx, local_hit, elem_weight = ctx.saved_tensors  # type: ignore[attr-defined]
+        dim = ctx.dim  # type: ignore[attr-defined]
+        eps = ctx.label_smoothing  # type: ignore[attr-defined]
+
+        onehot = torch.zeros_like(softmax)
+        onehot.scatter_(dim, local_idx, local_hit.unsqueeze(dim).to(softmax.dtype))
+
+        grad_logits = softmax - (1.0 - eps) * onehot
+        if eps != 0.0:
+            grad_logits = grad_logits - eps / ctx.n_global  # type: ignore[attr-defined]
+        grad_logits = grad_logits * (grad_per_element * elem_weight).unsqueeze(dim)
+        return grad_logits, None, None, None, None, None, None
+
+
 def distributed_cross_entropy(
     logits: torch.Tensor,
     target: torch.Tensor,
@@ -177,7 +279,6 @@ def distributed_cross_entropy(
     """
     dim = dim % logits.ndim
     groups = _normalize_groups(reduce_groups)
-    log_probs = _DistributedLogSoftmax.apply(logits, dim, channel_group)
 
     is_prob_target = target.dim() == logits.dim() and target.is_floating_point()
 
@@ -186,6 +287,7 @@ def distributed_cross_entropy(
             raise NotImplementedError(
                 "probability targets support neither weight nor label_smoothing"
             )
+        log_probs = _DistributedLogSoftmax.apply(logits, dim, channel_group)
         local = -(target * log_probs).sum(dim=dim)
         per_element = _RedundantAllReduce.apply(local, (channel_group,))
         denom = per_element.new_full((), float(per_element.numel()))
@@ -194,20 +296,23 @@ def distributed_cross_entropy(
     if label_smoothing != 0.0 and weight is not None:
         raise NotImplementedError("label_smoothing with weight is not supported")
 
-    nll, elem_weight, valid = _nll_terms(
-        log_probs, target, weight, ignore_index, dim, channel_group
+    n_local = logits.shape[dim]
+    offset = _group_rank(channel_group) * n_local
+    valid = target != ignore_index
+    target_clamped = target.clamp_min(0)
+    in_range = (target_clamped >= offset) & (target_clamped < offset + n_local)
+    local_hit = valid & in_range
+    local_idx = (target_clamped - offset).clamp_(0, n_local - 1).unsqueeze(dim)
+
+    if weight is not None:
+        elem_weight = torch.where(valid, weight[target_clamped], weight.new_zeros(()))
+    else:
+        elem_weight = valid.to(logits.dtype)
+
+    per_element, _ = _ChannelParallelCrossEntropy.apply(
+        logits, local_idx, local_hit, elem_weight, label_smoothing, dim, channel_group
     )
-
-    if label_smoothing == 0.0:
-        return reduce_loss(nll, elem_weight, reduction, groups)
-
-    n_global = log_probs.shape[dim] * _group_size(channel_group)
-    class_sum = _RedundantAllReduce.apply(log_probs.sum(dim=dim), (channel_group,))
-    smooth = torch.where(valid, -class_sum / n_global, class_sum.new_zeros(()))
-
-    eps = label_smoothing
-    per_element = (1.0 - eps) * nll + eps * smooth
-    return reduce_loss(per_element, valid.to(logits.dtype), reduction, groups)
+    return reduce_loss(per_element, elem_weight, reduction, groups)
 
 
 def distributed_binary_cross_entropy(
