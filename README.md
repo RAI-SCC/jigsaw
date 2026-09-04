@@ -79,6 +79,34 @@ set_all_seeds(local_rank)
 model = Linear(global_in_dim, global_out_dim, process_mesh_dict)
 ```
 
+### Mixed precision (autocast)
+
+Wrap the forward in `torch.autocast` and run `backward()` outside it, as with plain PyTorch:
+
+```python
+with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+    y = model(x)
+loss = loss_fn(y, target)
+loss.backward()   # outside the autocast region
+```
+
+_jigsaw_'s layers are custom `torch.autograd.Function`s, which `torch.autocast` does **not**
+descend into automatically, so each opts in by hand. Behaviour:
+
+- **Matmul family** — `DistributedXWT`, attention (plain + ring), `DistributedConv*` /
+  `DistributedConv*Transpose`: the forward runs in the autocast dtype and the output carries
+  it (bias included); gradients are reconciled to the **fp32 (parameter) dtype** in backward,
+  i.e. you keep fp32 master gradients for free.
+- **`DistributedLayerNorm` / `DistributedNoParamLayerNorm` / `DistributedSoftMax`** follow
+  stock-AMP "fp32 list" semantics: computed and emitted in fp32 even when fed bf16/fp16.
+- **Attention core (SDPA / TransformerEngine)**: under autocast it uses the autocast dtype
+  (so `autocast(float16)` stays fp16); with no autocast it uses bf16 on CUDA — keeping the
+  flash kernel eligible, which rejects fp32 — and the input dtype on CPU (SDPA math backend).
+
+Only `float16` and `bfloat16` are autocast dtypes. `float64` params work for the matmul,
+conv and norm layers but not attention (it force-casts q/k/v). `float8` is not supported by
+any hand-rolled layer — it needs TransformerEngine's own `fp8_autocast` path.
+
 ### Process mesh
 Each module accepts a ```process_mesh_dict```, where the last two dimensions represent the DTP. Default kw for the dictionary are ``row`` and ``col``. There are two options
 1) Training the model in a fully domain--tensor parallel manner. This means that a process mesh of size (4, 2) will have the parameters sharded across 8 processes.

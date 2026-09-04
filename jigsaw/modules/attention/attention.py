@@ -115,7 +115,26 @@ try:
     JIGSAW_TE_AVAILABLE=True
 except ModuleNotFoundError:
     JIGSAW_TE_AVAILABLE=False
-    
+
+
+def attn_core_dtype(x: torch.Tensor) -> torch.dtype:
+    """Dtype to run the attention core (q/k/v / SDPA / TE) in.
+
+    * Under autocast: the autocast dtype, so an ``autocast(float16)`` region
+      stays fp16 instead of being silently forced to bf16.
+    * Otherwise on CUDA: bf16, so the SDPA / TE flash kernel stays eligible --
+      it rejects fp32 -- instead of dropping to the slower tf32/fp32 math path.
+    * On CPU (no flash kernel): keep the incoming dtype; the SDPA math backend
+      handles fp32 directly.
+
+    Shared by :class:`DistributedAttention` and the serial :class:`Attention` so
+    ``convert_to_jigsaw`` parity holds.
+    """
+    if torch.is_autocast_enabled(x.device.type):
+        return torch.get_autocast_dtype(x.device.type)
+    if x.is_cuda:
+        return torch.bfloat16
+    return x.dtype
 
 
 class DistributedAttention(torch.nn.Module):
@@ -434,7 +453,7 @@ class DistributedAttention(torch.nn.Module):
         """
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.qkv(x)
-        
+
         if not self._te_bshd:
             qkv = rearrange(
                 qkv, "... n s (three h d) -> three ... n h s d", three=3, h=self.heads
@@ -443,20 +462,21 @@ class DistributedAttention(torch.nn.Module):
             qkv = rearrange(
                 qkv, "... n s (three h d) -> three ... n s h d", three=3, h=self.heads
             )
-            
+
+        core_dtype = attn_core_dtype(x)
         if self.qk_norm:
             q, k, v = qkv.unbind(0)
-            q = self.q_norm(q).to(torch.bfloat16)
-            k = self.k_norm(k).to(torch.bfloat16)
-            v = v.to(torch.bfloat16)
+            q = self.q_norm(q).to(core_dtype)
+            k = self.k_norm(k).to(core_dtype)
+            v = v.to(core_dtype)
         else:
-            q, k, v = qkv.to(torch.bfloat16).unbind(0)
+            q, k, v = qkv.to(core_dtype).unbind(0)
 
         out = self.attn_core(q, k, v, x=x)
         # out has shape [batch, local_heads, local_sequence length, head_dim]
         if not self._te_bshd:
-            out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous().to(self.dtype)
-            
+            out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous().to(x.dtype)
+
         out = cast(torch.Tensor, self.head_concat(out))
         # Output: [n_batch, seq_length, output_dim]
         return out
@@ -585,7 +605,7 @@ class Attention(torch.nn.Module):
         qkv = self.qkv(x)
         qkv = qkv.reshape(qkv.shape[0], qkv.shape[1], 3, self.heads, self.head_dim)
 
-        q, k, v = qkv.permute(2, 0, 3, 1, 4).to(torch.bfloat16)
+        q, k, v = qkv.permute(2, 0, 3, 1, 4).to(attn_core_dtype(x))
         out = self.attn_core(q=q, k=k, v=v, x=x)
 
         # out has shape [B, h, N, d]

@@ -15,6 +15,8 @@ from typing import Any, Optional, Protocol, cast
 import torch
 import torch.distributed as dist
 
+from jigsaw.autocast import cast_to_autocast_dtype
+
 from .config import ConvTransposeNdConfig
 
 
@@ -43,7 +45,7 @@ class ConvTransposeNd(torch.autograd.Function):
     def forward(
         x: torch.Tensor,
         weight: torch.Tensor,
-        bias: torch.Tensor,
+        bias: Optional[torch.Tensor],
         stride: tuple[int, ...],
         padding: tuple[int, ...],
         dilation: tuple[int, ...],
@@ -57,6 +59,10 @@ class ConvTransposeNd(torch.autograd.Function):
         in the halo regime, output-position) slice and ``x_aug`` is the gathered
         full-channel input kept for the backward pass.
         """
+        # Opt into autocast: this Function hides the inner ``F.conv_transpose*``
+        # from autocast's op-level policy, and the kernels size their
+        # channel-gather / halo buffers from these tensors before the conv runs.
+        x, weight, bias = cast_to_autocast_dtype(x, weight, bias)
         y, x_aug = config.dist_conv_transpose_fn(
             x,
             weight,
@@ -138,6 +144,11 @@ class ConvTransposeNd(torch.autograd.Function):
         x_aug, weight = c.saved_tensors
         config = c.config
 
+        # Under autocast the forward cast the inputs, so ``x_aug`` comes back in
+        # the autocast dtype; run backward in ``weight.dtype`` (the master
+        # precision ``grad_output`` is already reconciled to downstream).
+        x_aug = x_aug.to(weight.dtype)
+
         g_b = config.grad_bias(grad_output)
 
         g_x, g_w = config.dist_conv_transpose_backward_fn(
@@ -171,7 +182,7 @@ class ConvTransposeNd(torch.autograd.Function):
         in_dims: tuple[Optional[int], ...],
         x: torch.Tensor,
         weight: torch.Tensor,
-        bias: torch.Tensor,
+        bias: Optional[torch.Tensor],
         stride: int,
         padding: int,
         dilation: int,

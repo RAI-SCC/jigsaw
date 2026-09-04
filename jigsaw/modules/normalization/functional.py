@@ -5,6 +5,8 @@ from typing import Any, Optional, Protocol, cast
 import torch
 import torch.distributed as dist
 
+from jigsaw.autocast import promote_to_fp32_under_autocast
+
 
 class DistributedLNFunction(torch.autograd.Function):
     """Autograd function for distributed LayerNorm."""
@@ -19,6 +21,7 @@ class DistributedLNFunction(torch.autograd.Function):
         eps: float,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Perform forward pass for distributed layer norm."""
+        x, weight, bias = promote_to_fp32_under_autocast(x, weight, bias)
         # Compute mean and variance locally
         local_mean = x.mean(dim=-1, keepdim=True)
         local_var = x.var(dim=-1, keepdim=True, unbiased=False)
@@ -81,6 +84,9 @@ class DistributedLNFunction(torch.autograd.Function):
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None]:
         """Perform backward pass for distributed layer norm."""
         x_norm, weight, std = ctx.saved_tensors  # type: ignore[attr-defined]
+        # Match the forward compute dtype: under autocast the saved tensors are
+        # fp32 while ``grad_output`` arrives in the autocast dtype.
+        grad_output = grad_output.to(x_norm.dtype)
         spatial_group = ctx.spatial_group  # type: ignore[attr-defined]
         channel_group = ctx.channel_group  # type: ignore[attr-defined]
         n = (
@@ -145,6 +151,7 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
         x: torch.Tensor, channel_group: dist.ProcessGroup, eps: float
     ) -> tuple[torch.Tensor, float]:
         """Perform forward pass for distributed layer norm with no parameters."""
+        (x,) = promote_to_fp32_under_autocast(x)
         # Compute mean and variance locally
 
         n_l = x.shape[-1]  # normalized dimension size (local)
@@ -202,6 +209,8 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
     ) -> tuple[torch.Tensor | None, ...]:
         """Define backward pass for layer norm with no parameters."""
         x_norm, std = ctx.saved_tensors  # type: ignore[attr-defined]
+        # Match the forward compute dtype (fp32 under autocast).
+        grad_output = grad_output.to(x_norm.dtype)
         channel_group = ctx.channel_group  # type: ignore[attr-defined]
 
         n = (
@@ -244,6 +253,7 @@ class _DistributedSoftmax(torch.autograd.Function):
     @staticmethod
     def forward(x: torch.Tensor, dim: int, group: dist.ProcessGroup) -> torch.Tensor:
         """Overloaded Autograd function for distributed SoftMax."""
+        (x,) = promote_to_fp32_under_autocast(x)
         # local exponentials
         local_max = x.amax(dim=-1, keepdim=True)
         dist.all_reduce(local_max, op=dist.ReduceOp.MAX, group=group)
@@ -292,6 +302,8 @@ class _DistributedSoftmax(torch.autograd.Function):
         grad_out: gradient wrt output
         """
         (out,) = ctx.saved_tensors  # type: ignore[attr-defined]
+        # Match the forward compute dtype (fp32 under autocast).
+        grad_out = grad_out.to(out.dtype)
         dim = ctx.dim
         group = ctx.group
 

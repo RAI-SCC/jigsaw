@@ -39,7 +39,18 @@ def ring_backward(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for ring attention."""
     b, h, seq_local, d = q.shape
-    dq = torch.zeros_like(q, dtype=torch.float32)
+    # Reconcile dtypes before the cores run. Under autocast the forward saves
+    # bf16/fp16 tensors (``out``, ``lse`` and the K/V chunks the provider
+    # replays) and ``q``/``dout`` may arrive downcast too; the cores matmul
+    # ``q`` against those chunks, so a mixed-dtype pair raises. Run the cores in
+    # the projection weight's (master) precision -- the same
+    # backward-in-master-precision rule ``XWT`` follows when it casts
+    # ``grad_output``/``input`` to ``weight.dtype`` -- so a genuinely bf16/fp16
+    # (or fp64) model keeps its dtype instead of being forced to fp32.
+    core_dtype = w_qkv.dtype
+    dout, q = dout.to(core_dtype), q.to(core_dtype)
+    out, lse = out.to(core_dtype), lse.to(core_dtype)
+    dq = torch.zeros_like(q, dtype=core_dtype)
     dk_buf, dv_buf = get_dkv_buffer(ring_config, q, ring_group_size)
 
     # Cases where every rank processes the *same* global chunk `step` at ring
@@ -77,7 +88,8 @@ def ring_backward(
     for step in range(ring_group_size):
         kj, vj, kv = chunk_provider.get(step)
         dq_j, dk_j, dv_j = ring_config.attn_core_backward_fn(
-            dout, q, kj, vj, out, lse, scale, seq_local, seq_local
+            dout, q, kj.to(core_dtype), vj.to(core_dtype), out, lse, scale,
+            seq_local, seq_local,
         )
         dq += dq_j
         del dq_j, kj, vj, kv
