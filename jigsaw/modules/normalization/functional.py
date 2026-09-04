@@ -6,6 +6,29 @@ import torch
 import torch.distributed as dist
 
 
+def _fp32_under_autocast(
+    *tensors: Optional[torch.Tensor],
+) -> tuple[Optional[torch.Tensor], ...]:
+    """Promote operands to (at least) fp32 while autocast is active.
+
+    ``torch.autocast`` keeps ``layer_norm`` and ``softmax`` in fp32 by op-level
+    policy -- their reductions (mean / variance, ``exp``) are too precision
+    sensitive for bf16/fp16. A :class:`torch.autograd.Function` is opaque to that
+    policy, so the LayerNorm and softmax Functions here opt in explicitly: under
+    autocast every operand is cast up to ``promote_types(dtype, float32)``
+    (fp16/bf16 -> fp32; fp32/fp64 unchanged), which also makes their output land
+    in fp32 the way stock AMP does. Outside autocast the operands pass straight
+    through.
+    """
+    ref = next((t for t in tensors if t is not None), None)
+    if ref is None or not torch.is_autocast_enabled(ref.device.type):
+        return tensors
+    return tuple(
+        None if t is None else t.to(torch.promote_types(t.dtype, torch.float32))
+        for t in tensors
+    )
+
+
 class DistributedLNFunction(torch.autograd.Function):
     """Autograd function for distributed LayerNorm."""
 
@@ -19,6 +42,7 @@ class DistributedLNFunction(torch.autograd.Function):
         eps: float,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Perform forward pass for distributed layer norm."""
+        x, weight, bias = _fp32_under_autocast(x, weight, bias)  # type: ignore[assignment]
         # Compute mean and variance locally
         local_mean = x.mean(dim=-1, keepdim=True)
         local_var = x.var(dim=-1, keepdim=True, unbiased=False)
@@ -81,6 +105,9 @@ class DistributedLNFunction(torch.autograd.Function):
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None]:
         """Perform backward pass for distributed layer norm."""
         x_norm, weight, std = ctx.saved_tensors  # type: ignore[attr-defined]
+        # Match the forward compute dtype: under autocast the saved tensors are
+        # fp32 while ``grad_output`` arrives in the autocast dtype.
+        grad_output = grad_output.to(x_norm.dtype)
         spatial_group = ctx.spatial_group  # type: ignore[attr-defined]
         channel_group = ctx.channel_group  # type: ignore[attr-defined]
         n = (
@@ -145,6 +172,7 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
         x: torch.Tensor, channel_group: dist.ProcessGroup, eps: float
     ) -> tuple[torch.Tensor, float]:
         """Perform forward pass for distributed layer norm with no parameters."""
+        (x,) = _fp32_under_autocast(x)  # type: ignore[assignment]
         # Compute mean and variance locally
 
         n_l = x.shape[-1]  # normalized dimension size (local)
@@ -202,6 +230,8 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
     ) -> tuple[torch.Tensor | None, ...]:
         """Define backward pass for layer norm with no parameters."""
         x_norm, std = ctx.saved_tensors  # type: ignore[attr-defined]
+        # Match the forward compute dtype (fp32 under autocast).
+        grad_output = grad_output.to(x_norm.dtype)
         channel_group = ctx.channel_group  # type: ignore[attr-defined]
 
         n = (
@@ -244,6 +274,7 @@ class _DistributedSoftmax(torch.autograd.Function):
     @staticmethod
     def forward(x: torch.Tensor, dim: int, group: dist.ProcessGroup) -> torch.Tensor:
         """Overloaded Autograd function for distributed SoftMax."""
+        (x,) = _fp32_under_autocast(x)  # type: ignore[assignment]
         # local exponentials
         local_max = x.amax(dim=-1, keepdim=True)
         dist.all_reduce(local_max, op=dist.ReduceOp.MAX, group=group)
@@ -292,6 +323,8 @@ class _DistributedSoftmax(torch.autograd.Function):
         grad_out: gradient wrt output
         """
         (out,) = ctx.saved_tensors  # type: ignore[attr-defined]
+        # Match the forward compute dtype (fp32 under autocast).
+        grad_out = grad_out.to(out.dtype)
         dim = ctx.dim
         group = ctx.group
 
