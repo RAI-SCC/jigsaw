@@ -43,22 +43,22 @@ class TestAutocast:
         device : Any
             Device on which tensors and communication are placed.
 
-    """
-    process_mesh_dict = process_mesh_dict_2x2
-    local_rank = process_mesh_dict["model"].rank()
-    batch, seq, in_dim, out_dim = 1, 2, 8, 8
-    model = DistributedAttention(
-        in_dim,
-        embed_dim=out_dim,
-        out_dim=out_dim,
-        heads=4,
-        dropout_p=0.0,
-        local_rank=local_rank,
-        device=device,
-        spatial_group=process_mesh_dict["row"],
-        channel_group=process_mesh_dict["col"],
-        ring=False,
-    )
+        """
+        process_mesh_dict = process_mesh_dict_2x2
+        local_rank = process_mesh_dict["model"].rank()
+        batch, seq, in_dim, out_dim = 1, 2, 8, 8
+        model = DistributedAttention(
+            in_dim,
+            embed_dim=out_dim,
+            out_dim=out_dim,
+            heads=4,
+            dropout_p=0.0,
+            local_rank=local_rank,
+            device=device,
+            spatial_group=process_mesh_dict["row"],
+            channel_group=process_mesh_dict["col"],
+            ring=False,
+        )
 
         mse_loss = torch.nn.MSELoss()
 
