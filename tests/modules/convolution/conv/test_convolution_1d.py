@@ -780,6 +780,76 @@ class TestConv1dGroups:
         )
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"),
+        [(2, 3, 1, 1), (3, 1, 2, 2)],
+        ids=["stride_gt_kernel", "dilated"],
+    )
+    def test_2x2_arbitrary_params(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        kernel: int,
+        stride: int,
+        padding: int,
+        dilation: int,
+    ) -> None:
+        """Channel-local grouped conv1d, stride>kernel and dilated halo regimes."""
+        _conv1d_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=kernel,
+            length=32,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=2,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [2, 4])
+    def test_pure_spatial_4x1_halo(
+        self, device: torch.device, process_mesh_dict_4x1: dict, groups: int
+    ) -> None:
+        """4-way spatial split, grouped conv1d, halo regime (real cross-rank exchange)."""
+        _conv1d_reference_check(
+            device,
+            process_mesh_dict_4x1,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            length=64,
+            stride=2,
+            padding=1,
+            groups=groups,
+        )
+
+    @pytest.mark.dist(8)
+    @pytest.mark.parametrize("groups", [4, 8])
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    def test_2x4(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x4_rowcol: dict,
+        groups: int,
+        channel_comm: str,
+    ) -> None:
+        """2-way spatial x 4-way channel, channel-local grouped conv1d."""
+        _skip_if_unsupported(channel_comm)
+        _conv1d_reference_check(
+            device,
+            process_mesh_dict_2x4_rowcol,
+            in_channels=8,
+            out_channels=16,
+            kernel_size=4,
+            length=32,
+            groups=groups,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(4)
     def test_incompatible_groups_rejected(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:

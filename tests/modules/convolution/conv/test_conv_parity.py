@@ -44,6 +44,12 @@ _IDS = [f"conv{n}d_k{k}_s{s}_p{p}" for (n, _, _, _, _, k, s, p) in _CASES]
 
 
 class TestConvParity:
+    # ``groups`` is 1 (full-channel-gather path) or 2 == col.size() (every
+    # channel rank owns whole conv-groups, no channel comm). The converter maps a
+    # grouped ``torch.nn.Conv*`` the same way -- weight sharded on the output
+    # axis over ``col``, replicated over ``row`` -- so the parity rules are
+    # unchanged.
+    @pytest.mark.parametrize("groups", [1, 2])
     @pytest.mark.parametrize("bias", [False, True])
     @pytest.mark.parametrize(
         "n_spatial,batch,in_ch,out_ch,spatial,kernel,stride,padding", _CASES, ids=_IDS
@@ -52,6 +58,7 @@ class TestConvParity:
         self,
         device: torch.device,
         process_mesh_dict_2x2: dict,
+        groups: int,
         bias: bool,
         n_spatial: int,
         batch: int,
@@ -90,6 +97,7 @@ class TestConvParity:
             kernel_size=kernel,
             stride=stride,
             padding=padding,
+            groups=groups,
             bias=bias,
             device=device,
         )

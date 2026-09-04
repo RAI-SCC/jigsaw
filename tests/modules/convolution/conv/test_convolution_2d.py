@@ -1167,6 +1167,40 @@ class TestConv2dGroups:
             groups=groups,
         )
 
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"),
+        [
+            ((3, 5), (2, 3), (1, 1), 1),
+            ((5, 3), (2, 2), (2, 1), 1),
+            (3, 1, 2, (1, 2)),
+        ],
+        ids=["asym_stride_lt_k", "asym_stride", "dilated"],
+    )
+    def test_2x2_asymmetric_dilated(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        kernel: Pair,
+        stride: Pair,
+        padding: Pair,
+        dilation: Pair,
+    ) -> None:
+        """Channel-local grouped conv with asymmetric / dilated hyperparams."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=kernel,
+            height=24,
+            width=24,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=2,
+        )
+
     @pytest.mark.dist(8)
     @pytest.mark.parametrize("groups", [4, 8])
     @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
