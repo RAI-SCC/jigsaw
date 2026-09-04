@@ -1,6 +1,6 @@
 # Container image
 
-jigsaw runs on top of NVIDIA's PyTorch container. The `.sif` file lives externally. This directory documents how to rebuild it and how to set up the venv with jigsaw.
+jigsaw runs on top of NVIDIA's PyTorch container. The `.sif` file lives externally. This directory documents how to rebuild it, set up the venv with jigsaw, and run code inside it.
 
 ## Base image
 
@@ -53,20 +53,58 @@ Then set `JIGSAW_VENV=$ENV` in the site preset.
 The `--no-deps` flag on the jigsaw install stops pip from pulling a second `torch` / `torchvision` on top of the image's build. 
 NOTE: `requirements.txt` is only for bare-metal installs and should not be used here.
 
+## Running code in the container
+
+For a one-off command, call `apptainer exec` directly:
+
+```bash
+SIF=/path/to/pytorch26.02.sif
+ENV=$HOME/envs/jigsaw-te
+
+apptainer exec --nv --bind /scratch "$SIF" \
+    "$ENV/bin/python" train.py --config run.yaml
+```
+
+- `--nv` exposes the GPUs
+- Add `--bind` for any filesystem outside `$HOME` and `$PWD`. 
+- Without a venv, drop the `$ENV/bin/` prefix and pass
+`--env PYTHONPATH=/path/to/jigsaw` so the checkout is importable.
+
+For anything distributed, use `scripts/run.sh` instead of a raw `apptainer exec`.
+It wraps the same call, routes `python` through `JIGSAW_VENV`, and fills in
+`MASTER_ADDR` / `MASTER_PORT` from the SLURM allocation. See
+[scripts/README.md](../scripts/README.md).
+
+### Submitting a Python script with SLURM
+
+Launch one task per GPU with `srun` inside an `sbatch` script:
+
+```bash
+#!/usr/bin/env bash
+#SBATCH --job-name=jigsaw
+#SBATCH --account=hk-project-XXXX
+#SBATCH --partition=accelerated-h100
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --time=00:30:00
+
+export JIGSAW_SITE=horeka          # scripts/sites/<name>.env
+
+srun --mpi=pmix scripts/run.sh python -m your_training_module \
+    --config configs/run.yaml
+```
+
+Submit it with `sbatch train.sbatch`. `run.sh` derives the rendezvous address
+from the allocation; jigsaw reads `SLURM_PROCID` / `SLURM_NTASKS` /
+`SLURM_LOCALID` from `srun`. A copy-ready template is at
+[scripts/train.sbatch.example](../scripts/train.sbatch.example).
+
+NOTE: keep run-specific batch scripts out of the repo, under `experiments/`
+(gitignored) or elsewhere.
+
 ## Baking a frozen image
 
-For a self-contained artifact instead (production runs, or sharing with people
-who won't run the overlay steps), write an `apptainer.def`:
-
-```
-Bootstrap: docker
-From: nvcr.io/nvidia/pytorch:26.02-py3
-
-%post
-    pip install --no-build-isolation zarr timm xarray h5netcdf
-    MPICC=/opt/hpcx/ompi/bin/mpicc pip install --no-binary=mpi4py mpi4py
-```
-
-Build it with `apptainer build jigsaw.sif apptainer.def`. Install jigsaw itself
-through the venv as above, or add `pip install -e /opt/jigsaw` to `%post` with
-the repo bind-mounted.
+The venv overlay above is the default. For a self-contained image instead
+(production runs, or sharing with people who won't run the overlay steps), see
+[baking.md](baking.md).
