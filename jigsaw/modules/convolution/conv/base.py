@@ -12,12 +12,11 @@ import math
 from collections.abc import Sequence
 from typing import Any, Callable, Optional, cast
 
-import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
-from jigsaw import hooks
+from jigsaw import hooks, init
 from jigsaw.utils_aggregate import gather_1d_results
 
 from ..common.arg_norm import _as_spatial_groups, _ntuple
@@ -162,26 +161,35 @@ class _DistributedConvNd(torch.nn.Module):
         self.dtype = dtype
         self.bayesian = bayesian
 
-        k = np.sqrt(
-            self.groups
-            / (self.in_channels * channel_group.size() * math.prod(self.kernel_size))
+        # Global (unsharded) weight/bias shape, torch.nn.Conv{1,2,3}d layout
+        # ``(C_out, C_in / groups, *kernel)``. ``reset_parameters`` keys the init
+        # distribution off these, so a freshly built layer is drawn from the
+        # same distribution as the equivalent ``torch.nn.ConvNd`` -- the
+        # channel-group shard size only decides which output-channel slice this
+        # rank samples.
+        self.global_weight_shape = (
+            out_channels,
+            self.in_channels // groups,
+            *self.kernel_size,
         )
+        self.global_bias_shape = (out_channels,) if bias else None
+
         # Grouped conv weight is ``(C_out, C_in / groups, *kernel)`` (PyTorch
         # layout); the channel-parallel group shards the output-channel axis 0.
         self.weight = torch.nn.parameter.Parameter(
             torch.zeros(
-                self.out_channels, self.in_channels // groups, *self.kernel_size
+                self.out_channels,
+                self.in_channels // groups,
+                *self.kernel_size,
+                device=device,
             )
-            .uniform_(-k, k)
-            .to(device)
         )
         self.bias = (
-            torch.nn.parameter.Parameter(
-                torch.zeros(self.out_channels).uniform_(-k, k).to(device)
-            )
+            torch.nn.parameter.Parameter(torch.zeros(self.out_channels, device=device))
             if bias
             else None
         )
+        self.reset_parameters()
 
         self.config = (
             ConvNdConfig(
@@ -216,6 +224,31 @@ class _DistributedConvNd(torch.nn.Module):
         self._conv_apply: Callable[..., tuple[torch.Tensor, torch.Tensor]] = (
             ConvNd.apply
         )
+
+    def reset_parameters(self) -> None:
+        """
+        Re-draw ``weight`` (and ``bias``) from the same distribution as ``torch.nn.Conv{1,2,3}d``.
+
+        PyTorch draws ``weight`` from ``kaiming_uniform_(a=sqrt(5))`` and
+        ``bias`` from ``U(-1/sqrt(fan_in), 1/sqrt(fan_in))``, both keyed off the
+        *global* ``fan_in = (C_in / groups) * prod(kernel)``. Each
+        channel-parallel rank fills only its own output-channel weight/bias
+        shard, so the channel-sharded parameter is distributed exactly as the
+        non-distributed one would be. (The subsequent broadcast to every
+        spatial rank only replicates that draw; it does not change its
+        distribution.)
+
+        Override this method in a subclass, or call :mod:`jigsaw.init` helpers
+        directly with ``global_shape=self.global_weight_shape``, to install a
+        different init scheme.
+        """
+        init.kaiming_uniform_(
+            self.weight, a=math.sqrt(5), global_shape=self.global_weight_shape
+        )
+        if self.bias is not None:
+            fan_in, _ = init._calculate_fan_in_and_fan_out(self.global_weight_shape)
+            bound = 1.0 / math.sqrt(fan_in) if fan_in > 0 else 0.0
+            init.uniform_(self.bias, -bound, bound)
 
     @property
     def spatial_world_size(self) -> int:

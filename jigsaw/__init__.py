@@ -1,5 +1,6 @@
 """Jigsaw management package. This package provides classes for distributed model training."""
 
+from . import init as init
 from .modules import attention as attention
 from .modules import convolution as convolution
 from .modules import linear as linear
