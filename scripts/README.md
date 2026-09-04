@@ -1,6 +1,6 @@
 # scripts/ — container launcher
 
-Running jigsaw in a container is **optional**. It buys you a matching
+Running jigsaw in a container is **optional**. It provides a matching
 CUDA/NCCL/cuDNN stack and a working
 [TransformerEngine](../jigsaw/modules/attention/attention.py), which unlocks the
 `te` attention backend (`attn_backend="te"` on `DistributedAttention`, or
@@ -8,12 +8,12 @@ CUDA/NCCL/cuDNN stack and a working
 warns and falls back to `sdpa`. `ring` attention is a separate switch and works
 with every backend.
 
-## What lives here vs. what you supply
+## What the repo ships vs. what the cluster supplies
 
-| In the repo (portable) | You supply (per cluster) |
+| In the repo (portable) | Supplied per cluster |
 | --- | --- |
 | `run.sh` — the invariant `apptainer exec --nv` wrapper and the launch env-var contract | The image itself (`apptainer pull` / `build`) and where it lives |
-| `sites/example.env` — every knob, documented | `sites/<yourcluster>.env` — the values |
+| `sites/example.env` — every knob, documented | `sites/<cluster>.env` — the values |
 | `train.sbatch.example` — batch structure | Account, partition, walltime, node counts; the real batch script |
 | `sites/horeka.env` — a working example (best-effort, not CI-guaranteed) | mpi4py built against the image's MPI; the host venv overlay |
 
@@ -40,7 +40,7 @@ cp scripts/train.sbatch.example experiments/train.sbatch  # then edit + sbatch
 
 Point at a preset with `JIGSAW_SITE=<name>` (→ `sites/<name>.env`) or an explicit
 file with `JIGSAW_SITE_FILE=/abs/path.env`. With neither, export the `JIGSAW_*`
-vars yourself. Presets use `${VAR:-default}`, so anything you export before
+vars directly. Presets use `${VAR:-default}`, so any value exported before
 calling `run.sh` overrides the preset (e.g. `JIGSAW_SIF=/other.sif JIGSAW_SITE=horeka ...`).
 
 ## The launch contract
@@ -54,9 +54,9 @@ provide:
   when unset
 
 `run.sh` also sets `NVTE_FRAMEWORK=pytorch` and
-`CUDA_DEVICE_MAX_CONNECTIONS=1` unless you already chose values.
+`CUDA_DEVICE_MAX_CONNECTIONS=1` unless they are already set.
 
-Note: NGC images bake `MASTER_PORT` (and sometimes others) into the container
+NOTE: NGC images predefine `MASTER_PORT` (and sometimes others) in the container
 environment, which overrides plain host-env passthrough. `run.sh` works around
-this by forcing the launch-contract vars with `apptainer --env`, which wins over
-the baked values.
+this by forcing the launch-contract vars with `apptainer --env`, which takes
+precedence over the image-defined values.
