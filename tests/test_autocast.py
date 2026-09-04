@@ -7,9 +7,9 @@ scaled path (``torch._scaled_mm`` / transformer_engine) and a transport that can
 carry it (Gloo cannot). Within the fp16/bf16 range, jigsaw's Functions cast by
 hand and these tests pin the contract:
 
-* the matmul family (``XWT``, attention, ring attention, ``ConvNd`` /
-  ``ConvTransposeNd``) runs forward in the autocast dtype and reconciles
-  gradients to the fp32 parameter dtype in backward;
+* the matmul family (``XWT`` / ``XW`` / ``XTW`` -- bias included -- attention,
+  ring attention, ``ConvNd`` / ``ConvTransposeNd``) runs forward in the autocast
+  dtype and reconciles gradients to the fp32 parameter dtype in backward;
 * LayerNorm and softmax follow stock-AMP fp32-list semantics -- computed and
   emitted in fp32 under autocast even when fed bf16/fp16;
 * nothing goes non-finite, and every result tracks a high-precision reference.
@@ -20,9 +20,6 @@ Known quirks this file documents rather than hides:
   autocast dtype under autocast, else bf16 on CUDA (flash rejects fp32), else
   the input dtype on CPU. ``DistributedAttention`` still can't run an fp64
   parameter set (it force-casts q/k/v), so attention tests use fp32 params.
-* bias-carrying ``XWT`` returns the parameter dtype, not the autocast dtype,
-  because ``XWT.forward`` casts x and w but not the bias -- so
-  ``DistributedAttention``'s output (a bias ``head_concat``) is fp32.
 * ring attention drives its forward under autocast (bf16/fp16 saved tensors) and
   ``ring_backward`` upcasts them to fp32 before the cores run.
 """
@@ -46,8 +43,8 @@ _BASE_DTYPES = [torch.float32, torch.float64]
 
 #: (atol, rtol) for an autocast run vs a high-precision reference, by autocast dtype.
 _TOL = {torch.bfloat16: (3e-2, 3e-2), torch.float16: (6e-3, 6e-3)}
-#: attention's output is fp32 (bias upcast) with a bf16/fp16 core inside, so both
-#: autocast dtypes get one generous tolerance against the fp32 reference.
+#: attention runs a bf16/fp16 core regardless of which autocast dtype, so both
+#: get one generous tolerance against the fp32 (no-autocast) reference.
 _ATTN_TOL = (6e-2, 6e-2)
 
 
@@ -85,14 +82,16 @@ def _forward_backward(
 
 @pytest.mark.parametrize("autocast_dtype", _AUTOCAST_DTYPES)
 @pytest.mark.parametrize("base_dtype", _BASE_DTYPES)
+@pytest.mark.parametrize("bias", [False, True], ids=["no_bias", "bias"])
 class TestAutocastLinear:
-    """XWT: forward emits the autocast dtype, backward the fp32/fp64 param dtype."""
+    """XWT: forward emits the autocast dtype (bias included), backward the param dtype."""
 
     @pytest.mark.dist(4)
     def test_autocast_linear(
         self,
         process_mesh_dict_2x2: dict,
         device: torch.device,
+        bias: bool,
         base_dtype: torch.dtype,
         autocast_dtype: torch.dtype,
     ) -> None:
@@ -101,7 +100,7 @@ class TestAutocastLinear:
         model = DistributedXWT(
             in_dim,
             out_dim,
-            bias=False,
+            bias=bias,
             local_rank=pm["model"].rank(),
             device=device,
             model_group=pm["model"],
@@ -130,9 +129,9 @@ class TestAutocastLinear:
 class TestAutocastAttention:
     """DistributedAttention, plain and ring: autocast-safe, finite, fp32-close.
 
-    The core runs in the autocast dtype (see ``attn_core_dtype``); the module
-    output still lands in the fp32 param dtype because the ``head_concat`` bias
-    is not cast down. fp64 params remain unsupported (q/k/v are force-cast).
+    The core runs in the autocast dtype (see ``attn_core_dtype``) and the module
+    output carries it -- the ``head_concat`` bias is cast down too. fp64 params
+    remain unsupported (q/k/v are force-cast).
     """
 
     def _run(
@@ -148,13 +147,13 @@ class TestAutocastAttention:
             model, x, device, autocast_dtype, autocast=False
         )
 
-        assert y.dtype == torch.float32, f"attention output is {y.dtype}"
+        assert y.dtype == autocast_dtype, f"attention output is {y.dtype}"
         assert dx.dtype == torch.float32, f"input grad is {dx.dtype}"
         assert torch.isfinite(y).all(), "non-finite output"
         assert torch.isfinite(dx).all(), "non-finite input grad"
 
         atol, rtol = _ATTN_TOL
-        assert_close("output", y, y_ref, atol, rtol, device, group)
+        assert_close("output", y.float(), y_ref.float(), atol, rtol, device, group)
         assert_close("input grad", dx, dx_ref, atol, rtol, device, group)
 
     @pytest.mark.dist(4)

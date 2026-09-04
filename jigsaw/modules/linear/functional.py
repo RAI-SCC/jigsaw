@@ -9,6 +9,22 @@ from torch.nn.parameter import Parameter
 from .config import LinearConfig
 
 
+def _autocast_bias(
+    b: Optional[torch.Tensor], device_type: str
+) -> Optional[torch.Tensor]:
+    """Cast the bias to the active autocast dtype.
+
+    The distributed matmul emits the autocast dtype, so ``out.add(b)`` with an
+    fp32 ``b`` would promote the result back to fp32 -- losing the autocast dtype
+    on the layer's output. Casting ``b`` keeps the output in the autocast dtype,
+    matching stock ``nn.Linear`` under AMP; backward still reconciles grads to
+    ``weight.dtype``.
+    """
+    if b is not None and torch.is_autocast_enabled(device_type):
+        return b.to(torch.get_autocast_dtype(device_type))
+    return b
+
+
 class LinearCtx(Protocol):
     """Protocol for types stored within ctx."""
 
@@ -76,7 +92,7 @@ class XWT(torch.autograd.Function):
     def forward(
         x: torch.Tensor,
         w: torch.Tensor,
-        b: torch.Tensor,
+        b: Optional[torch.Tensor],
         local_rank: int,
         device: torch.device,
         config: LinearConfig,
@@ -118,6 +134,7 @@ class XWT(torch.autograd.Function):
             dtype = torch.get_autocast_dtype(device.type)
             x = x.to(dtype)
             w = w.to(dtype)
+        b = _autocast_bias(b, device.type)
         xwt = config.mm_kernels[0](x, w, local_rank, device, model_group)
         xwt = config.add_bias(xwt, b)
 
@@ -261,6 +278,7 @@ class XW(torch.autograd.Function):
             Local output tensor of shape (B, x_in, out_dim) or (S, B, x_in, out_dim).
         """
         w = config.reshape_weights(w)
+        b = _autocast_bias(b, device.type)
         xw = config.mm_kernels[1](x, w, local_rank, device, model_group)
         xw = config.add_bias(xw, b)
         xw = cast(torch.Tensor, xw)
@@ -396,6 +414,7 @@ class XTW(torch.autograd.Function):
             Local output tensor of shape (B, x_in, out_dim) or (S, B, x_in, out_dim).
         """
         w = config.reshape_weights(w)
+        b = _autocast_bias(b, device.type)
         xtw = config.mm_kernels[2](x, w, local_rank, device, model_group)
         xtw = config.add_bias(xtw, b)
         xtw = cast(torch.Tensor, xtw)
