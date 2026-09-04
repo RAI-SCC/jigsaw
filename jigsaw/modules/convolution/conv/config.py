@@ -48,6 +48,7 @@ class ConvNdConfig:
         stride: tuple[int, ...],
         device: torch.device,
         channel_comm: str = "auto",
+        groups: int = 1,
     ):
         """
         Initialize selection strategy for the N-D convolution.
@@ -71,9 +72,24 @@ class ConvNdConfig:
             peak) or ``"all_to_all"`` (same ring over masked all-to-all hops,
             NCCL only). ``"auto"`` (the default) picks ``"all_to_all"`` on a
             CUDA ``device`` and ``"p2p"`` otherwise.
+        groups: int
+            Convolution groups (PyTorch semantics). When ``groups`` is a multiple
+            of the channel-parallel group size ``G`` every rank owns whole
+            conv-groups: the kernels run a plain grouped conv on this rank's
+            channel shard with ``groups_local = groups // G`` groups and no
+            channel-group communication. ``groups == 1`` keeps the
+            full-channel-gather path.
         """
         self.n_spatial = len(kernel_size)
         self.channel_comm = resolve_channel_comm(channel_comm, device)
+        self.groups = groups
+        # ``channel_local``: this rank owns whole conv-groups -> no channel-group
+        # exchange, the native conv is called with ``groups_local`` groups.
+        # (base validated the divisibility; recompute the split here so a config
+        # built directly still resolves it.)
+        group_size = channel_group.size()
+        self.channel_local = groups % group_size == 0
+        self.groups_local = groups // group_size if self.channel_local else 1
         self.conv_fn = self._conv_fn_selection(bayesian)
         self.conv_input_fn = self._conv_input_fn_selection(bayesian)
         self.conv_weight_fn = self._conv_weight_fn_selection(bayesian)
