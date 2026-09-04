@@ -12,6 +12,7 @@ from typing import Any, Optional, Protocol, cast
 import torch
 import torch.distributed as dist
 
+from ..common.autocast import cast_forward_inputs
 from .config import ConvNdConfig
 
 
@@ -41,7 +42,7 @@ class ConvNd(torch.autograd.Function):
     def forward(
         x: torch.Tensor,
         weight: torch.Tensor,
-        bias: torch.Tensor,
+        bias: Optional[torch.Tensor],
         stride: tuple[int, ...],
         padding: tuple[int, ...],
         dilation: tuple[int, ...],
@@ -58,6 +59,7 @@ class ConvNd(torch.autograd.Function):
         regime, or additionally halo-padded along every split spatial axis in
         the halo regime.
         """
+        x, weight, bias = cast_forward_inputs(x, weight, bias)
         y, x_aug = config.dist_conv_fn(
             x,
             weight,
@@ -142,6 +144,11 @@ class ConvNd(torch.autograd.Function):
         x_aug, weight = c.saved_tensors
         config = c.config
 
+        # Under autocast the forward cast the inputs, so ``x_aug`` comes back in
+        # the autocast dtype; run backward in ``weight.dtype`` (the master
+        # precision ``grad_output`` is already reconciled to downstream).
+        x_aug = x_aug.to(weight.dtype)
+
         g_b = config.grad_bias(grad_output)
 
         g_x, g_w = config.dist_conv_backward_fn(
@@ -177,7 +184,7 @@ class ConvNd(torch.autograd.Function):
         in_dims: tuple[Optional[int], ...],
         x: torch.Tensor,
         weight: torch.Tensor,
-        bias: torch.Tensor,
+        bias: Optional[torch.Tensor],
         stride: int,
         padding: int,
         dilation: int,

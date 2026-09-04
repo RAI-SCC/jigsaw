@@ -7,21 +7,22 @@ scaled path (``torch._scaled_mm`` / transformer_engine) and a transport that can
 carry it (Gloo cannot). Within the fp16/bf16 range, jigsaw's Functions cast by
 hand and these tests pin the contract:
 
-* the matmul family (``XWT``, attention, ring attention) runs forward in the
-  autocast dtype and reconciles gradients to the fp32/fp64 parameter dtype in
-  backward;
+* the matmul family (``XWT``, attention, ring attention, ``ConvNd`` /
+  ``ConvTransposeNd``) runs forward in the autocast dtype and reconciles
+  gradients to the fp32 parameter dtype in backward;
 * LayerNorm and softmax follow stock-AMP fp32-list semantics -- computed and
   emitted in fp32 under autocast even when fed bf16/fp16;
 * nothing goes non-finite, and every result tracks a high-precision reference.
 
 Known quirks this file documents rather than hides:
 
-* ``DistributedAttention.forward`` hard-codes ``.to(torch.bfloat16)`` on q/k/v
-  and ``.to(self.dtype)`` on the core output, so attention ignores the autocast
-  dtype (always bf16 core) and cannot run an fp64 parameter set. Attention tests
-  therefore use fp32 params and a bf16-sized tolerance for both autocast dtypes.
+* the attention core follows :func:`jigsaw...attention.attn_core_dtype`: the
+  autocast dtype under autocast, else bf16 on CUDA (flash rejects fp32), else
+  the input dtype on CPU. ``DistributedAttention`` still can't run an fp64
+  parameter set (it force-casts q/k/v), so attention tests use fp32 params.
 * bias-carrying ``XWT`` returns the parameter dtype, not the autocast dtype,
-  because ``XWT.forward`` casts x and w but not the bias.
+  because ``XWT.forward`` casts x and w but not the bias -- so
+  ``DistributedAttention``'s output (a bias ``head_concat``) is fp32.
 * ring attention drives its forward under autocast (bf16/fp16 saved tensors) and
   ``ring_backward`` upcasts them to fp32 before the cores run.
 """
@@ -32,6 +33,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
+import jigsaw.modules.convolution as convolution
 import jigsaw.modules.normalization.normalization as norm
 from jigsaw.modules.attention import DistributedAttention
 from jigsaw.modules.linear import DistributedXWT
@@ -44,7 +46,8 @@ _BASE_DTYPES = [torch.float32, torch.float64]
 
 #: (atol, rtol) for an autocast run vs a high-precision reference, by autocast dtype.
 _TOL = {torch.bfloat16: (3e-2, 3e-2), torch.float16: (6e-3, 6e-3)}
-#: attention always runs a bf16 core (hard-coded), so fp16 gets the bf16 tolerance.
+#: attention's output is fp32 (bias upcast) with a bf16/fp16 core inside, so both
+#: autocast dtypes get one generous tolerance against the fp32 reference.
 _ATTN_TOL = (6e-2, 6e-2)
 
 
@@ -127,9 +130,9 @@ class TestAutocastLinear:
 class TestAutocastAttention:
     """DistributedAttention, plain and ring: autocast-safe, finite, fp32-close.
 
-    fp64 params are unsupported (hard-coded bf16 casts in ``forward``); the
-    output lands in the fp32 param dtype because the ``head_concat`` bias is not
-    cast down.
+    The core runs in the autocast dtype (see ``attn_core_dtype``); the module
+    output still lands in the fp32 param dtype because the ``head_concat`` bias
+    is not cast down. fp64 params remain unsupported (q/k/v are force-cast).
     """
 
     def _run(
@@ -330,3 +333,80 @@ class TestAutocastFp32List:
         torch.manual_seed(pm["model"].rank())
         x_low = torch.randn(4, 6, local_dim, device=device, dtype=autocast_dtype)
         self._check_fp32_list(model, x_low, device, autocast_dtype, pm["model"])
+
+
+@pytest.mark.parametrize("autocast_dtype", _AUTOCAST_DTYPES)
+@pytest.mark.parametrize(
+    "kernel, stride, padding",
+    [((2, 2), (2, 2), (0, 0)), ((3, 3), (1, 1), (1, 1))],
+    ids=["no_halo", "halo"],
+)
+class TestAutocastConv:
+    """ConvNd / ConvTransposeNd: forward emits the autocast dtype, backward fp32.
+
+    Both regimes -- ``stride == kernel`` (no channel/halo comm in backward) and
+    ``stride != kernel`` (halo exchange) -- are swept, both with a real channel
+    split so the custom Function (not the ``_forward_local`` shortcut) runs.
+    """
+
+    def _check(
+        self,
+        model: torch.nn.Module,
+        x: torch.Tensor,
+        device: torch.device,
+        autocast_dtype: torch.dtype,
+        group: dist.ProcessGroup,
+    ) -> None:
+        y, dx = _forward_backward(model, x, device, autocast_dtype, autocast=True)
+        y_ref, dx_ref = _forward_backward(
+            model, x, device, autocast_dtype, autocast=False
+        )
+
+        assert y.dtype == autocast_dtype, f"conv output is {y.dtype}"
+        assert dx.dtype == torch.float32, f"input grad is {dx.dtype}, not fp32"
+        assert model.weight.grad is not None and model.weight.grad.dtype == torch.float32
+        assert torch.isfinite(y).all(), "non-finite output"
+        assert torch.isfinite(dx).all(), "non-finite input grad"
+
+        atol, rtol = _TOL[autocast_dtype]
+        assert_close("output", y.float(), y_ref, atol, rtol, device, group)
+        assert_close("input grad", dx, dx_ref, atol, rtol, device, group)
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("transpose", [False, True], ids=["conv", "transpose"])
+    def test_autocast_conv2d(
+        self,
+        process_mesh_dict_2x2: dict,
+        device: torch.device,
+        kernel: tuple[int, int],
+        stride: tuple[int, int],
+        padding: tuple[int, int],
+        transpose: bool,
+        autocast_dtype: torch.dtype,
+    ) -> None:
+        pm = process_mesh_dict_2x2
+        nc, nsp = pm["col"].size(), pm["row"].size()
+        in_ch, out_ch = 4, 4
+        cls = (
+            convolution.DistributedConv2DTranspose
+            if transpose
+            else convolution.DistributedConv2D
+        )
+        model = cls(
+            in_ch,
+            out_ch,
+            kernel,
+            device=device,
+            spatial_group=pm["row"],
+            channel_group=pm["col"],
+            stride=stride,
+            padding=padding,
+            dilation=1,
+            groups=1,
+            bias=True,
+            dtype=torch.float32,
+        ).to(device)
+
+        torch.manual_seed(pm["model"].rank())
+        x = torch.randn(2, in_ch // nc, 8, 8 // nsp, device=device)
+        self._check(model, x, device, autocast_dtype, pm["model"])
