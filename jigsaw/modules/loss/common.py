@@ -268,6 +268,58 @@ def distributed_argmax(
     return candidate
 
 
+def _mean_over_groups(
+    local_sum: torch.Tensor,
+    local_denom: torch.Tensor,
+    reduce_groups: Groups,
+) -> torch.Tensor:
+    """All-reduce ``local_sum`` and ``local_denom`` together, then divide.
+
+    Packing the numerator and the (detached) ``"mean"`` normalizer into one
+    length-2 tensor costs a single collective launch per group instead of two.
+    """
+    stacked = torch.stack((local_sum, local_denom.to(local_sum.dtype)))
+    total, norm = _RedundantAllReduce.apply(stacked, reduce_groups).unbind()
+    return total / norm  # type: ignore[no-any-return]
+
+
+def reduce_scalar_loss(
+    local_sum: torch.Tensor,
+    local_denom: torch.Tensor,
+    reduction: str,
+    reduce_groups: Groups,
+) -> torch.Tensor:
+    """Reduce an already-summed local loss over ``reduce_groups``.
+
+    For the elementwise losses ``torch`` can produce the local ``"sum"`` with a
+    fused kernel, so there is no per-element tensor to hand to
+    :func:`reduce_loss`.  ``local_sum`` is this rank's summed contribution and
+    ``local_denom`` its summed ``"mean"`` normalizer (the global element count is
+    obtained by summing the local counts across the groups).
+
+    Parameters
+    ----------
+    local_sum : torch.Tensor
+        This rank's already-summed loss.
+    local_denom : torch.Tensor
+        This rank's already-summed ``"mean"`` normalizer; ignored for ``"sum"``.
+    reduction : str
+        ``"sum"`` or ``"mean"``.
+    reduce_groups : tuple[Optional[dist.ProcessGroup], ...]
+        Groups across which batch/spatial dimensions are partitioned.
+
+    Returns
+    -------
+    torch.Tensor
+        The reduced scalar loss.
+    """
+    if reduction == "sum":
+        return _RedundantAllReduce.apply(local_sum, reduce_groups)  # type: ignore[no-any-return]
+    if reduction == "mean":
+        return _mean_over_groups(local_sum, local_denom, reduce_groups)
+    raise ValueError(f"invalid reduction: {reduction!r}")
+
+
 def reduce_loss(
     per_element: torch.Tensor,
     denominator: Optional[torch.Tensor],
@@ -301,7 +353,5 @@ def reduce_loss(
         return _RedundantAllReduce.apply(local_sum, reduce_groups)  # type: ignore[no-any-return]
     if reduction == "mean":
         assert denominator is not None
-        total = _RedundantAllReduce.apply(local_sum, reduce_groups)
-        norm = _RedundantAllReduce.apply(denominator.detach().sum(), reduce_groups)
-        return total / norm  # type: ignore[no-any-return]
+        return _mean_over_groups(local_sum, denominator.detach().sum(), reduce_groups)
     raise ValueError(f"invalid reduction: {reduction!r}")

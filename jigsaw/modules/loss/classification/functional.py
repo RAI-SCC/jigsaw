@@ -20,6 +20,7 @@ from ..common import (
     _normalize_groups,
     _RedundantAllReduce,
     reduce_loss,
+    reduce_scalar_loss,
 )
 
 
@@ -242,9 +243,11 @@ def distributed_binary_cross_entropy(
         The reduced loss.
     """
     groups = _normalize_groups(reduce_groups)
-    per_element = F.binary_cross_entropy(probs, target, weight=weight, reduction="none")
-    denom = per_element.new_full((), float(per_element.numel()))
-    return reduce_loss(per_element, denom, reduction, groups)
+    if reduction == "none":
+        return F.binary_cross_entropy(probs, target, weight=weight, reduction="none")
+    local_sum = F.binary_cross_entropy(probs, target, weight=weight, reduction="sum")
+    local_count = probs.new_full((), float(probs.numel()))
+    return reduce_scalar_loss(local_sum, local_count, reduction, groups)
 
 
 def distributed_bce_with_logits(
@@ -279,8 +282,12 @@ def distributed_bce_with_logits(
         The reduced loss.
     """
     groups = _normalize_groups(reduce_groups)
-    per_element = F.binary_cross_entropy_with_logits(
-        logits, target, weight=weight, pos_weight=pos_weight, reduction="none"
+    if reduction == "none":
+        return F.binary_cross_entropy_with_logits(
+            logits, target, weight=weight, pos_weight=pos_weight, reduction="none"
+        )
+    local_sum = F.binary_cross_entropy_with_logits(
+        logits, target, weight=weight, pos_weight=pos_weight, reduction="sum"
     )
-    denom = per_element.new_full((), float(per_element.numel()))
-    return reduce_loss(per_element, denom, reduction, groups)
+    local_count = logits.new_full((), float(logits.numel()))
+    return reduce_scalar_loss(local_sum, local_count, reduction, groups)

@@ -8,39 +8,53 @@ matches the non-distributed loss on the gathered tensor.  The per-element term
 and the backward pass are entirely local.
 """
 
+import functools
+from typing import Callable
+
 import torch
 import torch.nn.functional as F
 
-from ..common import Groups, GroupsArg, _normalize_groups, reduce_loss
+from ..common import GroupsArg, _normalize_groups, reduce_scalar_loss
+
+_ElementwiseLoss = Callable[..., torch.Tensor]
 
 
-def _reduce_elementwise(
-    per_element: torch.Tensor,
+def _distributed_elementwise_loss(
+    fn: _ElementwiseLoss,
+    input: torch.Tensor,
+    target: torch.Tensor,
     reduction: str,
-    reduce_groups: Groups,
+    reduce_groups: GroupsArg,
 ) -> torch.Tensor:
-    """Reduce a per-element regression loss over the sharded element dimensions.
+    """Evaluate an elementwise regression loss and reduce it over the mesh.
 
-    ``"mean"`` divides by the *global* element count (the local counts are summed
-    across ``reduce_groups``), matching how :mod:`torch.nn.functional` averages
-    over every element of the tensor.
+    For ``"sum"`` / ``"mean"`` the local contribution is obtained straight from
+    ``fn(..., reduction="sum")`` -- a single fused kernel with no per-element
+    tensor to materialize -- and only the global element count is needed for the
+    ``"mean"`` denominator.  ``"none"`` still returns the full local shard.
 
     Parameters
     ----------
-    per_element : torch.Tensor
-        Local unreduced loss shard.
+    fn : Callable
+        A ``torch.nn.functional`` loss taking ``reduction=`` (e.g. ``F.mse_loss``).
+    input, target : torch.Tensor
+        This rank's matching shards.
     reduction : str
         ``"none"``, ``"sum"`` or ``"mean"``.
-    reduce_groups : tuple[Optional[dist.ProcessGroup], ...]
-        Every group across which the loss tensor is partitioned.
+    reduce_groups : GroupsArg
+        Every group across which ``input`` is partitioned.
 
     Returns
     -------
     torch.Tensor
         The reduced loss.
     """
-    denom = per_element.new_full((), float(per_element.numel()))
-    return reduce_loss(per_element, denom, reduction, reduce_groups)
+    groups = _normalize_groups(reduce_groups)
+    if reduction == "none":
+        return fn(input, target, reduction="none")
+    local_sum = fn(input, target, reduction="sum")
+    local_count = input.new_full((), float(input.numel()))
+    return reduce_scalar_loss(local_sum, local_count, reduction, groups)
 
 
 def distributed_mse_loss(
@@ -68,9 +82,9 @@ def distributed_mse_loss(
     torch.Tensor
         The reduced loss.
     """
-    groups = _normalize_groups(reduce_groups)
-    per_element = F.mse_loss(input, target, reduction="none")
-    return _reduce_elementwise(per_element, reduction, groups)
+    return _distributed_elementwise_loss(
+        F.mse_loss, input, target, reduction, reduce_groups
+    )
 
 
 def distributed_l1_loss(
@@ -98,9 +112,9 @@ def distributed_l1_loss(
     torch.Tensor
         The reduced loss.
     """
-    groups = _normalize_groups(reduce_groups)
-    per_element = F.l1_loss(input, target, reduction="none")
-    return _reduce_elementwise(per_element, reduction, groups)
+    return _distributed_elementwise_loss(
+        F.l1_loss, input, target, reduction, reduce_groups
+    )
 
 
 def distributed_smooth_l1_loss(
@@ -131,6 +145,10 @@ def distributed_smooth_l1_loss(
     torch.Tensor
         The reduced loss.
     """
-    groups = _normalize_groups(reduce_groups)
-    per_element = F.smooth_l1_loss(input, target, reduction="none", beta=beta)
-    return _reduce_elementwise(per_element, reduction, groups)
+    return _distributed_elementwise_loss(
+        functools.partial(F.smooth_l1_loss, beta=beta),
+        input,
+        target,
+        reduction,
+        reduce_groups,
+    )
