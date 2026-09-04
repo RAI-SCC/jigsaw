@@ -41,11 +41,13 @@ def ring_backward(
     b, h, seq_local, d = q.shape
     # Reconcile dtypes before the cores run. Under autocast the forward saves
     # bf16/fp16 tensors (``out``, ``lse`` and the K/V chunks the provider
-    # replays), while ``q`` stays in the master dtype; the cores matmul ``q``
-    # against those chunks, so a mixed-dtype pair raises. Upcast everything to
-    # fp32 -- the dtype ``dq`` already accumulates in, and the same
-    # backward-in-master-precision rule ``XWT`` follows.
-    core_dtype = torch.float32
+    # replays) and ``q``/``dout`` may arrive downcast too; the cores matmul
+    # ``q`` against those chunks, so a mixed-dtype pair raises. Run the cores in
+    # the projection weight's (master) precision -- the same
+    # backward-in-master-precision rule ``XWT`` follows when it casts
+    # ``grad_output``/``input`` to ``weight.dtype`` -- so a genuinely bf16/fp16
+    # (or fp64) model keeps its dtype instead of being forced to fp32.
+    core_dtype = w_qkv.dtype
     dout, q = dout.to(core_dtype), q.to(core_dtype)
     out, lse = out.to(core_dtype), lse.to(core_dtype)
     dq = torch.zeros_like(q, dtype=core_dtype)

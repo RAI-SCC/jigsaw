@@ -21,7 +21,8 @@ Known quirks this file documents rather than hides:
   the input dtype on CPU. ``DistributedAttention`` still can't run an fp64
   parameter set (it force-casts q/k/v), so attention tests use fp32 params.
 * ring attention drives its forward under autocast (bf16/fp16 saved tensors) and
-  ``ring_backward`` upcasts them to fp32 before the cores run.
+  ``ring_backward`` reconciles them to the ``w_qkv`` (master) dtype before the
+  cores run -- the same backward-in-master-precision rule ``XWT`` follows.
 """
 
 import contextlib
