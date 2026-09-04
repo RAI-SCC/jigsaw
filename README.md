@@ -95,9 +95,8 @@ descend into automatically, so each opts in by hand. Behaviour:
 
 - **Matmul family** — `DistributedXWT`, attention (plain + ring), `DistributedConv*` /
   `DistributedConv*Transpose`: the forward runs in the autocast dtype and the output carries
-  it; gradients are reconciled to the **fp32 (parameter) dtype** in backward, i.e. you keep
-  fp32 master gradients for free. A bias-carrying `DistributedXWT` returns the parameter
-  dtype rather than the autocast dtype (the bias is not cast down).
+  it (bias included); gradients are reconciled to the **fp32 (parameter) dtype** in backward,
+  i.e. you keep fp32 master gradients for free.
 - **`DistributedLayerNorm` / `DistributedNoParamLayerNorm` / `DistributedSoftMax`** follow
   stock-AMP "fp32 list" semantics: computed and emitted in fp32 even when fed bf16/fp16.
 - **Attention core (SDPA / TransformerEngine)**: under autocast it uses the autocast dtype
