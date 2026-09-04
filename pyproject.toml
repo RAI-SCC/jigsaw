@@ -20,6 +20,11 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Development Status :: 3 - Alpha",
 ]
+# Bare-metal install: `pip install -e .` pulls everything below.
+# Container install: the NGC image already ships torch (+ transformer-engine,
+# not listed here - it is environment-provided, never a pip dep). Install with
+# `pip install --no-deps -e .` plus the pure-Python extras, see
+# containers/README.md.
 dependencies = [
     "torch",
     "zarr",

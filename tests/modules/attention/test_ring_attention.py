@@ -345,49 +345,167 @@ class TestRingAttention:
             ring_group,
         )
 
-    @pytest.mark.dist(8)
-    @pytest.mark.parametrize(
-        "send_in_forward", [config.SendForward.X, config.SendForward.KV]
+
+@pytest.mark.te_required
+@pytest.mark.gpu_required
+@pytest.mark.dist(4)
+@pytest.mark.parametrize("save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL])
+@pytest.mark.parametrize(
+    "send_backward",
+    [config.SendBackward.GATHER_DKV, config.SendBackward.SEND_DKV],
+)
+def test_ring_forward_backward_te(
+    device: torch.device,
+    process_mesh_dict_4x1: dict,
+    save_scope: config.SaveScope,
+    send_backward: config.SendBackward,
+) -> None:
+    """Ring forward/backward with the TransformerEngine inner core vs full SDPA.
+
+    Exercises :mod:`jigsaw.modules.attention.functional.cores.te` inside the ring:
+    ``fused_attn_fwd`` supplies the per-chunk ``(out, lse)`` for the online-softmax
+    merge and ``fused_attn_bwd`` recomputes ``dQ/dK/dV`` from the saved *global*
+    ``out`` / ``lse``.
+    """
+    process_mesh_dict = process_mesh_dict_4x1
+    ring_config = config.RingAttentionConfig(
+        device=device,
+        send_in_forward=config.SendForward.X,
+        send_op=config.SendOp.P2P,
+        save_for_backward=config.SaveBackward.KV,
+        save_scope=save_scope,
+        send_backward=send_backward,
+        offload=config.Offload.DISABLED,
+        attn_backend=config.AttnBackend.TE,
     )
-    @pytest.mark.parametrize(
-        "save_for_backward", [config.SaveBackward.X, config.SaveBackward.KV]
+    assert ring_config.attn_core_forward_fn.__name__ == "forward"
+    assert ring_config.attn_core_forward_fn.__module__.endswith("functional.cores.te")
+
+    local_rank = dist.get_rank(group=process_mesh_dict["row"])
+    world_size = dist.get_world_size(group=process_mesh_dict["row"])
+    dtype = torch.bfloat16
+    torch.manual_seed(2)
+    b, h, n_global, d = 3, 6, world_size * 16, 16
+    n_local = n_global // world_size
+
+    w_qkv = torch.randn(3 * d * h, d, device=device, requires_grad=True, dtype=dtype) / (
+        d**0.5
     )
-    @pytest.mark.parametrize(
-        "send_op",
+    torch.manual_seed(local_rank)
+    x = torch.randn(b, n_local, d, device=device, requires_grad=True, dtype=dtype) / (
+        d**0.5
+    )
+    x.fill_(local_rank * 0.1)
+    x = x.contiguous()
+
+    qkv = x @ w_qkv.mT
+    q_local, k_local, v_local = (
+        t.contiguous()
+        for t in qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
+    )
+    scale = d**-0.5
+
+    ring_forward = forward.build_ring_forward(ring_config)
+    out, lse, chunks_to_save = ring_forward(
+        q_local,
+        k_local,
+        v_local,
+        x,
+        w_qkv,
+        scale,
+        0.0,
+        process_mesh_dict["row"],
+        local_rank,
+        world_size,
+        ring_config,
+    )
+    out_full = gather_1d_results(out, process_mesh_dict, dim=2)
+
+    q_ref = gather_1d_results(q_local, process_mesh_dict, dim=2).requires_grad_(True)
+    k_ref = gather_1d_results(k_local, process_mesh_dict, dim=2).requires_grad_(True)
+    v_ref = gather_1d_results(v_local, process_mesh_dict, dim=2).requires_grad_(True)
+    with torch.nn.attention.sdpa_kernel(
         [
-            config.SendOp.HYBRID_P2P,
-            config.SendOp.HYBRID_ALLTOALL,
-            config.SendOp.HYBRID_BROADCAST,
-            config.SendOp.P2P,
-            config.SendOp.ALLTOALL,
-            config.SendOp.BROADCAST,
-        ],
+            torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+            torch.nn.attention.SDPBackend.MATH,
+        ]
+    ):
+        out_ref = torch.nn.functional.scaled_dot_product_attention(
+            q_ref, k_ref, v_ref, is_causal=False, dropout_p=0.0
+        )
+
+    dq_local, dk_local, dv_local = backward.ring_backward(
+        torch.ones_like(out, device=device, dtype=out_ref.dtype),
+        q_local,
+        out,
+        x,
+        lse,
+        w_qkv,
+        scale,
+        process_mesh_dict["row"],
+        local_rank,
+        world_size,
+        chunks_to_save,
+        ring_config=ring_config,
     )
-    @pytest.mark.parametrize(
-        "save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL]
-    )
-    @pytest.mark.parametrize(
-        "send_backward",
-        [config.SendBackward.SEND_DKV, config.SendBackward.GATHER_DKV],
-    )
-    @pytest.mark.parametrize("offloader", [config.Offload.DISABLED, config.Offload.CPU])
-    def test_ring_hybrid(
-        self,
-        device: torch.device,
-        process_mesh_dict_2x4: dict,
-        send_in_forward: config.SendForward,
-        save_for_backward: config.SaveBackward,
-        send_op: config.SendOp,
-        save_scope: config.SaveScope,
-        send_backward: config.SendBackward,
-        offloader: config.Offload,
-    ) -> None:
-        """Verify if forward-backward pass works for ring attention."""
-        if (
-            send_in_forward == config.SendForward.KV
-            and save_for_backward == config.SaveBackward.X
-        ):
-            pytest.xfail("not yet supported")
+    out_ref.backward(torch.ones_like(out_ref))
+    dq_ref, dk_ref, dv_ref = q_ref.grad, k_ref.grad, v_ref.grad
+
+    atol = 2e-2
+    assert torch.allclose(out_full, out_ref, atol=atol)
+    for local_grad, ref_grad in (
+        (dq_local, dq_ref),
+        (dk_local, dk_ref),
+        (dv_local, dv_ref),
+    ):
+        ref_slice = ref_grad[
+            :, :, local_rank * n_local : (local_rank + 1) * n_local
+        ].to(local_grad.dtype)
+        assert torch.allclose(local_grad, ref_slice, atol=atol)
+
+
+@pytest.mark.dist(8)
+@pytest.mark.parametrize(
+    "send_in_forward", [config.SendForward.X, config.SendForward.KV]
+)
+@pytest.mark.parametrize(
+    "save_for_backward", [config.SaveBackward.X, config.SaveBackward.KV]
+)
+@pytest.mark.parametrize(
+    "send_op",
+    [
+        config.SendOp.HYBRID_P2P,
+        config.SendOp.HYBRID_ALLTOALL,
+        config.SendOp.HYBRID_BROADCAST,
+        config.SendOp.P2P,
+        config.SendOp.ALLTOALL,
+        config.SendOp.BROADCAST,
+    ],
+)
+@pytest.mark.parametrize(
+    "save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL]
+)
+@pytest.mark.parametrize(
+    "send_backward",
+    [config.SendBackward.SEND_DKV, config.SendBackward.GATHER_DKV],
+)
+@pytest.mark.parametrize("offloader", [config.Offload.DISABLED, config.Offload.CPU])
+def test_ring_hybrid(
+    device: torch.device,
+    process_mesh_dict_2x4: dict,
+    send_in_forward: config.SendForward,
+    save_for_backward: config.SaveBackward,
+    send_op: config.SendOp,
+    save_scope: config.SaveScope,
+    send_backward: config.SendBackward,
+    offloader: config.Offload,
+) -> None:
+    """Verify if forward-backward pass works for ring attention."""
+    if (
+        send_in_forward == config.SendForward.KV
+        and save_for_backward == config.SaveBackward.X
+    ):
+        pytest.xfail("not yet supported")
 
         process_mesh_dict = process_mesh_dict_2x4
 
