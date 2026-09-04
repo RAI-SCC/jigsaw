@@ -178,8 +178,10 @@ class XWT(torch.autograd.Function):
         model_group = ctx.model_group
 
         weight = config.reshape_weights(weight)
-        # handle conversion if necessary here
-        grad_output = grad_output.to(weight.dtype)
+        # handle conversion if necessary here. ``.contiguous()`` because the
+        # incoming grad may be a non-contiguous view (e.g. the broadcast grad
+        # from ``.sum().backward()``) and the p2p kernels ``dist.isend`` it.
+        grad_output = grad_output.to(weight.dtype).contiguous()
         input = input.to(weight.dtype)
         grad_input, grad_weight = config.mm_kernels[3](
             grad_output,
@@ -311,6 +313,9 @@ class XW(torch.autograd.Function):
         model_group = ctx.model_group
 
         weight = config.reshape_weights(weight)
+        # non-contiguous grads (e.g. the broadcast grad from ``.sum().backward()``)
+        # are ``dist.isend``-ed by the p2p kernels, which require contiguity.
+        grad_output = grad_output.contiguous()
 
         grad_input = config.mm_kernels[0](
             grad_output,
@@ -446,6 +451,9 @@ class XTW(torch.autograd.Function):
         model_group = ctx.model_group
 
         weight = config.reshape_weights(weight)
+        # non-contiguous grads (e.g. the broadcast grad from ``.sum().backward()``)
+        # are ``dist.isend``-ed by the p2p kernels, which require contiguity.
+        grad_output = grad_output.contiguous()
 
         grad_input = config.mm_kernels[0](
             weight,
