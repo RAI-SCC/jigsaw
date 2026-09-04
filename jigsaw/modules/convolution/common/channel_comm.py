@@ -51,9 +51,48 @@ def resolve_channel_comm(channel_comm: str, device: torch.device) -> str:
     return channel_comm
 
 
-def _resolve_channel_hop(
-    channel_comm: str, channel_group: dist.ProcessGroup
-) -> _HopFn:
+def resolve_conv_groups(
+    groups: int, in_channels: int, out_channels: int, channel_group_size: int
+) -> tuple[bool, int]:
+    """Validate ``groups`` against the channel-parallel split and resolve the regime.
+
+    A grouped convolution only mixes channels *within* a group, so once the
+    channel-parallel group owns whole conv-groups the convolution needs no
+    cross-rank channel exchange at all -- every rank runs a plain (grouped) native
+    conv on its own channel shard. That holds exactly when ``groups`` is a
+    multiple of the channel-parallel group size ``G`` (``G == 1`` included).
+
+    Returns ``(channel_local, groups_local)``:
+
+    * ``channel_local`` -- ``True`` when ``groups % G == 0``: the forward/backward
+      run entirely on this rank's channel shard, with ``groups_local`` groups and
+      no channel-group communication. ``False`` only for ``groups == 1`` with
+      ``G > 1`` -- the historical full-channel-gather path.
+    * ``groups_local`` -- the ``groups=`` value the local (sharded) native conv is
+      called with: ``groups // G`` in the local regime, ``1`` in the gather one.
+
+    ``groups > 1`` that is not a multiple of ``G`` (so several channel ranks would
+    share one conv-group) is not implemented.
+    """
+    if groups < 1:
+        raise ValueError(f"groups must be >= 1, got {groups}")
+    if in_channels % groups or out_channels % groups:
+        raise ValueError(
+            f"in_channels ({in_channels}) and out_channels ({out_channels}) must "
+            f"both be divisible by groups ({groups})"
+        )
+    if groups != 1 and groups % channel_group_size != 0:
+        raise NotImplementedError(
+            "Distributed grouped convolution needs groups == 1 or groups to be a "
+            f"multiple of the channel-parallel group size ({channel_group_size}); "
+            f"got groups={groups}."
+        )
+    channel_local = groups % channel_group_size == 0
+    groups_local = groups // channel_group_size if channel_local else 1
+    return channel_local, groups_local
+
+
+def _resolve_channel_hop(channel_comm: str, channel_group: dist.ProcessGroup) -> _HopFn:
     """Per-hop transport for a streaming ``channel_comm`` (``"p2p"`` / ``"all_to_all"``).
 
     ``"all_to_all"`` needs a backend with all-to-all support; gloo has none, so it

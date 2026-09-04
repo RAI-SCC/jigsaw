@@ -14,6 +14,55 @@ The dev environment (necessary for running tests) can be installed with
 pip install -e .[dev]
 ```
 
+### Option B: containerized (enables TransformerEngine)
+Running inside an NGC PyTorch container is optional. It gives a matched
+CUDA/NCCL stack and a working `transformer_engine`, which unlocks the `te`
+attention backend (`DistributedAttention(attn_backend="te")`); outside a
+container that choice warns and falls back to `sdpa`.
+
+`attn_backend` selects the attention core — `te`, `sdpa` (default, PyTorch
+flash/​math SDPA) or `math` (unfused reference). `ring` (sequence-parallel
+attention) is a **separate** switch that composes with any backend: `ring=True`
+still runs its inner per-chunk attention through the chosen core.
+
+The container is also useful without TE — a pinned CUDA/NCCL stack for
+reproducible scaling and parameter studies — in which case the defaults
+(`attn_backend="sdpa"`, `ring=False`) need no flags.
+
+The repo ships the portable parts — the image recipe
+([`containers/README.md`](containers/README.md)) and a cluster-agnostic launcher
+([`scripts/README.md`](scripts/README.md)). You supply the per-cluster pieces:
+the image, a `scripts/sites/<cluster>.env` preset, and your batch script.
+
+#### Launching
+
+`scripts/run.sh <command>` wraps the command in `apptainer exec --nv`, sourcing
+`scripts/sites/$JIGSAW_SITE.env` for the cluster-specific paths. The same
+invocation works from a login shell, from inside an `salloc` allocation, and
+from an `sbatch` script — `run.sh` derives `MASTER_ADDR` / `MASTER_PORT` from the
+SLURM allocation, and jigsaw reads `SLURM_PROCID` / `SLURM_NTASKS` /
+`SLURM_LOCALID` (which `srun` sets) via `resolve_launch_env()` in
+[`jigsaw/utils.py`](jigsaw/utils.py). `torchrun`'s `RANK` / `WORLD_SIZE` /
+`LOCAL_RANK` are accepted too.
+
+```bash
+# single process — login node or interactive allocation
+JIGSAW_SITE=horeka scripts/run.sh python -c "import transformer_engine; print('ok')"
+
+# distributed — one task per GPU. Identical whether run directly from a login
+# shell or as a step inside `salloc` / `sbatch`.
+JIGSAW_SITE=horeka srun --account=hk-project-XXXX --partition=accelerated-h100 \
+    --nodes=2 --ntasks-per-node=4 --gres=gpu:4 --mpi=pmix \
+    scripts/run.sh python -m your_script --attn-backend te
+
+# batch — copy the template, fill in the #SBATCH directives, submit
+cp scripts/train.sbatch.example experiments/train.sbatch   # gitignored
+sbatch experiments/train.sbatch
+```
+
+See [`scripts/README.md`](scripts/README.md) for the full launch contract and
+every `JIGSAW_*` knob.
+
 ## Usage
 _jigsaw_ is designed to follow the interface of PyTorch. The model must be defined exclusively via _jigsaw_ layers. i.e.
 ```
@@ -29,6 +78,34 @@ local_rank = model_group.rank()
 set_all_seeds(local_rank)
 model = Linear(global_in_dim, global_out_dim, process_mesh_dict)
 ```
+
+### Mixed precision (autocast)
+
+Wrap the forward in `torch.autocast` and run `backward()` outside it, as with plain PyTorch:
+
+```python
+with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+    y = model(x)
+loss = loss_fn(y, target)
+loss.backward()   # outside the autocast region
+```
+
+_jigsaw_'s layers are custom `torch.autograd.Function`s, which `torch.autocast` does **not**
+descend into automatically, so each opts in by hand. Behaviour:
+
+- **Matmul family** — `DistributedXWT`, attention (plain + ring), `DistributedConv*` /
+  `DistributedConv*Transpose`: the forward runs in the autocast dtype and the output carries
+  it (bias included); gradients are reconciled to the **fp32 (parameter) dtype** in backward,
+  i.e. you keep fp32 master gradients for free.
+- **`DistributedLayerNorm` / `DistributedNoParamLayerNorm` / `DistributedSoftMax`** follow
+  stock-AMP "fp32 list" semantics: computed and emitted in fp32 even when fed bf16/fp16.
+- **Attention core (SDPA / TransformerEngine)**: under autocast it uses the autocast dtype
+  (so `autocast(float16)` stays fp16); with no autocast it uses bf16 on CUDA — keeping the
+  flash kernel eligible, which rejects fp32 — and the input dtype on CPU (SDPA math backend).
+
+Only `float16` and `bfloat16` are autocast dtypes. `float64` params work for the matmul,
+conv and norm layers but not attention (it force-casts q/k/v). `float8` is not supported by
+any hand-rolled layer — it needs TransformerEngine's own `fp8_autocast` path.
 
 ### Process mesh
 Each module accepts a ```process_mesh_dict```, where the last two dimensions represent the DTP. Default kw for the dictionary are ``row`` and ``col``. There are two options

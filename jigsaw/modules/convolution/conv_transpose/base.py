@@ -27,6 +27,7 @@ from jigsaw import hooks
 from jigsaw.utils_aggregate import gather_1d_results
 
 from ..common.arg_norm import _as_spatial_groups, _ntuple
+from ..common.channel_comm import resolve_conv_groups
 from .config import ConvTransposeNdConfig
 from .functional import ConvTransposeNd
 
@@ -111,7 +112,11 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         dilation: int | tuple[int, ...]
             Dilation.
         groups: int
-            Number of groups. Not yet implemented.
+            Number of blocked connections from input to output channels
+            (PyTorch grouped transpose-convolution semantics). Must be ``1`` or a
+            multiple of ``channel_group.size()``; in the latter case each
+            channel-parallel rank owns whole conv-groups and the forward/backward
+            run with no channel-group communication.
         bias: bool
             Flag for whether bias is present.
         bayesian: bool
@@ -145,6 +150,13 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             self.padding = to_ntuple(padding)
 
         self.groups = groups
+        # ``channel_local``: every channel-parallel rank owns whole conv-groups,
+        # so the transpose conv runs on this rank's channel shard with
+        # ``groups_local`` groups and no channel-group communication. ``groups ==
+        # 1`` with a real channel group keeps the full-channel-gather path.
+        self._channel_local, self._groups_local = resolve_conv_groups(
+            groups, in_channels, out_channels, channel_group.size()
+        )
         self.channel_comm = channel_comm
         self.spatial_groups = _as_spatial_groups(spatial_group, self._n_spatial)
         # groups that carry a real (>1) split; the parameters are replicated
@@ -164,12 +176,20 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             self.groups
             / (self.out_channels * channel_group.size() * math.prod(self.kernel_size))
         )
+        # Transpose weight is ``(C_in, C_out / groups, *kernel)`` (PyTorch
+        # layout). In the gather regime (``groups == 1``, real channel group) the
+        # channel group shards the output-channel axis 1. In the channel-local
+        # regime each rank instead owns whole conv-groups, so it holds only its
+        # own input-channel shard (axis 0 -> ``C_in / G``) and the matching
+        # ``C_out / groups`` output-per-group slots.
+        w_in = (
+            self.in_channels // channel_group.size()
+            if self._channel_local
+            else self.in_channels
+        )
+        w_out = self.out_channels // self._groups_local
         self.weight = torch.nn.parameter.Parameter(
-            torch.zeros(
-                self.in_channels, self.out_channels // self.groups, *self.kernel_size
-            )
-            .uniform_(-k, k)
-            .to(device)
+            torch.zeros(w_in, w_out, *self.kernel_size).uniform_(-k, k).to(device)
         )
         self.bias = (
             torch.nn.parameter.Parameter(
@@ -188,6 +208,7 @@ class _DistributedConvTransposeNd(torch.nn.Module):
                 self.stride,
                 self.device,
                 self.channel_comm,
+                self.groups,
             )
             if config is None
             else config
@@ -276,13 +297,15 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             bayesian=False,  # TODO
             dtype=model.weight.dtype,
         )
-        # Map weights — clone so the original graph is detached. The channel
-        # group shards the weight's *output* channel axis (dim 1).
+        # Map weights — clone so the original graph is detached. The gather
+        # regime (``groups == 1``) shards the weight's output-channel axis
+        # (dim 1); the channel-local regime (channel group owns whole
+        # conv-groups) shards the input-channel axis (dim 0) instead.
+        shard_dim = 0 if instance._channel_local else 1
         out_rank = process_mesh_dict[col_kw].rank()
-        out_shard = model.weight.shape[1] // process_mesh_dict[col_kw].size()
-
+        out_shard = model.weight.shape[shard_dim] // process_mesh_dict[col_kw].size()
         instance.weight.data = (
-            model.weight.data[:, out_rank * out_shard : (out_rank + 1) * out_shard]
+            model.weight.data.narrow(shard_dim, out_rank * out_shard, out_shard)
             .clone()
             .to(device)
         )
@@ -362,8 +385,13 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         global_bias: Optional[torch.Tensor]
             Merged bias, if it exists.
         """
+        # Gather regime shards the weight output-channel axis (dim 1);
+        # channel-local regime shards the input-channel axis (dim 0).
         global_weights = gather_1d_results(
-            self.weight, process_mesh_dict, dim=1, pm_key=col_kw
+            self.weight,
+            process_mesh_dict,
+            dim=0 if self._channel_local else 1,
+            pm_key=col_kw,
         )
         global_bias = (
             gather_1d_results(self.bias, process_mesh_dict, dim=0, pm_key=col_kw)
@@ -381,6 +409,11 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         pm_model_key: str = "model",
     ) -> None:
         """Reshard the (channel-sharded) weight and bias onto a new process mesh."""
+        if self._channel_local and self.channel_group.size() > 1:
+            raise NotImplementedError(
+                "reshard_parameters does not yet support a grouped transpose "
+                "convolution whose channel group owns whole conv-groups."
+            )
         self.config = ConvTransposeNdConfig(
             self.bayesian,
             self.channel_group,
@@ -389,6 +422,7 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             self.stride,
             self.device,
             self.channel_comm,
+            self.groups,
         )
 
         from_weight_shape_local = self.weight.shape
@@ -465,12 +499,14 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         )
 
     def _forward_local(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass when ``channel_group.size() == 1`` (no channel comm).
+        """Forward pass when this rank owns whole conv-groups (no channel comm).
 
-        Nothing has to be gathered over the channel dimension, so the custom
-        autograd Function buys nothing: native ``conv_transpose{1,2,3}d`` plus
-        the spatial-group gradient hooks on ``weight`` / ``bias`` produce the
-        same result. This fast path only covers the exact-tiling case: no split
+        Covers ``channel_group.size() == 1`` and, for a grouped transpose conv,
+        any channel group whose size divides ``groups`` -- either way nothing has
+        to be gathered over the channel dimension and the custom autograd
+        Function buys nothing: native ``conv_transpose{1,2,3}d`` (with
+        ``groups_local`` groups) plus the spatial-group gradient hooks on
+        ``weight`` / ``bias`` produce the same result. This fast path only covers the exact-tiling case: no split
         spatial axis (any ``stride`` / ``padding`` / ``dilation``), or a split
         whose raw outputs tile with no overlap (``stride == kernel_size``, no
         padding / dilation). Halo-needing splits are handled too, but via
@@ -496,6 +532,7 @@ class _DistributedConvTransposeNd(torch.nn.Module):
                 stride=self.stride,
                 padding=self.padding,
                 dilation=self.dilation,
+                groups=self._groups_local,
             )
         else:
             y = conv_transpose(
@@ -504,6 +541,7 @@ class _DistributedConvTransposeNd(torch.nn.Module):
                 stride=self.stride,
                 padding=self.padding,
                 dilation=self.dilation,
+                groups=self._groups_local,
             )
         return cast(torch.Tensor, y)
 
@@ -522,14 +560,17 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             Local output tensor of shape
             ``(N, Cout / n_channel, *spatial' / n_spatial)``.
         """
-        # With no channel split the custom autograd Function buys nothing *unless*
-        # a spatially-split transpose conv needs a halo exchange; that case still
-        # has to go through ``_conv_apply`` (the halo kernel handles a channel
-        # group of one as the identity gather). ``_spatial_sync_groups`` is
-        # non-empty iff some spatial axis is really split -- checking
-        # ``spatial_group`` alone would miss a non-innermost-only split (its
-        # width group has size 1).
-        if self.channel_group.size() == 1 and not (
+        # When every channel-parallel rank owns whole conv-groups
+        # (``_channel_local`` -- always true with no channel split) the custom
+        # autograd Function buys nothing: the transpose conv runs on this rank's
+        # channel shard with no channel-group communication. The exception is a
+        # spatially-split transpose conv that needs a halo exchange; that still
+        # goes through ``_conv_apply`` (its kernel treats a group of one, or a
+        # group that owns whole conv-groups, as the identity gather).
+        # ``_spatial_sync_groups`` is non-empty iff some spatial axis is really
+        # split -- checking ``spatial_group`` alone would miss a
+        # non-innermost-only split (its width group has size 1).
+        if self._channel_local and not (
             self._spatial_sync_groups and self._needs_halo()
         ):
             return self._forward_local(x)

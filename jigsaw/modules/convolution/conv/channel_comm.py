@@ -152,6 +152,32 @@ def _over_channels_streaming(
     return y, x_full
 
 
+def _over_channels_local(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    b: Optional[torch.Tensor],
+    conv_kwargs: dict[str, Any],
+    conv_func: ConvFn,
+    halo_fn: Optional[HaloFn],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """No channel exchange: convolve this rank's channel shard directly.
+
+    Used when the channel group is size one, or when it owns whole conv-groups
+    (``conv_kwargs["groups"]`` carries ``groups_local``). ``w`` is this rank's
+    output-channel shard and already carries only the input channels it needs, so
+    there is nothing to gather. Returns ``(y, x_prepared)`` -- ``x_prepared`` is
+    the (halo-padded, in the halo regime) shard kept for the backward pass.
+    """
+    span = x.contiguous()
+    if halo_fn is not None:
+        span = halo_fn(span)
+    if b is not None:
+        y = conv_func(span, w, b, **conv_kwargs)
+    else:
+        y = conv_func(span, w, **conv_kwargs)
+    return y, span
+
+
 def over_channels(
     x: torch.Tensor,
     w: torch.Tensor,
@@ -163,16 +189,21 @@ def over_channels(
     n_spatial_dims: int,
     channel_comm: str,
     halo_fn: Optional[HaloFn] = None,
+    local: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Channel-parallel convolution for any ``channel_comm`` and dimensionality.
 
-    ``conv_kwargs`` holds ``stride`` / ``padding`` / ``dilation`` for
-    ``conv_func``; in the halo regime the split-axis padding is already
-    materialised into the ``halo_fn`` output, so pass ``0`` for that axis. All
-    strategies return the same ``(y, x_full)`` -- see
+    ``conv_kwargs`` holds ``stride`` / ``padding`` / ``dilation`` (and ``groups``)
+    for ``conv_func``; in the halo regime the split-axis padding is already
+    materialised into the ``halo_fn`` output, so pass ``0`` for that axis. When
+    ``local`` is set (this rank owns whole conv-groups) or the channel group is
+    size one, no exchange happens -- see :func:`_over_channels_local`. Otherwise
+    all strategies return the same ``(y, x_full)`` -- see
     :func:`_over_channels_all_gather` / :func:`_over_channels_streaming`.
     """
     channel_dim = -(n_spatial_dims + 1)
+    if local or channel_group.size() == 1:
+        return _over_channels_local(x, w, b, conv_kwargs, conv_func, halo_fn)
     if channel_comm == "all_gather":
         return _over_channels_all_gather(
             x, w, b, conv_kwargs, channel_group, conv_func, channel_dim, halo_fn

@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#
+# Batch template. Copy it, fill in the site-specific SBATCH directives, and
+# submit with `sbatch`. Run-specific batch scripts are not committed - keep
+# your copy under experiments/ (gitignored) or outside the repo.
+#
+#SBATCH --job-name=jigsaw
+#SBATCH --account=hk-project-XXXX
+#SBATCH --partition=accelerated-h100
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=16
+#SBATCH --time=00:30:00
+#SBATCH --output=slurm-%j.out
+
+set -euo pipefail
+
+export JIGSAW_SITE=horeka          # scripts/sites/<name>.env
+# export JIGSAW_SITE_FILE=/path/to/my.env   # ... or an explicit file
+
+# One task per GPU. run.sh derives MASTER_ADDR/MASTER_PORT from the allocation
+# and jigsaw reads SLURM_PROCID / SLURM_NTASKS / SLURM_LOCALID.
+srun --mpi=pmix scripts/run.sh python -m your_training_module \
+    --attn-backend te \
+    --config configs/run.yaml
