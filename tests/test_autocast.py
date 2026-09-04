@@ -14,7 +14,7 @@ hand and these tests pin the contract:
   emitted in fp32 under autocast even when fed bf16/fp16;
 * nothing goes non-finite, and every result tracks a high-precision reference.
 
-Known gaps this file documents rather than hides:
+Known quirks this file documents rather than hides:
 
 * ``DistributedAttention.forward`` hard-codes ``.to(torch.bfloat16)`` on q/k/v
   and ``.to(self.dtype)`` on the core output, so attention ignores the autocast
@@ -22,6 +22,8 @@ Known gaps this file documents rather than hides:
   therefore use fp32 params and a bf16-sized tolerance for both autocast dtypes.
 * bias-carrying ``XWT`` returns the parameter dtype, not the autocast dtype,
   because ``XWT.forward`` casts x and w but not the bias.
+* ring attention drives its forward under autocast (bf16/fp16 saved tensors) and
+  ``ring_backward`` upcasts them to fp32 before the cores run.
 """
 
 import contextlib
@@ -178,41 +180,37 @@ class TestAutocastAttention:
         self._run(model, x, device, autocast_dtype, pm["model"])
 
     @pytest.mark.dist(4)
-    @pytest.mark.xfail(
-        reason="ring attention + autocast is currently broken: fp16 hits "
-        "`at::autocast::prioritize` and the bf16 core path mismatches shapes. "
-        "Flips to pass once the ring Function handles an active autocast.",
-        strict=False,
-    )
     def test_autocast_ring_attention(
         self,
         process_mesh_dict_4x1: dict,
         device: torch.device,
         autocast_dtype: torch.dtype,
     ) -> None:
-        # Drives ``RingAttentionFunction`` directly (as tests/modules/attention
-        # does) rather than ``DistributedAttention(ring=True)``, whose bshd
-        # rearrange needs a topology this fixture does not provide.
+        # Drive the ring forward / backward directly (as tests/modules/attention
+        # does): the forward runs under autocast -- its saved ``out`` / ``lse`` /
+        # K-V chunks come back in the autocast dtype -- and ``ring_backward``
+        # must reconcile them against the fp32 ``q`` without a dtype clash.
         from jigsaw.modules.attention import config as attn_config
-        from jigsaw.modules.attention.functional import functional as ring_fn
+        from jigsaw.modules.attention.functional import backward as ring_bwd
+        from jigsaw.modules.attention.functional import forward as ring_fwd
 
         pm = process_mesh_dict_4x1
         ring_group = pm["row"]
         local_rank = ring_group.rank()
         world = ring_group.size()
         cfg = attn_config.RingAttentionConfig(device=device)
+        ring_forward = ring_fwd.build_ring_forward(cfg)
 
-        b, h, d = 2, 4, 4
-        n_local = (world * 8) // world
+        b, h, d = 2, 6, 16
+        n_local = (world * 16) // world
         torch.manual_seed(2)
-        w_qkv = (torch.randn(3 * d * h, d, device=device) / d**0.5).requires_grad_(True)
+        w_qkv = torch.randn(3 * d * h, d, device=device) / d**0.5
         torch.manual_seed(local_rank)
         x0 = (torch.randn(b, n_local, d, device=device) / d**0.5).contiguous()
         scale = d**-0.5
 
-        def run(autocast: bool) -> tuple[torch.Tensor, torch.Tensor]:
-            x = x0.clone().requires_grad_(True)
-            qkv = x @ w_qkv.mT
+        def run(autocast: bool) -> tuple[torch.Tensor, ...]:
+            qkv = x0 @ w_qkv.mT
             q, k, v = (
                 t.contiguous()
                 for t in qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
@@ -223,19 +221,32 @@ class TestAutocastAttention:
                 else contextlib.nullcontext()
             )
             with ctx:
-                out = ring_fn.RingAttentionFunction.apply(
-                    q, k, v, x, w_qkv, scale, 0.0, ring_group, local_rank, cfg
-                )[0]
-            (gx,) = torch.autograd.grad(out, x, torch.ones_like(out))
-            return out.detach(), gx.detach()
+                out, lse, chunks = ring_forward(
+                    q, k, v, x0, w_qkv, scale, 0.0, ring_group, local_rank, world, cfg
+                )
+            dq, dk, dv = ring_bwd.ring_backward(
+                torch.ones_like(out),
+                q,
+                out,
+                x0,
+                lse,
+                w_qkv,
+                scale,
+                ring_group,
+                local_rank,
+                world,
+                chunks,
+                ring_config=cfg,
+            )
+            return out.detach(), dq.detach(), dk.detach(), dv.detach()
 
-        out, gx = run(autocast=True)
-        out_ref, gx_ref = run(autocast=False)
+        got = run(autocast=True)
+        ref = run(autocast=False)
 
-        assert torch.isfinite(out).all() and torch.isfinite(gx).all()
         atol, rtol = _ATTN_TOL
-        assert_close("ring output", out.float(), out_ref.float(), atol, rtol, device, pm["model"])
-        assert_close("ring input grad", gx.float(), gx_ref.float(), atol, rtol, device, pm["model"])
+        for name, g, r in zip(("out", "dq", "dk", "dv"), got, ref):
+            assert torch.isfinite(g).all(), f"non-finite ring {name}"
+            assert_close(f"ring {name}", g.float(), r.float(), atol, rtol, device, ring_group)
 
 
 @pytest.mark.parametrize("autocast_dtype", _AUTOCAST_DTYPES)
