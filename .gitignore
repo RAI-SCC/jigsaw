@@ -173,3 +173,6 @@ pangu_evaluation/*
 lineartest.py
 pytest.sh
 possibly_corrupt_files_in_this_workspace.txt
+
+# benchmark run output (baselines/ is committed, results/ is not)
+benchmarks/results/
