@@ -17,12 +17,14 @@ next collective, exactly like the linear / attention / normalization suites.
 
 import pytest
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 
+import jigsaw.modules.linear as linear
 import jigsaw.modules.loss as jloss
 from jigsaw.modules.loss import classification as lossc
 from jigsaw.modules.loss import regression as lossr
-from jigsaw.utils_aggregate import gather_1d_results
+from jigsaw.utils_aggregate import gather_1d_results, gather_results
 from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -816,3 +818,182 @@ class TestModuleWrappers:
         assert_close(
             "accumulated grad", grad, ref_param.grad, FATOL, FRTOL, device, pmd["model"]
         )
+
+
+# --------------------------------------------------------------------------- #
+# end-to-end: a distributed linear model trained with a distributed loss
+# --------------------------------------------------------------------------- #
+class TestLinearTrainingParity:
+    """A ``DistributedXWT`` trained for a few SGD steps with a distributed loss
+    reproduces the *gathered* ``nn.Linear`` trained with the stock ``torch`` loss
+    it mirrors -- identical per-step loss values and identical weights after
+    every step.
+
+    ``DistributedXWT`` shards the weight ``(out, in)`` with ``out`` across ``row``
+    and ``in`` across ``col``; activations are ``(1, seq, features)`` with ``seq``
+    across ``row`` and ``features`` across ``col``.  The distributed loss is
+    handed ``channel_group`` / ``reduce_groups`` matching that layout and no
+    manual ``/ world_size`` rescaling -- it does the global reduction itself.
+    """
+
+    pytestmark = pytest.mark.dist(4)
+
+    MESHES = ["process_mesh_dict_2x2", "process_mesh_dict_2x1x2"]
+
+    @staticmethod
+    def _make_pair(
+        pmd: dict, in_dim: int, out_dim: int, device: torch.device
+    ) -> tuple[torch.nn.Module, torch.nn.Module]:
+        """Build a ``DistributedXWT`` and a gathered-weight ``nn.Linear`` twin."""
+        model_rank = dist.get_rank(group=pmd["model"])
+        torch.manual_seed(model_rank)
+        dist_lin = linear.DistributedXWT(
+            in_dim,
+            out_dim,
+            False,
+            model_rank,
+            device,
+            pmd["model"],
+            pmd["col"],
+            pmd["row"],
+            bayesian=False,
+        ).to(device)
+        w = gather_results(dist_lin.weight.data, process_mesh_dict=pmd)
+        ref_lin = torch.nn.Linear(in_dim, out_dim, bias=False).to(device)
+        ref_lin.weight.data = w.clone()
+        return dist_lin, ref_lin
+
+    @pytest.mark.parametrize("mesh_name", MESHES)
+    def test_mse_training_parity(
+        self, request: pytest.FixtureRequest, device: torch.device, mesh_name: str
+    ) -> None:
+        """``DistributedMSELoss`` on the sharded output == ``nn.MSELoss`` on the whole."""
+        pmd = request.getfixturevalue(mesh_name)
+        in_dim, out_dim, seq_local, steps = 6, 8, 5, 5
+        n_col = pmd["col"].size()
+        model_rank = dist.get_rank(group=pmd["model"])
+
+        dist_lin, ref_lin = self._make_pair(pmd, in_dim, out_dim, device)
+        loss_mod = jloss.DistributedMSELoss((pmd["row"], pmd["col"]), reduction="mean")
+        ref_loss_mod = torch.nn.MSELoss(reduction="mean")
+        opt = torch.optim.SGD(dist_lin.parameters(), lr=0.3)
+        ref_opt = torch.optim.SGD(ref_lin.parameters(), lr=0.3)
+
+        for step in range(steps):
+            opt.zero_grad()
+            ref_opt.zero_grad()
+
+            torch.manual_seed(100 + 10 * step + model_rank)
+            x = torch.randn(
+                1,
+                seq_local,
+                in_dim // n_col,
+                dtype=dist_lin.weight.dtype,
+                device=device,
+            )
+            torch.manual_seed(500 + 10 * step + model_rank)
+            target = torch.randn(
+                1,
+                seq_local,
+                out_dim // n_col,
+                dtype=dist_lin.weight.dtype,
+                device=device,
+            )
+
+            loss = loss_mod(dist_lin(x), target)
+            loss.backward()
+            opt.step()
+
+            ref_y = ref_lin(gather_results(x.detach(), process_mesh_dict=pmd))
+            ref_loss = ref_loss_mod(
+                ref_y, gather_results(target, process_mesh_dict=pmd)
+            )
+            ref_loss.backward()
+            ref_opt.step()
+
+            assert_close(
+                f"mse loss step {step}",
+                loss.detach(),
+                ref_loss.detach(),
+                FATOL,
+                FRTOL,
+                device,
+                pmd["model"],
+            )
+            w_gathered = gather_results(dist_lin.weight.data, process_mesh_dict=pmd)
+            assert_close(
+                f"weight step {step}",
+                w_gathered,
+                ref_lin.weight.data,
+                FATOL,
+                FRTOL,
+                device,
+                pmd["model"],
+            )
+
+    @pytest.mark.parametrize("mesh_name", MESHES)
+    def test_cross_entropy_training_parity(
+        self, request: pytest.FixtureRequest, device: torch.device, mesh_name: str
+    ) -> None:
+        """``DistributedCrossEntropyLoss`` on the sharded logits == ``F.cross_entropy``."""
+        pmd = request.getfixturevalue(mesh_name)
+        in_dim, out_dim, seq_local, steps = 6, 8, 5, 5
+        n_col = pmd["col"].size()
+        model_rank = dist.get_rank(group=pmd["model"])
+        row_rank = pmd["row"].rank()
+
+        dist_lin, ref_lin = self._make_pair(pmd, in_dim, out_dim, device)
+        ce = jloss.DistributedCrossEntropyLoss(
+            channel_group=pmd["col"], reduce_groups=(pmd["row"],), dim=-1
+        )
+        opt = torch.optim.SGD(dist_lin.parameters(), lr=0.3)
+        ref_opt = torch.optim.SGD(ref_lin.parameters(), lr=0.3)
+
+        for step in range(steps):
+            opt.zero_grad()
+            ref_opt.zero_grad()
+
+            torch.manual_seed(100 + 10 * step + model_rank)
+            x = torch.randn(
+                1,
+                seq_local,
+                in_dim // n_col,
+                dtype=dist_lin.weight.dtype,
+                device=device,
+            )
+            # the label indexes a shared sequence position, so it must be
+            # identical across the class (``col``) group -- seed by the row.
+            torch.manual_seed(700 + 10 * step + row_rank)
+            target = torch.randint(0, out_dim, (1, seq_local), device=device)
+
+            loss = ce(dist_lin(x), target)
+            loss.backward()
+            opt.step()
+
+            ref_y = ref_lin(gather_results(x.detach(), process_mesh_dict=pmd))
+            ref_target = gather_results(target.unsqueeze(-1), process_mesh_dict=pmd)[
+                ..., 0
+            ]
+            ref_loss = F.cross_entropy(ref_y.transpose(1, 2), ref_target)
+            ref_loss.backward()
+            ref_opt.step()
+
+            assert_close(
+                f"ce loss step {step}",
+                loss.detach(),
+                ref_loss.detach(),
+                FATOL,
+                FRTOL,
+                device,
+                pmd["model"],
+            )
+            w_gathered = gather_results(dist_lin.weight.data, process_mesh_dict=pmd)
+            assert_close(
+                f"weight step {step}",
+                w_gathered,
+                ref_lin.weight.data,
+                FATOL,
+                FRTOL,
+                device,
+                pmd["model"],
+            )
