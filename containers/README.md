@@ -103,8 +103,8 @@ from the allocation; jigsaw reads `SLURM_PROCID` / `SLURM_NTASKS` /
 NOTE: keep run-specific batch scripts out of the repo, under `experiments/`
 (gitignored) or elsewhere.
 
-## Baking a frozen image
+## Building a self-contained image
 
 The venv overlay above is the default. For a self-contained image instead
 (production runs, or sharing with people who won't run the overlay steps), see
-[baking.md](baking.md).
+[prebuilt-image.md](prebuilt-image.md).

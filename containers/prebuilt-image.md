@@ -1,8 +1,8 @@
-# Baking a frozen image
+# Building a self-contained image
 
-The venv overlay (see [README.md](README.md)) is the default. Bake a frozen
-image instead for production runs, or to share with people who won't run the
-overlay steps.
+The venv overlay (see [README.md](README.md)) is the default. Build the deps
+into the image itself for production runs, or to share with people who won't run
+the overlay steps.
 
 Write an `apptainer.def`:
 
