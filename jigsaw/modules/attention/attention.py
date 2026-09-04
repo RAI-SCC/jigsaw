@@ -1,7 +1,7 @@
 """Distributed attention modules."""
 import warnings
 
-from typing import Any, Optional, cast
+from typing import Any, Callable, Optional, cast
 
 import torch
 import torch.distributed as dist
@@ -173,15 +173,8 @@ class DistributedAttention(torch.nn.Module):
         self.dropout_p = dropout_p
         self.ring = ring
 
-        attn_backend = AttnBackend(attn_backend)
-        if attn_backend == AttnBackend.TE and not JIGSAW_TE_AVAILABLE:
-            warnings.warn(
-                "attn_backend='te' but transformer_engine is unavailable; "
-                "falling back to 'sdpa'. Install it or update your container."
-            )
-            attn_backend = AttnBackend.SDPA
-        self.attn_backend = attn_backend
-        self.te = attn_backend == AttnBackend.TE
+        self.attn_backend = self._resolve_backend(AttnBackend(attn_backend))
+        self.te = self.attn_backend == AttnBackend.TE
         # Only the non-ring TE core consumes/produces a bshd tensor; the ring
         # core (te_core included) works in the ring's bhsd convention and
         # transposes internally, so forward() keeps the bhsd rearrange for it.
@@ -200,20 +193,8 @@ class DistributedAttention(torch.nn.Module):
                 "Cannot perform ring attention if spatial size is 1."
             )
             self.attn_core = self._ring_attn_core
-        elif attn_backend == AttnBackend.TE:
-            self.attn_core = self._transformer_attn_core
-            self.attn = te.DotProductAttention(
-                num_attention_heads=self.heads,
-                kv_channels=embed_dim // heads,
-                num_gqa_groups=self.heads,
-                # attention_dropout=self.dropout_p,
-                qkv_format="bshd",
-                attn_mask_type="no_mask",
-            )
-        elif attn_backend == AttnBackend.MATH:
-            self.attn_core = self._attn_core_math
         else:
-            self.attn_core = self._attn_core
+            self.attn_core = self._select_attn_core(embed_dim, heads)
 
         if channel_group.size() == 1:
             self.qkv = torch.nn.Linear(
@@ -271,6 +252,48 @@ class DistributedAttention(torch.nn.Module):
             if ring and config is None
             else config
         )
+
+    @staticmethod
+    def _resolve_backend(attn_backend: AttnBackend) -> AttnBackend:
+        """Downgrade ``TE`` to ``SDPA`` when transformer_engine is not installed.
+
+        Deliberately asymmetric with :class:`~.config.RingAttentionConfig`, which
+        raises instead: a plain (non-ring) ``DistributedAttention`` stays usable
+        outside the container.
+        """
+        if attn_backend is AttnBackend.TE and not JIGSAW_TE_AVAILABLE:
+            warnings.warn(
+                "attn_backend='te' but transformer_engine is unavailable; "
+                "falling back to 'sdpa'. Install it or update your container."
+            )
+            return AttnBackend.SDPA
+        return attn_backend
+
+    def _select_attn_core(
+        self, embed_dim: int, heads: int
+    ) -> Callable[..., torch.Tensor]:
+        """Resolve ``self.attn_backend`` to its non-ring attention core.
+
+        The ``TE`` arm also builds the ``te.DotProductAttention`` module that
+        :meth:`_transformer_attn_core` calls.
+        """
+        match self.attn_backend:
+            case AttnBackend.TE:
+                self.attn = te.DotProductAttention(
+                    num_attention_heads=self.heads,
+                    kv_channels=embed_dim // heads,
+                    num_gqa_groups=self.heads,
+                    # attention_dropout=self.dropout_p,
+                    qkv_format="bshd",
+                    attn_mask_type="no_mask",
+                )
+                return self._transformer_attn_core
+            case AttnBackend.MATH:
+                return self._attn_core_math
+            case AttnBackend.SDPA:
+                return self._attn_core
+            case other:
+                raise ValueError(f"unhandled attn_backend {other}")
 
     def _attn_core(
         self,
