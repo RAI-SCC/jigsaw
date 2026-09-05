@@ -90,9 +90,21 @@ def ring_backward(
     ring_group_size: int,
     chunks_to_save: tuple[torch.Tensor, ...],
     ring_config: RingAttentionConfig,
+    key_padding_mask: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Backward pass for ring attention."""
+    """Backward pass for ring attention.
+
+    ``key_padding_mask``: this rank's local shard (``[B, seq_local]``, bool,
+    ``True`` = attend) of a global key-padding mask -- re-gathered here (mirrors
+    :func:`..forward._gather_key_padding_mask`) since the forward's own
+    all-gather result isn't saved for backward (it's small enough to redo).
+    """
     b, h, seq_local, d = q.shape
+    global_key_mask = None
+    if key_padding_mask is not None:
+        shards = [torch.empty_like(key_padding_mask) for _ in range(ring_group_size)]
+        dist.all_gather(shards, key_padding_mask.contiguous(), group=group)
+        global_key_mask = torch.cat(shards, dim=1)
     # Reconcile dtypes before the cores run. Under autocast the forward saves
     # bf16/fp16 tensors (``out``, ``lse`` and the K/V chunks the provider
     # replays) and ``q``/``dout`` may arrive downcast too; the cores matmul
@@ -144,10 +156,13 @@ def ring_backward(
 
         step_causal = False
         skip = False
-        if ring_config.causal:
+        kv_global_idx: Optional[int] = None
+        if ring_config.causal or global_key_mask is not None:
             kv_global_idx = _step_global_chunk_idx(
                 ring_config, local_rank, step, ring_group_size, group
             )
+        if ring_config.causal:
+            assert kv_global_idx is not None
             kind = _causal_step_kind(kv_global_idx, local_rank)
             skip = kind is None
             step_causal = bool(kind)
@@ -163,9 +178,14 @@ def ring_backward(
             dk_j = torch.zeros_like(kj, dtype=core_dtype)
             dv_j = torch.zeros_like(vj, dtype=core_dtype)
         else:
+            step_key_mask = None
+            if global_key_mask is not None:
+                assert kv_global_idx is not None
+                lo, hi = kv_global_idx * seq_local, (kv_global_idx + 1) * seq_local
+                step_key_mask = global_key_mask[:, lo:hi]
             dq_j, dk_j, dv_j = ring_config.attn_core_backward_fn(
                 dout, q, kj.to(core_dtype), vj.to(core_dtype), out, lse, scale,
-                seq_local, seq_local, causal=step_causal,
+                seq_local, seq_local, causal=step_causal, key_mask=step_key_mask,
             )
         dq += dq_j
         del dq_j, kj, vj, kv

@@ -117,6 +117,31 @@ except ModuleNotFoundError:
     JIGSAW_TE_AVAILABLE=False
 
 
+def _resolve_mask_and_causal(
+    attn_mask: Optional[torch.Tensor], causal: bool
+) -> tuple[Optional[torch.Tensor], bool]:
+    """Fold ``causal`` into an explicit mask when ``attn_mask`` is also given.
+
+    SDPA rejects ``attn_mask`` together with ``is_causal=True``, so the two are
+    composed here instead of leaving the caller to choose one or the other: an
+    explicit boolean causal mask is built and combined with ``attn_mask``
+    (bool: AND'd; float: causally-excluded positions set to ``-inf``), and
+    ``is_causal`` is turned off for the SDPA call. Shared by
+    :class:`DistributedAttention` and :class:`Attention`.
+    """
+    if attn_mask is None or not causal:
+        return attn_mask, causal
+    sq, sk = attn_mask.shape[-2], attn_mask.shape[-1]
+    causal_allow = torch.tril(
+        torch.ones(sq, sk, dtype=torch.bool, device=attn_mask.device)
+    )
+    if attn_mask.dtype == torch.bool:
+        combined = attn_mask & causal_allow
+    else:
+        combined = attn_mask.masked_fill(~causal_allow, float("-inf"))
+    return combined, False
+
+
 def attn_core_dtype(x: torch.Tensor) -> torch.dtype:
     """Dtype to run the attention core (q/k/v / SDPA / TE) in.
 
@@ -328,7 +353,8 @@ class DistributedAttention(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        **kwargs: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+        **kwargs: Any,
     ) -> torch.Tensor:
         """
         Attention computation.
@@ -341,6 +367,10 @@ class DistributedAttention(torch.nn.Module):
             Keys tensor.
         v: torch.Tensor
             Values tensor.
+        attn_mask: Optional[torch.Tensor]
+            Optional attention mask (bool or additive float), forwarded to
+            ``scaled_dot_product_attention``. Composed with ``self.causal``
+            when both are given -- see :func:`_resolve_mask_and_causal`.
         kwargs:
             Additional optional parameters.
 
@@ -350,6 +380,7 @@ class DistributedAttention(torch.nn.Module):
             Output of attention computation.
 
         """
+        mask, is_causal = _resolve_mask_and_causal(attn_mask, self.causal)
         with torch.nn.attention.sdpa_kernel(
             [
                 torch.nn.attention.SDPBackend.FLASH_ATTENTION,
@@ -357,7 +388,7 @@ class DistributedAttention(torch.nn.Module):
             ]
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, is_causal=self.causal, dropout_p=self.dropout_p
+                q, k, v, attn_mask=mask, is_causal=is_causal, dropout_p=self.dropout_p
             )
         return out
 
@@ -366,15 +397,17 @@ class DistributedAttention(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        **kwargs: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+        **kwargs: Any,
     ) -> torch.Tensor:
         """Unfused ``softmax(QK^T)V`` reference core (``attn_backend='math'``).
 
         Forces the MATH SDPA backend, so it runs for any shape / dtype / device.
         """
+        mask, is_causal = _resolve_mask_and_causal(attn_mask, self.causal)
         with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.MATH]):
             out = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, is_causal=self.causal, dropout_p=self.dropout_p
+                q, k, v, attn_mask=mask, is_causal=is_causal, dropout_p=self.dropout_p
             )
         return out
 
@@ -383,11 +416,12 @@ class DistributedAttention(torch.nn.Module):
             q: torch.Tensor,
             k: torch.Tensor,
             v: torch.Tensor,
-            **kwargs: torch.Tensor,
+            attn_mask: Optional[torch.Tensor] = None,
+            **kwargs: Any,
         ) -> torch.Tensor:
             """
             Attention computation.
-    
+
             Parameters
             ----------
             q: torch.Tensor
@@ -396,15 +430,25 @@ class DistributedAttention(torch.nn.Module):
                 Keys tensor.
             v: torch.Tensor
                 Values tensor.
+            attn_mask: Optional[torch.Tensor]
+                Not supported -- ``te.DotProductAttention``'s mask type is fixed
+                at construction (``"causal"``/``"no_mask"``, see ``_select_attn_core``),
+                not a per-call argument, so an arbitrary per-call mask can't be
+                threaded through without deciding the mask type up front.
             kwargs:
                 Additional optional parameters.
-    
+
             Returns
             -------
             out: torch.Tensor
                 Output of attention computation.
-    
+
             """
+            if attn_mask is not None:
+                raise NotImplementedError(
+                    "attn_mask is not supported with attn_backend='te'; "
+                    "use 'sdpa' or 'math' instead."
+                )
             out = TransformerEngineAttention.apply(q, k, v, self.attn)
             return out
         
@@ -414,7 +458,8 @@ class DistributedAttention(torch.nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         x: torch.Tensor,
-        **kwargs: torch.Tensor,
+        key_padding_mask: Optional[torch.Tensor] = None,
+        **kwargs: Any,
     ) -> torch.Tensor:
         """
         Ring attention computation.
@@ -429,6 +474,9 @@ class DistributedAttention(torch.nn.Module):
             Values tensor.
         x: torch.Tensor
             Input data.
+        key_padding_mask: Optional[torch.Tensor]
+            Local shard (``[B, S_local]``, bool, ``True`` = attend) of a
+            global key-padding mask. Unsupported with ``attn_backend='te'``.
         kwargs:
             Additional optional parameters.
 
@@ -438,6 +486,11 @@ class DistributedAttention(torch.nn.Module):
             Output of attention computation.
 
         """
+        if key_padding_mask is not None and self.te:
+            raise NotImplementedError(
+                "key_padding_mask is not supported with attn_backend='te'; "
+                "use 'sdpa' or 'math' instead."
+            )
         out = RingAttentionFunction.apply(
             q,
             k,
@@ -449,16 +502,42 @@ class DistributedAttention(torch.nn.Module):
             self.spatial_group,
             self.local_rank,
             self.config,
+            key_padding_mask,
         )[0]
         out = cast(torch.Tensor, out)
         return out
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+        key_padding_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         Forward pass for distributed multi-head attention.
 
         x: (n_batch, vars, n_lat, n_lon)
+        attn_mask: Optional[torch.Tensor]
+            Non-ring only (``ring=False``): optional attention mask (bool or
+            additive float) forwarded to the SDPA/MATH core. Unsupported with
+            ``ring=True`` (use ``key_padding_mask`` instead) or
+            ``attn_backend='te'``.
+        key_padding_mask: Optional[torch.Tensor]
+            Ring only (``ring=True``): this rank's local shard (``[B,
+            S_local]``, bool, ``True`` = attend) of a global key-padding mask.
+            Unsupported with ``ring=False`` (use ``attn_mask`` instead) or
+            ``attn_backend='te'``.
         """
+        if attn_mask is not None and self.ring:
+            raise ValueError(
+                "attn_mask is not supported with ring=True; pass "
+                "key_padding_mask instead."
+            )
+        if key_padding_mask is not None and not self.ring:
+            raise ValueError(
+                "key_padding_mask is only supported with ring=True; pass "
+                "attn_mask instead."
+            )
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.qkv(x)
 
@@ -480,7 +559,9 @@ class DistributedAttention(torch.nn.Module):
         else:
             q, k, v = qkv.to(core_dtype).unbind(0)
 
-        out = self.attn_core(q, k, v, x=x)
+        out = self.attn_core(
+            q, k, v, x=x, attn_mask=attn_mask, key_padding_mask=key_padding_mask
+        )
         # out has shape [batch, local_heads, local_sequence length, head_dim]
         if not self._te_bshd:
             out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous().to(x.dtype)
@@ -564,7 +645,12 @@ class Attention(torch.nn.Module):
             )
 
     def _attn_core(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, **kwargs: torch.Tensor
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+        **kwargs: Any,
     ) -> torch.Tensor:
         """
         Attention computation.
@@ -577,6 +663,10 @@ class Attention(torch.nn.Module):
             Keys tensor.
         v: torch.Tensor
             Values tensor.
+        attn_mask: Optional[torch.Tensor]
+            Optional attention mask (bool or additive float), forwarded to
+            ``scaled_dot_product_attention``. Composed with ``self.causal``
+            when both are given -- see :func:`_resolve_mask_and_causal`.
         kwargs:
             Additional optional parameters.
 
@@ -586,6 +676,7 @@ class Attention(torch.nn.Module):
             Output of attention computation.
 
         """
+        mask, is_causal = _resolve_mask_and_causal(attn_mask, self.causal)
         with torch.nn.attention.sdpa_kernel(
             [
                 torch.nn.attention.SDPBackend.FLASH_ATTENTION,
@@ -593,12 +684,14 @@ class Attention(torch.nn.Module):
             ]
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, is_causal=self.causal, dropout_p=self.dropout_p
+                q, k, v, attn_mask=mask, is_causal=is_causal, dropout_p=self.dropout_p
             )
 
         return out
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """
         Forward pass of multi-headed attention.
 
@@ -608,6 +701,9 @@ class Attention(torch.nn.Module):
         ----------
         x: torch.Tensor
             Tensor upon which to calculate attention.
+        attn_mask: Optional[torch.Tensor]
+            Optional attention mask (bool or additive float), forwarded to
+            the SDPA core. Composed with ``self.causal`` when both are given.
 
         Returns
         -------
@@ -619,7 +715,7 @@ class Attention(torch.nn.Module):
         qkv = qkv.reshape(qkv.shape[0], qkv.shape[1], 3, self.heads, self.head_dim)
 
         q, k, v = qkv.permute(2, 0, 3, 1, 4).to(attn_core_dtype(x))
-        out = self.attn_core(q=q, k=k, v=v, x=x)
+        out = self.attn_core(q=q, k=k, v=v, x=x, attn_mask=attn_mask)
 
         # out has shape [B, h, N, d]
         out = rearrange(out, "... h s d -> ... s (h d)").to(x.dtype)

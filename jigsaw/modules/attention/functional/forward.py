@@ -60,15 +60,19 @@ def _attend_step(
     out: torch.Tensor,
     lse: torch.Tensor,
     causal: bool = False,
+    key_mask: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the attention core on (q, kj, vj) and merge into the running (out, lse).
 
     kj/vj may be views into a KV buffer; flash attention requires contiguous
     inputs, so they're materialized here. ``causal`` masks the diagonal block
     (see :func:`_causal_step_kind`); it is never set together with a skip.
+    ``key_mask`` is this step's ``[B, n_local]`` slice of the global
+    key-padding mask (see :func:`ring_forward`).
     """
     out_j, l_j = ring_config.attn_core_forward_fn(
-        q, kj.contiguous(), vj.contiguous(), scale, dropout_p, causal=causal
+        q, kj.contiguous(), vj.contiguous(), scale, dropout_p, causal=causal,
+        key_mask=key_mask,
     )
 
     return _online_softmax_merge(out, lse, out_j, l_j)
@@ -110,6 +114,23 @@ def build_ring_forward(
     return ring_forward
 
 
+def _gather_key_padding_mask(
+    key_padding_mask: torch.Tensor, group: dist.ProcessGroup, ring_group_size: int
+) -> torch.Tensor:
+    """All-gather local ``[B, n_local]`` key-padding shards into ``[B, S_global]``.
+
+    A one-time, small collective (bandwidth negligible next to the K/V ring
+    traffic) done once per forward call, so every rank can slice out the
+    ``[B, n_local]`` key-validity slab for whatever global chunk it currently
+    holds (via ``provider.global_chunk_idx(step)``) without threading a new
+    tensor through every :class:`~.forward_chunk_provider._ForwardChunkProvider`
+    subclass's communication path.
+    """
+    shards = [torch.empty_like(key_padding_mask) for _ in range(ring_group_size)]
+    dist.all_gather(shards, key_padding_mask.contiguous(), group=group)
+    return torch.cat(shards, dim=1)
+
+
 def ring_forward(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -122,6 +143,7 @@ def ring_forward(
     local_rank: int,
     ring_group_size: int,
     ring_config: RingAttentionConfig,
+    key_padding_mask: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]:
     """Forward pass for ring attention.
 
@@ -152,6 +174,9 @@ def ring_forward(
         Number of ranks in ``group``.
     ring_config : RingAttentionConfig
         Ring-attention configuration.
+    key_padding_mask : Optional[torch.Tensor]
+        This rank's local shard (``[B, n_local]``, bool, ``True`` = attend) of
+        a global key-padding mask.
 
     Returns
     -------
@@ -162,6 +187,12 @@ def ring_forward(
     out = torch.zeros_like(q)
     lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype)
 
+    global_key_mask = None
+    if key_padding_mask is not None:
+        global_key_mask = _gather_key_padding_mask(
+            key_padding_mask, group, ring_group_size
+        )
+
     provider = build_forward_chunk_provider(
         ring_config, q, k, v, x, w_qkv, group, local_rank, ring_group_size
     )
@@ -169,15 +200,22 @@ def ring_forward(
     for step in range(ring_group_size):
         kj, vj = provider.get(step)
         provider.save_for_backward(step)
+        chunk_idx = provider.global_chunk_idx(step)
         step_causal = False
         if ring_config.causal:
-            kind = _causal_step_kind(provider.global_chunk_idx(step), local_rank)
+            kind = _causal_step_kind(chunk_idx, local_rank)
             if kind is None:
                 provider.advance(step, ring_group_size)
                 continue
             step_causal = kind
+        step_key_mask = (
+            global_key_mask[:, chunk_idx * n_local : (chunk_idx + 1) * n_local]
+            if global_key_mask is not None
+            else None
+        )
         out, lse = _attend_step(
-            ring_config, q, kj, vj, scale, dropout_p, out, lse, causal=step_causal
+            ring_config, q, kj, vj, scale, dropout_p, out, lse,
+            causal=step_causal, key_mask=step_key_mask,
         )
         provider.advance(step, ring_group_size)
 

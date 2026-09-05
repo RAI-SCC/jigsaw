@@ -220,3 +220,108 @@ class TestDistributedAttention:
             _build_distributed(process_mesh_dict_2x2, device, heads=3)
         with pytest.raises(AssertionError, match="Cannot perform ring attention"):
             _build_distributed(process_mesh_dict_1x4, device, ring=True)
+
+
+class TestAttentionMask:
+    """Non-ring ``attn_mask`` support (see ``test_key_padding_mask_ring_attention.py``
+    for the ring ``key_padding_mask`` path)."""
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("attn_backend", ["sdpa", "math"])
+    @pytest.mark.parametrize("causal", [False, True])
+    def test_non_ring_attn_mask_matches_sdpa(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        attn_backend: str,
+        causal: bool,
+    ) -> None:
+        """``DistributedAttention(ring=False).attn_core`` with a padding
+        ``attn_mask`` matches a whole-sequence masked SDPA reference, with and
+        without also being causal (composed per ``_resolve_mask_and_causal``)."""
+        model = _build_distributed(
+            process_mesh_dict_2x2, device, attn_backend=attn_backend, causal=causal
+        )
+        b, h, s, d = 2, model.heads, 6, _EMBED_DIM // _HEADS
+        torch.manual_seed(0)
+        q, k, v = (torch.randn(b, h, s, d, device=device) for _ in range(3))
+        key_mask = torch.ones(b, s, dtype=torch.bool, device=device)
+        key_mask[0, -2:] = False
+        allow = key_mask[:, None, None, :].expand(b, h, s, s)
+        attn_mask = torch.zeros(b, h, s, s, device=device).masked_fill(
+            ~allow, float("-inf")
+        )
+
+        out = model.attn_core(q, k, v, x=None, attn_mask=attn_mask)
+
+        if causal:
+            causal_allow = torch.tril(torch.ones(s, s, dtype=torch.bool, device=device))
+            allow = allow & causal_allow[None, None]
+        ref_mask = torch.zeros(b, h, s, s, device=device).masked_fill(
+            ~allow, float("-inf")
+        )
+        with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.MATH]):
+            ref = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, attn_mask=ref_mask
+            )
+
+        assert_close(
+            "attn_mask output", out, ref, 1e-5, 1e-5, device, process_mesh_dict_2x2["model"]
+        )
+
+    @pytest.mark.dist(4)
+    def test_ring_rejects_attn_mask(
+        self, device: torch.device, process_mesh_dict_4x1: dict
+    ) -> None:
+        """``ring=True`` wants ``key_padding_mask``, not ``attn_mask``."""
+        model = _build_distributed(process_mesh_dict_4x1, device, ring=True)
+        local_channels = _IN_DIM // process_mesh_dict_4x1["col"].size()
+        x = torch.randn(1, 8, local_channels, device=device)
+        with pytest.raises(ValueError, match="attn_mask is not supported with ring=True"):
+            model(x, attn_mask=torch.zeros(1, 1, 8, 8, device=device))
+
+    @pytest.mark.dist(4)
+    def test_non_ring_rejects_key_padding_mask(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """``ring=False`` wants ``attn_mask``, not ``key_padding_mask``."""
+        model = _build_distributed(process_mesh_dict_2x2, device, ring=False)
+        local_channels = _IN_DIM // process_mesh_dict_2x2["col"].size()
+        x = torch.randn(1, 8, local_channels, device=device)
+        with pytest.raises(
+            ValueError, match="key_padding_mask is only supported with ring=True"
+        ):
+            model(x, key_padding_mask=torch.ones(1, 8, dtype=torch.bool, device=device))
+
+    @pytest.mark.dist(4)
+    def test_te_core_rejects_attn_mask(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """``_transformer_attn_core`` rejects a mask before touching ``self.attn``
+        (which only exists for an actual TE-backed instance)."""
+        model = _build_distributed(process_mesh_dict_2x2, device)
+        dummy = torch.zeros(1, 1, 1, 1, device=device)
+        with pytest.raises(NotImplementedError, match="attn_backend='te'"):
+            model._transformer_attn_core(dummy, dummy, dummy, attn_mask=dummy)
+
+    @pytest.mark.dist(4)
+    def test_ring_te_rejects_key_padding_mask(
+        self, device: torch.device, process_mesh_dict_4x1: dict
+    ) -> None:
+        """``_ring_attn_core`` rejects a mask for a (simulated) TE-backed ring."""
+        model = _build_distributed(process_mesh_dict_4x1, device, ring=True)
+        model.te = True  # TE isn't installed in this environment; force the branch.
+        local_channels = _IN_DIM // process_mesh_dict_4x1["col"].size()
+        local_seq = 8
+        x = torch.randn(1, local_seq, local_channels, device=device)
+        dummy = torch.zeros(
+            1, model.heads, local_seq, _EMBED_DIM // _HEADS, device=device
+        )
+        with pytest.raises(NotImplementedError, match="attn_backend='te'"):
+            model._ring_attn_core(
+                dummy,
+                dummy,
+                dummy,
+                x,
+                key_padding_mask=torch.ones(1, local_seq, dtype=torch.bool, device=device),
+            )

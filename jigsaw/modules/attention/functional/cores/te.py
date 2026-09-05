@@ -17,6 +17,8 @@ Untested on GPU in this repo yet - covered by the ``te_required`` +
 
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 
 try:
@@ -96,6 +98,7 @@ def forward(
     scale: float,
     dropout_p: float,
     causal: bool = False,
+    key_mask: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """TE fused attention forward. Returns ``(out (b,h,s,d), logsumexp (b,h,s))``.
 
@@ -104,7 +107,16 @@ def forward(
     top-left-aligned ``"causal"`` mask is the correct causal boundary; every
     other block is either fully visible (``causal=False``) or skipped entirely
     by the caller.
+
+    ``key_mask`` (key-padding masking) is not supported by this core -- see
+    the module docstring -- and is rejected by the caller
+    (``DistributedAttention._ring_attn_core``) before this is ever reached
+    with a non-``None`` value.
     """
+    if key_mask is not None:
+        raise NotImplementedError(
+            "key-padding masks are not supported by the TE ring core."
+        )
     mask_type = "causal" if causal else "no_mask"
     b, h, s_q, d = q.shape
     s_kv = k.shape[2]
