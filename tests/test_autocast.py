@@ -224,7 +224,7 @@ class TestAutocastAttention:
                 else contextlib.nullcontext()
             )
             with ctx:
-                out, lse, chunks = ring_forward(
+                out, lse, chunks, base_seed, rng_states = ring_forward(
                     q, k, v, x0, w_qkv, scale, 0.0, ring_group, local_rank, world, cfg
                 )
             dq, dk, dv = ring_bwd.ring_backward(
