@@ -9,6 +9,7 @@ mirroring how :func:`.backward.ring_backward` delegates to a
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -58,17 +59,40 @@ def _attend_step(
     dropout_p: float,
     out: torch.Tensor,
     lse: torch.Tensor,
+    causal: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the attention core on (q, kj, vj) and merge into the running (out, lse).
 
     kj/vj may be views into a KV buffer; flash attention requires contiguous
-    inputs, so they're materialized here.
+    inputs, so they're materialized here. ``causal`` masks the diagonal block
+    (see :func:`_causal_step_kind`); it is never set together with a skip.
     """
     out_j, l_j = ring_config.attn_core_forward_fn(
-        q, kj.contiguous(), vj.contiguous(), scale, dropout_p
+        q, kj.contiguous(), vj.contiguous(), scale, dropout_p, causal=causal
     )
 
     return _online_softmax_merge(out, lse, out_j, l_j)
+
+
+def _causal_step_kind(kv_global_idx: int, q_global_idx: int) -> Optional[bool]:
+    """Classify a ring step's K/V chunk relative to this rank's own Q chunk.
+
+    Both chunks are ``n_local``-sized, contiguous, evenly-split shards of the
+    global sequence, so global chunk id alone (not position within the chunk)
+    decides visibility:
+
+    * ``kv_global_idx > q_global_idx``: every key is strictly in the future of
+      every query in this chunk -- fully masked, so the caller skips the step
+      entirely (returns ``None``).
+    * ``kv_global_idx == q_global_idx``: the "diagonal" block -- q and k start
+      at the same global offset, so the plain top-left triangular mask is the
+      causal boundary (returns ``True``).
+    * ``kv_global_idx < q_global_idx``: every key is at or before every query
+      in this chunk -- fully visible, no mask needed (returns ``False``).
+    """
+    if kv_global_idx > q_global_idx:
+        return None
+    return kv_global_idx == q_global_idx
 
 
 # --------------------------------------------------------------------------- #
@@ -145,7 +169,16 @@ def ring_forward(
     for step in range(ring_group_size):
         kj, vj = provider.get(step)
         provider.save_for_backward(step)
-        out, lse = _attend_step(ring_config, q, kj, vj, scale, dropout_p, out, lse)
+        step_causal = False
+        if ring_config.causal:
+            kind = _causal_step_kind(provider.global_chunk_idx(step), local_rank)
+            if kind is None:
+                provider.advance(step, ring_group_size)
+                continue
+            step_causal = kind
+        out, lse = _attend_step(
+            ring_config, q, kj, vj, scale, dropout_p, out, lse, causal=step_causal
+        )
         provider.advance(step, ring_group_size)
 
     ring_config.wait_offloads()

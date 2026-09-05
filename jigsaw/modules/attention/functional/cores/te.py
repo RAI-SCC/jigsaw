@@ -56,6 +56,7 @@ def _fused_attn_backend(
     seqlen_kv: int,
     head_dim: int,
     dropout_p: float,
+    mask_type: str = "no_mask",
 ) -> "tex.NVTE_Fused_Attn_Backend":
     """Ask cuDNN which fused-attention sub-backend serves this problem shape."""
     backend = tex.get_fused_attn_backend(
@@ -64,7 +65,7 @@ def _fused_attn_backend(
         TE_DType[dtype],
         QKVLayout[_LAYOUT],
         AttnBiasType["no_bias"],
-        AttnMaskType["no_mask"],
+        AttnMaskType[mask_type],
         SoftmaxType["vanilla"],
         dropout_p,
         n_heads,
@@ -94,12 +95,23 @@ def forward(
     v: torch.Tensor,
     scale: float,
     dropout_p: float,
+    causal: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """TE fused attention forward. Returns ``(out (b,h,s,d), logsumexp (b,h,s))``."""
+    """TE fused attention forward. Returns ``(out (b,h,s,d), logsumexp (b,h,s))``.
+
+    ``causal`` is only ever set for the ring's diagonal block (q/k chunks
+    starting at the same global offset, so ``s_q == s_kv``), where TE's
+    top-left-aligned ``"causal"`` mask is the correct causal boundary; every
+    other block is either fully visible (``causal=False``) or skipped entirely
+    by the caller.
+    """
+    mask_type = "causal" if causal else "no_mask"
     b, h, s_q, d = q.shape
     s_kv = k.shape[2]
     q_b, k_b, v_b = (t.transpose(1, 2).contiguous() for t in (q, k, v))  # -> bshd
-    backend = _fused_attn_backend(True, q_b.dtype, h, s_q, s_kv, d, dropout_p)
+    backend = _fused_attn_backend(
+        True, q_b.dtype, h, s_q, s_kv, d, dropout_p, mask_type
+    )
     cu_q = _full_cu_seqlens(b, s_q, q.device)
     cu_kv = _full_cu_seqlens(b, s_kv, q.device)
 
@@ -126,7 +138,7 @@ def forward(
         True,  # fast_zero_fill
         _LAYOUT,
         "no_bias",
-        "no_mask",
+        mask_type,
         "vanilla",
         (-1, -1),
         None,  # bottom_right_diagonal
@@ -149,6 +161,7 @@ def backward(
     logsumexp: torch.Tensor,
     scale: float,
     *_: object,
+    causal: bool = False,
     **__: object,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """TE fused attention backward from the saved (global) ``out`` / ``logsumexp``.
@@ -157,14 +170,15 @@ def backward(
     the dot-product-attention gradients using the passed ``o`` and ``lse``; with
     the ring's globally normalised ``out`` / ``lse`` this yields the correct
     per-chunk ``dQ/dK/dV``. Dropout is forced off, so the ``rng_state`` slot of
-    ``aux_ctx_tensors`` is a placeholder.
+    ``aux_ctx_tensors`` is a placeholder. See :func:`forward` for ``causal``.
     """
+    mask_type = "causal" if causal else "no_mask"
     b, h, s_q, d = q.shape
     s_kv = k.shape[2]
     q_b, k_b, v_b, o_b, do_b = (
         t.transpose(1, 2).contiguous() for t in (q, k, v, out, grad_out)
     )
-    backend = _fused_attn_backend(True, q_b.dtype, h, s_q, s_kv, d, 0.0)
+    backend = _fused_attn_backend(True, q_b.dtype, h, s_q, s_kv, d, 0.0, mask_type)
     cu_q = _full_cu_seqlens(b, s_q, q.device)
     cu_kv = _full_cu_seqlens(b, s_kv, q.device)
     # cuDNN's bwd wants the LSE shaped as its fwd emitted it: (b, h, s_q, 1).
@@ -200,7 +214,7 @@ def backward(
         True,  # fast_zero_fill
         _LAYOUT,
         "no_bias",
-        "no_mask",
+        mask_type,
         "vanilla",
         (-1, -1),
         None,  # bottom_right_diagonal

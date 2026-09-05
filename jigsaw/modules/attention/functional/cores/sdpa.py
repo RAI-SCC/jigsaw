@@ -15,7 +15,12 @@ import torch
 
 
 def forward(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale: float, dropout_p: float
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    scale: float,
+    dropout_p: float,
+    causal: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Flash attention forward pass. Returns (out, logsumexp).
 
@@ -35,6 +40,11 @@ def forward(
     * ``cum_seq_q`` / ``cum_seq_k`` (backward) are for nested/ragged batches
       only and stay ``None`` here.
     * backward returns ``(dq, dk, dv)`` in the same ``(B, H, S, d)`` layout.
+
+    ``causal`` is only ever set for the ring's diagonal block (q/k chunks
+    starting at the same global offset), where the kernel's top-left-aligned
+    triangular mask is the correct causal boundary; every other block is
+    either fully visible (``causal=False``) or skipped by the caller entirely.
     """
     q, k, v = [x.to(torch.float16) for x in (q, k, v)]
     out, logsumexp, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
@@ -42,7 +52,7 @@ def forward(
         k,
         v,
         dropout_p=dropout_p,
-        is_causal=False,
+        is_causal=causal,
         scale=scale,
         return_debug_mask=False,
     )
@@ -60,11 +70,12 @@ def backward(
     scale: float,
     max_q: float,
     max_k: float,
+    causal: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward call to flash attention. Returns (dq, dk, dv).
 
-    See :func:`forward` for the ``(B, H, S, d)`` layout and the meaning of
-    ``max_q`` / ``max_k`` / ``philox_*`` / ``cum_seq_*``.
+    See :func:`forward` for the ``(B, H, S, d)`` layout, the meaning of
+    ``max_q`` / ``max_k`` / ``philox_*`` / ``cum_seq_*``, and ``causal``.
     """
     dq, dk, dv = torch.ops.aten._scaled_dot_product_flash_attention_backward(
         grad_out,
@@ -74,7 +85,7 @@ def backward(
         out,
         logsumexp,
         dropout_p=0.0,
-        is_causal=False,
+        is_causal=causal,
         scale=scale,
         cum_seq_q=None,
         cum_seq_k=None,

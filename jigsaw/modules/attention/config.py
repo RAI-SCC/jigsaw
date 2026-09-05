@@ -324,6 +324,7 @@ class RingAttentionConfig:
         offload: Offload = Offload.DISABLED,
         gpus_per_node: int = 4,
         attn_backend: AttnBackend = AttnBackend.SDPA,
+        causal: bool = False,
     ):
         """Initialize the object.
 
@@ -349,6 +350,14 @@ class RingAttentionConfig:
             Inner per-chunk attention core. ``SDPA`` (default) keeps the
             device-based pick (flash on CUDA, math on CPU); ``TE`` uses the
             TransformerEngine fused core; ``MATH`` the unfused reference.
+        causal : bool
+            Whether the ring performs causal (autoregressive) attention. Each
+            rank's query chunk then only attends to K/V chunks at or before
+            its own global position: chunks strictly in the future are
+            skipped outright, the one chunk at the same global position (the
+            "diagonal" block) is masked causally, and every chunk strictly in
+            the past is attended in full -- see :func:`.forward.ring_forward`
+            and :func:`.backward.ring_backward`.
 
         """
         if gpus_per_node <= 0:
@@ -362,6 +371,7 @@ class RingAttentionConfig:
         self.gpus_per_node = gpus_per_node
         self.device = device
         self.attn_backend = AttnBackend(attn_backend)
+        self.causal = causal
 
         # Resolve every policy to its concrete callable, once.
         self.offloader = _select_offloader(offload, device)
@@ -396,5 +406,6 @@ class RingAttentionConfig:
             f"save_scope={self.save_scope.name}, "
             f"send_backward={self.send_backward.name}, "
             f"offload={self.offload.name}, "
-            f"attn_backend={self.attn_backend.name})"
+            f"attn_backend={self.attn_backend.name}, "
+            f"causal={self.causal})"
         )

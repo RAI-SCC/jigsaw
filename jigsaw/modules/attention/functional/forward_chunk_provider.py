@@ -121,15 +121,21 @@ class _ForwardChunkProvider(ABC):
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Make chunk ``step`` current and return its ``(kj, vj)``."""
 
-    def _global_chunk_idx(self, step: int) -> int:
-        """Global chunk id of the chunk held at ring ``step`` (GLOBAL save only)."""
+    def global_chunk_idx(self, step: int) -> int:
+        """Global chunk id of the ``(kj, vj)`` chunk held at ring ``step``.
+
+        Used both by :meth:`save_for_backward` (GLOBAL scope) and by the
+        causal ring loop (:func:`..forward.ring_forward`) to decide whether
+        that chunk is fully in the past, fully in the future, or the diagonal
+        block relative to this rank's own (``local_rank``-th) query chunk.
+        """
         raise NotImplementedError
 
     def save_for_backward(self, step: int) -> None:
         """Record the chunk currently in hand for the backward pass."""
         if self.config.save_scope != SaveScope.GLOBAL:
             return
-        self.chunks_to_save[self._global_chunk_idx(step)] = (
+        self.chunks_to_save[self.global_chunk_idx(step)] = (
             self.config.save_for_backward_fn(self.x_j, self.kv_j)
         )
 
@@ -187,7 +193,7 @@ class _RingForwardChunkProvider(_ForwardChunkProvider):
                 self._kv_from_x()
         return self.kj, self.vj
 
-    def _global_chunk_idx(self, step: int) -> int:
+    def global_chunk_idx(self, step: int) -> int:
         """``direction=-1`` ring: after ``step`` receives, ``x_j`` came from here."""
         return (self.local_rank + step) % self.world_size
 
@@ -247,7 +253,7 @@ class _BroadcastForwardChunkProvider(_ForwardChunkProvider):
                 self._kv_from_x()
         return self.kj, self.vj
 
-    def _global_chunk_idx(self, step: int) -> int:
+    def global_chunk_idx(self, step: int) -> int:
         """Step ``step`` broadcasts global chunk ``step`` to every rank."""
         return step
 
@@ -375,7 +381,7 @@ class _HybridP2PForwardChunkProvider(_HybridForwardChunkProvider):
             self._intra_handle.wait()
             self._recv(self._intra_recv_buf)
 
-    def _global_chunk_idx(self, step: int) -> int:
+    def global_chunk_idx(self, step: int) -> int:
         """Chunk at ``step`` is owned by ``(node_idx + node_step, local_idx + inner)``."""
         node_step, inner = divmod(step, self.gpn)
         cur_node = (self.topo.node_idx + node_step) % self.n_nodes
@@ -449,7 +455,7 @@ class _HybridBroadcastForwardChunkProvider(_HybridForwardChunkProvider):
             self.kv_j, self.kj, self.vj = recv_buf, recv_buf[0], recv_buf[1]
         return self.kj, self.vj
 
-    def _global_chunk_idx(self, step: int) -> int:
+    def global_chunk_idx(self, step: int) -> int:
         """Inner step ``inner`` broadcasts global chunk ``cur_node * gpn + inner``."""
         node_step, inner = divmod(step, self.gpn)
         cur_node = (self.topo.node_idx + node_step) % self.n_nodes

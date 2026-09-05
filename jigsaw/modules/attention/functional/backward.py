@@ -1,5 +1,7 @@
 """Backward implementations for ring attention."""
 
+from typing import Optional
+
 import torch
 import torch.distributed as dist
 
@@ -17,6 +19,58 @@ from .functional import HybridTopology, get_hybrid_topology
 # as inter-node, so a step's dK/dV belongs to local index ``local_idx + step``
 # rather than ``step`` (HYBRID_BROADCAST leaves the chunk put intra-node).
 _INTRA_ROTATING_HYBRIDS = frozenset({SendOp.HYBRID_P2P, SendOp.HYBRID_ALLTOALL})
+
+
+# --------------------------------------------------------------------------- #
+# backward: which global chunk is held at a given step
+# --------------------------------------------------------------------------- #
+def _step_global_chunk_idx(
+    ring_config: RingAttentionConfig,
+    local_rank: int,
+    step: int,
+    ring_group_size: int,
+    group: dist.ProcessGroup,
+) -> int:
+    """Global chunk id of the ``(kj, vj)`` chunk this rank holds at backward ``step``.
+
+    Mirrors the mapping :class:`~.forward_chunk_provider._ForwardChunkProvider`
+    subclasses expose via ``global_chunk_idx`` (backward re-circulates chunks
+    over the same topology, in reverse), used both to route a step's dK/dV to
+    its owning chunk (:func:`accumulate_dkv`, GATHER_DKV + LOCAL scope) and by
+    the causal ring loop (:func:`ring_backward`) to decide whether that chunk
+    is fully in the past, fully in the future, or the diagonal block relative
+    to this rank's own (``local_rank``-th) query chunk.
+    """
+    if ring_config.save_scope == SaveScope.GLOBAL or ring_config.send_op == SendOp.BROADCAST:
+        # GLOBAL: the forward stored `chunks_to_save` by global chunk id, so
+        # backward step `step` looks up global chunk `step` directly for every
+        # send_op. BROADCAST (any scope): step `step` broadcasts global chunk
+        # `step` to the whole ring, mirroring the forward broadcast provider.
+        return step
+    match ring_config.send_op:
+        case SendOp.HYBRID_P2P | SendOp.HYBRID_BROADCAST | SendOp.HYBRID_ALLTOALL:
+            topo = get_hybrid_topology(group, ring_config.gpus_per_node)
+            node_step = step // topo.gpus_per_node
+            local = (
+                topo.local_idx + step
+                if ring_config.send_op in _INTRA_ROTATING_HYBRIDS
+                else step
+            )
+            return topo.rank_at(topo.node_idx - node_step, local)
+        case _:
+            return (local_rank + step) % ring_group_size
+
+
+def _causal_step_kind(kv_global_idx: int, q_global_idx: int) -> Optional[bool]:
+    """Classify a backward step's K/V chunk relative to this rank's own Q chunk.
+
+    See :func:`.forward._causal_step_kind` -- the same three-way
+    skip / diagonal-mask / full-attend classification, mirrored for backward.
+    """
+    if kv_global_idx > q_global_idx:
+        return None
+    return kv_global_idx == q_global_idx
+
 
 # --------------------------------------------------------------------------- #
 # backward: main loop
@@ -87,10 +141,32 @@ def ring_backward(
 
     for step in range(ring_group_size):
         kj, vj, kv = chunk_provider.get(step)
-        dq_j, dk_j, dv_j = ring_config.attn_core_backward_fn(
-            dout, q, kj.to(core_dtype), vj.to(core_dtype), out, lse, scale,
-            seq_local, seq_local,
-        )
+
+        step_causal = False
+        skip = False
+        if ring_config.causal:
+            kv_global_idx = _step_global_chunk_idx(
+                ring_config, local_rank, step, ring_group_size, group
+            )
+            kind = _causal_step_kind(kv_global_idx, local_rank)
+            skip = kind is None
+            step_causal = bool(kind)
+
+        if skip:
+            # This step's K/V chunk is strictly in the future of every query
+            # in `q`: it contributed nothing in the forward pass, so its
+            # gradient contribution here is exactly zero. Still run the full
+            # accumulate/relay bookkeeping below (with zeros) so the
+            # communication pattern -- other ranks may depend on this chunk
+            # being forwarded on -- stays intact.
+            dq_j = torch.zeros_like(q, dtype=core_dtype)
+            dk_j = torch.zeros_like(kj, dtype=core_dtype)
+            dv_j = torch.zeros_like(vj, dtype=core_dtype)
+        else:
+            dq_j, dk_j, dv_j = ring_config.attn_core_backward_fn(
+                dout, q, kj.to(core_dtype), vj.to(core_dtype), out, lse, scale,
+                seq_local, seq_local, causal=step_causal,
+            )
         dq += dq_j
         del dq_j, kj, vj, kv
 
@@ -188,34 +264,12 @@ def accumulate_dkv(
             ring_config, dk_buf, dv_buf, dk_j, dv_j, step, group
         )
 
-    if ring_config.save_scope == SaveScope.GLOBAL:
-        # The forward stored `chunks_to_save` by global chunk id and
-        # `_GlobalChunkProvider` looks them up directly, so ring step
-        # `step` == global chunk index for every send_op.
-        global_chunk_idx = step
-    else:
-        # LOCAL scope: the backward chunk provider re-circulates chunks, so the
-        # global chunk this step's dK/dV belongs to depends on the send_op.
-        match ring_config.send_op:
-            case SendOp.HYBRID_P2P | SendOp.HYBRID_BROADCAST | SendOp.HYBRID_ALLTOALL:
-                # The chunk sits on node `node_idx - step // gpn` (the inter-node
-                # ring runs backwards relative to the forward). HYBRID_P2P and
-                # HYBRID_ALLTOALL also rotate it intra-node, so its local index
-                # is `local_idx + step`; HYBRID_BROADCAST leaves it put and
-                # node-local rank `step % gpn` was the broadcast source, so
-                # `step` is the local index.
-                topo = get_hybrid_topology(group, ring_config.gpus_per_node)
-                node_step = step // topo.gpus_per_node
-                local = (
-                    topo.local_idx + step
-                    if ring_config.send_op in _INTRA_ROTATING_HYBRIDS
-                    else step
-                )
-                global_chunk_idx = topo.rank_at(topo.node_idx - node_step, local)
-            case SendOp.BROADCAST:
-                global_chunk_idx = (local_rank - step) % ring_group_size
-            case _:
-                global_chunk_idx = (local_rank + step) % ring_group_size
+    # (BROADCAST + LOCAL never reaches here: `ring_backward` routes it through
+    # `all_reduce_dkv` instead, since a broadcast step gives every rank a
+    # partial for the *same* chunk rather than one this rank alone owns.)
+    global_chunk_idx = _step_global_chunk_idx(
+        ring_config, local_rank, step, ring_group_size, group
+    )
     return _accumulate_dkv_gather(
         dk_buf, dv_buf, dk_j, dv_j, seq_local, global_chunk_idx
     )

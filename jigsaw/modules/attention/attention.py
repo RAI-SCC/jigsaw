@@ -160,6 +160,7 @@ class DistributedAttention(torch.nn.Module):
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
         dtype: torch.dtype = torch.float32,
         config: Optional[attention_config.RingAttentionConfig] = None,
+        causal: bool = False,
     ):
         """
 
@@ -178,6 +179,12 @@ class DistributedAttention(torch.nn.Module):
         attn_backend: AttnBackend | str
             Attention core implementation -- ``"te"``, ``"sdpa"`` (default) or
             ``"math"``. See :class:`.config.AttnBackend`.
+        causal: bool
+            Whether to perform causal (autoregressive) attention -- position
+            ``i`` only attends to positions ``<= i``. For ``ring=True`` this is
+            forwarded to the default :class:`.config.RingAttentionConfig`
+            (built when ``config`` is not given); passing an explicit
+            ``config`` instead, its own ``causal`` setting wins.
         """
         super().__init__()
         self.local_rank = local_rank
@@ -191,6 +198,7 @@ class DistributedAttention(torch.nn.Module):
         self.dtype = dtype
         self.dropout_p = dropout_p
         self.ring = ring
+        self.causal = causal
 
         self.attn_backend = self._resolve_backend(AttnBackend(attn_backend))
         self.te = self.attn_backend == AttnBackend.TE
@@ -267,7 +275,7 @@ class DistributedAttention(torch.nn.Module):
 
         self.config = (
             attention_config.RingAttentionConfig(
-                device=device, attn_backend=self.attn_backend
+                device=device, attn_backend=self.attn_backend, causal=causal
             )
             if ring and config is None
             else config
@@ -305,7 +313,7 @@ class DistributedAttention(torch.nn.Module):
                     num_gqa_groups=self.heads,
                     # attention_dropout=self.dropout_p,
                     qkv_format="bshd",
-                    attn_mask_type="no_mask",
+                    attn_mask_type="causal" if self.causal else "no_mask",
                 )
                 return self._transformer_attn_core
             case AttnBackend.MATH:
@@ -349,7 +357,7 @@ class DistributedAttention(torch.nn.Module):
             ]
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, is_causal=False, dropout_p=self.dropout_p
+                q, k, v, is_causal=self.causal, dropout_p=self.dropout_p
             )
         return out
 
@@ -366,7 +374,7 @@ class DistributedAttention(torch.nn.Module):
         """
         with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.MATH]):
             out = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, is_causal=False, dropout_p=self.dropout_p
+                q, k, v, is_causal=self.causal, dropout_p=self.dropout_p
             )
         return out
 
@@ -500,6 +508,7 @@ class Attention(torch.nn.Module):
         dropout_p: float = 0.0,
         qk_norm: bool = False,
         dtype: torch.dtype = torch.float32,
+        causal: bool = False,
     ):
         """
         Initialize Attention module.
@@ -523,6 +532,9 @@ class Attention(torch.nn.Module):
             Boolean flag for whether to apply qk_norm before attn_core.
         dtype: torch.dtype
             Data type of the model and data.
+        causal: bool
+            Whether to perform causal (autoregressive) attention -- position
+            ``i`` only attends to positions ``<= i``.
         """
         super().__init__()
         self.qkv = torch.nn.Linear(
@@ -544,6 +556,7 @@ class Attention(torch.nn.Module):
         self.attn_core = self._attn_core
         self.qk_norm = qk_norm
         self.dtype = dtype
+        self.causal = causal
         if qk_norm:
             self.q_norm, self.k_norm = (
                 torch.nn.RMSNorm(self.head_dim),
@@ -580,7 +593,7 @@ class Attention(torch.nn.Module):
             ]
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, is_causal=False, dropout_p=self.dropout_p
+                q, k, v, is_causal=self.causal, dropout_p=self.dropout_p
             )
 
         return out
@@ -698,6 +711,7 @@ class Attention(torch.nn.Module):
             ring=ring,
             attn_backend=attn_backend,
             dtype=attention.dtype,
+            causal=attention.causal,
         )
 
         # Build the Distributed Linear and overwrite its weight

@@ -30,7 +30,7 @@ def _build_distributed(
         channel_group=mesh["col"],
         bayesian=False,
         qk_norm=False,
-        ring_attention=False,
+        ring=False,
     )
     kwargs.update(overrides)
     return attention.DistributedAttention(**kwargs)
@@ -110,8 +110,9 @@ class TestDistributedAttention:
         _assert_all_params_replicated(model, process_mesh_dict_2x2, device)
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("causal", [False, True])
     def test_converter_parity(
-        self, device: torch.device, process_mesh_dict_2x1x2: dict
+        self, device: torch.device, process_mesh_dict_2x1x2: dict, causal: bool
     ) -> None:
         """Serial ``Attention`` -> ``convert_to_jigsaw`` reproduces the forward, the input
         gradient and the ``head_concat`` weight/gradient.
@@ -120,6 +121,10 @@ class TestDistributedAttention:
         equivalent to a plain serial call. ``qkv`` is compared by sum because the
         converter permutes its ``[3, heads, head_dim, in]`` layout, so a plain
         gather does not line the elements back up.
+
+        ``causal=True`` needs no separate reference: the split is purely along
+        the channel dim, so every rank sees the whole (unsharded) sequence and
+        the serial module's own (causal) forward already is the reference.
         """
         mesh = process_mesh_dict_2x1x2
         col = mesh["col"]
@@ -127,7 +132,7 @@ class TestDistributedAttention:
 
         torch.manual_seed(1)  # identical serial reference on every rank
         serial = attention.Attention(
-            _IN_DIM, _EMBED_DIM, _OUT_DIM, _HEADS, device, dropout_p=0.0
+            _IN_DIM, _EMBED_DIM, _OUT_DIM, _HEADS, device, dropout_p=0.0, causal=causal
         )
         ref_qkv_w = serial.qkv.weight.detach().clone()
         ref_hc_w = serial.head_concat.weight.detach().clone()
@@ -146,6 +151,7 @@ class TestDistributedAttention:
         dist_model = attention.Attention.convert_to_jigsaw(
             serial, mesh, device, ring=False
         )
+        assert dist_model.causal is causal
 
         cshard = _IN_DIM // col.size()
         x_local = (
@@ -213,4 +219,4 @@ class TestDistributedAttention:
         with pytest.raises(AssertionError, match="heads is not divisible"):
             _build_distributed(process_mesh_dict_2x2, device, heads=3)
         with pytest.raises(AssertionError, match="Cannot perform ring attention"):
-            _build_distributed(process_mesh_dict_1x4, device, ring_attention=True)
+            _build_distributed(process_mesh_dict_1x4, device, ring=True)

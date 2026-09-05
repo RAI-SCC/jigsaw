@@ -215,6 +215,44 @@ class TestDistributedAttentionBackend:
 
         torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-4)
 
+    @pytest.mark.parametrize("backend", ["sdpa", "math"])
+    def test_causal_flag_wires_into_attn_core(
+        self, te_unavailable, device, solo_group, backend
+    ):
+        """``causal=True`` reaches ``is_causal`` on both the sdpa and math cores."""
+        model = _build_attn(backend, device, solo_group, causal=True)
+        core = model._attn_core if backend == "sdpa" else model._attn_core_math
+        torch.manual_seed(0)
+        q, k, v = (torch.randn(2, model.heads, 6, 4, device=device) for _ in range(3))
+
+        out = core(q, k, v)
+        ref = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+
+        torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-4)
+
+    def test_causal_defaults_false(self, te_unavailable, device, solo_group):
+        model = _build_attn("sdpa", device, solo_group)
+        assert model.causal is False
+
+    @pytest.mark.dist(4)
+    def test_causal_wires_ring_config(self, device, process_mesh_dict_4x1):
+        """``ring=True`` builds its default ``RingAttentionConfig`` with the same ``causal``."""
+        model = attention.DistributedAttention(
+            in_dim=16,
+            embed_dim=16,
+            out_dim=16,
+            heads=4,
+            dropout_p=0.0,
+            local_rank=process_mesh_dict_4x1["row"].rank(),
+            device=device,
+            spatial_group=process_mesh_dict_4x1["row"],
+            channel_group=process_mesh_dict_4x1["col"],
+            ring=True,
+            causal=True,
+        )
+        assert model.config is not None
+        assert model.config.causal is True
+
 
 # --------------------------------------------------------------------------- #
 # RingAttentionConfig: the asymmetric TE behaviour + repr
@@ -306,3 +344,45 @@ class TestBackendWithTe:
             .reshape(batch, seq, heads * head_dim)
         )
         torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)
+
+    def test_te_core_forward_backward_causal_matches_sdpa(self, device):
+        """``causal=True`` reaches the cuDNN ``"causal"`` mask type end-to-end.
+
+        Mirrors ``test_math_core_is_plain_softmax_attention`` /
+        ``test_causal_flag_wires_into_attn_core`` for the TE ring core.
+        """
+        from jigsaw.modules.attention.functional.cores import te as te_core
+
+        torch.manual_seed(0)
+        b, h, s, d = 2, 4, 16, 32
+        scale = d**-0.5
+        q, k, v = (
+            torch.randn(b, h, s, d, device=device, dtype=torch.bfloat16)
+            for _ in range(3)
+        )
+        for t in (q, k, v):
+            t.requires_grad_(True)
+
+        out, lse = te_core.forward(q, k, v, scale, 0.0, causal=True)
+        grad_out = torch.ones_like(out)
+        dq, dk, dv = te_core.backward(
+            grad_out,
+            q.detach(),
+            k.detach(),
+            v.detach(),
+            out.detach(),
+            lse.detach(),
+            scale,
+            causal=True,
+        )
+
+        ref = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, is_causal=True, scale=scale
+        )
+        ref.backward(grad_out)
+
+        torch.testing.assert_close(out, ref.detach(), rtol=2e-2, atol=2e-2)
+        assert q.grad is not None and k.grad is not None and v.grad is not None
+        torch.testing.assert_close(dq, q.grad, rtol=2e-2, atol=2e-2)
+        torch.testing.assert_close(dk, k.grad, rtol=2e-2, atol=2e-2)
+        torch.testing.assert_close(dv, v.grad, rtol=2e-2, atol=2e-2)
