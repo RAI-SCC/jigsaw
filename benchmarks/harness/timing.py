@@ -179,7 +179,7 @@ def benchmark(
     per_rank_median: Optional[list[float]] = None
     imbalance: Optional[float] = None
     if group is not None and dist.is_initialized():
-        # reduce each block to the slowest rank, then summarise
+        # reduce each block to the slowest rank, then summarize
         red = torch.tensor(times, device=device if is_cuda else "cpu")
         dist.all_reduce(red, op=dist.ReduceOp.MAX, group=group)
         agg = red.cpu().numpy()

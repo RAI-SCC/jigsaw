@@ -43,7 +43,7 @@ def run_grid(
     min_block_ms: float = 50.0,
     time_budget_s: float = 15.0,
 ) -> Path | None:
-    """Run every combo in ``combos`` and, on rank 0, write + summarise the run.
+    """Run every combo in ``combos`` and, on rank 0, write + summarize the run.
 
     Returns the run-file path on rank 0, else ``None``.
     """
