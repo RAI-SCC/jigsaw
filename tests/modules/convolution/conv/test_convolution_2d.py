@@ -1275,20 +1275,92 @@ class TestConv2dGroups:
         )
 
     @pytest.mark.dist(4)
-    @pytest.mark.parametrize("groups", [3, 9])
-    def test_incompatible_groups_rejected(
+    def test_channel_grouped_2x2(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """``groups=3`` not a multiple of ``col.size() == 2`` -- output-side straddling.
+
+        The full-channel gather then runs one plain conv per conv-group the local
+        output shard touches.
+        """
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            groups=3,
+        )
+
+    @pytest.mark.dist(4)
+    def test_channel_grouped_2x2_halo(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """Channel-grouped conv through the halo path (stride < kernel)."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            stride=2,
+            padding=1,
+            groups=3,
+        )
+
+    @pytest.mark.dist(4)
+    def test_channel_grouped_1x4(
+        self, device: torch.device, process_mesh_dict_1x4: dict
+    ) -> None:
+        """``groups=2`` on ``col.size() == 4`` -- input-side straddling, output shard clean."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_1x4,
+            in_channels=8,
+            out_channels=8,
+            kernel_size=4,
+            height=16,
+            width=16,
+            groups=2,
+        )
+
+    @pytest.mark.dist(6)
+    @pytest.mark.parametrize("stride,padding", [(4, 0), (2, 1)])
+    def test_channel_grouped_2x3(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x3: dict,
+        stride: int,
+        padding: int,
+    ) -> None:
+        """``groups=2`` on ``col.size() == 3`` -- the asked case, no-halo and halo."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x3,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=4,
+            height=24,
+            width=24,
+            stride=stride,
+            padding=padding,
+            groups=2,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [5, 7])
+    def test_indivisible_groups_rejected(
         self, device: torch.device, process_mesh_dict_2x2: dict, groups: int
     ) -> None:
-        """``1 < groups`` not a multiple of ``col.size()`` fails fast at construction.
-
-        ``col.size() == 2`` here, so an odd ``groups`` that still divides the
-        channel counts (18 is 2 * 9, 9 = 3 * 3) can only mean several channel
-        ranks share one conv-group -- unsupported.
-        """
-        with pytest.raises(NotImplementedError):
+        """``groups`` not dividing the channel counts fails fast at construction."""
+        with pytest.raises(ValueError):
             convolution.DistributedConv2D(
-                18,
-                18,
+                12,
+                12,
                 4,
                 device=device,
                 spatial_group=process_mesh_dict_2x2["row"],

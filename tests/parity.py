@@ -313,6 +313,27 @@ def _merge(
     return parts[0]
 
 
+def fold_grouped_transpose_weight(w_dense: torch.Tensor, groups: int) -> torch.Tensor:
+    """Fold a dense channel-grouped transpose weight into torch's grouped layout.
+
+    The distributed transpose conv keeps the channel-grouped weight (uneven
+    ``groups`` -- not a multiple of the channel-parallel group size) as a *dense*
+    ``(C_in, C_out, *kernel)`` tensor whose cross-conv-group blocks are zero.
+    ``torch.nn.functional.conv_transpose{1,2,3}d`` wants the block-sparse
+    ``(C_in, C_out / groups, *kernel)`` layout instead; per conv-group ``g`` its
+    ``C_out / groups`` output slots come from ``w_dense[g_in_block, g_out_block]``.
+    Applies equally to the weight and its gradient.
+    """
+    c_in, c_out = w_dense.shape[0], w_dense.shape[1]
+    cin_g, cout_g = c_in // groups, c_out // groups
+    folded = w_dense.new_zeros(c_in, cout_g, *w_dense.shape[2:])
+    for g in range(groups):
+        folded[g * cin_g : (g + 1) * cin_g] = w_dense[
+            g * cin_g : (g + 1) * cin_g, g * cout_g : (g + 1) * cout_g
+        ]
+    return folded
+
+
 def all_ranks_ok(ok: bool, device: torch.device, group: dist.ProcessGroup) -> bool:
     """
     Reduce a per-rank check with logical AND so every rank reaches the same verdict.

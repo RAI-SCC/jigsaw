@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 import jigsaw.modules.convolution as convolution
 from jigsaw.utils_aggregate import gather_1d_results, gather_results_as_list
-from tests.parity import assert_close
+from tests.parity import assert_close, fold_grouped_transpose_weight
 
 pytestmark = [pytest.mark.dist_required]
 
@@ -111,11 +111,16 @@ def _conv2d_transpose_reference_check(
     # --- reconstruct the equivalent global transpose convolution -----------
     # weight is (C_in, C_out // groups, kH, kW). The gather regime (groups == 1)
     # shards the output-channel axis (dim 1); the channel-local regime (groups a
-    # multiple of col.size()) shards the input-channel axis (dim 0) instead.
+    # multiple of col.size()) shards the input-channel axis (dim 0) instead. The
+    # channel-grouped regime (uneven groups) shards dim 1 too but as a *dense*
+    # (C_in, C_out // G, ...) block whose cross-group entries are zero -- fold it
+    # back to torch's block-sparse (C_in, C_out // groups, ...) layout.
     weight_dim = 0 if conv._channel_local else 1
     weight_global = gather_1d_results(
         conv.weight.detach(), mesh, dim=weight_dim, pm_key="col"
     ).clone()
+    if conv._channel_grouped:
+        weight_global = fold_grouped_transpose_weight(weight_global, groups)
     bias_global = gather_1d_results(
         conv.bias.detach(), mesh, dim=0, pm_key="col"
     ).clone()
@@ -170,6 +175,8 @@ def _conv2d_transpose_reference_check(
     w_grad_global = gather_1d_results(
         conv.weight.grad, mesh, dim=weight_dim, pm_key="col"
     )
+    if conv._channel_grouped:
+        w_grad_global = fold_grouped_transpose_weight(w_grad_global, groups)
     b_grad_global = gather_1d_results(conv.bias.grad, mesh, dim=0, pm_key="col")
 
     # Collective-safe: every rank reaches the same verdict, so a mismatch on a
@@ -187,8 +194,18 @@ def _conv2d_transpose_reference_check(
         device,
         model_group,
     )
+    # The channel-grouped path sums the per-group grad_output slabs in a
+    # different order than the single fused reference, so the bias grad drifts a
+    # touch past 1e-4.
+    bias_tol = 1e-3 if conv._channel_grouped else 1e-4
     assert_close(
-        "bias grad", b_grad_global, bias_global.grad, 1e-4, 1e-4, device, model_group
+        "bias grad",
+        b_grad_global,
+        bias_global.grad,
+        bias_tol,
+        bias_tol,
+        device,
+        model_group,
     )
 
 
@@ -591,15 +608,92 @@ class TestConv2dTransposeGroups:
         )
 
     @pytest.mark.dist(4)
-    @pytest.mark.parametrize("groups", [3, 9])
-    def test_incompatible_groups_rejected(
+    def test_channel_grouped_2x2(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """``groups=3`` not a multiple of ``col.size() == 2`` -- output-side straddling.
+
+        The full-channel gather then runs one plain transpose conv per conv-group
+        the local output shard touches.
+        """
+        _conv2d_transpose_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            groups=3,
+        )
+
+    @pytest.mark.dist(4)
+    def test_channel_grouped_2x2_halo(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """Channel-grouped transpose conv through the halo path (stride < kernel)."""
+        _conv2d_transpose_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            stride=2,
+            padding=1,
+            groups=3,
+        )
+
+    @pytest.mark.dist(4)
+    def test_channel_grouped_1x4(
+        self, device: torch.device, process_mesh_dict_1x4: dict
+    ) -> None:
+        """``groups=2`` on ``col.size() == 4`` -- input-side straddling, output shard clean."""
+        _conv2d_transpose_reference_check(
+            device,
+            process_mesh_dict_1x4,
+            in_channels=8,
+            out_channels=8,
+            kernel_size=4,
+            height=16,
+            width=16,
+            groups=2,
+        )
+
+    @pytest.mark.dist(6)
+    @pytest.mark.parametrize("stride,padding", [(4, 0), (2, 1)])
+    def test_channel_grouped_2x3(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x3: dict,
+        stride: int,
+        padding: int,
+    ) -> None:
+        """``groups=2`` on ``col.size() == 3`` -- no-halo and halo regimes."""
+        _conv2d_transpose_reference_check(
+            device,
+            process_mesh_dict_2x3,
+            in_channels=12,
+            out_channels=12,
+            kernel_size=4,
+            height=24,
+            width=24,
+            stride=stride,
+            padding=padding,
+            groups=2,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [5, 7])
+    def test_indivisible_groups_rejected(
         self, device: torch.device, process_mesh_dict_2x2: dict, groups: int
     ) -> None:
-        """``1 < groups`` not a multiple of ``col.size()`` fails at construction."""
-        with pytest.raises(NotImplementedError):
+        """``groups`` not dividing the channel counts fails fast at construction."""
+        with pytest.raises(ValueError):
             convolution.DistributedConv2DTranspose(
-                18,
-                18,
+                12,
+                12,
                 4,
                 device=device,
                 spatial_group=process_mesh_dict_2x2["row"],
