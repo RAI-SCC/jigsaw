@@ -465,50 +465,69 @@ def test_ring_forward_backward_te(
         assert torch.allclose(local_grad, ref_slice, atol=atol)
 
 
-@pytest.mark.dist(8)
-@pytest.mark.parametrize(
-    "send_in_forward", [config.SendForward.X, config.SendForward.KV]
-)
-@pytest.mark.parametrize(
-    "save_for_backward", [config.SaveBackward.X, config.SaveBackward.KV]
-)
-@pytest.mark.parametrize(
-    "send_op",
-    [
-        config.SendOp.HYBRID_P2P,
-        config.SendOp.HYBRID_ALLTOALL,
-        config.SendOp.HYBRID_BROADCAST,
-        config.SendOp.P2P,
-        config.SendOp.ALLTOALL,
-        config.SendOp.BROADCAST,
-    ],
-)
-@pytest.mark.parametrize(
-    "save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL]
-)
-@pytest.mark.parametrize(
-    "send_backward",
-    [config.SendBackward.SEND_DKV, config.SendBackward.GATHER_DKV],
-)
-@pytest.mark.parametrize("offloader", [config.Offload.DISABLED, config.Offload.CPU])
-def test_ring_hybrid(
+# Shared parametrization for the ``test_ring_hybrid*`` variants. Kept as a list
+# so both the 8-rank (``2 nodes x 4 GPUs``) and the 4-rank (``2 nodes x 2 GPUs``)
+# test stack the identical grid without duplicating six ``parametrize`` blocks.
+_RING_HYBRID_PARAMETRIZE = [
+    pytest.mark.parametrize(
+        "send_in_forward", [config.SendForward.X, config.SendForward.KV]
+    ),
+    pytest.mark.parametrize(
+        "save_for_backward", [config.SaveBackward.X, config.SaveBackward.KV]
+    ),
+    pytest.mark.parametrize(
+        "send_op",
+        [
+            config.SendOp.HYBRID_P2P,
+            config.SendOp.HYBRID_ALLTOALL,
+            config.SendOp.HYBRID_BROADCAST,
+            config.SendOp.P2P,
+            config.SendOp.ALLTOALL,
+            config.SendOp.BROADCAST,
+        ],
+    ),
+    pytest.mark.parametrize(
+        "save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL]
+    ),
+    pytest.mark.parametrize(
+        "send_backward",
+        [config.SendBackward.SEND_DKV, config.SendBackward.GATHER_DKV],
+    ),
+    pytest.mark.parametrize("offloader", [config.Offload.DISABLED, config.Offload.CPU]),
+]
+
+
+def _apply_ring_hybrid_parametrize(fn):
+    """Stack the shared ``test_ring_hybrid*`` parametrization onto ``fn``."""
+    for marker in reversed(_RING_HYBRID_PARAMETRIZE):
+        fn = marker(fn)
+    return fn
+
+
+def _check_ring_hybrid(
     device: torch.device,
-    process_mesh_dict_2x4: dict,
+    process_mesh_dict: dict,
     send_in_forward: config.SendForward,
     save_for_backward: config.SaveBackward,
     send_op: config.SendOp,
     save_scope: config.SaveScope,
     send_backward: config.SendBackward,
     offloader: config.Offload,
+    gpus_per_node: int,
 ) -> None:
-    """Verify if forward-backward pass works for ring attention."""
+    """Forward+backward parity check for one hybrid ring topology.
+
+    Shared body for :func:`test_ring_hybrid` (8 ranks, ``2 nodes x 4 GPUs``)
+    and :func:`test_ring_hybrid_single_node` (4 ranks, ``2 nodes x 2 GPUs``).
+    The hybrid node split is driven purely by ``gpus_per_node``, so both keep
+    ``n_nodes == 2`` and every ``HYBRID_*`` send op exercises a real intra-node
+    and a real inter-node sub-group.
+    """
     if (
         send_in_forward == config.SendForward.KV
         and save_for_backward == config.SaveBackward.X
     ):
         pytest.xfail("not yet supported")
-
-    process_mesh_dict = process_mesh_dict_2x4
 
     ring_config = config.RingAttentionConfig(
         device=device,
@@ -518,6 +537,7 @@ def test_ring_hybrid(
         save_scope=save_scope,
         send_backward=send_backward,
         offload=offloader,
+        gpus_per_node=gpus_per_node,
     )
 
     ring_forward = forward.build_ring_forward(ring_config)
@@ -685,4 +705,65 @@ def test_ring_hybrid(
         1e-5,
         device,
         ring_group,
+    )
+
+
+@pytest.mark.dist(8)
+@_apply_ring_hybrid_parametrize
+def test_ring_hybrid(
+    device: torch.device,
+    process_mesh_dict_2x4: dict,
+    send_in_forward: config.SendForward,
+    save_for_backward: config.SaveBackward,
+    send_op: config.SendOp,
+    save_scope: config.SaveScope,
+    send_backward: config.SendBackward,
+    offloader: config.Offload,
+) -> None:
+    """Verify forward-backward parity for the hybrid ring on 8 ranks.
+
+    The ring spans the full ``2 x 4`` model mesh and splits into
+    ``2 nodes x 4 GPUs`` (``gpus_per_node=4``).
+    """
+    _check_ring_hybrid(
+        device,
+        process_mesh_dict_2x4,
+        send_in_forward,
+        save_for_backward,
+        send_op,
+        save_scope,
+        send_backward,
+        offloader,
+        gpus_per_node=4,
+    )
+
+
+@pytest.mark.dist(4)
+@_apply_ring_hybrid_parametrize
+def test_ring_hybrid_single_node(
+    device: torch.device,
+    process_mesh_dict_4x1: dict,
+    send_in_forward: config.SendForward,
+    save_for_backward: config.SaveBackward,
+    send_op: config.SendOp,
+    save_scope: config.SaveScope,
+    send_backward: config.SendBackward,
+    offloader: config.Offload,
+) -> None:
+    """Verify forward-backward parity for the hybrid ring on 4 ranks.
+
+    Runs the 4-rank ring as ``2 nodes x 2 GPUs`` (``gpus_per_node=2``) so every
+    hybrid send op still exercises both its intra-node (2 members) and
+    inter-node (2 members) paths while fitting on a single 2-GPU node.
+    """
+    _check_ring_hybrid(
+        device,
+        process_mesh_dict_4x1,
+        send_in_forward,
+        save_for_backward,
+        send_op,
+        save_scope,
+        send_backward,
+        offloader,
+        gpus_per_node=2,
     )
