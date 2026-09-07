@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Optional
+from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -17,6 +18,17 @@ import torch.distributed as dist
 from jigsaw.modules.attention.config import RingAttentionConfig
 
 from .forward_chunk_provider import build_forward_chunk_provider
+from .functional import combine_dropout_seed
+
+
+def _draw_base_seed(device: torch.device) -> int:
+    """Draw a fresh per-call dropout base seed from the ambient default RNG.
+
+    Consumed once per ring-attention forward; every per-chunk sub-seed
+    (:func:`..functional.combine_dropout_seed`) derives from it deterministically,
+    so only this one int needs saving for backward to replay every chunk's mask.
+    """
+    return int(torch.randint(0, 2**31 - 1, (1,), device=device).item())
 
 
 # --------------------------------------------------------------------------- #
@@ -61,7 +73,8 @@ def _attend_step(
     lse: torch.Tensor,
     causal: bool = False,
     key_mask: Optional[torch.Tensor] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    seed: Optional[int],
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Run the attention core on (q, kj, vj) and merge into the running (out, lse).
 
     kj/vj may be views into a KV buffer; flash attention requires contiguous
@@ -69,13 +82,18 @@ def _attend_step(
     (see :func:`_causal_step_kind`); it is never set together with a skip.
     ``key_mask`` is this step's ``[B, n_local]`` slice of the global
     key-padding mask (see :func:`ring_forward`).
+    inputs, so they're materialized here. Returns the merged ``(out, lse)``
+    plus this step's ``rng_state`` (``None`` unless the core is one that
+    threads back opaque kernel RNG state instead of using ``seed`` -- see
+    :mod:`.cores`).
     """
-    out_j, l_j = ring_config.attn_core_forward_fn(
+    out_j, l_j, rng_state_j = ring_config.attn_core_forward_fn(
         q, kj.contiguous(), vj.contiguous(), scale, dropout_p, causal=causal,
-        key_mask=key_mask,
+        key_mask=key_mask,, seed=seed
     )
 
-    return _online_softmax_merge(out, lse, out_j, l_j)
+    o_new, l_new = _online_softmax_merge(out, lse, out_j, l_j)
+    return o_new, l_new, rng_state_j
 
 
 def _causal_step_kind(kv_global_idx: int, q_global_idx: int) -> Optional[bool]:
@@ -104,7 +122,16 @@ def _causal_step_kind(kv_global_idx: int, q_global_idx: int) -> Optional[bool]:
 # --------------------------------------------------------------------------- #
 def build_ring_forward(
     ring_config: RingAttentionConfig,
-) -> Callable[..., tuple[torch.Tensor, torch.Tensor, tuple]]:
+) -> Callable[
+    ...,
+    tuple[
+        torch.Tensor,
+        torch.Tensor,
+        tuple,
+        Optional[int],
+        tuple,
+    ],
+]:
     """Return the ring-attention forward.
 
     Kept for backwards compatibility: the concrete communication strategy is now
@@ -144,7 +171,13 @@ def ring_forward(
     ring_group_size: int,
     ring_config: RingAttentionConfig,
     key_padding_mask: Optional[torch.Tensor] = None,
-) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    tuple[torch.Tensor | None, ...],
+    Optional[int],
+    tuple[torch.Tensor | None, ...],
+]:
     """Forward pass for ring attention.
 
     One loop over ``ring_group_size`` ring steps: the
@@ -180,8 +213,10 @@ def ring_forward(
 
     Returns
     -------
-    tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]]
-        Attention output, log-sum-exp values, and the chunks saved for backward.
+    tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...], int | None, tuple[torch.Tensor | None, ...]]
+        Attention output, log-sum-exp values, the chunks saved for backward,
+        the dropout base seed (``None`` if ``dropout_p == 0``), and per-global-chunk
+        RNG state (see :func:`_attend_step`).
     """
     b, heads, n_local, d = q.shape
     out = torch.zeros_like(q)
@@ -196,6 +231,9 @@ def ring_forward(
     provider = build_forward_chunk_provider(
         ring_config, q, k, v, x, w_qkv, group, local_rank, ring_group_size
     )
+
+    base_seed = _draw_base_seed(q.device) if dropout_p > 0.0 else None
+    rng_states: list[Optional[torch.Tensor]] = [None] * ring_group_size
 
     for step in range(ring_group_size):
         kj, vj = provider.get(step)
@@ -217,8 +255,18 @@ def ring_forward(
             ring_config, q, kj, vj, scale, dropout_p, out, lse,
             causal=step_causal, key_mask=step_key_mask,
         )
+        global_chunk_idx = provider.global_chunk_idx(step)
+        seed = (
+            combine_dropout_seed(base_seed, local_rank, global_chunk_idx)
+            if base_seed is not None
+            else None
+        )
+        out, lse, rng_state_j = _attend_step(
+            ring_config, q, kj, vj, scale, dropout_p, out, lse, seed
+        )
+        rng_states[global_chunk_idx] = rng_state_j
         provider.advance(step, ring_group_size)
 
     ring_config.wait_offloads()
     out = out.to(q.dtype)
-    return out, lse, provider.result()
+    return out, lse, provider.result(), base_seed, tuple(rng_states)

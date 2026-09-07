@@ -306,7 +306,10 @@ class TestBackendWithTe:
         """
         import transformer_engine.pytorch as te
 
-        from jigsaw.modules.attention.attention import TransformerEngineAttention
+        from jigsaw.modules.attention.attention import (
+            TransformerEngineAttention,
+            _capture_rng_state,
+        )
 
         batch, seq, heads, head_dim = 2, 16, 4, 32
         attn = te.DotProductAttention(
@@ -327,7 +330,8 @@ class TestBackendWithTe:
         for t in (q, k, v):
             t.requires_grad_(True)
 
-        out = TransformerEngineAttention.apply(q, k, v, attn)
+        rng_state = _capture_rng_state(device)
+        out = TransformerEngineAttention.apply(q, k, v, attn, rng_state)
         assert out.shape == (batch, seq, heads * head_dim)
 
         out.sum().backward()

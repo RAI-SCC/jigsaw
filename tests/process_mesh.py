@@ -1,8 +1,11 @@
-import math
-
 import pytest
 import torch
-import torch.distributed as dist
+
+import jigsaw
+
+# These fixtures are thin wrappers over ``jigsaw.make_process_mesh``; they keep
+# the historical positional signatures and trim the result to the keys the tests
+# have always seen (leading replica axes such as ``dp`` stay out of the dict).
 
 
 def make_process_mesh(
@@ -12,51 +15,15 @@ def make_process_mesh(
     model_name: str = "model",
 ) -> dict:
     """Return process mesh with rows, columns, and model group."""
-    assert len(mesh_shape) == len(mesh_dim_names)
-
-    world_size = dist.get_world_size(group=None)
-    if -1 in mesh_shape:
-        index = mesh_shape.index(-1)
-        mesh_shape[index] = world_size // -torch.prod(torch.tensor(mesh_shape)).item()
-
-    # ``init_device_mesh`` happily builds a mesh that only spans the first
-    # ``prod(mesh_shape)`` ranks when the world is larger; the ranks left out
-    # then blow up in ``get_group`` while the rest block forever in the first
-    # collective. Fail loudly and identically on every rank instead.
-    mesh_numel = math.prod(mesh_shape)
-    assert mesh_numel == world_size, (
-        f"mesh_shape {mesh_shape} needs exactly {mesh_numel} ranks but the world "
-        f"has {world_size}; launch with -np {mesh_numel} or mark the test "
-        f"@pytest.mark.dist({mesh_numel})."
-    )
-
-    row_col_mesh = dist.device_mesh.init_device_mesh(
+    axes = dict(zip(mesh_dim_names, mesh_shape, strict=True))
+    model_axes = mesh_dim_names[-2:]
+    mesh = jigsaw.make_process_mesh(
+        axes,
         device_type=device_type,
-        mesh_shape=tuple(mesh_shape),
-        mesh_dim_names=tuple(mesh_dim_names),
+        model_parallel_axes=model_axes,
+        model_key=model_name,
     )
-    if len(mesh_shape) == 2:
-        model_mesh = dist.device_mesh.init_device_mesh(
-            device_type=device_type,
-            mesh_shape=tuple([mesh_shape[-1] * mesh_shape[-2]]),
-            mesh_dim_names=tuple([model_name]),
-        )
-    else:  #
-        model_mesh = dist.device_mesh.init_device_mesh(
-            device_type=device_type,
-            mesh_shape=tuple(
-                [math.prod(mesh_shape[:-2]), mesh_shape[-2] * mesh_shape[-1]]
-            ),
-            mesh_dim_names=tuple(["x", "model"]),
-        )
-
-    mesh = {
-        f"{mesh_dim_names[-2]}": row_col_mesh.get_group(mesh_dim_names[-2]),
-        f"{mesh_dim_names[-1]}": row_col_mesh.get_group(mesh_dim_names[-1]),
-        f"{model_name}": model_mesh.get_group(model_name),
-    }
-
-    return mesh
+    return {key: mesh[key] for key in (*model_axes, model_name)}
 
 
 def make_multi_spatial_mesh(
@@ -74,19 +41,11 @@ def make_multi_spatial_mesh(
     ``["sd", "sh", "sw"]``), a channel group under ``channel_name`` and a
     ``model_name`` group spanning every rank (spatial x channel).
     """
-    shape = tuple([*spatial_sizes, channel_size])
-    names = tuple([*spatial_names, channel_name])
-    nd_mesh = dist.device_mesh.init_device_mesh(
-        device_type=device_type, mesh_shape=shape, mesh_dim_names=names
-    )
-    model_mesh = dist.device_mesh.init_device_mesh(
-        device_type=device_type,
-        mesh_shape=(math.prod(shape),),
-        mesh_dim_names=(model_name,),
-    )
-    mesh = {name: nd_mesh.get_group(name) for name in names}
-    mesh[model_name] = model_mesh.get_group(model_name)
-    return mesh
+    axes = {
+        **dict(zip(spatial_names, spatial_sizes, strict=True)),
+        channel_name: channel_size,
+    }
+    return jigsaw.make_process_mesh(axes, device_type=device_type, model_key=model_name)
 
 
 @pytest.fixture(scope="session")

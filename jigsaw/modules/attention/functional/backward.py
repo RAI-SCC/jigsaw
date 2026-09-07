@@ -2,6 +2,8 @@
 
 from typing import Optional
 
+from typing import Optional
+
 import torch
 import torch.distributed as dist
 
@@ -13,7 +15,7 @@ from jigsaw.modules.attention.config import (
 )
 
 from .backward_chunk_provider import _build_backward_chunk_provider
-from .functional import HybridTopology, get_hybrid_topology
+from .functional import HybridTopology, combine_dropout_seed, get_hybrid_topology
 
 # Hybrid send-ops whose backward chunk provider rotates chunks intra-node as well
 # as inter-node, so a step's dK/dV belongs to local index ``local_idx + step``
@@ -72,6 +74,84 @@ def _causal_step_kind(kv_global_idx: int, q_global_idx: int) -> Optional[bool]:
     return kv_global_idx == q_global_idx
 
 
+
+# --------------------------------------------------------------------------- #
+# backward: which global chunk does step `step` hold?
+#
+# Shared by the dropout-mask seed lookup (below, before the core call) and
+# `accumulate_dkv`'s dK/dV bucketing (which needs the same answer *after* the
+# core call) -- both need to know, for LOCAL save_scope, which global chunk
+# the backward ring re-circulated into this step, and the mapping is the same
+# regardless of what either caller does with it.
+# --------------------------------------------------------------------------- #
+def _local_scope_global_chunk_idx(
+    ring_config: RingAttentionConfig,
+    local_rank: int,
+    step: int,
+    ring_group_size: int,
+    group: dist.ProcessGroup,
+) -> int:
+    """Global chunk id backward ``step`` holds, for ``SaveScope.LOCAL``.
+
+    Independent of ``send_backward``: :class:`~.backward_chunk_provider._LocalChunkProvider`
+    (and its hybrid / broadcast siblings) re-circulate chunks the same way
+    regardless of how dK/dV are later accumulated.
+
+    NOTE: the ``BROADCAST`` case is unreachable from :func:`accumulate_dkv` --
+    ``ring_backward``'s ``all_reduce_dkv`` shortcut catches every
+    ``send_op == BROADCAST and save_scope == LOCAL`` combination before it gets
+    there, regardless of ``send_backward`` -- so it was previously inert; it's
+    only exercised now via the dropout-seed lookup this function was extracted
+    to also serve.
+    """
+    match ring_config.send_op:
+        case SendOp.HYBRID_P2P | SendOp.HYBRID_BROADCAST | SendOp.HYBRID_ALLTOALL:
+            # The chunk sits on node `node_idx - step // gpn` (the inter-node
+            # ring runs backwards relative to the forward). HYBRID_P2P and
+            # HYBRID_ALLTOALL also rotate it intra-node, so its local index
+            # is `local_idx + step`; HYBRID_BROADCAST leaves it put and
+            # node-local rank `step % gpn` was the broadcast source, so
+            # `step` is the local index.
+            topo = get_hybrid_topology(group, ring_config.gpus_per_node)
+            node_step = step // topo.gpus_per_node
+            local = (
+                topo.local_idx + step
+                if ring_config.send_op in _INTRA_ROTATING_HYBRIDS
+                else step
+            )
+            return topo.rank_at(topo.node_idx - node_step, local)
+        case SendOp.BROADCAST:
+            # `_LocalChunkProviderBroadcast.get(step)` broadcasts from rank
+            # `step` (its *own* local chunk, i.e. global chunk `step`) to
+            # everyone -- the receiving rank's identity doesn't matter, mirroring
+            # the forward `_BroadcastForwardChunkProvider.global_chunk_idx(step) == step`.
+            return step
+        case _:
+            return (local_rank + step) % ring_group_size
+
+
+def global_chunk_idx_backward(
+    ring_config: RingAttentionConfig,
+    local_rank: int,
+    step: int,
+    ring_group_size: int,
+    group: dist.ProcessGroup,
+) -> int:
+    """Global chunk id that backward ``step`` processes, for any save_scope/send_op.
+
+    ``GLOBAL`` scope: the forward stored ``chunks_to_save`` by global chunk id
+    and :class:`~.backward_chunk_provider._GlobalChunkProvider` looks it up
+    directly, so ``step`` *is* the global chunk id. ``LOCAL`` scope
+    re-circulates chunks around the ring, so the mapping depends on
+    ``send_op`` -- see :func:`_local_scope_global_chunk_idx`.
+    """
+    if ring_config.save_scope == SaveScope.GLOBAL:
+        return step
+    return _local_scope_global_chunk_idx(
+        ring_config, local_rank, step, ring_group_size, group
+    )
+
+
 # --------------------------------------------------------------------------- #
 # backward: main loop
 # --------------------------------------------------------------------------- #
@@ -91,6 +171,9 @@ def ring_backward(
     chunks_to_save: tuple[torch.Tensor, ...],
     ring_config: RingAttentionConfig,
     key_padding_mask: Optional[torch.Tensor] = None,
+    dropout_p: float = 0.0,
+    base_seed: Optional[int] = None,
+    rng_states: Optional[tuple[Optional[torch.Tensor], ...]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for ring attention.
 
@@ -183,10 +266,20 @@ def ring_backward(
                 assert kv_global_idx is not None
                 lo, hi = kv_global_idx * seq_local, (kv_global_idx + 1) * seq_local
                 step_key_mask = global_key_mask[:, lo:hi]
-            dq_j, dk_j, dv_j = ring_config.attn_core_backward_fn(
+            global_chunk_idx = global_chunk_idx_backward(
+            ring_config, local_rank, step, ring_group_size, group
+        )
+        seed = (
+            combine_dropout_seed(base_seed, local_rank, global_chunk_idx)
+            if base_seed is not None
+            else None
+        )
+        rng_state = rng_states[global_chunk_idx] if rng_states is not None else None
+        dq_j, dk_j, dv_j = ring_config.attn_core_backward_fn(
                 dout, q, kj.to(core_dtype), vj.to(core_dtype), out, lse, scale,
                 seq_local, seq_local, causal=step_causal, key_mask=step_key_mask,
-            )
+                dropout_p=dropout_p, seed=seed, rng_state=rng_state,
+        )
         dq += dq_j
         del dq_j, kj, vj, kv
 

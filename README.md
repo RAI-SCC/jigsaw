@@ -108,7 +108,29 @@ conv and norm layers but not attention (it force-casts q/k/v). `float8` is not s
 any hand-rolled layer — it needs TransformerEngine's own `fp8_autocast` path.
 
 ### Process mesh
-Each module accepts a ```process_mesh_dict```, where the last two dimensions represent the DTP. Default kw for the dictionary are ``row`` and ``col``. There are two options
+Each module accepts a ```process_mesh_dict``` -- a mapping ``{axis name -> ProcessGroup}``. The last two axes represent the DTP (default kw ``row`` and ``col``); any leading axes are data-parallel replicas. On top of the per-axis groups the dict carries a ``model`` group spanning one full parameter replica, which the parameter-free matmul, the weight-merging converters and seed setup all read.
+
+Build one with `jigsaw.make_process_mesh`, which takes an ordered ``{name: size}`` mapping (one axis may be `-1`, inferred from the world size) and adds the flattened ``model`` group:
+
+```python
+import torch.distributed as dist
+import jigsaw
+
+dist.init_process_group("nccl")
+
+# fully domain--tensor parallel: (4, 2) shards params across all 8 ranks
+mesh = jigsaw.make_process_mesh({"row": 4, "col": 2})
+
+# data parallel over `dp`, DTP over row x col; `model` spans one row x col replica
+mesh = jigsaw.make_process_mesh(
+    {"dp": -1, "row": 2, "col": 2}, model_parallel_axes=("row", "col")
+)
+
+# convolution: split the domain over several spatial axes plus a channel axis
+mesh = jigsaw.make_process_mesh({"sh": 2, "sw": 2, "col": 2})
+```
+
+There are two options
 1) Training the model in a fully domain--tensor parallel manner. This means that a process mesh of size (4, 2) will have the parameters sharded across 8 processes.
 2) Training the model with domain-parallelism across the ``rows`` axis, and with domain--tensor parallelism across the ``col`` axis. See the individual modules for detailed usage.
 
