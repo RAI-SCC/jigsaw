@@ -4,40 +4,12 @@ from typing import Any, cast
 
 import torch
 import torch.distributed as dist
-import torch.distributed._functional_collectives as _funcol
 from torch._C._functorch import maybe_current_level
 
 from jigsaw.comm import get_empty, resolve_matmul_dtype
 from jigsaw.modules.buffers import get_preallocated_buffer
 
-
-def _peer_grad_output_under_vmap(
-    grad_output: torch.Tensor, mod: int, model_group: dist.ProcessGroup
-) -> torch.Tensor:
-    """The other rank's ``grad_output``, fetched with a vmap-safe collective.
-
-    ``fused_xw_xtw_twoway`` normally swaps ``grad_output`` with its single peer
-    through ``dist.all_to_all``. That op has no ``functorch`` batching rule, so
-    when the linear layer's backward runs *inside* ``vmap`` (a Bayesian
-    ensemble differentiated with ``vmap(grad(...))``) the swap raises
-    "Batching rule not implemented for c10d::alltoall_". The lowered functional
-    ``all_gather`` collective does have a batching rule, so on that path we
-    all-gather both ranks' ``grad_output`` and pick the peer's half. Only ever
-    hit under a transform -- the eager path keeps the original ``all_to_all``.
-
-    The raw ``_c10d_functional`` ops are called directly rather than via the
-    ``all_gather_tensor`` wrapper: the wrapper's autograd ``Function`` has no
-    ``setup_context`` and ``functorch``'s grad transform rejects it.
-    """
-    group_name = _funcol._resolve_group_name(model_group)
-    # This is a backward pass already; the exchanged gradient does not itself
-    # need to be differentiable, and detaching keeps the raw op's autograd
-    # wrapper (which lacks ``setup_context``) off the functorch grad path.
-    x = grad_output.detach().contiguous().unsqueeze(0)
-    gathered = torch.ops._c10d_functional.all_gather_into_tensor(x, 2, group_name)
-    gathered = torch.ops._c10d_functional.wait_tensor(gathered)
-    return gathered[1 - mod]
-
+from ._vmap_collectives import vmap_safe_peer_exchange
 
 streams = None
 streamz = None
@@ -113,7 +85,7 @@ def fused_xw_xtw_twoway(
         # ``vmap(grad(...))``): ``dist.all_to_all`` has no batching rule. Fetch
         # the peer's ``grad_output`` with a vmap-safe collective and run the
         # same maths synchronously.
-        buffer_x = _peer_grad_output_under_vmap(grad_output, mod, model_group)
+        buffer_x = vmap_safe_peer_exchange(grad_output, mod, model_group)
         match mod:
             case 0:
                 grad_input = torch.matmul(grad_output, w0) + torch.matmul(buffer_x, w1)

@@ -4,33 +4,13 @@ from typing import Any, Optional, Protocol, Union, cast
 
 import torch
 import torch.distributed as dist
-from torch.nn.parameter import Parameter
-
 from torch._C._functorch import maybe_current_level
+from torch.nn.parameter import Parameter
 
 from jigsaw.autocast import cast_to_autocast_dtype
 
+from ._vmap_collectives import vmap_safe_all_reduce_sum
 from .config import LinearConfig
-
-
-def _vmap_safe_all_reduce_sum(
-    t: torch.Tensor, group: "dist.ProcessGroup"
-) -> torch.Tensor:
-    """SUM all-reduce ``t`` over ``group`` with a functorch-batchable collective.
-
-    A plain ``DistributedXWT`` relies on a ``post_accumulate_grad_hook`` to sum
-    each spatial rank's weight/bias gradient across the spatial group. Under
-    ``functional_call`` + ``vmap(grad(...))`` (Bayesian ensembles) params carry
-    no ``.grad`` and that hook never runs, so the reduction has to happen inside
-    the autograd ``Function``'s backward instead. ``dist.all_reduce`` has no
-    batching rule; the lowered ``_c10d_functional`` op does. Detached because
-    this is a backward pass -- the reduced gradient is not itself differentiated.
-    """
-    import torch.distributed._functional_collectives as funcol
-
-    group_name = funcol._resolve_group_name(group)
-    out = torch.ops._c10d_functional.all_reduce(t.detach().contiguous(), "sum", group_name)
-    return torch.ops._c10d_functional.wait_tensor(out)
 
 
 class LinearCtx(Protocol):
@@ -229,9 +209,9 @@ class XWT(torch.autograd.Function):
             and spatial_group is not None
             and dist.get_world_size(spatial_group) > 1
         ):
-            grad_weight = _vmap_safe_all_reduce_sum(grad_weight, spatial_group)
+            grad_weight = vmap_safe_all_reduce_sum(grad_weight, spatial_group)
             if grad_b is not None:
-                grad_b = _vmap_safe_all_reduce_sum(grad_b, spatial_group)
+                grad_b = vmap_safe_all_reduce_sum(grad_b, spatial_group)
 
         return grad_input, grad_weight, grad_b, None, None, None, None, None, None
 

@@ -20,14 +20,17 @@ of integration:
    ``all_to_all``.
 3. :class:`TestDistributedAttentionEnsembleVmap` -- a full non-ring
    ``DistributedAttention`` under ``vmap(functional_call(...))`` with stacked
-   ensemble parameters, vs a per-member loop, sdpa and te. **Forward passes**
-   for both backends. **Grad xfails** for both: the te core's
-   ``TransformerEngineAttention.backward`` recomputes the fused kernel under
-   ``enable_grad`` + ``requires_grad_()`` (forbidden inside a functorch
-   transform), and the sdpa path's ensemble ``qkv.weight`` grad drifts because
-   functorch's generic batched fallback for the ``_c10d_functional``
-   collectives in ``XWT.backward`` issues one un-lockstepped collective per
-   ensemble member.
+   ensemble parameters, vs a per-member loop, sdpa and te. **Forward and grad
+   pass** for both backends. Grad needed two fixes: ``XWT.backward``'s spatial
+   all-reduce and two-way peer exchange go through
+   :mod:`jigsaw.modules.linear._vmap_collectives` (whose ``vmap`` staticmethods
+   absorb the ensemble axis and run one *synchronous* collective -- functorch's
+   generic fallback issues an async collective per member and the last member's
+   ``wait_tensor`` does not block), and
+   ``TransformerEngineAttention.backward`` peels the functorch wrappers, folds
+   the ensemble axis into the batch and recomputes on plain tensors with the
+   transform stack suspended (TE's fused kernel dereferences storage pointers
+   and cannot see a ``TensorWrapper``).
 4. :class:`TestRingVmap` -- ``torch.vmap`` over a ``ring=True``
    ``DistributedAttention``. ``RingAttentionFunction.vmap`` folds the members
    axis into the batch, runs one un-vmapped ring pass and unfolds. Forward
@@ -264,13 +267,21 @@ class TestDistributedAttentionEnsembleVmap:
     * ``config.reshape_weights`` / ``grad_sum`` reduce relative to the trailing
       weight axes (``unsqueeze(-3)`` / ``sum(dim=-3)``) so they are correct
       whether or not ``vmap`` has peeled the members axis.
-    * ``fused_xw_xtw_twoway`` swaps ``grad_output`` with a vmap-batchable
-      ``all_gather`` (``dist.all_to_all`` has no batching rule), and
-      ``get_preallocated_buffer`` hands back a fresh tensor rather than mutating
+    * ``fused_xw_xtw_twoway`` swaps ``grad_output`` with its channel peer, and
+      ``XWT.backward`` all-reduces the weight/bias grad over the spatial group
+      itself (the ``post_accumulate_grad_hook`` that normally does it never
+      fires under ``functional_call``). Both go through
+      :mod:`jigsaw.modules.linear._vmap_collectives`: a bare
+      ``_c10d_functional`` collective in a functorch-batched backward falls back
+      to one *async* op per member and the last member's ``wait_tensor`` does
+      not block, so the last ensemble member's grad drifts by whole units.
+    * ``get_preallocated_buffer`` hands back a fresh tensor rather than mutating
       its module-level cache (forbidden on a captured tensor under ``grad``).
-    * ``XWT.backward`` performs the spatial-group weight/bias grad all-reduce
-      itself -- the ``post_accumulate_grad_hook`` that normally does it never
-      fires under ``functional_call``.
+    * the ``te`` core's ``TransformerEngineAttention.backward`` peels the
+      functorch wrappers off q/k/v/grad_out, folds the ensemble axis into the
+      batch and recomputes on plain tensors with the transform stack suspended
+      -- TE's fused kernel dereferences storage pointers and cannot see a
+      ``TensorWrapper`` -- then re-wraps the grads onto the recorded chain.
 
     The reference's ``head_concat.bias`` grad is scaled down by the spatial
     size: ``DistributedAttention`` registers a *second*, redundant spatial
@@ -364,12 +375,6 @@ class TestDistributedAttentionEnsembleVmap:
 
     @pytest.mark.dist(4)
     @pytest.mark.te_required
-    @pytest.mark.xfail(
-        strict=True,
-        reason="TransformerEngineAttention.backward recomputes the fused kernel "
-        "under enable_grad + requires_grad_(), which functorch's grad transform "
-        "forbids; the te core has no vmap(grad(...)) path.",
-    )
     def test_te_ensemble_vmap_grad(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
@@ -381,18 +386,6 @@ class TestDistributedAttentionEnsembleVmap:
             )
 
     @pytest.mark.dist(4)
-    @pytest.mark.xfail(
-        strict=True,
-        reason="``head_concat`` grads match on the spatial ranks that own the "
-        "reduction, but the ensemble ``qkv.weight`` grad -- back-propagated "
-        "through the attention core under the members-fold -- drifts far past "
-        "tolerance (max abs diff ~5-10) and one ensemble member's grad is near "
-        "zero. Root cause is functorch's generic batched fallback for the "
-        "spatial ``all_reduce`` / peer ``all_gather`` in ``XWT.backward``: it "
-        "issues one collective per members slice with no cross-rank lockstep "
-        "guarantee. Needs a real functorch batching rule for the "
-        "``_c10d_functional`` collectives.",
-    )
     def test_sdpa_ensemble_vmap_grad(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:

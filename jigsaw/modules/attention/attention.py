@@ -113,27 +113,127 @@ try:
             ctx.rng_state = rng_state
 
         @staticmethod
+        def _recompute_grads(
+            attn: "te.DotProductAttention",
+            rng_state: tuple,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            grad_out: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            """dq/dk/dv via a plain-eager recompute of ``attn(q, k, v)``.
+
+            ``q``/``k``/``v``/``grad_out`` must be ordinary tensors -- no
+            functorch wrappers, no live transform on the stack (TE's fused
+            kernel dereferences storage pointers and cannot see a
+            ``TensorWrapper``). The RNG state ``forward`` saw is replayed so a
+            dropout-enabled ``attn`` draws the identical mask, then the caller's
+            state is restored so the recompute leaves the ambient stream
+            untouched.
+            """
+            with torch.enable_grad():
+                qd, kd, vd = (t.detach().requires_grad_(True) for t in (q, k, v))
+                current_state = _capture_rng_state(q.device)
+                _restore_rng_state(rng_state, q.device)
+                try:
+                    out = attn(qd, kd, vd)
+                finally:
+                    _restore_rng_state(current_state, q.device)
+                return torch.autograd.grad(
+                    out, (qd, kd, vd), grad_out, retain_graph=False
+                )
+
+        @staticmethod
         def backward(  # type: ignore[override]
             ctx: Any, grad_out: torch.Tensor
         ) -> tuple[Optional[torch.Tensor], ...]:
-            """Recompute the TE forward under grad and pull out dq/dk/dv."""
+            """Recompute the TE forward under grad and pull out dq/dk/dv.
+
+            On the plain path this is a straight eager recompute. On the
+            ``vmap(grad(...))`` (Bayesian-ensemble) path this ``backward`` is
+            itself invoked inside the ``grad`` transform: ``requires_grad_()``
+            raises there and, worse, TE's fused kernel cannot read the storage
+            of a functorch ``TensorWrapper``. The ensemble axis has already been
+            folded into the batch by :meth:`vmap`, so the only thing in the way
+            is the wrappers themselves -- peel them, run the ordinary recompute
+            with the transform stack suspended, and let ``grad`` re-wrap the
+            returned grads.
+            """
             q, k, v = ctx.saved_tensors
-            with torch.enable_grad():
-                qd, kd, vd = (t.detach().requires_grad_(True) for t in (q, k, v))
-                # Replay the RNG state `forward` saw, so a dropout-enabled `attn`
-                # draws the same mask here as it did originally; restore the
-                # caller's own state afterwards so this recompute has no
-                # observable side effect on the ambient RNG stream.
-                current_state = _capture_rng_state(q.device)
-                _restore_rng_state(ctx.rng_state, q.device)
-                try:
-                    out = ctx.attn(qd, kd, vd)
-                finally:
-                    _restore_rng_state(current_state, q.device)
-                grads = torch.autograd.grad(
-                    out, (qd, kd, vd), grad_out, retain_graph=False
+
+            if not torch._C._are_functorch_transforms_active():
+                dq, dk, dv = TransformerEngineAttention._recompute_grads(
+                    ctx.attn, ctx.rng_state, q, k, v, grad_out
                 )
-            return grads[0], grads[1], grads[2], None, None
+                return dq, dk, dv, None, None
+
+            import torch._C._functorch as _ft
+
+            # Record the wrapper chain on ``grad_out`` (outer -> inner) so the
+            # recomputed grads can be re-wrapped identically. Every input here
+            # (saved q/k/v, grad_out) carries the same chain: a ``grad`` layer
+            # from the enclosing ``grad(...)``, and -- on the ensemble path -- a
+            # ``vmap`` batched layer under it.
+            chain: list[tuple[str, int, Optional[int]]] = []
+            probe = grad_out
+            while _ft.is_functorch_wrapped_tensor(probe):
+                lvl = _ft.maybe_get_level(probe)
+                if _ft.is_batchedtensor(probe):
+                    chain.append(("vmap", lvl, _ft.maybe_get_bdim(probe)))
+                else:
+                    chain.append(("grad", lvl, None))
+                probe = _ft.get_unwrapped(probe)
+
+            def _peel(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+                if t is None:
+                    return None
+                while _ft.is_functorch_wrapped_tensor(t):
+                    t = _ft.get_unwrapped(t)
+                return t
+
+            vmap_bdim = next((bd for kind, _, bd in chain if kind == "vmap"), None)
+
+            saved_layers = []
+            try:
+                while _ft.get_dynamic_layer_stack_depth() > 0:
+                    saved_layers.append(_ft.pop_dynamic_layer_stack())
+
+                qp, kp, vp, gp = (_peel(t) for t in (q, k, v, grad_out))
+                rng_p = tuple(_peel(t) for t in ctx.rng_state)
+
+                # Fold the vmapped ensemble axis into the batch (mirroring
+                # :meth:`vmap`) so TE sees a plain 4D ``bshd`` tensor.
+                n = None if vmap_bdim is None else qp.shape[vmap_bdim]
+
+                def _fold(t: torch.Tensor) -> torch.Tensor:
+                    if vmap_bdim is None:
+                        return t.contiguous()
+                    return t.movedim(vmap_bdim, 0).flatten(0, 1).contiguous()
+
+                dq, dk, dv = TransformerEngineAttention._recompute_grads(
+                    ctx.attn, rng_p, _fold(qp), _fold(kp), _fold(vp), _fold(gp)
+                )
+
+                def _unfold(t: torch.Tensor) -> torch.Tensor:
+                    if vmap_bdim is None:
+                        return t
+                    return t.unflatten(0, (n, -1)).movedim(0, vmap_bdim)
+
+                dq, dk, dv = (_unfold(dq), _unfold(dk), _unfold(dv))
+            finally:
+                for layer in reversed(saved_layers):
+                    _ft.push_dynamic_layer_stack(layer)
+
+            # Replay the recorded wrapper chain (inner -> outer) onto each grad.
+            def _rewrap(t: torch.Tensor) -> torch.Tensor:
+                for kind, lvl, bd in reversed(chain):
+                    if kind == "vmap":
+                        t = _ft._add_batch_dim(t, bd, lvl)
+                    else:
+                        t = _ft._wrap_for_grad(t, lvl)
+                return t
+
+            return _rewrap(dq), _rewrap(dk), _rewrap(dv), None, None
 
         @staticmethod
         def vmap(
