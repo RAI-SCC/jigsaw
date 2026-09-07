@@ -98,6 +98,15 @@ class ConvTransposeNdConfig:
         if self.channel_grouped:
             # The streaming ring cannot express per-group accumulation; the
             # channel-grouped regime always uses the one-shot gather.
+            #
+            # Limitation: this gather is unconditionally *full*. Every rank
+            # all-gathers all ``G`` input-channel shards and materialises the
+            # whole ``C_in`` activation (backward reduce-scatters the whole
+            # ``C_in`` gradient), even though a rank only needs the input spans
+            # of the conv-groups its ``C_out / G`` output shard touches -- often
+            # a strict subset of the other ranks' shards. Gathering just the
+            # overlapping ranks is possible in principle but not implemented;
+            # the cost does not shrink as a rank's share of conv-groups shrinks.
             self.channel_comm = "all_gather"
             self.in_channels = in_channels
             self.out_channels = out_channels

@@ -201,6 +201,13 @@ def _over_channels_grouped_gather(
     ``[in_lo:in_hi]``. Each partial conv is a plain ``groups=1`` conv
     (``conv_kwargs["groups"]`` is 1 here).
 
+    Limitation: the gather is always the *full* ``gather_full_channels`` -- every
+    rank receives all ``G`` input-channel shards and holds the whole ``C_in``
+    activation, regardless of how few conv-groups its output shard owns. A rank
+    only needs the ``[in_lo:in_hi]`` spans of the groups in ``group_blocks``, so
+    a narrower gather over just the overlapping ranks would suffice, but it is
+    not implemented.
+
     Returns ``(y, x_full)`` -- ``x_full`` (halo-padded along the split axis when
     ``halo_fn`` is given) is kept for the backward pass.
     """

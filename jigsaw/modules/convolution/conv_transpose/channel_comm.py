@@ -226,6 +226,13 @@ def _over_channels_transpose_grouped_gather(
     halo reduce) and the bias are applied once to the concatenated output,
     matching :func:`_over_channels_all_gather`.
 
+    Limitation: the gather is always the *full* ``gather_full_channels`` -- every
+    rank receives all ``G`` input-channel shards and holds the whole ``C_in``
+    activation, regardless of how few conv-groups its output shard owns. A rank
+    only needs the ``[in_lo:in_hi]`` spans of the groups in ``group_blocks``, so
+    a narrower gather over just the overlapping ranks would suffice, but it is
+    not implemented.
+
     Returns ``(y, x_full)`` -- ``x_full`` is kept for the backward pass.
     """
     x_full = gather_full_channels(x.contiguous(), channel_group, channel_dim)
