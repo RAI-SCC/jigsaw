@@ -16,7 +16,6 @@ class LinearConfig:
         self,
         parallelism: int,
         bias: torch.Tensor | None,
-        bayesian: bool,
         linear_layer: bool = True,
         device: torch.device = torch.device("cuda"),
     ):
@@ -28,8 +27,6 @@ class LinearConfig:
             Number of processes participating in parallel execution.
         bias : torch.Tensor | None
             Optional bias parameter.
-        bayesian : bool
-            Whether to use Bayesian parameter sampling.
         linear_layer : bool
             Whether the operation belongs to a linear layer.
         device : torch.device
@@ -37,49 +34,9 @@ class LinearConfig:
 
         """
         self.mm_kernels = self._mm_kernel_selection(parallelism, device)
-        self.grad_bias = self._grad_bias_selection(parallelism, bias, bayesian)
-        self.add_bias = self._add_bias_selection(bias, bayesian)
-        self.reshape_weights = self._reshape_weights_selection(bayesian, linear_layer)
+        self.grad_bias = self._grad_bias_selection(parallelism, bias)
+        self.add_bias = self._add_bias_selection(bias)
         self.grad_sum = self._sum_grad_weights_selection(linear_layer)
-
-    # reshape weights
-    def _reshape_weights_selection(
-        self, bayesian: bool, linear_layer: bool
-    ) -> Callable:
-        """
-        Selector function to decide if .
-
-        Parameters
-        ----------
-        bayesian: bool
-            Flag to see if the weight reshape is necessary.
-        linear_layer: bool
-            Flag to see if the module has weights.
-        """
-        # If the model is Bayesian and the module is a linear layer,
-        # weight reshape will be necessary.
-        if linear_layer and bayesian:
-            return self._reshape_weights
-        # If it is a distributed matrix operation with no explicit
-        # weight sampling, weight reshape is not needed.
-        else:
-            return self._no_reshape_weights
-
-    def _reshape_weights(self, w: torch.Tensor) -> torch.Tensor:
-        """
-        Reshape weights for vmap by unsqueezing in the batch dimension.
-
-        Parameters
-        ----------
-        w: torch.tensor
-            model weights.
-        """
-        w = w.unsqueeze(1)
-        return w
-
-    def _no_reshape_weights(self, w: torch.Tensor) -> torch.Tensor:
-        """Return weights as-is. Dummy identity function."""
-        return w
 
     def _sum_grad_weights_selection(self, linear_layer: bool) -> Callable:
         """Determine if summation over batch dimension is necessary."""
@@ -89,49 +46,45 @@ class LinearConfig:
             return self._no_grad_sum
 
     def _no_grad_sum(
-        self, grad_weight: torch.Tensor, batch_dim: torch.Tensor
+        self, grad_weight: torch.Tensor, members: bool = False
     ) -> torch.Tensor:
         """Identity function to return gradient weights."""
         return grad_weight
 
     def _grad_sum(
-        self, grad_weight: torch.Tensor, batch_dim: torch.Tensor
+        self, grad_weight: torch.Tensor, members: bool = False
     ) -> torch.Tensor:
-        """Summation over gradient weights over the batch dimension."""
+        """Reduce the per-sample weight grad to the parameter shape.
+
+        Plain call: ``grad_weight`` is ``(B, out, in)`` -> sum the batch axis.
+        Under the ``vmap`` rule (:func:`_linear_vmap`) an ensemble/members axis
+        rides in front and the weight carries a singleton batch axis
+        (``members`` is then true), so ``grad_weight`` is ``(E, B, out, in)`` ->
+        reduce only ``B``, keeping the members axis and the singleton to match
+        the ``(E, 1, out, in)`` weight.
+        """
+        if members:
+            return grad_weight.sum(dim=1, keepdim=True)
         if len(grad_weight.shape) > 2:
-            return grad_weight.sum(dim=int(batch_dim))
-        else:
-            return grad_weight
+            return grad_weight.sum(dim=0)
+        return grad_weight
 
     # Adding xwt + b
-    def _add_bias_selection(
-        self, bias: Union[torch.Tensor, None], bayesian: bool
-    ) -> Callable:
+    def _add_bias_selection(self, bias: Union[torch.Tensor, None]) -> Callable:
         """
         Selector function to add bias to weights.
 
-        If the bias is None, return identity.
-        If the model is bayesian, perform associated bias reshape.
-        Else, if bias exists, add bias.
+        If the bias is None, return identity. Else, if bias exists, add bias.
 
         Parameters
         ----------
         bias: torch.Tensor
             Value of the bias term. Not the boolean flag.
-        bayesian: bool
-            Flag to indicate if the model is bayesian.
         """
         if bias is None:
             return self._return_identity
-        elif bayesian:
-            return self._add_bias_bayesian
         else:
             return self._add_bias
-
-    def _add_bias_bayesian(self, x: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        """Perform reshape for bias and add to x."""
-        b = b.unsqueeze(1).unsqueeze(1)
-        return x.add(b)
 
     def _add_bias(self, x: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         """Add bias to x."""
@@ -148,7 +101,6 @@ class LinearConfig:
         self,
         parallelism: int,
         bias: Union[torch.Tensor, None],
-        bayesian: bool,
     ) -> Callable:
         """
         Selector function for calculating gradient of bias.

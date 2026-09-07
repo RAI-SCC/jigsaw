@@ -20,7 +20,6 @@ class LinearCtx(Protocol):
     config: LinearConfig
     model_group: dist.ProcessGroup
     spatial_group: dist.ProcessGroup
-    bayesian: bool
     b: Optional[Parameter]
 
 
@@ -35,9 +34,9 @@ def _setup_linear_ctx(
     the extra function call is not on any per-element hot path.
 
     ctx: FunctionCtx
-    inputs: tuple(x, w, b, local_rank, device, config, model_group, bayesian)
+    inputs: tuple(x, w, b, local_rank, device, config, model_group)
     """
-    x, w, b, local_rank, device, config, model_group, bayesian = inputs
+    x, w, b, local_rank, device, config, model_group = inputs
     ctx.save_for_backward(x, w, b)
     c = cast(LinearCtx, ctx)
     c.local_rank = local_rank
@@ -45,10 +44,11 @@ def _setup_linear_ctx(
     c.config = config
     c.model_group = model_group
     c.b = b
-    c.bayesian = bayesian
 
 
 def _linear_vmap(
+    info: Any,
+    in_dims: tuple[Optional[int], ...],
     fn: Any,
     x: torch.Tensor,
     w: torch.Tensor,
@@ -57,17 +57,30 @@ def _linear_vmap(
     device: torch.device,
     config: LinearConfig,
     model_group: dist.ProcessGroup,
-    bayesian: bool,
 ) -> tuple[torch.Tensor, Optional[int]]:
     """
     Shared ``vmap`` rule for the distributed linear autograd Functions.
 
-    Makes the (possibly batched) input contiguous, re-applies ``fn`` -- which
-    already broadcasts over the leading vmapped dimension -- and reports that the
-    vmapped dimension of the output sits at position 0.
+    The staticmethod protocol has already exposed the mapped (ensemble / members)
+    dimension as a plain leading axis. Move it to 0 on every operand, give the
+    weight and bias singleton batch axes so the kernels broadcast one member's
+    parameters over the whole real batch, and make a *single* un-vmapped ``fn``
+    call: the members axis rides through as an extra leading batch dimension, so
+    every collective still runs exactly once (E x the payload, not E rounds).
+    The backward reduces the weight grad over the real batch axis only
+    (``LinearConfig._grad_sum`` keys off the extra leading dim), and the output's
+    mapped dimension sits at position 0.
     """
-    x = x.contiguous()
-    out = fn(x, w, b, local_rank, device, config, model_group, bayesian)
+    xd, wd, bd = in_dims[0], in_dims[1], in_dims[2]
+    x = x.movedim(xd, 0) if xd is not None else x.expand(info.batch_size, *x.shape)
+    w = w.movedim(wd, 0) if wd is not None else w.expand(info.batch_size, *w.shape)
+    if b is not None:
+        b = b.movedim(bd, 0) if bd is not None else b.expand(info.batch_size, *b.shape)
+    # (E, *) -> broadcast one member's weight/bias over the real batch.
+    w = w.unsqueeze(1)
+    if b is not None:
+        b = b.unsqueeze(1).unsqueeze(1)
+    out = fn(x.contiguous(), w, b, local_rank, device, config, model_group)
     return out, 0
 
 
@@ -83,7 +96,6 @@ class XWT(torch.autograd.Function):
         device: torch.device,
         config: LinearConfig,
         model_group: dist.ProcessGroup,
-        bayesian: bool = False,
     ) -> torch.Tensor:
         """
         Forward pass of linear layer (XWT) distributed across parallelism processes.
@@ -106,8 +118,6 @@ class XWT(torch.autograd.Function):
             Process group for an individual model-parallel instance.
         spatial_group: dist.ProcessGroup
             Process group for domain-parallel ranks.
-        bayesian: bool
-            Flag for whether the model is bayesian.
 
 
         Returns
@@ -115,7 +125,6 @@ class XWT(torch.autograd.Function):
         Cij: torch.Tensor
             Local output tensor of shape (B, out_dim, in_dim) or (S, B, out_dim, in_dim).
         """
-        w = config.reshape_weights(w)
         # Opt into autocast: this Function hides the inner matmul from autocast's
         # op-level policy. ``XWT`` casts x/w here (its kernel does not); casting
         # the bias too keeps ``add_bias`` from promoting the output back to fp32.
@@ -135,7 +144,7 @@ class XWT(torch.autograd.Function):
         Set up context.
 
         ctx: FunctionCtx
-        inputs: tuple(x, w, b, local_rank, device, config, model_group, bayesian)
+        inputs: tuple(x, w, b, local_rank, device, config, model_group)
         output: xwt
         """
         _setup_linear_ctx(ctx, inputs)
@@ -147,7 +156,6 @@ class XWT(torch.autograd.Function):
         torch.Tensor,
         torch.Tensor,
         Optional[torch.Tensor],
-        None,
         None,
         None,
         None,
@@ -179,7 +187,6 @@ class XWT(torch.autograd.Function):
         config = ctx.config
         model_group = ctx.model_group
 
-        weight = config.reshape_weights(weight)
         # handle conversion if necessary here
         grad_output = grad_output.to(weight.dtype)
         input = input.to(weight.dtype)
@@ -191,13 +198,12 @@ class XWT(torch.autograd.Function):
             device=device,
             model_group=model_group,
         )
-        grad_weight = config.grad_sum(
-            grad_weight, ctx.bayesian
-        )  # sum along batch dimension
+        # sum along the batch dimension (weight.ndim > 2 -> vmap members path)
+        grad_weight = config.grad_sum(grad_weight, weight.ndim > 2)
 
         grad_b = config.grad_bias(grad_output)
 
-        return grad_input, grad_weight, grad_b, None, None, None, None, None, None
+        return grad_input, grad_weight, grad_b, None, None, None, None, None
 
     @staticmethod
     def vmap(
@@ -210,11 +216,10 @@ class XWT(torch.autograd.Function):
         device: torch.device,
         config: LinearConfig,
         model_group: dist.ProcessGroup,
-        bayesian: bool,
     ) -> tuple[torch.Tensor, Optional[int]]:
         """Define XWT behavior under torch.vmap (see :func:`_linear_vmap`)."""
         return _linear_vmap(
-            XWT.apply, x, w, b, local_rank, device, config, model_group, bayesian
+            info, in_dims, XWT.apply, x, w, b, local_rank, device, config, model_group
         )
 
 
@@ -230,7 +235,6 @@ class XW(torch.autograd.Function):
         device: torch.device,
         config: LinearConfig,
         model_group: dist.ProcessGroup,
-        bayesian: bool,
     ) -> torch.Tensor:
         """
         Forward pass of linear layer (XW) distributed across two processes.
@@ -254,15 +258,12 @@ class XW(torch.autograd.Function):
             Instance of LinearConfig class.
         model_group : dist.ProcessGroup, optional
             Process group for an individual model-parallel instance.
-        bayesian : bool
-            Flag to indicate if the model is bayesian.
 
         Returns
         -------
         C: torch.Tensor
             Local output tensor of shape (B, x_in, out_dim) or (S, B, x_in, out_dim).
         """
-        w = config.reshape_weights(w)
         # Cast the bias to the autocast dtype (the kernel casts x/w itself) so
         # ``add_bias`` does not promote the output back to fp32 under autocast.
         (b,) = cast_to_autocast_dtype(b)
@@ -288,7 +289,7 @@ class XW(torch.autograd.Function):
     def backward(
         ctx: LinearCtx, grad_output: torch.Tensor
     ) -> tuple[
-        torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None, None, None
+        torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None, None
     ]:
         """
         Backward pass of linear layer (XW) distributed across two processes.
@@ -315,8 +316,6 @@ class XW(torch.autograd.Function):
         config = ctx.config
         model_group = ctx.model_group
 
-        weight = config.reshape_weights(weight)
-
         grad_input = config.mm_kernels[0](
             grad_output,
             weight,
@@ -332,10 +331,10 @@ class XW(torch.autograd.Function):
             model_group=model_group,
         )
 
-        grad_weight = config.grad_sum(grad_weight, ctx.bayesian)
+        grad_weight = config.grad_sum(grad_weight, weight.ndim > 2)
         grad_b = config.grad_bias(grad_output)
 
-        return grad_input, grad_weight, grad_b, None, None, None, None, None
+        return grad_input, grad_weight, grad_b, None, None, None, None
 
     @staticmethod
     def vmap(
@@ -348,11 +347,10 @@ class XW(torch.autograd.Function):
         device: torch.device,
         config: LinearConfig,
         model_group: dist.ProcessGroup,
-        bayesian: bool,
     ) -> tuple[torch.Tensor, Optional[int]]:
         """Define XW behavior under torch.vmap (see :func:`_linear_vmap`)."""
         return _linear_vmap(
-            XW.apply, x, w, b, local_rank, device, config, model_group, bayesian
+            info, in_dims, XW.apply, x, w, b, local_rank, device, config, model_group
         )
 
 
@@ -368,7 +366,6 @@ class XTW(torch.autograd.Function):
         device: torch.device,
         config: LinearConfig,
         model_group: dist.ProcessGroup,
-        bayesian: bool,
     ) -> torch.Tensor:
         """
         Forward pass of linear layer (XTW).
@@ -392,15 +389,12 @@ class XTW(torch.autograd.Function):
             Instance of LinearConfig class.
         model_group : dist.ProcessGroup, optional
             Process group for an individual model-parallel instance.
-        bayesian : bool
-            Flag to indicate if the model is bayesian.
 
         Returns
         -------
         C: torch.Tensor
             Local output tensor of shape (B, x_in, out_dim) or (S, B, x_in, out_dim).
         """
-        w = config.reshape_weights(w)
         # Cast the bias to the autocast dtype (the kernel casts x/w itself) so
         # ``add_bias`` does not promote the output back to fp32 under autocast.
         (b,) = cast_to_autocast_dtype(b)
@@ -426,7 +420,7 @@ class XTW(torch.autograd.Function):
     def backward(
         ctx: LinearCtx, grad_output: torch.Tensor
     ) -> tuple[
-        torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None, None, None
+        torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None, None
     ]:
         """
         Backward pass of linear layer (XW) distributed across two processes.
@@ -453,8 +447,6 @@ class XTW(torch.autograd.Function):
         config = ctx.config
         model_group = ctx.model_group
 
-        weight = config.reshape_weights(weight)
-
         grad_input = config.mm_kernels[0](
             weight,
             grad_output,
@@ -470,10 +462,10 @@ class XTW(torch.autograd.Function):
             model_group=model_group,
         )
 
-        grad_weight = config.grad_sum(grad_weight, ctx.bayesian)
+        grad_weight = config.grad_sum(grad_weight, weight.ndim > 2)
         grad_b = config.grad_bias(grad_output)
 
-        return grad_input, grad_weight, grad_b, None, None, None, None, None
+        return grad_input, grad_weight, grad_b, None, None, None, None
 
     @staticmethod
     def vmap(
@@ -486,9 +478,8 @@ class XTW(torch.autograd.Function):
         device: torch.device,
         config: LinearConfig,
         model_group: dist.ProcessGroup,
-        bayesian: bool,
     ) -> tuple[torch.Tensor, Optional[int]]:
         """Define XTW behavior under torch.vmap (see :func:`_linear_vmap`)."""
         return _linear_vmap(
-            XTW.apply, x, w, b, local_rank, device, config, model_group, bayesian
+            info, in_dims, XTW.apply, x, w, b, local_rank, device, config, model_group
         )

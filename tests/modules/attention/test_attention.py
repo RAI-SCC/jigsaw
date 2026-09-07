@@ -28,7 +28,6 @@ def _build_distributed(
         device=device,
         spatial_group=mesh["row"],
         channel_group=mesh["col"],
-        bayesian=False,
         qk_norm=False,
         ring=False,
     )

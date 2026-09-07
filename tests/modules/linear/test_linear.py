@@ -35,7 +35,6 @@ class TestForward:
             process_mesh_dict_2x2["model"],
             process_mesh_dict_2x2["col"],
             process_mesh_dict_2x2["row"],
-            bayesian=False,
         ).to(device)
 
         x_in = torch.randn(
@@ -92,7 +91,6 @@ class TestForward:
             model_group=process_mesh_dict_2x1x2["model"],
             column_group=process_mesh_dict_2x1x2["col"],
             row_group=process_mesh_dict_2x1x2["row"],
-            bayesian=False,
         ).to(device)
 
         x_in = torch.randn(
@@ -140,7 +138,6 @@ class TestForward:
             process_mesh_dict_2x2["model"],
             process_mesh_dict_2x2["col"],
             process_mesh_dict_2x2["row"],
-            False,
         ).to(device)
 
         assert isinstance(linlayer.bias, torch.Tensor)
@@ -193,7 +190,6 @@ class TestForward:
             process_mesh_dict_2x2["model"],
             process_mesh_dict_2x2["col"],
             process_mesh_dict_2x2["row"],
-            False,
         ).to(device)
         x_in = torch.randn(
             1, seq_global // 2, in_dim // 2, dtype=linlayer.weight.dtype, device=device
@@ -253,7 +249,6 @@ class TestBackward:
             process_mesh_dict_2x2["model"],
             process_mesh_dict_2x2["col"],
             process_mesh_dict_2x2["row"],
-            False,
         ).to(device)
         w_gathered = gather_results(
             linlayer.weight.data, process_mesh_dict=process_mesh_dict_2x2
@@ -365,7 +360,6 @@ class TestBackward:
             process_mesh_dict_2x2["model"],
             process_mesh_dict_2x2["col"],
             process_mesh_dict_2x2["row"],
-            False,
         ).to(device)
         w_gathered = gather_results(
             linlayer.weight.data, process_mesh_dict=process_mesh_dict_2x2
@@ -462,7 +456,6 @@ class TestBackward:
             process_mesh_dict_2x2["model"],
             process_mesh_dict_2x2["col"],
             process_mesh_dict_2x2["row"],
-            False,
         ).to(device)
 
         assert isinstance(linlayer.weight, torch.Tensor)
@@ -611,7 +604,6 @@ class TestBackward:
             process_mesh_dict_2x1x2["model"],
             process_mesh_dict_2x1x2["col"],
             process_mesh_dict_2x1x2["row"],
-            False,
         ).to(device)
 
         w_gathered = gather_results(
@@ -766,7 +758,6 @@ class TestBackward:
             process_mesh_dict_2x2["col"],
             process_mesh_dict_2x2["col"],
             process_mesh_dict_2x2["row"],
-            False,
         ).to(device)
 
         # broadcasting
@@ -979,7 +970,6 @@ class TestBackward:
             process_mesh_dict_4x2["model"],
             process_mesh_dict_4x2["col"],
             process_mesh_dict_4x2["row"],
-            False,
         )
         w_gathered = gather_results(
             linlayer.weight.data, process_mesh_dict=process_mesh_dict_4x2

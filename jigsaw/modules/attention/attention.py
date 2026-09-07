@@ -207,7 +207,6 @@ class DistributedAttention(torch.nn.Module):
         device: torch.device,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
-        bayesian: bool = False,
         qk_norm: bool = False,
         ring: bool = False,
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
@@ -283,7 +282,6 @@ class DistributedAttention(torch.nn.Module):
                 model_group=self.channel_group,
                 row_group=self.spatial_group,
                 column_group=self.channel_group,
-                bayesian=bayesian,
                 dtype=self.dtype,
             )
 
@@ -296,7 +294,6 @@ class DistributedAttention(torch.nn.Module):
             model_group=self.channel_group,
             row_group=self.spatial_group,
             column_group=self.channel_group,
-            bayesian=bayesian,
             dtype=self.dtype,
         )
 
@@ -758,7 +755,6 @@ class Attention(torch.nn.Module):
             device=attention.device,
             spatial_group=process_mesh_dict[row_kw],
             channel_group=process_mesh_dict[col_kw],
-            bayesian=False,
             qk_norm=attention.qk_norm,
             ring=ring,
             attn_backend=attn_backend,

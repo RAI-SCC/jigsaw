@@ -58,7 +58,6 @@ class TestWeightMerging:
             model_group=from_pm_dict["model"],
             row_group=from_pm_dict["row"],
             column_group=from_pm_dict["col"],
-            bayesian=False,
         )
         assert isinstance(linear_layer.weight, torch.Tensor)
         assert isinstance(linear_layer.bias, torch.Tensor)

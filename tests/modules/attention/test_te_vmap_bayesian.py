@@ -20,9 +20,10 @@ of integration:
    ``all_to_all``.
 3. :class:`TestDistributedAttentionEnsembleVmap` -- a full non-ring
    ``DistributedAttention`` under ``vmap(functional_call(...))`` with stacked
-   ensemble parameters, vs a per-member loop, sdpa and te. **Forward passes;
-   grad xfails** -- ``XWT.backward``'s ``bayesian`` weight reshape double-counts
-   the members axis under ``vmap(grad(...))``.
+   ensemble parameters, vs a per-member loop, sdpa and te. **Forward + grad
+   pass** -- the linear ``vmap`` staticmethod loops the members axis and runs
+   one ordinary distributed call per member, so backward reduces each member's
+   weight grad over the real batch axis only.
 4. :class:`TestRingVmap` -- ``torch.vmap`` over a ``ring=True``
    ``DistributedAttention`` raises: ``RingAttentionFunction`` has no ``vmap``
    staticmethod. **Passes** (asserts the raise); flip to a parity test when a
@@ -144,7 +145,7 @@ _IN = _EMBED = _OUT = 64
 _HEADS = 4
 
 
-def _build_attn(mesh: dict, device: torch.device, backend: str, bayesian: bool,
+def _build_attn(mesh: dict, device: torch.device, backend: str,
                 ring: bool = False):
     model = attention.DistributedAttention(
         in_dim=_IN,
@@ -156,7 +157,6 @@ def _build_attn(mesh: dict, device: torch.device, backend: str, bayesian: bool,
         device=device,
         spatial_group=mesh["row"],
         channel_group=mesh["col"],
-        bayesian=bayesian,
         qk_norm=False,
         ring=ring,
         attn_backend=backend,
@@ -199,7 +199,7 @@ class TestDistributedAttentionPlain:
     def test_te_forward_channel_parallel(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        model = _build_attn(process_mesh_dict_2x2, device, "te", bayesian=False)
+        model = _build_attn(process_mesh_dict_2x2, device, "te")
         x = _local_x(process_mesh_dict_2x2, device)
         y = model(x)
         assert y.shape == x.shape
@@ -207,7 +207,7 @@ class TestDistributedAttentionPlain:
         assert torch.isfinite(y).all()
 
     def _check_backward(self, mesh, device, backend):
-        model = _build_attn(mesh, device, backend, bayesian=False)
+        model = _build_attn(mesh, device, backend)
         x = _local_x(mesh, device).requires_grad_(True)
         model(x).sum().backward()
         assert x.grad is not None
@@ -244,30 +244,27 @@ class TestDistributedAttentionEnsembleVmap:
     with an ensemble (leading members axis) of stacked parameters -- the shape
     ``torch_blue`` drives for Bayesian sampling.
 
-    Reference is a per-member Python loop over ``bayesian=False`` modules holding
-    the same weights (``bayesian`` only changes a call-time weight reshape, not
-    the values), so a mismatch is the vmap members-fold, not the sharding.
+    Reference is a per-member Python loop over stand-alone modules holding the
+    same weights, so a mismatch is the vmap members handling, not the sharding.
 
-    **Forward** works for both ``sdpa`` and ``te`` once the core-dtype and
-    grad-input-contiguity fixes are in (see :class:`TestDistributedAttentionPlain`).
-    **Grad** still xfails: under ``vmap(grad(...))`` functorch already peels the
-    members axis, then ``XWT.backward`` calls ``config.reshape_weights`` which
-    unsqueezes a *second* one, so ``torch.split`` in ``fused_xw_xtw_twoway`` gets
-    a size-1 dim. Fix: make the ``bayesian`` weight reshape vmap-aware (or move
-    it into the ``vmap`` staticmethod).
+    Both **forward** and **grad** pass for ``sdpa`` and ``te``: the linear
+    ``vmap`` staticmethod loops the members axis and runs one ordinary
+    distributed call per member, so each member's backward reduces its weight
+    grad over the real batch axis and ``torch.stack`` re-assembles per-member
+    grads -- matching the loop reference.
     """
 
     E = 2
 
     def _build(self, mesh, device, backend):
-        """Ensemble of ``bayesian=True`` models + stacked state + a
-        weight-matched ``bayesian=False`` per-member reference set + inputs."""
+        """Ensemble models + stacked state + a weight-matched per-member
+        reference set + inputs."""
         b_models = [
-            _build_attn(mesh, device, backend, bayesian=True) for _ in range(self.E)
+            _build_attn(mesh, device, backend) for _ in range(self.E)
         ]
         params, buffers = stack_module_state(b_models)
         ref_models = [
-            _build_attn(mesh, device, backend, bayesian=False) for _ in range(self.E)
+            _build_attn(mesh, device, backend) for _ in range(self.E)
         ]
         for rm, bm in zip(ref_models, b_models, strict=True):
             _copy_weights(rm, bm)
@@ -322,14 +319,8 @@ class TestDistributedAttentionEnsembleVmap:
             device=device, group=process_mesh_dict_2x2["model"],
         )
 
-    _XWT_VMAP_GRAD = pytest.mark.xfail(
-        strict=True,
-        reason="XWT.backward's bayesian reshape_weights double-counts the members axis under vmap(grad)",
-    )
-
     @pytest.mark.dist(4)
     @pytest.mark.te_required
-    @_XWT_VMAP_GRAD
     def test_te_ensemble_vmap_grad(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
@@ -341,7 +332,6 @@ class TestDistributedAttentionEnsembleVmap:
             )
 
     @pytest.mark.dist(4)
-    @_XWT_VMAP_GRAD
     def test_sdpa_ensemble_vmap_grad(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
@@ -371,7 +361,7 @@ class TestRingVmap:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         model = _build_attn(
-            process_mesh_dict_2x2, device, "sdpa", bayesian=False, ring=True
+            process_mesh_dict_2x2, device, "sdpa", ring=True
         )
         x_e = _local_x(process_mesh_dict_2x2, device, members=2)
 
