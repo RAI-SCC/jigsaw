@@ -30,7 +30,7 @@ def _build_distributed(
         channel_group=mesh["col"],
         bayesian=False,
         qk_norm=False,
-        ring_attention=False,
+        ring=False,
     )
     kwargs.update(overrides)
     return attention.DistributedAttention(**kwargs)
@@ -213,4 +213,4 @@ class TestDistributedAttention:
         with pytest.raises(AssertionError, match="heads is not divisible"):
             _build_distributed(process_mesh_dict_2x2, device, heads=3)
         with pytest.raises(AssertionError, match="Cannot perform ring attention"):
-            _build_distributed(process_mesh_dict_1x4, device, ring_attention=True)
+            _build_distributed(process_mesh_dict_1x4, device, ring=True)
