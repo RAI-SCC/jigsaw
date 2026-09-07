@@ -1,8 +1,6 @@
 """Dropout correctness tests.
 
-Ring attention's SDPA/TE inner cores need CUDA to exercise their dropout path
-at all (see their module docstrings in ``jigsaw.modules.attention.functional.cores``);
-this file covers what *can* be checked without a GPU:
+The GPU-free checks:
 
 * the ring's ``math`` core (the CPU fallback for every backend) reproduces,
   via seed replay, the exact backward a plain autograd graph gives for the
@@ -12,6 +10,11 @@ this file covers what *can* be checked without a GPU:
 * dropout is gated by ``self.training`` for the non-ring ``Attention`` /
   ``DistributedAttention`` cores (eval mode must be deterministic and
   bit-identical to a ``dropout_p=0`` module with the same weights).
+
+The ring's SDPA/TE inner cores draw an opaque mask in a CUDA kernel, so their
+dropout-replay path needs a GPU: ``TestSdpaTeCoreDropoutReplay`` covers it
+(``gpu_required``, plus ``te_required`` for the ``te`` case) and is skipped
+where the hardware or ``transformer_engine`` is missing.
 """
 
 import pytest
@@ -56,8 +59,8 @@ class TestMathCoreDropout:
         mask (see ``math.py``'s module docstring for the derivation).
         Cross-checking against autograd through an explicit, differentiable
         reimplementation using the *same* mask is the strongest test
-        available without a GPU (the SDPA/TE cores' dropout paths need CUDA
-        and are otherwise untested -- see their module docstrings).
+        available without a GPU; the SDPA/TE cores' CUDA dropout paths are
+        checked the same way in ``TestSdpaTeCoreDropoutReplay`` below.
         """
         torch.manual_seed(1)
         b, h, s, d = 2, 3, 7, 4
