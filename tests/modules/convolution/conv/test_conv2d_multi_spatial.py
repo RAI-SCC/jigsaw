@@ -23,6 +23,28 @@ def _pair(value: Pair) -> tuple[int, int]:
     return (value, value) if isinstance(value, int) else tuple(value)
 
 
+@pytest.fixture(autouse=True)
+def _deterministic_cudnn():
+    """Pin cuDNN to a deterministic, non-benchmarked convolution algorithm.
+
+    The sharded ``DistributedConv2D`` and its single-process ``F.conv2d``
+    reference are different-shaped calls, so cuDNN's benchmarked heuristic can
+    pick algorithms whose fp32 accumulation order differs by more than the
+    1e-4 parity tolerance (seen on the CUDA 13 container stack for the
+    ``k5_s1_p2_d1`` grid-sweep case). Forcing the deterministic path makes both
+    sides land on the same algorithm family, so the tolerance stays meaningful.
+    """
+    prev_deterministic = torch.backends.cudnn.deterministic
+    prev_benchmark = torch.backends.cudnn.benchmark
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    try:
+        yield
+    finally:
+        torch.backends.cudnn.deterministic = prev_deterministic
+        torch.backends.cudnn.benchmark = prev_benchmark
+
+
 # ---------------------------------------------------------------------------
 # multi-spatial-dim parallelism: the domain is split along height *and* width
 # ---------------------------------------------------------------------------
