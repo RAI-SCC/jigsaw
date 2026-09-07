@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 
+from jigsaw import log
+
 
 def set_all_seeds(seed: int = 0) -> None:
     """Initialize all random seeds."""
@@ -126,7 +128,14 @@ def init_cuda() -> tuple[torch.device, int, int, int]:
     env = resolve_launch_env()
     rank, world_size, slurm_localid = env.rank, env.world_size, env.local_rank
 
-    print(f"Rank {rank}: world_size {world_size}, slurm_localid {slurm_localid}")
+    log.configure_logging()
+    log.info_all(
+        "launch: rank %d/%d, local_rank %d, via %s",
+        rank,
+        world_size,
+        slurm_localid,
+        env.source,
+    )
     # Initialize GPUs and dataloaders
     device = torch.device(f"cuda:{slurm_localid}")
     torch.cuda.set_device(slurm_localid)
@@ -137,11 +146,14 @@ def init_cuda() -> tuple[torch.device, int, int, int]:
     )
 
     if dist.is_initialized():
-        print(
-            f"Rank {rank}/{world_size}: Process group initialized with torch rank {dist.get_rank()} and torch world size {dist.get_world_size()}."
+        log.info(
+            "process group up: torch rank %d, world size %d, backend %s",
+            dist.get_rank(),
+            dist.get_world_size(),
+            dist.get_backend(),
         )
     else:
-        print(f"Rank {rank} not initialized")
+        log.error_all("process group failed to initialise on rank %d", rank)
 
     return device, slurm_localid, rank, world_size
 
@@ -192,8 +204,9 @@ def load_model(
         epoch = state["epoch"] + 1
         # epoch = 0
     except Exception:
-        if rank == 0:
-            print(f"Could not load model from {file_path}. Initializing from scratch.")
+        log.warning(
+            "could not load model from %s; initialising from scratch", file_path
+        )
         epoch = 0
     return model, optimizer, epoch
 

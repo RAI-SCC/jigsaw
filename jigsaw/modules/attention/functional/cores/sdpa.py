@@ -91,10 +91,7 @@ def forward(
     * forward returns ``(out, logsumexp, cum_seq_q, cum_seq_k, max_q, max_k,
       philox_seed, philox_offset, debug_attn_mask)``; ``philox_seed`` /
       ``philox_offset`` are the kernel's own dropout RNG state -- opaque and
-      generated internally (the op takes no seed input), so unlike :mod:`.math`
-      this core can't rederive its mask from an int and instead threads the
-      real state back as ``rng_state`` (``None`` when ``dropout_p == 0``, since
-      the mask is never drawn).
+      generated internally (the op takes no seed input)
     * ``max_q`` / ``max_k`` (backward) are the query / key sequence lengths.
     * ``cum_seq_q`` / ``cum_seq_k`` (backward) are for nested/ragged batches
       only and stay ``None`` here.
