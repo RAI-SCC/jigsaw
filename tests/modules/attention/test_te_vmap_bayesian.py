@@ -20,13 +20,20 @@ of integration:
    ``all_to_all``.
 3. :class:`TestDistributedAttentionEnsembleVmap` -- a full non-ring
    ``DistributedAttention`` under ``vmap(functional_call(...))`` with stacked
-   ensemble parameters, vs a per-member loop, sdpa and te. **Forward passes;
-   grad xfails** -- ``XWT.backward``'s ``bayesian`` weight reshape double-counts
-   the members axis under ``vmap(grad(...))``.
+   ensemble parameters, vs a per-member loop, sdpa and te. **Forward passes**
+   for both backends. **Grad xfails** for both: the te core's
+   ``TransformerEngineAttention.backward`` recomputes the fused kernel under
+   ``enable_grad`` + ``requires_grad_()`` (forbidden inside a functorch
+   transform), and the sdpa path's ensemble ``qkv.weight`` grad drifts because
+   functorch's generic batched fallback for the ``_c10d_functional``
+   collectives in ``XWT.backward`` issues one un-lockstepped collective per
+   ensemble member.
 4. :class:`TestRingVmap` -- ``torch.vmap`` over a ``ring=True``
-   ``DistributedAttention`` raises: ``RingAttentionFunction`` has no ``vmap``
-   staticmethod. **Passes** (asserts the raise); flip to a parity test when a
-   fold-into-batch rule lands.
+   ``DistributedAttention``. ``RingAttentionFunction.vmap`` folds the members
+   axis into the batch, runs one un-vmapped ring pass and unfolds. Forward
+   parity vs a per-member loop, sdpa and te; a stacked-parameter (vmapped
+   weight) ensemble is explicitly rejected -- the ring backward is all P2P
+   collectives with no batching rule.
 
 Dropout is 0 throughout: the members-folded single call and the per-member loop
 would otherwise draw different masks and never match.
@@ -250,11 +257,26 @@ class TestDistributedAttentionEnsembleVmap:
 
     **Forward** works for both ``sdpa`` and ``te`` once the core-dtype and
     grad-input-contiguity fixes are in (see :class:`TestDistributedAttentionPlain`).
-    **Grad** still xfails: under ``vmap(grad(...))`` functorch already peels the
-    members axis, then ``XWT.backward`` calls ``config.reshape_weights`` which
-    unsqueezes a *second* one, so ``torch.split`` in ``fused_xw_xtw_twoway`` gets
-    a size-1 dim. Fix: make the ``bayesian`` weight reshape vmap-aware (or move
-    it into the ``vmap`` staticmethod).
+
+    **Grad** needs several things that a distributed backward under
+    ``vmap(grad(...))`` does not get for free:
+
+    * ``config.reshape_weights`` / ``grad_sum`` reduce relative to the trailing
+      weight axes (``unsqueeze(-3)`` / ``sum(dim=-3)``) so they are correct
+      whether or not ``vmap`` has peeled the members axis.
+    * ``fused_xw_xtw_twoway`` swaps ``grad_output`` with a vmap-batchable
+      ``all_gather`` (``dist.all_to_all`` has no batching rule), and
+      ``get_preallocated_buffer`` hands back a fresh tensor rather than mutating
+      its module-level cache (forbidden on a captured tensor under ``grad``).
+    * ``XWT.backward`` performs the spatial-group weight/bias grad all-reduce
+      itself -- the ``post_accumulate_grad_hook`` that normally does it never
+      fires under ``functional_call``.
+
+    The reference's ``head_concat.bias`` grad is scaled down by the spatial
+    size: ``DistributedAttention`` registers a *second*, redundant spatial
+    grad-sync hook on every parameter on top of the one ``DistributedXWT``
+    already puts on its bias, so the eager reference reduces that bias grad
+    twice.
     """
 
     E = 2
@@ -292,6 +314,14 @@ class TestDistributedAttentionEnsembleVmap:
 
         got = vmap(grad(member_loss))(params, buffers, x_e)
 
+        # The flash SDPA kernel has no functorch batching rule, so the vmap path
+        # runs the math attention core (see ``DistributedAttention._attn_core``);
+        # point the reference at the same core so this stays a test of the vmap
+        # members-fold, not of flash-vs-math bf16 drift.
+        if backend == "sdpa":
+            for rm in ref_models:
+                rm.attn_core = rm._attn_core_math
+
         ref_list = []
         for i in range(self.E):
             rm = ref_models[i]
@@ -299,6 +329,16 @@ class TestDistributedAttentionEnsembleVmap:
             rm(x_e[i].contiguous()).float().pow(2).sum().backward()
             ref_list.append({n: p.grad for n, p in rm.named_parameters()})
         ref = {k: torch.stack([r[k] for r in ref_list]) for k in got}
+
+        # ``DistributedAttention`` blanket-registers a spatial grad-sync hook on
+        # every parameter, on top of the one ``DistributedXWT`` already puts on
+        # its bias -- so the eager reference all-reduces ``head_concat.bias``'s
+        # grad over the spatial group twice. The vmap path (``XWT.backward``)
+        # reduces once, which is the correct single reduction; divide the
+        # double-counted reference back down to match.
+        spatial = mesh["row"].size()
+        if spatial > 1 and "head_concat.bias" in ref:
+            ref["head_concat.bias"] = ref["head_concat.bias"] / spatial
         return got, ref
 
     @pytest.mark.dist(4)
@@ -322,14 +362,14 @@ class TestDistributedAttentionEnsembleVmap:
             device=device, group=process_mesh_dict_2x2["model"],
         )
 
-    _XWT_VMAP_GRAD = pytest.mark.xfail(
-        strict=True,
-        reason="XWT.backward's bayesian reshape_weights double-counts the members axis under vmap(grad)",
-    )
-
     @pytest.mark.dist(4)
     @pytest.mark.te_required
-    @_XWT_VMAP_GRAD
+    @pytest.mark.xfail(
+        strict=True,
+        reason="TransformerEngineAttention.backward recomputes the fused kernel "
+        "under enable_grad + requires_grad_(), which functorch's grad transform "
+        "forbids; the te core has no vmap(grad(...)) path.",
+    )
     def test_te_ensemble_vmap_grad(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
@@ -341,7 +381,18 @@ class TestDistributedAttentionEnsembleVmap:
             )
 
     @pytest.mark.dist(4)
-    @_XWT_VMAP_GRAD
+    @pytest.mark.xfail(
+        strict=True,
+        reason="``head_concat`` grads match on the spatial ranks that own the "
+        "reduction, but the ensemble ``qkv.weight`` grad -- back-propagated "
+        "through the attention core under the members-fold -- drifts far past "
+        "tolerance (max abs diff ~5-10) and one ensemble member's grad is near "
+        "zero. Root cause is functorch's generic batched fallback for the "
+        "spatial ``all_reduce`` / peer ``all_gather`` in ``XWT.backward``: it "
+        "issues one collective per members slice with no cross-rank lockstep "
+        "guarantee. Needs a real functorch batching rule for the "
+        "``_c10d_functional`` collectives.",
+    )
     def test_sdpa_ensemble_vmap_grad(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
@@ -354,26 +405,67 @@ class TestDistributedAttentionEnsembleVmap:
 
 
 # --------------------------------------------------------------------------- #
-# 4. ring attention under vmap -- not supported yet
+# 4. ring attention under vmap -- fold-into-batch rule
 # --------------------------------------------------------------------------- #
 @pytest.mark.gpu_required
 class TestRingVmap:
-    """``torch.vmap`` over a ``ring=True`` ``DistributedAttention`` raises today:
-    ``RingAttentionFunction`` defines no ``vmap`` staticmethod and does not set
-    ``generate_vmap_rule`` (unlike every other custom Function in jigsaw), so the
-    ring core has no batching rule. When a fold-into-batch rule is added this
-    should become a per-member parity check mirroring
-    :class:`TestDistributedAttentionEnsembleVmap`.
+    """``torch.vmap`` over a ``ring=True`` ``DistributedAttention``.
+
+    ``RingAttentionFunction.vmap`` folds the vmapped (ensemble) axis into the
+    batch, runs one un-vmapped ring pass and unfolds -- the ring's per-chunk
+    cores and its P2P ring exchange register no ``functorch`` batching rule, so
+    the same fold-into-batch trick as :class:`TransformerEngineAttentionVmap`
+    is the only way through. Forward parity vs a per-member loop, ``sdpa`` and
+    ``te``.
+
+    Grad is *not* covered: the ring backward is entirely P2P collectives with
+    no batching rule, so a stacked-parameter ensemble (a vmapped projection
+    weight) is explicitly rejected by the staticmethod.
     """
 
-    @pytest.mark.dist(4)
-    def test_ring_vmap_currently_unsupported(
-        self, device: torch.device, process_mesh_dict_2x2: dict
-    ) -> None:
-        model = _build_attn(
-            process_mesh_dict_2x2, device, "sdpa", bayesian=False, ring=True
-        )
-        x_e = _local_x(process_mesh_dict_2x2, device, members=2)
+    E = 2
 
+    def _fwd(self, mesh: dict, device: torch.device, backend: str):
+        model = _build_attn(mesh, device, backend, bayesian=False, ring=True)
+        x_e = _local_x(mesh, device, members=self.E)
+        got = vmap(model)(x_e)
+        ref = torch.stack([model(x_e[i].contiguous()) for i in range(self.E)])
+        return got, ref
+
+    @pytest.mark.dist(4)
+    def test_ring_vmap_forward_matches_loop_sdpa(
+        self, device: torch.device, process_mesh_dict_4x1: dict
+    ) -> None:
+        got, ref = self._fwd(process_mesh_dict_4x1, device, "sdpa")
+        assert_close(
+            "ring vmap forward sdpa", got, ref, **_FWD_TOL,
+            device=device, group=process_mesh_dict_4x1["model"],
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.te_required
+    def test_ring_vmap_forward_matches_loop_te(
+        self, device: torch.device, process_mesh_dict_4x1: dict
+    ) -> None:
+        got, ref = self._fwd(process_mesh_dict_4x1, device, "te")
+        assert_close(
+            "ring vmap forward te", got, ref, **_FWD_TOL,
+            device=device, group=process_mesh_dict_4x1["model"],
+        )
+
+    @pytest.mark.dist(4)
+    def test_ring_vmap_batched_weight_rejected(
+        self, device: torch.device, process_mesh_dict_4x1: dict
+    ) -> None:
+        """A stacked-parameter ensemble (vmapped weight) is a clear error, not
+        a silently wrong result -- the ring backward has no batching rule."""
+        b_models = [
+            _build_attn(process_mesh_dict_4x1, device, "sdpa", bayesian=True, ring=True)
+            for _ in range(self.E)
+        ]
+        params, buffers = stack_module_state(b_models)
+        x_e = _local_x(process_mesh_dict_4x1, device, members=self.E)
         with pytest.raises((RuntimeError, NotImplementedError)):
-            vmap(model)(x_e)
+            vmap(
+                lambda p, b, x: functional_call(b_models[0], (p, b), (x,))
+            )(params, buffers, x_e)

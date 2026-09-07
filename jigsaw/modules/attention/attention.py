@@ -6,6 +6,7 @@ from typing import Any, Callable, Optional, cast
 import torch
 import torch.distributed as dist
 from einops import rearrange
+from torch._C._functorch import maybe_current_level
 
 from jigsaw import hooks
 from jigsaw.modules import linear
@@ -395,12 +396,15 @@ class DistributedAttention(torch.nn.Module):
             Output of attention computation.
 
         """
-        with torch.nn.attention.sdpa_kernel(
-            [
-                torch.nn.attention.SDPBackend.FLASH_ATTENTION,
-                torch.nn.attention.SDPBackend.MATH,
-            ]
-        ):
+        # The flash kernel registers no functorch batching rule: under ``vmap``
+        # it silently falls back to a slow -- and, for its backward, inexact --
+        # per-sample loop. The MATH backend is fully batchable, so pin it while a
+        # transform is active (Bayesian-ensemble ``vmap``). Plain calls keep
+        # flash.
+        backends = [torch.nn.attention.SDPBackend.MATH]
+        if maybe_current_level() is None:
+            backends.insert(0, torch.nn.attention.SDPBackend.FLASH_ATTENTION)
+        with torch.nn.attention.sdpa_kernel(backends):
             out = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, is_causal=False,
                 dropout_p=self.dropout_p if self.training else 0.0,

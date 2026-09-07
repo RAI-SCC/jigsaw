@@ -395,3 +395,69 @@ class RingAttentionFunction(torch.autograd.Function):
         )
 
         return dq, dk, dv, None, None, None, None, None, None, None
+
+    @staticmethod
+    def vmap(
+        info: Any,
+        in_dims: tuple[Optional[int], ...],
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        x: torch.Tensor,
+        w_qkv: torch.Tensor,
+        scale: float,
+        dropout_p: float,
+        group: dist.ProcessGroup,
+        local_rank: int,
+        config: RingAttentionConfig,
+    ) -> tuple[tuple, tuple]:
+        """Fold the vmapped (ensemble) axis into the batch and run one ring pass.
+
+        The ring's per-chunk attention cores and its P2P ring communication
+        register no ``functorch`` batching rule, so -- like
+        :class:`~jigsaw.modules.attention.attention.TransformerEngineAttention`
+        -- we move the vmapped axis to the front of ``q`` / ``k`` / ``v`` /
+        ``x``, flatten it into their batch axis, run a single un-vmapped ring
+        forward, then unflatten the batch axis of the output.
+
+        The projection weight must not itself be vmapped: a stacked-parameter
+        Bayesian ensemble over ring attention would also need a vmap-safe ring
+        *backward* (the ring backward is entirely P2P collectives), which is
+        not implemented.
+        """
+        q_bdim, k_bdim, v_bdim, x_bdim, w_bdim = in_dims[:5]
+        if w_bdim is not None:
+            raise NotImplementedError(
+                "vmap over ring attention with a batched projection weight "
+                "(stacked-parameter ensemble) is not supported"
+            )
+
+        def _to_front(t: torch.Tensor, bdim: Optional[int]) -> torch.Tensor:
+            if bdim is None:
+                return t.expand(info.batch_size, *t.shape)
+            return t.movedim(bdim, 0)
+
+        q = _to_front(q, q_bdim)
+        k = _to_front(k, k_bdim)
+        v = _to_front(v, v_bdim)
+        x = _to_front(x, x_bdim)
+        samples = q.shape[0]
+
+        # [samples, b, ...] -> [samples * b, ...]: the ring only ever treats the
+        # leading axis as an opaque batch, so folding it in is transparent.
+        q = q.flatten(0, 1)
+        k = k.flatten(0, 1)
+        v = v.flatten(0, 1)
+        x = x.flatten(0, 1)
+
+        out, lse, chunks_to_save, base_seed, rng_states = RingAttentionFunction.apply(
+            q, k, v, x, w_qkv, scale, dropout_p, group, local_rank, config
+        )
+        out = out.unflatten(0, (samples, -1))
+        # Only ``out`` carries a batched axis back to the caller; the other
+        # returns are non-differentiable bookkeeping that ``_ring_attn_core``
+        # discards.
+        return (
+            (out, lse, chunks_to_save, base_seed, rng_states),
+            (0, None, None, None, None),
+        )

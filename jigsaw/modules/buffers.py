@@ -21,6 +21,7 @@ because the next request hands back the same storage.
 import sys
 
 import torch
+from torch._C._functorch import maybe_current_level
 
 # (caller_file, caller_lineno, str(device), dtype, local_rank, index)
 _BufferKey = tuple[str, int, str, torch.dtype, int, int]
@@ -73,6 +74,19 @@ def get_preallocated_buffer(
     torch.Tensor
         A zeroed view onto the cached buffer with the requested ``shape``.
     """
+    needed = 1
+    for dim in shape:
+        needed *= dim
+
+    # Under a functorch transform (``vmap`` / ``grad`` / ...) the module-level
+    # cache tensor is "captured" -- the grad transform forbids the in-place
+    # ``zero_`` below on it ("would mutate a captured Tensor"), and a cached
+    # buffer would anyway be shared across the transform's batched slices. Hand
+    # back a fresh zeroed tensor instead; the reuse optimisation only matters on
+    # the plain eager path.
+    if maybe_current_level() is not None:
+        return torch.zeros(*shape, dtype=dtype, device=device)
+
     caller = sys._getframe(1)
     key: _BufferKey = (
         caller.f_code.co_filename,
@@ -82,10 +96,6 @@ def get_preallocated_buffer(
         local_rank,
         index,
     )
-
-    needed = 1
-    for dim in shape:
-        needed *= dim
 
     buf = _prealloc_buffers.get(key)
     if buf is None or buf.numel() < needed:

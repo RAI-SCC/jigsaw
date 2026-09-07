@@ -41,6 +41,12 @@ class LinearConfig:
         self.add_bias = self._add_bias_selection(bias, bayesian)
         self.reshape_weights = self._reshape_weights_selection(bayesian, linear_layer)
         self.grad_sum = self._sum_grad_weights_selection(linear_layer)
+        # Spatial (row) process group over which a parameterised layer's
+        # weight/bias gradients must be summed. Set by :class:`DistributedXWT`;
+        # only consulted in the backward when running under ``vmap`` (where the
+        # module's ``post_accumulate_grad_hook`` that normally does this is
+        # bypassed). ``None`` for the parameter-free matmul modules.
+        self.spatial_group: object | None = None
 
     # reshape weights
     def _reshape_weights_selection(
@@ -67,15 +73,17 @@ class LinearConfig:
 
     def _reshape_weights(self, w: torch.Tensor) -> torch.Tensor:
         """
-        Reshape weights for vmap by unsqueezing in the batch dimension.
+        Insert a size-1 data-batch axis so ``w`` broadcasts over the batch.
 
-        Parameters
-        ----------
-        w: torch.tensor
-            model weights.
+        ``w`` is ``(out, in)`` with an optional leading ensemble ("members")
+        axis. That axis is present when the members are threaded explicitly
+        (``w`` is ``(members, out, in)``) and *peeled* when the call runs under
+        ``vmap`` (``w`` is a batched ``(out, in)``). Unsqueezing at ``-3`` --
+        i.e. just before ``out`` -- inserts the broadcast axis in the right
+        place either way, whereas a fixed positive ``unsqueeze(1)`` lands on the
+        wrong axis once ``vmap`` has removed the members axis.
         """
-        w = w.unsqueeze(1)
-        return w
+        return w.unsqueeze(-3)
 
     def _no_reshape_weights(self, w: torch.Tensor) -> torch.Tensor:
         """Return weights as-is. Dummy identity function."""
@@ -97,9 +105,17 @@ class LinearConfig:
     def _grad_sum(
         self, grad_weight: torch.Tensor, batch_dim: torch.Tensor
     ) -> torch.Tensor:
-        """Summation over gradient weights over the batch dimension."""
+        """Sum the data-batch axis out of ``grad_weight``.
+
+        ``grad_weight`` arrives as ``(*members, batch, a, b)`` -- the trailing
+        two axes are the weight's, the data-batch axis sits at ``-3``, and the
+        optional leading members axis is present only when the ensemble is
+        threaded explicitly (``vmap`` peels it). Reducing at ``-3`` therefore
+        works with and without that leading axis; ``batch_dim`` is kept for
+        call-site compatibility but no longer selects the axis.
+        """
         if len(grad_weight.shape) > 2:
-            return grad_weight.sum(dim=int(batch_dim))
+            return grad_weight.sum(dim=-3)
         else:
             return grad_weight
 
