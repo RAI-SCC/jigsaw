@@ -1,48 +1,48 @@
-"""Test cpu-gpu backend being initialized"""
+"""Test the hybrid ``cpu:gloo,cuda:nccl`` backend being initialized.
+
+Marked ``no_dist_env`` so the shared session group is *not* set up: this file
+brings up its own hybrid-backend group. That means it only works when run on
+its own (``pytest tests/test_gloo_nccl.py`` under ``srun -n8``); inside the full
+suite another test initialises the default group first and the fixture skips.
+"""
 
 import math
-import os
-import subprocess
 
 import pytest
 import torch
 import torch.distributed as dist
 
+from jigsaw.utils import resolve_launch_env
+
 pytestmark = [
     pytest.mark.gpu_required,
     pytest.mark.dist_required,
     pytest.mark.hybrid_dist_env,
+    pytest.mark.dist(8),
 ]
 
 
 @pytest.fixture(scope="module")
 def dist_gloo_env():
-    """Initialize the distributed process group once for the entire test session."""
-    rank = int(os.getenv("SLURM_PROCID"))
-    world_size = int(os.getenv("SLURM_NTASKS"))
-    local_id = int(os.getenv("SLURM_LOCALID", rank))
+    """Bring up a ``cpu:gloo,cuda:nccl`` process group for this module."""
+    if dist.is_initialized():
+        pytest.skip("a default process group already exists; run this file on its own")
 
-    device_id = local_id if torch.cuda.device_count() != 1 else 0
+    try:
+        env = resolve_launch_env(strict=True)  # writes MASTER_ADDR / MASTER_PORT
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
+    if env.master_addr in ("", "localhost") and env.world_size > 1:
+        pytest.skip("could not resolve MASTER_ADDR (no scontrol / nodelist)")
+
+    device_id = env.local_rank if torch.cuda.device_count() != 1 else 0
     device = torch.device("cuda", device_id)
     torch.cuda.set_device(device)
 
-    os.environ["MASTER_PORT"] = "12342"
-
-    master_addr = (
-        subprocess.check_output(
-            ["scontrol", "show", "hostnames", os.environ["SLURM_JOB_NODELIST"]]
-        )
-        .decode()
-        .split("\n")[0]
-        .strip()
-    )
-
-    os.environ["MASTER_ADDR"] = master_addr
-
     dist.init_process_group(
         backend="cpu:gloo,cuda:nccl",
-        rank=rank,
-        world_size=world_size,
+        rank=env.rank,
+        world_size=env.world_size,
         device_id=device,
         init_method="env://",
     )

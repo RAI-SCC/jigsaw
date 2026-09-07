@@ -1,4 +1,5 @@
 import gc
+import importlib.util
 import os
 import sys
 import warnings
@@ -63,6 +64,9 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "no_dist_env: skip the dist_env autouse fixture")
     config.addinivalue_line("markers", "gpu_required: test requires GPU")
     config.addinivalue_line(
+        "markers", "te_required: test requires transformer_engine (container path)"
+    )
+    config.addinivalue_line(
         "markers", "dist_required: test requires distributed environment"
     )
     config.addinivalue_line(
@@ -102,8 +106,24 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
 
 
 @pytest.fixture(autouse=True, scope="session")
-def dist_env(device: torch.device) -> Generator[None, None, None]:
-    """Initialize the distributed process group once for the entire test session."""
+def dist_env(
+    request: pytest.FixtureRequest, device: torch.device
+) -> Generator[None, None, None]:
+    """Initialize the shared process group once for the whole test session.
+
+    Stays session-scoped and autouse so it runs before the session-scoped
+    ``process_mesh_dict_*`` fixtures, which need the default group. When *every*
+    selected test is marked ``no_dist_env`` -- e.g. running ``test_gloo_nccl.py``
+    on its own, which brings up its own ``cpu:gloo,cuda:nccl`` group -- the
+    shared group is not created, so that is not a double init.
+    """
+    items = request.session.items
+    if items and all(
+        item.get_closest_marker("no_dist_env") is not None for item in items
+    ):
+        yield None
+        return
+
     if device.type == "cuda":
         torch.cuda.set_device(device)
         assert dist.is_nccl_available()
@@ -167,6 +187,7 @@ def pytest_collection_modifyitems(config, items):
         or os.environ.get("RANK") is not None
         or mpi_size > 1
     )
+    has_te = importlib.util.find_spec("transformer_engine") is not None
 
     for item in items:
         if item.get_closest_marker("gpu_required") and not has_gpu:
@@ -175,3 +196,5 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(
                 pytest.mark.skip(reason="Not running in distributed environment")
             )
+        if item.get_closest_marker("te_required") and not has_te:
+            item.add_marker(pytest.mark.skip(reason="transformer_engine not installed"))
