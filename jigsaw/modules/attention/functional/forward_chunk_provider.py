@@ -31,6 +31,7 @@ import torch.distributed as dist
 
 from jigsaw.comm import get_empty
 from jigsaw.modules.attention.config import (
+    InterNodeTransport,
     RingAttentionConfig,
     SaveScope,
     SendForward,
@@ -277,11 +278,26 @@ class _HybridForwardChunkProvider(_ForwardChunkProvider):
         self._inter_recv_buf: Optional[torch.Tensor] = None
         self._inter_handle: Optional[dist.Work] = None
 
+        # Every round re-sends the *same* local chunk (`self.x` / `self.kv`), so
+        # under CPU_GLOO stage it to pinned host memory exactly once here rather
+        # than D2H-copying it on every `_launch_inter_forward`. Each round's
+        # `wait()` drains the prior send before the buffer is reused.
+        self._inter_send_host: Optional[torch.Tensor] = None
+        if self.config.inter_node_transport == InterNodeTransport.CPU_GLOO:
+            assert self.config.offloader is not None  # guaranteed by config validation
+            base = self.x if self.send_x else self.kv
+            self._inter_send_host = self.config.offloader.offload_blocking(base)
+
     def _launch_inter_forward(self, node_step: int) -> None:
         """Start this round's inter-node send of the original local chunk."""
         buf = torch.empty_like(self.x_j if self.send_x else self.kv_j)
+        send_data = (
+            self._inter_send_host
+            if self._inter_send_host is not None
+            else (self.x.clone() if self.send_x else self.kv.clone())
+        )
         self._inter_recv_buf, self._inter_handle = self.config.inter_p2p_fn(
-            data=(self.x.clone() if self.send_x else self.kv.clone()),
+            data=send_data,
             buffer=buf,
             send_recv_ranks=self._inter_ranks,
             group=self.group,

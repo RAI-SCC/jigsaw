@@ -336,6 +336,15 @@ class _CpuInterP2PWork:
         """Whether :meth:`wait` has already run."""
         return self._done
 
+    @property
+    def recv_host(self) -> torch.Tensor:
+        """Pinned host buffer the chunk landed in.
+
+        Feed it back as ``data`` to relay the chunk on without a device
+        round-trip.
+        """
+        return self._recv_host
+
 
 def cpu_inter_p2p(
     data: torch.Tensor,
@@ -353,12 +362,15 @@ def cpu_inter_p2p(
 
     Drop-in for :func:`comm_1d_p2p` / :func:`comm_1d_alltoall` on the ring's
     *inter-node* hop when ``RingAttentionConfig.inter_node_transport`` is
-    ``CPU_GLOO``. ``data`` / ``buffer`` are GPU tensors exactly as the other
-    primitives expect; this routine D2H-stages ``data`` to a pinned host buffer,
-    exchanges it with the ``(send_to, recv_from)`` peers named in
-    ``send_recv_ranks`` (group-relative ring positions) via ordered
-    ``isend`` / ``irecv`` -- no ``batch_isend_irecv`` and no ``barrier``, which
-    Gloo handles poorly -- and stages the received chunk back into ``buffer``.
+    ``CPU_GLOO``. ``buffer`` is a GPU tensor exactly as the other primitives
+    expect; ``data`` is normally a GPU tensor too and gets D2H-staged to a
+    pinned host buffer, but a caller that already holds the chunk in host
+    memory (relaying it, or re-sending a stable tensor every round) may pass a
+    **CPU** ``data`` to skip that copy. The chunk is exchanged with the
+    ``(send_to, recv_from)`` peers named in ``send_recv_ranks`` (group-relative
+    ring positions) via ordered ``isend`` / ``irecv`` -- no ``batch_isend_irecv``
+    and no ``barrier``, which Gloo handles poorly -- and staged back into
+    ``buffer``. The pinned receive buffer is exposed as ``work.recv_host``.
 
     The transfer runs on the CPU + NIC and never touches a CUDA stream, so on an
     inter-node ring it frees the GPU copy engines and the NVLink-C2C link for the
@@ -367,7 +379,8 @@ def cpu_inter_p2p(
     Parameters
     ----------
     data : torch.Tensor
-        GPU tensor to send.
+        Chunk to send. A GPU tensor is D2H-staged first; a CPU tensor is sent
+        as-is (only made contiguous).
     buffer : torch.Tensor
         GPU tensor the received chunk is written into.
     direction : int, optional
@@ -397,7 +410,11 @@ def cpu_inter_p2p(
     send_to, recv_from = send_recv_ranks
 
     pin = torch.cuda.is_available()
-    if offloader is not None:
+    if data.device.type == "cpu":
+        # Already staged (a relayed chunk, or a per-round-stable tensor the
+        # caller D2H'd once) -- send it straight from host memory.
+        send_host = data.contiguous()
+    elif offloader is not None:
         send_host = offloader.offload_blocking(data)
     else:
         send_host = torch.empty(
