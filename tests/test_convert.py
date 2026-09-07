@@ -625,7 +625,10 @@ class TestConvertToTorch:
             "sum of grad weights do not match"
         )
         assert torch.allclose(ref_head_cat_w, dist_head_cat_w), "forward does not match"
-        assert torch.allclose(ref_head_cat_grad, dist_head_cat_grad), (
+        # Gradient reduction order differs between the sharded head-concat matmul
+        # and the serial reference, so this needs the same ~1e-4 slack as the
+        # other gradient checks in this test rather than allclose's 1e-8 default.
+        assert torch.allclose(ref_head_cat_grad, dist_head_cat_grad, atol=1e-4), (
             "grad of head concat does not match"
         )
         assert torch.allclose(ref_x_grad, dist_x_grad, atol=1e-4), (

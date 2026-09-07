@@ -23,6 +23,7 @@ import torch
 
 import jigsaw.convert as convert
 from jigsaw.modules import roll
+from jigsaw.modules.linear.linear import _SUPPORTED_XWT_LAYOUTS
 from jigsaw.modules.normalization import normalization as norm
 from jigsaw.utils_aggregate import gather_1d_results
 from tests.parity import all_ranks_ok, assert_close
@@ -298,14 +299,23 @@ class TestReshardMatchesDirect:
                 grp,
             )
 
-        # ``DistributedXWT`` shards the bias over ``col`` only while the forward
-        # output feature axis is sharded over ``model // col``; ``add_bias`` only
-        # lines up when ``row == col``. That is a pre-existing base-layer limit
-        # (a plain ``convert_to_jigsaw(..., to_mesh)`` forward fails the same
-        # way), not a reshard bug -- the shard-equality checks above already
-        # prove the reshard is correct, so the forward compare is skipped for
-        # this combination.
-        if kind == "linear" and bias and to_mesh["row"].size() != to_mesh["col"].size():
+        # The XWT kernels only implement a fixed set of row x col arrangements
+        # (see ``_SUPPORTED_XWT_LAYOUTS``); on any other factorisation
+        # ``forward`` raises rather than returning a mis-shaped result. The
+        # reshard still has to land the module in the *same* state as a direct
+        # conversion, so both must raise identically.
+        layout = (to_mesh["row"].size(), to_mesh["col"].size())
+        if kind == "linear" and layout not in _SUPPORTED_XWT_LAYOUTS:
+            x = torch.randn(2, 8, direct.weight.shape[1], device=device)
+            for mod in (direct, reshuffled):
+                raised = False
+                try:
+                    mod(x)
+                except NotImplementedError:
+                    raised = True
+                assert all_ranks_ok(raised, device, grp), (
+                    f"expected NotImplementedError forward on {layout} mesh"
+                )
             return
 
         x = _local_input(direct, kind, device)

@@ -14,6 +14,15 @@ from jigsaw.utils_aggregate import gather_1d_results, gather_results
 from .config import LinearConfig
 from .functional import XTW, XW, XWT
 
+# ``(row_group.size(), column_group.size())`` layouts the XWT kernels implement.
+# The kernel is picked by ``parallelism`` (= row * col) alone and each one bakes
+# in a fixed 2-D arrangement of the model ranks, so an arbitrary ``row x col``
+# factorisation of the same rank count is *not* interchangeable: parallelism 4
+# is a 2x2 SUMMA, parallelism 8 a 4x2 one, parallelism 2 an in-split (1x2).
+# ``merge_weights`` / ``reshard_parameters`` still work for any factorisation --
+# only ``forward`` is constrained.
+_SUPPORTED_XWT_LAYOUTS = frozenset({(1, 1), (1, 2), (2, 2), (4, 2)})
+
 
 class DistributedXWT(torch.nn.Module):
     """Batched matrix-matrix (XWT) multiplication distributed across n processes."""
@@ -166,6 +175,14 @@ class DistributedXWT(torch.nn.Module):
             B, out_dim are global values.
             in_dim is local value.
         """
+        layout = (self.row_group.size(), self.column_group.size())
+        if layout not in _SUPPORTED_XWT_LAYOUTS:
+            raise NotImplementedError(
+                f"DistributedXWT.forward has no kernel for a "
+                f"row x col = {layout[0]}x{layout[1]} mesh; the XWT kernels "
+                f"implement only {sorted(_SUPPORTED_XWT_LAYOUTS)} (row, col). "
+                f"merge_weights / reshard_parameters still work on this mesh."
+            )
         cij = self.XWT(
             x,
             self.weight,
