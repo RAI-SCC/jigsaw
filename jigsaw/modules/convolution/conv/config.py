@@ -5,9 +5,17 @@ spatial rank is inferred from ``len(kernel_size)`` and selects the native
 primitives (``F.conv{n}d``, ``torch.nn.grad.conv{n}d_input`` /
 ``conv{n}d_weight``). The regime split (no-halo vs halo) and every other
 selection rule are dimension-independent.
+
+There is no ``bayesian`` construction flag: the ensemble / members axis is owned
+entirely by :meth:`~jigsaw.modules.convolution.conv.functional.ConvNd.vmap`,
+which hands the kernels an operand with an extra leading batch dim. The
+``conv_fn`` / ``conv_input_fn`` / ``conv_weight_fn`` dispatchers notice that dim
+at call time (rank ``> n_spatial + 2``) and route through a ``torch.vmap`` of the
+*local* primitive so each member gets its own weights; without it they call the
+native primitive directly.
 """
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 
 import torch
 import torch.distributed as dist
@@ -41,7 +49,6 @@ class ConvNdConfig:
 
     def __init__(
         self,
-        bayesian: bool,
         channel_group: dist.ProcessGroup,
         bias: Parameter | None,
         kernel_size: tuple[int, ...],
@@ -53,8 +60,6 @@ class ConvNdConfig:
         """
         Initialize selection strategy for the N-D convolution.
 
-        bayesian: bool
-            Flag for whether the model is bayesian.
         channel_group: dist.ProcessGroup
             Tensor-parallel process group.
         bias: torch.Tensor | None
@@ -90,10 +95,17 @@ class ConvNdConfig:
         group_size = channel_group.size()
         self.channel_local = groups % group_size == 0
         self.groups_local = groups // group_size if self.channel_local else 1
-        self.conv_fn = self._conv_fn_selection(bayesian)
-        self.conv_input_fn = self._conv_input_fn_selection(bayesian)
-        self.conv_weight_fn = self._conv_weight_fn_selection(bayesian)
-        self.weight_reshape = self._reshape_weights_selection(bayesian)
+        # Native primitive + its ``torch.vmap`` (over a leading members axis); the
+        # dispatchers below pick between them from the operand rank at call time.
+        conv = _CONV_FN[self.n_spatial - 1]
+        conv_input = _CONV_INPUT_FN[self.n_spatial - 1]
+        conv_weight = _CONV_WEIGHT_FN[self.n_spatial - 1]
+        self._conv_fn = conv
+        self._conv_fn_members = torch.vmap(conv)
+        self._conv_input_fn = conv_input
+        self._conv_input_fn_members = torch.vmap(conv_input, in_dims=(None, 0, 0))
+        self._conv_weight_fn = conv_weight
+        self._conv_weight_fn_members = torch.vmap(conv_weight, in_dims=(0, None, 0))
         self.grad_bias = self._grad_bias_selection(bias)
         # ``stride == kernel_size`` tiles the domain with no overlap, so the
         # spatial split needs no communication. Otherwise neighbouring output
@@ -105,40 +117,55 @@ class ConvNdConfig:
             self.dist_conv_fn = dist_conv.conv_halo_nway
             self.dist_conv_backward_fn = dist_conv.conv_halo_nway_backward
 
-    def _conv_fn_selection(self, bayesian: bool) -> Callable:
-        """Select the forward primitive, vmapped when the model is bayesian."""
-        conv = _CONV_FN[self.n_spatial - 1]
-        if bayesian:
-            return torch.vmap(conv)
-        return conv
+    def _has_members(self, ndim: int) -> bool:
+        """Whether ``ndim`` carries a leading members axis on top of ``(N, C, *spatial)``."""
+        return ndim > self.n_spatial + 2
 
-    def _conv_input_fn_selection(self, bayesian: bool) -> Callable:
-        """Select the grad-input primitive, vmapped when the model is bayesian."""
-        conv_input = _CONV_INPUT_FN[self.n_spatial - 1]
-        if bayesian:
-            return torch.vmap(conv_input, in_dims=(None, 0, 0))
-        return conv_input
+    def local_shape(self, shape: torch.Size) -> torch.Size:
+        """Return the trailing ``(N, C, *spatial)`` shape, dropping any members axis.
 
-    def _conv_weight_fn_selection(self, bayesian: bool) -> Callable:
-        """Select the grad-weight primitive, vmapped when the model is bayesian."""
-        conv_weight = _CONV_WEIGHT_FN[self.n_spatial - 1]
-        if bayesian:
-            return torch.vmap(conv_weight, in_dims=(0, None, 0))
-        return conv_weight
+        ``conv{n}d_input`` / ``conv{n}d_weight`` take an *un-batched* size; under
+        the members ``torch.vmap`` the extra leading axis must be stripped so the
+        stated size matches one member's operand.
+        """
+        return shape[-(self.n_spatial + 2) :]
 
-    def _reshape_weights_selection(self, bayesian: bool) -> Callable:
-        """Select the weight-reshape helper (a no-op unless bayesian)."""
-        if bayesian:
-            return self._reshape_weights
-        return self._no_reshape_weights
+    def conv_fn(
+        self, x: torch.Tensor, w: torch.Tensor, *args: Any, **kwargs: Any
+    ) -> torch.Tensor:
+        """Native forward conv; ``torch.vmap``-ed when ``w`` carries a members axis."""
+        fn = self._conv_fn_members if self._has_members(w.ndim) else self._conv_fn
+        return cast(torch.Tensor, fn(x, w, *args, **kwargs))
 
-    def _reshape_weights(self, w: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        """Broadcast the weights over the vmap (batch) dimension."""
-        return w.expand(x.shape[0], *w.shape)
+    def conv_input_fn(
+        self,
+        input_size: torch.Size,
+        weight: torch.Tensor,
+        grad_output: torch.Tensor,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        """Native grad-input conv; ``torch.vmap``-ed when ``weight`` carries a members axis."""
+        fn = (
+            self._conv_input_fn_members
+            if self._has_members(weight.ndim)
+            else self._conv_input_fn
+        )
+        return cast(torch.Tensor, fn(input_size, weight, grad_output, **kwargs))
 
-    def _no_reshape_weights(self, w: torch.Tensor, **kwargs: Any) -> torch.Tensor:
-        """No-op."""
-        return w
+    def conv_weight_fn(
+        self,
+        input: torch.Tensor,
+        weight_size: torch.Size,
+        grad_output: torch.Tensor,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        """Native grad-weight conv; ``torch.vmap``-ed when ``input`` carries a members axis."""
+        fn = (
+            self._conv_weight_fn_members
+            if self._has_members(input.ndim)
+            else self._conv_weight_fn
+        )
+        return cast(torch.Tensor, fn(input, weight_size, grad_output, **kwargs))
 
     def _grad_bias_selection(self, bias: Optional[torch.Tensor]) -> Callable:
         """Select the grad-bias reducer; the spatial reduction is done by a hook."""

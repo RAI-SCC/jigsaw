@@ -116,7 +116,6 @@ def conv_nway_backward(
     local_in_spatial: tuple[int, ...],
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
     channel_group: dist.ProcessGroup,
-    bayesian: bool,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Backward for the no-halo regime.
@@ -124,7 +123,11 @@ def conv_nway_backward(
     Each rank holds the full-channel grad wrt input for its own output-channel
     slice; summing those across the channel group and keeping this rank's channel
     slice yields ``g_x``. ``g_w`` needs no channel reduction (spatial ranks are
-    reduced by the parameter hook).
+    reduced by the parameter hook). A leading members axis on ``grad_output`` /
+    ``x_aug`` / ``weight`` (from :meth:`ConvNd.vmap`) rides through untouched --
+    the ``config`` dispatchers ``torch.vmap`` the local grad primitives, the
+    channel reduce is dimension-agnostic, and ``config.local_shape`` strips the
+    axis from the sizes the grad primitives are told.
     """
     if _needs_halo(spatial_groups, padding, dilation):
         return conv_halo_nway_backward(
@@ -137,12 +140,11 @@ def conv_nway_backward(
             local_in_spatial,
             spatial_groups,
             channel_group,
-            bayesian,
             config,
         )
 
     g_x = config.conv_input_fn(
-        x_aug.shape[int(bayesian) :],
+        config.local_shape(x_aug.shape),
         weight,
         grad_output.to(weight.dtype),  # handles autocast
         stride=stride,
@@ -155,7 +157,7 @@ def conv_nway_backward(
 
     g_w = config.conv_weight_fn(
         x_aug,
-        weight.shape[int(bayesian) :],
+        config.local_shape(weight.shape),
         grad_output.to(weight.dtype),
         stride=stride,
         padding=padding,
@@ -250,7 +252,6 @@ def conv_halo_nway_backward(
     local_in_spatial: tuple[int, ...],
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
     channel_group: dist.ProcessGroup,
-    bayesian: bool,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Backward for the halo regime.
@@ -266,7 +267,7 @@ def conv_halo_nway_backward(
     local_padding = _local_padding(padding, spatial_groups)
 
     g_x_need = config.conv_input_fn(
-        x_aug.shape[int(bayesian) :],
+        config.local_shape(x_aug.shape),
         weight,
         grad_output.to(weight.dtype),  # handles autocast
         stride=stride,
@@ -279,7 +280,7 @@ def conv_halo_nway_backward(
     # two overlap instead of running back to back.
     g_w = config.conv_weight_fn(
         x_aug,
-        weight.shape[int(bayesian) :],
+        config.local_shape(weight.shape),
         grad_output.to(weight.dtype),
         stride=stride,
         padding=local_padding,

@@ -47,7 +47,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
     # type-hints
     bias: Optional[Parameter]
     config: ConvTransposeNdConfig
-    bayesian: bool
     spatial_group: Optional[dist.ProcessGroup]
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...]
     channel_group: dist.ProcessGroup
@@ -75,7 +74,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         groups: int = 1,
         bias: bool = True,
         # --- distributed (optional) ---
-        bayesian: bool = False,
         dtype: torch.dtype = torch.float32,
         channel_comm: str = "auto",
         config: Optional[ConvTransposeNdConfig] = None,
@@ -118,8 +116,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             run with no channel-group communication.
         bias: bool
             Flag for whether bias is present.
-        bayesian: bool
-            Flag for whether model is vmapped.
         dtype: torch.dtype
             Data type of the convolution.
         channel_comm: str
@@ -169,7 +165,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         self.channel_group = channel_group
         self.device = device
         self.dtype = dtype
-        self.bayesian = bayesian
 
         # Global (unsharded) weight/bias shape, torch.nn.ConvTranspose{1,2,3}d
         # layout ``(C_in, C_out / groups, *kernel)``. ``reset_parameters`` keys
@@ -208,7 +203,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
 
         self.config = (
             ConvTransposeNdConfig(
-                self.bayesian,
                 self.channel_group,
                 self.bias,
                 self.kernel_size,
@@ -329,7 +323,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             spatial_group=process_mesh_dict[row_kw],
             channel_group=process_mesh_dict[col_kw],
             device=device,
-            bayesian=False,  # TODO
             dtype=model.weight.dtype,
         )
         # Map weights — clone so the original graph is detached. The gather
@@ -450,7 +443,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
                 "convolution whose channel group owns whole conv-groups."
             )
         self.config = ConvTransposeNdConfig(
-            self.bayesian,
             self.channel_group,
             self.bias,
             self.kernel_size,

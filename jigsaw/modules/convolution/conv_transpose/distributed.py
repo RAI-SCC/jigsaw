@@ -111,13 +111,15 @@ def _grad_input_weight_reduced(
     ``channel_local`` regime (the rank owns whole conv-groups, so its ``g_x`` is
     already complete) or for a channel group of one. ``grad_weight`` never needs a
     channel reduction (the spatial reduction is a parameter hook). When a real
-    channel-group reduce is pending -- and the op is not vmapped, where a masked
-    ``convolution_backward`` output cannot be stacked -- the two grads are
-    computed in separate passes so the grad-weight pass overlaps the
-    reduce-scatter of grad_input; otherwise a single fused pass feeds the reduce.
+    channel-group reduce is pending -- and the op is not vmapped over a members
+    axis, where a masked ``convolution_backward`` output cannot be stacked -- the
+    two grads are computed in separate passes so the grad-weight pass overlaps
+    the reduce-scatter of grad_input; otherwise a single fused pass feeds the
+    reduce.
     """
+    members = weight.ndim > config.n_spatial + 2
     reduce_pending = channel_group.size() > 1 and not config.channel_local
-    if reduce_pending and not config.bayesian:
+    if reduce_pending and not members:
         g_x, _ = _grad_input_weight(
             grad_output,
             x_full,

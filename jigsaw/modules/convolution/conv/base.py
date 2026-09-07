@@ -37,7 +37,6 @@ class _DistributedConvNd(torch.nn.Module):
     # type-hints
     bias: Optional[Parameter]
     config: ConvNdConfig
-    bayesian: bool
     spatial_group: Optional[dist.ProcessGroup]
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...]
     channel_group: dist.ProcessGroup
@@ -65,7 +64,6 @@ class _DistributedConvNd(torch.nn.Module):
         groups: int = 1,
         bias: bool = True,
         # --- distributed (optional) ---
-        bayesian: bool = False,
         dtype: torch.dtype = torch.float32,
         channel_comm: str = "auto",
         config: Optional[ConvNdConfig] = None,
@@ -108,8 +106,6 @@ class _DistributedConvNd(torch.nn.Module):
             channel-group communication.
         bias: bool
             Flag for whether bias is present.
-        bayesian: bool
-            Flag for whether model is vmapped.
         dtype: torch.dtype
             Data type of the convolution.
         channel_comm: str
@@ -159,7 +155,6 @@ class _DistributedConvNd(torch.nn.Module):
         self.channel_group = channel_group
         self.device = device
         self.dtype = dtype
-        self.bayesian = bayesian
 
         # Global (unsharded) weight/bias shape, torch.nn.Conv{1,2,3}d layout
         # ``(C_out, C_in / groups, *kernel)``. ``reset_parameters`` keys the init
@@ -193,7 +188,6 @@ class _DistributedConvNd(torch.nn.Module):
 
         self.config = (
             ConvNdConfig(
-                self.bayesian,
                 self.channel_group,
                 self.bias,
                 self.kernel_size,
@@ -311,7 +305,6 @@ class _DistributedConvNd(torch.nn.Module):
             spatial_group=process_mesh_dict[row_kw],
             channel_group=process_mesh_dict[col_kw],
             device=device,
-            bayesian=False,  # TODO
             dtype=model.weight.dtype,
         )
         # Map weights — clone so the original graph is detached. The channel
@@ -421,7 +414,6 @@ class _DistributedConvNd(torch.nn.Module):
     ) -> None:
         """Reshard the (channel-sharded) weight and bias onto a new process mesh."""
         self.config = ConvNdConfig(
-            self.bayesian,
             self.channel_group,
             self.bias,
             self.kernel_size,
@@ -585,7 +577,6 @@ class _DistributedConvNd(torch.nn.Module):
             self.dilation,
             self.spatial_groups,
             self.channel_group,
-            self.bayesian,
             self.config,
         )
 

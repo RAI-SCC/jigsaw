@@ -109,7 +109,6 @@ def _conv3d_transpose_reference_check(
         dilation=dilation,
         groups=groups,
         bias=True,
-        bayesian=False,
         dtype=torch.float32,
         channel_comm=channel_comm,
     ).to(device)
@@ -228,7 +227,6 @@ class TestConv3dTranspose:
             dilation=1,
             groups=1,
             bias=True,
-            bayesian=False,
             dtype=torch.float32,
         ).to(device)
 
@@ -340,7 +338,6 @@ class TestConv3dTranspose:
             dilation=1,
             groups=1,
             bias=True,
-            bayesian=False,
             dtype=torch.float32,
         ).to(device)
         x = torch.randn(2, 4, 4, 4, 8, device=device)

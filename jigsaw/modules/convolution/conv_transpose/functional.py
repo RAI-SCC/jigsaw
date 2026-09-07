@@ -17,6 +17,7 @@ import torch.distributed as dist
 
 from jigsaw.autocast import cast_to_autocast_dtype
 
+from ..common.vmap import align_members_axis
 from .config import ConvTransposeNdConfig
 
 
@@ -189,8 +190,18 @@ class ConvTransposeNd(torch.autograd.Function):
         spatial_groups: tuple[dist.ProcessGroup | None, ...],
         channel_group: dist.ProcessGroup,
         config: ConvTransposeNdConfig,
-    ) -> tuple[torch.Tensor, Optional[int]]:
-        """Handle vmap for the distributed ConvTransposeNd."""
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor], int]:
+        """Map the ensemble / members axis for the distributed ConvTransposeNd.
+
+        Expose the mapped axis as a leading batch dim on ``x`` / ``weight`` /
+        ``bias`` (:func:`align_members_axis`) and make a single un-vmapped
+        ``apply``: the channel-gather / transpose-halo collectives run once
+        (``E`` x the payload, not ``E`` rounds) and the per-member weights ride
+        the ``torch.vmap`` of the local ``F.conv_transpose*`` /
+        ``convolution_backward`` inside the ``config`` dispatchers. Both outputs
+        carry the members axis at position 0.
+        """
+        x, weight, bias = align_members_axis(info, in_dims, x, weight, bias)
         out = ConvTransposeNd.apply(
             x,
             weight,

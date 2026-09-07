@@ -122,7 +122,6 @@ def _conv2d_multi_spatial_reference_check(
         dilation=dilation,
         groups=groups,
         bias=True,
-        bayesian=False,
         dtype=torch.float32,
     ).to(device)
 

@@ -14,6 +14,7 @@ import torch.distributed as dist
 
 from jigsaw.autocast import cast_to_autocast_dtype
 
+from ..common.vmap import align_members_axis
 from .config import ConvNdConfig
 
 
@@ -26,7 +27,6 @@ class ConvNdCtx(Protocol):
     dilation: int | tuple[int, ...]
     spatial_groups: tuple[dist.ProcessGroup | None, ...]
     channel_group: dist.ProcessGroup
-    bayesian: bool
     config: ConvNdConfig
     saved_tensors: tuple[torch.Tensor, torch.Tensor]
 
@@ -49,7 +49,6 @@ class ConvNd(torch.autograd.Function):
         dilation: tuple[int, ...],
         spatial_groups: tuple[dist.ProcessGroup | None, ...],
         channel_group: dist.ProcessGroup,
-        bayesian: bool,
         config: ConvNdConfig,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of the distributed ConvNd function.
@@ -59,6 +58,11 @@ class ConvNd(torch.autograd.Function):
         kept for backward: the gathered full-channel input in the no-halo
         regime, or additionally halo-padded along every split spatial axis in
         the halo regime.
+
+        ``x`` / ``weight`` / ``bias`` may carry a leading members axis when
+        called from :meth:`vmap`; it rides through as an extra leading batch
+        dimension (the collectives are dimension-agnostic and the ``config``
+        dispatchers ``torch.vmap`` the local ``F.conv*``).
         """
         # Opt into autocast: this Function hides the inner ``F.conv*`` from
         # autocast's op-level policy, and the kernels size their channel-gather /
@@ -94,7 +98,6 @@ class ConvNd(torch.autograd.Function):
             dilation,
             spatial_groups,
             channel_group,
-            bayesian,
             config,
         ) = inputs
 
@@ -114,7 +117,6 @@ class ConvNd(torch.autograd.Function):
         c.stride = stride
         c.padding = padding
         c.dilation = dilation
-        c.bayesian = bayesian
         c.config = config
 
     @staticmethod
@@ -126,7 +128,6 @@ class ConvNd(torch.autograd.Function):
         torch.Tensor,
         torch.Tensor,
         Optional[torch.Tensor],
-        None,
         None,
         None,
         None,
@@ -165,7 +166,6 @@ class ConvNd(torch.autograd.Function):
             c.local_in_spatial,
             c.spatial_groups,
             c.channel_group,
-            c.bayesian,
             config,
         )
 
@@ -173,7 +173,6 @@ class ConvNd(torch.autograd.Function):
             g_x,
             g_w,
             g_b,
-            None,
             None,
             None,
             None,
@@ -194,10 +193,18 @@ class ConvNd(torch.autograd.Function):
         dilation: int,
         spatial_groups: tuple[dist.ProcessGroup | None, ...],
         channel_group: dist.ProcessGroup,
-        bayesian: bool,
         config: ConvNdConfig,
-    ) -> tuple[torch.Tensor, Optional[int]]:
-        """Handle vmap for the distributed ConvNd."""
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor], int]:
+        """Map the ensemble / members axis for the distributed ConvNd.
+
+        Expose the mapped axis as a leading batch dim on ``x`` / ``weight`` /
+        ``bias`` (:func:`align_members_axis`) and make a single un-vmapped
+        ``apply``: the channel-gather / halo collectives run once (``E`` x the
+        payload, not ``E`` rounds) and the per-member weights ride the
+        ``torch.vmap`` of the local ``F.conv*`` inside the ``config``
+        dispatchers. Both outputs carry the members axis at position 0.
+        """
+        x, weight, bias = align_members_axis(info, in_dims, x, weight, bias)
         out = ConvNd.apply(
             x,
             weight,
@@ -207,7 +214,6 @@ class ConvNd(torch.autograd.Function):
             dilation,
             spatial_groups,
             channel_group,
-            bayesian,
             config,
         )
 
