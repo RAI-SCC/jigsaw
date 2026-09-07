@@ -17,11 +17,12 @@ own opaque RNG state internally (``aux_ctx_tensors[1]`` from
 threads that state back verbatim as ``rng_state`` for :func:`backward` to
 replay, instead of rederiving a mask from an int like :mod:`.math` does.
 
-Untested on GPU in this repo yet - covered by the ``te_required`` +
-``gpu_required`` ring parity test. The dropout path is additionally untested
-against transformer_engine itself (not installed in this environment); it
-mirrors the no-dropout path's existing (tested) structure but should be
-verified against a real TE build before relying on it.
+Covered by the ``te_required`` + ``gpu_required`` ring parity test. The
+dropout path is exercised by
+``tests/modules/attention/test_dropout.py::TestSdpaTeCoreDropoutReplay``,
+which recovers the opaque cuDNN mask from the forward output and checks that
+:func:`backward` replays it (verified against transformer_engine 2.12 on an
+NVIDIA A100).
 """
 
 from __future__ import annotations

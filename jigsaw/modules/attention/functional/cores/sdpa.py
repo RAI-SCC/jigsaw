@@ -8,11 +8,12 @@ ring's online-softmax merge and explicit-LSE backward need.
 On CPU the selectors fall back to :mod:`.math`; see
 :func:`..config._select_attn_core_forward_fn`.
 
-NOTE: the dropout path below is untested -- it needs CUDA, which this repo's
-test environment doesn't have. It follows the same replay strategy already
-used for the (tested) no-dropout path, just threading through the two extra
-tensors the kernel needs to reproduce its mask; treat it as implemented but
-unverified until it's run on a GPU.
+The dropout path threads through the two extra tensors the flash kernel needs
+to reproduce its mask, on top of the replay strategy the no-dropout path
+already uses. It needs CUDA, so it is skipped where no GPU is present;
+``tests/modules/attention/test_dropout.py::TestSdpaTeCoreDropoutReplay``
+recovers the opaque mask from the forward output and checks that
+:func:`backward` replays it (verified on an NVIDIA A100).
 """
 
 from __future__ import annotations
