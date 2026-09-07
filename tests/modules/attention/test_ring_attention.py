@@ -572,21 +572,21 @@ def _check_ring_hybrid(
     )
     scale = q_local.shape[-1] ** -0.5
 
-        # just test helper function forward
-        ring_forward = forward.build_ring_forward(ring_config)
-        out, lse, chunks_to_save, base_seed, rng_states = ring_forward(
-            q_local,
-            k_local,
-            v_local,
-            x,
-            w_qkv,
-            scale,
-            0.0,
-            group=process_mesh_dict["model"],
-            local_rank=local_rank,
-            ring_group_size=world_size,
-            ring_config=ring_config,
-        )
+    # just test helper function forward
+    ring_forward = forward.build_ring_forward(ring_config)
+    out, lse, chunks_to_save, base_seed, rng_states = ring_forward(
+        q_local,
+        k_local,
+        v_local,
+        x,
+        w_qkv,
+        scale,
+        0.0,
+        group=process_mesh_dict["model"],
+        local_rank=local_rank,
+        ring_group_size=world_size,
+        ring_config=ring_config,
+    )
 
     out_full = gather_1d_results(out, process_mesh_dict, dim=2)
     x_full = gather_1d_results(x, process_mesh_dict, dim=1)
