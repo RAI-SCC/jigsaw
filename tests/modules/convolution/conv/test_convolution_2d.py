@@ -1313,6 +1313,36 @@ class TestConv2dGroups:
         )
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("stride,padding", [(4, 0), (2, 1)])
+    def test_channel_grouped_2x2_multigroup_run(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        stride: int,
+        padding: int,
+    ) -> None:
+        """``groups=5`` on ``col.size() == 2`` -- a rank owns whole conv-groups *and* straddles.
+
+        Each rank's output shard covers 2.5 conv-groups, so its block list is
+        ``[partial, full, partial]`` (or ``[partial, full, full]`` / ...): the
+        backward fuses the equal-width runs into native grouped calls, so this
+        pins down the ``groups=len(run) > 1`` path in :func:`_grouped_conv_grads`.
+        No-halo (``stride == kernel``) and halo (``stride < kernel``) both.
+        """
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=20,
+            out_channels=20,
+            kernel_size=4,
+            height=16,
+            width=16,
+            stride=stride,
+            padding=padding,
+            groups=5,
+        )
+
+    @pytest.mark.dist(4)
     def test_channel_grouped_1x4(
         self, device: torch.device, process_mesh_dict_1x4: dict
     ) -> None:

@@ -30,6 +30,7 @@ streaming (``"p2p"`` / ``"all_to_all"``) strategies apply it to each channel
 slab as the slabs travel around the ring, overlapping it with the next hop.
 """
 
+from itertools import groupby
 from typing import Any, Optional
 
 import torch
@@ -68,22 +69,32 @@ def _grouped_conv_grads(
     dilation: tuple[int, ...],
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``channel_grouped`` backward: full-channel ``g_x`` and local ``g_w``, group by group.
+    """``channel_grouped`` backward: full-channel ``g_x`` and local ``g_w``, run by run.
 
-    Mirrors :func:`_over_channels_grouped_gather`: for every conv-group the local
-    output shard touches, the plain (``groups=1``) grad-input / grad-weight
-    primitives run on that group's full input-channel slice and this rank's local
-    output-channel slice. ``g_x`` comes back shaped like ``x_full`` (the gathered,
-    and in the halo regime halo-padded, full-channel input) with the untouched
-    input-channel slices left at zero -- the caller reduce-scatters it over the
-    channel group. ``g_w`` is this rank's full local weight.
+    Mirrors :func:`_over_channels_grouped_gather`: the conv-groups the local
+    output shard touches are differentiated against their full input-channel
+    slice and this rank's local output-channel slice. Every such block spans the
+    same ``C_in / groups`` input channels and -- except, at most, the two
+    shard-boundary blocks whose conv-group is only partly owned here -- the same
+    ``C_out / groups`` output channels, and consecutive blocks are contiguous on
+    both axes. So each maximal run of equal-output-width blocks is one native
+    grouped (``groups = len(run)``) grad-input / grad-weight call: at most three
+    calls of each, versus one per block. ``g_x`` comes back shaped like
+    ``x_full`` (the gathered, and in the halo regime halo-padded, full-channel
+    input) with the untouched input-channel slices left at zero -- the caller
+    reduce-scatters it over the channel group. ``g_w`` is this rank's full local
+    weight.
     """
     channel_dim = -(config.n_spatial + 1)
     g_x = x_full.new_zeros(x_full.shape)
     g_w = weight.new_zeros(weight.shape)
     blocks = _group_blocks(config)
     assert blocks is not None  # only called in the channel_grouped regime
-    for out_lo, out_hi, in_lo, in_hi in blocks:
+    for _, run_iter in groupby(blocks, key=lambda blk: blk[1] - blk[0]):
+        run = list(run_iter)
+        out_lo, in_lo = run[0][0], run[0][2]
+        out_hi, in_hi = run[-1][1], run[-1][3]
+        n_groups = len(run)
         xg = x_full.narrow(channel_dim, in_lo, in_hi - in_lo)
         go = grad_output.narrow(channel_dim, out_lo, out_hi - out_lo).to(weight.dtype)
         wg = weight[out_lo:out_hi]
@@ -95,7 +106,7 @@ def _grouped_conv_grads(
                 stride=stride,
                 padding=padding,
                 dilation=dilation,
-                groups=1,
+                groups=n_groups,
             )
         )
         g_w[out_lo:out_hi] = config.conv_weight_fn(
@@ -105,7 +116,7 @@ def _grouped_conv_grads(
             stride=stride,
             padding=padding,
             dilation=dilation,
-            groups=1,
+            groups=n_groups,
         )
     return g_x, g_w
 
