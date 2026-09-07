@@ -150,14 +150,31 @@ def benchmark(
         return max(ms, 1e-6) / inner
 
     # --- pick inner so a block lasts >= min_block_ms ----------------------
+    # ``step`` may issue collectives, so every rank must run the *same* number
+    # of them, always: drive the autorange off the group-wide-max ``per_step``
+    # so all ranks compute an identical ``inner`` and take the same number of
+    # ``time_block`` calls -- otherwise a fast rank exits this loop and starts
+    # the next collective while a slow rank is still timing, and they deadlock.
+    distributed = group is not None and dist.is_initialized()
+
+    def agree_max(value: float) -> float:
+        if not distributed:
+            return value
+        t = torch.tensor([value], device=device if is_cuda else "cpu")
+        dist.all_reduce(t, op=dist.ReduceOp.MAX, group=group)
+        return float(t.item())
+
     inner = 1
-    per_step = time_block(inner)
+    per_step = agree_max(time_block(inner))
     while per_step * inner < min_block_ms and inner < 100_000:
         target = min_block_ms / max(per_step * inner, 1e-6)
         inner = min(100_000, max(inner + 1, int(inner * target * 1.2)))
-        per_step = time_block(inner)
+        per_step = agree_max(time_block(inner))
 
     # --- measured blocks -------------------------------------------------
+    # The loop must execute an identical number of iterations on every rank
+    # (same reason as ``inner``): decide convergence / budget locally, then
+    # stop only when *all* ranks are done, or *any* rank hits the budget.
     times: list[float] = []
     t_start = time.perf_counter()
     converged = False
@@ -169,8 +186,20 @@ def benchmark(
             iqr = float(np.percentile(arr, 75) - np.percentile(arr, 25))
             if med > 0 and iqr / med <= iqr_target:
                 converged = True
+        over_budget = time.perf_counter() - t_start > time_budget_s
+        if distributed:
+            dev = device if is_cuda else "cpu"
+            # min over ranks -> every rank converged; max -> some rank is
+            # out of time. One packed all_reduce keeps this collective-safe.
+            flags = torch.tensor(
+                [1 if converged else 0, 0 if over_budget else 1], device=dev
+            )
+            dist.all_reduce(flags, op=dist.ReduceOp.MIN, group=group)
+            all_converged = bool(flags[0].item())
+            any_over_budget = not bool(flags[1].item())
+            if all_converged or any_over_budget:
                 break
-        if time.perf_counter() - t_start > time_budget_s:
+        elif converged or over_budget:
             break
 
     local = np.array(times)
