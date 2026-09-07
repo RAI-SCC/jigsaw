@@ -50,6 +50,12 @@ dev = [
     "mypy",
 
 ]
+docs = [
+    "sphinx",
+    "sphinx-rtd-theme",
+    "myst-parser",
+    "numpy",
+]
 scripts = []
 
 # Mypy

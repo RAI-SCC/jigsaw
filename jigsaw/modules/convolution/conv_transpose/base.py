@@ -18,12 +18,11 @@ import math
 from collections.abc import Sequence
 from typing import Any, Callable, Optional, cast
 
-import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
-from jigsaw import hooks
+from jigsaw import hooks, init
 from jigsaw.utils_aggregate import gather_1d_results
 
 from ..common.arg_norm import _as_spatial_groups, _ntuple
@@ -182,10 +181,19 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         self.dtype = dtype
         self.bayesian = bayesian
 
-        k = np.sqrt(
-            self.groups
-            / (self.out_channels * channel_group.size() * math.prod(self.kernel_size))
+        # Global (unsharded) weight/bias shape, torch.nn.ConvTranspose{1,2,3}d
+        # layout ``(C_in, C_out / groups, *kernel)``. ``reset_parameters`` keys
+        # the init distribution off these, so a freshly built layer is drawn
+        # from the same distribution as the equivalent
+        # ``torch.nn.ConvTransposeNd`` -- the channel-group shard size only
+        # decides which slice of that distribution this rank samples.
+        self.global_weight_shape = (
+            in_channels,
+            out_channels // groups,
+            *self.kernel_size,
         )
+        self.global_bias_shape = (out_channels,) if bias else None
+
         # Transpose weight is ``(C_in, C_out / groups, *kernel)`` (PyTorch
         # layout). In the gather regime (``groups == 1``, real channel group) the
         # channel group shards the output-channel axis 1. In the channel-local
@@ -216,12 +224,11 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             weight *= mask.view(w_in, w_out, *([1] * len(self.kernel_size)))
         self.weight = torch.nn.parameter.Parameter(weight.to(device))
         self.bias = (
-            torch.nn.parameter.Parameter(
-                torch.zeros(self.out_channels).uniform_(-k, k).to(device)
-            )
+            torch.nn.parameter.Parameter(torch.zeros(self.out_channels, device=device))
             if bias
             else None
         )
+        self.reset_parameters()
 
         self.config = (
             ConvTransposeNdConfig(
@@ -258,6 +265,34 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         self._conv_apply: Callable[..., tuple[torch.Tensor, torch.Tensor]] = (
             ConvTransposeNd.apply
         )
+
+    def reset_parameters(self) -> None:
+        """
+        Re-draw ``weight`` (and ``bias``) as ``torch.nn.ConvTranspose{1,2,3}d`` would.
+
+        PyTorch draws ``weight`` from ``kaiming_uniform_(a=sqrt(5))`` and
+        ``bias`` from ``U(-1/sqrt(fan_in), 1/sqrt(fan_in))``, both keyed off the
+        *global* ``fan_in = (C_out / groups) * prod(kernel)`` (the transpose
+        weight's input-channel axis leads, so ``fan_in`` reads off its *second*
+        axis -- see :func:`jigsaw.init._calculate_fan_in_and_fan_out`). Each
+        channel-parallel rank fills only its own weight/bias shard (the
+        output-channel axis in the gather regime, the input-channel axis in the
+        channel-local regime), so the channel-sharded parameter is distributed
+        exactly as the non-distributed one would be. (The subsequent broadcast
+        to every spatial rank only replicates that draw; it does not change its
+        distribution.)
+
+        Override this method in a subclass, or call :mod:`jigsaw.init` helpers
+        directly with ``global_shape=self.global_weight_shape``, to install a
+        different init scheme.
+        """
+        init.kaiming_uniform_(
+            self.weight, a=math.sqrt(5), global_shape=self.global_weight_shape
+        )
+        if self.bias is not None:
+            fan_in, _ = init._calculate_fan_in_and_fan_out(self.global_weight_shape)
+            bound = 1.0 / math.sqrt(fan_in) if fan_in > 0 else 0.0
+            init.uniform_(self.bias, -bound, bound)
 
     @property
     def spatial_world_size(self) -> int:
