@@ -19,8 +19,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-from typing import Optional
-
 import torch
 
 
@@ -62,16 +60,12 @@ def _build_bias(
 
 def forward(
     q: torch.Tensor,
-   
     k: torch.Tensor,
-   
     v: torch.Tensor,
-   
     scale: float,
-   
     dropout_p: float,
     causal: bool = False,
-    key_mask: Optional[torch.Tensor] = None,,
+    key_mask: Optional[torch.Tensor] = None,
     seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Flash attention forward pass. Returns ``(out, logsumexp, rng_state)``.
@@ -114,16 +108,16 @@ def forward(
     q, k, v = [x.to(torch.float16) for x in (q, k, v)]
     if key_mask is None:
         (
-        out,
-        logsumexp,
-        _cum_seq_q,
-        _cum_seq_k,
-        _max_q,
-        _max_k,
-        philox_seed,
-        philox_offset,
-        _debug_attn_mask,
-    ) = torch.ops.aten._scaled_dot_product_flash_attention(
+            out,
+            logsumexp,
+            _cum_seq_q,
+            _cum_seq_k,
+            _max_q,
+            _max_k,
+            philox_seed,
+            philox_offset,
+            _debug_attn_mask,
+        ) = torch.ops.aten._scaled_dot_product_flash_attention(
             q,
             k,
             v,
@@ -132,24 +126,24 @@ def forward(
             scale=scale,
             return_debug_mask=False,
         )
-        return out, logsumexp
+        # ``philox_seed`` / ``philox_offset`` are the flash kernel's opaque
+        # dropout RNG state. Their shapes are build-dependent and need not match
+        # (this torch build returns ``(2,)`` and ``()``), so flatten and
+        # concatenate into a single 1-D tensor -- the ring stores ``rng_state``
+        # via ``ctx.save_for_backward``, which takes tensors, not tuples -- and
+        # split it back in :func:`backward`. ``philox_offset`` is always last.
+        rng_state = (
+            torch.cat([philox_seed.reshape(-1), philox_offset.reshape(-1)])
+            if dropout_p > 0.0
+            else None
+        )
+        return out, logsumexp, rng_state
 
     bias = _build_bias(q.shape[-2], k.shape[-2], causal, key_mask, q.dtype, q.device)
     out, logsumexp, *_ = torch.ops.aten._scaled_dot_product_efficient_attention(
         q, k, v, bias, True, dropout_p, False, scale=scale
     )
-    # ``philox_seed`` / ``philox_offset`` are the flash kernel's opaque dropout
-    # RNG state. Their shapes are build-dependent and need not match (this torch
-    # build returns ``(2,)`` and ``()``), so flatten and concatenate into a
-    # single 1-D tensor -- the ring stores ``rng_state`` via
-    # ``ctx.save_for_backward``, which takes tensors, not tuples -- and split it
-    # back in :func:`backward`. ``philox_offset`` is always the last element.
-    rng_state = (
-        torch.cat([philox_seed.reshape(-1), philox_offset.reshape(-1)])
-        if dropout_p > 0.0
-        else None
-    )
-    return out, logsumexp, rng_state
+    return out, logsumexp, None
 
 
 def backward(
@@ -177,18 +171,18 @@ def backward(
     ``dropout_p == 0`` case) any same-device int64 tensors work, hence zeros.
 
     See :func:`forward` for the ``(B, H, S, d)`` layout, the meaning of
-    ``max_q`` / ``max_k`` / ``cum_seq_*``, ``causal``, and the
+    ``max_q`` / ``max_k`` / ``philox_*`` / ``cum_seq_*``, ``causal``, and the
     ``key_mask`` mask-aware fork onto ``_scaled_dot_product_efficient_attention``
     (mirrored here via its ``_backward`` counterpart).
     """
     if key_mask is None:
         if rng_state is not None:
-        philox_seed, philox_offset = rng_state[:-1], rng_state[-1]
-    else:
-        philox_seed = torch.zeros(1, dtype=torch.long, device=q.device)
-        philox_offset = torch.zeros(1, dtype=torch.long, device=q.device)
+            philox_seed, philox_offset = rng_state[:-1], rng_state[-1]
+        else:
+            philox_seed = torch.zeros(1, dtype=torch.long, device=q.device)
+            philox_offset = torch.zeros(1, dtype=torch.long, device=q.device)
 
-    dq, dk, dv = torch.ops.aten._scaled_dot_product_flash_attention_backward(
+        dq, dk, dv = torch.ops.aten._scaled_dot_product_flash_attention_backward(
             grad_out,
             q,
             k,

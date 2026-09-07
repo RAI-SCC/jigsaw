@@ -36,7 +36,7 @@ class TestMathCoreKeyPaddingMask:
         key_mask = torch.ones(b, s, dtype=torch.bool)
         key_mask[0, -2:] = False  # batch 0: last two keys are padding
 
-        out, lse = math_core.forward(q, k, v, scale=scale, key_mask=key_mask)
+        out, lse, _ = math_core.forward(q, k, v, scale=scale, key_mask=key_mask)
 
         allow = key_mask[:, None, None, :].expand(b, h, s, s)
         add_mask = torch.zeros(b, h, s, s).masked_fill(~allow, float("-inf"))
@@ -63,7 +63,7 @@ class TestMathCoreKeyPaddingMask:
         key_mask = torch.ones(b, s, dtype=torch.bool)
         key_mask[1, :2] = False
 
-        out, lse = math_core.forward(
+        out, lse, _ = math_core.forward(
             q, k, v, scale=scale, causal=True, key_mask=key_mask
         )
         assert not torch.isnan(out).any()
@@ -93,7 +93,7 @@ class TestMathCoreKeyPaddingMask:
         key_mask[0, -1] = False
 
         q, k, v = (torch.randn(b, h, s, d, requires_grad=True) for _ in range(3))
-        out, lse = math_core.forward(q, k, v, scale=scale, key_mask=key_mask)
+        out, lse, _ = math_core.forward(q, k, v, scale=scale, key_mask=key_mask)
         grad_out = torch.randn_like(out)
         out.backward(grad_out)
 
@@ -123,7 +123,7 @@ class TestMathCoreKeyPaddingMask:
         key_mask[1, 0] = False  # batch 1, query 0's only causal key is itself
 
         q, k, v = (torch.randn(b, h, s, d, requires_grad=True) for _ in range(3))
-        out, lse = math_core.forward(
+        out, lse, _ = math_core.forward(
             q, k, v, scale=scale, causal=True, key_mask=key_mask
         )
         grad_out = torch.randn_like(out)
@@ -205,7 +205,7 @@ class TestRingAttentionKeyPaddingMask:
         )
         scale = q_local.shape[-1] ** -0.5
 
-        out, lse, chunks_to_save = forward.ring_forward(
+        out, lse, chunks_to_save, _, _ = forward.ring_forward(
             q_local,
             k_local,
             v_local,

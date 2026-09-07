@@ -35,7 +35,7 @@ class TestMathCoreCausal:
         q, k, v = (torch.randn(b, h, s, d) for _ in range(3))
         scale = d**-0.5
 
-        out, lse = math_core.forward(q, k, v, scale=scale, causal=True)
+        out, lse, _ = math_core.forward(q, k, v, scale=scale, causal=True)
         ref = torch.nn.functional.scaled_dot_product_attention(
             q, k, v, is_causal=True, scale=scale
         )
@@ -53,8 +53,8 @@ class TestMathCoreCausal:
         """``causal=False`` (the default) is untouched by the new mask path."""
         torch.manual_seed(1)
         q, k, v = (torch.randn(2, 2, 5, 4) for _ in range(3))
-        out_default, lse_default = math_core.forward(q, k, v, scale=0.5)
-        out_explicit, lse_explicit = math_core.forward(
+        out_default, lse_default, _ = math_core.forward(q, k, v, scale=0.5)
+        out_explicit, lse_explicit, _ = math_core.forward(
             q, k, v, scale=0.5, causal=False
         )
         torch.testing.assert_close(out_default, out_explicit)
@@ -67,7 +67,7 @@ class TestMathCoreCausal:
         q, k, v = (
             torch.randn(b, h, s, d, requires_grad=True) for _ in range(3)
         )
-        out, lse = math_core.forward(q, k, v, scale=scale, causal=True)
+        out, lse, _ = math_core.forward(q, k, v, scale=scale, causal=True)
         grad_out = torch.randn_like(out)
         out.backward(grad_out)
 
@@ -150,7 +150,7 @@ class TestRingAttentionCausal:
         scale = q_local.shape[-1] ** -0.5
 
         ring_forward = forward.build_ring_forward(ring_config)
-        out, lse, chunks_to_save = ring_forward(
+        out, lse, chunks_to_save, _, _ = ring_forward(
             q_local,
             k_local,
             v_local,
@@ -281,7 +281,7 @@ class TestRingAttentionCausal:
         )
         scale = d**-0.5
 
-        out, _, _ = forward.ring_forward(
+        out, _, _, _, _ = forward.ring_forward(
             q_local,
             k_local,
             v_local,
@@ -296,5 +296,5 @@ class TestRingAttentionCausal:
         )
 
         if local_rank == 0:
-            ref, _ = math_core.forward(q_local, k_local, v_local, scale, causal=True)
+            ref, _, _ = math_core.forward(q_local, k_local, v_local, scale, causal=True)
             torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)

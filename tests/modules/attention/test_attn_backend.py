@@ -367,7 +367,7 @@ class TestBackendWithTe:
         for t in (q, k, v):
             t.requires_grad_(True)
 
-        out, lse = te_core.forward(q, k, v, scale, 0.0, causal=True)
+        out, lse, _ = te_core.forward(q, k, v, scale, 0.0, causal=True)
         grad_out = torch.ones_like(out)
         dq, dk, dv = te_core.backward(
             grad_out,

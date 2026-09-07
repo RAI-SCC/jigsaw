@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Optional, Protocol, cast
+from typing import Any, Optional, Protocol, cast
 
 import torch
 import torch.distributed as dist

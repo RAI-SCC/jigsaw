@@ -70,8 +70,9 @@ def forward(
     dropout_p: float = 0.0,
     causal: bool = False,
     key_mask: Optional[torch.Tensor] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Vanilla attention forward pass. Returns (out, logsumexp).
+    seed: Optional[int] = None,
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """Vanilla attention forward pass. Returns ``(out, logsumexp, rng_state)``.
 
     ``key_mask`` (``[B, Sk]``, bool, ``True`` = attend) masks out padding key
     positions; it composes with ``causal`` (a position is excluded if either
@@ -81,10 +82,6 @@ def forward(
     ``nan``, and this step's contribution must still be a well-defined zero
     for the ring's online-softmax merge (:func:`..forward._online_softmax_merge`)
     to not get poisoned by a ``0 * nan``.
-    """
-    seed: Optional[int] = None,
-) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    """Vanilla attention forward pass. Returns ``(out, logsumexp, rng_state)``.
 
     ``rng_state`` is always ``None`` -- this core replays dropout from ``seed``
     instead (see module docstring).
@@ -97,12 +94,9 @@ def forward(
         scores = scores.masked_fill(exclude, float("-inf"))
         dead_row = exclude.all(dim=-1, keepdim=True)  # broadcasts against (B, H, Sq, 1)
     logsumexp = scores.logsumexp(dim=-1)  # (B, H, Sq)
-    probs = torch.softmax(scores, dim=-1)
-    if dead_row is not None:
-        probs = torch.where(dead_row, torch.zeros_like(probs), probs)
-    out = probs @ v
-    return out, logsumexp
     p = torch.softmax(scores, dim=-1)
+    if dead_row is not None:
+        p = torch.where(dead_row, torch.zeros_like(p), p)
     if dropout_p > 0.0:
         assert seed is not None, "dropout_p > 0 requires a seed"
         keep = _dropout_mask(p.shape, p.device, seed) >= dropout_p

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Optional
-from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -71,9 +70,9 @@ def _attend_step(
     dropout_p: float,
     out: torch.Tensor,
     lse: torch.Tensor,
+    seed: Optional[int],
     causal: bool = False,
     key_mask: Optional[torch.Tensor] = None,
-    seed: Optional[int],
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Run the attention core on (q, kj, vj) and merge into the running (out, lse).
 
@@ -81,15 +80,14 @@ def _attend_step(
     inputs, so they're materialized here. ``causal`` masks the diagonal block
     (see :func:`_causal_step_kind`); it is never set together with a skip.
     ``key_mask`` is this step's ``[B, n_local]`` slice of the global
-    key-padding mask (see :func:`ring_forward`).
-    inputs, so they're materialized here. Returns the merged ``(out, lse)``
-    plus this step's ``rng_state`` (``None`` unless the core is one that
-    threads back opaque kernel RNG state instead of using ``seed`` -- see
-    :mod:`.cores`).
+    key-padding mask (see :func:`ring_forward`). Returns the merged
+    ``(out, lse)`` plus this step's ``rng_state`` (``None`` unless the core is
+    one that threads back opaque kernel RNG state instead of using ``seed`` --
+    see :mod:`.cores`).
     """
     out_j, l_j, rng_state_j = ring_config.attn_core_forward_fn(
-        q, kj.contiguous(), vj.contiguous(), scale, dropout_p, causal=causal,
-        key_mask=key_mask,, seed=seed
+        q, kj.contiguous(), vj.contiguous(), scale, dropout_p,
+        causal=causal, key_mask=key_mask, seed=seed,
     )
 
     o_new, l_new = _online_softmax_merge(out, lse, out_j, l_j)
@@ -251,20 +249,16 @@ def ring_forward(
             if global_key_mask is not None
             else None
         )
-        out, lse = _attend_step(
-            ring_config, q, kj, vj, scale, dropout_p, out, lse,
-            causal=step_causal, key_mask=step_key_mask,
-        )
-        global_chunk_idx = provider.global_chunk_idx(step)
         seed = (
-            combine_dropout_seed(base_seed, local_rank, global_chunk_idx)
+            combine_dropout_seed(base_seed, local_rank, chunk_idx)
             if base_seed is not None
             else None
         )
         out, lse, rng_state_j = _attend_step(
-            ring_config, q, kj, vj, scale, dropout_p, out, lse, seed
+            ring_config, q, kj, vj, scale, dropout_p, out, lse, seed,
+            causal=step_causal, key_mask=step_key_mask,
         )
-        rng_states[global_chunk_idx] = rng_state_j
+        rng_states[chunk_idx] = rng_state_j
         provider.advance(step, ring_group_size)
 
     ring_config.wait_offloads()
