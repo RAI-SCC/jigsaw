@@ -211,7 +211,7 @@ class TestRingAttention:
 
         # just test helper function forward
         ring_forward = forward.build_ring_forward(ring_config)
-        out, lse, chunks_to_save = ring_forward(
+        out, lse, chunks_to_save, base_seed, rng_states = ring_forward(
             q_local,
             k_local,
             v_local,
@@ -407,7 +407,7 @@ def test_ring_forward_backward_te(
     scale = d**-0.5
 
     ring_forward = forward.build_ring_forward(ring_config)
-    out, lse, chunks_to_save = ring_forward(
+    out, lse, chunks_to_save, base_seed, rng_states = ring_forward(
         q_local,
         k_local,
         v_local,
@@ -554,7 +554,7 @@ def test_ring_hybrid(
 
     # just test helper function forward
     ring_forward = forward.build_ring_forward(ring_config)
-    out, lse, chunks_to_save = ring_forward(
+    out, lse, chunks_to_save, base_seed, rng_states = ring_forward(
         q_local,
         k_local,
         v_local,
