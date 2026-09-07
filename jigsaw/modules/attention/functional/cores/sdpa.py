@@ -24,6 +24,8 @@ import torch
 
 
 def _build_bias(
+    b: int,
+    h: int,
     sq: int,
     sk: int,
     causal: bool,
@@ -41,6 +43,11 @@ def _build_bias(
     a large-but-finite bias is the standard fix framework attention kernels use
     for additive masks and needs no cooperation from the (opaque, CUDA-only)
     kernel. Returns ``None`` when neither ``causal`` nor ``key_mask`` applies.
+
+    The mem-efficient kernel neither broadcasts the bias's batch/head dims nor
+    tolerates an unaligned last-dim stride, so the result is expanded to the
+    full ``(b, h, sq, sk)`` and, when ``sk`` is not a multiple of 8, padded up
+    and sliced back (mirrors aten's own ``sdp::preprocess_mask``).
     """
     if not causal and key_mask is None:
         return None
@@ -56,7 +63,9 @@ def _build_bias(
     if key_mask is not None:
         pad_exclude = (~key_mask)[:, None, None, :]
         bias = bias.masked_fill(pad_exclude, neg)
-    return bias
+    if sk % 8:
+        bias = torch.nn.functional.pad(bias, (0, 8 - sk % 8))[..., :sk]
+    return bias.expand(b, h, sq, sk)
 
 
 def forward(
@@ -140,11 +149,14 @@ def forward(
         )
         return out, logsumexp, rng_state
 
-    bias = _build_bias(q.shape[-2], k.shape[-2], causal, key_mask, q.dtype, q.device)
+    b, h, sq = q.shape[0], q.shape[1], q.shape[-2]
+    bias = _build_bias(b, h, sq, k.shape[-2], causal, key_mask, q.dtype, q.device)
     out, logsumexp, *_ = torch.ops.aten._scaled_dot_product_efficient_attention(
         q, k, v, bias, True, dropout_p, False, scale=scale
     )
-    return out, logsumexp, None
+    # the mem-efficient kernel pads the LSE seq dim up to a multiple of 32;
+    # the ring's online-softmax merge wants it back at (b, h, sq).
+    return out, logsumexp[..., :sq].contiguous(), None
 
 
 def backward(
@@ -214,7 +226,10 @@ def backward(
         )
         return dq.to(in_dtype), dk.to(in_dtype), dv.to(in_dtype)
 
-    bias = _build_bias(q.shape[-2], k.shape[-2], causal, key_mask, q.dtype, q.device)
+    bias = _build_bias(
+        q.shape[0], q.shape[1], q.shape[-2], k.shape[-2],
+        causal, key_mask, q.dtype, q.device,
+    )
     dq, dk, dv, _ = torch.ops.aten._scaled_dot_product_efficient_attention_backward(
         grad_out,
         q,
@@ -230,4 +245,10 @@ def backward(
         is_causal=False,
         scale=scale,
     )
-    return dq.to(in_dtype), dk.to(in_dtype), dv.to(in_dtype)
+    # the mem-efficient backward returns non-contiguous grads; the ring's dK/dV
+    # all-reduce / relay needs them contiguous.
+    return (
+        dq.to(in_dtype).contiguous(),
+        dk.to(in_dtype).contiguous(),
+        dv.to(in_dtype).contiguous(),
+    )

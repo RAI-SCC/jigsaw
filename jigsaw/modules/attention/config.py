@@ -1,5 +1,6 @@
 """Config for attention."""
 
+import warnings
 from enum import Enum
 from typing import Any, Callable, Optional
 
@@ -101,11 +102,24 @@ SaveForBackwardFn = Callable[[torch.Tensor, torch.Tensor], Optional[torch.Tensor
 def _select_offloader(
     offload: Offload, device: torch.device
 ) -> Optional[NVLinkActivationOffloader]:
-    """Build the activation offloader for the configured policy."""
+    """Build the activation offloader for the configured policy.
+
+    ``Offload.CPU`` stages GPU activations to pinned host memory over CUDA side
+    streams; with no CUDA device there is nothing to stage and no stream to
+    build, so it degrades to a no-op (``None``) with a warning rather than
+    failing in :class:`~jigsaw.offload.NVLinkActivationOffloader`'s constructor.
+    """
     match offload:
         case Offload.DISABLED:
             return None
         case Offload.CPU:
+            if device.type != "cuda":
+                warnings.warn(
+                    "Offload.CPU has no effect without a CUDA device; "
+                    "activation offloading disabled.",
+                    stacklevel=2,
+                )
+                return None
             return NVLinkActivationOffloader(device)
         case other:
             raise ValueError(f"unhandled offload option {other}")
