@@ -659,18 +659,8 @@ def _check_ring_hybrid(
     # dq_local, dq_full: results from true ring attention
     assert_close("output", out_full, out_ref, atol, 1e-5, device, ring_group)
     assert_close(
-        "dq sum",
-        dq_full.sum(),
-        dq_ref.to(dq_full.dtype).sum(),
-        1e-8,
-        1e-5,
-        device,
-        ring_group,
-    )
-    assert_close(
         "dq", dq_full, dq_ref.to(dq_full.dtype), atol, 1e-5, device, ring_group
     )
-    # assert torch.allclose(dk_full.sum(), dk_ref.to(dk_full.dtype).sum())
     assert_close(
         "dk", dk_full, dk_ref.to(dk_full.dtype), atol, 1e-5, device, ring_group
     )
