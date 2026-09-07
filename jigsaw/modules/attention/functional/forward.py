@@ -8,7 +8,6 @@ mirroring how :func:`.backward.ring_backward` delegates to a
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Optional
 
 import torch
@@ -91,27 +90,6 @@ def _attend_step(
 # --------------------------------------------------------------------------- #
 # forward driver
 # --------------------------------------------------------------------------- #
-def build_ring_forward(
-    ring_config: RingAttentionConfig,
-) -> Callable[
-    ...,
-    tuple[
-        torch.Tensor,
-        torch.Tensor,
-        tuple,
-        Optional[int],
-        tuple,
-    ],
-]:
-    """Return the ring-attention forward.
-
-    Kept for backwards compatibility: the concrete communication strategy is now
-    chosen per call by :func:`~.forward_chunk_provider.build_forward_chunk_provider`,
-    so this always returns the one :func:`ring_forward` driver.
-    """
-    return ring_forward
-
-
 def ring_forward(
     q: torch.Tensor,
     k: torch.Tensor,

@@ -202,7 +202,6 @@ class TestAutocastAttention:
         local_rank = ring_group.rank()
         world = ring_group.size()
         cfg = attn_config.RingAttentionConfig(device=device)
-        ring_forward = ring_fwd.build_ring_forward(cfg)
 
         b, h, d = 2, 6, 16
         n_local = (world * 16) // world
@@ -224,7 +223,7 @@ class TestAutocastAttention:
                 else contextlib.nullcontext()
             )
             with ctx:
-                out, lse, chunks, base_seed, rng_states = ring_forward(
+                out, lse, chunks, base_seed, rng_states = ring_fwd.ring_forward(
                     q, k, v, x0, w_qkv, scale, 0.0, ring_group, local_rank, world, cfg
                 )
             dq, dk, dv = ring_bwd.ring_backward(
