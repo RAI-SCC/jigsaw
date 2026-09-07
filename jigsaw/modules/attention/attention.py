@@ -533,9 +533,13 @@ class DistributedAttention(torch.nn.Module):
             q, k, v = qkv.to(core_dtype).unbind(0)
 
         out = self.attn_core(q, k, v, x=x)
-        # out has shape [batch, local_heads, local_sequence length, head_dim]
+        # The core runs in ``core_dtype`` (bf16 on CUDA, see ``attn_core_dtype``);
+        # ``head_concat`` holds the model-dtype weights, so fold ``out`` back to
+        # ``x.dtype`` before it. The non-bshd path also collapses heads here; the
+        # ``_te_bshd`` core already returns ``... n s (h d)``.
         if not self._te_bshd:
-            out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous().to(x.dtype)
+            out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous()
+        out = out.to(x.dtype)
 
         out = cast(torch.Tensor, self.head_concat(out))
         # Output: [n_batch, seq_length, output_dim]
