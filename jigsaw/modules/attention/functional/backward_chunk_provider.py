@@ -551,6 +551,15 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
         step : int
             Current ring step (only its intra-node phase is used as the tag).
         """
+        # NOTE (CPU_GLOO, not yet done): unlike the forward
+        # `_HybridForwardChunkProvider`, this still hands `cpu_inter_p2p` a GPU
+        # tensor every hop, so each relay pays a fresh D2H. The host-resident
+        # relay -- stage `self.x`/`self.kv` once, then send from the previous
+        # hop's `work.recv_host` (already exposed by `_CpuInterP2PWork`) -- is
+        # deferred until it can be validated on GPU (see
+        # `test_ring_hybrid_cpu_gloo`). The `_accumulate_dkv_*` relays in
+        # `backward.py` keep their per-step D2H regardless: dK/dV are freshly
+        # computed on-device each step.
         buf = torch.empty_like(data)
         self._internode_recv_buf, self._internode_handle = self.config.inter_p2p_fn(
             data=data,
