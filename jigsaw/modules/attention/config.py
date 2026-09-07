@@ -1,6 +1,7 @@
 """Config for attention."""
 
 from enum import Enum
+from functools import partial
 from typing import Any, Callable, Optional
 
 import torch
@@ -57,6 +58,23 @@ class SendOp(Enum):
     HYBRID_P2P = 3
     HYBRID_BROADCAST = 4
     HYBRID_ALLTOALL = 5
+
+
+class InterNodeTransport(Enum):
+    """Transport for the ring's inter-node hop (hybrid send-ops only)."""
+
+    NCCL = 0
+    # Rotate the inter-node chunk in pinned host memory over Gloo: the transfer
+    # runs on the CPU + NIC instead of a CUDA stream, freeing the GPU copy
+    # engines / NVLink-C2C link for concurrent activation-offload traffic.
+    CPU_GLOO = 1
+
+
+# Hybrid send-ops whose inter-node hop is a plain (send_to, recv_from)
+# permutation -- the only ones `InterNodeTransport.CPU_GLOO` supports.
+_CPU_GLOO_SEND_OPS = frozenset(
+    {SendOp.HYBRID_P2P, SendOp.HYBRID_BROADCAST, SendOp.HYBRID_ALLTOALL}
+)
 
 
 class AttnBackend(str, Enum):
@@ -185,6 +203,51 @@ def _select_p2p_fn(send_op: SendOp) -> CommFn:
         return comm.comm_1d_p2p
     alltoall = {SendOp.ALLTOALL, SendOp.BROADCAST, SendOp.HYBRID_ALLTOALL}
     return comm.comm_1d_alltoall if send_op in alltoall else comm.comm_1d_p2p
+
+
+def _select_inter_p2p_fn(
+    send_op: SendOp,
+    inter_node_transport: InterNodeTransport,
+    offloader: Optional[NVLinkActivationOffloader],
+) -> CommFn:
+    """Pick the primitive for the ring's *inter-node* hop.
+
+    ``NCCL`` keeps whatever :func:`_select_p2p_fn` chooses (``comm_1d_p2p`` or,
+    for the all-to-all-flavoured hybrids, ``comm_1d_alltoall``). ``CPU_GLOO``
+    always routes the hop through :func:`comm.cpu_inter_p2p` -- the all-to-all
+    vs p2p distinction is moot on Gloo -- with the activation ``offloader``
+    bound in to supply the pinned D2H / H2D staging.
+    """
+    if inter_node_transport == InterNodeTransport.NCCL:
+        return _select_p2p_fn(send_op)
+    return partial(comm.cpu_inter_p2p, offloader=offloader)
+
+
+def _validate_cpu_gloo(send_op: SendOp, offload: Offload) -> None:
+    """Guard the preconditions for ``InterNodeTransport.CPU_GLOO``.
+
+    The Gloo host-to-host hop only makes sense for a hybrid ring (it replaces
+    *just* the inter-node step), needs the CPU offloader for its pinned D2H/H2D
+    staging, and needs a backend that can carry CPU tensors over Gloo -- the
+    hybrid ``cpu:gloo,cuda:nccl`` backend reports e.g. ``"cpu:gloo,cuda:nccl"``.
+    """
+    if send_op not in _CPU_GLOO_SEND_OPS:
+        raise ValueError(
+            f"inter_node_transport=CPU_GLOO needs a hybrid send_op "
+            f"({sorted(op.name for op in _CPU_GLOO_SEND_OPS)}), got {send_op.name}"
+        )
+    if offload != Offload.CPU:
+        raise ValueError(
+            "inter_node_transport=CPU_GLOO needs offload=Offload.CPU "
+            "(it reuses the activation offloader's pinned-memory staging)"
+        )
+    if dist.is_available() and dist.is_initialized():
+        backend = str(dist.get_backend())
+        if "gloo" not in backend:
+            raise ValueError(
+                f"inter_node_transport=CPU_GLOO needs a Gloo-capable backend "
+                f"(e.g. 'cpu:gloo,cuda:nccl'), got '{backend}'"
+            )
 
 
 def _select_send_op_fn(send_op: SendOp) -> CommFn:
@@ -324,6 +387,7 @@ class RingAttentionConfig:
         offload: Offload = Offload.DISABLED,
         gpus_per_node: int = 4,
         attn_backend: AttnBackend = AttnBackend.SDPA,
+        inter_node_transport: InterNodeTransport = InterNodeTransport.NCCL,
     ):
         """Initialize the object.
 
@@ -349,10 +413,18 @@ class RingAttentionConfig:
             Inner per-chunk attention core. ``SDPA`` (default) keeps the
             device-based pick (flash on CUDA, math on CPU); ``TE`` uses the
             TransformerEngine fused core; ``MATH`` the unfused reference.
+        inter_node_transport : InterNodeTransport
+            Transport for the ring's inter-node hop. ``NCCL`` (default) keeps
+            the GPU/NCCL path. ``CPU_GLOO`` sends that hop from pinned host
+            memory over Gloo; it requires a hybrid ``send_op``, ``offload=CPU``
+            and a Gloo-capable backend.
 
         """
         if gpus_per_node <= 0:
             raise ValueError("gpus_per_node must be positive")
+        inter_node_transport = InterNodeTransport(inter_node_transport)
+        if inter_node_transport == InterNodeTransport.CPU_GLOO:
+            _validate_cpu_gloo(send_op, offload)
         self.send_in_forward = send_in_forward
         self.save_for_backward = save_for_backward
         self.send_op = send_op
@@ -362,10 +434,14 @@ class RingAttentionConfig:
         self.gpus_per_node = gpus_per_node
         self.device = device
         self.attn_backend = AttnBackend(attn_backend)
+        self.inter_node_transport = inter_node_transport
 
         # Resolve every policy to its concrete callable, once.
         self.offloader = _select_offloader(offload, device)
         self.p2p_fn = _select_p2p_fn(send_op)
+        self.inter_p2p_fn = _select_inter_p2p_fn(
+            send_op, inter_node_transport, self.offloader
+        )
         self.send_op_fn = _select_send_op_fn(send_op)
         self.attn_core_forward_fn = _select_attn_core_forward_fn(
             device, self.attn_backend
@@ -396,5 +472,6 @@ class RingAttentionConfig:
             f"save_scope={self.save_scope.name}, "
             f"send_backward={self.send_backward.name}, "
             f"offload={self.offload.name}, "
-            f"attn_backend={self.attn_backend.name})"
+            f"attn_backend={self.attn_backend.name}, "
+            f"inter_node_transport={self.inter_node_transport.name})"
         )

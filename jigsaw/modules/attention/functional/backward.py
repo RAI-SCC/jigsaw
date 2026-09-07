@@ -398,7 +398,7 @@ def _accumulate_dkv_send(
     if ring_config.send_op in _INTRA_ROTATING_HYBRIDS:
         topo = get_hybrid_topology(group, ring_config.gpus_per_node)
         send_recv_ranks = _hybrid_dkv_relay_peers(topo, step)
-        recv_buf, _ = ring_config.p2p_fn(
+        recv_buf, _ = ring_config.inter_p2p_fn(
             dkv,
             recv_buf,
             send_recv_ranks=send_recv_ranks,
@@ -454,7 +454,7 @@ def _accumulate_dkv_hybrid_broadcast(
         # ends up with the partial for a chunk it owns; the rest take part to
         # keep the collective whole and discard what they receive.
         recv = torch.empty_like(dkv)
-        recv, _ = ring_config.p2p_fn(
+        recv, _ = ring_config.inter_p2p_fn(
             dkv,
             recv,
             send_recv_ranks=(

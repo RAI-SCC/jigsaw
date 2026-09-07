@@ -500,8 +500,16 @@ def test_ring_hybrid(
     save_scope: config.SaveScope,
     send_backward: config.SendBackward,
     offloader: config.Offload,
+    inter_node_transport: config.InterNodeTransport = (
+        config.InterNodeTransport.NCCL
+    ),
 ) -> None:
-    """Verify if forward-backward pass works for ring attention."""
+    """Verify if forward-backward pass works for ring attention.
+
+    ``inter_node_transport`` has no parametrize decorator: it defaults to
+    ``NCCL`` for the normal matrix and is only overridden by
+    :func:`test_ring_hybrid_cpu_gloo`, which calls this function directly.
+    """
     if (
         send_in_forward == config.SendForward.KV
         and save_for_backward == config.SaveBackward.X
@@ -518,6 +526,7 @@ def test_ring_hybrid(
         save_scope=save_scope,
         send_backward=send_backward,
         offload=offloader,
+        inter_node_transport=inter_node_transport,
     )
 
     ring_forward = forward.build_ring_forward(ring_config)
@@ -685,4 +694,59 @@ def test_ring_hybrid(
         1e-5,
         device,
         ring_group,
+    )
+
+
+@pytest.mark.hybrid_dist_env
+@pytest.mark.gpu_required
+@pytest.mark.dist(8)
+@pytest.mark.parametrize(
+    "send_in_forward", [config.SendForward.X, config.SendForward.KV]
+)
+@pytest.mark.parametrize(
+    "send_op",
+    [
+        config.SendOp.HYBRID_P2P,
+        config.SendOp.HYBRID_ALLTOALL,
+        config.SendOp.HYBRID_BROADCAST,
+    ],
+)
+@pytest.mark.parametrize(
+    "save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL]
+)
+@pytest.mark.parametrize(
+    "send_backward",
+    [config.SendBackward.SEND_DKV, config.SendBackward.GATHER_DKV],
+)
+def test_ring_hybrid_cpu_gloo(
+    device: torch.device,
+    process_mesh_dict_2x4: dict,
+    send_in_forward: config.SendForward,
+    send_op: config.SendOp,
+    save_scope: config.SaveScope,
+    send_backward: config.SendBackward,
+) -> None:
+    """``InterNodeTransport.CPU_GLOO`` must match the serial reference.
+
+    Reuses :func:`test_ring_hybrid`'s harness with the inter-node hop routed
+    through :func:`jigsaw.comm.cpu_inter_p2p` (pinned host memory + Gloo)
+    instead of NCCL. Needs a Gloo-capable backend -- run this file under a
+    ``cpu:gloo,cuda:nccl`` launch (see ``tests/test_gloo_nccl.py``); it skips
+    otherwise.
+    """
+    if "gloo" not in str(dist.get_backend()):
+        pytest.skip(
+            "CPU_GLOO inter-node transport needs a Gloo-capable backend "
+            "(run under a cpu:gloo,cuda:nccl launch)"
+        )
+    test_ring_hybrid(
+        device=device,
+        process_mesh_dict_2x4=process_mesh_dict_2x4,
+        send_in_forward=send_in_forward,
+        save_for_backward=config.SaveBackward.KV,
+        send_op=send_op,
+        save_scope=save_scope,
+        send_backward=send_backward,
+        offloader=config.Offload.CPU,
+        inter_node_transport=config.InterNodeTransport.CPU_GLOO,
     )

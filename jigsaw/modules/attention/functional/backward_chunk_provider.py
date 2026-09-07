@@ -552,7 +552,7 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
             Current ring step (only its intra-node phase is used as the tag).
         """
         buf = torch.empty_like(data)
-        self._internode_recv_buf, self._internode_handle = self.config.p2p_fn(
+        self._internode_recv_buf, self._internode_handle = self.config.inter_p2p_fn(
             data=data,
             buffer=buf,
             send_recv_ranks=self._inter_ranks,
