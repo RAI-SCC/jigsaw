@@ -349,7 +349,9 @@ class TestRingAttention:
 @pytest.mark.te_required
 @pytest.mark.gpu_required
 @pytest.mark.dist(4)
-@pytest.mark.parametrize("save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL])
+@pytest.mark.parametrize(
+    "save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL]
+)
 @pytest.mark.parametrize(
     "send_backward",
     [config.SendBackward.GATHER_DKV, config.SendBackward.SEND_DKV],
@@ -388,9 +390,9 @@ def test_ring_forward_backward_te(
     b, h, n_global, d = 3, 6, world_size * 16, 16
     n_local = n_global // world_size
 
-    w_qkv = torch.randn(3 * d * h, d, device=device, requires_grad=True, dtype=dtype) / (
-        d**0.5
-    )
+    w_qkv = torch.randn(
+        3 * d * h, d, device=device, requires_grad=True, dtype=dtype
+    ) / (d**0.5)
     torch.manual_seed(local_rank)
     x = torch.randn(b, n_local, d, device=device, requires_grad=True, dtype=dtype) / (
         d**0.5
@@ -400,8 +402,7 @@ def test_ring_forward_backward_te(
 
     qkv = x @ w_qkv.mT
     q_local, k_local, v_local = (
-        t.contiguous()
-        for t in qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
+        t.contiguous() for t in qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
     )
     scale = d**-0.5
 
@@ -507,51 +508,49 @@ def test_ring_hybrid(
     ):
         pytest.xfail("not yet supported")
 
-        process_mesh_dict = process_mesh_dict_2x4
+    process_mesh_dict = process_mesh_dict_2x4
 
-        ring_config = config.RingAttentionConfig(
-            device=device,
-            send_in_forward=send_in_forward,
-            send_op=send_op,
-            save_for_backward=save_for_backward,
-            save_scope=save_scope,
-            send_backward=send_backward,
-            offload=offloader,
-        )
+    ring_config = config.RingAttentionConfig(
+        device=device,
+        send_in_forward=send_in_forward,
+        send_op=send_op,
+        save_for_backward=save_for_backward,
+        save_scope=save_scope,
+        send_backward=send_backward,
+        offload=offloader,
+    )
 
-        ring_forward = forward.build_ring_forward(ring_config)
-        local_rank = dist.get_rank(group=process_mesh_dict["model"])
-        world_size = dist.get_world_size(group=process_mesh_dict["model"])
+    ring_forward = forward.build_ring_forward(ring_config)
+    local_rank = dist.get_rank(group=process_mesh_dict["model"])
+    world_size = dist.get_world_size(group=process_mesh_dict["model"])
 
-        dtype = torch.bfloat16 if dist.get_backend() == "nccl" else torch.float32
-        torch.manual_seed(2)  # same seed for weight initialization
-        b, h, n_global, d = 3, 6, world_size * 16, 16
-        n_local = n_global // world_size
+    dtype = torch.bfloat16 if dist.get_backend() == "nccl" else torch.float32
+    torch.manual_seed(2)  # same seed for weight initialization
+    b, h, n_global, d = 3, 6, world_size * 16, 16
+    n_local = n_global // world_size
 
-        w_qkv = torch.randn(
-            3 * d * h, d, device=device, requires_grad=True, dtype=dtype
-        ) / (d**0.5)
-        w_qkv.fill_(0.01)
-        torch.manual_seed(local_rank)  # different seed for input data generation
-        x = torch.randn(
-            b, n_local, d, device=device, requires_grad=True, dtype=dtype
-        ) / (d**0.5)
-        x = x.contiguous()
-        x = x.fill_(0.1 * local_rank)
+    w_qkv = torch.randn(
+        3 * d * h, d, device=device, requires_grad=True, dtype=dtype
+    ) / (d**0.5)
+    w_qkv.fill_(0.01)
+    torch.manual_seed(local_rank)  # different seed for input data generation
+    x = torch.randn(b, n_local, d, device=device, requires_grad=True, dtype=dtype) / (
+        d**0.5
+    )
+    x = x.contiguous()
+    x = x.fill_(0.1 * local_rank)
 
-        qkv = x @ w_qkv.mT
-        # QKV shape: [B, Nlocal, 3*d*h]
-        # We need QKV to have shape: []
-        q_local, k_local, v_local = qkv.reshape(b, n_local, 3, h, d).permute(
-            2, 0, 3, 1, 4
-        )
+    qkv = x @ w_qkv.mT
+    # QKV shape: [B, Nlocal, 3*d*h]
+    # We need QKV to have shape: []
+    q_local, k_local, v_local = qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
 
-        q_local, k_local, v_local = (
-            q_local.contiguous(),
-            k_local.contiguous(),
-            v_local.contiguous(),
-        )
-        scale = q_local.shape[-1] ** -0.5
+    q_local, k_local, v_local = (
+        q_local.contiguous(),
+        k_local.contiguous(),
+        v_local.contiguous(),
+    )
+    scale = q_local.shape[-1] ** -0.5
 
         # just test helper function forward
         ring_forward = forward.build_ring_forward(ring_config)
@@ -569,133 +568,121 @@ def test_ring_hybrid(
             ring_config=ring_config,
         )
 
-        out_full = gather_1d_results(out, process_mesh_dict, dim=2)
-        x_full = gather_1d_results(x, process_mesh_dict, dim=1)
-        qkv = x_full @ w_qkv.mT
-        q_ref = gather_1d_results(q_local, process_mesh_dict, dim=2).requires_grad_(
-            True
-        )
-        k_ref = gather_1d_results(k_local, process_mesh_dict, dim=2).requires_grad_(
-            True
-        )
-        v_ref = gather_1d_results(v_local, process_mesh_dict, dim=2).requires_grad_(
-            True
+    out_full = gather_1d_results(out, process_mesh_dict, dim=2)
+    x_full = gather_1d_results(x, process_mesh_dict, dim=1)
+    qkv = x_full @ w_qkv.mT
+    q_ref = gather_1d_results(q_local, process_mesh_dict, dim=2).requires_grad_(True)
+    k_ref = gather_1d_results(k_local, process_mesh_dict, dim=2).requires_grad_(True)
+    v_ref = gather_1d_results(v_local, process_mesh_dict, dim=2).requires_grad_(True)
+
+    # Reference calculation
+    with torch.nn.attention.sdpa_kernel(
+        [
+            torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+            torch.nn.attention.SDPBackend.MATH,
+        ]
+    ):
+        out_ref = torch.nn.functional.scaled_dot_product_attention(
+            q_ref, k_ref, v_ref, is_causal=False, dropout_p=0.0
         )
 
-        # Reference calculation
-        with torch.nn.attention.sdpa_kernel(
-            [
-                torch.nn.attention.SDPBackend.FLASH_ATTENTION,
-                torch.nn.attention.SDPBackend.MATH,
-            ]
-        ):
-            out_ref = torch.nn.functional.scaled_dot_product_attention(
-                q_ref, k_ref, v_ref, is_causal=False, dropout_p=0.0
-            )
+    q_ref2, k_ref2, v_ref2 = (
+        q_ref.detach().clone(),
+        k_ref.detach().clone(),
+        v_ref.detach().clone(),
+    )
+    q_ref2 = q_ref2.requires_grad_(True)
+    k_ref2 = k_ref2.requires_grad_(True)
+    v_ref2 = v_ref2.requires_grad_(True)
 
-        q_ref2, k_ref2, v_ref2 = (
-            q_ref.detach().clone(),
-            k_ref.detach().clone(),
-            v_ref.detach().clone(),
-        )
-        q_ref2 = q_ref2.requires_grad_(True)
-        k_ref2 = k_ref2.requires_grad_(True)
-        v_ref2 = v_ref2.requires_grad_(True)
+    out_core = ring_config.attn_core_forward_fn(
+        q_ref2, k_ref2, v_ref2, dropout_p=0.0, scale=scale
+    )[0]
+    out_core = out_core.requires_grad_(True)
 
-        out_core = ring_config.attn_core_forward_fn(
-            q_ref2, k_ref2, v_ref2, dropout_p=0.0, scale=scale
-        )[0]
-        out_core = out_core.requires_grad_(True)
+    dout_local = torch.ones_like(out, device=device, dtype=out_ref.dtype)
+    dq_local, dk_local, dv_local = backward.ring_backward(
+        dout_local,
+        q_local,
+        out,
+        x,
+        lse,
+        w_qkv,
+        scale,
+        process_mesh_dict["model"],
+        local_rank,
+        world_size,
+        chunks_to_save,
+        ring_config=ring_config,
+    )
 
-        dout_local = torch.ones_like(out, device=device, dtype=out_ref.dtype)
-        dq_local, dk_local, dv_local = backward.ring_backward(
-            dout_local,
-            q_local,
-            out,
-            x,
-            lse,
-            w_qkv,
-            scale,
-            process_mesh_dict["model"],
-            local_rank,
-            world_size,
-            chunks_to_save,
-            ring_config=ring_config,
-        )
+    # Backward pass
+    out_ref.backward(torch.ones_like(out_ref))
+    dq_ref, dk_ref, dv_ref = q_ref.grad, k_ref.grad, v_ref.grad
 
-        # Backward pass
-        out_ref.backward(torch.ones_like(out_ref))
-        dq_ref, dk_ref, dv_ref = q_ref.grad, k_ref.grad, v_ref.grad
+    out_core.backward(torch.ones_like(out_core))
+    atol = 1e-2 if dtype == torch.bfloat16 else 1e-3
+    ring_group = process_mesh_dict["model"]
+    # dq_ref: results from calling torch.nn.SDPA
+    # q_ref2: results from calling forward-backward core functionality
+    # from ring_config.attn_core_forward_fn
 
-        out_core.backward(torch.ones_like(out_core))
-        atol = 1e-2 if dtype == torch.bfloat16 else 1e-3
-        ring_group = process_mesh_dict["model"]
-        # dq_ref: results from calling torch.nn.SDPA
-        # q_ref2: results from calling forward-backward core functionality
-        # from ring_config.attn_core_forward_fn
+    assert_close("dq core vs sdpa", q_ref2.grad, dq_ref, atol, 1e-5, device, ring_group)
+    assert_close("dk core vs sdpa", k_ref2.grad, dk_ref, atol, 1e-5, device, ring_group)
+    assert_close("dv core vs sdpa", v_ref2.grad, dv_ref, atol, 1e-5, device, ring_group)
 
-        assert_close(
-            "dq core vs sdpa", q_ref2.grad, dq_ref, atol, 1e-5, device, ring_group
-        )
-        assert_close(
-            "dk core vs sdpa", k_ref2.grad, dk_ref, atol, 1e-5, device, ring_group
-        )
-        assert_close(
-            "dv core vs sdpa", v_ref2.grad, dv_ref, atol, 1e-5, device, ring_group
-        )
+    # gather
+    dq_full = gather_1d_results(dq_local, process_mesh_dict, dim=2)
+    dk_full = gather_1d_results(dk_local, process_mesh_dict, dim=2)
+    dv_full = gather_1d_results(dv_local, process_mesh_dict, dim=2)
 
-        # gather
-        dq_full = gather_1d_results(dq_local, process_mesh_dict, dim=2)
-        dk_full = gather_1d_results(dk_local, process_mesh_dict, dim=2)
-        dv_full = gather_1d_results(dv_local, process_mesh_dict, dim=2)
+    # dq_local, dq_full: results from true ring attention
+    assert_close("output", out_full, out_ref, atol, 1e-5, device, ring_group)
+    assert_close(
+        "dq sum",
+        dq_full.sum(),
+        dq_ref.to(dq_full.dtype).sum(),
+        1e-8,
+        1e-5,
+        device,
+        ring_group,
+    )
+    assert_close(
+        "dq", dq_full, dq_ref.to(dq_full.dtype), atol, 1e-5, device, ring_group
+    )
+    # assert torch.allclose(dk_full.sum(), dk_ref.to(dk_full.dtype).sum())
+    assert_close(
+        "dk", dk_full, dk_ref.to(dk_full.dtype), atol, 1e-5, device, ring_group
+    )
+    assert_close(
+        "dv", dv_full, dv_ref.to(dv_full.dtype), atol, 1e-5, device, ring_group
+    )
 
-        # dq_local, dq_full: results from true ring attention
-        assert_close("output", out_full, out_ref, atol, 1e-5, device, ring_group)
-        assert_close(
-            "dq sum",
-            dq_full.sum(),
-            dq_ref.to(dq_full.dtype).sum(),
-            1e-8,
-            1e-5,
-            device,
-            ring_group,
-        )
-        assert_close(
-            "dq", dq_full, dq_ref.to(dq_full.dtype), atol, 1e-5, device, ring_group
-        )
-        # assert torch.allclose(dk_full.sum(), dk_ref.to(dk_full.dtype).sum())
-        assert_close(
-            "dk", dk_full, dk_ref.to(dk_full.dtype), atol, 1e-5, device, ring_group
-        )
-        assert_close(
-            "dv", dv_full, dv_ref.to(dv_full.dtype), atol, 1e-5, device, ring_group
-        )
-
-        local_slice = slice(local_rank * n_local, (local_rank + 1) * n_local)
-        assert_close(
-            "dq local shard",
-            dq_local,
-            dq_ref[:, :, local_slice].to(dq_local.dtype),
-            atol,
-            1e-5,
-            device,
-            ring_group,
-        )
-        assert_close(
-            "dk local shard",
-            dk_local,
-            dk_ref[:, :, local_slice].to(dk_local.dtype),
-            atol,
-            1e-5,
-            device,
-            ring_group,
-        )
-        assert_close(
-            "dv local shard",
-            dv_local,
-            dv_ref[:, :, local_slice].to(dv_local.dtype),
-            atol,
-            1e-5,
-            device,
-            ring_group,
-        )
+    local_slice = slice(local_rank * n_local, (local_rank + 1) * n_local)
+    assert_close(
+        "dq local shard",
+        dq_local,
+        dq_ref[:, :, local_slice].to(dq_local.dtype),
+        atol,
+        1e-5,
+        device,
+        ring_group,
+    )
+    assert_close(
+        "dk local shard",
+        dk_local,
+        dk_ref[:, :, local_slice].to(dk_local.dtype),
+        atol,
+        1e-5,
+        device,
+        ring_group,
+    )
+    assert_close(
+        "dv local shard",
+        dv_local,
+        dv_ref[:, :, local_slice].to(dv_local.dtype),
+        atol,
+        1e-5,
+        device,
+        ring_group,
+    )
