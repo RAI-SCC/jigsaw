@@ -112,12 +112,24 @@ def backward(
 
     See :func:`forward` for the ``(B, H, S, d)`` layout and the meaning of
     ``max_q`` / ``max_k`` / ``cum_seq_*``.
+
+    ``q``/``k``/``v``/``out``/``grad_out`` are cast to fp16 to match
+    :func:`forward`, and ``logsumexp`` to fp32: the flash backward kernel reads
+    it as fp32 and returns garbage for a 16-bit ``logsumexp`` (the ring's
+    :func:`..backward.ring_backward` hands it back downcast to the model dtype).
+    Gradients are returned in the input dtype.
     """
     if rng_state is not None:
         philox_seed, philox_offset = rng_state[:-1], rng_state[-1]
     else:
         philox_seed = torch.zeros(1, dtype=torch.long, device=q.device)
         philox_offset = torch.zeros(1, dtype=torch.long, device=q.device)
+
+    in_dtype = grad_out.dtype
+    grad_out, q, k, v, out = (
+        t.to(torch.float16) for t in (grad_out, q, k, v, out)
+    )
+    logsumexp = logsumexp.to(torch.float32)
 
     dq, dk, dv = torch.ops.aten._scaled_dot_product_flash_attention_backward(
         grad_out,
@@ -136,4 +148,4 @@ def backward(
         philox_seed=philox_seed,
         philox_offset=philox_offset,
     )
-    return dq, dk, dv
+    return dq.to(in_dtype), dk.to(in_dtype), dv.to(in_dtype)

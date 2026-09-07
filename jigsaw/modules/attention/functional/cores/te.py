@@ -191,8 +191,10 @@ def backward(
     backend = _fused_attn_backend(True, q_b.dtype, h, s_q, s_kv, d, dropout_p)
     cu_q = _full_cu_seqlens(b, s_q, q.device)
     cu_kv = _full_cu_seqlens(b, s_kv, q.device)
-    # cuDNN's bwd wants the LSE shaped as its fwd emitted it: (b, h, s_q, 1).
-    lse = logsumexp
+    # cuDNN's bwd wants the LSE shaped as its fwd emitted it, (b, h, s_q, 1),
+    # and in fp32 -- a 16-bit LSE (the ring hands it back downcast to the model
+    # dtype) makes the kernel recompute the softmax wrong.
+    lse = logsumexp.to(torch.float32)
     if lse.dim() == 3:
         lse = lse.unsqueeze(-1)
     aux = [
