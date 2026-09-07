@@ -1,13 +1,14 @@
 """Modules for distributed linear layers and operations."""
 
+import math
 from typing import Any, Optional, cast
 
-import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
 import jigsaw.hooks as hooks
+from jigsaw import init
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
 
 from .config import LinearConfig
@@ -70,30 +71,32 @@ class DistributedXWT(torch.nn.Module):
         self.dtype = dtype
         self.device = device
 
-        stdev = 1.0 / np.sqrt(in_dim * row_group.size())
         assert in_dim % column_group.size() == 0
         assert out_dim % (model_group.size() // column_group.size()) == 0
+
+        # Global (unsharded) weight/bias shape, torch.nn.Linear layout ``(out,
+        # in)``. ``reset_parameters`` keys the init distribution off these, so a
+        # freshly built layer is drawn from the same distribution as the
+        # equivalent ``torch.nn.Linear`` -- the row-/column-group shard sizes
+        # only decide which slice of that distribution this rank samples.
+        self.global_weight_shape = (out_dim, in_dim)
+        self.global_bias_shape = (out_dim,) if bias else None
 
         bias_dim = out_dim // column_group.size()
         in_dim = in_dim // (column_group.size())
         out_dim = out_dim // (model_group.size() // column_group.size())
 
         self.weight = torch.nn.Parameter(
-            torch.zeros(out_dim, in_dim, dtype=self.dtype, device=self.device).uniform_(
-                -stdev, stdev
-            )
+            torch.zeros(out_dim, in_dim, dtype=self.dtype, device=self.device)
         )
         self.parallelism = model_group.size()
 
         self.bias = (
-            torch.nn.Parameter(
-                torch.zeros(bias_dim, dtype=self.dtype, device=self.device).uniform_(
-                    -stdev, stdev
-                )
-            )
+            torch.nn.Parameter(torch.zeros(bias_dim, dtype=self.dtype, device=self.device))
             if bias
             else None
         )
+        self.reset_parameters()
 
         self.out_dim = out_dim
         self.in_dim = in_dim
@@ -122,6 +125,28 @@ class DistributedXWT(torch.nn.Module):
             dist.broadcast(self.bias.data, group_src=0, group=self.row_group)
 
         self.XWT = XWT.apply
+
+    def reset_parameters(self) -> None:
+        """
+        Re-draw ``weight`` (and ``bias``) from the same distribution as ``torch.nn.Linear``.
+
+        ``torch.nn.Linear`` draws ``weight`` from ``kaiming_uniform_(a=sqrt(5))``
+        and ``bias`` from ``U(-1/sqrt(fan_in), 1/sqrt(fan_in))``, both keyed off
+        the *global* ``fan_in`` (``in_dim``). Each rank fills only its own
+        ``weight`` / ``bias`` shard, so the row- and column-sharded parameter is
+        distributed exactly as the non-distributed one would be.
+
+        Override this method in a subclass, or call :mod:`jigsaw.init` helpers
+        directly with ``global_shape=self.global_weight_shape``, to install a
+        different init scheme.
+        """
+        init.kaiming_uniform_(
+            self.weight, a=math.sqrt(5), global_shape=self.global_weight_shape
+        )
+        if self.bias is not None:
+            fan_in, _ = init._calculate_fan_in_and_fan_out(self.global_weight_shape)
+            bound = 1.0 / math.sqrt(fan_in) if fan_in > 0 else 0.0
+            init.uniform_(self.bias, -bound, bound)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

@@ -56,6 +56,7 @@ def _conv2d_transpose_multi_spatial_reference_check(
     stride: Pair | None = None,
     padding: Pair = 0,
     dilation: Pair = 1,
+    groups: int = 1,
     channel_comm: str = "all_gather",
 ) -> None:
     """Compare a ``DistributedConv2DTranspose`` split along H *and* W to a plain op.
@@ -94,7 +95,7 @@ def _conv2d_transpose_multi_spatial_reference_check(
         stride=stride,
         padding=padding,
         dilation=dilation,
-        groups=1,
+        groups=groups,
         bias=True,
         bayesian=False,
         dtype=torch.float32,
@@ -102,14 +103,18 @@ def _conv2d_transpose_multi_spatial_reference_check(
     ).to(device)
 
     # --- reconstruct the equivalent global transpose convolution ----------
-    # weight is (C_in, C_out // groups, kH, kW): the channel group shards dim 1.
+    # weight is (C_in, C_out // groups, kH, kW). The gather regime (groups == 1)
+    # shards the output-channel axis (dim 1); the channel-local regime (groups a
+    # multiple of col.size()) shards the input-channel axis (dim 0) instead.
+    weight_dim = 0 if conv._channel_local else 1
+
     def _gather_spatial(t: torch.Tensor, channel_dim: int) -> torch.Tensor:
         t = gather_1d_results(t, mesh, dim=channel_dim, pm_key="col")
         t = gather_1d_results(t, mesh, dim=-2, pm_key="sh")
         return gather_1d_results(t, mesh, dim=-1, pm_key="sw")
 
     weight_global = gather_1d_results(
-        conv.weight.detach(), mesh, dim=1, pm_key="col"
+        conv.weight.detach(), mesh, dim=weight_dim, pm_key="col"
     ).clone()
     bias_global = gather_1d_results(
         conv.bias.detach(), mesh, dim=0, pm_key="col"
@@ -127,6 +132,7 @@ def _conv2d_transpose_multi_spatial_reference_check(
         stride=stride,
         padding=padding,
         dilation=dilation,
+        groups=groups,
     )
 
     # When a halo exchange is needed, every split axis's global output must be
@@ -164,7 +170,9 @@ def _conv2d_transpose_multi_spatial_reference_check(
     # --- gather distributed results back to global tensors --------------
     y_global = _gather_spatial(y.detach(), -3)
     x_grad_global = _gather_spatial(x_dist.grad, -3)
-    w_grad_global = gather_1d_results(conv.weight.grad, mesh, dim=1, pm_key="col")
+    w_grad_global = gather_1d_results(
+        conv.weight.grad, mesh, dim=weight_dim, pm_key="col"
+    )
     b_grad_global = gather_1d_results(conv.bias.grad, mesh, dim=0, pm_key="col")
 
     # Collective-safe: every rank reaches the same verdict, so a mismatch on a
@@ -382,3 +390,112 @@ class TestConv2dTransposeMultiSpatial:
             padding=1,
             channel_comm=channel_comm,
         )
+
+
+class TestConv2dTransposeMultiSpatialGroups:
+    """Grouped transpose conv with the domain split along H and/or W.
+
+    The per-axis halo exchange is unaffected by ``groups``; the channel-parallel
+    work still collapses to a plain local grouped transpose conv whenever
+    ``groups`` is a multiple of ``col.size()``. The weight is then sharded on its
+    input-channel axis 0 instead of the output axis 1.
+    """
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [1, 2, 4, 8])
+    def test_hw_split_no_halo(
+        self, device: torch.device, spatial_mesh_2x2_hw: dict, groups: int
+    ) -> None:
+        """2x2 H/W split, no channel split: any ``groups`` dividing the channels."""
+        _conv2d_transpose_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x2_hw,
+            in_channels=8,
+            out_channels=16,
+            kernel_size=4,
+            height=16,
+            width=16,
+            groups=groups,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [1, 2])
+    @pytest.mark.parametrize("channel_comm", ["all_gather", "p2p"])
+    def test_h_split_plus_channel(
+        self,
+        device: torch.device,
+        spatial_mesh_2x1_hw_x2c: dict,
+        groups: int,
+        channel_comm: str,
+    ) -> None:
+        """2-way H split + 2-way channel split: gather (groups 1) and channel-local (2)."""
+        _conv2d_transpose_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x1_hw_x2c,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            groups=groups,
+            channel_comm=channel_comm,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [2, 4])
+    def test_h_split_plus_channel_halo(
+        self, device: torch.device, spatial_mesh_2x1_hw_x2c: dict, groups: int
+    ) -> None:
+        """Channel-local grouped transpose conv, halo path on the split H axis."""
+        _conv2d_transpose_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x1_hw_x2c,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            stride=2,
+            padding=1,
+            groups=groups,
+        )
+
+    @pytest.mark.dist(8)
+    @pytest.mark.parametrize("groups", [2, 4])
+    def test_hw_split_plus_channel_halo(
+        self, device: torch.device, spatial_mesh_2x2_hw_x2c: dict, groups: int
+    ) -> None:
+        """2x2 H/W split + 2-way channel split, channel-local grouped transpose, halo."""
+        _conv2d_transpose_multi_spatial_reference_check(
+            device,
+            spatial_mesh_2x2_hw_x2c,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            stride=2,
+            padding=1,
+            groups=groups,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [3, 9])
+    def test_incompatible_groups_rejected(
+        self, device: torch.device, spatial_mesh_2x1_hw_x2c: dict, groups: int
+    ) -> None:
+        """``1 < groups`` not a multiple of ``col.size()`` fails at construction."""
+        with pytest.raises(NotImplementedError):
+            convolution.DistributedConv2DTranspose(
+                18,
+                18,
+                4,
+                device=device,
+                spatial_group=[
+                    spatial_mesh_2x1_hw_x2c["sh"],
+                    spatial_mesh_2x1_hw_x2c["sw"],
+                ],
+                channel_group=spatial_mesh_2x1_hw_x2c["col"],
+                stride=4,
+                groups=groups,
+            ).to(device)

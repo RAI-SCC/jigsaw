@@ -73,10 +73,25 @@ def _grad_input_weight(
         list(dilation),
         True,  # transposed
         [0] * config.n_spatial,  # output_padding
-        1,  # groups
+        config.groups_local,  # groups (1 in the full-channel-gather regime)
         list(output_mask),  # (grad_input, grad_weight, grad_bias)
     )
     return g_x, g_w
+
+
+def _channel_reduce_grad_input(
+    g_x: torch.Tensor, channel_group: dist.ProcessGroup, config: Any
+) -> tuple[torch.Tensor, Optional[dist.Work]]:
+    """Sum the grad wrt input across the channel group, keeping this rank's shard.
+
+    In the ``channel_local`` regime (every rank owns whole conv-groups) the
+    forward did no channel exchange, so ``g_x`` is already this rank's complete
+    channel shard and no reduction is needed. Otherwise this is the
+    :func:`_reduce_scatter_channels` over the full-channel grad.
+    """
+    if config.channel_local:
+        return g_x.contiguous(), None
+    return _reduce_scatter_channels(g_x, channel_group, config.n_spatial)
 
 
 def _grad_input_weight_reduced(
@@ -91,22 +106,37 @@ def _grad_input_weight_reduced(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Local ``grad_input`` / ``grad_weight`` with ``grad_input`` reduced over channels.
 
-    ``grad_input`` needs a channel-group sum (each rank holds the grad for its own
-    output-channel slice); ``grad_weight`` does not (the spatial reduction is a
-    parameter hook). When the channel group is real -- and the op is not vmapped,
-    where a masked ``convolution_backward`` output cannot be stacked -- the two
-    grads are computed in separate passes so the grad-weight pass overlaps the
-    channel-group reduce-scatter of grad_input; otherwise a single fused pass
-    feeds the reduce.
+    ``grad_input`` needs a channel-group sum in the gather regime (each rank holds
+    the grad for its own output-channel slice); it needs none in the
+    ``channel_local`` regime (the rank owns whole conv-groups, so its ``g_x`` is
+    already complete) or for a channel group of one. ``grad_weight`` never needs a
+    channel reduction (the spatial reduction is a parameter hook). When a real
+    channel-group reduce is pending -- and the op is not vmapped, where a masked
+    ``convolution_backward`` output cannot be stacked -- the two grads are
+    computed in separate passes so the grad-weight pass overlaps the
+    reduce-scatter of grad_input; otherwise a single fused pass feeds the reduce.
     """
-    if channel_group.size() > 1 and not config.bayesian:
+    reduce_pending = channel_group.size() > 1 and not config.channel_local
+    if reduce_pending and not config.bayesian:
         g_x, _ = _grad_input_weight(
-            grad_output, x_full, weight, stride, padding, dilation, config,
+            grad_output,
+            x_full,
+            weight,
+            stride,
+            padding,
+            dilation,
+            config,
             output_mask=(True, False, False),
         )
-        g_x, handle = _reduce_scatter_channels(g_x, channel_group, config.n_spatial)
+        g_x, handle = _channel_reduce_grad_input(g_x, channel_group, config)
         _, g_w = _grad_input_weight(
-            grad_output, x_full, weight, stride, padding, dilation, config,
+            grad_output,
+            x_full,
+            weight,
+            stride,
+            padding,
+            dilation,
+            config,
             output_mask=(False, True, False),
         )
         if handle is not None:
@@ -116,7 +146,7 @@ def _grad_input_weight_reduced(
     g_x, g_w = _grad_input_weight(
         grad_output, x_full, weight, stride, padding, dilation, config
     )
-    g_x, handle = _reduce_scatter_channels(g_x, channel_group, config.n_spatial)
+    g_x, handle = _channel_reduce_grad_input(g_x, channel_group, config)
     if handle is not None:
         handle.wait()
     return g_x, g_w
@@ -155,11 +185,17 @@ def conv_transpose_nway(
         x,
         w,
         b,
-        {"stride": stride, "padding": padding, "dilation": dilation},
+        {
+            "stride": stride,
+            "padding": padding,
+            "dilation": dilation,
+            "groups": config.groups_local,
+        },
         channel_group=channel_group,
         conv_func=config.conv_transpose_fn,
         n_spatial_dims=config.n_spatial,
         channel_comm=config.channel_comm,
+        local=config.channel_local,
     )
 
 
@@ -263,12 +299,14 @@ def conv_transpose_halo_nway(
             "stride": stride,
             "padding": _local_padding(padding, spatial_groups),
             "dilation": dilation,
+            "groups": config.groups_local,
         },
         channel_group=channel_group,
         conv_func=config.conv_transpose_fn,
         n_spatial_dims=config.n_spatial,
         channel_comm=config.channel_comm,
         post_fn=post_fn,
+        local=config.channel_local,
     )
 
 
