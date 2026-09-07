@@ -299,12 +299,18 @@ class _CpuInterP2PWork:
         recv_host: torch.Tensor,
         buffer: torch.Tensor,
         offloader: Optional["NVLinkActivationOffloader"],
+        defer_h2d: bool,
     ) -> None:
         self._send_work = send_work
         self._recv_work = recv_work
         self._recv_host = recv_host
         self._buffer = buffer
         self._offloader = offloader
+        # When True the H2D is only stream-ordered (no CPU sync) -- valid because
+        # the async call sites hold this object (hence `_recv_host`) alive until
+        # a later round replaces it, well after the copy has drained. The sync
+        # sites discard the handle immediately, so they must fully block.
+        self._defer_h2d = defer_h2d
         self._done = False
 
     def wait(self, timeout: Optional[Any] = None) -> bool:
@@ -313,13 +319,12 @@ class _CpuInterP2PWork:
             return True
         if self._recv_work is not None:
             self._recv_work.wait()
-        # Blocking H2D: `.wait()` is called exactly when the caller needs the
-        # chunk on-device, and a CPU sync here guarantees the pinned
-        # `_recv_host` buffer is safe to drop once this returns (the async
-        # call sites hold the work object; the sync ones discard it).
         if self._offloader is not None:
             event = self._offloader.prefetch_into(self._buffer, self._recv_host)
-            event.synchronize()
+            if self._defer_h2d:
+                self._offloader.wait_prefetch(event)
+            else:
+                event.synchronize()
         else:
             self._buffer.copy_(self._recv_host)
         if self._send_work is not None:
@@ -412,7 +417,9 @@ def cpu_inter_p2p(
         recv_work = dist.irecv(recv_host, group_src=recv_from, group=group)
         send_work = dist.isend(send_host, group_dst=send_to, group=group)
 
-    work = _CpuInterP2PWork(send_work, recv_work, recv_host, buffer, offloader)
+    work = _CpuInterP2PWork(
+        send_work, recv_work, recv_host, buffer, offloader, defer_h2d=async_op
+    )
     if async_op:
         return buffer, work
     work.wait()
