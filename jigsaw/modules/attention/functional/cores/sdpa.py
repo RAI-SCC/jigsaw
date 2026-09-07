@@ -73,7 +73,17 @@ def forward(
         return_debug_mask=False,
     )
 
-    rng_state = torch.stack([philox_seed, philox_offset]) if dropout_p > 0.0 else None
+    # ``philox_seed`` / ``philox_offset`` are the flash kernel's opaque dropout
+    # RNG state. Their shapes are build-dependent and need not match (this torch
+    # build returns ``(2,)`` and ``()``), so flatten and concatenate into a
+    # single 1-D tensor -- the ring stores ``rng_state`` via
+    # ``ctx.save_for_backward``, which takes tensors, not tuples -- and split it
+    # back in :func:`backward`. ``philox_offset`` is always the last element.
+    rng_state = (
+        torch.cat([philox_seed.reshape(-1), philox_offset.reshape(-1)])
+        if dropout_p > 0.0
+        else None
+    )
     return out, logsumexp, rng_state
 
 
@@ -93,17 +103,17 @@ def backward(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward call to flash attention. Returns (dq, dk, dv).
 
-    ``rng_state`` -- the ``(philox_seed, philox_offset)`` pair :func:`forward`
-    returned for this same chunk -- is replayed here so the kernel reconstructs
-    the identical dropout mask it applied in forward; without it (``None``,
-    the ``dropout_p == 0`` case) any same-device int64 tensors work, hence
-    zeros.
+    ``rng_state`` -- the flattened ``[*philox_seed, philox_offset]`` tensor
+    :func:`forward` packed for this same chunk -- is split back here (offset is
+    the last element) and replayed so the kernel reconstructs the identical
+    dropout mask it applied in forward; without it (``None``, the
+    ``dropout_p == 0`` case) any same-device int64 tensors work, hence zeros.
 
     See :func:`forward` for the ``(B, H, S, d)`` layout and the meaning of
     ``max_q`` / ``max_k`` / ``cum_seq_*``.
     """
     if rng_state is not None:
-        philox_seed, philox_offset = rng_state[0], rng_state[1]
+        philox_seed, philox_offset = rng_state[:-1], rng_state[-1]
     else:
         philox_seed = torch.zeros(1, dtype=torch.long, device=q.device)
         philox_offset = torch.zeros(1, dtype=torch.long, device=q.device)

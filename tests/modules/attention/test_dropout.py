@@ -19,6 +19,8 @@ import torch
 
 from jigsaw.modules.attention import Attention, DistributedAttention
 from jigsaw.modules.attention.functional.cores import math as math_core
+from jigsaw.modules.attention.functional.cores import sdpa as sdpa_core
+from jigsaw.modules.attention.functional.cores import te as te_core
 from jigsaw.modules.attention.functional.functional import combine_dropout_seed
 
 
@@ -186,3 +188,82 @@ class TestEvalModeDisablesDropout:
             out_never_dropout = model_no_dropout(x)
 
         torch.testing.assert_close(out_dropout_eval, out_never_dropout)
+
+
+# --------------------------------------------------------------------------- #
+# Ring inner cores whose dropout path needs CUDA (see their module docstrings)
+# --------------------------------------------------------------------------- #
+_CORES = [
+    pytest.param(sdpa_core, torch.float16, (32, 32), 3e-3, id="sdpa"),
+    pytest.param(
+        te_core, torch.bfloat16, (), 2e-2, id="te", marks=pytest.mark.te_required
+    ),
+]
+
+
+@pytest.mark.gpu_required
+@pytest.mark.parametrize("core, dtype, extra_bwd, tol", _CORES)
+class TestSdpaTeCoreDropoutReplay:
+    """The SDPA-flash / TE cores must replay their forward dropout mask in backward.
+
+    The kernels draw an *opaque* mask, so we make it observable: with ``S == d``
+    and ``V`` the identity (per ``(b, h)``), the attention output *is* the
+    post-dropout probability matrix, and a differentiable reference built from
+    that same recovered mask gives the ground-truth ``dq/dk/dv`` to compare
+    ``<core>.backward(..., rng_state=...)`` against.
+    """
+
+    B, H, S = 2, 3, 32
+    D = S
+    SCALE = D**-0.5
+    P = 0.3
+
+    def _qkv(self, dtype: torch.dtype):
+        torch.manual_seed(0)
+        q = torch.randn(self.B, self.H, self.S, self.D, device="cuda", dtype=dtype)
+        k = torch.randn(self.B, self.H, self.S, self.D, device="cuda", dtype=dtype)
+        v = torch.eye(self.S, device="cuda", dtype=dtype)
+        v = v.expand(self.B, self.H, self.S, self.S).contiguous()
+        return q, k, v
+
+    def test_forward_mask_is_stochastic_and_scaled(self, core, dtype, extra_bwd, tol):
+        q, k, v = self._qkv(dtype)
+        out0, _, rng0 = core.forward(q, k, v, self.SCALE, self.P)
+        out1, _, _ = core.forward(q, k, v, self.SCALE, self.P)
+        assert rng0 is not None
+        assert not torch.allclose(out0, out1)  # fresh mask each call
+
+        p_ref = torch.softmax((q.float() @ k.float().mT) * self.SCALE, dim=-1)
+        kept = out0.float() > 0
+        assert abs((1.0 - kept.float().mean().item()) - self.P) < 0.05
+        torch.testing.assert_close(
+            out0.float(), p_ref * kept / (1 - self.P), atol=tol, rtol=tol
+        )
+
+    def test_backward_replays_forward_mask(self, core, dtype, extra_bwd, tol):
+        q, k, v = self._qkv(dtype)
+        out, lse, rng = core.forward(q, k, v, self.SCALE, self.P)
+        grad_out = torch.randn(
+            self.B, self.H, self.S, self.D, device="cuda", dtype=dtype
+        )
+
+        dq, dk, dv = core.backward(
+            grad_out, q, k, v, out, lse, self.SCALE, *extra_bwd,
+            dropout_p=self.P, rng_state=rng,
+        )
+        # deterministic given rng_state
+        dq2, _, _ = core.backward(
+            grad_out, q, k, v, out, lse, self.SCALE, *extra_bwd,
+            dropout_p=self.P, rng_state=rng,
+        )
+        assert torch.equal(dq, dq2)
+
+        # ground truth: autograd through the identical (recovered) mask
+        kept = (out.float() > 0).float()
+        qg = q.float().clone().requires_grad_(True)
+        kg = k.float().clone().requires_grad_(True)
+        vg = v.float().clone().requires_grad_(True)
+        p_soft = torch.softmax((qg @ kg.mT) * self.SCALE, dim=-1)
+        ((p_soft * kept / (1 - self.P)) @ vg).backward(grad_out.float())
+        for got, ref in ((dq, qg.grad), (dk, kg.grad), (dv, vg.grad)):
+            torch.testing.assert_close(got.float(), ref, atol=tol, rtol=tol)
