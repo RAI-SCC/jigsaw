@@ -26,7 +26,7 @@ from jigsaw import hooks, init
 from jigsaw.utils_aggregate import gather_1d_results
 
 from ..common.arg_norm import _as_spatial_groups, _ntuple
-from ..common.channel_comm import conv_group_blocks, resolve_conv_groups
+from ..common.channel_comm import resolve_conv_groups
 from .config import ConvTransposeNdConfig
 from .functional import ConvTransposeNd
 
@@ -202,27 +202,18 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         # ``C_out / groups`` output-per-group slots. The channel-grouped regime
         # (uneven ``groups``) keeps every input channel on axis 0 and this rank's
         # ``C_out / G`` output-channel shard on axis 1 -- a *dense* layout whose
-        # cross-conv-group entries stay zero (masked below; the per-group kernels
-        # never touch them).
+        # cross-conv-group entries are never read: the per-group kernels
+        # ``narrow`` to their own block in both forward and backward, and those
+        # entries receive no gradient.
         w_in = (
             self.in_channels // channel_group.size()
             if self._channel_local
             else self.in_channels
         )
         w_out = self.out_channels // self._groups_local
-        weight = torch.zeros(w_in, w_out, *self.kernel_size).uniform_(-k, k)
-        if self._channel_grouped:
-            mask = torch.zeros(w_in, w_out)
-            for out_lo, out_hi, in_lo, in_hi in conv_group_blocks(
-                out_channels,
-                in_channels,
-                groups,
-                channel_group.rank(),
-                channel_group.size(),
-            ):
-                mask[in_lo:in_hi, out_lo:out_hi] = 1.0
-            weight *= mask.view(w_in, w_out, *([1] * len(self.kernel_size)))
-        self.weight = torch.nn.parameter.Parameter(weight.to(device))
+        self.weight = torch.nn.parameter.Parameter(
+            torch.zeros(w_in, w_out, *self.kernel_size, device=device)
+        )
         self.bias = (
             torch.nn.parameter.Parameter(torch.zeros(self.out_channels, device=device))
             if bias
