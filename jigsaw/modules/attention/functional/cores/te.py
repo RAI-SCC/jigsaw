@@ -11,11 +11,23 @@ softmax LSE.
 Scope: non-FP8, no bias, no mask, ``bshd`` layout. Tensors follow the ring's
 ``(b, h, s, d)`` convention on the way in and out; LSE is ``(b, h, s)``.
 
-Untested on GPU in this repo yet - covered by the ``te_required`` +
-``gpu_required`` ring parity test.
+Dropout replay follows the same strategy as :mod:`.sdpa`: cuDNN generates its
+own opaque RNG state internally (``aux_ctx_tensors[1]`` from
+``fused_attn_fwd``) rather than accepting a caller-supplied seed, so this core
+threads that state back verbatim as ``rng_state`` for :func:`backward` to
+replay, instead of rederiving a mask from an int like :mod:`.math` does.
+
+Covered by the ``te_required`` + ``gpu_required`` ring parity test. The
+dropout path is exercised by
+``tests/modules/attention/test_dropout.py::TestSdpaTeCoreDropoutReplay``,
+which recovers the opaque cuDNN mask from the forward output and checks that
+:func:`backward` replays it (verified against transformer_engine 2.12 on an
+NVIDIA A100).
 """
 
 from __future__ import annotations
+
+from typing import Optional
 
 import torch
 
@@ -94,8 +106,14 @@ def forward(
     v: torch.Tensor,
     scale: float,
     dropout_p: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """TE fused attention forward. Returns ``(out (b,h,s,d), logsumexp (b,h,s))``."""
+    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """TE fused attention forward.
+
+    Returns ``(out (b,h,s,d), logsumexp (b,h,s), rng_state)`` -- ``rng_state``
+    is cuDNN's own opaque dropout RNG state (``None`` when ``dropout_p == 0``),
+    threaded back for :func:`backward` to replay (see module docstring).
+    """
     b, h, s_q, d = q.shape
     s_kv = k.shape[2]
     q_b, k_b, v_b = (t.transpose(1, 2).contiguous() for t in (q, k, v))  # -> bshd
@@ -137,7 +155,8 @@ def forward(
     )
     # cuDNN returns LSE as (b, h, s_q, 1); the ring wants (b, h, s_q).
     lse = aux[0].squeeze(-1)
-    return out.transpose(1, 2).contiguous(), lse
+    rng_state = aux[1] if dropout_p > 0.0 else None
+    return out.transpose(1, 2).contiguous(), lse, rng_state
 
 
 def backward(
@@ -149,6 +168,9 @@ def backward(
     logsumexp: torch.Tensor,
     scale: float,
     *_: object,
+    dropout_p: float = 0.0,
+    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
+    rng_state: Optional[torch.Tensor] = None,
     **__: object,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """TE fused attention backward from the saved (global) ``out`` / ``logsumexp``.
@@ -156,24 +178,30 @@ def backward(
     ``fused_attn_bwd`` recomputes ``S = scale * QK^T``, ``P = exp(S - lse)`` and
     the dot-product-attention gradients using the passed ``o`` and ``lse``; with
     the ring's globally normalised ``out`` / ``lse`` this yields the correct
-    per-chunk ``dQ/dK/dV``. Dropout is forced off, so the ``rng_state`` slot of
-    ``aux_ctx_tensors`` is a placeholder.
+    per-chunk ``dQ/dK/dV``. ``rng_state`` -- cuDNN's own dropout RNG state,
+    threaded back from this same chunk's :func:`forward` call -- reproduces the
+    identical dropout mask; ``None`` (the ``dropout_p == 0`` case) falls back
+    to a placeholder, matching cuDNN's own "unused" convention for no-dropout.
     """
     b, h, s_q, d = q.shape
     s_kv = k.shape[2]
     q_b, k_b, v_b, o_b, do_b = (
         t.transpose(1, 2).contiguous() for t in (q, k, v, out, grad_out)
     )
-    backend = _fused_attn_backend(True, q_b.dtype, h, s_q, s_kv, d, 0.0)
+    backend = _fused_attn_backend(True, q_b.dtype, h, s_q, s_kv, d, dropout_p)
     cu_q = _full_cu_seqlens(b, s_q, q.device)
     cu_kv = _full_cu_seqlens(b, s_kv, q.device)
-    # cuDNN's bwd wants the LSE shaped as its fwd emitted it: (b, h, s_q, 1).
-    lse = logsumexp
+    # cuDNN's bwd wants the LSE shaped as its fwd emitted it, (b, h, s_q, 1),
+    # and in fp32 -- a 16-bit LSE (the ring hands it back downcast to the model
+    # dtype) makes the kernel recompute the softmax wrong.
+    lse = logsumexp.to(torch.float32)
     if lse.dim() == 3:
         lse = lse.unsqueeze(-1)
     aux = [
         lse.contiguous(),
-        torch.zeros(2, dtype=torch.int64, device=q.device),  # rng_state, unused
+        rng_state
+        if rng_state is not None
+        else torch.zeros(2, dtype=torch.int64, device=q.device),
     ]
 
     dq, dk, dv, *_rest = fused_attn_bwd(
@@ -196,7 +224,7 @@ def backward(
         None,  # dp_quantizer
         None,  # dqkv_quantizer
         scale,
-        0.0,  # dropout
+        dropout_p,
         True,  # fast_zero_fill
         _LAYOUT,
         "no_bias",
