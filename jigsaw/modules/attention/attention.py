@@ -57,9 +57,13 @@ try:
         *normal, un-vmapped* forward, then unfold the result. Outside of vmap the function
         is a thin pass-through to ``attn``.
 
-        NOTE: the dropout-replay path (``rng_state``) is untested against a real
-        ``transformer_engine`` build (not installed in this environment); only
-        the no-dropout path is exercised today.
+        The dropout-replay path (``rng_state``) is covered by
+        ``tests/modules/attention/test_dropout.py::TestTeAttnDropoutReplay``
+        (``te_required`` + ``gpu_required``): restoring the captured state makes
+        the backward recompute reproduce the forward mask bit-for-bit, its
+        gradients match autograd through that replayed forward, and the ambient
+        RNG stream is left untouched (verified against transformer_engine 2.12
+        on an NVIDIA A100).
         """
 
         @staticmethod

@@ -118,7 +118,12 @@ def ring_backward(
     # (or fp64) model keeps its dtype instead of being forced to fp32.
     core_dtype = w_qkv.dtype
     dout, q = dout.to(core_dtype), q.to(core_dtype)
-    out, lse = out.to(core_dtype), lse.to(core_dtype)
+    out = out.to(core_dtype)
+    # ``lse`` is *not* folded into ``core_dtype``: it is a softmax normaliser,
+    # never matmul'd against a chunk, and the fused SDPA/TE backward kernels
+    # read it as fp32 -- a 16-bit ``lse`` makes them recompute the softmax
+    # wrong. Each core casts it to what its kernel wants (the ``math`` core
+    # keeps whatever precision the forward produced).
     dq = torch.zeros_like(q, dtype=core_dtype)
     dk_buf, dv_buf = get_dkv_buffer(ring_config, q, ring_group_size)
 

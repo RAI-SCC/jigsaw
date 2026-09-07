@@ -8,11 +8,12 @@ ring's online-softmax merge and explicit-LSE backward need.
 On CPU the selectors fall back to :mod:`.math`; see
 :func:`..config._select_attn_core_forward_fn`.
 
-NOTE: the dropout path below is untested -- it needs CUDA, which this repo's
-test environment doesn't have. It follows the same replay strategy already
-used for the (tested) no-dropout path, just threading through the two extra
-tensors the kernel needs to reproduce its mask; treat it as implemented but
-unverified until it's run on a GPU.
+The dropout path threads through the two extra tensors the flash kernel needs
+to reproduce its mask, on top of the replay strategy the no-dropout path
+already uses. It needs CUDA, so it is skipped where no GPU is present;
+``tests/modules/attention/test_dropout.py::TestSdpaTeCoreDropoutReplay``
+recovers the opaque mask from the forward output and checks that
+:func:`backward` replays it (verified on an NVIDIA A100).
 """
 
 from __future__ import annotations
@@ -174,7 +175,19 @@ def backward(
     ``max_q`` / ``max_k`` / ``philox_*`` / ``cum_seq_*``, ``causal``, and the
     ``key_mask`` mask-aware fork onto ``_scaled_dot_product_efficient_attention``
     (mirrored here via its ``_backward`` counterpart).
+
+    ``q``/``k``/``v``/``out``/``grad_out`` are cast to fp16 to match
+    :func:`forward`, and ``logsumexp`` to fp32: the flash backward kernel reads
+    it as fp32 and returns garbage for a 16-bit ``logsumexp`` (the ring's
+    :func:`..backward.ring_backward` hands it back downcast to the model dtype).
+    Gradients are returned in the input dtype.
     """
+    in_dtype = grad_out.dtype
+    grad_out, q, k, v, out = (
+        t.to(torch.float16) for t in (grad_out, q, k, v, out)
+    )
+    logsumexp = logsumexp.to(torch.float32)
+
     if key_mask is None:
         if rng_state is not None:
             philox_seed, philox_offset = rng_state[:-1], rng_state[-1]
@@ -199,7 +212,7 @@ def backward(
             philox_seed=philox_seed,
             philox_offset=philox_offset,
         )
-        return dq, dk, dv
+        return dq.to(in_dtype), dk.to(in_dtype), dv.to(in_dtype)
 
     bias = _build_bias(q.shape[-2], k.shape[-2], causal, key_mask, q.dtype, q.device)
     dq, dk, dv, _ = torch.ops.aten._scaled_dot_product_efficient_attention_backward(
@@ -217,4 +230,4 @@ def backward(
         is_causal=False,
         scale=scale,
     )
-    return dq, dk, dv
+    return dq.to(in_dtype), dk.to(in_dtype), dv.to(in_dtype)

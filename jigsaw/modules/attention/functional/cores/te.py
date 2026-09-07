@@ -17,11 +17,12 @@ own opaque RNG state internally (``aux_ctx_tensors[1]`` from
 threads that state back verbatim as ``rng_state`` for :func:`backward` to
 replay, instead of rederiving a mask from an int like :mod:`.math` does.
 
-Untested on GPU in this repo yet - covered by the ``te_required`` +
-``gpu_required`` ring parity test. The dropout path is additionally untested
-against transformer_engine itself (not installed in this environment); it
-mirrors the no-dropout path's existing (tested) structure but should be
-verified against a real TE build before relying on it.
+Covered by the ``te_required`` + ``gpu_required`` ring parity test. The
+dropout path is exercised by
+``tests/modules/attention/test_dropout.py::TestSdpaTeCoreDropoutReplay``,
+which recovers the opaque cuDNN mask from the forward output and checks that
+:func:`backward` replays it (verified against transformer_engine 2.12 on an
+NVIDIA A100).
 """
 
 from __future__ import annotations
@@ -108,8 +109,15 @@ def forward(
     dropout_p: float,
     causal: bool = False,
     key_mask: Optional[torch.Tensor] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """TE fused attention forward. Returns ``(out (b,h,s,d), logsumexp (b,h,s))``.
+    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """TE fused attention forward.
+
+    Returns ``(out (b,h,s,d), logsumexp (b,h,s), rng_state)`` -- ``rng_state``
+    is cuDNN's own opaque dropout RNG state (``None`` when ``dropout_p == 0``),
+    threaded back for :func:`backward` to replay (see module docstring). This
+    core uses that saved state rather than the ``seed`` int :mod:`.math` /
+    :mod:`.sdpa` take, so ``seed`` is accepted only for interface parity.
 
     ``causal`` is only ever set for the ring's diagonal block (q/k chunks
     starting at the same global offset, so ``s_q == s_kv``), where TE's
@@ -208,8 +216,10 @@ def backward(
     backend = _fused_attn_backend(True, q_b.dtype, h, s_q, s_kv, d, dropout_p, mask_type)
     cu_q = _full_cu_seqlens(b, s_q, q.device)
     cu_kv = _full_cu_seqlens(b, s_kv, q.device)
-    # cuDNN's bwd wants the LSE shaped as its fwd emitted it: (b, h, s_q, 1).
-    lse = logsumexp
+    # cuDNN's bwd wants the LSE shaped as its fwd emitted it, (b, h, s_q, 1),
+    # and in fp32 -- a 16-bit LSE (the ring hands it back downcast to the model
+    # dtype) makes the kernel recompute the softmax wrong.
+    lse = logsumexp.to(torch.float32)
     if lse.dim() == 3:
         lse = lse.unsqueeze(-1)
     aux = [
