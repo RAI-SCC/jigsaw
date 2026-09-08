@@ -17,6 +17,32 @@ from .functional.functional import RingAttentionFunction
 try:
     import transformer_engine.pytorch as te
 
+    def _capture_rng_state(
+        device: torch.device,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Snapshot the ambient RNG so a later recompute can replay it exactly.
+
+        ``TransformerEngineAttention.backward`` recomputes ``attn(q, k, v)``
+        from scratch to get an autograd graph to differentiate; if ``attn``
+        applies dropout, that recompute must draw the *same* mask as the
+        original forward call, not a fresh one, or the gradient corresponds to
+        a different dropout mask than the one that actually produced the
+        forward output. Mirrors ``torch.utils.checkpoint``'s own save/restore
+        of CPU + per-device CUDA RNG state around a recompute.
+        """
+        cpu_state = torch.get_rng_state()
+        cuda_state = (
+            torch.cuda.get_rng_state(device) if device.type == "cuda" else None
+        )
+        return cpu_state, cuda_state
+
+    def _restore_rng_state(
+        state: tuple[torch.Tensor, Optional[torch.Tensor]], device: torch.device
+    ) -> None:
+        cpu_state, cuda_state = state
+        torch.set_rng_state(cpu_state)
+        if cuda_state is not None:
+            torch.cuda.set_rng_state(cuda_state, device)
 
     class TransformerEngineAttention(torch.autograd.Function):
         """Autograd wrapper around ``te.DotProductAttention`` that supports ``torch.vmap``.
@@ -30,6 +56,10 @@ try:
         vmapped (samples) dimension into the batch dimension, run the kernel once as a
         *normal, un-vmapped* forward, then unfold the result. Outside of vmap the function
         is a thin pass-through to ``attn``.
+
+        NOTE: the dropout-replay path (``rng_state``) is untested against a real
+        ``transformer_engine`` build (not installed in this environment); only
+        the no-dropout path is exercised today.
         """
 
         @staticmethod
@@ -38,6 +68,7 @@ try:
             k: torch.Tensor,
             v: torch.Tensor,
             attn: "te.DotProductAttention",
+            rng_state: tuple[torch.Tensor, Optional[torch.Tensor]],
         ) -> torch.Tensor:
             """Run TE dot-product attention.
 
@@ -48,6 +79,13 @@ try:
                 (``[batch, seq, heads, head_dim]``).
             attn: te.DotProductAttention
                 The transformer-engine attention module to call.
+            rng_state: tuple[torch.Tensor, torch.Tensor | None]
+                RNG snapshot captured just before this call (by
+                :meth:`DistributedAttention._transformer_attn_core`), so
+                ``backward``'s recompute can replay the identical dropout mask
+                (see :func:`_capture_rng_state`). Not itself used here --
+                threaded through only so :meth:`setup_context` can stash it on
+                ``ctx``.
 
             Returns
             -------
@@ -58,15 +96,16 @@ try:
 
         @staticmethod
         def setup_context(ctx: Any, inputs: tuple, output: torch.Tensor) -> None:
-            """Save q/k/v and ``attn`` so :meth:`backward` can recompute.
+            """Save q/k/v, ``attn`` and the RNG snapshot so :meth:`backward` can recompute.
 
             A custom ``autograd.Function`` is a graph boundary, so the graph
             ``attn(q, k, v)` would build internally is discarded -- backward has
             to rebuild it.
             """
-            q, k, v, attn = inputs
+            q, k, v, attn, rng_state = inputs
             ctx.save_for_backward(q, k, v)
             ctx.attn = attn
+            ctx.rng_state = rng_state
 
         @staticmethod
         def backward(  # type: ignore[override]
@@ -76,11 +115,20 @@ try:
             q, k, v = ctx.saved_tensors
             with torch.enable_grad():
                 qd, kd, vd = (t.detach().requires_grad_(True) for t in (q, k, v))
-                out = ctx.attn(qd, kd, vd)
+                # Replay the RNG state `forward` saw, so a dropout-enabled `attn`
+                # draws the same mask here as it did originally; restore the
+                # caller's own state afterwards so this recompute has no
+                # observable side effect on the ambient RNG stream.
+                current_state = _capture_rng_state(q.device)
+                _restore_rng_state(ctx.rng_state, q.device)
+                try:
+                    out = ctx.attn(qd, kd, vd)
+                finally:
+                    _restore_rng_state(current_state, q.device)
                 grads = torch.autograd.grad(
                     out, (qd, kd, vd), grad_out, retain_graph=False
                 )
-            return grads[0], grads[1], grads[2], None
+            return grads[0], grads[1], grads[2], None, None
 
         @staticmethod
         def vmap(
@@ -90,6 +138,7 @@ try:
             k: torch.Tensor,
             v: torch.Tensor,
             attn: "te.DotProductAttention",
+            rng_state: tuple[torch.Tensor, Optional[torch.Tensor]],
         ) -> tuple[torch.Tensor, int]:
 
             q_bdim, k_bdim, v_bdim = in_dims[0], in_dims[1], in_dims[2]
@@ -303,7 +352,7 @@ class DistributedAttention(torch.nn.Module):
                     num_attention_heads=self.heads,
                     kv_channels=embed_dim // heads,
                     num_gqa_groups=self.heads,
-                    # attention_dropout=self.dropout_p,
+                    attention_dropout=self.dropout_p,
                     qkv_format="bshd",
                     attn_mask_type="no_mask",
                 )
@@ -349,7 +398,8 @@ class DistributedAttention(torch.nn.Module):
             ]
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, is_causal=False, dropout_p=self.dropout_p
+                q, k, v, is_causal=False,
+                dropout_p=self.dropout_p if self.training else 0.0,
             )
         return out
 
@@ -366,7 +416,8 @@ class DistributedAttention(torch.nn.Module):
         """
         with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.MATH]):
             out = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, is_causal=False, dropout_p=self.dropout_p
+                q, k, v, is_causal=False,
+                dropout_p=self.dropout_p if self.training else 0.0,
             )
         return out
 
@@ -379,7 +430,7 @@ class DistributedAttention(torch.nn.Module):
         ) -> torch.Tensor:
             """
             Attention computation.
-    
+
             Parameters
             ----------
             q: torch.Tensor
@@ -390,16 +441,21 @@ class DistributedAttention(torch.nn.Module):
                 Values tensor.
             kwargs:
                 Additional optional parameters.
-    
+
             Returns
             -------
             out: torch.Tensor
                 Output of attention computation.
-    
+
             """
-            out = TransformerEngineAttention.apply(q, k, v, self.attn)
+            # `self.attn` (a real nn.Module) applies its own training-mode gate
+            # to `attention_dropout` internally, same as any other dropout
+            # module; the RNG snapshot is only for `backward`'s recompute to
+            # replay that same draw (see `_capture_rng_state`).
+            rng_state = _capture_rng_state(q.device)
+            out = TransformerEngineAttention.apply(q, k, v, self.attn, rng_state)
             return out
-        
+
     def _ring_attn_core(
         self,
         q: torch.Tensor,
@@ -437,7 +493,7 @@ class DistributedAttention(torch.nn.Module):
             x,
             self.qkv.weight,
             self.scale,
-            self.dropout_p,
+            self.dropout_p if self.training else 0.0,
             self.spatial_group,
             self.local_rank,
             self.config,
@@ -580,7 +636,8 @@ class Attention(torch.nn.Module):
             ]
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, is_causal=False, dropout_p=self.dropout_p
+                q, k, v, is_causal=False,
+                dropout_p=self.dropout_p if self.training else 0.0,
             )
 
         return out
