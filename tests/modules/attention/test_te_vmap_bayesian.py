@@ -11,7 +11,11 @@ of integration:
    a custom Function under vmap (``te``'s fused kernels register no batching
    rule); its ``vmap`` staticmethod folds the members axis into the batch,
    runs one un-vmapped call, and unfolds. Forward + grad vs a Python loop.
-   **Passes.**
+   **Passes** -- including after the wrapper moved off
+   ``te.DotProductAttention`` onto the fused kernels directly: the fold makes
+   the folded ``q/k/v`` produce a matching folded LSE / ``rng_state``, so the
+   re-entrant ``apply`` inside the rule sends gradients through the wrapper's
+   own ``fused_attn_bwd`` backward.
 2. :class:`TestDistributedAttentionPlain` -- a plain (no vmap, no ensemble)
    ``DistributedAttention`` forward+backward on a channel-parallel mesh, sdpa
    and te. **Passes.** Regression guards for two fixes: ``forward`` now casts
@@ -57,20 +61,7 @@ class TestTransformerEngineAttentionVmap:
     """The wrapper's ``vmap`` staticmethod folds members into batch and unfolds."""
 
     E, B, H, S, D = 3, 2, 4, 16, 32
-
-    def _attn(self):
-        import transformer_engine.pytorch as te
-
-        a = te.DotProductAttention(
-            num_attention_heads=self.H,
-            kv_channels=self.D,
-            num_gqa_groups=self.H,
-            qkv_format="bshd",
-            attn_mask_type="no_mask",
-            attention_dropout=0.0,
-        )
-        a.eval()
-        return a
+    SCALE = D**-0.5
 
     def _qkv(self, device, requires_grad=False):
         torch.manual_seed(0)
@@ -82,18 +73,19 @@ class TestTransformerEngineAttentionVmap:
             for _ in range(3)
         ]
 
-    def test_forward_matches_loop(self, device: torch.device) -> None:
-        from jigsaw.modules.attention.attention import (
-            TransformerEngineAttention,
-            _capture_rng_state,
-        )
+    @staticmethod
+    def _f(q, k, v, scale):
+        from jigsaw.modules.attention.attention import TransformerEngineAttention
 
-        attn = self._attn()
+        # apply() returns (out, logsumexp, rng_state); only the output is used
+        # outside the ring.
+        return TransformerEngineAttention.apply(q, k, v, scale, 0.0)[0]
+
+    def test_forward_matches_loop(self, device: torch.device) -> None:
         qe, ke, ve = self._qkv(device)
-        rng_state = _capture_rng_state(device)
 
         def f(q, k, v):
-            return TransformerEngineAttention.apply(q, k, v, attn, rng_state)
+            return self._f(q, k, v, self.SCALE)
 
         got = vmap(f)(qe, ke, ve)
         assert got.shape == (self.E, self.B, self.S, self.H * self.D)
@@ -106,17 +98,10 @@ class TestTransformerEngineAttentionVmap:
         torch.testing.assert_close(got, ref, **_FWD_TOL)
 
     def test_grad_matches_loop(self, device: torch.device) -> None:
-        from jigsaw.modules.attention.attention import (
-            TransformerEngineAttention,
-            _capture_rng_state,
-        )
-
-        attn = self._attn()
         qe, ke, ve = self._qkv(device, requires_grad=True)
-        rng_state = _capture_rng_state(device)
 
         def f(q, k, v):
-            return TransformerEngineAttention.apply(q, k, v, attn, rng_state)
+            return self._f(q, k, v, self.SCALE)
 
         vmap(f)(qe, ke, ve).float().pow(2).sum().backward()
         got = (qe.grad, ke.grad, ve.grad)

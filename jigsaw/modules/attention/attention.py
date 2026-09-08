@@ -1,6 +1,5 @@
 """Distributed attention modules."""
 import warnings
-
 from typing import Any, Callable, Optional, cast
 
 import torch
@@ -12,58 +11,57 @@ from jigsaw.modules import linear
 
 from . import config as attention_config
 from .config import AttnBackend
+from .functional.cores import te as te_core
 from .functional.functional import RingAttentionFunction
 
-try:
-    import transformer_engine.pytorch as te
+#: Whether the TE fused-attention kernels can be called at all. Both TE paths --
+#: the ring's inner core and :class:`TransformerEngineAttention` below -- go
+#: through :mod:`.functional.cores.te`, so one probe covers both: it is false if
+#: ``transformer_engine`` is missing *or* if its ``cpp_extensions`` surface moved.
+JIGSAW_TE_AVAILABLE = te_core.TE_CORE_AVAILABLE
 
-    def _capture_rng_state(
-        device: torch.device,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Snapshot the ambient RNG so a later recompute can replay it exactly.
-
-        ``TransformerEngineAttention.backward`` recomputes ``attn(q, k, v)``
-        from scratch to get an autograd graph to differentiate; if ``attn``
-        applies dropout, that recompute must draw the *same* mask as the
-        original forward call, not a fresh one, or the gradient corresponds to
-        a different dropout mask than the one that actually produced the
-        forward output. Mirrors ``torch.utils.checkpoint``'s own save/restore
-        of CPU + per-device CUDA RNG state around a recompute.
-        """
-        cpu_state = torch.get_rng_state()
-        cuda_state = (
-            torch.cuda.get_rng_state(device) if device.type == "cuda" else None
-        )
-        return cpu_state, cuda_state
-
-    def _restore_rng_state(
-        state: tuple[torch.Tensor, Optional[torch.Tensor]], device: torch.device
-    ) -> None:
-        cpu_state, cuda_state = state
-        torch.set_rng_state(cpu_state)
-        if cuda_state is not None:
-            torch.cuda.set_rng_state(cuda_state, device)
+if JIGSAW_TE_AVAILABLE:
 
     class TransformerEngineAttention(torch.autograd.Function):
-        """Autograd wrapper around ``te.DotProductAttention`` that supports ``torch.vmap``.
+        """Autograd wrapper around TransformerEngine's fused (cuDNN) attention kernels.
 
-        ``transformer_engine``'s fused attention kernels are opaque C++/CUDA extensions
-        that do not register a batching rule, so calling them inside ``torch.vmap``
-        (as ``torch_blue`` does for Bayesian sampling) fails.
+        Drives :mod:`.functional.cores.te` -- the same ``fused_attn_fwd`` /
+        ``fused_attn_bwd`` pair the ring's inner core uses -- in the non-ring,
+        ``bshd`` configuration, so ``attn_backend="te"`` means the same cuDNN
+        kernels whether or not ``ring`` is set.
 
-        By routing the call through a custom ``autograd.Function`` with a ``vmap``
-        staticmethod we get full control over what happens under vmap: we simply fold the
-        vmapped (samples) dimension into the batch dimension, run the kernel once as a
-        *normal, un-vmapped* forward, then unfold the result. Outside of vmap the function
-        is a thin pass-through to ``attn``.
+        Replaces a wrapper around ``te.DotProductAttention``. That module is an
+        ``autograd.Function`` internally, hence a graph boundary, so the wrapper
+        had to recompute the whole forward under ``enable_grad`` just to get a
+        graph to differentiate -- fwd, fwd, bwd per training step -- plus a
+        CPU/CUDA RNG snapshot/restore dance so the recompute redrew the
+        forward's dropout mask. Calling the kernels directly gives
+        ``fused_attn_bwd`` and cuDNN's own ``rng_state`` instead: no recompute,
+        no RNG bookkeeping. Measured on an A100 (b=2, h=8, d=64, bf16), with
+        both paths on the cuDNN backend: 1.2x-2.0x faster fwd+bwd across
+        s=512..8192, the wider margins at short sequences where
+        ``DotProductAttention``'s per-call Python (its ``AttentionParams``
+        backend-selection cache) also disappears.
 
-        The dropout-replay path (``rng_state``) is covered by
-        ``tests/modules/attention/test_dropout.py::TestTeAttnDropoutReplay``
-        (``te_required`` + ``gpu_required``): restoring the captured state makes
-        the backward recompute reproduce the forward mask bit-for-bit, its
-        gradients match autograd through that replayed forward, and the ambient
-        RNG stream is left untouched (verified against transformer_engine 2.12
-        on an NVIDIA A100).
+        The softmax LSE the core returns is dropped here (the ring needs it for
+        its online-softmax merge; a single un-chunked call does not). That costs
+        nothing: cuDNN computes the LSE regardless as the softmax normaliser and
+        writes it out for its own backward.
+
+        Trade-offs vs ``DotProductAttention``: no FP8, bias, mask or GQA support,
+        and -- the substantive one -- no backend *dispatch*.
+        ``DotProductAttention`` picks per shape between flash-attn, the cuDNN
+        fused kernels and an unfused path, and on this container (TE 2.12,
+        A100, no mask, d=64) it picks flash-attn every time, so the switch also
+        pins the kernel. That is a win or a wash except for long sequences with
+        dropout, where cuDNN fused is the slower kernel (s=8192, p=0.1: 10.9 ms
+        vs 8.9 ms fwd+bwd) -- ``attn_backend="sdpa"``, which is torch's flash
+        kernel, is the escape hatch there. Where cuDNN has no fused backend at
+        all, :func:`.functional.cores.te._fused_attn_backend` raises rather than
+        falling back silently.
+
+        ``torch.vmap`` support (``torch_blue``'s Bayesian ensembles) survives the
+        move: see the :meth:`vmap` staticmethod.
         """
 
         @staticmethod
@@ -71,68 +69,71 @@ try:
             q: torch.Tensor,
             k: torch.Tensor,
             v: torch.Tensor,
-            attn: "te.DotProductAttention",
-            rng_state: tuple[torch.Tensor, Optional[torch.Tensor]],
-        ) -> torch.Tensor:
-            """Run TE dot-product attention.
+            scale: float,
+            dropout_p: float,
+        ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+            """Run TE fused attention.
 
             Parameters
             ----------
             q, k, v: torch.Tensor
                 Query/key/value tensors in ``bshd`` format
-                (``[batch, seq, heads, head_dim]``).
-            attn: te.DotProductAttention
-                The transformer-engine attention module to call.
-            rng_state: tuple[torch.Tensor, torch.Tensor | None]
-                RNG snapshot captured just before this call (by
-                :meth:`DistributedAttention._transformer_attn_core`), so
-                ``backward``'s recompute can replay the identical dropout mask
-                (see :func:`_capture_rng_state`). Not itself used here --
-                threaded through only so :meth:`setup_context` can stash it on
-                ``ctx``.
+                (``[batch, seq, heads, head_dim]``), fp16 or bf16.
+            scale: float
+                Softmax scale (``head_dim ** -0.5`` for the callers here --
+                ``te.DotProductAttention``'s default).
+            dropout_p: float
+                Attention dropout probability. Already gated on training mode by
+                the caller; this function has no ``self.training`` to consult.
 
             Returns
             -------
-            torch.Tensor
-                Attention output in ``bshd`` format.
+            tuple
+                ``(out, logsumexp, rng_state)``. ``out`` is
+                ``[batch, seq, heads * head_dim]`` -- heads merged, matching what
+                ``te.DotProductAttention(qkv_format="bshd")`` returned.
+                ``logsumexp`` ``(b, h, s)`` and ``rng_state`` exist only so
+                :meth:`setup_context` can hand them to :meth:`backward`; callers
+                take ``[0]``.
             """
-            return attn(q, k, v)
+            out, lse, rng_state = te_core.forward(
+                q, k, v, scale, dropout_p, layout="bshd"
+            )
+            return out.flatten(-2), lse, rng_state
 
         @staticmethod
-        def setup_context(ctx: Any, inputs: tuple, output: torch.Tensor) -> None:
-            """Save q/k/v, ``attn`` and the RNG snapshot so :meth:`backward` can recompute.
-
-            A custom ``autograd.Function`` is a graph boundary, so the graph
-            ``attn(q, k, v)` would build internally is discarded -- backward has
-            to rebuild it.
-            """
-            q, k, v, attn, rng_state = inputs
-            ctx.save_for_backward(q, k, v)
-            ctx.attn = attn
-            ctx.rng_state = rng_state
+        def setup_context(ctx: Any, inputs: tuple, output: tuple) -> None:
+            """Save what ``fused_attn_bwd`` needs: q/k/v, out, LSE and the RNG state."""
+            _q, _k, _v, scale, dropout_p = inputs
+            out, lse, rng_state = output
+            ctx.save_for_backward(*inputs[:3], out, lse, rng_state)
+            ctx.scale = scale
+            ctx.dropout_p = dropout_p
+            ctx.mark_non_differentiable(lse)
 
         @staticmethod
         def backward(  # type: ignore[override]
-            ctx: Any, grad_out: torch.Tensor
+            ctx: Any,
+            grad_out: torch.Tensor,
+            _grad_lse: Optional[torch.Tensor],
+            _grad_rng: Optional[torch.Tensor],
         ) -> tuple[Optional[torch.Tensor], ...]:
-            """Recompute the TE forward under grad and pull out dq/dk/dv."""
-            q, k, v = ctx.saved_tensors
-            with torch.enable_grad():
-                qd, kd, vd = (t.detach().requires_grad_(True) for t in (q, k, v))
-                # Replay the RNG state `forward` saw, so a dropout-enabled `attn`
-                # draws the same mask here as it did originally; restore the
-                # caller's own state afterwards so this recompute has no
-                # observable side effect on the ambient RNG stream.
-                current_state = _capture_rng_state(q.device)
-                _restore_rng_state(ctx.rng_state, q.device)
-                try:
-                    out = ctx.attn(qd, kd, vd)
-                finally:
-                    _restore_rng_state(current_state, q.device)
-                grads = torch.autograd.grad(
-                    out, (qd, kd, vd), grad_out, retain_graph=False
-                )
-            return grads[0], grads[1], grads[2], None, None
+            """dq/dk/dv straight from ``fused_attn_bwd`` -- no forward recompute."""
+            q, k, v, out, lse, rng_state = ctx.saved_tensors
+            bshd = q.shape  # [b, s, h, d]; forward merged (h, d) in its output
+            dq, dk, dv = te_core.backward(
+                grad_out.reshape(bshd),
+                q,
+                k,
+                v,
+                out.reshape(bshd),
+                lse,
+                ctx.scale,
+                dropout_p=ctx.dropout_p,
+                rng_state=rng_state,
+                layout="bshd",
+            )
+            return dq, dk, dv, None, None
 
         @staticmethod
         def vmap(
@@ -141,10 +142,25 @@ try:
             q: torch.Tensor,
             k: torch.Tensor,
             v: torch.Tensor,
-            attn: "te.DotProductAttention",
-            rng_state: tuple[torch.Tensor, Optional[torch.Tensor]],
-        ) -> tuple[torch.Tensor, int]:
+            scale: float,
+            dropout_p: float,
+        ) -> tuple[tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]], tuple]:
+            """Fold the vmapped (samples) axis into the batch, run one plain call, unfold.
 
+            ``transformer_engine``'s kernels are opaque C++/CUDA extensions with no
+            batching rule, so calling them under ``torch.vmap`` (as ``torch_blue``
+            does for Bayesian sampling) fails; having a ``vmap`` staticmethod lets
+            us decide what happens instead. Since attention is independent across
+            the batch axis, ``[samples, batch, ...] -> [samples * batch, ...]`` is
+            exact.
+
+            It re-enters :meth:`forward` via ``apply``, so gradients route
+            through :meth:`backward` -- the folded ``q/k/v`` produce the matching
+            folded LSE / ``rng_state``, which is what ``fused_attn_bwd`` needs.
+            Forward and grad are checked against a per-member Python loop by
+            ``tests/modules/attention/test_te_vmap_bayesian.py::TestTransformerEngineAttentionVmap``
+            (``te_required`` + ``gpu_required``).
+            """
             q_bdim, k_bdim, v_bdim = in_dims[0], in_dims[1], in_dims[2]
 
             # Move the vmapped dimension to the front for each tensor.
@@ -159,15 +175,14 @@ try:
             k = k.flatten(0, 1)
             v = v.flatten(0, 1)
 
-            out = attn(q, k, v)
+            out, lse, rng_state = TransformerEngineAttention.apply(
+                q, k, v, scale, dropout_p
+            )
 
             # Unfold the samples dimension back out to the front.
             out = out.unflatten(0, (samples, -1))
-            return out, 0
-
-    JIGSAW_TE_AVAILABLE=True
-except ModuleNotFoundError:
-    JIGSAW_TE_AVAILABLE=False
+            lse = lse.unflatten(0, (samples, -1))
+            return (out, lse, rng_state), (0, 0, None)
 
 
 def attn_core_dtype(x: torch.Tensor) -> torch.dtype:
@@ -267,7 +282,7 @@ class DistributedAttention(torch.nn.Module):
             )
             self.attn_core = self._ring_attn_core
         else:
-            self.attn_core = self._select_attn_core(embed_dim, heads)
+            self.attn_core = self._select_attn_core()
 
         if channel_group.size() == 1:
             self.qkv = torch.nn.Linear(
@@ -342,24 +357,15 @@ class DistributedAttention(torch.nn.Module):
             return AttnBackend.SDPA
         return attn_backend
 
-    def _select_attn_core(
-        self, embed_dim: int, heads: int
-    ) -> Callable[..., torch.Tensor]:
+    def _select_attn_core(self) -> Callable[..., torch.Tensor]:
         """Resolve ``self.attn_backend`` to its non-ring attention core.
 
-        The ``TE`` arm also builds the ``te.DotProductAttention`` module that
-        :meth:`_transformer_attn_core` calls.
+        The ``TE`` arm needs no per-module state: it goes straight to the fused
+        kernels via :class:`TransformerEngineAttention`, parameterised per call
+        by ``self.scale`` / ``self.dropout_p``.
         """
         match self.attn_backend:
             case AttnBackend.TE:
-                self.attn = te.DotProductAttention(
-                    num_attention_heads=self.heads,
-                    kv_channels=embed_dim // heads,
-                    num_gqa_groups=self.heads,
-                    attention_dropout=self.dropout_p,
-                    qkv_format="bshd",
-                    attn_mask_type="no_mask",
-                )
                 return self._transformer_attn_core
             case AttnBackend.MATH:
                 return self._attn_core_math
@@ -426,39 +432,42 @@ class DistributedAttention(torch.nn.Module):
         return out
 
     def _transformer_attn_core(
-            self,
-            q: torch.Tensor,
-            k: torch.Tensor,
-            v: torch.Tensor,
-            **kwargs: torch.Tensor,
-        ) -> torch.Tensor:
-            """
-            Attention computation.
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        **kwargs: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Attention computation on TransformerEngine's fused (cuDNN) kernels.
 
-            Parameters
-            ----------
-            q: torch.Tensor
-                Query tensor.
-            k: torch.Tensor
-                Keys tensor.
-            v: torch.Tensor
-                Values tensor.
-            kwargs:
-                Additional optional parameters.
+        Shares :mod:`.functional.cores.te` with the ring's inner core; see
+        :class:`TransformerEngineAttention` for why the kernels are called
+        directly rather than through ``te.DotProductAttention``.
 
-            Returns
-            -------
-            out: torch.Tensor
-                Output of attention computation.
+        Parameters
+        ----------
+        q: torch.Tensor
+            Query tensor, ``bshd`` (``[batch, seq, heads, head_dim]``).
+        k: torch.Tensor
+            Keys tensor, ``bshd``.
+        v: torch.Tensor
+            Values tensor, ``bshd``.
+        kwargs:
+            Additional optional parameters.
 
-            """
-            # `self.attn` (a real nn.Module) applies its own training-mode gate
-            # to `attention_dropout` internally, same as any other dropout
-            # module; the RNG snapshot is only for `backward`'s recompute to
-            # replay that same draw (see `_capture_rng_state`).
-            rng_state = _capture_rng_state(q.device)
-            out = TransformerEngineAttention.apply(q, k, v, self.attn, rng_state)
-            return out
+        Returns
+        -------
+        out: torch.Tensor
+            Output of attention computation, ``[batch, seq, heads * head_dim]``.
+
+        """
+        # There is no dropout nn.Module here to apply its own training-mode
+        # gate, so gate it the way the sdpa/math cores do.
+        out, _lse, _rng_state = TransformerEngineAttention.apply(
+            q, k, v, self.scale, self.dropout_p if self.training else 0.0
+        )
+        return cast(torch.Tensor, out)
 
     def _ring_attn_core(
         self,

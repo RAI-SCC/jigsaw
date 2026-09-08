@@ -1,4 +1,4 @@
-"""TransformerEngine fused-attention core for the ring inner step.
+"""TransformerEngine fused-attention core.
 
 The ring's online-softmax merge (:func:`..forward._attend_step`) needs a per-chunk
 log-sum-exp from every inner attention call, and its backward
@@ -8,8 +8,20 @@ TransformerEngine's cuDNN fused-attention kernels directly via
 ``fused_attn_fwd`` / ``fused_attn_bwd``, whose ``aux_ctx_tensors[0]`` is the
 softmax LSE.
 
-Scope: non-FP8, no bias, no mask, ``bshd`` layout. Tensors follow the ring's
-``(b, h, s, d)`` convention on the way in and out; LSE is ``(b, h, s)``.
+The non-ring TE core
+(:meth:`~jigsaw.modules.attention.attention.DistributedAttention._transformer_attn_core`)
+goes through here too, with ``layout="bshd"``, and simply drops the LSE: cuDNN
+computes it either way as the running softmax normaliser and writes it out for
+its own backward, so taking it costs one unused ``(b, h, s)`` fp32 tensor.
+What calling the kernels directly buys is the explicit ``fused_attn_bwd``,
+which ``te.DotProductAttention`` hides behind its own ``autograd.Function`` --
+see :class:`~jigsaw.modules.attention.attention.TransformerEngineAttention` for
+what that cost and what the dispatch it also gives up is worth.
+
+Scope: non-FP8, no bias, no mask, no GQA. ``layout`` selects the caller's
+tensor convention (``"bhsd"`` for the ring, ``"bshd"`` for the non-ring core --
+cuDNN speaks only the latter, so ``"bhsd"`` is transposed in and out); LSE is
+``(b, h, s)`` regardless.
 
 Dropout replay follows the same strategy as :mod:`.sdpa`: cuDNN generates its
 own opaque RNG state internally (``aux_ctx_tensors[1]`` from
@@ -27,7 +39,8 @@ NVIDIA A100).
 
 from __future__ import annotations
 
-from typing import Optional
+import functools
+from typing import Literal, Optional
 
 import torch
 
@@ -52,6 +65,31 @@ except Exception:  # pragma: no cover - TE not installed (no container)
 
 _LAYOUT = "bshd_bshd_bshd"
 
+#: Layout of the ``q``/``k``/``v``/``out`` tensors a caller hands in and gets back.
+#: cuDNN itself only speaks ``bshd`` (see :data:`_LAYOUT`); ``"bhsd"`` -- the ring's
+#: own convention -- is transposed in and out around the kernel, ``"bshd"`` is
+#: passed straight through.
+Layout = Literal["bhsd", "bshd"]
+
+
+def _to_bshd(t: torch.Tensor, layout: Layout) -> torch.Tensor:
+    """Bring ``t`` into the contiguous ``bshd`` the fused kernels require."""
+    return t.contiguous() if layout == "bshd" else t.transpose(1, 2).contiguous()
+
+
+def _from_bshd(t: torch.Tensor, layout: Layout) -> torch.Tensor:
+    """Inverse of :func:`_to_bshd`."""
+    return t if layout == "bshd" else t.transpose(1, 2).contiguous()
+
+
+def _shape(q: torch.Tensor, k: torch.Tensor, layout: Layout) -> tuple[int, int, int, int, int]:
+    """``(batch, heads, seqlen_q, seqlen_kv, head_dim)`` for either layout."""
+    if layout == "bshd":
+        b, s_q, h, d = q.shape
+        return b, h, s_q, k.shape[1], d
+    b, h, s_q, d = q.shape
+    return b, h, s_q, k.shape[2], d
+
 
 def _full_cu_seqlens(batch: int, seqlen: int, device: torch.device) -> torch.Tensor:
     """``[0, s, 2s, ..., b*s]`` int32 offsets for an unpadded ``bshd`` batch."""
@@ -60,6 +98,7 @@ def _full_cu_seqlens(batch: int, seqlen: int, device: torch.device) -> torch.Ten
     )
 
 
+@functools.lru_cache(maxsize=None)
 def _fused_attn_backend(
     is_training: bool,
     dtype: torch.dtype,
@@ -69,7 +108,11 @@ def _fused_attn_backend(
     head_dim: int,
     dropout_p: float,
 ) -> "tex.NVTE_Fused_Attn_Backend":
-    """Ask cuDNN which fused-attention sub-backend serves this problem shape."""
+    """Ask cuDNN which fused-attention sub-backend serves this problem shape.
+
+    Cached on its arguments: the ring calls it once per chunk per ring step, and
+    the answer only depends on the (shape, dtype, dropout) problem description.
+    """
     backend = tex.get_fused_attn_backend(
         is_training,
         TE_DType[dtype],
@@ -107,16 +150,21 @@ def forward(
     scale: float,
     dropout_p: float,
     seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
+    *,
+    layout: Layout = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """TE fused attention forward.
 
-    Returns ``(out (b,h,s,d), logsumexp (b,h,s), rng_state)`` -- ``rng_state``
-    is cuDNN's own opaque dropout RNG state (``None`` when ``dropout_p == 0``),
-    threaded back for :func:`backward` to replay (see module docstring).
+    Returns ``(out, logsumexp (b,h,s), rng_state)``. ``out`` comes back in the
+    same ``layout`` ``q``/``k``/``v`` were given in -- ``(b,h,s,d)`` by default
+    (the ring's convention), ``(b,s,h,d)`` for ``layout="bshd"``, which skips
+    the transposes entirely. ``logsumexp`` is ``(b,h,s)`` either way.
+    ``rng_state`` is cuDNN's own opaque dropout RNG state (``None`` when
+    ``dropout_p == 0``), threaded back for :func:`backward` to replay (see
+    module docstring).
     """
-    b, h, s_q, d = q.shape
-    s_kv = k.shape[2]
-    q_b, k_b, v_b = (t.transpose(1, 2).contiguous() for t in (q, k, v))  # -> bshd
+    b, h, s_q, s_kv, d = _shape(q, k, layout)
+    q_b, k_b, v_b = (_to_bshd(t, layout) for t in (q, k, v))
     backend = _fused_attn_backend(True, q_b.dtype, h, s_q, s_kv, d, dropout_p)
     cu_q = _full_cu_seqlens(b, s_q, q.device)
     cu_kv = _full_cu_seqlens(b, s_kv, q.device)
@@ -156,7 +204,7 @@ def forward(
     # cuDNN returns LSE as (b, h, s_q, 1); the ring wants (b, h, s_q).
     lse = aux[0].squeeze(-1)
     rng_state = aux[1] if dropout_p > 0.0 else None
-    return out.transpose(1, 2).contiguous(), lse, rng_state
+    return _from_bshd(out, layout), lse, rng_state
 
 
 def backward(
@@ -171,6 +219,7 @@ def backward(
     dropout_p: float = 0.0,
     seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
     rng_state: Optional[torch.Tensor] = None,
+    layout: Layout = "bhsd",
     **__: object,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """TE fused attention backward from the saved (global) ``out`` / ``logsumexp``.
@@ -182,11 +231,14 @@ def backward(
     threaded back from this same chunk's :func:`forward` call -- reproduces the
     identical dropout mask; ``None`` (the ``dropout_p == 0`` case) falls back
     to a placeholder, matching cuDNN's own "unused" convention for no-dropout.
+
+    ``layout`` describes ``q``/``k``/``v``/``out``/``grad_out`` and the returned
+    gradients, exactly as in :func:`forward`; ``logsumexp`` is ``(b,h,s)``
+    regardless.
     """
-    b, h, s_q, d = q.shape
-    s_kv = k.shape[2]
+    b, h, s_q, s_kv, d = _shape(q, k, layout)
     q_b, k_b, v_b, o_b, do_b = (
-        t.transpose(1, 2).contiguous() for t in (q, k, v, out, grad_out)
+        _to_bshd(t, layout) for t in (q, k, v, out, grad_out)
     )
     backend = _fused_attn_backend(True, q_b.dtype, h, s_q, s_kv, d, dropout_p)
     cu_q = _full_cu_seqlens(b, s_q, q.device)
@@ -236,7 +288,7 @@ def backward(
         False,  # cuda_graph
     )
     return (
-        dq.transpose(1, 2).contiguous(),
-        dk.transpose(1, 2).contiguous(),
-        dv.transpose(1, 2).contiguous(),
+        _from_bshd(dq, layout),
+        _from_bshd(dk, layout),
+        _from_bshd(dv, layout),
     )

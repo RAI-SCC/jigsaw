@@ -18,8 +18,8 @@ skipped where the hardware or ``transformer_engine`` is missing):
   opaque mask in a CUDA kernel and must replay it from the saved RNG state in
   their backward.
 * ``TestTeAttnDropoutReplay`` -- the non-ring ``TransformerEngineAttention``
-  wrapper's recompute-backward must replay the forward mask via the captured
-  CPU/CUDA RNG state.
+  wrapper, which drives the same fused kernels in ``bshd`` and replays their
+  mask through the same cuDNN ``rng_state``.
 """
 
 import pytest
@@ -278,127 +278,115 @@ class TestSdpaTeCoreDropoutReplay:
 
 
 # --------------------------------------------------------------------------- #
-# Non-ring TransformerEngineAttention: RNG replay across its recompute-backward
+# Non-ring TransformerEngineAttention: cuDNN rng_state replay through fused_attn_bwd
 # --------------------------------------------------------------------------- #
 @pytest.mark.gpu_required
 @pytest.mark.te_required
 class TestTeAttnDropoutReplay:
-    """``TransformerEngineAttention`` (the non-ring ``te.DotProductAttention``
-    wrapper) is a custom ``autograd.Function``, so its ``backward`` re-runs the
-    TE forward to get a graph to differentiate. With dropout on, that recompute
-    must replay the *forward's* mask -- it snapshots CPU + CUDA RNG in
-    ``forward`` and restores it around the recompute (``_capture_rng_state`` /
-    ``_restore_rng_state``), the same trick ``torch.utils.checkpoint`` uses.
+    """``TransformerEngineAttention`` (the non-ring, ``bshd`` wrapper around the
+    same fused kernels as :mod:`~jigsaw.modules.attention.functional.cores.te`)
+    must replay its forward dropout mask in backward.
+
+    Same observability trick as :class:`TestSdpaTeCoreDropoutReplay`, one level
+    up: with ``S == d`` and ``V`` the identity per ``(b, h)``, the attention
+    output *is* the post-dropout probability matrix, so the mask cuDNN drew --
+    opaque inside the kernel -- can be recovered from the output and used to
+    build a differentiable ground-truth reference.
+
+    The wrapper carries cuDNN's own ``rng_state`` from ``forward`` into
+    ``fused_attn_bwd``; there is no forward recompute and no ambient CPU/CUDA
+    RNG snapshot involved (the mask is not drawn from the ambient stream).
     """
 
-    B, H, S, D = 2, 4, 16, 32
-    P = 0.5
+    B, H, S = 2, 3, 32
+    D = S
+    SCALE = D**-0.5
+    P = 0.3
+    TOL = 2e-2
 
-    def _attn(self):
-        import transformer_engine.pytorch as te
-
-        return te.DotProductAttention(
-            num_attention_heads=self.H,
-            kv_channels=self.D,
-            num_gqa_groups=self.H,
-            qkv_format="bshd",
-            attn_mask_type="no_mask",
-            attention_dropout=self.P,
-        )
-
-    def _qkv(self, requires_grad: bool = True):
+    def _qkv(self, requires_grad: bool = False):
+        """``bshd`` q/k, and a ``V`` that is the identity for every ``(b, h)``."""
         torch.manual_seed(0)
-        return [
+        q, k = (
             torch.randn(
                 self.B, self.S, self.H, self.D,
                 device="cuda", dtype=torch.bfloat16, requires_grad=requires_grad,
             )
-            for _ in range(3)
-        ]
-
-    def test_forward_dropout_gated_by_training(self) -> None:
-        """Sanity: dropout draws a fresh mask each ``train()`` call and none in ``eval()``."""
-        from jigsaw.modules.attention.attention import (
-            TransformerEngineAttention,
-            _capture_rng_state,
+            for _ in range(2)
         )
+        v = torch.eye(self.S, device="cuda", dtype=torch.bfloat16)
+        v = v[None, :, None, :].expand(self.B, self.S, self.H, self.S).contiguous()
+        v.requires_grad_(requires_grad)
+        return q, k, v
 
-        attn = self._attn()
-        q, k, v = self._qkv(requires_grad=False)
+    def _apply(self, q, k, v, dropout_p):
+        from jigsaw.modules.attention.attention import TransformerEngineAttention
 
-        attn.train()
-        a = TransformerEngineAttention.apply(q, k, v, attn, _capture_rng_state(q.device))
-        b = TransformerEngineAttention.apply(q, k, v, attn, _capture_rng_state(q.device))
-        assert not torch.allclose(a, b)
+        return TransformerEngineAttention.apply(q, k, v, self.SCALE, dropout_p)[0]
 
-        attn.eval()
-        c = TransformerEngineAttention.apply(q, k, v, attn, _capture_rng_state(q.device))
-        d = TransformerEngineAttention.apply(q, k, v, attn, _capture_rng_state(q.device))
-        torch.testing.assert_close(c, d)
+    def _bhsd(self, t):
+        """``[b, s, h*d]`` (the wrapper's output layout) -> ``[b, h, s, d]``."""
+        return t.reshape(self.B, self.S, self.H, self.D).transpose(1, 2)
 
-    def test_restoring_rng_reproduces_the_forward_mask(self) -> None:
-        """Restoring the captured state makes a plain re-run of ``attn`` bit-identical
-        -- exactly the invariant ``backward``'s recompute leans on."""
-        from jigsaw.modules.attention.attention import (
-            TransformerEngineAttention,
-            _capture_rng_state,
-            _restore_rng_state,
-        )
-
-        attn = self._attn()
-        attn.train()
-        q, k, v = self._qkv(requires_grad=False)
-
-        rng_state = _capture_rng_state(q.device)
-        out = TransformerEngineAttention.apply(q, k, v, attn, rng_state)
-
-        _restore_rng_state(rng_state, q.device)
-        out_replay = attn(q, k, v)
-        torch.testing.assert_close(out_replay, out)
-
-    def test_backward_matches_autograd_through_the_replayed_forward(self) -> None:
-        from jigsaw.modules.attention.attention import (
-            TransformerEngineAttention,
-            _capture_rng_state,
-            _restore_rng_state,
-        )
-
-        attn = self._attn()
-        attn.train()
+    def test_forward_mask_is_stochastic_and_scaled(self) -> None:
         q, k, v = self._qkv()
+        out0 = self._bhsd(self._apply(q, k, v, self.P))
+        out1 = self._bhsd(self._apply(q, k, v, self.P))
+        assert not torch.allclose(out0, out1)  # fresh mask each call
 
-        rng_state = _capture_rng_state(q.device)
-        out = TransformerEngineAttention.apply(q, k, v, attn, rng_state)
-        grad_out = torch.randn_like(out)
-
-        rng_before = torch.cuda.get_rng_state(q.device).clone()
-        out.backward(grad_out)
-        # the recompute puts back the ambient RNG stream it borrowed
-        assert torch.equal(torch.cuda.get_rng_state(q.device), rng_before)
-
-        # ground truth: a fresh graph, RNG replayed to the same state
-        qr, kr, vr = (t.detach().clone().requires_grad_(True) for t in (q, k, v))
-        _restore_rng_state(rng_state, q.device)
-        attn(qr, kr, vr).backward(grad_out)
-        for got, ref in ((q.grad, qr.grad), (k.grad, kr.grad), (v.grad, vr.grad)):
-            torch.testing.assert_close(got, ref, atol=2e-2, rtol=2e-2)
-
-    def test_backward_replays_the_mask_rather_than_drawing_a_fresh_one(self) -> None:
-        """Guard against the check above being vacuous: a graph on a *fresh*
-        mask (no replay) almost surely disagrees with the replayed gradient."""
-        from jigsaw.modules.attention.attention import (
-            TransformerEngineAttention,
-            _capture_rng_state,
+        qb, kb = (t.transpose(1, 2).float() for t in (q, k))
+        p_ref = torch.softmax((qb @ kb.mT) * self.SCALE, dim=-1)
+        kept = out0.float() > 0
+        assert abs((1.0 - kept.float().mean().item()) - self.P) < 0.05
+        torch.testing.assert_close(
+            out0.float(), p_ref * kept / (1 - self.P), atol=self.TOL, rtol=self.TOL
         )
 
-        attn = self._attn()
-        attn.train()
+    def test_dropout_p_zero_is_deterministic(self) -> None:
+        """Sanity: the stochasticity above is the dropout, not the kernel."""
         q, k, v = self._qkv()
+        torch.testing.assert_close(
+            self._apply(q, k, v, 0.0), self._apply(q, k, v, 0.0)
+        )
 
-        out = TransformerEngineAttention.apply(q, k, v, attn, _capture_rng_state(q.device))
+    def test_backward_replays_the_forward_mask(self) -> None:
+        q, k, v = self._qkv(requires_grad=True)
+        out = self._apply(q, k, v, self.P)
         grad_out = torch.randn_like(out)
         out.backward(grad_out)
 
-        qr, kr, vr = (t.detach().clone().requires_grad_(True) for t in (q, k, v))
-        attn(qr, kr, vr).backward(grad_out)  # fresh mask, no RNG replay
-        assert not torch.allclose(q.grad, qr.grad, atol=2e-2, rtol=2e-2)
+        # ground truth: autograd through the identical (recovered) mask
+        kept = (self._bhsd(out.detach()).float() > 0).float()
+        qg, kg, vg = (
+            t.detach().transpose(1, 2).float().clone().requires_grad_(True)
+            for t in (q, k, v)
+        )
+        p_soft = torch.softmax((qg @ kg.mT) * self.SCALE, dim=-1)
+        ref_out = (p_soft * kept / (1 - self.P)) @ vg
+        ref_out.backward(self._bhsd(grad_out).float())
+
+        for name, got, ref in zip("qkv", (q.grad, k.grad, v.grad), (qg.grad, kg.grad, vg.grad)):
+            assert got is not None, f"no grad for {name}"
+            torch.testing.assert_close(
+                got.float().transpose(1, 2), ref, atol=self.TOL, rtol=self.TOL
+            )
+
+    def test_backward_does_not_draw_a_fresh_mask(self) -> None:
+        """Guard against the check above being vacuous: a *different* mask
+        almost surely gives a different gradient."""
+        q, k, v = self._qkv(requires_grad=True)
+        out = self._apply(q, k, v, self.P)
+        grad_out = torch.randn_like(out)
+        out.backward(grad_out)
+
+        torch.manual_seed(1)
+        kept = (torch.rand(self.B, self.H, self.S, self.S, device="cuda") > self.P).float()
+        qg, kg, vg = (
+            t.detach().transpose(1, 2).float().clone().requires_grad_(True)
+            for t in (q, k, v)
+        )
+        p_soft = torch.softmax((qg @ kg.mT) * self.SCALE, dim=-1)
+        ((p_soft * kept / (1 - self.P)) @ vg).backward(self._bhsd(grad_out).float())
+        assert not torch.allclose(
+            q.grad.float().transpose(1, 2), qg.grad, atol=self.TOL, rtol=self.TOL
+        )

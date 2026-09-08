@@ -245,13 +245,21 @@ class TestRingAttentionConfigBackend:
 @pytest.mark.gpu_required
 class TestBackendWithTe:
     def test_distributed_attention_te_is_wired(self, device, solo_group):
-        import transformer_engine.pytorch as te
+        from jigsaw.modules.attention.attention import (
+            DistributedAttention,
+            TransformerEngineAttention,
+        )
 
         model = _build_attn("te", device, solo_group)
 
         assert model.attn_backend is AttnBackend.TE
         assert model.te is True
-        assert isinstance(model.attn, te.DotProductAttention)
+        # The TE core carries no per-module state (no `te.DotProductAttention`
+        # submodule): it calls the fused kernels through the shared wrapper,
+        # parameterised per call by `self.scale` / `self.dropout_p`.
+        assert model.attn_core.__func__ is DistributedAttention._transformer_attn_core
+        assert not hasattr(model, "attn")
+        assert TransformerEngineAttention is not None
 
     def test_availability_flags_are_true(self):
         from jigsaw.modules.attention.attention import JIGSAW_TE_AVAILABLE
@@ -266,21 +274,10 @@ class TestBackendWithTe:
         Ported from the standalone ``test_transformer_engine.py`` so the numeric
         check survives that file's removal on ``refactor/tests``.
         """
-        import transformer_engine.pytorch as te
-
-        from jigsaw.modules.attention.attention import (
-            TransformerEngineAttention,
-            _capture_rng_state,
-        )
+        from jigsaw.modules.attention.attention import TransformerEngineAttention
 
         batch, seq, heads, head_dim = 2, 16, 4, 32
-        attn = te.DotProductAttention(
-            num_attention_heads=heads,
-            kv_channels=head_dim,
-            num_gqa_groups=heads,
-            qkv_format="bshd",
-            attn_mask_type="no_mask",
-        )
+        scale = head_dim**-0.5
 
         torch.manual_seed(0)
         q, k, v = (
@@ -292,9 +289,12 @@ class TestBackendWithTe:
         for t in (q, k, v):
             t.requires_grad_(True)
 
-        rng_state = _capture_rng_state(device)
-        out = TransformerEngineAttention.apply(q, k, v, attn, rng_state)
+        out, lse, rng_state = TransformerEngineAttention.apply(q, k, v, scale, 0.0)
         assert out.shape == (batch, seq, heads * head_dim)
+        # The LSE the ring needs is produced here too and simply dropped by the
+        # non-ring core; `rng_state` is None without dropout.
+        assert lse.shape == (batch, heads, seq)
+        assert rng_state is None
 
         out.sum().backward()
         assert q.grad is not None and k.grad is not None and v.grad is not None
