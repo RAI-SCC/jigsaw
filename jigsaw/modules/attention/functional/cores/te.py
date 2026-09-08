@@ -116,6 +116,12 @@ def forward(
     """
     b, h, s_q, d = q.shape
     s_kv = k.shape[2]
+    # cuDNN's fused_attn_fwd asserts ``q_dtype == kv_dtype``. The ring recomputes
+    # remote-chunk K/V from the (uncast) module input, so on the
+    # ``DistributedAttention`` fp32-model path K/V arrive wider than Q (fp32 K/V
+    # vs bf16 Q). Match them to Q, mirroring the sdpa core's blanket fp16 cast.
+    k = k.to(q.dtype)
+    v = v.to(q.dtype)
     q_b, k_b, v_b = (t.transpose(1, 2).contiguous() for t in (q, k, v))  # -> bshd
     backend = _fused_attn_backend(True, q_b.dtype, h, s_q, s_kv, d, dropout_p)
     cu_q = _full_cu_seqlens(b, s_q, q.device)
@@ -185,6 +191,10 @@ def backward(
     """
     b, h, s_q, d = q.shape
     s_kv = k.shape[2]
+    # Match every tensor to Q's dtype: cuDNN asserts ``q_dtype == kv_dtype`` and
+    # ``dqkv_dtype`` must agree too. K/V (and the incoming grad) can be wider
+    # than Q on the fp32-model ring path -- see :func:`forward`.
+    k, v, out, grad_out = (t.to(q.dtype) for t in (k, v, out, grad_out))
     q_b, k_b, v_b, o_b, do_b = (
         t.transpose(1, 2).contiguous() for t in (q, k, v, out, grad_out)
     )

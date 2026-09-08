@@ -4,9 +4,12 @@ from typing import Any, cast
 
 import torch
 import torch.distributed as dist
+from torch._C._functorch import maybe_current_level
 
 from jigsaw.comm import get_empty, resolve_matmul_dtype
 from jigsaw.modules.buffers import get_preallocated_buffer
+
+from ._vmap_collectives import vmap_safe_peer_exchange
 
 streams = None
 streamz = None
@@ -76,6 +79,25 @@ def fused_xw_xtw_twoway(
     # rejects non-contiguous tensors; autograd routinely hands us a strided
     # gradient (e.g. through a preceding transpose / rearrange).
     grad_output = grad_output.contiguous()
+
+    if maybe_current_level() is not None:
+        # Backward running inside a functorch transform (Bayesian ensemble under
+        # ``vmap(grad(...))``): ``dist.all_to_all`` has no batching rule. Fetch
+        # the peer's ``grad_output`` with a vmap-safe collective and run the
+        # same maths synchronously.
+        buffer_x = vmap_safe_peer_exchange(grad_output, mod, model_group)
+        match mod:
+            case 0:
+                grad_input = torch.matmul(grad_output, w0) + torch.matmul(buffer_x, w1)
+                grad_weight_top = torch.matmul(grad_output.mT, input)
+                grad_weight_bottom = torch.matmul(buffer_x.mT, input)
+            case 1:
+                grad_input = torch.matmul(grad_output, w1) + torch.matmul(buffer_x, w0)
+                grad_weight_bottom = torch.matmul(grad_output.mT, input)
+                grad_weight_top = torch.matmul(buffer_x.mT, input)
+        grad_weight = torch.concat([grad_weight_top, grad_weight_bottom], dim=-2)
+        return grad_input, grad_weight
+
     buffer_x = get_preallocated_buffer(
         grad_output.shape, grad_output.dtype, local_rank, device
     )

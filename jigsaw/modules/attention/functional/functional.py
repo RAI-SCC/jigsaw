@@ -8,6 +8,8 @@ from typing import Any, Optional, Protocol, cast
 import torch
 import torch.distributed as dist
 
+from jigsaw.modules import vmap_fold
+
 from ..config import RingAttentionConfig
 
 _SEED_MODULUS = 2**31 - 1
@@ -309,7 +311,13 @@ class RingAttentionFunction(torch.autograd.Function):
             q,
             out,
             x,
-            lse.mT,
+            # ``(b, h, s)`` as :func:`..backward.ring_backward` and every core
+            # expect it -- ``backward`` passes this straight through. It used to
+            # be saved ``.mT``'d with no transpose back; the unfused ``math``
+            # core is the one that then raises on the axis swap (the fused cores
+            # reshape ``lse`` internally). Nothing exercised this autograd path
+            # until the plain / ``vmap`` ring-grad tests did.
+            lse,
             w_qkv,
             *chunks_to_save,  # *[t for pair in chunks_to_save for t in pair]
             *rng_states,
@@ -376,22 +384,90 @@ class RingAttentionFunction(torch.autograd.Function):
 
         from .backward import ring_backward
 
-        dq, dk, dv = ring_backward(
-            dout,
-            q,
-            out,
-            x,
-            lse,
-            w_qkv,
-            ctx.scale,
-            ctx.group,
-            ctx.local_rank,
-            ctx.ring_group_size,
-            cast(tuple[torch.Tensor, ...], chunks_to_save),
-            ring_config=ctx.config,
-            dropout_p=ctx.dropout_p,
-            base_seed=ctx.base_seed,
-            rng_states=cast(tuple[Optional[torch.Tensor], ...], rng_states),
+        def compute(dout_, q_, out_, x_, lse_, w_, *rest):
+            return ring_backward(
+                dout_,
+                q_,
+                out_,
+                x_,
+                lse_,
+                w_,
+                ctx.scale,
+                ctx.group,
+                ctx.local_rank,
+                ctx.ring_group_size,
+                rest[:n_chunks],
+                ring_config=ctx.config,
+                dropout_p=ctx.dropout_p,
+                base_seed=ctx.base_seed,
+                rng_states=rest[n_chunks:],
+            )
+
+        # Off a transform this is a plain ``compute(dout, *saved)``. Under
+        # ``vmap(grad(...))`` there is no ``vmap`` hook for ``backward`` the way
+        # there is for :meth:`vmap`, so ``run_unwrapped`` peels the functorch
+        # wrappers, folds the ensemble axis into the ring's batch exactly as
+        # :meth:`vmap` does for the forward, runs one un-vmapped
+        # ``ring_backward`` (its P2P collectives have no batching rule), and
+        # re-wraps the grads.
+        dq, dk, dv = vmap_fold.run_unwrapped(
+            dout, (q, out, x, lse, w_qkv, *chunks_to_save, *rng_states), compute
         )
 
         return dq, dk, dv, None, None, None, None, None, None, None
+
+    @staticmethod
+    def vmap(
+        info: Any,
+        in_dims: tuple[Optional[int], ...],
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        x: torch.Tensor,
+        w_qkv: torch.Tensor,
+        scale: float,
+        dropout_p: float,
+        group: dist.ProcessGroup,
+        local_rank: int,
+        config: RingAttentionConfig,
+    ) -> tuple[tuple, tuple]:
+        """Fold the vmapped (ensemble) axis into the batch and run one ring pass.
+
+        The ring's per-chunk attention cores and its P2P ring communication
+        register no ``functorch`` batching rule, so -- like
+        :class:`~jigsaw.modules.attention.attention.TransformerEngineAttention`
+        -- we move the vmapped axis to the front of ``q`` / ``k`` / ``v`` /
+        ``x``, flatten it into their batch axis, run a single un-vmapped ring
+        forward, then unflatten the batch axis of the output.
+
+        The projection weight must not itself be vmapped: a stacked-parameter
+        Bayesian ensemble over ring attention would also need a vmap-safe ring
+        *backward* (the ring backward is entirely P2P collectives), which is
+        not implemented.
+        """
+        q_bdim, k_bdim, v_bdim, x_bdim, w_bdim = in_dims[:5]
+        if w_bdim is not None:
+            raise NotImplementedError(
+                "vmap over ring attention with a batched projection weight "
+                "(stacked-parameter ensemble) is not supported"
+            )
+
+        # [samples, b, ...] -> [samples * b, ...]: the ring only ever treats the
+        # leading axis as an opaque batch, so folding it in is transparent.
+        n = info.batch_size
+        q, k, v, x = (
+            vmap_fold.fold(t, bdim, n)
+            for t, bdim in zip((q, k, v, x), (q_bdim, k_bdim, v_bdim, x_bdim))
+        )
+
+        out, lse, chunks_to_save, base_seed, rng_states = RingAttentionFunction.apply(
+            q, k, v, x, w_qkv, scale, dropout_p, group, local_rank, config
+        )
+        out = vmap_fold.unfold(out, n)
+        # Only ``out`` carries a batched axis back to the caller; the other
+        # returns are non-differentiable bookkeeping that ``_ring_attn_core``
+        # discards.
+        return (
+            (out, lse, chunks_to_save, base_seed, rng_states),
+            (0, None, None, None, None),
+        )

@@ -4,10 +4,12 @@ from typing import Any, Optional, Protocol, Union, cast
 
 import torch
 import torch.distributed as dist
+from torch._C._functorch import maybe_current_level
 from torch.nn.parameter import Parameter
 
 from jigsaw.autocast import cast_to_autocast_dtype
 
+from ._vmap_collectives import vmap_safe_all_reduce_sum
 from .config import LinearConfig
 
 
@@ -196,6 +198,20 @@ class XWT(torch.autograd.Function):
         )  # sum along batch dimension
 
         grad_b = config.grad_bias(grad_output)
+
+        # Eager: the spatial-group weight/bias grad reduction is done by the
+        # module's ``post_accumulate_grad_hook``. Under ``vmap`` (functorch
+        # bypasses ``.grad`` and its hooks) do it here instead -- but only then,
+        # or the eager path would reduce twice.
+        spatial_group = getattr(config, "spatial_group", None)
+        if (
+            maybe_current_level() is not None
+            and spatial_group is not None
+            and dist.get_world_size(spatial_group) > 1
+        ):
+            grad_weight = vmap_safe_all_reduce_sum(grad_weight, spatial_group)
+            if grad_b is not None:
+                grad_b = vmap_safe_all_reduce_sum(grad_b, spatial_group)
 
         return grad_input, grad_weight, grad_b, None, None, None, None, None, None
 

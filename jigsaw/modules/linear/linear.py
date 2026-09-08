@@ -126,6 +126,10 @@ class DistributedXWT(torch.nn.Module):
             if config is None
             else config
         )
+        # So ``XWT.backward`` can reproduce the spatial-group grad reduction that
+        # this layer's ``post_accumulate_grad_hook`` does, on the ``vmap`` path
+        # where that hook never fires (see ``functional._vmap_safe_all_reduce_sum``).
+        self.config.spatial_group = self.row_group
 
         if self.bias is not None:
             self.bias.register_post_accumulate_grad_hook(

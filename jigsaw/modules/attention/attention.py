@@ -6,9 +6,10 @@ from typing import Any, Callable, Optional, cast
 import torch
 import torch.distributed as dist
 from einops import rearrange
+from torch._C._functorch import maybe_current_level
 
 from jigsaw import hooks
-from jigsaw.modules import linear
+from jigsaw.modules import linear, vmap_fold
 
 from . import config as attention_config
 from .config import AttnBackend
@@ -43,6 +44,38 @@ try:
         torch.set_rng_state(cpu_state)
         if cuda_state is not None:
             torch.cuda.set_rng_state(cuda_state, device)
+
+    def _te_recompute_grads(
+        attn: "te.DotProductAttention",
+        rng_state: tuple[torch.Tensor, Optional[torch.Tensor]],
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        grad_out: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """dq/dk/dv from an eager recompute of ``attn(q, k, v)``.
+
+        Every argument must be an ordinary tensor with no live transform on the
+        stack -- TE's fused kernel reads storage pointers, which a functorch
+        wrapper does not have. :func:`~jigsaw.modules.vmap_fold.run_unwrapped`
+        is what guarantees that on the ensemble path.
+
+        A custom ``autograd.Function`` is a graph boundary, so the graph ``attn``
+        built internally in the forward is gone and has to be rebuilt here. The
+        RNG state the forward saw is replayed so a dropout-enabled ``attn`` draws
+        the identical mask, then the caller's own state is restored so the
+        recompute leaves the ambient stream untouched.
+        """
+        with torch.enable_grad():
+            qd, kd, vd = (t.detach().requires_grad_(True) for t in (q, k, v))
+            current_state = _capture_rng_state(q.device)
+            _restore_rng_state(rng_state, q.device)
+            try:
+                out = attn(qd, kd, vd)
+            finally:
+                _restore_rng_state(current_state, q.device)
+            return torch.autograd.grad(out, (qd, kd, vd), grad_out, retain_graph=False)
+
 
     class TransformerEngineAttention(torch.autograd.Function):
         """Autograd wrapper around ``te.DotProductAttention`` that supports ``torch.vmap``.
@@ -115,24 +148,28 @@ try:
         def backward(  # type: ignore[override]
             ctx: Any, grad_out: torch.Tensor
         ) -> tuple[Optional[torch.Tensor], ...]:
-            """Recompute the TE forward under grad and pull out dq/dk/dv."""
+            """Recompute the TE forward under grad and pull out dq/dk/dv.
+
+            Off a transform this is a straight eager recompute. Under
+            ``vmap(grad(...))`` there is no ``vmap`` hook for ``backward`` the
+            way there is for :meth:`vmap`, so
+            :func:`~jigsaw.modules.vmap_fold.run_unwrapped` peels the functorch
+            wrappers, folds the ensemble axis into the batch exactly as
+            :meth:`vmap` does for the forward, recomputes once, and re-wraps.
+            The saved RNG state rides along in ``saved`` so it is peeled too --
+            ``torch.set_rng_state`` needs a plain tensor.
+            """
             q, k, v = ctx.saved_tensors
-            with torch.enable_grad():
-                qd, kd, vd = (t.detach().requires_grad_(True) for t in (q, k, v))
-                # Replay the RNG state `forward` saw, so a dropout-enabled `attn`
-                # draws the same mask here as it did originally; restore the
-                # caller's own state afterwards so this recompute has no
-                # observable side effect on the ambient RNG stream.
-                current_state = _capture_rng_state(q.device)
-                _restore_rng_state(ctx.rng_state, q.device)
-                try:
-                    out = ctx.attn(qd, kd, vd)
-                finally:
-                    _restore_rng_state(current_state, q.device)
-                grads = torch.autograd.grad(
-                    out, (qd, kd, vd), grad_out, retain_graph=False
+
+            def recompute(dout, q_, k_, v_, cpu_state, cuda_state):
+                return _te_recompute_grads(
+                    ctx.attn, (cpu_state, cuda_state), q_, k_, v_, dout
                 )
-            return grads[0], grads[1], grads[2], None, None
+
+            dq, dk, dv = vmap_fold.run_unwrapped(
+                grad_out, (q, k, v, *ctx.rng_state), recompute
+            )
+            return dq, dk, dv, None, None
 
         @staticmethod
         def vmap(
@@ -144,26 +181,17 @@ try:
             attn: "te.DotProductAttention",
             rng_state: tuple[torch.Tensor, Optional[torch.Tensor]],
         ) -> tuple[torch.Tensor, int]:
+            """Fold the vmapped (samples) axis into the batch and call TE once.
 
-            q_bdim, k_bdim, v_bdim = in_dims[0], in_dims[1], in_dims[2]
-
-            # Move the vmapped dimension to the front for each tensor.
-            q = q.movedim(q_bdim, 0) if q_bdim is not None else q.expand(info.batch_size, *q.shape)
-            k = k.movedim(k_bdim, 0) if k_bdim is not None else k.expand(info.batch_size, *k.shape)
-            v = v.movedim(v_bdim, 0) if v_bdim is not None else v.expand(info.batch_size, *v.shape)
-
-            samples = q.shape[0]
-            # q/k/v now have shape [samples, batch, seq, heads, head_dim].
-            # Fold samples into the batch dimension so TE sees a plain bshd tensor.
-            q = q.flatten(0, 1)
-            k = k.flatten(0, 1)
-            v = v.flatten(0, 1)
-
-            out = attn(q, k, v)
-
-            # Unfold the samples dimension back out to the front.
-            out = out.unflatten(0, (samples, -1))
-            return out, 0
+            TE's fused kernel has no batching rule, but it does treat its
+            leading axis as an opaque batch -- so one ``[samples * batch, ...]``
+            call is exactly ``samples`` per-member calls.
+            """
+            n = info.batch_size
+            q, k, v = (
+                vmap_fold.fold(t, bdim, n) for t, bdim in zip((q, k, v), in_dims[:3])
+            )
+            return vmap_fold.unfold(attn(q, k, v), n), 0
 
     JIGSAW_TE_AVAILABLE=True
 except ModuleNotFoundError:
@@ -395,12 +423,15 @@ class DistributedAttention(torch.nn.Module):
             Output of attention computation.
 
         """
-        with torch.nn.attention.sdpa_kernel(
-            [
-                torch.nn.attention.SDPBackend.FLASH_ATTENTION,
-                torch.nn.attention.SDPBackend.MATH,
-            ]
-        ):
+        # The flash kernel registers no functorch batching rule: under ``vmap``
+        # it silently falls back to a slow -- and, for its backward, inexact --
+        # per-sample loop. The MATH backend is fully batchable, so pin it while a
+        # transform is active (Bayesian-ensemble ``vmap``). Plain calls keep
+        # flash.
+        backends = [torch.nn.attention.SDPBackend.MATH]
+        if maybe_current_level() is None:
+            backends.insert(0, torch.nn.attention.SDPBackend.FLASH_ATTENTION)
+        with torch.nn.attention.sdpa_kernel(backends):
             out = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, is_causal=False,
                 dropout_p=self.dropout_p if self.training else 0.0,
