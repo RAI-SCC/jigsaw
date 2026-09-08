@@ -14,6 +14,15 @@ from jigsaw.utils_aggregate import gather_1d_results, gather_results
 from .config import LinearConfig
 from .functional import XTW, XW, XWT
 
+# ``(row_group.size(), column_group.size())`` layouts the XWT kernels implement.
+# The kernel is picked by ``parallelism`` (= row * col) alone and each one bakes
+# in a fixed 2-D arrangement of the model ranks, so an arbitrary ``row x col``
+# factorisation of the same rank count is *not* interchangeable: parallelism 4
+# is a 2x2 SUMMA, parallelism 8 a 4x2 one, parallelism 2 an in-split (1x2).
+# ``merge_weights`` / ``reshard_parameters`` still work for any factorisation --
+# only ``forward`` is constrained.
+_SUPPORTED_XWT_LAYOUTS = frozenset({(1, 1), (1, 2), (2, 2), (4, 2)})
+
 
 class DistributedXWT(torch.nn.Module):
     """Batched matrix-matrix (XWT) multiplication distributed across n processes."""
@@ -166,6 +175,14 @@ class DistributedXWT(torch.nn.Module):
             B, out_dim are global values.
             in_dim is local value.
         """
+        layout = (self.row_group.size(), self.column_group.size())
+        if layout not in _SUPPORTED_XWT_LAYOUTS:
+            raise NotImplementedError(
+                f"DistributedXWT.forward has no kernel for a "
+                f"row x col = {layout[0]}x{layout[1]} mesh; the XWT kernels "
+                f"implement only {sorted(_SUPPORTED_XWT_LAYOUTS)} (row, col). "
+                f"merge_weights / reshard_parameters still work on this mesh."
+            )
         cij = self.XWT(
             x,
             self.weight,
@@ -351,18 +368,27 @@ class DistributedXWT(torch.nn.Module):
         to_process_mesh: dict,
         pm_row_key: str = "row",
         pm_col_key: str = "col",
+        pm_model_key: str = "model",
     ) -> None:
-        """from_process_mesh has process mesh with 'row' and 'col' flags."""
-        # re-define self selector
-        self.parallelism = to_process_mesh["row"].size() * to_process_mesh["col"].size()
-        self.config = LinearConfig(
-            self.parallelism,
-            self.bias,
-            self.bayesian,
-            linear_layer=True,
-            device=self.device,
-        )
+        """
+        Re-slice ``weight`` (and ``bias``) from ``from_process_mesh`` onto ``to_process_mesh``.
 
+        The gathered global parameters are identical before and after; only which
+        row-/column-group slice this rank holds changes. The module is also
+        rebound to ``to_process_mesh`` -- process groups, ``local_rank``,
+        ``parallelism``, the kernel-selection ``config`` and the bias grad-sync
+        hook -- so a forward/backward pass on the new mesh is immediately valid.
+
+        Parameters
+        ----------
+        from_process_mesh: dict
+            Mesh the parameters are currently sharded over. Needs the row, column
+            and model process groups.
+        to_process_mesh: dict
+            Mesh to reshard onto. Needs the row, column and model process groups.
+        pm_row_key, pm_col_key, pm_model_key: str
+            Keys for the row, column and model process groups in both meshes.
+        """
         # Find the local and global shapes
         from_weight_shape_local = self.weight.shape
         weight_shape_global = (
@@ -394,7 +420,9 @@ class DistributedXWT(torch.nn.Module):
             )
 
         # Gather
-        global_weights, global_bias = self.merge_weights(from_process_mesh)
+        global_weights, global_bias = self.merge_weights(
+            from_process_mesh, pm_row_key, pm_col_key, pm_model_key
+        )
 
         row_rank, row_shard_size = (
             to_process_mesh[pm_row_key].rank(),
@@ -421,6 +449,31 @@ class DistributedXWT(torch.nn.Module):
                 ].contiguous()
             )
             del global_bias
+
+        # Rebind the module to the target mesh so a forward/backward pass on it
+        # is valid: process groups, ranks, the kernel-selection config and the
+        # bias grad-sync hook all key off the new group sizes.
+        self.row_group = to_process_mesh[pm_row_key]
+        self.column_group = to_process_mesh[pm_col_key]
+        self.model_group = to_process_mesh[pm_model_key]
+        self.local_rank = self.model_group.rank()
+        self.parallelism = self.model_group.size()
+        self.out_dim, self.in_dim = tuple(self.weight.shape)
+        self.config = LinearConfig(
+            self.parallelism,
+            self.bias,
+            self.bayesian,
+            linear_layer=True,
+            device=self.device,
+        )
+
+        if self.bias is not None:
+            # ``self.bias`` is a fresh Parameter, so the __init__ hook is gone;
+            # re-register it on the new row group and re-broadcast rank 0's slice.
+            self.bias.register_post_accumulate_grad_hook(
+                hooks.make_grad_sync_hook(self.row_group, async_op=True)
+            )
+            dist.broadcast(self.bias.data, group_src=0, group=self.row_group)
 
 
 class _DistributedMatMul(torch.nn.Module):
