@@ -494,7 +494,6 @@ class _DistributedConvNd(torch.nn.Module):
         self._spatial_sync_groups = [
             g for g in self.spatial_groups if g is not None and g.size() > 1
         ]
-        self.spatial_group = self.spatial_groups[-1]
         self.out_channels = weight_shape_global[0] // self.channel_group.size()
         self._channel_local, self._groups_local = resolve_conv_groups(
             self.groups,
