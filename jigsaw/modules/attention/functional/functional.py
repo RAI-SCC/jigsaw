@@ -8,6 +8,8 @@ from typing import Any, Optional, Protocol, cast
 import torch
 import torch.distributed as dist
 
+from jigsaw.modules import vmap_fold
+
 from ..config import RingAttentionConfig
 
 _SEED_MODULUS = 2**31 - 1
@@ -379,44 +381,37 @@ class RingAttentionFunction(torch.autograd.Function):
         n_chunks = ctx.n_chunks
         chunks_to_save = ctx.saved_tensors[5 : 5 + n_chunks]
         rng_states = ctx.saved_tensors[5 + n_chunks :]
-        n_saved = 5 + n_chunks
 
-        from ._vmap_grad import run_backward_unwrapped
         from .backward import ring_backward
 
-        def _compute(
-            dout_: torch.Tensor, *saved: Optional[torch.Tensor]
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            q_, out_, x_, lse_, w_ = saved[:5]
+        def compute(dout_, q_, out_, x_, lse_, w_, *rest):
             return ring_backward(
                 dout_,
-                cast(torch.Tensor, q_),
-                cast(torch.Tensor, out_),
-                cast(torch.Tensor, x_),
-                cast(torch.Tensor, lse_),
-                cast(torch.Tensor, w_),
+                q_,
+                out_,
+                x_,
+                lse_,
+                w_,
                 ctx.scale,
                 ctx.group,
                 ctx.local_rank,
                 ctx.ring_group_size,
-                cast(tuple[torch.Tensor, ...], tuple(saved[5:n_saved])),
+                rest[:n_chunks],
                 ring_config=ctx.config,
                 dropout_p=ctx.dropout_p,
                 base_seed=ctx.base_seed,
-                rng_states=cast(
-                    tuple[Optional[torch.Tensor], ...], tuple(saved[n_saved:])
-                ),
+                rng_states=rest[n_chunks:],
             )
 
-        # Off the functorch path this is a plain ``_compute(dout, *saved)``. Under
-        # ``vmap(grad(...))`` (Bayesian ensemble) it peels the functorch wrappers,
-        # folds the ensemble axis into the ring's batch, runs one un-vmapped
-        # ``ring_backward`` (its P2P collectives have no batching rule) and
-        # re-wraps the grads -- mirroring :meth:`vmap`.
-        dq, dk, dv = run_backward_unwrapped(
-            dout,
-            (q, out, x, lse, w_qkv, *chunks_to_save, *rng_states),
-            _compute,
+        # Off a transform this is a plain ``compute(dout, *saved)``. Under
+        # ``vmap(grad(...))`` there is no ``vmap`` hook for ``backward`` the way
+        # there is for :meth:`vmap`, so ``run_unwrapped`` peels the functorch
+        # wrappers, folds the ensemble axis into the ring's batch exactly as
+        # :meth:`vmap` does for the forward, runs one un-vmapped
+        # ``ring_backward`` (its P2P collectives have no batching rule), and
+        # re-wraps the grads.
+        dq, dk, dv = vmap_fold.run_unwrapped(
+            dout, (q, out, x, lse, w_qkv, *chunks_to_save, *rng_states), compute
         )
 
         return dq, dk, dv, None, None, None, None, None, None, None
@@ -457,28 +452,18 @@ class RingAttentionFunction(torch.autograd.Function):
                 "(stacked-parameter ensemble) is not supported"
             )
 
-        def _to_front(t: torch.Tensor, bdim: Optional[int]) -> torch.Tensor:
-            if bdim is None:
-                return t.expand(info.batch_size, *t.shape)
-            return t.movedim(bdim, 0)
-
-        q = _to_front(q, q_bdim)
-        k = _to_front(k, k_bdim)
-        v = _to_front(v, v_bdim)
-        x = _to_front(x, x_bdim)
-        samples = q.shape[0]
-
         # [samples, b, ...] -> [samples * b, ...]: the ring only ever treats the
         # leading axis as an opaque batch, so folding it in is transparent.
-        q = q.flatten(0, 1)
-        k = k.flatten(0, 1)
-        v = v.flatten(0, 1)
-        x = x.flatten(0, 1)
+        n = info.batch_size
+        q, k, v, x = (
+            vmap_fold.fold(t, bdim, n)
+            for t, bdim in zip((q, k, v, x), (q_bdim, k_bdim, v_bdim, x_bdim))
+        )
 
         out, lse, chunks_to_save, base_seed, rng_states = RingAttentionFunction.apply(
             q, k, v, x, w_qkv, scale, dropout_p, group, local_rank, config
         )
-        out = out.unflatten(0, (samples, -1))
+        out = vmap_fold.unfold(out, n)
         # Only ``out`` carries a batched axis back to the caller; the other
         # returns are non-differentiable bookkeeping that ``_ring_attn_core``
         # discards.

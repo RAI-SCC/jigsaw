@@ -28,18 +28,15 @@ of integration:
    absorb the ensemble axis and run one *synchronous* collective -- functorch's
    generic fallback issues an async collective per member and the last member's
    ``wait_tensor`` does not block), and
-   ``TransformerEngineAttention.backward`` peels the functorch wrappers, folds
-   the ensemble axis into the batch and recomputes on plain tensors with the
-   transform stack suspended (TE's fused kernel dereferences storage pointers
-   and cannot see a ``TensorWrapper``).
+   ``TransformerEngineAttention.backward`` routes through
+   :func:`~jigsaw.modules.vmap_fold.run_unwrapped`, which peels the functorch
+   wrappers, folds the ensemble axis into the batch and recomputes on plain
+   tensors with the transform stack suspended (TE's fused kernel reads storage
+   pointers, which a functorch wrapper does not have).
 4. :class:`TestRingVmap` -- ``torch.vmap`` over a ``ring=True``
    ``DistributedAttention``. ``RingAttentionFunction.vmap`` folds the members
-   axis into the batch for the forward; ``RingAttentionFunction.backward``
-   routes through
-   :func:`jigsaw.modules.attention.functional._vmap_grad.run_backward_unwrapped`,
-   which peels the functorch wrappers off the cotangent, folds it the same way,
-   runs one un-vmapped ``ring_backward`` and re-wraps the grads layer by layer
-   as the dynamic layer stack is restored. Forward *and input-gradient* parity
+   axis into the batch for the forward; ``RingAttentionFunction.backward`` does
+   the mirror image via ``run_unwrapped``. Forward *and input-gradient* parity
    vs a per-member loop, sdpa, te and math. A stacked-parameter (vmapped
    weight) ensemble is still rejected up front -- differentiating w.r.t. a
    batched weight would need the dK/dV relay's collectives to absorb the
@@ -436,10 +433,10 @@ class TestRingVmap:
     ``functorch`` batching rule, so both directions use the same
     fold-into-batch trick as :class:`TransformerEngineAttentionVmap`:
     ``RingAttentionFunction.vmap`` folds the ensemble axis into the batch for
-    the forward, and ``RingAttentionFunction.backward`` -- via
-    :func:`~jigsaw.modules.attention.functional._vmap_grad.run_backward_unwrapped`
-    -- peels the functorch wrappers off the cotangent, folds it the same way,
-    runs one un-vmapped ``ring_backward`` and re-wraps the grads.
+    the forward, and ``RingAttentionFunction.backward`` -- which gets no such
+    hook -- routes through :func:`~jigsaw.modules.vmap_fold.run_unwrapped`,
+    which peels the functorch wrappers by hand, folds the cotangent the same
+    way and runs one un-vmapped ``ring_backward``.
 
     Forward *and* input-gradient parity vs a per-member loop, for ``sdpa``,
     ``te`` and ``math``. Grad is covered only for the **activation**: a
@@ -463,12 +460,12 @@ class TestRingVmap:
 
         ``got`` folds the members axis into the ring's batch
         (``RingAttentionFunction.vmap``) and issues one un-vmapped forward;
-        ``RingAttentionFunction.backward`` (via ``run_backward_unwrapped``) peels
-        the functorch wrappers off the cotangent, folds it the same way and runs
-        one un-vmapped ``ring_backward``, then re-wraps the grads. Both sides run
-        the *identical* ring core (the vmap path never drops flash to math,
-        unlike the non-ring :class:`TestDistributedAttentionEnsembleVmap`), so no
-        core-swap on the reference. Only the activation is differentiated -- a
+        :func:`~jigsaw.modules.vmap_fold.run_unwrapped` peels the functorch
+        wrappers off the cotangent, folds it the same way and runs one
+        un-vmapped ``ring_backward``. Both sides run the *identical* ring core
+        (the vmap path never drops flash to math, unlike the non-ring
+        :class:`TestDistributedAttentionEnsembleVmap`), so no core-swap on the
+        reference. Only the activation is differentiated -- a
         stacked-parameter ensemble is rejected
         (``test_ring_vmap_batched_weight_rejected``).
 
