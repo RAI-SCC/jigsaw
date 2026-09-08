@@ -61,7 +61,9 @@ def _grad_input_weight(
     is handled separately (the spatial reduction is a parameter hook).
     ``output_mask`` selects which grads to actually compute -- a masked-off entry
     comes back as ``None`` -- so the caller can split the two into separate
-    passes and overlap the second with the channel-group reduce of the first.
+    passes and overlap the second with the channel-group reduce of the first
+    (``config.conv_transpose_grad_fn`` keeps the split working under a members
+    axis).
     """
     g_x, g_w, _ = config.conv_transpose_grad_fn(
         grad_output.to(weight.dtype),  # handles autocast
@@ -111,15 +113,15 @@ def _grad_input_weight_reduced(
     ``channel_local`` regime (the rank owns whole conv-groups, so its ``g_x`` is
     already complete) or for a channel group of one. ``grad_weight`` never needs a
     channel reduction (the spatial reduction is a parameter hook). When a real
-    channel-group reduce is pending -- and the op is not vmapped over a members
-    axis, where a masked ``convolution_backward`` output cannot be stacked -- the
-    two grads are computed in separate passes so the grad-weight pass overlaps
-    the reduce-scatter of grad_input; otherwise a single fused pass feeds the
-    reduce.
+    channel-group reduce is pending the two grads are computed in separate passes
+    so the grad-weight pass overlaps the reduce-scatter of grad_input; otherwise a
+    single fused pass feeds the reduce. Under a members axis the split calls each
+    ask ``convolution_backward`` for one grad, which ``conv_transpose_grad_fn``
+    routes through a one-output ``torch.vmap`` (the masked-off output is ``None``
+    and cannot ride the members axis).
     """
-    members = weight.ndim > config.n_spatial + 2
     reduce_pending = channel_group.size() > 1 and not config.channel_local
-    if reduce_pending and not members:
+    if reduce_pending:
         g_x, _ = _grad_input_weight(
             grad_output,
             x_full,

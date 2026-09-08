@@ -32,6 +32,34 @@ from . import distributed as dist_conv
 _CONV_TRANSPOSE_FN = (F.conv_transpose1d, F.conv_transpose2d, F.conv_transpose3d)
 
 
+def _grad_input_only(
+    grad_output: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    *args: Any,
+) -> torch.Tensor:
+    """``convolution_backward`` keeping only ``grad_input``.
+
+    A single-tensor return so ``torch.vmap`` can stack it along a members axis --
+    ``convolution_backward``'s masked-off outputs come back as ``None`` and a
+    3-tuple ``torch.vmap`` cannot map an out-dim over ``None``. ``args`` already
+    carries the ``output_mask`` (``(True, False, False)`` here).
+    """
+    g_x = torch.ops.aten.convolution_backward(grad_output, input, weight, *args)[0]
+    return cast(torch.Tensor, g_x)
+
+
+def _grad_weight_only(
+    grad_output: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    *args: Any,
+) -> torch.Tensor:
+    """``convolution_backward`` keeping only ``grad_weight`` (see :func:`_grad_input_only`)."""
+    g_w = torch.ops.aten.convolution_backward(grad_output, input, weight, *args)[1]
+    return cast(torch.Tensor, g_w)
+
+
 class ConvTransposeNdConfig:
     """Selection strategy for the N-D transpose-conv kernels used in fwd/bwd."""
 
@@ -96,10 +124,20 @@ class ConvTransposeNdConfig:
         # ``convolution_backward`` is dimension-independent (the spatial rank
         # rides in the stride/padding/dilation lists); grad_output / input /
         # weight carry the members axis, the trailing scalars / lists do not.
+        # The fused ``(True, True, False)`` call vmaps as the 3-tuple; the
+        # backward's overlap path splits it into two single-grad calls, whose
+        # masked-off output is ``None`` and so needs a one-output vmap each.
+        _grad_in_dims = (0, 0, 0, None, None, None, None, None, None, None, None)
         self._conv_transpose_grad_fn_members = torch.vmap(
             torch.ops.aten.convolution_backward,
-            in_dims=(0, 0, 0, None, None, None, None, None, None, None, None),
+            in_dims=_grad_in_dims,
             out_dims=(0, 0, None),  # type: ignore[arg-type]
+        )
+        self._grad_input_only_members = torch.vmap(
+            _grad_input_only, in_dims=_grad_in_dims
+        )
+        self._grad_weight_only_members = torch.vmap(
+            _grad_weight_only, in_dims=_grad_in_dims
         )
         self.grad_bias = self._grad_bias_selection(bias)
         # ``stride == kernel_size`` makes each rank's raw output tile the global
@@ -139,15 +177,31 @@ class ConvTransposeNdConfig:
         weight: torch.Tensor,
         *args: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, None]:
-        """``convolution_backward``; ``torch.vmap``-ed when ``weight`` carries a members axis."""
-        fn = (
-            self._conv_transpose_grad_fn_members
-            if self._has_members(weight.ndim)
-            else self._conv_transpose_grad_fn
-        )
+        """``convolution_backward``; ``torch.vmap``-ed when ``weight`` carries a members axis.
+
+        ``args[-1]`` is the ``output_mask``. Without a members axis the native
+        3-tuple op handles every mask. With one, a call for a single grad
+        (``(True, False, False)`` or ``(False, True, False)`` -- the backward's
+        overlap path) is routed through a one-output vmap wrapper, because a
+        masked-off ``convolution_backward`` output is ``None`` and the 3-tuple
+        vmap cannot map an out-dim over it; only the fused ``(True, True, False)``
+        call uses that wrapper. Grads not asked for come back ``None``.
+        """
+        if not self._has_members(weight.ndim):
+            return cast(
+                "tuple[torch.Tensor, torch.Tensor, None]",
+                self._conv_transpose_grad_fn(grad_output, input, weight, *args),
+            )
+        want_input, want_weight, _ = args[-1]
+        if want_input and not want_weight:
+            g_x = self._grad_input_only_members(grad_output, input, weight, *args)
+            return cast("tuple[torch.Tensor, torch.Tensor, None]", (g_x, None, None))
+        if want_weight and not want_input:
+            g_w = self._grad_weight_only_members(grad_output, input, weight, *args)
+            return cast("tuple[torch.Tensor, torch.Tensor, None]", (None, g_w, None))
         return cast(
             "tuple[torch.Tensor, torch.Tensor, None]",
-            fn(grad_output, input, weight, *args),
+            self._conv_transpose_grad_fn_members(grad_output, input, weight, *args),
         )
 
     def _grad_bias_selection(self, bias: Optional[torch.Tensor]) -> Callable:
