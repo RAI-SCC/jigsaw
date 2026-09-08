@@ -178,6 +178,54 @@ def _over_channels_local(
     return y, span
 
 
+def _over_channels_grouped_gather(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    b: Optional[torch.Tensor],
+    conv_kwargs: dict[str, Any],
+    channel_group: dist.ProcessGroup,
+    conv_func: ConvFn,
+    channel_dim: int,
+    halo_fn: Optional[HaloFn],
+    group_blocks: list[tuple[int, int, int, int]],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Uneven ``groups`` (``channel_grouped``): gather the full input, one conv per group.
+
+    ``groups`` is not a multiple of the channel-parallel group size, so a
+    conv-group's channels straddle rank boundaries. The full-channel input is
+    gathered as in :func:`_over_channels_all_gather`, then this rank's output
+    shard is produced one conv-group at a time -- ``group_blocks`` (from
+    :func:`jigsaw.modules.convolution.common.channel_comm.conv_group_blocks`)
+    gives, per group the shard touches, the local output-channel slice
+    ``[out_lo:out_hi]`` of ``w`` / ``b`` and the full input-channel slice
+    ``[in_lo:in_hi]``. Each partial conv is a plain ``groups=1`` conv
+    (``conv_kwargs["groups"]`` is 1 here).
+
+    Limitation: the gather is always the *full* ``gather_full_channels`` -- every
+    rank receives all ``G`` input-channel shards and holds the whole ``C_in``
+    activation, regardless of how few conv-groups its output shard owns. A rank
+    only needs the ``[in_lo:in_hi]`` spans of the groups in ``group_blocks``, so
+    a narrower gather over just the overlapping ranks would suffice, but it is
+    not implemented.
+
+    Returns ``(y, x_full)`` -- ``x_full`` (halo-padded along the split axis when
+    ``halo_fn`` is given) is kept for the backward pass.
+    """
+    x_full = gather_full_channels(x.contiguous(), channel_group, channel_dim)
+    if halo_fn is not None:
+        x_full = halo_fn(x_full)
+
+    pieces = []
+    for out_lo, out_hi, in_lo, in_hi in group_blocks:
+        xg = x_full.narrow(channel_dim, in_lo, in_hi - in_lo)
+        wg = w[out_lo:out_hi]
+        if b is not None:
+            pieces.append(conv_func(xg, wg, b[out_lo:out_hi], **conv_kwargs))
+        else:
+            pieces.append(conv_func(xg, wg, **conv_kwargs))
+    return torch.cat(pieces, dim=channel_dim), x_full
+
+
 def over_channels(
     x: torch.Tensor,
     w: torch.Tensor,
@@ -190,6 +238,7 @@ def over_channels(
     channel_comm: str,
     halo_fn: Optional[HaloFn] = None,
     local: bool = False,
+    group_blocks: Optional[list[tuple[int, int, int, int]]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Channel-parallel convolution for any ``channel_comm`` and dimensionality.
 
@@ -197,11 +246,26 @@ def over_channels(
     for ``conv_func``; in the halo regime the split-axis padding is already
     materialised into the ``halo_fn`` output, so pass ``0`` for that axis. When
     ``local`` is set (this rank owns whole conv-groups) or the channel group is
-    size one, no exchange happens -- see :func:`_over_channels_local`. Otherwise
-    all strategies return the same ``(y, x_full)`` -- see
-    :func:`_over_channels_all_gather` / :func:`_over_channels_streaming`.
+    size one, no exchange happens -- see :func:`_over_channels_local`. When
+    ``group_blocks`` is given (the uneven-``groups`` ``channel_grouped`` regime)
+    the full input is gathered and convolved group by group -- see
+    :func:`_over_channels_grouped_gather`. Otherwise all strategies return the
+    same ``(y, x_full)`` -- see :func:`_over_channels_all_gather` /
+    :func:`_over_channels_streaming`.
     """
     channel_dim = -(n_spatial_dims + 1)
+    if group_blocks is not None:
+        return _over_channels_grouped_gather(
+            x,
+            w,
+            b,
+            conv_kwargs,
+            channel_group,
+            conv_func,
+            channel_dim,
+            halo_fn,
+            group_blocks,
+        )
     if local or channel_group.size() == 1:
         return _over_channels_local(x, w, b, conv_kwargs, conv_func, halo_fn)
     if channel_comm == "all_gather":

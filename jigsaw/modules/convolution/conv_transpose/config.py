@@ -43,6 +43,8 @@ class ConvTransposeNdConfig:
         device: torch.device,
         channel_comm: str = "auto",
         groups: int = 1,
+        in_channels: int | None = None,
+        out_channels: int | None = None,
     ):
         """
         Initialize selection strategy for the N-D transpose convolution.
@@ -72,7 +74,13 @@ class ConvTransposeNdConfig:
             whole conv-groups: the kernels run a plain grouped transpose conv on
             this rank's channel shard with ``groups_local = groups // G`` groups
             and no channel-group communication. ``groups == 1`` keeps the
-            full-channel-gather path.
+            full-channel-gather path. ``1 < groups`` not a multiple of ``G``
+            (``channel_grouped``) also gathers the full-channel input but then
+            runs one plain transpose conv per conv-group and is pinned to
+            ``channel_comm="all_gather"``.
+        in_channels, out_channels: int | None
+            Global channel counts. Required only for the ``channel_grouped``
+            regime (its per-group loop needs the conv-group geometry).
         """
         self.n_spatial = len(kernel_size)
         self.bayesian = bayesian
@@ -80,10 +88,30 @@ class ConvTransposeNdConfig:
         self.groups = groups
         # ``channel_local``: this rank owns whole conv-groups -> no channel-group
         # exchange, the native transpose conv is called with ``groups_local``
-        # groups. (base validated the divisibility.)
+        # groups. ``channel_grouped``: ``1 < groups`` not a multiple of ``G`` ->
+        # gather the full input, then one plain transpose conv per conv-group.
+        # (base validated the divisibility.)
         group_size = channel_group.size()
         self.channel_local = groups % group_size == 0
+        self.channel_grouped = groups != 1 and not self.channel_local
         self.groups_local = groups // group_size if self.channel_local else 1
+        if self.channel_grouped:
+            # The streaming ring cannot express per-group accumulation; the
+            # channel-grouped regime always uses the one-shot gather.
+            #
+            # Limitation: this gather is unconditionally *full*. Every rank
+            # all-gathers all ``G`` input-channel shards and materialises the
+            # whole ``C_in`` activation (backward reduce-scatters the whole
+            # ``C_in`` gradient), even though a rank only needs the input spans
+            # of the conv-groups its ``C_out / G`` output shard touches -- often
+            # a strict subset of the other ranks' shards. Gathering just the
+            # overlapping ranks is possible in principle but not implemented;
+            # the cost does not shrink as a rank's share of conv-groups shrinks.
+            self.channel_comm = "all_gather"
+            self.in_channels = in_channels
+            self.out_channels = out_channels
+            self.channel_rank = channel_group.rank()
+            self.channel_size = group_size
         self.conv_transpose_fn = self._conv_transpose_fn_selection(bayesian)
         self.conv_transpose_grad_fn = self._conv_transpose_grad_fn_selection(bayesian)
         self.weight_reshape = self._reshape_weights_selection(bayesian)
