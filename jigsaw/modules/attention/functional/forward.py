@@ -32,32 +32,48 @@ def _draw_base_seed(device: torch.device) -> int:
 # --------------------------------------------------------------------------- #
 # small numeric helpers
 # --------------------------------------------------------------------------- #
-def _online_softmax_merge(
+def _online_softmax_merge_(
     o1: torch.Tensor, l1: torch.Tensor, o2: torch.Tensor, l2: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Merge two partial online-softmax attention results.
+    """Merge a partial online-softmax result ``(o2, l2)`` into ``(o1, l1)`` in place.
+
+    ``o1`` and ``l1`` are the ring's running accumulators, owned by
+    :func:`ring_forward` and aliased nowhere else, so this mutates them in place:
+    no per-step ``(b, h, n, d)`` / ``(b, h, n)`` allocation, and the accumulator
+    itself is allocated once instead of being rebuilt every ring step.
+
+    Algebra (``l1``/``l2`` are log-sum-exps, not raw maxima): with
+    ``l_new = logaddexp(l1, l2)`` the two blend weights of the old
+    ``exp(l1 - l_new) * o1 + exp(l2 - l_new) * o2`` are just
+    ``1 - w`` and ``w`` for ``w = exp(l2 - l_new) = sigmoid(l2 - l1)``, so the
+    running-max cancels and only one small ``(b, h, n)`` weight is materialised.
+    The output update is then ``o1 <- (1 - w) * o1 + w * o2`` as two in-place
+    big-tensor kernels (``mul_`` then ``addcmul_``) with no temporaries -- down
+    from three big kernels and three big allocations. ``addcmul_`` promotes
+    ``o2`` (fp16/bf16 from the core) into ``o1``'s fp32 accumulator for free.
+    At the seed state ``l1 = -inf`` -> ``w = sigmoid(+inf) = 1`` -> ``o1 := o2``.
+
+    ``l1`` (small, ``(b, h, n)``) is returned fresh rather than updated in place:
+    an ``out=`` ``logaddexp`` cannot run when ``l2`` still carries autograd
+    history (the TE cores return a grad-tracked ``lse``), and the caller rebinds
+    it anyway.
 
     Parameters
     ----------
-    o1 : torch.Tensor
-        Output tensor for the first partial result.
-    l1 : torch.Tensor
-        Log-sum-exp values for the first partial result.
-    o2 : torch.Tensor
-        Output tensor for the second partial result.
-    l2 : torch.Tensor
-        Log-sum-exp values for the second partial result.
+    o1, l1 : torch.Tensor
+        Running output ``(b, h, n, d)`` (updated in place) and log-sum-exp
+        ``(b, h, n)``, both at least fp32.
+    o2, l2 : torch.Tensor
+        This step's partial output and log-sum-exp.
 
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor]
-        Result returned by the operation.
+        ``o1`` (mutated) and the new ``l1``.
     """
-    l_new = torch.logaddexp(l1, l2)
-    e1 = torch.exp(l1 - l_new)
-    e2 = torch.exp(l2 - l_new)
-    o_new = e1.unsqueeze(-1) * o1 + e2.unsqueeze(-1) * o2
-    return o_new, l_new
+    w = torch.sigmoid(l2 - l1).unsqueeze(-1)  # exp(l2 - logaddexp(l1, l2)), in (0, 1)
+    o1.mul_(1 - w).addcmul_(w, o2)
+    return o1, torch.logaddexp(l1, l2)
 
 
 def _attend_step(
@@ -83,8 +99,8 @@ def _attend_step(
         q, kj.contiguous(), vj.contiguous(), scale, dropout_p, seed=seed
     )
 
-    o_new, l_new = _online_softmax_merge(out, lse, out_j, l_j)
-    return o_new, l_new, rng_state_j
+    out, lse = _online_softmax_merge_(out, lse, out_j, l_j)
+    return out, lse, rng_state_j
 
 
 # --------------------------------------------------------------------------- #
@@ -147,8 +163,18 @@ def ring_forward(
         RNG state (see :func:`_attend_step`).
     """
     b, heads, n_local, d = q.shape
-    out = torch.zeros_like(q)
-    lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype)
+    # Accumulate ``out`` / ``lse`` in at least fp32, mutated in place across ring
+    # steps by ``_online_softmax_merge_``. ``lse`` is a softmax normaliser, never
+    # matmul'd, and the fused SDPA/TE backward kernels read it as fp32 -- a
+    # 16-bit ``lse`` makes them recompute the softmax wrong (see
+    # ``backward.ring_backward``); the old code only reached fp32 here by
+    # accident of dtype promotion. ``out`` is cast back to ``q.dtype`` on return.
+    # An fp64 model keeps fp64 for both.
+    acc_dtype = torch.promote_types(q.dtype, torch.float32)
+    out = torch.zeros((b, heads, n_local, d), device=q.device, dtype=acc_dtype)
+    lse = torch.full(
+        (b, heads, n_local), float("-inf"), device=q.device, dtype=acc_dtype
+    )
 
     provider = build_forward_chunk_provider(
         ring_config, q, k, v, x, w_qkv, group, local_rank, ring_group_size

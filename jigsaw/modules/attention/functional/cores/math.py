@@ -8,7 +8,7 @@ Dropout is applied post-softmax (inverted dropout: kept elements scaled by
 ``1 / (1 - dropout_p)``), matching ``torch.nn.functional.scaled_dot_product_attention``'s
 convention. ``logsumexp`` is computed from the *pre*-dropout scores -- dropout
 doesn't change the normalising constant, and the ring's online-softmax merge
-(:func:`..forward._online_softmax_merge`) needs the undropped value to combine
+(:func:`..forward._online_softmax_merge_`) needs the undropped value to combine
 chunks correctly.
 
 Since this core has no opaque kernel-internal RNG state to thread back (unlike
