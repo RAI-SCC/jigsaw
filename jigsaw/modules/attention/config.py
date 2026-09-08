@@ -370,6 +370,11 @@ class RingAttentionConfig:
         self.device = device
         self.attn_backend = AttnBackend(attn_backend)
 
+        # Layout the ring circulates q/k/v/out in, and hands to the inner core.
+        # The TE cores (cuDNN / FA2) are natively bshd -- carrying the ring in
+        # bshd for them means zero transposes per chunk; SDPA / math are bhsd.
+        self.core_layout = "bshd" if self.attn_backend == AttnBackend.TE else "bhsd"
+
         # Resolve every policy to its concrete callable, once.
         self.offloader = _select_offloader(offload, device)
         self.p2p_fn = _select_p2p_fn(send_op)

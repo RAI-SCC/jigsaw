@@ -407,8 +407,11 @@ def test_ring_forward_backward_te(
     x = x.contiguous()
 
     qkv = x @ w_qkv.mT
+    # The TE ring core is bshd-native (``core_layout == "bshd"``), so the ring
+    # takes / returns ``(b, s, h, d)``; the SDPA reference below stays bhsd and
+    # the two are bridged with a transpose.
     q_local, k_local, v_local = (
-        t.contiguous() for t in qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
+        t.contiguous() for t in qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 1, 3, 4)
     )
     scale = d**-0.5
 
@@ -426,11 +429,17 @@ def test_ring_forward_backward_te(
         world_size,
         ring_config,
     )
-    out_full = gather_1d_results(out, process_mesh_dict, dim=2)
+    out_full = gather_1d_results(out, process_mesh_dict, dim=1).transpose(1, 2)
 
-    q_ref = gather_1d_results(q_local, process_mesh_dict, dim=2).requires_grad_(True)
-    k_ref = gather_1d_results(k_local, process_mesh_dict, dim=2).requires_grad_(True)
-    v_ref = gather_1d_results(v_local, process_mesh_dict, dim=2).requires_grad_(True)
+    def _ref(t: torch.Tensor) -> torch.Tensor:
+        return (
+            gather_1d_results(t, process_mesh_dict, dim=1)
+            .transpose(1, 2)
+            .contiguous()
+            .requires_grad_(True)
+        )
+
+    q_ref, k_ref, v_ref = _ref(q_local), _ref(k_local), _ref(v_local)
     with torch.nn.attention.sdpa_kernel(
         [
             torch.nn.attention.SDPBackend.FLASH_ATTENTION,
@@ -465,10 +474,12 @@ def test_ring_forward_backward_te(
         (dk_local, dk_ref),
         (dv_local, dv_ref),
     ):
+        # ring grad is bshd -> bhsd, then slice this rank's chunk on the seq axis
+        local_bhsd = local_grad.transpose(1, 2)
         ref_slice = ref_grad[
             :, :, local_rank * n_local : (local_rank + 1) * n_local
-        ].to(local_grad.dtype)
-        assert torch.allclose(local_grad, ref_slice, atol=atol)
+        ].to(local_bhsd.dtype)
+        assert torch.allclose(local_bhsd, ref_slice, atol=atol)
 
 
 # Shared parametrization for the ``test_ring_hybrid*`` variants. Kept as a list

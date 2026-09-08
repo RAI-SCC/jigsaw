@@ -44,12 +44,17 @@ def forward(
     scale: Optional[float] = 0.0,
     dropout_p: float = 0.0,
     seed: Optional[int] = None,
+    *,
+    layout: str = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Vanilla attention forward pass. Returns ``(out, logsumexp, rng_state)``.
 
     ``rng_state`` is always ``None`` -- this core replays dropout from ``seed``
     instead (see module docstring).
     """
+    assert layout == "bhsd", (
+        f"math core is bhsd-only; got layout={layout!r}. The bshd ring is TE-only."
+    )
     scale = scale or (q.size(-1) ** -0.5)
     scores = (q @ k.mT) * scale
     logsumexp = scores.logsumexp(dim=-1)  # (B, H, Sq)

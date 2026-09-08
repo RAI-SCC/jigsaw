@@ -37,7 +37,7 @@ from jigsaw.modules.attention.config import (
     SendOp,
 )
 
-from .functional import _compute_kv, get_hybrid_topology
+from .functional import _compute_kv, bhnd, get_hybrid_topology
 
 
 # --------------------------------------------------------------------------- #
@@ -82,7 +82,8 @@ class _ForwardChunkProvider(ABC):
         self.group = group
         self.local_rank = local_rank
         self.world_size = world_size
-        self.b, self.h, self.n_local, self.d = q.shape
+        self.layout = ring_config.core_layout
+        self.b, self.h, self.n_local, self.d = bhnd(q.shape, self.layout)
         self.send_x = ring_config.send_in_forward == SendForward.X
 
         # Local KV, kept private so an in-flight send can never alias k / v.
@@ -107,7 +108,7 @@ class _ForwardChunkProvider(ABC):
     def _kv_from_x(self) -> None:
         """Recompute ``kv_j / kj / vj`` from the chunk currently in ``x_j``."""
         self.kv_j, self.kj, self.vj = _compute_kv(
-            self.x_j, self.w_qkv, self.b, self.n_local, self.h, self.d
+            self.x_j, self.w_qkv, self.b, self.n_local, self.h, self.d, self.layout
         )
 
     def _recv(self, recv_buf: torch.Tensor) -> None:

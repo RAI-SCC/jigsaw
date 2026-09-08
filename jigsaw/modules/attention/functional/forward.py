@@ -16,7 +16,7 @@ import torch.distributed as dist
 from jigsaw.modules.attention.config import RingAttentionConfig
 
 from .forward_chunk_provider import build_forward_chunk_provider
-from .functional import combine_dropout_seed
+from .functional import bhnd, combine_dropout_seed
 
 
 def _draw_base_seed(device: torch.device) -> int:
@@ -33,7 +33,11 @@ def _draw_base_seed(device: torch.device) -> int:
 # small numeric helpers
 # --------------------------------------------------------------------------- #
 def _online_softmax_merge_(
-    o1: torch.Tensor, l1: torch.Tensor, o2: torch.Tensor, l2: torch.Tensor
+    o1: torch.Tensor,
+    l1: torch.Tensor,
+    o2: torch.Tensor,
+    l2: torch.Tensor,
+    layout: str = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Merge a partial online-softmax result ``(o2, l2)`` into ``(o1, l1)`` in place.
 
@@ -58,20 +62,30 @@ def _online_softmax_merge_(
     history (the TE cores return a grad-tracked ``lse``), and the caller rebinds
     it anyway.
 
+    ``o1``/``o2`` follow ``layout`` (``"bhsd"`` or ``"bshd"``); ``l1``/``l2`` are
+    ``(b, h, n)`` either way (every core emits the LSE in that shape), so for
+    ``"bshd"`` the blend weight is transposed to ``(b, n, h, 1)`` before it
+    broadcasts over ``o1``'s trailing ``d``.
+
     Parameters
     ----------
     o1, l1 : torch.Tensor
-        Running output ``(b, h, n, d)`` (updated in place) and log-sum-exp
+        Running output (``layout``-shaped, updated in place) and log-sum-exp
         ``(b, h, n)``, both at least fp32.
     o2, l2 : torch.Tensor
         This step's partial output and log-sum-exp.
+    layout : str
+        Layout of ``o1`` / ``o2``.
 
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor]
         ``o1`` (mutated) and the new ``l1``.
     """
-    w = torch.sigmoid(l2 - l1).unsqueeze(-1)  # exp(l2 - logaddexp(l1, l2)), in (0, 1)
+    w = torch.sigmoid(l2 - l1)  # exp(l2 - logaddexp(l1, l2)), in (0, 1); (b, h, n)
+    if layout == "bshd":
+        w = w.transpose(1, 2)  # (b, n, h)
+    w = w.unsqueeze(-1)
     o1.mul_(1 - w).addcmul_(w, o2)
     return o1, torch.logaddexp(l1, l2)
 
@@ -96,10 +110,18 @@ def _attend_step(
     :mod:`.cores`).
     """
     out_j, l_j, rng_state_j = ring_config.attn_core_forward_fn(
-        q, kj.contiguous(), vj.contiguous(), scale, dropout_p, seed=seed
+        q,
+        kj.contiguous(),
+        vj.contiguous(),
+        scale,
+        dropout_p,
+        seed=seed,
+        layout=ring_config.core_layout,
     )
 
-    out, lse = _online_softmax_merge_(out, lse, out_j, l_j)
+    out, lse = _online_softmax_merge_(
+        out, lse, out_j, l_j, layout=ring_config.core_layout
+    )
     return out, lse, rng_state_j
 
 
@@ -162,19 +184,21 @@ def ring_forward(
         the dropout base seed (``None`` if ``dropout_p == 0``), and per-global-chunk
         RNG state (see :func:`_attend_step`).
     """
-    b, heads, n_local, d = q.shape
     # Accumulate ``out`` / ``lse`` in at least fp32, mutated in place across ring
     # steps by ``_online_softmax_merge_``. ``lse`` is a softmax normaliser, never
     # matmul'd, and the fused SDPA/TE backward kernels read it as fp32 -- a
     # 16-bit ``lse`` makes them recompute the softmax wrong (see
     # ``backward.ring_backward``); the old code only reached fp32 here by
     # accident of dtype promotion. ``out`` is cast back to ``q.dtype`` on return.
-    # An fp64 model keeps fp64 for both.
+    # An fp64 model keeps fp64 for both. Shapes track ``q`` so this is agnostic
+    # to ``ring_config.core_layout`` (bhsd / bshd).
     acc_dtype = torch.promote_types(q.dtype, torch.float32)
-    out = torch.zeros((b, heads, n_local, d), device=q.device, dtype=acc_dtype)
-    lse = torch.full(
-        (b, heads, n_local), float("-inf"), device=q.device, dtype=acc_dtype
-    )
+    b, heads, n_local, _ = bhnd(q.shape, ring_config.core_layout)
+    out = torch.zeros(q.shape, device=q.device, dtype=acc_dtype)
+    # ``lse`` is always ``(b, h, n)`` -- both the SDPA and TE cores emit and
+    # consume it in that shape regardless of the q/k/v layout; the merge
+    # transposes the blend weight instead (see ``_online_softmax_merge_``).
+    lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=acc_dtype)
 
     provider = build_forward_chunk_provider(
         ring_config, q, k, v, x, w_qkv, group, local_rank, ring_group_size

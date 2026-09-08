@@ -268,10 +268,10 @@ class DistributedAttention(torch.nn.Module):
 
         self.attn_backend = self._resolve_backend(AttnBackend(attn_backend))
         self.te = self.attn_backend == AttnBackend.TE
-        # Only the non-ring TE core consumes/produces a bshd tensor; the ring
-        # cores (functional.cores.te included) work in the ring's bhsd
-        # convention and transpose internally, so forward() keeps the bhsd
-        # rearrange for it.
+        # Both TE paths run bshd q/k/v (``self.te`` gates the rearrange in
+        # ``forward``). They differ only in the *output*: the non-ring core
+        # returns ``... n s (h d)`` (heads already folded), the ring returns
+        # ``... n s h d``. ``_te_bshd`` marks the non-ring case for that.
         self._te_bshd = self.te and not ring
 
         self.heads = heads // self.channel_group.size()
@@ -573,13 +573,15 @@ class DistributedAttention(torch.nn.Module):
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.qkv(x)
 
-        if not self._te_bshd:
+        # TE cores (ring and non-ring) are bshd-native -- feed them ``n s h d`` so
+        # nothing transposes per chunk; SDPA / math want ``n h s d``.
+        if self.te:
             qkv = rearrange(
-                qkv, "... n s (three h d) -> three ... n h s d", three=3, h=self.heads
+                qkv, "... n s (three h d) -> three ... n s h d", three=3, h=self.heads
             )
         else:
             qkv = rearrange(
-                qkv, "... n s (three h d) -> three ... n s h d", three=3, h=self.heads
+                qkv, "... n s (three h d) -> three ... n h s d", three=3, h=self.heads
             )
 
         core_dtype = attn_core_dtype(x)
@@ -592,11 +594,15 @@ class DistributedAttention(torch.nn.Module):
             q, k, v = qkv.to(core_dtype).unbind(0)
 
         out = self.attn_core(q, k, v, x=x)
-        # The core runs in ``core_dtype`` (bf16 on CUDA, see ``attn_core_dtype``);
-        # ``head_concat`` holds the model-dtype weights, so fold ``out`` back to
-        # ``x.dtype`` before it. The non-bshd path also collapses heads here; the
-        # ``_te_bshd`` core already returns ``... n s (h d)``.
-        if not self._te_bshd:
+        # Fold ``out`` to ``... n s (h d)`` in ``x.dtype`` before ``head_concat``
+        # (which holds model-dtype weights). The non-ring TE core already returns
+        # ``... n s (h d)``; the ring TE core returns bshd ``... n s h d``; every
+        # other core returns bhsd ``... n h s d``.
+        if self._te_bshd:
+            pass
+        elif self.te:
+            out = rearrange(out, "... n s h d -> ... n s (h d)").contiguous()
+        else:
             out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous()
         out = out.to(x.dtype)
 

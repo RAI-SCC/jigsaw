@@ -223,7 +223,7 @@ class _GlobalChunkProvider(_BackwardChunkProvider):
             return kv[0].contiguous(), kv[1].contiguous(), kv
         elif self.config.save_for_backward == SaveBackward.X:
             kv, kj, vj = _compute_kv(
-                chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
+                chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d, self.config.core_layout
             )
             return kj.contiguous(), vj.contiguous(), kv
         else:
@@ -318,7 +318,7 @@ class _LocalChunkProvider(_BackwardChunkProvider):
         if self.config.save_for_backward == SaveBackward.KV:
             return chunk
         kv, _, _ = _compute_kv(
-            chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d
+            chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d, self.config.core_layout
         )
         return kv
 
@@ -340,7 +340,7 @@ class _LocalChunkProvider(_BackwardChunkProvider):
         """
         if self.config.send_in_forward == SendForward.X:
             kv, kj, vj = _compute_kv(
-                recv_buf, self.w_qkv, self.b, self.seq_local, self.h, self.d
+                recv_buf, self.w_qkv, self.b, self.seq_local, self.h, self.d, self.config.core_layout
             )
             return kj.contiguous(), vj.contiguous(), kv
         kv = recv_buf
@@ -377,7 +377,7 @@ class _LocalChunkProvider(_BackwardChunkProvider):
             if self.config.send_in_forward == SendForward.X:
                 # Local Q always attends its own local K/V on step 0.
                 kv, kj, vj = _compute_kv(
-                    self.x, self.w_qkv, self.b, self.seq_local, self.h, self.d
+                    self.x, self.w_qkv, self.b, self.seq_local, self.h, self.d, self.config.core_layout
                 )
             else:
                 kj, vj = kv[0].contiguous(), kv[1].contiguous()
@@ -618,7 +618,7 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProviderHybrid):
             if self.config.send_in_forward == SendForward.X:
                 # Local Q always attends its own local K/V on step 0.
                 kv, kj, vj = _compute_kv(
-                    self.x, self.w_qkv, self.b, self.seq_local, self.h, self.d
+                    self.x, self.w_qkv, self.b, self.seq_local, self.h, self.d, self.config.core_layout
                 )
             else:
                 kj, vj = kv[0].contiguous(), kv[1].contiguous()
