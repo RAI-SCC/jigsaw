@@ -465,6 +465,229 @@ def test_ring_forward_backward_te(
         assert torch.allclose(local_grad, ref_slice, atol=atol)
 
 
+@pytest.mark.dist(4)
+@pytest.mark.parametrize(
+    "save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL]
+)
+@pytest.mark.parametrize(
+    "send_backward",
+    [config.SendBackward.GATHER_DKV, config.SendBackward.SEND_DKV],
+)
+def test_ring_forward_backward_math(
+    device: torch.device,
+    process_mesh_dict_4x1: dict,
+    save_scope: config.SaveScope,
+    send_backward: config.SendBackward,
+) -> None:
+    """Ring forward/backward with the unfused ``MATH`` inner core vs full SDPA.
+
+    ``attn_backend=MATH`` forces
+    :mod:`jigsaw.modules.attention.functional.cores.math` -- the plain
+    ``softmax(QK^T)V`` reference -- as the ring's per-chunk core on every device.
+    On CPU ``SDPA`` already lands there; on CUDA this is the only way to run the
+    unfused core inside the ring, and it is the one backend the big
+    ``test_ring_forward_backward`` grid (which never sets ``attn_backend``) and
+    ``test_ring_forward_backward_te`` both skip. ``math`` derives its dropout
+    mask from the threaded ``seed`` rather than an opaque kernel ``rng_state``;
+    dropout is 0 here so the pass reduces to the online-softmax merge and its
+    recompute.
+    """
+    process_mesh_dict = process_mesh_dict_4x1
+    ring_config = config.RingAttentionConfig(
+        device=device,
+        send_in_forward=config.SendForward.X,
+        send_op=config.SendOp.P2P,
+        save_for_backward=config.SaveBackward.KV,
+        save_scope=save_scope,
+        send_backward=send_backward,
+        offload=config.Offload.DISABLED,
+        attn_backend=config.AttnBackend.MATH,
+    )
+    assert ring_config.attn_core_forward_fn.__module__.endswith(
+        "functional.cores.math"
+    )
+    assert ring_config.attn_core_backward_fn.__module__.endswith(
+        "functional.cores.math"
+    )
+
+    local_rank = dist.get_rank(group=process_mesh_dict["row"])
+    world_size = dist.get_world_size(group=process_mesh_dict["row"])
+    dtype = torch.bfloat16 if dist.get_backend() == "nccl" else torch.float32
+    torch.manual_seed(2)
+    b, h, n_global, d = 3, 6, world_size * 16, 16
+    n_local = n_global // world_size
+
+    w_qkv = torch.randn(
+        3 * d * h, d, device=device, requires_grad=True, dtype=dtype
+    ) / (d**0.5)
+    torch.manual_seed(local_rank)
+    x = torch.randn(b, n_local, d, device=device, requires_grad=True, dtype=dtype) / (
+        d**0.5
+    )
+    x.fill_(local_rank * 0.1)
+    x = x.contiguous()
+
+    qkv = x @ w_qkv.mT
+    q_local, k_local, v_local = (
+        t.contiguous()
+        for t in qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
+    )
+    scale = d**-0.5
+
+    out, lse, chunks_to_save, base_seed, rng_states = forward.ring_forward(
+        q_local,
+        k_local,
+        v_local,
+        x,
+        w_qkv,
+        scale,
+        0.0,
+        process_mesh_dict["row"],
+        local_rank,
+        world_size,
+        ring_config,
+    )
+    out_full = gather_1d_results(out, process_mesh_dict, dim=2)
+
+    q_ref = gather_1d_results(q_local, process_mesh_dict, dim=2).requires_grad_(True)
+    k_ref = gather_1d_results(k_local, process_mesh_dict, dim=2).requires_grad_(True)
+    v_ref = gather_1d_results(v_local, process_mesh_dict, dim=2).requires_grad_(True)
+    with torch.nn.attention.sdpa_kernel(
+        [
+            torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+            torch.nn.attention.SDPBackend.MATH,
+        ]
+    ):
+        out_ref = torch.nn.functional.scaled_dot_product_attention(
+            q_ref, k_ref, v_ref, is_causal=False, dropout_p=0.0
+        )
+
+    dq_local, dk_local, dv_local = backward.ring_backward(
+        torch.ones_like(out, device=device, dtype=out_ref.dtype),
+        q_local,
+        out,
+        x,
+        lse,
+        w_qkv,
+        scale,
+        process_mesh_dict["row"],
+        local_rank,
+        world_size,
+        chunks_to_save,
+        ring_config=ring_config,
+    )
+    out_ref.backward(torch.ones_like(out_ref))
+    dq_ref, dk_ref, dv_ref = q_ref.grad, k_ref.grad, v_ref.grad
+
+    # bf16: the unfused math core vs the flash SDPA reference -- same 2e-2 the
+    # TE sibling uses (``test_ring_forward_backward_te``).
+    atol = 2e-2 if dtype == torch.bfloat16 else 1e-3
+    ring_group = process_mesh_dict["row"]
+    assert_close("output", out_full, out_ref, atol, 1e-5, device, ring_group)
+    for name, local_grad, ref_grad in (
+        ("dq", dq_local, dq_ref),
+        ("dk", dk_local, dk_ref),
+        ("dv", dv_local, dv_ref),
+    ):
+        ref_slice = ref_grad[
+            :, :, local_rank * n_local : (local_rank + 1) * n_local
+        ].to(local_grad.dtype)
+        assert_close(
+            f"{name} local shard",
+            local_grad,
+            ref_slice,
+            atol,
+            1e-5,
+            device,
+            ring_group,
+        )
+
+
+@pytest.mark.gpu_required
+@pytest.mark.dist(4)
+@pytest.mark.parametrize("attn_backend", ["sdpa", "math"])
+def test_ring_attention_function_autograd(
+    device: torch.device,
+    process_mesh_dict_4x1: dict,
+    attn_backend: str,
+) -> None:
+    """``RingAttentionFunction`` end to end through ``torch.autograd`` (no vmap).
+
+    The ``test_ring_forward_backward*`` tests drive ``ring_forward`` /
+    ``ring_backward`` directly, so ``RingAttentionFunction.setup_context`` /
+    ``backward`` -- the ``autograd.Function`` glue an ordinary
+    ``DistributedAttention(ring=True)`` backward goes through -- had no numerical
+    coverage. This pins it: forward via ``.apply``, gradients via ``.backward()``,
+    both vs a gathered full-sequence SDPA reference, for ``sdpa`` and ``math``.
+    """
+    pm = process_mesh_dict_4x1
+    ring_group = pm["row"]
+    local_rank = dist.get_rank(group=ring_group)
+    world_size = dist.get_world_size(group=ring_group)
+    dtype = torch.bfloat16 if dist.get_backend() == "nccl" else torch.float32
+    ring_config = config.RingAttentionConfig(
+        device=device,
+        send_in_forward=config.SendForward.X,
+        send_op=config.SendOp.P2P,
+        save_for_backward=config.SaveBackward.KV,
+        save_scope=config.SaveScope.GLOBAL,
+        send_backward=config.SendBackward.SEND_DKV,
+        offload=config.Offload.DISABLED,
+        attn_backend=attn_backend,
+    )
+
+    torch.manual_seed(2)
+    b, h, n_global, d = 3, 6, world_size * 16, 16
+    n_local = n_global // world_size
+    w_qkv = (
+        torch.randn(3 * d * h, d, device=device, dtype=dtype) / (d**0.5)
+    )
+    torch.manual_seed(local_rank)
+    x = (torch.randn(b, n_local, d, device=device, dtype=dtype) / (d**0.5)).contiguous()
+
+    qkv = x @ w_qkv.mT
+    q_local, k_local, v_local = (
+        t.detach().contiguous().requires_grad_(True)
+        for t in qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
+    )
+    scale = d**-0.5
+
+    out = functional.RingAttentionFunction.apply(
+        q_local, k_local, v_local, x, w_qkv, scale, 0.0,
+        ring_group, local_rank, ring_config,
+    )[0]
+    out_full = gather_1d_results(out, pm, dim=2)
+    out.backward(torch.ones_like(out))
+
+    q_ref = gather_1d_results(q_local.detach(), pm, dim=2).requires_grad_(True)
+    k_ref = gather_1d_results(k_local.detach(), pm, dim=2).requires_grad_(True)
+    v_ref = gather_1d_results(v_local.detach(), pm, dim=2).requires_grad_(True)
+    with torch.nn.attention.sdpa_kernel(
+        [
+            torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+            torch.nn.attention.SDPBackend.MATH,
+        ]
+    ):
+        out_ref = torch.nn.functional.scaled_dot_product_attention(
+            q_ref, k_ref, v_ref, is_causal=False, dropout_p=0.0
+        )
+    out_ref.backward(torch.ones_like(out_ref))
+
+    atol = 2e-2 if dtype == torch.bfloat16 else 1e-3
+    assert_close("output", out_full, out_ref, atol, 1e-5, device, ring_group)
+    for name, local_grad, ref_grad in (
+        ("dq", q_local.grad, q_ref.grad),
+        ("dk", k_local.grad, k_ref.grad),
+        ("dv", v_local.grad, v_ref.grad),
+    ):
+        ref_slice = ref_grad[
+            :, :, local_rank * n_local : (local_rank + 1) * n_local
+        ].to(local_grad.dtype)
+        assert_close(
+            f"{name} local shard", local_grad, ref_slice, atol, 1e-5, device, ring_group
+        )
+
+
 # Shared parametrization for the ``test_ring_hybrid*`` variants. Kept as a list
 # so both the 8-rank (``2 nodes x 4 GPUs``) and the 4-rank (``2 nodes x 2 GPUs``)
 # test stack the identical grid without duplicating six ``parametrize`` blocks.

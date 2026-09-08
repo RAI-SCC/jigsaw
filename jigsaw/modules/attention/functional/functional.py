@@ -309,7 +309,13 @@ class RingAttentionFunction(torch.autograd.Function):
             q,
             out,
             x,
-            lse.mT,
+            # ``(b, h, s)`` as :func:`..backward.ring_backward` and every core
+            # expect it -- ``backward`` passes this straight through. It used to
+            # be saved ``.mT``'d with no transpose back; the unfused ``math``
+            # core is the one that then raises on the axis swap (the fused cores
+            # reshape ``lse`` internally). Nothing exercised this autograd path
+            # until the plain / ``vmap`` ring-grad tests did.
+            lse,
             w_qkv,
             *chunks_to_save,  # *[t for pair in chunks_to_save for t in pair]
             *rng_states,
@@ -373,25 +379,44 @@ class RingAttentionFunction(torch.autograd.Function):
         n_chunks = ctx.n_chunks
         chunks_to_save = ctx.saved_tensors[5 : 5 + n_chunks]
         rng_states = ctx.saved_tensors[5 + n_chunks :]
+        n_saved = 5 + n_chunks
 
+        from ._vmap_grad import run_backward_unwrapped
         from .backward import ring_backward
 
-        dq, dk, dv = ring_backward(
+        def _compute(
+            dout_: torch.Tensor, *saved: Optional[torch.Tensor]
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            q_, out_, x_, lse_, w_ = saved[:5]
+            return ring_backward(
+                dout_,
+                cast(torch.Tensor, q_),
+                cast(torch.Tensor, out_),
+                cast(torch.Tensor, x_),
+                cast(torch.Tensor, lse_),
+                cast(torch.Tensor, w_),
+                ctx.scale,
+                ctx.group,
+                ctx.local_rank,
+                ctx.ring_group_size,
+                cast(tuple[torch.Tensor, ...], tuple(saved[5:n_saved])),
+                ring_config=ctx.config,
+                dropout_p=ctx.dropout_p,
+                base_seed=ctx.base_seed,
+                rng_states=cast(
+                    tuple[Optional[torch.Tensor], ...], tuple(saved[n_saved:])
+                ),
+            )
+
+        # Off the functorch path this is a plain ``_compute(dout, *saved)``. Under
+        # ``vmap(grad(...))`` (Bayesian ensemble) it peels the functorch wrappers,
+        # folds the ensemble axis into the ring's batch, runs one un-vmapped
+        # ``ring_backward`` (its P2P collectives have no batching rule) and
+        # re-wraps the grads -- mirroring :meth:`vmap`.
+        dq, dk, dv = run_backward_unwrapped(
             dout,
-            q,
-            out,
-            x,
-            lse,
-            w_qkv,
-            ctx.scale,
-            ctx.group,
-            ctx.local_rank,
-            ctx.ring_group_size,
-            cast(tuple[torch.Tensor, ...], chunks_to_save),
-            ring_config=ctx.config,
-            dropout_p=ctx.dropout_p,
-            base_seed=ctx.base_seed,
-            rng_states=cast(tuple[Optional[torch.Tensor], ...], rng_states),
+            (q, out, x, lse, w_qkv, *chunks_to_save, *rng_states),
+            _compute,
         )
 
         return dq, dk, dv, None, None, None, None, None, None, None

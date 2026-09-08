@@ -20,8 +20,9 @@ of integration:
    ``all_to_all``.
 3. :class:`TestDistributedAttentionEnsembleVmap` -- a full non-ring
    ``DistributedAttention`` under ``vmap(functional_call(...))`` with stacked
-   ensemble parameters, vs a per-member loop, sdpa and te. **Forward and grad
-   pass** for both backends. Grad needed two fixes: ``XWT.backward``'s spatial
+   ensemble parameters, vs a per-member loop, sdpa, te and math. **Forward and
+   grad pass** for all three backends. Grad needed two fixes: ``XWT.backward``'s
+   spatial
    all-reduce and two-way peer exchange go through
    :mod:`jigsaw.modules.linear._vmap_collectives` (whose ``vmap`` staticmethods
    absorb the ensemble axis and run one *synchronous* collective -- functorch's
@@ -33,10 +34,16 @@ of integration:
    and cannot see a ``TensorWrapper``).
 4. :class:`TestRingVmap` -- ``torch.vmap`` over a ``ring=True``
    ``DistributedAttention``. ``RingAttentionFunction.vmap`` folds the members
-   axis into the batch, runs one un-vmapped ring pass and unfolds. Forward
-   parity vs a per-member loop, sdpa and te; a stacked-parameter (vmapped
-   weight) ensemble is explicitly rejected -- the ring backward is all P2P
-   collectives with no batching rule.
+   axis into the batch for the forward; ``RingAttentionFunction.backward``
+   routes through
+   :func:`jigsaw.modules.attention.functional._vmap_grad.run_backward_unwrapped`,
+   which peels the functorch wrappers off the cotangent, folds it the same way,
+   runs one un-vmapped ``ring_backward`` and re-wraps the grads layer by layer
+   as the dynamic layer stack is restored. Forward *and input-gradient* parity
+   vs a per-member loop, sdpa, te and math. A stacked-parameter (vmapped
+   weight) ensemble is still rejected up front -- differentiating w.r.t. a
+   batched weight would need the dK/dV relay's collectives to absorb the
+   ensemble axis, which they do not.
 
 Dropout is 0 throughout: the members-folded single call and the per-member loop
 would otherwise draw different masks and never match.
@@ -396,6 +403,27 @@ class TestDistributedAttentionEnsembleVmap:
                 device=device, group=process_mesh_dict_2x2["model"],
             )
 
+    @pytest.mark.dist(4)
+    def test_math_ensemble_vmap_forward(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        got, ref = self._fwd(process_mesh_dict_2x2, device, "math")
+        assert_close(
+            "math ensemble forward", got, ref, **_FWD_TOL,
+            device=device, group=process_mesh_dict_2x2["model"],
+        )
+
+    @pytest.mark.dist(4)
+    def test_math_ensemble_vmap_grad(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        got, ref = self._grad(process_mesh_dict_2x2, device, "math")
+        for k in got:
+            assert_close(
+                f"math ensemble grad[{k}]", got[k], ref[k], **_GRAD_TOL,
+                device=device, group=process_mesh_dict_2x2["model"],
+            )
+
 
 # --------------------------------------------------------------------------- #
 # 4. ring attention under vmap -- fold-into-batch rule
@@ -404,16 +432,21 @@ class TestDistributedAttentionEnsembleVmap:
 class TestRingVmap:
     """``torch.vmap`` over a ``ring=True`` ``DistributedAttention``.
 
-    ``RingAttentionFunction.vmap`` folds the vmapped (ensemble) axis into the
-    batch, runs one un-vmapped ring pass and unfolds -- the ring's per-chunk
-    cores and its P2P ring exchange register no ``functorch`` batching rule, so
-    the same fold-into-batch trick as :class:`TransformerEngineAttentionVmap`
-    is the only way through. Forward parity vs a per-member loop, ``sdpa`` and
-    ``te``.
+    The ring's per-chunk cores and its P2P ring exchange register no
+    ``functorch`` batching rule, so both directions use the same
+    fold-into-batch trick as :class:`TransformerEngineAttentionVmap`:
+    ``RingAttentionFunction.vmap`` folds the ensemble axis into the batch for
+    the forward, and ``RingAttentionFunction.backward`` -- via
+    :func:`~jigsaw.modules.attention.functional._vmap_grad.run_backward_unwrapped`
+    -- peels the functorch wrappers off the cotangent, folds it the same way,
+    runs one un-vmapped ``ring_backward`` and re-wraps the grads.
 
-    Grad is *not* covered: the ring backward is entirely P2P collectives with
-    no batching rule, so a stacked-parameter ensemble (a vmapped projection
-    weight) is explicitly rejected by the staticmethod.
+    Forward *and* input-gradient parity vs a per-member loop, for ``sdpa``,
+    ``te`` and ``math``. Grad is covered only for the **activation**: a
+    stacked-parameter ensemble (a vmapped projection weight) is still rejected
+    up front (``test_ring_vmap_batched_weight_rejected``) -- differentiating
+    w.r.t. a batched weight would need the dK/dV relay's collectives to absorb
+    the ensemble axis, which they do not.
     """
 
     E = 2
@@ -423,6 +456,47 @@ class TestRingVmap:
         x_e = _local_x(mesh, device, members=self.E)
         got = vmap(model)(x_e)
         ref = torch.stack([model(x_e[i].contiguous()) for i in range(self.E)])
+        return got, ref
+
+    def _grad(self, mesh: dict, device: torch.device, backend: str):
+        """Input-grad of ``vmap(grad(loss))`` vs a plain per-member autograd loop.
+
+        ``got`` folds the members axis into the ring's batch
+        (``RingAttentionFunction.vmap``) and issues one un-vmapped forward;
+        ``RingAttentionFunction.backward`` (via ``run_backward_unwrapped``) peels
+        the functorch wrappers off the cotangent, folds it the same way and runs
+        one un-vmapped ``ring_backward``, then re-wraps the grads. Both sides run
+        the *identical* ring core (the vmap path never drops flash to math,
+        unlike the non-ring :class:`TestDistributedAttentionEnsembleVmap`), so no
+        core-swap on the reference. Only the activation is differentiated -- a
+        stacked-parameter ensemble is rejected
+        (``test_ring_vmap_batched_weight_rejected``).
+
+        ``te`` is pinned to bf16 (as ``test_ring_forward_backward_te`` is): its
+        fused kernel has no fp32 backend for these shapes, and ``ring_backward``
+        recomputes in the projection-weight dtype.
+        """
+        model = _build_attn(mesh, device, backend, bayesian=False, ring=True)
+        if backend == "te":
+            model = model.to(torch.bfloat16)
+        params = dict(model.named_parameters())
+        buffers = dict(model.named_buffers())
+        x_e = _local_x(mesh, device, members=self.E)
+        if backend == "te":
+            x_e = x_e.to(torch.bfloat16)
+
+        def member_loss(x):
+            return functional_call(model, (params, buffers), (x,)).float().pow(2).sum()
+
+        got = vmap(grad(member_loss))(x_e)
+
+        ref_members = []
+        for i in range(self.E):
+            xi = x_e[i].detach().clone().contiguous().requires_grad_(True)
+            model(xi).float().pow(2).sum().backward()
+            ref_members.append(xi.grad)
+            model.zero_grad(set_to_none=True)
+        ref = torch.stack(ref_members)
         return got, ref
 
     @pytest.mark.dist(4)
@@ -443,6 +517,47 @@ class TestRingVmap:
         got, ref = self._fwd(process_mesh_dict_4x1, device, "te")
         assert_close(
             "ring vmap forward te", got, ref, **_FWD_TOL,
+            device=device, group=process_mesh_dict_4x1["model"],
+        )
+
+    @pytest.mark.dist(4)
+    def test_ring_vmap_forward_matches_loop_math(
+        self, device: torch.device, process_mesh_dict_4x1: dict
+    ) -> None:
+        got, ref = self._fwd(process_mesh_dict_4x1, device, "math")
+        assert_close(
+            "ring vmap forward math", got, ref, **_FWD_TOL,
+            device=device, group=process_mesh_dict_4x1["model"],
+        )
+
+    @pytest.mark.dist(4)
+    def test_ring_vmap_grad_matches_loop_sdpa(
+        self, device: torch.device, process_mesh_dict_4x1: dict
+    ) -> None:
+        got, ref = self._grad(process_mesh_dict_4x1, device, "sdpa")
+        assert_close(
+            "ring vmap grad sdpa", got, ref, **_GRAD_TOL,
+            device=device, group=process_mesh_dict_4x1["model"],
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.te_required
+    def test_ring_vmap_grad_matches_loop_te(
+        self, device: torch.device, process_mesh_dict_4x1: dict
+    ) -> None:
+        got, ref = self._grad(process_mesh_dict_4x1, device, "te")
+        assert_close(
+            "ring vmap grad te", got, ref, **_GRAD_TOL,
+            device=device, group=process_mesh_dict_4x1["model"],
+        )
+
+    @pytest.mark.dist(4)
+    def test_ring_vmap_grad_matches_loop_math(
+        self, device: torch.device, process_mesh_dict_4x1: dict
+    ) -> None:
+        got, ref = self._grad(process_mesh_dict_4x1, device, "math")
+        assert_close(
+            "ring vmap grad math", got, ref, **_GRAD_TOL,
             device=device, group=process_mesh_dict_4x1["model"],
         )
 

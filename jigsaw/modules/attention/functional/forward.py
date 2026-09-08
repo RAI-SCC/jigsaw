@@ -78,9 +78,22 @@ def _attend_step(
     plus this step's ``rng_state`` (``None`` unless the core is one that
     threads back opaque kernel RNG state instead of using ``seed`` -- see
     :mod:`.cores`).
+
+    ``kj``/``vj`` are cast to ``q``'s dtype first. ``DistributedAttention``
+    downcasts ``q``/``k``/``v`` to the core dtype (bf16 on CUDA) but hands the
+    ring its ``x`` / projection weight in the master dtype, so a chunk
+    recomputed from ``x`` via ``w_qkv`` (``_compute_kv``) comes back in the
+    master dtype -- a mismatch the fused SDPA/TE cores paper over (they force
+    their own kernel dtype) but the unfused ``math`` core raises on. This is the
+    forward twin of the ``core_dtype`` reconcile in :func:`..backward.ring_backward`.
     """
     out_j, l_j, rng_state_j = ring_config.attn_core_forward_fn(
-        q, kj.contiguous(), vj.contiguous(), scale, dropout_p, seed=seed
+        q,
+        kj.to(q.dtype).contiguous(),
+        vj.to(q.dtype).contiguous(),
+        scale,
+        dropout_p,
+        seed=seed,
     )
 
     o_new, l_new = _online_softmax_merge(out, lse, out_j, l_j)
