@@ -38,7 +38,6 @@ class _DistributedConvNd(torch.nn.Module):
     bias: Optional[Parameter]
     config: ConvNdConfig
     bayesian: bool
-    spatial_group: Optional[dist.ProcessGroup]
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...]
     channel_group: dist.ProcessGroup
     device: torch.device
@@ -153,9 +152,6 @@ class _DistributedConvNd(torch.nn.Module):
         self._spatial_sync_groups = [
             g for g in self.spatial_groups if g is not None and g.size() > 1
         ]
-        # representative single group kept for backward compatibility (the
-        # innermost / width-axis group, or ``None`` when it is not split).
-        self.spatial_group = self.spatial_groups[-1]
         self.channel_group = channel_group
         self.device = device
         self.dtype = dtype
@@ -419,18 +415,16 @@ class _DistributedConvNd(torch.nn.Module):
         pm_col_key: str = "col",
         pm_model_key: str = "model",
     ) -> None:
-        """Reshard the (channel-sharded) weight and bias onto a new process mesh."""
-        self.config = ConvNdConfig(
-            self.bayesian,
-            self.channel_group,
-            self.bias,
-            self.kernel_size,
-            self.stride,
-            self.device,
-            self.channel_comm,
-            self.groups,
-        )
+        """
+        Re-slice the channel-sharded ``weight`` / ``bias`` onto a new process mesh.
 
+        The gathered global parameters are unchanged; only which output-channel
+        slice this rank holds moves. The module is also rebound to
+        ``to_process_mesh_dict`` -- spatial/channel process groups, the
+        channel-local regime, the kernel-selection ``config`` and the
+        spatial-group grad-sync hooks -- so a forward/backward pass on the new
+        mesh is immediately valid.
+        """
         from_weight_shape_local = self.weight.shape
         weight_shape_global = (
             from_weight_shape_local[0] * from_process_mesh_dict[pm_col_key].size(),
@@ -476,17 +470,58 @@ class _DistributedConvNd(torch.nn.Module):
         )
         del global_weights
 
-        col_rank, col_shard_size = (
-            to_process_mesh_dict[pm_col_key].rank(),
-            to_bias_shape_local,
-        )
-        if isinstance(global_bias, torch.Tensor):
+        if self.bias is not None and isinstance(global_bias, torch.Tensor):
+            col_rank, col_shard_size = (
+                to_process_mesh_dict[pm_col_key].rank(),
+                to_bias_shape_local,
+            )
             self.bias = torch.nn.Parameter(
                 global_bias[
                     col_rank * col_shard_size : (col_rank + 1) * col_shard_size
                 ].contiguous()
             )
             del global_bias
+
+        # Rebind to the target mesh so a forward/backward pass on it is valid.
+        self.channel_group = to_process_mesh_dict[pm_col_key]
+        self.spatial_groups = _as_spatial_groups(
+            to_process_mesh_dict[pm_row_key], self._n_spatial
+        )
+        self._spatial_sync_groups = [
+            g for g in self.spatial_groups if g is not None and g.size() > 1
+        ]
+        self.out_channels = weight_shape_global[0] // self.channel_group.size()
+        self._channel_local, self._groups_local = resolve_conv_groups(
+            self.groups,
+            self.in_channels,
+            weight_shape_global[0],
+            self.channel_group.size(),
+        )
+        self.config = ConvNdConfig(
+            self.bayesian,
+            self.channel_group,
+            self.bias,
+            self.kernel_size,
+            self.stride,
+            self.device,
+            self.channel_comm,
+            self.groups,
+        )
+
+        # The re-sliced parameters are fresh Parameters, so the __init__ hooks
+        # are gone. Re-register the spatial-group grad sync and re-broadcast
+        # rank 0's slice across every spatial rank (innermost axis first).
+        if self._spatial_sync_groups:
+            self.weight.register_post_accumulate_grad_hook(
+                hooks.make_grad_sync_hook(self._spatial_sync_groups)
+            )
+            if self.bias is not None:
+                self.bias.register_post_accumulate_grad_hook(
+                    hooks.make_grad_sync_hook(self._spatial_sync_groups)
+                )
+        for p in self.parameters():
+            for g in reversed(self._spatial_sync_groups):
+                dist.broadcast(p.data, group_src=0, group=g)
 
     def _needs_halo(self) -> bool:
         """Whether a spatially-split conv would need neighbour halos.
@@ -569,8 +604,8 @@ class _DistributedConvNd(torch.nn.Module):
         # spatially-split conv that needs a halo exchange; that still goes through
         # ``_conv_apply`` (its kernel treats a group of one, or a group that owns
         # whole conv-groups, as the identity gather). ``_spatial_sync_groups`` is
-        # non-empty iff some spatial axis is really split -- checking
-        # ``spatial_group`` alone would miss a non-innermost-only split.
+        # non-empty iff some spatial axis is really split -- checking only the
+        # innermost ``spatial_groups[-1]`` would miss a non-innermost-only split.
         if self._channel_local and not (
             self._spatial_sync_groups and self._needs_halo()
         ):

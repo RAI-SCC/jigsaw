@@ -8,6 +8,7 @@ from jigsaw.modules.attention import Attention, DistributedAttention
 from jigsaw.modules.linear import DistributedXWT
 from jigsaw.modules.roll import Roll
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
+from tests.parity import assert_close
 
 # Every test here builds a 2x2 / 2x1x2 mesh, so it needs exactly 4 ranks;
 # without this an 8-rank run would build a mesh over ranks 0-3 and deadlock.
@@ -109,10 +110,11 @@ class TestConvertToTorch:
         assert ref_forward is not None
         assert ref_d_w is not None
         assert ref_d_x is not None
-        assert torch.allclose(ref_w, dist_w), "weights do not match"
-        assert torch.allclose(ref_forward, dist_forward), "forward does not match"
-        assert torch.allclose(ref_d_w, dist_d_w), "weight grad does not match"
-        assert torch.allclose(ref_d_x, dist_d_x), "dx does not match"
+        grp = process_mesh_dict["model"]
+        assert_close("weight", dist_w, ref_w, 1e-8, 1e-5, device, grp)
+        assert_close("forward", dist_forward, ref_forward, 1e-8, 1e-5, device, grp)
+        assert_close("weight grad", dist_d_w, ref_d_w, 1e-8, 1e-5, device, grp)
+        assert_close("input grad", dist_d_x, ref_d_x, 1e-8, 1e-5, device, grp)
 
         # bias
         if bias:
@@ -131,8 +133,8 @@ class TestConvertToTorch:
 
             assert ref_b is not None
             assert ref_d_b is not None
-            assert torch.allclose(ref_b, dist_b), "bias does not match"
-            assert torch.allclose(ref_d_b, dist_d_b), "bias grad does not match"
+            assert_close("bias", dist_b, ref_b, 1e-8, 1e-5, device, grp)
+            assert_close("bias grad", dist_d_b, ref_d_b, 1e-8, 1e-5, device, grp)
 
     @pytest.mark.parametrize(
         "bias,process_mesh_dict",
@@ -289,16 +291,17 @@ class TestConvertToTorch:
         assert isinstance(ref_forward, torch.Tensor)
         assert isinstance(ref_dw_1, torch.Tensor)
         assert isinstance(ref_dw_2, torch.Tensor)
-        assert torch.allclose(ref_w_1, dist_w_1), "weights of linear1 do not match"
-        assert torch.allclose(ref_w_2, dist_w_2), "weights of linear2 do not match"
-        assert torch.allclose(ref_forward, dist_forward), "forward does not match"
-        assert torch.allclose(ref_dw_1, dist_dw_1), (
-            "grad of linear1 weight does not match"
+        grp = process_mesh_dict["model"]
+        assert_close("linear1 weight", dist_w_1, ref_w_1, 1e-8, 1e-5, device, grp)
+        assert_close("linear2 weight", dist_w_2, ref_w_2, 1e-8, 1e-5, device, grp)
+        assert_close("forward", dist_forward, ref_forward, 1e-8, 1e-5, device, grp)
+        assert_close(
+            "linear1 weight grad", dist_dw_1, ref_dw_1, 1e-8, 1e-5, device, grp
         )
-        assert torch.allclose(ref_dw_2, dist_dw_2), (
-            "grad of linear2 weight does not match"
+        assert_close(
+            "linear2 weight grad", dist_dw_2, ref_dw_2, 1e-8, 1e-5, device, grp
         )
-        assert torch.allclose(ref_dx, dist_dx), "grad of x does not match"
+        assert_close("input grad", dist_dx, ref_dx, 1e-8, 1e-5, device, grp)
 
         # bias terms
         if bias:
@@ -333,14 +336,10 @@ class TestConvertToTorch:
             assert isinstance(ref_b_2, torch.Tensor)
             assert isinstance(ref_d_b_1, torch.Tensor)
             assert isinstance(ref_d_b_2, torch.Tensor)
-            assert torch.allclose(ref_b_1, dist_b_1), "weights of bias1 do not match"
-            assert torch.allclose(ref_b_2, dist_b_2), "weights of bias2 do not match"
-            assert torch.allclose(ref_d_b_1, dist_d_b_1), (
-                "weights of bias1 grad do not match"
-            )
-            assert torch.allclose(ref_d_b_2, dist_d_b_2), (
-                "weights of bias2 grad do not match"
-            )
+            assert_close("bias1", dist_b_1, ref_b_1, 1e-8, 1e-5, device, grp)
+            assert_close("bias2", dist_b_2, ref_b_2, 1e-8, 1e-5, device, grp)
+            assert_close("bias1 grad", dist_d_b_1, ref_d_b_1, 1e-8, 1e-5, device, grp)
+            assert_close("bias2 grad", dist_d_b_2, ref_d_b_2, 1e-8, 1e-5, device, grp)
 
     def test_attention(
         self, device: torch.device, process_mesh_dict_2x1x2: dict
@@ -507,24 +506,13 @@ class TestConvertToTorch:
         assert isinstance(ref_k_grad, torch.Tensor)
         assert isinstance(ref_v_grad, torch.Tensor)
         assert isinstance(ref_x_grad, torch.Tensor)
-        assert torch.allclose(ref_forward, dist_forward, atol=1e-4), (
-            "forward does not match"
-        )
-        assert torch.allclose(q_weight, dist_q_w, atol=1e-4), (
-            "weights of qkv do not match"
-        )
-        assert torch.allclose(ref_q_grad, dist_q_grad, atol=1e-4), (
-            "grad of q.weight does not match"
-        )
-        assert torch.allclose(ref_k_grad, dist_k_grad, atol=1e-4), (
-            "grad of k.weight does not match"
-        )
-        assert torch.allclose(ref_v_grad, dist_v_grad, atol=1e-4), (
-            "grad of v.weight does not match"
-        )
-        assert torch.allclose(ref_x_grad, dist_x_grad, atol=1e-4), (
-            "grad of x does not match"
-        )
+        grp = process_mesh_dict_2x1x2["model"]
+        assert_close("forward", dist_forward, ref_forward, 1e-4, 1e-5, device, grp)
+        assert_close("qkv weight", dist_q_w, q_weight, 1e-4, 1e-5, device, grp)
+        assert_close("q.weight grad", dist_q_grad, ref_q_grad, 1e-4, 1e-5, device, grp)
+        assert_close("k.weight grad", dist_k_grad, ref_k_grad, 1e-4, 1e-5, device, grp)
+        assert_close("v.weight grad", dist_v_grad, ref_v_grad, 1e-4, 1e-5, device, grp)
+        assert_close("input grad", dist_x_grad, ref_x_grad, 1e-4, 1e-5, device, grp)
 
     def test_jigsaw_transformer(
         self, device: torch.device, process_mesh_dict_2x1x2: dict
@@ -615,22 +603,42 @@ class TestConvertToTorch:
         assert ref_head_cat_w is not None
         assert ref_head_cat_grad is not None
         assert ref_x_grad is not None
-        assert torch.allclose(ref_forward, dist_forward, atol=1e-5), (
-            "forward does not match"
+        grp = process_mesh_dict_2x1x2["model"]
+        assert_close("forward", dist_forward, ref_forward, 1e-5, 1e-5, device, grp)
+        assert_close(
+            "qkv weight sum",
+            dist_qkv_w.sum(),
+            ref_qkv_w.sum(),
+            1e-5,
+            1e-5,
+            device,
+            grp,
         )
-        assert torch.allclose(ref_qkv_w.sum(), dist_qkv_w.sum(), atol=1e-5), (
-            "sum of weights do not match"
+        assert_close(
+            "qkv weight grad sum",
+            dist_qkv_grad.sum(),
+            ref_qkv_grad.sum(),
+            1e-5,
+            1e-5,
+            device,
+            grp,
         )
-        assert torch.allclose(ref_qkv_grad.sum(), dist_qkv_grad.sum(), atol=1e-5), (
-            "sum of grad weights do not match"
+        assert_close(
+            "head concat weight", dist_head_cat_w, ref_head_cat_w, 1e-8, 1e-5, device, grp
         )
-        assert torch.allclose(ref_head_cat_w, dist_head_cat_w), "forward does not match"
-        assert torch.allclose(ref_head_cat_grad, dist_head_cat_grad), (
-            "grad of head concat does not match"
+        # Gradient reduction order differs between the sharded head-concat matmul
+        # and the serial reference, so this needs the same ~1e-4 slack as the
+        # other gradient checks in this test rather than allclose's 1e-8 default.
+        assert_close(
+            "head concat weight grad",
+            dist_head_cat_grad,
+            ref_head_cat_grad,
+            1e-4,
+            1e-5,
+            device,
+            grp,
         )
-        assert torch.allclose(ref_x_grad, dist_x_grad, atol=1e-4), (
-            "grad of x does not match"
-        )
+        assert_close("input grad", dist_x_grad, ref_x_grad, 1e-4, 1e-5, device, grp)
 
     def test_jigsaw_conv2d(
         self, device: torch.device, process_mesh_dict_2x2: dict
@@ -720,18 +728,11 @@ class TestConvertToTorch:
         assert ref_conv_weights is not None
         assert ref_d_w is not None
         assert ref_d_x is not None
-        assert torch.allclose(ref_forward, dist_forward, atol=1e-3), (
-            "forward does not match"
-        )
-        assert torch.allclose(ref_conv_weights, dist_w, atol=1e-5), (
-            "weights do not match"
-        )
-        assert torch.allclose(ref_d_w, dist_d_w, atol=1e-4), (
-            "weight grad does not match"
-        )
-        assert torch.allclose(ref_d_x, dist_d_x, atol=1e-4), (
-            "weight grad does not match"
-        )
+        grp = process_mesh_dict_2x2["model"]
+        assert_close("forward", dist_forward, ref_forward, 1e-3, 1e-5, device, grp)
+        assert_close("weight", dist_w, ref_conv_weights, 1e-5, 1e-5, device, grp)
+        assert_close("weight grad", dist_d_w, ref_d_w, 1e-4, 1e-5, device, grp)
+        assert_close("input grad", dist_d_x, ref_d_x, 1e-4, 1e-5, device, grp)
 
     def test_jigsaw_conv2dtranspose(
         self, device: torch.device, process_mesh_dict_2x2: dict
@@ -824,18 +825,11 @@ class TestConvertToTorch:
         assert ref_conv_weights is not None
         assert ref_d_w is not None
         assert ref_d_x is not None
-        assert torch.allclose(ref_forward, dist_forward, atol=1e-3), (
-            "forward does not match"
-        )
-        assert torch.allclose(ref_conv_weights, dist_w, atol=1e-5), (
-            "weights do not match"
-        )
-        assert torch.allclose(ref_d_w, dist_d_w, atol=1e-4), (
-            "weight grad does not match"
-        )
-        assert torch.allclose(ref_d_x, dist_d_x, atol=1e-4), (
-            "weight grad does not match"
-        )
+        grp = process_mesh_dict_2x2["model"]
+        assert_close("forward", dist_forward, ref_forward, 1e-3, 1e-5, device, grp)
+        assert_close("weight", dist_w, ref_conv_weights, 1e-5, 1e-5, device, grp)
+        assert_close("weight grad", dist_d_w, ref_d_w, 1e-4, 1e-5, device, grp)
+        assert_close("input grad", dist_d_x, ref_d_x, 1e-4, 1e-5, device, grp)
 
     @pytest.mark.gpu_required
     def test_jigsaw_roll(
@@ -888,6 +882,12 @@ class TestConvertToTorch:
             dist_forward, process_mesh_dict_2x2, dim=-2, pm_key="row"
         )
 
-        assert torch.allclose(ref_forward, dist_forward, atol=1e-3), (
-            "forward does not match"
+        assert_close(
+            "forward",
+            dist_forward,
+            ref_forward,
+            1e-3,
+            1e-5,
+            device,
+            process_mesh_dict_2x2["model"],
         )
