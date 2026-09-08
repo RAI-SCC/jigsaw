@@ -262,10 +262,9 @@ class RingAttentionFunction(torch.autograd.Function):
             the base seed instead -- see :mod:`.cores`).
         """
         ring_group_size = dist.get_world_size(group)
-        from .forward import build_ring_forward
+        from .forward import ring_forward
 
-        ring_forward_fn = build_ring_forward(config)
-        out, lse, chunks_to_save, base_seed, rng_states = ring_forward_fn(
+        out, lse, chunks_to_save, base_seed, rng_states = ring_forward(
             q,
             k,
             v,

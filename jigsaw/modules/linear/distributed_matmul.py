@@ -72,6 +72,10 @@ def fused_xw_xtw_twoway(
     """
     mod = local_rank % 2
     w0, w1 = torch.split(weight, weight.shape[-2] // 2, dim=-2)
+    # ``grad_output`` is sent verbatim through ``all_to_all`` below, which
+    # rejects non-contiguous tensors; autograd routinely hands us a strided
+    # gradient (e.g. through a preceding transpose / rearrange).
+    grad_output = grad_output.contiguous()
     buffer_x = get_preallocated_buffer(
         grad_output.shape, grad_output.dtype, local_rank, device
     )

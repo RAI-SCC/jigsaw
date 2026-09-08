@@ -177,7 +177,7 @@ class TestRingAttention:
         )
         print(f"R{dist.get_rank()} config {ring_config}")
 
-        ring_forward = forward.build_ring_forward(ring_config)
+        ring_forward = forward.ring_forward
         local_rank = dist.get_rank(group=process_mesh_dict["row"])
         world_size = dist.get_world_size(group=process_mesh_dict["row"])
         dtype = torch.bfloat16 if dist.get_backend() == "nccl" else torch.float32
@@ -210,7 +210,7 @@ class TestRingAttention:
         scale = q_local.shape[-1] ** -0.5
 
         # just test helper function forward
-        ring_forward = forward.build_ring_forward(ring_config)
+        ring_forward = forward.ring_forward
         out, lse, chunks_to_save, base_seed, rng_states = ring_forward(
             q_local,
             k_local,
@@ -406,7 +406,7 @@ def test_ring_forward_backward_te(
     )
     scale = d**-0.5
 
-    ring_forward = forward.build_ring_forward(ring_config)
+    ring_forward = forward.ring_forward
     out, lse, chunks_to_save, base_seed, rng_states = ring_forward(
         q_local,
         k_local,
@@ -540,7 +540,7 @@ def _check_ring_hybrid(
         gpus_per_node=gpus_per_node,
     )
 
-    ring_forward = forward.build_ring_forward(ring_config)
+    ring_forward = forward.ring_forward
     local_rank = dist.get_rank(group=process_mesh_dict["model"])
     world_size = dist.get_world_size(group=process_mesh_dict["model"])
 
@@ -573,7 +573,7 @@ def _check_ring_hybrid(
     scale = q_local.shape[-1] ** -0.5
 
     # just test helper function forward
-    ring_forward = forward.build_ring_forward(ring_config)
+    ring_forward = forward.ring_forward
     out, lse, chunks_to_save, base_seed, rng_states = ring_forward(
         q_local,
         k_local,
