@@ -38,7 +38,6 @@ class _DistributedConvNd(torch.nn.Module):
     bias: Optional[Parameter]
     config: ConvNdConfig
     bayesian: bool
-    spatial_group: Optional[dist.ProcessGroup]
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...]
     channel_group: dist.ProcessGroup
     device: torch.device
@@ -153,9 +152,6 @@ class _DistributedConvNd(torch.nn.Module):
         self._spatial_sync_groups = [
             g for g in self.spatial_groups if g is not None and g.size() > 1
         ]
-        # representative single group kept for backward compatibility (the
-        # innermost / width-axis group, or ``None`` when it is not split).
-        self.spatial_group = self.spatial_groups[-1]
         self.channel_group = channel_group
         self.device = device
         self.dtype = dtype
@@ -608,8 +604,8 @@ class _DistributedConvNd(torch.nn.Module):
         # spatially-split conv that needs a halo exchange; that still goes through
         # ``_conv_apply`` (its kernel treats a group of one, or a group that owns
         # whole conv-groups, as the identity gather). ``_spatial_sync_groups`` is
-        # non-empty iff some spatial axis is really split -- checking
-        # ``spatial_group`` alone would miss a non-innermost-only split.
+        # non-empty iff some spatial axis is really split -- checking only the
+        # innermost ``spatial_groups[-1]`` would miss a non-innermost-only split.
         if self._channel_local and not (
             self._spatial_sync_groups and self._needs_halo()
         ):
