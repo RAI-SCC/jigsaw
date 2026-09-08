@@ -14,12 +14,12 @@ The GPU-free checks:
 The GPU-only checks (``gpu_required``, and ``te_required`` for the TE ones;
 skipped where the hardware or ``transformer_engine`` is missing):
 
-* ``TestSdpaTeCoreDropoutReplay`` -- the ring's SDPA/TE inner cores draw an
-  opaque mask in a CUDA kernel and must replay it from the saved RNG state in
-  their backward.
+* ``TestSdpaTeCoreDropoutReplay`` -- the ring's SDPA and TE (cuDNN and flash)
+  inner cores draw an opaque mask in a CUDA kernel and must replay it from the
+  saved RNG state in their backward.
 * ``TestTeAttnDropoutReplay`` -- the non-ring ``TransformerEngineAttention``
-  wrapper, which drives the same fused kernels in ``bshd`` and replays their
-  mask through the same cuDNN ``rng_state``.
+  wrapper, which drives those same cores in ``bshd`` and replays their mask
+  through the same kernel-supplied ``rng_state``.
 """
 
 import pytest
@@ -28,7 +28,8 @@ import torch
 from jigsaw.modules.attention import Attention, DistributedAttention
 from jigsaw.modules.attention.functional.cores import math as math_core
 from jigsaw.modules.attention.functional.cores import sdpa as sdpa_core
-from jigsaw.modules.attention.functional.cores import te as te_core
+from jigsaw.modules.attention.functional.cores.te import cudnn as te_cudnn_core
+from jigsaw.modules.attention.functional.cores.te import flash as te_flash_core
 from jigsaw.modules.attention.functional.functional import combine_dropout_seed
 
 
@@ -204,7 +205,14 @@ class TestEvalModeDisablesDropout:
 _CORES = [
     pytest.param(sdpa_core, torch.float16, (32, 32), 3e-3, id="sdpa"),
     pytest.param(
-        te_core, torch.bfloat16, (), 2e-2, id="te", marks=pytest.mark.te_required
+        te_cudnn_core, torch.bfloat16, (), 2e-2, id="te-cudnn",
+        marks=pytest.mark.te_required,
+    ),
+    # te.flash needs flash_attn rather than transformer_engine, but the marker
+    # gates on the container that ships both.
+    pytest.param(
+        te_flash_core, torch.bfloat16, (), 2e-2, id="te-flash",
+        marks=pytest.mark.te_required,
     ),
 ]
 
@@ -282,10 +290,18 @@ class TestSdpaTeCoreDropoutReplay:
 # --------------------------------------------------------------------------- #
 @pytest.mark.gpu_required
 @pytest.mark.te_required
+@pytest.mark.parametrize(
+    "core",
+    [
+        pytest.param(te_cudnn_core, id="te-cudnn"),
+        pytest.param(te_flash_core, id="te-flash"),
+    ],
+)
 class TestTeAttnDropoutReplay:
     """``TransformerEngineAttention`` (the non-ring, ``bshd`` wrapper around the
-    same fused kernels as :mod:`~jigsaw.modules.attention.functional.cores.te`)
-    must replay its forward dropout mask in backward.
+    same cores as :mod:`~jigsaw.modules.attention.functional.cores.te`) must
+    replay its forward dropout mask in backward -- on either arm, so both are
+    covered here regardless of which one this GPU's architecture selects.
 
     Same observability trick as :class:`TestSdpaTeCoreDropoutReplay`, one level
     up: with ``S == d`` and ``V`` the identity per ``(b, h)``, the attention
@@ -293,9 +309,9 @@ class TestTeAttnDropoutReplay:
     opaque inside the kernel -- can be recovered from the output and used to
     build a differentiable ground-truth reference.
 
-    The wrapper carries cuDNN's own ``rng_state`` from ``forward`` into
-    ``fused_attn_bwd``; there is no forward recompute and no ambient CPU/CUDA
-    RNG snapshot involved (the mask is not drawn from the ambient stream).
+    The wrapper carries the kernel's own ``rng_state`` from ``forward`` into its
+    backward; there is no forward recompute and no ambient CPU/CUDA RNG snapshot
+    involved (the mask is not drawn from the ambient stream).
     """
 
     B, H, S = 2, 3, 32
@@ -319,19 +335,21 @@ class TestTeAttnDropoutReplay:
         v.requires_grad_(requires_grad)
         return q, k, v
 
-    def _apply(self, q, k, v, dropout_p):
+    def _apply(self, q, k, v, dropout_p, core):
         from jigsaw.modules.attention.attention import TransformerEngineAttention
 
-        return TransformerEngineAttention.apply(q, k, v, self.SCALE, dropout_p)[0]
+        return TransformerEngineAttention.apply(
+            q, k, v, self.SCALE, dropout_p, core
+        )[0]
 
     def _bhsd(self, t):
         """``[b, s, h*d]`` (the wrapper's output layout) -> ``[b, h, s, d]``."""
         return t.reshape(self.B, self.S, self.H, self.D).transpose(1, 2)
 
-    def test_forward_mask_is_stochastic_and_scaled(self) -> None:
+    def test_forward_mask_is_stochastic_and_scaled(self, core) -> None:
         q, k, v = self._qkv()
-        out0 = self._bhsd(self._apply(q, k, v, self.P))
-        out1 = self._bhsd(self._apply(q, k, v, self.P))
+        out0 = self._bhsd(self._apply(q, k, v, self.P, core))
+        out1 = self._bhsd(self._apply(q, k, v, self.P, core))
         assert not torch.allclose(out0, out1)  # fresh mask each call
 
         qb, kb = (t.transpose(1, 2).float() for t in (q, k))
@@ -342,16 +360,16 @@ class TestTeAttnDropoutReplay:
             out0.float(), p_ref * kept / (1 - self.P), atol=self.TOL, rtol=self.TOL
         )
 
-    def test_dropout_p_zero_is_deterministic(self) -> None:
+    def test_dropout_p_zero_is_deterministic(self, core) -> None:
         """Sanity: the stochasticity above is the dropout, not the kernel."""
         q, k, v = self._qkv()
         torch.testing.assert_close(
-            self._apply(q, k, v, 0.0), self._apply(q, k, v, 0.0)
+            self._apply(q, k, v, 0.0, core), self._apply(q, k, v, 0.0, core)
         )
 
-    def test_backward_replays_the_forward_mask(self) -> None:
+    def test_backward_replays_the_forward_mask(self, core) -> None:
         q, k, v = self._qkv(requires_grad=True)
-        out = self._apply(q, k, v, self.P)
+        out = self._apply(q, k, v, self.P, core)
         grad_out = torch.randn_like(out)
         out.backward(grad_out)
 
@@ -371,11 +389,11 @@ class TestTeAttnDropoutReplay:
                 got.float().transpose(1, 2), ref, atol=self.TOL, rtol=self.TOL
             )
 
-    def test_backward_does_not_draw_a_fresh_mask(self) -> None:
+    def test_backward_does_not_draw_a_fresh_mask(self, core) -> None:
         """Guard against the check above being vacuous: a *different* mask
         almost surely gives a different gradient."""
         q, k, v = self._qkv(requires_grad=True)
-        out = self._apply(q, k, v, self.P)
+        out = self._apply(q, k, v, self.P, core)
         grad_out = torch.randn_like(out)
         out.backward(grad_out)
 

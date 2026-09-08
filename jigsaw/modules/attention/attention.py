@@ -14,51 +14,50 @@ from .config import AttnBackend
 from .functional.cores import te as te_core
 from .functional.functional import RingAttentionFunction
 
-#: Whether the TE fused-attention kernels can be called at all. Both TE paths --
-#: the ring's inner core and :class:`TransformerEngineAttention` below -- go
-#: through :mod:`.functional.cores.te`, so one probe covers both: it is false if
-#: ``transformer_engine`` is missing *or* if its ``cpp_extensions`` surface moved.
+#: Whether ``attn_backend="te"`` can be run at all. Both TE paths -- the ring's
+#: inner core and :class:`TransformerEngineAttention` below -- go through
+#: :mod:`.functional.cores.te`, so one probe covers both: it is false only when
+#: *neither* arm is importable (no ``transformer_engine`` for cuDNN, no
+#: ``flash_attn`` for flash).
 JIGSAW_TE_AVAILABLE = te_core.TE_CORE_AVAILABLE
 
 if JIGSAW_TE_AVAILABLE:
 
     class TransformerEngineAttention(torch.autograd.Function):
-        """Autograd wrapper around TransformerEngine's fused (cuDNN) attention kernels.
+        """Autograd wrapper around the TransformerEngine attention kernels.
 
-        Drives :mod:`.functional.cores.te` -- the same ``fused_attn_fwd`` /
-        ``fused_attn_bwd`` pair the ring's inner core uses -- in the non-ring,
-        ``bshd`` configuration, so ``attn_backend="te"`` means the same cuDNN
-        kernels whether or not ``ring`` is set.
+        Drives :mod:`.functional.cores.te` -- the same cores the ring's inner
+        step uses -- in the non-ring, ``bshd`` configuration, so
+        ``attn_backend="te"`` means the same kernel whether or not ``ring`` is
+        set. Which kernel that is depends on the GPU (cuDNN on Hopper+,
+        ``flash_attn`` on Ampere) and is resolved once into ``self.te_core`` by
+        :func:`.functional.cores.te.select_core`, then passed in as ``core``.
 
         Replaces a wrapper around ``te.DotProductAttention``. That module is an
         ``autograd.Function`` internally, hence a graph boundary, so the wrapper
         had to recompute the whole forward under ``enable_grad`` just to get a
         graph to differentiate -- fwd, fwd, bwd per training step -- plus a
         CPU/CUDA RNG snapshot/restore dance so the recompute redrew the
-        forward's dropout mask. Calling the kernels directly gives
-        ``fused_attn_bwd`` and cuDNN's own ``rng_state`` instead: no recompute,
-        no RNG bookkeeping. Measured on an A100 (b=2, h=8, d=64, bf16), with
-        both paths on the cuDNN backend: 1.2x-2.0x faster fwd+bwd across
-        s=512..8192, the wider margins at short sequences where
-        ``DotProductAttention``'s per-call Python (its ``AttentionParams``
-        backend-selection cache) also disappears.
+        forward's dropout mask. Calling the kernels directly gives their real
+        backward and their own ``rng_state`` instead: no recompute, no RNG
+        bookkeeping. Measured on an A100 (b=2, h=8, d=64, bf16), holding the
+        kernel fixed: 1.2x-2.0x faster fwd+bwd across s=512..8192, the wider
+        margins at short sequences where ``DotProductAttention``'s per-call
+        Python (its ``AttentionParams`` backend-selection cache) also disappears.
 
-        The softmax LSE the core returns is dropped here (the ring needs it for
+        The softmax LSE the cores return is dropped here (the ring needs it for
         its online-softmax merge; a single un-chunked call does not). That costs
-        nothing: cuDNN computes the LSE regardless as the softmax normaliser and
-        writes it out for its own backward.
+        nothing: both kernels compute the LSE regardless as the softmax
+        normaliser and write it out for their own backward.
 
-        Trade-offs vs ``DotProductAttention``: no FP8, bias, mask or GQA support,
-        and -- the substantive one -- no backend *dispatch*.
-        ``DotProductAttention`` picks per shape between flash-attn, the cuDNN
-        fused kernels and an unfused path, and on this container (TE 2.12,
-        A100, no mask, d=64) it picks flash-attn every time, so the switch also
-        pins the kernel. That is a win or a wash except for long sequences with
-        dropout, where cuDNN fused is the slower kernel (s=8192, p=0.1: 10.9 ms
-        vs 8.9 ms fwd+bwd) -- ``attn_backend="sdpa"``, which is torch's flash
-        kernel, is the escape hatch there. Where cuDNN has no fused backend at
-        all, :func:`.functional.cores.te._fused_attn_backend` raises rather than
-        falling back silently.
+        What is given up relative to ``DotProductAttention``: FP8, bias, mask and
+        GQA support, and its per-*shape* backend dispatch. The latter costs
+        little in practice -- for jigsaw's problem class (non-FP8, no mask, no
+        bias, no GQA) TE's selector returns the same verdict for every shape
+        probed on an A100, which is what makes the coarse per-architecture rule
+        in :func:`.functional.cores.te.select_core` a faithful stand-in. Where a
+        kernel cannot serve a shape at all, the core raises rather than falling
+        back silently.
 
         ``torch.vmap`` support (``torch_blue``'s Bayesian ensembles) survives the
         move: see the :meth:`vmap` staticmethod.
@@ -71,8 +70,9 @@ if JIGSAW_TE_AVAILABLE:
             v: torch.Tensor,
             scale: float,
             dropout_p: float,
+            core: Any,
         ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-            """Run TE fused attention.
+            """Run TE attention on ``core``.
 
             Parameters
             ----------
@@ -85,6 +85,10 @@ if JIGSAW_TE_AVAILABLE:
             dropout_p: float
                 Attention dropout probability. Already gated on training mode by
                 the caller; this function has no ``self.training`` to consult.
+            core: module
+                The TE core to run -- :mod:`.functional.cores.te.cudnn` or
+                :mod:`.functional.cores.te.flash`, resolved once per module by
+                :func:`.functional.cores.te.select_core`.
 
             Returns
             -------
@@ -96,19 +100,20 @@ if JIGSAW_TE_AVAILABLE:
                 :meth:`setup_context` can hand them to :meth:`backward`; callers
                 take ``[0]``.
             """
-            out, lse, rng_state = te_core.forward(
+            out, lse, rng_state = core.forward(
                 q, k, v, scale, dropout_p, layout="bshd"
             )
             return out.flatten(-2), lse, rng_state
 
         @staticmethod
         def setup_context(ctx: Any, inputs: tuple, output: tuple) -> None:
-            """Save what ``fused_attn_bwd`` needs: q/k/v, out, LSE and the RNG state."""
-            _q, _k, _v, scale, dropout_p = inputs
+            """Save what the backward kernel needs: q/k/v, out, LSE and the RNG state."""
+            _q, _k, _v, scale, dropout_p, core = inputs
             out, lse, rng_state = output
             ctx.save_for_backward(*inputs[:3], out, lse, rng_state)
             ctx.scale = scale
             ctx.dropout_p = dropout_p
+            ctx.core = core
             ctx.mark_non_differentiable(lse)
 
         @staticmethod
@@ -118,10 +123,10 @@ if JIGSAW_TE_AVAILABLE:
             _grad_lse: Optional[torch.Tensor],
             _grad_rng: Optional[torch.Tensor],
         ) -> tuple[Optional[torch.Tensor], ...]:
-            """dq/dk/dv straight from ``fused_attn_bwd`` -- no forward recompute."""
+            """dq/dk/dv straight from the kernel's backward -- no forward recompute."""
             q, k, v, out, lse, rng_state = ctx.saved_tensors
             bshd = q.shape  # [b, s, h, d]; forward merged (h, d) in its output
-            dq, dk, dv = te_core.backward(
+            dq, dk, dv = ctx.core.backward(
                 grad_out.reshape(bshd),
                 q,
                 k,
@@ -133,7 +138,7 @@ if JIGSAW_TE_AVAILABLE:
                 rng_state=rng_state,
                 layout="bshd",
             )
-            return dq, dk, dv, None, None
+            return dq, dk, dv, None, None, None
 
         @staticmethod
         def vmap(
@@ -144,6 +149,7 @@ if JIGSAW_TE_AVAILABLE:
             v: torch.Tensor,
             scale: float,
             dropout_p: float,
+            core: Any,
         ) -> tuple[tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]], tuple]:
             """Fold the vmapped (samples) axis into the batch, run one plain call, unfold.
 
@@ -176,7 +182,7 @@ if JIGSAW_TE_AVAILABLE:
             v = v.flatten(0, 1)
 
             out, lse, rng_state = TransformerEngineAttention.apply(
-                q, k, v, scale, dropout_p
+                q, k, v, scale, dropout_p, core
             )
 
             # Unfold the samples dimension back out to the front.
@@ -360,12 +366,16 @@ class DistributedAttention(torch.nn.Module):
     def _select_attn_core(self) -> Callable[..., torch.Tensor]:
         """Resolve ``self.attn_backend`` to its non-ring attention core.
 
-        The ``TE`` arm needs no per-module state: it goes straight to the fused
-        kernels via :class:`TransformerEngineAttention`, parameterised per call
-        by ``self.scale`` / ``self.dropout_p``.
+        The ``TE`` arm resolves *which* TE kernel this GPU gets (``self.te_core``);
+        it needs no other per-module state, going straight to that core via
+        :class:`TransformerEngineAttention`, parameterised per call by
+        ``self.scale`` / ``self.dropout_p``.
         """
         match self.attn_backend:
             case AttnBackend.TE:
+                # cuDNN on Hopper+, flash_attn on Ampere -- resolved once here so
+                # nothing branches per call. See `functional.cores.te`.
+                self.te_core = te_core.select_core(self.device)
                 return self._transformer_attn_core
             case AttnBackend.MATH:
                 return self._attn_core_math
@@ -439,9 +449,10 @@ class DistributedAttention(torch.nn.Module):
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Attention computation on TransformerEngine's fused (cuDNN) kernels.
+        Attention computation on the TransformerEngine kernels.
 
-        Shares :mod:`.functional.cores.te` with the ring's inner core; see
+        Runs ``self.te_core`` -- cuDNN on Hopper+, ``flash_attn`` on Ampere --
+        shared with the ring's inner core; see
         :class:`TransformerEngineAttention` for why the kernels are called
         directly rather than through ``te.DotProductAttention``.
 
@@ -465,7 +476,7 @@ class DistributedAttention(torch.nn.Module):
         # There is no dropout nn.Module here to apply its own training-mode
         # gate, so gate it the way the sdpa/math cores do.
         out, _lse, _rng_state = TransformerEngineAttention.apply(
-            q, k, v, self.scale, self.dropout_p if self.training else 0.0
+            q, k, v, self.scale, self.dropout_p if self.training else 0.0, self.te_core
         )
         return cast(torch.Tensor, out)
 

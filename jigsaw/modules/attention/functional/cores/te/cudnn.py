@@ -1,8 +1,11 @@
-"""TransformerEngine fused-attention core.
+"""TransformerEngine's cuDNN fused-attention core (``te.cudnn``).
 
-The ring's online-softmax merge (:func:`..forward._attend_step`) needs a per-chunk
+One of the two kernels ``attn_backend="te"`` dispatches to -- the Hopper-and-newer
+arm; :mod:`.flash` is the Ampere arm. See :mod:`..te` for the rule.
+
+The ring's online-softmax merge (:func:`...forward._attend_step`) needs a per-chunk
 log-sum-exp from every inner attention call, and its backward
-(:func:`..backward.ring_backward`) recomputes ``dQ/dK/dV`` from the *global* output
+(:func:`...backward.ring_backward`) recomputes ``dQ/dK/dV`` from the *global* output
 and LSE. ``te.DotProductAttention`` returns only the output, so this module drives
 TransformerEngine's cuDNN fused-attention kernels directly via
 ``fused_attn_fwd`` / ``fused_attn_bwd``, whose ``aux_ctx_tensors[0]`` is the
@@ -16,18 +19,21 @@ its own backward, so taking it costs one unused ``(b, h, s)`` fp32 tensor.
 What calling the kernels directly buys is the explicit ``fused_attn_bwd``,
 which ``te.DotProductAttention`` hides behind its own ``autograd.Function`` --
 see :class:`~jigsaw.modules.attention.attention.TransformerEngineAttention` for
-what that cost and what the dispatch it also gives up is worth.
+what that cost.
+
+This is also the only TE path that can ever carry FP8, though this core does not
+implement it yet.
 
 Scope: non-FP8, no bias, no mask, no GQA. ``layout`` selects the caller's
 tensor convention (``"bhsd"`` for the ring, ``"bshd"`` for the non-ring core --
 cuDNN speaks only the latter, so ``"bhsd"`` is transposed in and out); LSE is
 ``(b, h, s)`` regardless.
 
-Dropout replay follows the same strategy as :mod:`.sdpa`: cuDNN generates its
+Dropout replay follows the same strategy as :mod:`..sdpa`: cuDNN generates its
 own opaque RNG state internally (``aux_ctx_tensors[1]`` from
 ``fused_attn_fwd``) rather than accepting a caller-supplied seed, so this core
 threads that state back verbatim as ``rng_state`` for :func:`backward` to
-replay, instead of rederiving a mask from an int like :mod:`.math` does.
+replay, instead of rederiving a mask from an int like :mod:`..math` does.
 
 Covered by the ``te_required`` + ``gpu_required`` ring parity test. The
 dropout path is exercised by
@@ -58,9 +64,9 @@ try:
         fused_attn_fwd,
     )
 
-    TE_CORE_AVAILABLE = True
+    CUDNN_CORE_AVAILABLE = True
 except Exception:  # pragma: no cover - TE not installed (no container)
-    TE_CORE_AVAILABLE = False
+    CUDNN_CORE_AVAILABLE = False
 
 
 _LAYOUT = "bshd_bshd_bshd"

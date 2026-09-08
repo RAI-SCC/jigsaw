@@ -65,8 +65,9 @@ class AttnBackend(str, Enum):
     Applies to both the plain :class:`~..attention.DistributedAttention` core and
     the ring's per-chunk inner attention.
 
-    - ``TE``: TransformerEngine fused (cuDNN) kernels. CUDA + ``transformer_engine``
-      only; the ring uses :mod:`.functional.cores.te`.
+    - ``TE``: whichever kernel TransformerEngine would run on this GPU -- the
+      cuDNN fused kernels on Hopper and newer, the ``flash_attn`` package on
+      Ampere. CUDA only; see :mod:`.functional.cores.te`.
     - ``SDPA``: PyTorch scaled-dot-product attention -- the flash kernel on CUDA
       (with a math fallback), the math kernel on CPU. Default.
     - ``MATH``: the unfused ``softmax(QK^T)V`` reference. Any device/shape/dtype.
@@ -112,7 +113,11 @@ def _select_offloader(
 
 
 def _te_core_or_raise() -> None:
-    """Guard: the TE fused-attention core needs ``transformer_engine`` + CUDA."""
+    """Guard: the TE cores need ``transformer_engine`` or ``flash_attn``, plus CUDA.
+
+    Either arm of :mod:`.functional.cores.te` satisfies this; which one actually
+    runs is :func:`.functional.cores.te.select_core`'s call.
+    """
     from .functional.cores.te import TE_CORE_AVAILABLE
 
     if not TE_CORE_AVAILABLE:
@@ -127,6 +132,8 @@ def _select_attn_core_forward_fn(
     """Pick the ring inner-attention forward core for ``device`` / ``attn_backend``.
 
     ``SDPA`` keeps the historical device-based pick (flash on CUDA, math on CPU).
+    ``TE`` picks by GPU architecture -- cuDNN on Hopper and newer, ``flash_attn``
+    on Ampere; see :func:`.functional.cores.te.select_core`.
     Cores live in :mod:`.functional.cores`; each exposes ``forward`` / ``backward``.
     """
     from .functional.cores import math as math_core
@@ -137,7 +144,7 @@ def _select_attn_core_forward_fn(
             _te_core_or_raise()
             from .functional.cores import te as te_core
 
-            return te_core.forward
+            return te_core.select_core(device).forward
         case AttnBackend.MATH:
             return math_core.forward
         case AttnBackend.SDPA:
@@ -162,7 +169,7 @@ def _select_attn_core_backward_fn(
             _te_core_or_raise()
             from .functional.cores import te as te_core
 
-            return te_core.backward
+            return te_core.select_core(device).backward
         case AttnBackend.MATH:
             return math_core.backward
         case AttnBackend.SDPA:

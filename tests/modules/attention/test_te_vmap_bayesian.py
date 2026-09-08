@@ -44,6 +44,7 @@ import torch.distributed as dist
 from torch.func import functional_call, grad, stack_module_state, vmap
 
 from jigsaw.modules.attention import attention
+from jigsaw.modules.attention.functional.cores import te as te_cores
 from tests.parity import assert_close
 
 # TE fused attention needs fp16/bf16 and (on CUDA) the attn core runs bf16
@@ -74,18 +75,20 @@ class TestTransformerEngineAttentionVmap:
         ]
 
     @staticmethod
-    def _f(q, k, v, scale):
+    def _f(q, k, v, scale, core):
         from jigsaw.modules.attention.attention import TransformerEngineAttention
 
         # apply() returns (out, logsumexp, rng_state); only the output is used
         # outside the ring.
-        return TransformerEngineAttention.apply(q, k, v, scale, 0.0)[0]
+        return TransformerEngineAttention.apply(q, k, v, scale, 0.0, core)[0]
 
     def test_forward_matches_loop(self, device: torch.device) -> None:
         qe, ke, ve = self._qkv(device)
 
+        core = te_cores.select_core(device)
+
         def f(q, k, v):
-            return self._f(q, k, v, self.SCALE)
+            return self._f(q, k, v, self.SCALE, core)
 
         got = vmap(f)(qe, ke, ve)
         assert got.shape == (self.E, self.B, self.S, self.H * self.D)
@@ -100,8 +103,10 @@ class TestTransformerEngineAttentionVmap:
     def test_grad_matches_loop(self, device: torch.device) -> None:
         qe, ke, ve = self._qkv(device, requires_grad=True)
 
+        core = te_cores.select_core(device)
+
         def f(q, k, v):
-            return self._f(q, k, v, self.SCALE)
+            return self._f(q, k, v, self.SCALE, core)
 
         vmap(f)(qe, ke, ve).float().pow(2).sum().backward()
         got = (qe.grad, ke.grad, ve.grad)

@@ -31,6 +31,7 @@ from jigsaw.modules.attention.config import (
 )
 from jigsaw.modules.attention.functional.cores import math as math_core
 from jigsaw.modules.attention.functional.cores import sdpa as sdpa_core
+from jigsaw.modules.attention.functional.cores import te as te_cores
 
 CPU = torch.device("cpu")
 
@@ -106,6 +107,58 @@ class TestSelectRingCore:
             _select_attn_core_forward_fn(CPU, "te")
         with pytest.raises(RuntimeError, match="needs transformer_engine"):
             _select_attn_core_backward_fn(CPU, "te")
+
+
+class TestTeCoreSelection:
+    """``select_core``: cuDNN on Hopper and newer, ``flash_attn`` on Ampere."""
+
+    def test_env_override_wins(self, monkeypatch):
+        monkeypatch.setenv("JIGSAW_TE_CORE", "cudnn")
+        assert te_cores.select_core(torch.device("cuda")) is te_cores.cudnn
+        monkeypatch.setenv("JIGSAW_TE_CORE", "flash")
+        assert te_cores.select_core(torch.device("cuda")) is te_cores.flash
+
+    def test_env_override_rejects_unknown(self, monkeypatch):
+        monkeypatch.setenv("JIGSAW_TE_CORE", "cudnnn")
+        with pytest.raises(ValueError, match="JIGSAW_TE_CORE"):
+            te_cores.select_core(CPU)
+
+    def test_cpu_resolves_to_cudnn(self, monkeypatch):
+        """Historical behaviour: the selector succeeds, the kernel call reports
+        that there is no GPU."""
+        monkeypatch.delenv("JIGSAW_TE_CORE", raising=False)
+        assert te_cores.select_core(CPU) is te_cores.cudnn
+
+    @pytest.mark.parametrize(
+        "capability,expected",
+        [((8, 0), "flash"), ((8, 6), "flash"), ((9, 0), "cudnn"), ((10, 0), "cudnn")],
+    )
+    def test_architecture_rule(self, monkeypatch, capability, expected):
+        monkeypatch.delenv("JIGSAW_TE_CORE", raising=False)
+        monkeypatch.setattr(
+            torch.cuda, "get_device_capability", lambda device=None: capability
+        )
+        chosen = te_cores.select_core(torch.device("cuda"))
+        assert chosen is getattr(te_cores, expected)
+
+    def test_falls_back_when_preferred_arm_missing(self, monkeypatch):
+        """A container without ``flash_attn`` still runs ``te`` on Ampere."""
+        monkeypatch.delenv("JIGSAW_TE_CORE", raising=False)
+        monkeypatch.setattr(
+            torch.cuda, "get_device_capability", lambda device=None: (8, 0)
+        )
+        monkeypatch.setattr(te_cores.flash, "FLASH_CORE_AVAILABLE", False)
+        assert te_cores.select_core(torch.device("cuda")) is te_cores.cudnn
+
+    def test_raises_when_neither_arm_available(self, monkeypatch):
+        monkeypatch.delenv("JIGSAW_TE_CORE", raising=False)
+        monkeypatch.setattr(
+            torch.cuda, "get_device_capability", lambda device=None: (9, 0)
+        )
+        monkeypatch.setattr(te_cores.flash, "FLASH_CORE_AVAILABLE", False)
+        monkeypatch.setattr(te_cores.cudnn, "CUDNN_CORE_AVAILABLE", False)
+        with pytest.raises(RuntimeError, match="neither is importable"):
+            te_cores.select_core(torch.device("cuda"))
 
 
 class TestTeCoreGuard:
@@ -245,21 +298,18 @@ class TestRingAttentionConfigBackend:
 @pytest.mark.gpu_required
 class TestBackendWithTe:
     def test_distributed_attention_te_is_wired(self, device, solo_group):
-        from jigsaw.modules.attention.attention import (
-            DistributedAttention,
-            TransformerEngineAttention,
-        )
+        from jigsaw.modules.attention.attention import DistributedAttention
 
         model = _build_attn("te", device, solo_group)
 
         assert model.attn_backend is AttnBackend.TE
         assert model.te is True
-        # The TE core carries no per-module state (no `te.DotProductAttention`
-        # submodule): it calls the fused kernels through the shared wrapper,
-        # parameterised per call by `self.scale` / `self.dropout_p`.
+        # The TE core carries no `te.DotProductAttention` submodule: it calls the
+        # kernels through the shared wrapper, parameterised per call by
+        # `self.scale` / `self.dropout_p` and by the core resolved here.
         assert model.attn_core.__func__ is DistributedAttention._transformer_attn_core
         assert not hasattr(model, "attn")
-        assert TransformerEngineAttention is not None
+        assert model.te_core is te_cores.select_core(device)
 
     def test_availability_flags_are_true(self):
         from jigsaw.modules.attention.attention import JIGSAW_TE_AVAILABLE
@@ -278,6 +328,7 @@ class TestBackendWithTe:
 
         batch, seq, heads, head_dim = 2, 16, 4, 32
         scale = head_dim**-0.5
+        core = te_cores.select_core(device)
 
         torch.manual_seed(0)
         q, k, v = (
@@ -289,7 +340,9 @@ class TestBackendWithTe:
         for t in (q, k, v):
             t.requires_grad_(True)
 
-        out, lse, rng_state = TransformerEngineAttention.apply(q, k, v, scale, 0.0)
+        out, lse, rng_state = TransformerEngineAttention.apply(
+            q, k, v, scale, 0.0, core
+        )
         assert out.shape == (batch, seq, heads * head_dim)
         # The LSE the ring needs is produced here too and simply dropped by the
         # non-ring core; `rng_state` is None without dropout.

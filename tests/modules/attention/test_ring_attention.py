@@ -4,6 +4,7 @@ import torch.distributed as dist
 
 import jigsaw.modules.attention.config as config
 from jigsaw.modules.attention.functional import backward, forward, functional
+from jigsaw.modules.attention.functional.cores import te as te_cores
 from jigsaw.utils_aggregate import (
     gather_1d_results,
 )
@@ -365,9 +366,10 @@ def test_ring_forward_backward_te(
     """Ring forward/backward with the TransformerEngine inner core vs full SDPA.
 
     Exercises :mod:`jigsaw.modules.attention.functional.cores.te` inside the ring:
-    ``fused_attn_fwd`` supplies the per-chunk ``(out, lse)`` for the online-softmax
-    merge and ``fused_attn_bwd`` recomputes ``dQ/dK/dV`` from the saved *global*
-    ``out`` / ``lse``.
+    whichever arm this GPU selects supplies the per-chunk ``(out, lse)`` for the
+    online-softmax merge, and its backward recomputes ``dQ/dK/dV`` from the saved
+    *global* ``out`` / ``lse``. Set ``JIGSAW_TE_CORE`` to exercise the arm this
+    architecture does not pick.
     """
     process_mesh_dict = process_mesh_dict_4x1
     ring_config = config.RingAttentionConfig(
@@ -381,7 +383,11 @@ def test_ring_forward_backward_te(
         attn_backend=config.AttnBackend.TE,
     )
     assert ring_config.attn_core_forward_fn.__name__ == "forward"
-    assert ring_config.attn_core_forward_fn.__module__.endswith("functional.cores.te")
+    # `te` resolves to one of two arms by GPU architecture (cuDNN on Hopper+,
+    # flash_attn on Ampere), so pin it to whichever `select_core` names here.
+    expected = te_cores.select_core(device).__name__
+    assert ring_config.attn_core_forward_fn.__module__ == expected
+    assert expected.endswith((".te.cudnn", ".te.flash"))
 
     local_rank = dist.get_rank(group=process_mesh_dict["row"])
     world_size = dist.get_world_size(group=process_mesh_dict["row"])
