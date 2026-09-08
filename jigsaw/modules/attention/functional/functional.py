@@ -309,7 +309,12 @@ class RingAttentionFunction(torch.autograd.Function):
             q,
             out,
             x,
-            lse.mT,
+            # `(b, h, s)`, exactly as `ring_forward` produced it and as every
+            # inner core's backward expects it. (Was saved `.mT`'d to `(b, s, h)`
+            # here; `ring_backward` passes it straight through, so the cores got
+            # the transposed tensor -- a silent stride error for SDPA/TE, a hard
+            # shape error for the math core, whenever heads != seq_local.)
+            lse,
             w_qkv,
             *chunks_to_save,  # *[t for pair in chunks_to_save for t in pair]
             *rng_states,

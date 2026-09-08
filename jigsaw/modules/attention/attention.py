@@ -339,13 +339,52 @@ class DistributedAttention(torch.nn.Module):
         self.heads = heads // self.channel_group.size()
         self.scale = (embed_dim // heads) ** -0.5
 
-        self.config = (
-            attention_config.RingAttentionConfig(
-                device=device, attn_backend=self.attn_backend
+        self.config = self._resolve_ring_config(ring, config, device)
+
+    def _resolve_ring_config(
+        self,
+        ring: bool,
+        config: Optional[attention_config.RingAttentionConfig],
+        device: torch.device,
+    ) -> Optional[attention_config.RingAttentionConfig]:
+        """Pick the ``RingAttentionConfig`` for this module.
+
+        With channel/tensor parallelism the fused ``qkv`` projection is split
+        across the channel group (a distributed ``DistributedXWT`` matmul), so
+        the ring cannot rebuild K/V from a circulated ``x`` chunk with the plain
+        local matmul in :func:`..functional.functional._compute_kv`. The ring
+        must instead circulate the already-projected K/V directly -- i.e.
+        ``send_in_forward=KV`` *and* ``save_for_backward=KV`` (the only pairing
+        that never calls ``_compute_kv``, forward or backward). A default config
+        is built that way; an explicit one is required to already be.
+        """
+        if not ring:
+            return config
+
+        channel_parallel = self.channel_group.size() > 1
+        if config is None:
+            kwargs: dict = dict(device=device, attn_backend=self.attn_backend)
+            if channel_parallel:
+                kwargs.update(
+                    send_in_forward=attention_config.SendForward.KV,
+                    save_for_backward=attention_config.SaveBackward.KV,
+                )
+            return attention_config.RingAttentionConfig(**kwargs)
+
+        if channel_parallel and (
+            config.send_in_forward != attention_config.SendForward.KV
+            or config.save_for_backward != attention_config.SaveBackward.KV
+        ):
+            raise ValueError(
+                "ring attention with channel/tensor parallelism "
+                f"(channel_group.size()={self.channel_group.size()}) needs "
+                "send_in_forward=KV and save_for_backward=KV -- the qkv "
+                "projection is sharded across the channel group, so the ring "
+                "cannot recompute K/V from a circulated x chunk. Got "
+                f"send_in_forward={config.send_in_forward.name}, "
+                f"save_for_backward={config.save_for_backward.name}."
             )
-            if ring and config is None
-            else config
-        )
+        return config
 
     @staticmethod
     def _resolve_backend(attn_backend: AttnBackend) -> AttnBackend:
