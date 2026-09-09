@@ -30,6 +30,8 @@ def forward(
     scale: float,
     dropout_p: float,
     seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
+    *,
+    layout: str = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Flash attention forward pass. Returns ``(out, logsumexp, rng_state)``.
 
@@ -50,6 +52,9 @@ def forward(
       only and stay ``None`` here.
     * backward returns ``(dq, dk, dv)`` in the same ``(B, H, S, d)`` layout.
     """
+    assert layout == "bhsd", (
+        f"sdpa core is bhsd-only; got layout={layout!r}. The bshd ring is TE-only."
+    )
     q, k, v = [x.to(torch.float16) for x in (q, k, v)]
     (
         out,
@@ -98,6 +103,7 @@ def backward(
     dropout_p: float = 0.0,
     seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
     rng_state: Optional[torch.Tensor] = None,
+    layout: str = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward call to flash attention. Returns (dq, dk, dv).
 
@@ -116,6 +122,9 @@ def backward(
     :func:`..backward.ring_backward` hands it back downcast to the model dtype).
     Gradients are returned in the input dtype.
     """
+    assert layout == "bhsd", (
+        f"sdpa core is bhsd-only; got layout={layout!r}. The bshd ring is TE-only."
+    )
     if rng_state is not None:
         philox_seed, philox_offset = rng_state[:-1], rng_state[-1]
     else:

@@ -98,6 +98,25 @@ export MASTER_PORT="${MASTER_PORT:-29500}"
 export NVTE_FRAMEWORK="${NVTE_FRAMEWORK:-pytorch}"
 export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
 
+# --- Triton / Inductor runtime-build toolchain ------------------------------
+# Triton (and Inductor's C++ wrapper) compile a small shim at runtime the first
+# time a kernel is used -- jigsaw hits this in the ring attention fused merge
+# and in `xw_twoway`. Two things in the NGC image + HoreKa combination break
+# that build; fix both unless the caller opted out with JIGSAW_FIX_TOOLCHAIN=0:
+#   * The host shell leaks CC/CXX pointing at an Intel oneAPI `icx`/`icpx` that
+#     is not in the image. Drop them so the build falls back to the image gcc.
+#   * Triton links against `libcuda.so.1`, but the image's
+#     /usr/local/cuda/compat copies are unresolvable in the container mount;
+#     apptainer's `--nv` injects a working driver into /.singularity.d/libs;
+#     point TRITON_LIBCUDA_PATH there. It is an *in-container* path so it
+#     cannot be probed from here -- jigsaw's merge kernel degrades to its eager
+#     path if the value is ever wrong, and a caller on a non-apptainer runtime
+#     can export the right dir (or JIGSAW_FIX_TOOLCHAIN=0) themselves.
+if [[ "${JIGSAW_FIX_TOOLCHAIN:-1}" == "1" ]]; then
+    case "${CC:-}" in */icx | */icpx | *oneapi* | *Intel_OneAPI*) unset CC CXX ;; esac
+    export TRITON_LIBCUDA_PATH="${TRITON_LIBCUDA_PATH:-/.singularity.d/libs}"
+fi
+
 # --- assemble the apptainer invocation ------------------------------------
 runtime="${JIGSAW_APPTAINER:-apptainer}"
 
@@ -121,7 +140,7 @@ env_args=(
     --env "CUDA_DEVICE_MAX_CONNECTIONS=$CUDA_DEVICE_MAX_CONNECTIONS"
 )
 for v in NCCL_SOCKET_IFNAME NCCL_DEBUG NVTE_FUSED_ATTN NVTE_FLASH_ATTN \
-         WORLD_SIZE RANK LOCAL_RANK; do
+         WORLD_SIZE RANK LOCAL_RANK TRITON_LIBCUDA_PATH; do
     [[ -n "${!v:-}" ]] && env_args+=(--env "$v=${!v}")
 done
 

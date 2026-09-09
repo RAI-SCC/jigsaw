@@ -32,8 +32,32 @@ def combine_dropout_seed(base_seed: int, local_rank: int, global_chunk_idx: int)
     ) % _SEED_MODULUS
 
 
+#: Ring q/k/v/out layouts. ``"bhsd"`` is the ring's historical convention (SDPA /
+#: math cores); ``"bshd"`` is what the TE cores speak natively, so the TE ring
+#: carries it end to end and skips every per-chunk transpose. Set on
+#: :class:`~..config.RingAttentionConfig.core_layout`.
+_SEQ_DIM = {"bhsd": 2, "bshd": 1}
+
+
+def seq_dim(layout: str) -> int:
+    """Axis holding the sequence in a ring q/k/v/out tensor of ``layout``."""
+    return _SEQ_DIM[layout]
+
+
+def bhnd(shape: torch.Size, layout: str) -> tuple[int, int, int, int]:
+    """``(b, h, n, d)`` from a ring q/k/v/out ``shape`` in ``layout``."""
+    b, x, y, d = shape
+    return (b, y, x, d) if layout == "bshd" else (b, x, y, d)
+
+
 def _compute_kv(
-    xj: torch.Tensor, w_qkv: torch.Tensor, b: int, n_local: int, h: int, d: int
+    xj: torch.Tensor,
+    w_qkv: torch.Tensor,
+    b: int,
+    n_local: int,
+    h: int,
+    d: int,
+    layout: str = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute key and value tensors from an input chunk.
 
@@ -51,15 +75,19 @@ def _compute_kv(
         Number of attention heads.
     d : int
         Embedding dimension per head.
+    layout : str
+        ``"bhsd"`` (default) or ``"bshd"`` -- the layout of the returned
+        ``kj`` / ``vj`` (and the stacked ``kv``, minus its leading pair axis).
 
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         The fused key-value tensor and its key and value views.
     """
-    kv = (
-        (xj @ w_qkv[d * h :, :].mT).reshape(b, n_local, 2, h, d).permute(2, 0, 3, 1, 4)
-    ).contiguous()
+    kv2 = (xj @ w_qkv[d * h :, :].mT).reshape(b, n_local, 2, h, d)
+    # (b, n, 2, h, d) -> (2, b, h, n, d)  [bhsd]  /  (2, b, n, h, d)  [bshd]
+    perm = (2, 0, 1, 3, 4) if layout == "bshd" else (2, 0, 3, 1, 4)
+    kv = kv2.permute(*perm).contiguous()
     return kv, kv[0], kv[1]
 
 
@@ -309,7 +337,12 @@ class RingAttentionFunction(torch.autograd.Function):
             q,
             out,
             x,
-            lse.mT,
+            # `(b, h, s)`, exactly as `ring_forward` produced it and as every
+            # inner core's backward expects it. (Was saved `.mT`'d to `(b, s, h)`
+            # here; `ring_backward` passes it straight through, so the cores got
+            # the transposed tensor -- a silent stride error for SDPA/TE, a hard
+            # shape error for the math core, whenever heads != seq_local.)
+            lse,
             w_qkv,
             *chunks_to_save,  # *[t for pair in chunks_to_save for t in pair]
             *rng_states,

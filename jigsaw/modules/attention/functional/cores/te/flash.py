@@ -74,8 +74,17 @@ def _pad_head_dim(t: torch.Tensor, head_dim: int) -> torch.Tensor:
 
 
 def _to_bshd(t: torch.Tensor, layout: Layout) -> torch.Tensor:
-    """Bring ``t`` into the ``bshd`` FA2 requires (see :func:`..cudnn._to_bshd`)."""
-    return t.contiguous() if layout == "bshd" else t.transpose(1, 2).contiguous()
+    """View ``t`` as ``bshd`` for FA2 (see :func:`..cudnn._to_bshd`).
+
+    No ``.contiguous()``: FA2's ``_flash_attn_forward`` / ``_flash_attn_backward``
+    read the batch/seq/head strides in-kernel and only copy an input whose *last*
+    dim isn't unit-stride (their internal ``maybe_contiguous``). The ring's
+    ``bhsd`` tensor transposed to ``bshd`` keeps ``stride(-1) == 1``, so it is
+    consumed as a view -- forcing it contiguous here was up to 8 full
+    ``(b, h, s, d)`` copies per ring step (3 fwd inputs + 5 bwd inputs) for
+    nothing. cuDNN (:mod:`.cudnn`) is stricter and keeps its own copy.
+    """
+    return t if layout == "bshd" else t.transpose(1, 2)
 
 
 def _from_bshd(t: torch.Tensor, layout: Layout) -> torch.Tensor:
@@ -155,7 +164,14 @@ def backward(
         _pad_head_dim(_to_bshd(t, layout), head_dim)
         for t in (q, k, v, out, grad_out)
     )
-    dq, dk, dv = (torch.empty_like(t) for t in (q_b, k_b, v_b))
+    # Contiguous bshd output buffers: q_b/k_b/v_b are now bare transpose *views*
+    # (``_to_bshd`` no longer copies), and FA2 writes the grads with whatever
+    # strides these buffers carry -- a preserved-format ``empty_like`` would hand
+    # it non-contiguous targets and just move the copy into ``_from_bshd``.
+    dq, dk, dv = (
+        torch.empty_like(t, memory_format=torch.contiguous_format)
+        for t in (q_b, k_b, v_b)
+    )
 
     _flash_attn_backward(
         do_b,

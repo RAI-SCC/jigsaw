@@ -15,8 +15,10 @@ import torch.distributed as dist
 
 from jigsaw.modules.attention.config import RingAttentionConfig
 
+from ._merge_kernel import fused_online_softmax_merge_
+from ._nvtx import nvtx_range
 from .forward_chunk_provider import build_forward_chunk_provider
-from .functional import combine_dropout_seed
+from .functional import bhnd, combine_dropout_seed
 
 
 def _draw_base_seed(device: torch.device) -> int:
@@ -32,32 +34,73 @@ def _draw_base_seed(device: torch.device) -> int:
 # --------------------------------------------------------------------------- #
 # small numeric helpers
 # --------------------------------------------------------------------------- #
-def _online_softmax_merge(
-    o1: torch.Tensor, l1: torch.Tensor, o2: torch.Tensor, l2: torch.Tensor
+def _online_softmax_merge_(
+    o1: torch.Tensor,
+    l1: torch.Tensor,
+    o2: torch.Tensor,
+    l2: torch.Tensor,
+    layout: str = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Merge two partial online-softmax attention results.
+    """Merge a partial online-softmax result ``(o2, l2)`` into ``(o1, l1)`` in place.
+
+    ``o1`` and ``l1`` are the ring's running accumulators, owned by
+    :func:`ring_forward` and aliased nowhere else, so this mutates them in place:
+    no per-step ``(b, h, n, d)`` / ``(b, h, n)`` allocation, and the accumulator
+    itself is allocated once instead of being rebuilt every ring step.
+
+    Algebra (``l1``/``l2`` are log-sum-exps, not raw maxima): with
+    ``l_new = logaddexp(l1, l2)`` the two blend weights of the old
+    ``exp(l1 - l_new) * o1 + exp(l2 - l_new) * o2`` are just
+    ``1 - w`` and ``w`` for ``w = exp(l2 - l_new) = sigmoid(l2 - l1)``, so the
+    running-max cancels and only one small ``(b, h, n)`` weight is materialised.
+    The output update is then ``o1 <- (1 - w) * o1 + w * o2`` as two in-place
+    big-tensor kernels (``mul_`` then ``addcmul_``) with no temporaries -- down
+    from three big kernels and three big allocations. ``addcmul_`` promotes
+    ``o2`` (fp16/bf16 from the core) into ``o1``'s fp32 accumulator for free.
+    At the seed state ``l1 = -inf`` -> ``w = sigmoid(+inf) = 1`` -> ``o1 := o2``.
+
+    ``l1`` (small, ``(b, h, n)``) is returned fresh rather than updated in place:
+    an ``out=`` ``logaddexp`` cannot run when ``l2`` still carries autograd
+    history (the TE cores return a grad-tracked ``lse``), and the caller rebinds
+    it anyway.
+
+    ``o1``/``o2`` follow ``layout`` (``"bhsd"`` or ``"bshd"``); ``l1``/``l2`` are
+    ``(b, h, n)`` either way (every core emits the LSE in that shape), so for
+    ``"bshd"`` the blend weight is transposed to ``(b, n, h, 1)`` before it
+    broadcasts over ``o1``'s trailing ``d``.
 
     Parameters
     ----------
-    o1 : torch.Tensor
-        Output tensor for the first partial result.
-    l1 : torch.Tensor
-        Log-sum-exp values for the first partial result.
-    o2 : torch.Tensor
-        Output tensor for the second partial result.
-    l2 : torch.Tensor
-        Log-sum-exp values for the second partial result.
+    o1, l1 : torch.Tensor
+        Running output (``layout``-shaped, updated in place) and log-sum-exp
+        ``(b, h, n)``, both at least fp32.
+    o2, l2 : torch.Tensor
+        This step's partial output and log-sum-exp.
+    layout : str
+        Layout of ``o1`` / ``o2``.
 
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor]
-        Result returned by the operation.
+        ``o1`` (mutated) and the new ``l1``.
+
+    A Triton kernel (:func:`._merge_kernel.fused_online_softmax_merge_`) fuses
+    the whole thing -- ``sigmoid`` + the blend + ``logaddexp`` -- into one launch
+    with a single read of ``o2`` and one read-modify-write of ``o1``, ~1.7x
+    faster than the eager path below. It returns ``None`` (and this falls back to
+    eager) when Triton is unavailable or the inputs are outside its supported
+    set.
     """
-    l_new = torch.logaddexp(l1, l2)
-    e1 = torch.exp(l1 - l_new)
-    e2 = torch.exp(l2 - l_new)
-    o_new = e1.unsqueeze(-1) * o1 + e2.unsqueeze(-1) * o2
-    return o_new, l_new
+    fused = fused_online_softmax_merge_(o1, l1, o2, l2, layout)
+    if fused is not None:
+        return fused
+
+    w = torch.sigmoid(l2 - l1)  # exp(l2 - logaddexp(l1, l2)), in (0, 1); (b, h, n)
+    if layout == "bshd":
+        w = w.transpose(1, 2)  # (b, n, h)
+    w = w.unsqueeze(-1)
+    o1.mul_(1 - w).addcmul_(w, o2)
+    return o1, torch.logaddexp(l1, l2)
 
 
 def _attend_step(
@@ -79,12 +122,24 @@ def _attend_step(
     threads back opaque kernel RNG state instead of using ``seed`` -- see
     :mod:`.cores`).
     """
-    out_j, l_j, rng_state_j = ring_config.attn_core_forward_fn(
-        q, kj.contiguous(), vj.contiguous(), scale, dropout_p, seed=seed
-    )
+    with nvtx_range("attn/contig"):
+        kjc, vjc = kj.contiguous(), vj.contiguous()
+    with nvtx_range("attn/core"):
+        out_j, l_j, rng_state_j = ring_config.attn_core_forward_fn(
+            q,
+            kjc,
+            vjc,
+            scale,
+            dropout_p,
+            seed=seed,
+            layout=ring_config.core_layout,
+        )
 
-    o_new, l_new = _online_softmax_merge(out, lse, out_j, l_j)
-    return o_new, l_new, rng_state_j
+    with nvtx_range("attn/merge"):
+        out, lse = _online_softmax_merge_(
+            out, lse, out_j, l_j, layout=ring_config.core_layout
+        )
+    return out, lse, rng_state_j
 
 
 # --------------------------------------------------------------------------- #
@@ -146,9 +201,21 @@ def ring_forward(
         the dropout base seed (``None`` if ``dropout_p == 0``), and per-global-chunk
         RNG state (see :func:`_attend_step`).
     """
-    b, heads, n_local, d = q.shape
-    out = torch.zeros_like(q)
-    lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=q.dtype)
+    # Accumulate ``out`` / ``lse`` in at least fp32, mutated in place across ring
+    # steps by ``_online_softmax_merge_``. ``lse`` is a softmax normaliser, never
+    # matmul'd, and the fused SDPA/TE backward kernels read it as fp32 -- a
+    # 16-bit ``lse`` makes them recompute the softmax wrong (see
+    # ``backward.ring_backward``); the old code only reached fp32 here by
+    # accident of dtype promotion. ``out`` is cast back to ``q.dtype`` on return.
+    # An fp64 model keeps fp64 for both. Shapes track ``q`` so this is agnostic
+    # to ``ring_config.core_layout`` (bhsd / bshd).
+    acc_dtype = torch.promote_types(q.dtype, torch.float32)
+    b, heads, n_local, _ = bhnd(q.shape, ring_config.core_layout)
+    out = torch.zeros(q.shape, device=q.device, dtype=acc_dtype)
+    # ``lse`` is always ``(b, h, n)`` -- both the SDPA and TE cores emit and
+    # consume it in that shape regardless of the q/k/v layout; the merge
+    # transposes the blend weight instead (see ``_online_softmax_merge_``).
+    lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=acc_dtype)
 
     provider = build_forward_chunk_provider(
         ring_config, q, k, v, x, w_qkv, group, local_rank, ring_group_size
@@ -158,19 +225,23 @@ def ring_forward(
     rng_states: list[Optional[torch.Tensor]] = [None] * ring_group_size
 
     for step in range(ring_group_size):
-        kj, vj = provider.get(step)
-        provider.save_for_backward(step)
-        global_chunk_idx = provider.global_chunk_idx(step)
-        seed = (
-            combine_dropout_seed(base_seed, local_rank, global_chunk_idx)
-            if base_seed is not None
-            else None
-        )
-        out, lse, rng_state_j = _attend_step(
-            ring_config, q, kj, vj, scale, dropout_p, out, lse, seed
-        )
-        rng_states[global_chunk_idx] = rng_state_j
-        provider.advance(step, ring_group_size)
+        with nvtx_range(f"fwd/step{step}"):
+            with nvtx_range("get"):
+                kj, vj = provider.get(step)
+            with nvtx_range("save_for_backward"):
+                provider.save_for_backward(step)
+            global_chunk_idx = provider.global_chunk_idx(step)
+            seed = (
+                combine_dropout_seed(base_seed, local_rank, global_chunk_idx)
+                if base_seed is not None
+                else None
+            )
+            out, lse, rng_state_j = _attend_step(
+                ring_config, q, kj, vj, scale, dropout_p, out, lse, seed
+            )
+            rng_states[global_chunk_idx] = rng_state_j
+            with nvtx_range("advance"):
+                provider.advance(step, ring_group_size)
 
     ring_config.wait_offloads()
     out = out.to(q.dtype)

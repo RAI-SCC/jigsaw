@@ -12,8 +12,15 @@ from jigsaw.modules.attention.config import (
     SendOp,
 )
 
+from ._nvtx import nvtx_range
 from .backward_chunk_provider import _build_backward_chunk_provider
-from .functional import HybridTopology, combine_dropout_seed, get_hybrid_topology
+from .functional import (
+    HybridTopology,
+    bhnd,
+    combine_dropout_seed,
+    get_hybrid_topology,
+    seq_dim,
+)
 
 # Hybrid send-ops whose backward chunk provider rotates chunks intra-node as well
 # as inter-node, so a step's dK/dV belongs to local index ``local_idx + step``
@@ -121,7 +128,8 @@ def ring_backward(
     rng_states: Optional[tuple[Optional[torch.Tensor], ...]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for ring attention."""
-    b, h, seq_local, d = q.shape
+    layout = ring_config.core_layout
+    b, h, seq_local, d = bhnd(q.shape, layout)
     # Reconcile dtypes before the cores run. Under autocast the forward saves
     # bf16/fp16 tensors (``out``, ``lse`` and the K/V chunks the provider
     # replays) and ``q``/``dout`` may arrive downcast too; the cores matmul
@@ -174,46 +182,51 @@ def ring_backward(
     )
 
     for step in range(ring_group_size):
-        kj, vj, kv = chunk_provider.get(step)
-        global_chunk_idx = global_chunk_idx_backward(
-            ring_config, local_rank, step, ring_group_size, group
-        )
-        seed = (
-            combine_dropout_seed(base_seed, local_rank, global_chunk_idx)
-            if base_seed is not None
-            else None
-        )
-        rng_state = rng_states[global_chunk_idx] if rng_states is not None else None
-        dq_j, dk_j, dv_j = ring_config.attn_core_backward_fn(
-            dout, q, kj.to(core_dtype), vj.to(core_dtype), out, lse, scale,
-            seq_local, seq_local,
-            dropout_p=dropout_p, seed=seed, rng_state=rng_state,
-        )
-        dq += dq_j
-        del dq_j, kj, vj, kv
-
-        if all_reduce_dkv:
-            dist.all_reduce(dk_j, op=dist.ReduceOp.SUM, group=group)
-            dist.all_reduce(dv_j, op=dist.ReduceOp.SUM, group=group)
-            if local_rank == step:
-                dk_buf = dk_j
-                dv_buf = dv_j
-        else:
-            dk_buf, dv_buf = accumulate_dkv(
-                ring_config,
-                dk_buf,
-                dv_buf,
-                dk_j,
-                dv_j,
-                step,
-                ring_group_size,
-                seq_local,
-                local_rank,
-                group,
+        with nvtx_range(f"bwd/step{step}"):
+            with nvtx_range("get"):
+                kj, vj, kv = chunk_provider.get(step)
+            global_chunk_idx = global_chunk_idx_backward(
+                ring_config, local_rank, step, ring_group_size, group
             )
+            seed = (
+                combine_dropout_seed(base_seed, local_rank, global_chunk_idx)
+                if base_seed is not None
+                else None
+            )
+            rng_state = rng_states[global_chunk_idx] if rng_states is not None else None
+            with nvtx_range("core"):
+                dq_j, dk_j, dv_j = ring_config.attn_core_backward_fn(
+                    dout, q, kj.to(core_dtype), vj.to(core_dtype), out, lse, scale,
+                    seq_local, seq_local,
+                    dropout_p=dropout_p, seed=seed, rng_state=rng_state, layout=layout,
+                )
+            dq += dq_j
+            del dq_j, kj, vj, kv
 
-        # No-op for providers that don't re-circulate chunks (e.g. global).
-        chunk_provider.maybe_forward(step, ring_group_size)
+            with nvtx_range("dkv_accum"):
+                if all_reduce_dkv:
+                    dist.all_reduce(dk_j, op=dist.ReduceOp.SUM, group=group)
+                    dist.all_reduce(dv_j, op=dist.ReduceOp.SUM, group=group)
+                    if local_rank == step:
+                        dk_buf = dk_j
+                        dv_buf = dv_j
+                else:
+                    dk_buf, dv_buf = accumulate_dkv(
+                        ring_config,
+                        dk_buf,
+                        dv_buf,
+                        dk_j,
+                        dv_j,
+                        step,
+                        ring_group_size,
+                        seq_local,
+                        local_rank,
+                        group,
+                    )
+
+            # No-op for providers that don't re-circulate chunks (e.g. global).
+            with nvtx_range("maybe_forward"):
+                chunk_provider.maybe_forward(step, ring_group_size)
 
     if all_reduce_dkv:
         # `dk_buf`/`dv_buf` already hold this rank's final local gradient.
@@ -251,10 +264,11 @@ def get_dkv_buffer(
     Otherwise (SEND_DKV relay): a local-sized buffer that dK/dV are added into,
         with partial sums P2P-relayed around the ring each step.
     """
+    shape = list(q.shape)
     if _use_global_dkv_buffer(ring_config):
-        shape = [*q.shape[0:2], ring_group_size * q.shape[2], *q.shape[3:]]
-    else:
-        shape = list(q.shape)
+        # Global buffer spans every rank's chunk along the sequence axis.
+        sd = seq_dim(ring_config.core_layout)
+        shape[sd] = ring_group_size * shape[sd]
     return (
         torch.zeros(shape, device=q.device, dtype=q.dtype),
         torch.zeros(shape, device=q.device, dtype=q.dtype),
@@ -292,7 +306,13 @@ def accumulate_dkv(
         ring_config, local_rank, step, ring_group_size, group
     )
     return _accumulate_dkv_gather(
-        dk_buf, dv_buf, dk_j, dv_j, seq_local, global_chunk_idx
+        dk_buf,
+        dv_buf,
+        dk_j,
+        dv_j,
+        seq_local,
+        global_chunk_idx,
+        seq_dim(ring_config.core_layout),
     )
 
 
@@ -303,6 +323,7 @@ def _accumulate_dkv_gather(
     dv_j: torch.Tensor,
     seq_local: int,
     global_chunk_idx: int,
+    sd: int = 2,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Scatter-add this step's dk, dv into their slot of the global buffer.
@@ -329,9 +350,9 @@ def _accumulate_dkv_gather(
     dk_buf, dv_buf: torch.Tensor, torch.Tensor
         Accumulated buffers for dk and dv.
     """
-    lo, hi = global_chunk_idx * seq_local, (global_chunk_idx + 1) * seq_local
-    dk_buf[:, :, lo:hi] += dk_j
-    dv_buf[:, :, lo:hi] += dv_j
+    lo = global_chunk_idx * seq_local
+    dk_buf.narrow(sd, lo, seq_local).add_(dk_j)
+    dv_buf.narrow(sd, lo, seq_local).add_(dv_j)
     return dk_buf, dv_buf
 
 
@@ -511,6 +532,10 @@ def postprocess_dkv(
     if _use_global_dkv_buffer(ring_config):
         dist.all_reduce(dk_buf, op=dist.ReduceOp.SUM, group=group)
         dist.all_reduce(dv_buf, op=dist.ReduceOp.SUM, group=group)
-        lo, hi = local_rank * seq_local, (local_rank + 1) * seq_local
-        return dk_buf[:, :, lo:hi], dv_buf[:, :, lo:hi]
+        sd = seq_dim(ring_config.core_layout)
+        lo = local_rank * seq_local
+        return (
+            dk_buf.narrow(sd, lo, seq_local),
+            dv_buf.narrow(sd, lo, seq_local),
+        )
     return dk_buf, dv_buf

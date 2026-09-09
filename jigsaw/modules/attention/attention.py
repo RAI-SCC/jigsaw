@@ -268,10 +268,10 @@ class DistributedAttention(torch.nn.Module):
 
         self.attn_backend = self._resolve_backend(AttnBackend(attn_backend))
         self.te = self.attn_backend == AttnBackend.TE
-        # Only the non-ring TE core consumes/produces a bshd tensor; the ring
-        # cores (functional.cores.te included) work in the ring's bhsd
-        # convention and transpose internally, so forward() keeps the bhsd
-        # rearrange for it.
+        # Both TE paths run bshd q/k/v (``self.te`` gates the rearrange in
+        # ``forward``). They differ only in the *output*: the non-ring core
+        # returns ``... n s (h d)`` (heads already folded), the ring returns
+        # ``... n s h d``. ``_te_bshd`` marks the non-ring case for that.
         self._te_bshd = self.te and not ring
 
         self.heads = heads // self.channel_group.size()
@@ -308,18 +308,27 @@ class DistributedAttention(torch.nn.Module):
                 dtype=self.dtype,
             )
 
-        self.head_concat = linear.DistributedXWT(
-            embed_dim,
-            out_dim,
-            bias=True,
-            local_rank=self.local_rank,
-            device=self.device,
-            model_group=self.channel_group,
-            row_group=self.spatial_group,
-            column_group=self.channel_group,
-            bayesian=bayesian,
-            dtype=self.dtype,
-        )
+        if channel_group.size() == 1:
+            # No channel/tensor parallelism: the output projection is a plain
+            # local matmul, same as ``qkv`` above. ``DistributedXWT`` only has
+            # kernels for (row, col) in {(1,1),(1,2),(2,2),(4,2)}, so this also
+            # unblocks a pure ring (spatial=N, channel=1).
+            self.head_concat = torch.nn.Linear(
+                embed_dim, out_dim, bias=True, device=device, dtype=self.dtype
+            )
+        else:
+            self.head_concat = linear.DistributedXWT(
+                embed_dim,
+                out_dim,
+                bias=True,
+                local_rank=self.local_rank,
+                device=self.device,
+                model_group=self.channel_group,
+                row_group=self.spatial_group,
+                column_group=self.channel_group,
+                bayesian=bayesian,
+                dtype=self.dtype,
+            )
 
         # sync up up spatial parameters
         for p in self.parameters():
@@ -339,13 +348,52 @@ class DistributedAttention(torch.nn.Module):
         self.heads = heads // self.channel_group.size()
         self.scale = (embed_dim // heads) ** -0.5
 
-        self.config = (
-            attention_config.RingAttentionConfig(
-                device=device, attn_backend=self.attn_backend
+        self.config = self._resolve_ring_config(ring, config, device)
+
+    def _resolve_ring_config(
+        self,
+        ring: bool,
+        config: Optional[attention_config.RingAttentionConfig],
+        device: torch.device,
+    ) -> Optional[attention_config.RingAttentionConfig]:
+        """Pick the ``RingAttentionConfig`` for this module.
+
+        With channel/tensor parallelism the fused ``qkv`` projection is split
+        across the channel group (a distributed ``DistributedXWT`` matmul), so
+        the ring cannot rebuild K/V from a circulated ``x`` chunk with the plain
+        local matmul in :func:`..functional.functional._compute_kv`. The ring
+        must instead circulate the already-projected K/V directly -- i.e.
+        ``send_in_forward=KV`` *and* ``save_for_backward=KV`` (the only pairing
+        that never calls ``_compute_kv``, forward or backward). A default config
+        is built that way; an explicit one is required to already be.
+        """
+        if not ring:
+            return config
+
+        channel_parallel = self.channel_group.size() > 1
+        if config is None:
+            kwargs: dict = dict(device=device, attn_backend=self.attn_backend)
+            if channel_parallel:
+                kwargs.update(
+                    send_in_forward=attention_config.SendForward.KV,
+                    save_for_backward=attention_config.SaveBackward.KV,
+                )
+            return attention_config.RingAttentionConfig(**kwargs)
+
+        if channel_parallel and (
+            config.send_in_forward != attention_config.SendForward.KV
+            or config.save_for_backward != attention_config.SaveBackward.KV
+        ):
+            raise ValueError(
+                "ring attention with channel/tensor parallelism "
+                f"(channel_group.size()={self.channel_group.size()}) needs "
+                "send_in_forward=KV and save_for_backward=KV -- the qkv "
+                "projection is sharded across the channel group, so the ring "
+                "cannot recompute K/V from a circulated x chunk. Got "
+                f"send_in_forward={config.send_in_forward.name}, "
+                f"save_for_backward={config.save_for_backward.name}."
             )
-            if ring and config is None
-            else config
-        )
+        return config
 
     @staticmethod
     def _resolve_backend(attn_backend: AttnBackend) -> AttnBackend:
@@ -534,13 +582,15 @@ class DistributedAttention(torch.nn.Module):
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.qkv(x)
 
-        if not self._te_bshd:
+        # TE cores (ring and non-ring) are bshd-native -- feed them ``n s h d`` so
+        # nothing transposes per chunk; SDPA / math want ``n h s d``.
+        if self.te:
             qkv = rearrange(
-                qkv, "... n s (three h d) -> three ... n h s d", three=3, h=self.heads
+                qkv, "... n s (three h d) -> three ... n s h d", three=3, h=self.heads
             )
         else:
             qkv = rearrange(
-                qkv, "... n s (three h d) -> three ... n s h d", three=3, h=self.heads
+                qkv, "... n s (three h d) -> three ... n h s d", three=3, h=self.heads
             )
 
         core_dtype = attn_core_dtype(x)
@@ -553,11 +603,15 @@ class DistributedAttention(torch.nn.Module):
             q, k, v = qkv.to(core_dtype).unbind(0)
 
         out = self.attn_core(q, k, v, x=x)
-        # The core runs in ``core_dtype`` (bf16 on CUDA, see ``attn_core_dtype``);
-        # ``head_concat`` holds the model-dtype weights, so fold ``out`` back to
-        # ``x.dtype`` before it. The non-bshd path also collapses heads here; the
-        # ``_te_bshd`` core already returns ``... n s (h d)``.
-        if not self._te_bshd:
+        # Fold ``out`` to ``... n s (h d)`` in ``x.dtype`` before ``head_concat``
+        # (which holds model-dtype weights). The non-ring TE core already returns
+        # ``... n s (h d)``; the ring TE core returns bshd ``... n s h d``; every
+        # other core returns bhsd ``... n h s d``.
+        if self._te_bshd:
+            pass
+        elif self.te:
+            out = rearrange(out, "... n s h d -> ... n s (h d)").contiguous()
+        else:
             out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous()
         out = out.to(x.dtype)
 
