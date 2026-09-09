@@ -233,6 +233,7 @@ class DistributedAttention(torch.nn.Module):
         ring: bool = False,
         ulysses: bool = False,
         ulysses_gpus_per_node: int = 0,
+        ulysses_inter_comm: str = "p2p",
         ulysses_inter_save_scope: attention_config.SaveScope | str = (
             attention_config.SaveScope.LOCAL
         ),
@@ -272,6 +273,18 @@ class DistributedAttention(torch.nn.Module):
             over the slow one. Needs ``spatial`` divisible by this into a ring of
             ``>= 2``, and ``heads // channel`` divisible by it. ``0`` (default)
             keeps the flat single-level Ulysses.
+        ulysses_inter_comm: str
+            How the hierarchical scheme moves K/V over the inter-node sub-group
+            (only read when ``ulysses_gpus_per_node > 0``). ``"p2p"`` (default)
+            rings K/V around the ``n_nodes`` peers with a per-step online-softmax
+            merge (``ulysses_inter_save_scope`` applies). ``"all_gather"``
+            gathers every peer's K/V once and runs a single dense attention over
+            the full sequence -- same inter-node bytes as the ring, one
+            attention kernel instead of ``n_nodes``, no merge and no fp32
+            accumulator, at the cost of holding the whole gathered K/V
+            (``n_nodes`` chunks) per rank. The direct analogue, at this level,
+            of Transformer Engine's ``cp_comm_type="a2a+p2p"`` degenerating to a
+            single exchange.
         ulysses_inter_save_scope: SaveScope | str
             ``save_scope`` for the hierarchical scheme's inter-node K/V ring
             (only read when ``ulysses_gpus_per_node > 0``). ``LOCAL`` (default)
@@ -307,6 +320,12 @@ class DistributedAttention(torch.nn.Module):
             if isinstance(ulysses_inter_save_scope, attention_config.SaveScope)
             else attention_config.SaveScope[ulysses_inter_save_scope]
         )
+        if ulysses_inter_comm not in ("p2p", "all_gather"):
+            raise ValueError(
+                f"ulysses_inter_comm must be 'p2p' or 'all_gather', got "
+                f"{ulysses_inter_comm!r}"
+            )
+        self.ulysses_inter_comm = ulysses_inter_comm
         if ring and ulysses:
             raise ValueError("ring and ulysses are mutually exclusive")
 
@@ -747,6 +766,35 @@ class DistributedAttention(torch.nn.Module):
 
         return core
 
+    def _inter_node_gather_core(
+        self, dropout_p: float
+    ) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
+        """All-gather K/V over the inter-node group, then one dense attention.
+
+        The ``ulysses_inter_comm="all_gather"`` inner core of the hierarchical
+        scheme. After the intra-node all-to-all ``q``/``k``/``v`` cover one
+        node's worth of sequence on ``local_heads // A`` heads;
+        :class:`~.functional.ulysses._SeqAllGather` collects every inter-node
+        peer's K/V shard into the full sequence (its backward reduce-scatters
+        dK/dV), and :meth:`_dense_bshd_core` runs a single attention kernel over
+        it -- no P2P ring, no per-step online-softmax merge, no fp32
+        accumulator. Same inter-node bytes as the ring; one attention call
+        instead of ``n_nodes``.
+        """
+        from .functional.ulysses import _SeqAllGather
+
+        dense = self._dense_bshd_core(dropout_p)
+        group = self._uly_inter_group
+
+        def core(
+            qc: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor
+        ) -> torch.Tensor:
+            k_full = _SeqAllGather.apply(kc, group)
+            v_full = _SeqAllGather.apply(vc, group)
+            return dense(qc, k_full, v_full)
+
+        return core
+
     def _ulysses_attn_core(
         self,
         q: torch.Tensor,
@@ -763,8 +811,10 @@ class DistributedAttention(torch.nn.Module):
         attention, one all-to-all back.
 
         Hierarchical (``> 0``, the ``a2a+p2p`` analogue): an all-to-all over the
-        intra-node sub-group -> ``[b, seq // n_nodes, local_heads // A, d]``, a
-        P2P ring over the inter-node sub-group, an all-to-all back.
+        intra-node sub-group -> ``[b, seq // n_nodes, local_heads // A, d]``,
+        then over the inter-node sub-group either a P2P ring
+        (``ulysses_inter_comm="p2p"``) or a single K/V all-gather + dense
+        attention (``"all_gather"``), then an all-to-all back.
         """
         from .functional.ulysses import (
             hierarchical_ulysses_attention,
@@ -775,8 +825,13 @@ class DistributedAttention(torch.nn.Module):
         qkv_stack = kwargs.get("qkv_stack")
 
         if self.ulysses_gpn:
+            inter_core = (
+                self._inter_node_gather_core(dropout_p)
+                if self.ulysses_inter_comm == "all_gather"
+                else self._inter_node_ring_core(dropout_p)
+            )
             return hierarchical_ulysses_attention(
-                q, k, v, self._uly_intra_group, self._inter_node_ring_core(dropout_p),
+                q, k, v, self._uly_intra_group, inter_core,
                 qkv_stack=qkv_stack,
             )
         return ulysses_attention(
@@ -987,6 +1042,7 @@ class Attention(torch.nn.Module):
         ring: bool = True,
         ulysses: bool = False,
         ulysses_gpus_per_node: int = 0,
+        ulysses_inter_comm: str = "p2p",
         ulysses_inter_save_scope: attention_config.SaveScope | str = (
             attention_config.SaveScope.LOCAL
         ),
@@ -1066,6 +1122,7 @@ class Attention(torch.nn.Module):
             ring=ring,
             ulysses=ulysses,
             ulysses_gpus_per_node=ulysses_gpus_per_node,
+            ulysses_inter_comm=ulysses_inter_comm,
             ulysses_inter_save_scope=ulysses_inter_save_scope,
             attn_backend=attn_backend,
             dtype=attention.dtype,
