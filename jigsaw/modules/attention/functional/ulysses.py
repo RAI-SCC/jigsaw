@@ -15,9 +15,13 @@ Trade-off vs. the ring:
 * It needs the head count to divide the group: ``local_heads % P == 0`` where
   ``local_heads = heads // channel_group.size()``. The ring works for any head
   count. When the a2a group crosses a slow fabric boundary (multi-node) the
-  all-to-all is exposed; the hierarchical ``a2a+p2p`` scheme -- Ulysses over an
-  intra-node sub-group nested in a ring over the inter-node one -- is the
-  follow-on and is not implemented here yet.
+  all-to-all is exposed; :func:`hierarchical_ulysses_attention` -- Ulysses over
+  an intra-node sub-group nested in a ring over the inter-node one -- is the
+  ``cp_comm_type="a2a+p2p"`` analogue that keeps the a2a on the fast fabric.
+
+The three Q/K/V shards ride **one** all-to-all: the scatter/gather helpers take
+arbitrary leading dims, so a ``[3, b, s, h, d]`` stack goes through a single
+``all_to_all_single`` instead of three.
 
 Composes with channel/tensor parallelism unchanged: the all-to-all sits between
 the (already channel-sharded) ``qkv`` projection and ``head_concat``, operating
@@ -36,61 +40,61 @@ import torch
 import torch.distributed as dist
 
 
-def _scatter_heads_gather_seq(
-    x: torch.Tensor, group: dist.ProcessGroup
-) -> torch.Tensor:
-    """``[b, s_local, h, d] -> [b, s_local * P, h // P, d]`` via one all-to-all.
+def _a2a_heads_to_seq(x: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor:
+    """``[..., s_local, h, d] -> [..., s_local * P, h // P, d]`` via one all-to-all.
 
-    Sends head-block ``p`` of the local sequence to rank ``p`` and concatenates
-    the sequence shards received from every rank, so the result is
-    sequence-complete on ``h // P`` heads. ``P = group.size()``; the global
-    sequence order is rank-0 tokens, rank-1 tokens, ... which is exactly how the
-    sequence was sharded across ``group``.
+    Scatters the head axis (``-2``) across ``group`` and gathers the sequence
+    axis (``-3``): sends head-block ``p`` of the local sequence to rank ``p`` and
+    stacks the sequence shards received from every rank in source-rank order --
+    exactly how the sequence was sharded across ``group``. Leading dims (batch,
+    or a ``3`` for a stacked Q/K/V) are carried through untouched.
     """
     p = dist.get_world_size(group)
     if p == 1:
         return x
-    b, s, h, d = x.shape
+    *lead, s, h, d = x.shape
+    nlead = len(lead)
     assert h % p == 0, f"ulysses all-to-all: heads {h} not divisible by group size {p}"
-    # [b, s, P, h//P, d] -> [P, b, s, h//P, d]
-    send = x.reshape(b, s, p, h // p, d).permute(2, 0, 1, 3, 4).contiguous()
+    # [..., s, P, h//P, d] -> [P, ..., s, h//P, d]
+    send = x.reshape(*lead, s, p, h // p, d).movedim(nlead + 1, 0).contiguous()
     recv = torch.empty_like(send)
     dist.all_to_all_single(recv, send, group=group)
-    # recv[src] is src's local sequence on our head-slice; stack seq by source.
-    return recv.permute(1, 0, 2, 3, 4).reshape(b, p * s, h // p, d).contiguous()
+    # recv[src] is src's local sequence on our head-slice; put P back just
+    # before s, so the gathered sequence is source-rank-major.
+    return recv.movedim(0, nlead).reshape(*lead, p * s, h // p, d).contiguous()
 
 
-def _scatter_seq_gather_heads(
-    x: torch.Tensor, group: dist.ProcessGroup
-) -> torch.Tensor:
-    """``[b, s_full, h_p, d] -> [b, s_full // P, h_p * P, d]`` -- inverse of
-    :func:`_scatter_heads_gather_seq`.
+def _a2a_seq_to_heads(x: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor:
+    """``[..., s_full, h_p, d] -> [..., s_full // P, h_p * P, d]`` -- inverse of
+    :func:`_a2a_heads_to_seq`.
 
-    Sends sequence-block ``p`` (keeping our ``h_p`` heads) to rank ``p`` and
-    concatenates the head shards received from every rank, so the result is
-    head-complete on ``s_full // P`` tokens with the heads back in source-rank
-    order (reconstructing the pre-Ulysses head layout).
+    Scatters the sequence axis (``-3``) across ``group`` and gathers the head
+    axis (``-2``): the heads come back in source-rank order, reconstructing the
+    pre-Ulysses head layout.
     """
     p = dist.get_world_size(group)
     if p == 1:
         return x
-    b, s, h_p, d = x.shape
+    *lead, s, hp, d = x.shape
+    nlead = len(lead)
     assert s % p == 0, f"ulysses all-to-all: seq {s} not divisible by group size {p}"
-    # [b, P, s//P, h_p, d] -> [P, b, s//P, h_p, d]
-    send = x.reshape(b, p, s // p, h_p, d).permute(1, 0, 2, 3, 4).contiguous()
+    # [..., P, s//P, h_p, d] -> [P, ..., s//P, h_p, d]
+    send = x.reshape(*lead, p, s // p, hp, d).movedim(nlead, 0).contiguous()
     recv = torch.empty_like(send)
     dist.all_to_all_single(recv, send, group=group)
-    # recv[src] is our sequence-block on src's heads; stack heads by source.
-    return recv.permute(1, 2, 0, 3, 4).reshape(b, s // p, h_p * p, d).contiguous()
+    # recv[src] is our sequence-block on src's heads; put P just before h_p, so
+    # the gathered heads are source-rank-major (the pre-Ulysses layout).
+    return recv.movedim(0, nlead + 1).reshape(*lead, s // p, hp * p, d).contiguous()
 
 
 class _UlyssesAllToAll(torch.autograd.Function):
-    """Autograd-aware Ulysses all-to-all.
+    """Autograd-aware Ulysses all-to-all over an arbitrary leading batch.
 
     ``gather_seq=True`` goes sequence-parallel -> head-parallel
-    (:func:`_scatter_heads_gather_seq`); ``False`` is the inverse. The backward
-    of one direction is the forward of the other, so gradients flow straight
-    through without saving anything but the direction and the group.
+    (:func:`_a2a_heads_to_seq`); ``False`` is the inverse. The backward of one
+    direction is the forward of the other, so gradients flow straight through
+    without saving anything but the direction and the group. A ``[3, b, s, h, d]``
+    stack of Q/K/V is one call.
     """
 
     @staticmethod
@@ -98,9 +102,9 @@ class _UlyssesAllToAll(torch.autograd.Function):
         x: torch.Tensor, gather_seq: bool, group: dist.ProcessGroup
     ) -> torch.Tensor:
         return (
-            _scatter_heads_gather_seq(x, group)
+            _a2a_heads_to_seq(x, group)
             if gather_seq
-            else _scatter_seq_gather_heads(x, group)
+            else _a2a_seq_to_heads(x, group)
         )
 
     @staticmethod
@@ -112,9 +116,9 @@ class _UlyssesAllToAll(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_out: torch.Tensor):  # type: ignore[no-untyped-def]
         grad_in = (
-            _scatter_seq_gather_heads(grad_out, ctx.group)
+            _a2a_seq_to_heads(grad_out, ctx.group)
             if ctx.gather_seq
-            else _scatter_heads_gather_seq(grad_out, ctx.group)
+            else _a2a_heads_to_seq(grad_out, ctx.group)
         )
         return grad_in, None, None
 
@@ -153,10 +157,9 @@ def ulysses_attention(
         ``bshd`` ``[b, seq // P, local_heads, head_dim]`` -- same layout and
         sharding as ``q``.
     """
-    q = _UlyssesAllToAll.apply(q, True, group)
-    k = _UlyssesAllToAll.apply(k, True, group)
-    v = _UlyssesAllToAll.apply(v, True, group)
-    out = core(q, k, v)
+    # One all-to-all for all three shards: stack -> [3, b, s, h, d] -> a2a.
+    qkv = _UlyssesAllToAll.apply(torch.stack((q, k, v)), True, group)
+    out = core(*qkv.unbind(0))
     return _UlyssesAllToAll.apply(out, False, group)
 
 
@@ -175,6 +178,10 @@ def hierarchical_ulysses_attention(
     group -- circulates only ``n_nodes`` K/V chunks instead of the full spatial
     ring, and its inner attention runs on ``local_heads // intra_group.size()``
     heads over ``seq // n_nodes`` tokens.
+
+    ``ring_core`` is expected to be an overlapped ring (jigsaw's P2P provider
+    kicks each inter-node K/V send before the matching attention block, so the
+    inter-node exchange runs under the node-local attention compute).
 
     ``q``/``k``/``v`` are ``bshd`` ``[b, seq // spatial, local_heads, d]``;
     ``ring_core`` gets ``[b, seq // n_nodes, local_heads // A, d]`` (``A =

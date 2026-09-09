@@ -14,8 +14,8 @@ from einops import rearrange
 import jigsaw.modules.attention as attention
 from jigsaw.modules.attention.attention import attn_core_dtype
 from jigsaw.modules.attention.functional.ulysses import (
-    _scatter_heads_gather_seq,
-    _scatter_seq_gather_heads,
+    _a2a_heads_to_seq,
+    _a2a_seq_to_heads,
 )
 from jigsaw.utils_aggregate import gather_1d_results, gather_1d_results_list
 from tests.parity import all_ranks_ok, assert_close
@@ -29,8 +29,9 @@ _HEADS = 4
 class TestUlyssesAllToAll:
     @pytest.mark.dist(4)
     def test_roundtrip_is_identity(self, device: torch.device) -> None:
-        """``scatter_seq_gather_heads . scatter_heads_gather_seq == id`` and the
-        gathered sequence matches a plain all-gather."""
+        """``_a2a_seq_to_heads . _a2a_heads_to_seq == id`` and the gathered
+        sequence matches a plain all-gather. Also checks the fused
+        ``[3, b, s, h, d]`` stack path used for Q/K/V."""
         group = dist.group.WORLD
         assert group is not None
         p = dist.get_world_size(group)
@@ -40,7 +41,7 @@ class TestUlyssesAllToAll:
         torch.manual_seed(rank)
         x = torch.randn(b, s_loc, h, d, device=device)
 
-        gathered = _scatter_heads_gather_seq(x, group)  # [b, s_loc * p, h // p, d]
+        gathered = _a2a_heads_to_seq(x, group)  # [b, s_loc * p, h // p, d]
         assert gathered.shape == (b, s_loc * p, h // p, d)
 
         # Sequence axis is source-rank-major: block r is rank r's local x, sliced
@@ -61,8 +62,28 @@ class TestUlyssesAllToAll:
             group,
         )
 
-        back = _scatter_seq_gather_heads(gathered, group)  # [b, s_loc, h, d]
+        back = _a2a_seq_to_heads(gathered, group)  # [b, s_loc, h, d]
         assert_close("roundtrip is identity", back, x, 1e-6, 1e-6, device, group)
+
+        # Fused Q/K/V: a [3, b, s, h, d] stack rides one all-to-all and each
+        # slice matches the per-tensor path.
+        qkv = torch.stack((x, x + 1, x + 2))
+        fused = _a2a_heads_to_seq(qkv, group)
+        assert fused.shape == (3, b, s_loc * p, h // p, d)
+        for i in range(3):
+            assert_close(
+                f"fused slice {i}",
+                fused[i],
+                _a2a_heads_to_seq(qkv[i].contiguous(), group),
+                1e-6,
+                1e-6,
+                device,
+                group,
+            )
+        assert_close(
+            "fused roundtrip", _a2a_seq_to_heads(fused, group), qkv, 1e-6, 1e-6,
+            device, group,
+        )
 
 
 def _dense_reference(

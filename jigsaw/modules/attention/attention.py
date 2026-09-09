@@ -337,6 +337,12 @@ class DistributedAttention(torch.nn.Module):
                     device=self.device,
                     send_in_forward=attention_config.SendForward.KV,
                     save_for_backward=attention_config.SaveBackward.KV,
+                    # LOCAL: don't clone every arrived K/V chunk in the forward
+                    # (the inter-node ring is only `n_nodes` steps); the backward
+                    # re-rings them. SendOp.P2P's provider issues each inter-node
+                    # K/V send *before* the matching attention block, so the
+                    # exchange overlaps the node-local compute.
+                    save_scope=attention_config.SaveScope.LOCAL,
                     send_op=attention_config.SendOp.P2P,
                     attn_backend=self.attn_backend,
                 )
