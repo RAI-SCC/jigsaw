@@ -209,6 +209,17 @@ def ring_forward(
     # accident of dtype promotion. ``out`` is cast back to ``q.dtype`` on return.
     # An fp64 model keeps fp64 for both. Shapes track ``q`` so this is agnostic
     # to ``ring_config.core_layout`` (bhsd / bshd).
+    # Build the provider first: its ``__init__`` kicks the ring's first KV
+    # send (a P2P/all-to-all whose bytes then move on the NCCL stream while the
+    # host sets everything else up). The ``out``/``lse`` zero-fills and the
+    # dropout seed below don't depend on it, so issuing the send ahead of them
+    # overlaps the send launch with that host work -- it matters most for the
+    # hierarchical Ulysses inter-node ring, where that first send crosses the
+    # slow fabric.
+    provider = build_forward_chunk_provider(
+        ring_config, q, k, v, x, w_qkv, group, local_rank, ring_group_size
+    )
+
     acc_dtype = torch.promote_types(q.dtype, torch.float32)
     b, heads, n_local, _ = bhnd(q.shape, ring_config.core_layout)
     out = torch.zeros(q.shape, device=q.device, dtype=acc_dtype)
@@ -216,10 +227,6 @@ def ring_forward(
     # consume it in that shape regardless of the q/k/v layout; the merge
     # transposes the blend weight instead (see ``_online_softmax_merge_``).
     lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=acc_dtype)
-
-    provider = build_forward_chunk_provider(
-        ring_config, q, k, v, x, w_qkv, group, local_rank, ring_group_size
-    )
 
     base_seed = _draw_base_seed(q.device) if dropout_p > 0.0 else None
     rng_states: list[Optional[torch.Tensor]] = [None] * ring_group_size

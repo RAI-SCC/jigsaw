@@ -233,6 +233,9 @@ class DistributedAttention(torch.nn.Module):
         ring: bool = False,
         ulysses: bool = False,
         ulysses_gpus_per_node: int = 0,
+        ulysses_inter_save_scope: attention_config.SaveScope | str = (
+            attention_config.SaveScope.LOCAL
+        ),
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
         dtype: torch.dtype = torch.float32,
         config: Optional[attention_config.RingAttentionConfig] = None,
@@ -269,6 +272,18 @@ class DistributedAttention(torch.nn.Module):
             over the slow one. Needs ``spatial`` divisible by this into a ring of
             ``>= 2``, and ``heads // channel`` divisible by it. ``0`` (default)
             keeps the flat single-level Ulysses.
+        ulysses_inter_save_scope: SaveScope | str
+            ``save_scope`` for the hierarchical scheme's inter-node K/V ring
+            (only read when ``ulysses_gpus_per_node > 0``). ``LOCAL`` (default)
+            keeps only this rank's own chunk and re-rings the rest over the
+            slow fabric in the backward. ``GLOBAL`` keeps every K/V chunk the
+            forward ring received so the backward reads them from memory, at
+            one extra ``n_nodes``-chunk buffer per rank -- but it also routes
+            dK/dV through an all-reduce per backward step, so at ``n_nodes ==
+            2`` (one inter-node hop either way) it is a wash-to-slightly-worse
+            (measured: 181 vs 175 ms median, GH200 8x1 s=131072); the win is
+            expected only at ``n_nodes >= 4``, where ``LOCAL`` re-rings K/V
+            through many hops.
         attn_backend: AttnBackend | str
             Attention core implementation -- ``"te"``, ``"sdpa"`` (default) or
             ``"math"``. See :class:`.config.AttnBackend`.
@@ -287,6 +302,11 @@ class DistributedAttention(torch.nn.Module):
         self.ring = ring
         self.ulysses = ulysses
         self.ulysses_gpn = ulysses_gpus_per_node if ulysses else 0
+        self.ulysses_inter_save_scope = (
+            ulysses_inter_save_scope
+            if isinstance(ulysses_inter_save_scope, attention_config.SaveScope)
+            else attention_config.SaveScope[ulysses_inter_save_scope]
+        )
         if ring and ulysses:
             raise ValueError("ring and ulysses are mutually exclusive")
 
@@ -337,12 +357,15 @@ class DistributedAttention(torch.nn.Module):
                     device=self.device,
                     send_in_forward=attention_config.SendForward.KV,
                     save_for_backward=attention_config.SaveBackward.KV,
-                    # LOCAL: don't clone every arrived K/V chunk in the forward
-                    # (the inter-node ring is only `n_nodes` steps); the backward
-                    # re-rings them. SendOp.P2P's provider issues each inter-node
-                    # K/V send *before* the matching attention block, so the
-                    # exchange overlaps the node-local compute.
-                    save_scope=attention_config.SaveScope.LOCAL,
+                    # LOCAL (default): keep only this rank's chunk; the backward
+                    # re-rings the rest. At n_nodes == 2 that is one inter-node
+                    # hop, same as GLOBAL would cost (GLOBAL keeps every arrived
+                    # K/V chunk but then all-reduces dK/dV each backward step) --
+                    # measured a wash there; GLOBAL is expected to pay off only
+                    # at n_nodes >= 4. Either way SendOp.P2P's provider issues
+                    # each inter-node K/V send *before* the matching attention
+                    # block, so the forward exchange overlaps node-local compute.
+                    save_scope=self.ulysses_inter_save_scope,
                     send_op=attention_config.SendOp.P2P,
                     attn_backend=self.attn_backend,
                 )
@@ -749,13 +772,16 @@ class DistributedAttention(torch.nn.Module):
         )
 
         dropout_p = self.dropout_p if self.training else 0.0
+        qkv_stack = kwargs.get("qkv_stack")
 
         if self.ulysses_gpn:
             return hierarchical_ulysses_attention(
-                q, k, v, self._uly_intra_group, self._inter_node_ring_core(dropout_p)
+                q, k, v, self._uly_intra_group, self._inter_node_ring_core(dropout_p),
+                qkv_stack=qkv_stack,
             )
         return ulysses_attention(
-            q, k, v, self.spatial_group, self._dense_bshd_core(dropout_p)
+            q, k, v, self.spatial_group, self._dense_bshd_core(dropout_p),
+            qkv_stack=qkv_stack,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -780,15 +806,24 @@ class DistributedAttention(torch.nn.Module):
             )
 
         core_dtype = attn_core_dtype(x)
+        # ``qkv_stack`` -- the contiguous ``[3, ... n s h d]`` tensor ``q/k/v`` are
+        # unbound from -- is handed to the Ulysses core so it feeds the
+        # sequence<->head all-to-all directly instead of re-``torch.stack``-ing
+        # its three views (a full [3, b, s, h, d] copy per forward, and its
+        # transpose in the backward). Only when ``qk_norm`` is off; the norm
+        # rewrites q/k after the unbind, so the stack no longer matches.
         if self.qk_norm:
             q, k, v = qkv.unbind(0)
             q = self.q_norm(q).to(core_dtype)
             k = self.k_norm(k).to(core_dtype)
             v = v.to(core_dtype)
+            qkv_stack = None
         else:
-            q, k, v = qkv.to(core_dtype).unbind(0)
+            qkv = qkv.to(core_dtype)
+            q, k, v = qkv.unbind(0)
+            qkv_stack = qkv
 
-        out = self.attn_core(q, k, v, x=x)
+        out = self.attn_core(q, k, v, x=x, qkv_stack=qkv_stack)
         # Fold ``out`` to ``... n s (h d)`` in ``x.dtype`` before ``head_concat``
         # (which holds model-dtype weights). The non-ring TE core already returns
         # ``... n s (h d)``; the ring TE core and the Ulysses core return bshd
@@ -952,6 +987,9 @@ class Attention(torch.nn.Module):
         ring: bool = True,
         ulysses: bool = False,
         ulysses_gpus_per_node: int = 0,
+        ulysses_inter_save_scope: attention_config.SaveScope | str = (
+            attention_config.SaveScope.LOCAL
+        ),
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
         **kwargs: Any,
     ) -> "DistributedAttention":
@@ -1028,6 +1066,7 @@ class Attention(torch.nn.Module):
             ring=ring,
             ulysses=ulysses,
             ulysses_gpus_per_node=ulysses_gpus_per_node,
+            ulysses_inter_save_scope=ulysses_inter_save_scope,
             attn_backend=attn_backend,
             dtype=attention.dtype,
         )

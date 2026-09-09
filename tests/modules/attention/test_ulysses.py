@@ -175,8 +175,9 @@ class TestUlyssesAttention:
         )
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("inter_save_scope", ["GLOBAL", "LOCAL"])
     def test_hierarchical_matches_dense_reference(
-        self, device: torch.device, process_mesh_dict_4x1: dict
+        self, device: torch.device, process_mesh_dict_4x1: dict, inter_save_scope: str
     ) -> None:
         """Hierarchical Ulysses (intra-node a2a x inter-node p2p ring) reproduces
         the same gathered-sequence dense run as the flat scheme.
@@ -184,6 +185,9 @@ class TestUlyssesAttention:
         ``spatial=4, ulysses_gpus_per_node=2``: a 2-rank intra-node all-to-all
         nested in a 2-node P2P ring. The ring's online-softmax merge adds a few
         ULP of noise the single-kernel flat path does not, hence the looser atol.
+
+        Both inter-node ring ``save_scope``s are covered: ``LOCAL`` (default,
+        re-ring K/V in the backward) and ``GLOBAL`` (keep K/V for the backward).
         """
         mesh = process_mesh_dict_4x1
         row = mesh["row"]
@@ -205,6 +209,7 @@ class TestUlyssesAttention:
             ring=False,
             ulysses=True,
             ulysses_gpus_per_node=2,
+            ulysses_inter_save_scope=inter_save_scope,
             attn_backend="sdpa",
             dtype=dtype,
         )

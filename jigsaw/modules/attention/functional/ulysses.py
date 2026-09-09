@@ -132,6 +132,7 @@ def ulysses_attention(
     v: torch.Tensor,
     group: dist.ProcessGroup,
     core: AttnCore,
+    qkv_stack: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run ``core`` on the full sequence via a head-parallel Ulysses all-to-all.
 
@@ -150,6 +151,12 @@ def ulysses_attention(
         ``[b, seq_after_a2a, local_heads // P, head_dim]``. For flat Ulysses
         this is a single dense kernel over the full sequence; for the
         hierarchical scheme it is a P2P ring over the inter-node group.
+    qkv_stack : torch.Tensor, optional
+        The contiguous ``[3, b, seq // P, local_heads, head_dim]`` tensor
+        ``q``/``k``/``v`` were unbound from (:meth:`DistributedAttention.forward`
+        keeps it when ``qk_norm`` is off). When given it is fed to the
+        all-to-all as-is, skipping a ``torch.stack((q, k, v))`` -- a full
+        ``[3, ...]`` copy each forward, plus its transpose in the backward.
 
     Returns
     -------
@@ -157,8 +164,10 @@ def ulysses_attention(
         ``bshd`` ``[b, seq // P, local_heads, head_dim]`` -- same layout and
         sharding as ``q``.
     """
-    # One all-to-all for all three shards: stack -> [3, b, s, h, d] -> a2a.
-    qkv = _UlyssesAllToAll.apply(torch.stack((q, k, v)), True, group)
+    # One all-to-all for all three shards: [3, b, s, h, d] -> a2a. Reuse the
+    # caller's stacked q/k/v when it has one; else stack the three views here.
+    stacked = qkv_stack if qkv_stack is not None else torch.stack((q, k, v))
+    qkv = _UlyssesAllToAll.apply(stacked, True, group)
     out = core(*qkv.unbind(0))
     return _UlyssesAllToAll.apply(out, False, group)
 
@@ -169,6 +178,7 @@ def hierarchical_ulysses_attention(
     v: torch.Tensor,
     intra_group: dist.ProcessGroup,
     ring_core: AttnCore,
+    qkv_stack: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Ulysses over an intra-node sub-group, a P2P ring over the inter-node one.
 
@@ -186,6 +196,9 @@ def hierarchical_ulysses_attention(
     ``q``/``k``/``v`` are ``bshd`` ``[b, seq // spatial, local_heads, d]``;
     ``ring_core`` gets ``[b, seq // n_nodes, local_heads // A, d]`` (``A =
     intra_group.size()``) and must return the same shape. Needs
-    ``local_heads % A == 0``.
+    ``local_heads % A == 0``. ``qkv_stack`` is forwarded to
+    :func:`ulysses_attention` (skips the ``torch.stack``).
     """
-    return ulysses_attention(q, k, v, intra_group, ring_core)
+    return ulysses_attention(
+        q, k, v, intra_group, ring_core, qkv_stack=qkv_stack
+    )

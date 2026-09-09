@@ -87,7 +87,9 @@ class _ForwardChunkProvider(ABC):
         self.send_x = ring_config.send_in_forward == SendForward.X
 
         # Local KV, kept private so an in-flight send can never alias k / v.
-        self.kv = torch.concat([k.unsqueeze(0), v.unsqueeze(0)]).clone().contiguous()
+        # ``torch.concat`` already allocates fresh contiguous storage, so it is
+        # the copy that de-aliases -- no extra ``.clone()`` needed.
+        self.kv = torch.concat([k.unsqueeze(0), v.unsqueeze(0)]).contiguous()
 
         # Running "chunk currently in hand" state.
         self.x_j = x
