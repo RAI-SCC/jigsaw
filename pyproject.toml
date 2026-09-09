@@ -89,6 +89,9 @@ ignore = ["E501", "NPY201", "N812"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["D", "F403"]
+# Triton kernels: UPPERCASE params are the ecosystem convention for
+# `tl.constexpr` / shape arguments.
+"jigsaw/modules/attention/functional/_merge_kernel.py" = ["N803"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"

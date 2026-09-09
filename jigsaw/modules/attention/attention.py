@@ -308,18 +308,27 @@ class DistributedAttention(torch.nn.Module):
                 dtype=self.dtype,
             )
 
-        self.head_concat = linear.DistributedXWT(
-            embed_dim,
-            out_dim,
-            bias=True,
-            local_rank=self.local_rank,
-            device=self.device,
-            model_group=self.channel_group,
-            row_group=self.spatial_group,
-            column_group=self.channel_group,
-            bayesian=bayesian,
-            dtype=self.dtype,
-        )
+        if channel_group.size() == 1:
+            # No channel/tensor parallelism: the output projection is a plain
+            # local matmul, same as ``qkv`` above. ``DistributedXWT`` only has
+            # kernels for (row, col) in {(1,1),(1,2),(2,2),(4,2)}, so this also
+            # unblocks a pure ring (spatial=N, channel=1).
+            self.head_concat = torch.nn.Linear(
+                embed_dim, out_dim, bias=True, device=device, dtype=self.dtype
+            )
+        else:
+            self.head_concat = linear.DistributedXWT(
+                embed_dim,
+                out_dim,
+                bias=True,
+                local_rank=self.local_rank,
+                device=self.device,
+                model_group=self.channel_group,
+                row_group=self.spatial_group,
+                column_group=self.channel_group,
+                bayesian=bayesian,
+                dtype=self.dtype,
+            )
 
         # sync up up spatial parameters
         for p in self.parameters():
