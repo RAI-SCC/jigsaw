@@ -12,7 +12,7 @@ from jigsaw.modules import linear
 from . import config as attention_config
 from .config import AttnBackend
 from .functional.cores import te as te_core
-from .functional.functional import RingAttentionFunction
+from .functional.functional import RingAttentionFunction, get_hybrid_topology
 
 #: Whether ``attn_backend="te"`` can be run at all. Both TE paths -- the ring's
 #: inner core and :class:`TransformerEngineAttention` below -- go through
@@ -232,6 +232,7 @@ class DistributedAttention(torch.nn.Module):
         qk_norm: bool = False,
         ring: bool = False,
         ulysses: bool = False,
+        ulysses_gpus_per_node: int = 0,
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
         dtype: torch.dtype = torch.float32,
         config: Optional[attention_config.RingAttentionConfig] = None,
@@ -258,6 +259,16 @@ class DistributedAttention(torch.nn.Module):
             an all-to-all brings the result back. Mutually exclusive with
             ``ring``; needs ``heads // channel_group.size()`` divisible by
             ``spatial_group.size()``. See :mod:`.functional.ulysses`.
+        ulysses_gpus_per_node: int
+            When ``> 0`` and ``ulysses`` is set, run the *hierarchical* scheme
+            (the analogue of Transformer Engine's ``cp_comm_type="a2a+p2p"``):
+            an all-to-all over an intra-node sub-group of this many consecutive
+            spatial ranks, nested in a P2P ring over the inter-node sub-group
+            (``spatial // ulysses_gpus_per_node`` ranks). The all-to-all stays
+            on the fast intra-node fabric; only ``n_nodes`` K/V chunks ever ring
+            over the slow one. Needs ``spatial`` divisible by this into a ring of
+            ``>= 2``, and ``heads // channel`` divisible by it. ``0`` (default)
+            keeps the flat single-level Ulysses.
         attn_backend: AttnBackend | str
             Attention core implementation -- ``"te"``, ``"sdpa"`` (default) or
             ``"math"``. See :class:`.config.AttnBackend`.
@@ -275,6 +286,7 @@ class DistributedAttention(torch.nn.Module):
         self.dropout_p = dropout_p
         self.ring = ring
         self.ulysses = ulysses
+        self.ulysses_gpn = ulysses_gpus_per_node if ulysses else 0
         if ring and ulysses:
             raise ValueError("ring and ulysses are mutually exclusive")
 
@@ -305,10 +317,34 @@ class DistributedAttention(torch.nn.Module):
             assert spatial_group.size() > 1, (
                 "Cannot perform ulysses attention if spatial size is 1."
             )
-            assert self.heads % spatial_group.size() == 0, (
-                f"ulysses attention needs heads // channel ({self.heads}) "
-                f"divisible by spatial group size ({spatial_group.size()})"
-            )
+            if self.ulysses_gpn:
+                a = self.ulysses_gpn
+                assert spatial_group.size() % a == 0 and spatial_group.size() // a >= 2, (
+                    f"hierarchical ulysses needs spatial ({spatial_group.size()}) "
+                    f"to split into an intra-node a2a group of {a} and an "
+                    f"inter-node ring of >= 2; use ulysses_gpus_per_node=0 for "
+                    f"the flat scheme"
+                )
+                assert self.heads % a == 0, (
+                    f"hierarchical ulysses scatters heads over the intra-node "
+                    f"group: heads // channel ({self.heads}) must be divisible by "
+                    f"ulysses_gpus_per_node ({a})"
+                )
+                topo = get_hybrid_topology(spatial_group, a)
+                self._uly_intra_group = topo.intranode_group
+                self._uly_inter_group = topo.internode_group
+                self._uly_ring_cfg = attention_config.RingAttentionConfig(
+                    device=self.device,
+                    send_in_forward=attention_config.SendForward.KV,
+                    save_for_backward=attention_config.SaveBackward.KV,
+                    send_op=attention_config.SendOp.P2P,
+                    attn_backend=self.attn_backend,
+                )
+            else:
+                assert self.heads % spatial_group.size() == 0, (
+                    f"ulysses attention needs heads // channel ({self.heads}) "
+                    f"divisible by spatial group size ({spatial_group.size()})"
+                )
             if self.te:
                 # Same per-GPU-arch kernel the ring's inner core resolves; the
                 # Ulysses path calls it directly on the gathered full sequence.
@@ -600,26 +636,15 @@ class DistributedAttention(torch.nn.Module):
         out = cast(torch.Tensor, out)
         return out
 
-    def _ulysses_attn_core(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        **kwargs: torch.Tensor,
-    ) -> torch.Tensor:
-        """Ulysses (all-to-all, head-parallel) sequence-parallel attention.
+    def _dense_bshd_core(
+        self, dropout_p: float
+    ) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
+        """A single dense-attention call on ``bshd`` ``q``/``k``/``v``.
 
-        ``q``/``k``/``v`` are ``bshd`` ``[b, seq // spatial, local_heads, d]``.
-        :func:`.functional.ulysses.ulysses_attention` all-to-alls them to
-        ``[b, seq, local_heads // spatial, d]``, runs one dense attention over
-        the full sequence, and all-to-alls the result back. The inner kernel is
-        the same backend the module was built with -- the resolved TE kernel
-        (``bshd``-native) or SDPA (transposed to ``bhsd`` around the call).
+        The resolved TE kernel (``bshd``-native) or torch SDPA (transposed to
+        ``bhsd`` around the call and back). Used as the inner core of flat
+        Ulysses -- over the whole gathered sequence.
         """
-        from .functional.ulysses import ulysses_attention
-
-        dropout_p = self.dropout_p if self.training else 0.0
-
         if self.te:
 
             def core(
@@ -650,7 +675,82 @@ class DistributedAttention(torch.nn.Module):
                     )
                 return out.transpose(1, 2)
 
-        return ulysses_attention(q, k, v, self.spatial_group, core)
+        return core
+
+    def _inter_node_ring_core(
+        self, dropout_p: float
+    ) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
+        """A P2P ring over the inter-node group on ``bshd`` ``q``/``k``/``v``.
+
+        The inner core of the hierarchical Ulysses scheme: after the intra-node
+        all-to-all, ``q``/``k``/``v`` cover one node's worth of sequence on
+        ``local_heads // A`` heads, and this rings the (already-projected) K/V
+        around the ``n_nodes`` inter-node peers via :class:`RingAttentionFunction`
+        with ``send_in_forward = save_for_backward = KV`` (so it never rebuilds
+        K/V from ``x`` -- the dummy ``x`` / ``w_qkv`` below are unused).
+        ``_uly_ring_cfg.core_layout`` is ``bshd`` for the TE core, ``bhsd``
+        otherwise; transpose around the call for the latter.
+        """
+        layout = self._uly_ring_cfg.core_layout
+        inter_rank = dist.get_rank(self._uly_inter_group)
+
+        def core(
+            qc: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor
+        ) -> torch.Tensor:
+            if layout == "bhsd":
+                qc, kc, vc = (t.transpose(1, 2).contiguous() for t in (qc, kc, vc))
+            out = RingAttentionFunction.apply(
+                qc,
+                kc,
+                vc,
+                qc.detach(),  # dummy x -- unused with send_in_forward=KV
+                self.qkv.weight,  # dummy w_qkv -- unused with send_in_forward=KV
+                self.scale,
+                dropout_p,
+                self._uly_inter_group,
+                inter_rank,
+                self._uly_ring_cfg,
+            )[0]
+            out = cast(torch.Tensor, out)
+            if layout == "bhsd":
+                out = out.transpose(1, 2).contiguous()
+            return out
+
+        return core
+
+    def _ulysses_attn_core(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        **kwargs: torch.Tensor,
+    ) -> torch.Tensor:
+        """Ulysses (all-to-all, head-parallel) sequence-parallel attention.
+
+        ``q``/``k``/``v`` are ``bshd`` ``[b, seq // spatial, local_heads, d]``.
+
+        Flat (``ulysses_gpus_per_node == 0``): one all-to-all over the whole
+        spatial group -> ``[b, seq, local_heads // spatial, d]``, one dense
+        attention, one all-to-all back.
+
+        Hierarchical (``> 0``, the ``a2a+p2p`` analogue): an all-to-all over the
+        intra-node sub-group -> ``[b, seq // n_nodes, local_heads // A, d]``, a
+        P2P ring over the inter-node sub-group, an all-to-all back.
+        """
+        from .functional.ulysses import (
+            hierarchical_ulysses_attention,
+            ulysses_attention,
+        )
+
+        dropout_p = self.dropout_p if self.training else 0.0
+
+        if self.ulysses_gpn:
+            return hierarchical_ulysses_attention(
+                q, k, v, self._uly_intra_group, self._inter_node_ring_core(dropout_p)
+            )
+        return ulysses_attention(
+            q, k, v, self.spatial_group, self._dense_bshd_core(dropout_p)
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -845,6 +945,7 @@ class Attention(torch.nn.Module):
         model_kw: str = "model",
         ring: bool = True,
         ulysses: bool = False,
+        ulysses_gpus_per_node: int = 0,
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
         **kwargs: Any,
     ) -> "DistributedAttention":
@@ -920,6 +1021,7 @@ class Attention(torch.nn.Module):
             qk_norm=attention.qk_norm,
             ring=ring,
             ulysses=ulysses,
+            ulysses_gpus_per_node=ulysses_gpus_per_node,
             attn_backend=attn_backend,
             dtype=attention.dtype,
         )

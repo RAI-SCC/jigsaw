@@ -137,10 +137,15 @@ def ulysses_attention(
         Local, sequence-sharded projections, ``bshd``
         ``[b, seq // P, local_heads, head_dim]`` (``P = group.size()``).
     group : dist.ProcessGroup
-        The sequence-parallel (spatial) group to gather the sequence over.
+        The all-to-all group to gather the sequence over -- the whole spatial
+        group for flat Ulysses, or the intra-node sub-group for the
+        hierarchical scheme.
     core : callable
-        ``core(q, k, v) -> out`` running dense attention on ``bshd`` tensors and
-        returning ``bshd`` ``[b, seq, local_heads // P, head_dim]``.
+        ``core(q, k, v) -> out`` running attention over the sequence the
+        all-to-all made local, on ``bshd`` tensors, and returning ``bshd``
+        ``[b, seq_after_a2a, local_heads // P, head_dim]``. For flat Ulysses
+        this is a single dense kernel over the full sequence; for the
+        hierarchical scheme it is a P2P ring over the inter-node group.
 
     Returns
     -------
@@ -153,3 +158,27 @@ def ulysses_attention(
     v = _UlyssesAllToAll.apply(v, True, group)
     out = core(q, k, v)
     return _UlyssesAllToAll.apply(out, False, group)
+
+
+def hierarchical_ulysses_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    intra_group: dist.ProcessGroup,
+    ring_core: AttnCore,
+) -> torch.Tensor:
+    """Ulysses over an intra-node sub-group, a P2P ring over the inter-node one.
+
+    The mirror of Transformer Engine's ``cp_comm_type="a2a+p2p"``: the
+    ``intra_group`` all-to-all (fast, NVLink) scatters heads and gathers one
+    node's worth of sequence, so ``ring_core`` -- a ring over the inter-node
+    group -- circulates only ``n_nodes`` K/V chunks instead of the full spatial
+    ring, and its inner attention runs on ``local_heads // intra_group.size()``
+    heads over ``seq // n_nodes`` tokens.
+
+    ``q``/``k``/``v`` are ``bshd`` ``[b, seq // spatial, local_heads, d]``;
+    ``ring_core`` gets ``[b, seq // n_nodes, local_heads // A, d]`` (``A =
+    intra_group.size()``) and must return the same shape. Needs
+    ``local_heads % A == 0``.
+    """
+    return ulysses_attention(q, k, v, intra_group, ring_core)

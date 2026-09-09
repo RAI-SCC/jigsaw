@@ -154,6 +154,64 @@ class TestUlyssesAttention:
         )
 
     @pytest.mark.dist(4)
+    def test_hierarchical_matches_dense_reference(
+        self, device: torch.device, process_mesh_dict_4x1: dict
+    ) -> None:
+        """Hierarchical Ulysses (intra-node a2a x inter-node p2p ring) reproduces
+        the same gathered-sequence dense run as the flat scheme.
+
+        ``spatial=4, ulysses_gpus_per_node=2``: a 2-rank intra-node all-to-all
+        nested in a 2-node P2P ring. The ring's online-softmax merge adds a few
+        ULP of noise the single-kernel flat path does not, hence the looser atol.
+        """
+        mesh = process_mesh_dict_4x1
+        row = mesh["row"]
+        model_group = mesh["model"]
+        dtype = torch.float32 if dist.get_backend() != "nccl" else torch.bfloat16
+        atol = 1e-4 if dtype == torch.float32 else 2e-2
+
+        torch.manual_seed(0)
+        model = attention.DistributedAttention(
+            in_dim=_IN_DIM,
+            embed_dim=_EMBED_DIM,
+            out_dim=_OUT_DIM,
+            heads=_HEADS,
+            dropout_p=0.0,
+            local_rank=mesh["col"].rank(),
+            device=device,
+            spatial_group=row,
+            channel_group=mesh["col"],
+            ring=False,
+            ulysses=True,
+            ulysses_gpus_per_node=2,
+            attn_backend="sdpa",
+            dtype=dtype,
+        )
+
+        b, s_loc = 2, 16
+        s_full = s_loc * row.size()
+        torch.manual_seed(100 + row.rank())
+        x_local = torch.randn(
+            b, s_loc, _IN_DIM, device=device, dtype=dtype, requires_grad=True
+        )
+        out_local = model(x_local)
+        assert out_local.shape == (b, s_loc, _OUT_DIM)
+
+        x_full = gather_1d_results(x_local.detach(), mesh, dim=1, pm_key="row")
+        x_full.requires_grad_(True)
+        out_ref = _dense_reference(model, x_full)
+        out_full = gather_1d_results(out_local, mesh, dim=1, pm_key="row")
+        assert_close("output", out_full, out_ref, atol, 1e-4, device, model_group)
+
+        torch.manual_seed(7)
+        dout_full = torch.randn(b, s_full, _OUT_DIM, device=device, dtype=dtype)
+        r0 = row.rank() * s_loc
+        out_local.backward(dout_full[:, r0 : r0 + s_loc, :])
+        out_ref.backward(dout_full)
+        dx_full = gather_1d_results(x_local.grad, mesh, dim=1, pm_key="row")
+        assert_close("input grad", dx_full, x_full.grad, atol, 1e-4, device, model_group)
+
+    @pytest.mark.dist(4)
     def test_composes_with_channel_parallel(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
