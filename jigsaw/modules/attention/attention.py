@@ -231,6 +231,7 @@ class DistributedAttention(torch.nn.Module):
         bayesian: bool = False,
         qk_norm: bool = False,
         ring: bool = False,
+        ulysses: bool = False,
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
         dtype: torch.dtype = torch.float32,
         config: Optional[attention_config.RingAttentionConfig] = None,
@@ -249,6 +250,14 @@ class DistributedAttention(torch.nn.Module):
             Run ring (sequence-parallel) attention over ``spatial_group``. A
             separate switch from ``attn_backend``: the ring's inner per-chunk
             attention still uses the chosen backend.
+        ulysses: bool
+            Run Ulysses (all-to-all, head-parallel) sequence parallelism over
+            ``spatial_group`` instead of the ring: one all-to-all trades the
+            local sequence shard for a head shard, a single dense attention runs
+            over the full sequence on ``heads // (channel * spatial)`` heads, and
+            an all-to-all brings the result back. Mutually exclusive with
+            ``ring``; needs ``heads // channel_group.size()`` divisible by
+            ``spatial_group.size()``. See :mod:`.functional.ulysses`.
         attn_backend: AttnBackend | str
             Attention core implementation -- ``"te"``, ``"sdpa"`` (default) or
             ``"math"``. See :class:`.config.AttnBackend`.
@@ -265,14 +274,19 @@ class DistributedAttention(torch.nn.Module):
         self.dtype = dtype
         self.dropout_p = dropout_p
         self.ring = ring
+        self.ulysses = ulysses
+        if ring and ulysses:
+            raise ValueError("ring and ulysses are mutually exclusive")
 
         self.attn_backend = self._resolve_backend(AttnBackend(attn_backend))
         self.te = self.attn_backend == AttnBackend.TE
         # Both TE paths run bshd q/k/v (``self.te`` gates the rearrange in
-        # ``forward``). They differ only in the *output*: the non-ring core
-        # returns ``... n s (h d)`` (heads already folded), the ring returns
-        # ``... n s h d``. ``_te_bshd`` marks the non-ring case for that.
-        self._te_bshd = self.te and not ring
+        # ``forward``); the Ulysses path is bshd for every backend. They differ
+        # only in the *output*: the non-ring, non-ulysses TE core returns
+        # ``... n s (h d)`` (heads already folded), the ring and Ulysses cores
+        # return ``... n s h d``. ``_te_bshd`` marks the folded case.
+        self._bshd_qkv = self.te or self.ulysses
+        self._te_bshd = self.te and not ring and not ulysses
 
         self.heads = heads // self.channel_group.size()
         self.scale = (embed_dim // heads) ** -0.5
@@ -287,6 +301,19 @@ class DistributedAttention(torch.nn.Module):
                 "Cannot perform ring attention if spatial size is 1."
             )
             self.attn_core = self._ring_attn_core
+        elif self.ulysses:
+            assert spatial_group.size() > 1, (
+                "Cannot perform ulysses attention if spatial size is 1."
+            )
+            assert self.heads % spatial_group.size() == 0, (
+                f"ulysses attention needs heads // channel ({self.heads}) "
+                f"divisible by spatial group size ({spatial_group.size()})"
+            )
+            if self.te:
+                # Same per-GPU-arch kernel the ring's inner core resolves; the
+                # Ulysses path calls it directly on the gathered full sequence.
+                self.te_core = te_core.select_core(self.device)
+            self.attn_core = self._ulysses_attn_core
         else:
             self.attn_core = self._select_attn_core()
 
@@ -573,6 +600,58 @@ class DistributedAttention(torch.nn.Module):
         out = cast(torch.Tensor, out)
         return out
 
+    def _ulysses_attn_core(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        **kwargs: torch.Tensor,
+    ) -> torch.Tensor:
+        """Ulysses (all-to-all, head-parallel) sequence-parallel attention.
+
+        ``q``/``k``/``v`` are ``bshd`` ``[b, seq // spatial, local_heads, d]``.
+        :func:`.functional.ulysses.ulysses_attention` all-to-alls them to
+        ``[b, seq, local_heads // spatial, d]``, runs one dense attention over
+        the full sequence, and all-to-alls the result back. The inner kernel is
+        the same backend the module was built with -- the resolved TE kernel
+        (``bshd``-native) or SDPA (transposed to ``bhsd`` around the call).
+        """
+        from .functional.ulysses import ulysses_attention
+
+        dropout_p = self.dropout_p if self.training else 0.0
+
+        if self.te:
+
+            def core(
+                qc: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor
+            ) -> torch.Tensor:
+                out, _lse, _rng = TransformerEngineAttention.apply(
+                    qc, kc, vc, self.scale, dropout_p, self.te_core
+                )  # [b, s, h * d]
+                return out.unflatten(-1, (qc.shape[-2], qc.shape[-1]))
+        else:
+
+            def core(
+                qc: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor
+            ) -> torch.Tensor:
+                with torch.nn.attention.sdpa_kernel(
+                    [
+                        torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+                        torch.nn.attention.SDPBackend.MATH,
+                    ]
+                ):
+                    out = torch.nn.functional.scaled_dot_product_attention(
+                        qc.transpose(1, 2),
+                        kc.transpose(1, 2),
+                        vc.transpose(1, 2),
+                        is_causal=False,
+                        dropout_p=dropout_p,
+                        scale=self.scale,
+                    )
+                return out.transpose(1, 2)
+
+        return ulysses_attention(q, k, v, self.spatial_group, core)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass for distributed multi-head attention.
@@ -583,8 +662,9 @@ class DistributedAttention(torch.nn.Module):
         qkv = self.qkv(x)
 
         # TE cores (ring and non-ring) are bshd-native -- feed them ``n s h d`` so
-        # nothing transposes per chunk; SDPA / math want ``n h s d``.
-        if self.te:
+        # nothing transposes per chunk; the Ulysses path is bshd end to end and
+        # transposes only around a non-TE inner kernel. SDPA / math want ``n h s d``.
+        if self._bshd_qkv:
             qkv = rearrange(
                 qkv, "... n s (three h d) -> three ... n s h d", three=3, h=self.heads
             )
@@ -605,11 +685,11 @@ class DistributedAttention(torch.nn.Module):
         out = self.attn_core(q, k, v, x=x)
         # Fold ``out`` to ``... n s (h d)`` in ``x.dtype`` before ``head_concat``
         # (which holds model-dtype weights). The non-ring TE core already returns
-        # ``... n s (h d)``; the ring TE core returns bshd ``... n s h d``; every
-        # other core returns bhsd ``... n h s d``.
+        # ``... n s (h d)``; the ring TE core and the Ulysses core return bshd
+        # ``... n s h d``; every other core returns bhsd ``... n h s d``.
         if self._te_bshd:
             pass
-        elif self.te:
+        elif self.te or self.ulysses:
             out = rearrange(out, "... n s h d -> ... n s (h d)").contiguous()
         else:
             out = rearrange(out, "... n h s d -> ... n s (h d)").contiguous()
@@ -764,6 +844,7 @@ class Attention(torch.nn.Module):
         col_kw: str = "col",
         model_kw: str = "model",
         ring: bool = True,
+        ulysses: bool = False,
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
         **kwargs: Any,
     ) -> "DistributedAttention":
@@ -793,6 +874,9 @@ class Attention(torch.nn.Module):
             Boolean flag for whether ring attention should be computed on the "row" dimension.
             If not, the "row" dimension will simply perform attention in parallel over the different
             domains. This is useful for, domain-parallel i.e., Windowed attention.
+        ulysses: bool
+            Run Ulysses (all-to-all, head-parallel) sequence parallelism on the
+            "row" dimension instead of the ring. Mutually exclusive with ``ring``.
         attn_backend: AttnBackend | str
             Attention core implementation (``"te"`` / ``"sdpa"`` / ``"math"``);
             forwarded to :class:`DistributedAttention`. Composes with ``ring``.
@@ -835,6 +919,7 @@ class Attention(torch.nn.Module):
             bayesian=False,
             qk_norm=attention.qk_norm,
             ring=ring,
+            ulysses=ulysses,
             attn_backend=attn_backend,
             dtype=attention.dtype,
         )
@@ -850,6 +935,8 @@ class Attention(torch.nn.Module):
         )  # type: ignore[assignment]
         if ring:
             instance.attn_core = DistributedAttention._ring_attn_core  # type: ignore[assignment]
+        elif ulysses:
+            instance.attn_core = instance._ulysses_attn_core  # type: ignore[assignment]
 
         # [3*embed_dim, input_dim]
         # Now, local W has shape [3*embed_dim, embed_dim//channel size]

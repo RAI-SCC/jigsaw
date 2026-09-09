@@ -7,6 +7,7 @@ from .functional import (
     RingAttentionFunction,
     get_hybrid_topology,
 )
+from .ulysses import ulysses_attention
 
 __all__ = [
     "HybridTopology",
@@ -14,4 +15,5 @@ __all__ = [
     "get_hybrid_topology",
     "ring_backward",
     "ring_forward",
+    "ulysses_attention",
 ]
