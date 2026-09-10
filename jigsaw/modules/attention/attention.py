@@ -100,39 +100,8 @@ try:
 
         @staticmethod
         def setup_context(ctx: Any, inputs: tuple, output: torch.Tensor) -> None:
-            """Save q/k/v, ``attn`` and the RNG snapshot so :meth:`backward` can recompute.
-
-            A custom ``autograd.Function`` is a graph boundary, so the graph
-            ``attn(q, k, v)` would build internally is discarded -- backward has
-            to rebuild it.
-            """
-            q, k, v, attn, rng_state = inputs
-            ctx.save_for_backward(q, k, v)
-            ctx.attn = attn
-            ctx.rng_state = rng_state
-
-        @staticmethod
-        def backward(  # type: ignore[override]
-            ctx: Any, grad_out: torch.Tensor
-        ) -> tuple[Optional[torch.Tensor], ...]:
-            """Recompute the TE forward under grad and pull out dq/dk/dv."""
-            q, k, v = ctx.saved_tensors
-            with torch.enable_grad():
-                qd, kd, vd = (t.detach().requires_grad_(True) for t in (q, k, v))
-                # Replay the RNG state `forward` saw, so a dropout-enabled `attn`
-                # draws the same mask here as it did originally; restore the
-                # caller's own state afterwards so this recompute has no
-                # observable side effect on the ambient RNG stream.
-                current_state = _capture_rng_state(q.device)
-                _restore_rng_state(ctx.rng_state, q.device)
-                try:
-                    out = ctx.attn(qd, kd, vd)
-                finally:
-                    _restore_rng_state(current_state, q.device)
-                grads = torch.autograd.grad(
-                    out, (qd, kd, vd), grad_out, retain_graph=False
-                )
-            return grads[0], grads[1], grads[2], None, None
+            """No context is needed; gradients flow through ``attn`` itself."""
+            return None
 
         @staticmethod
         def vmap(
