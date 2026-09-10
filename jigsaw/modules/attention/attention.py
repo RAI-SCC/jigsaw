@@ -237,6 +237,7 @@ class DistributedAttention(torch.nn.Module):
         ulysses_inter_save_scope: attention_config.SaveScope | str = (
             attention_config.SaveScope.LOCAL
         ),
+        ulysses_inter_overlap: bool = False,
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
         dtype: torch.dtype = torch.float32,
         config: Optional[attention_config.RingAttentionConfig] = None,
@@ -297,6 +298,16 @@ class DistributedAttention(torch.nn.Module):
             (measured: 181 vs 175 ms median, GH200 8x1 s=131072); the win is
             expected only at ``n_nodes >= 4``, where ``LOCAL`` re-rings K/V
             through many hops.
+        ulysses_inter_overlap: bool
+            Put the hierarchical scheme's inter-node K/V ring (and its backward
+            dK/dV relay) on a dedicated CUDA stream with double buffering, so
+            each inter-node transfer overlaps the node-local attention core --
+            the ``cp_stream`` trick Transformer Engine's ``a2a+p2p`` uses. Only
+            read when ``ulysses_gpus_per_node > 0`` and
+            ``ulysses_inter_comm == "p2p"``; forwarded to the inter-node ring's
+            :class:`.config.RingAttentionConfig` as ``overlap_comm`` (CUDA-only,
+            inert otherwise). Pairs best with ``ulysses_inter_save_scope=LOCAL``
+            (the re-ringing backward the overlap targets).
         attn_backend: AttnBackend | str
             Attention core implementation -- ``"te"``, ``"sdpa"`` (default) or
             ``"math"``. See :class:`.config.AttnBackend`.
@@ -320,6 +331,7 @@ class DistributedAttention(torch.nn.Module):
             if isinstance(ulysses_inter_save_scope, attention_config.SaveScope)
             else attention_config.SaveScope[ulysses_inter_save_scope]
         )
+        self.ulysses_inter_overlap = bool(ulysses_inter_overlap)
         if ulysses_inter_comm not in ("p2p", "all_gather"):
             raise ValueError(
                 f"ulysses_inter_comm must be 'p2p' or 'all_gather', got "
@@ -387,6 +399,10 @@ class DistributedAttention(torch.nn.Module):
                     save_scope=self.ulysses_inter_save_scope,
                     send_op=attention_config.SendOp.P2P,
                     attn_backend=self.attn_backend,
+                    # cp_stream-style overlap of the inter-node K/V + dK/dV
+                    # transfers with the node-local cores (CUDA-only; inert
+                    # otherwise). See `RingAttentionConfig.overlap_comm`.
+                    overlap_comm=self.ulysses_inter_overlap,
                 )
             else:
                 assert self.heads % spatial_group.size() == 0, (
@@ -1046,6 +1062,7 @@ class Attention(torch.nn.Module):
         ulysses_inter_save_scope: attention_config.SaveScope | str = (
             attention_config.SaveScope.LOCAL
         ),
+        ulysses_inter_overlap: bool = False,
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
         **kwargs: Any,
     ) -> "DistributedAttention":
@@ -1124,6 +1141,7 @@ class Attention(torch.nn.Module):
             ulysses_gpus_per_node=ulysses_gpus_per_node,
             ulysses_inter_comm=ulysses_inter_comm,
             ulysses_inter_save_scope=ulysses_inter_save_scope,
+            ulysses_inter_overlap=ulysses_inter_overlap,
             attn_backend=attn_backend,
             dtype=attention.dtype,
         )

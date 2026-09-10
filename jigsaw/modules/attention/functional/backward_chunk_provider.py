@@ -18,6 +18,7 @@ from jigsaw.modules.attention.config import (
 )
 from jigsaw.offload import NVLinkActivationOffloader
 
+from ._comm_overlap import consume, issue_on_comm_stream
 from .functional import _compute_kv, get_hybrid_topology
 
 
@@ -86,6 +87,8 @@ def _build_backward_chunk_provider(
     )
     match ring_config.send_op:
         case SendOp.P2P | SendOp.ALLTOALL:
+            if ring_config.overlap_active:
+                return _LocalChunkProviderOverlap(*args[:-1])
             return _LocalChunkProvider(*args[:-1])
         case SendOp.BROADCAST:
             return _LocalChunkProviderBroadcast(*args)
@@ -413,6 +416,76 @@ class _LocalChunkProvider(_BackwardChunkProvider):
             async_op=True,
             step=step,
         )
+
+
+class _LocalChunkProviderOverlap(_LocalChunkProvider):
+    """:class:`_LocalChunkProvider` with the K/V relay on a dedicated stream.
+
+    Two persistent buffers ping-pong. :func:`~.backward.ring_backward` calls
+    :meth:`maybe_forward` right after :meth:`get` (before the attention core)
+    when overlap is on, so the relay of the next chunk runs on
+    ``ring_config.comm_stream`` under the core instead of after it. Selected by
+    :func:`_build_backward_chunk_provider` only when
+    :attr:`RingAttentionConfig.overlap_active`; the matching dK/dV relay is
+    :class:`~.backward._DkvRelay`.
+    """
+
+    def __init__(self, *args: object) -> None:
+        """Defer buffer sizing to step 0 (needs the K/V shape)."""
+        super().__init__(*args)  # type: ignore[arg-type]
+        self._cs = self.config.comm_stream
+        self._bufs: Optional[list[torch.Tensor]] = None
+        self._pending = 0
+        self._work: object = None
+        self._event: Optional[torch.cuda.Event] = None
+
+    def _kick(self, src: torch.Tensor, into: int, step: int) -> None:
+        """Issue a ``direction=-1`` ring send of ``src`` into ``self._bufs[into]``."""
+        assert self._bufs is not None
+        buf = self._bufs[into]
+        _, self._work, self._event = issue_on_comm_stream(
+            self._cs,
+            lambda: self.config.send_op_fn(
+                src, buf, direction=-1, group=self.group, async_op=True, step=step
+            ),
+            keep_alive=(src, buf),
+        )
+        self._pending = into
+
+    def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return chunk ``step`` -- local on step 0, else adopted off the comm stream."""
+        if step == 0:
+            kv = self._kv0()
+            send_buf = (
+                self.x if self.config.send_in_forward == SendForward.X else kv
+            )
+            self._bufs = [torch.empty_like(send_buf), torch.empty_like(send_buf)]
+            self._kick(send_buf, into=0, step=step)
+            if self.config.send_in_forward == SendForward.X:
+                kv, kj, vj = _compute_kv(
+                    self.x, self.w_qkv, self.b, self.seq_local, self.h, self.d,
+                    self.config.core_layout,
+                )
+            else:
+                kj, vj = kv[0].contiguous(), kv[1].contiguous()
+            return kj, vj, kv
+
+        assert self._event is not None and self._bufs is not None
+        recv_buf = self._bufs[self._pending]
+        consume(self._event, recv_buf)
+        return self._kv_from(recv_buf)
+
+    def maybe_forward(self, step: int, ring_group_size: int) -> None:
+        """Relay the chunk held at ``step`` onward, on the comm stream.
+
+        Called before the step's attention core (not after) so the transfer
+        overlaps it. Step 0's relay was already issued in :meth:`get`; the last
+        step has nothing to prefetch.
+        """
+        if step == 0 or step >= ring_group_size - 1:
+            return
+        assert self._bufs is not None
+        self._kick(self._bufs[self._pending], into=1 - self._pending, step=step)
 
 
 class _LocalChunkProviderBroadcast(_LocalChunkProvider):

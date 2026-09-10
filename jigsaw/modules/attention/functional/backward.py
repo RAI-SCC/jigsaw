@@ -12,6 +12,7 @@ from jigsaw.modules.attention.config import (
     SendOp,
 )
 
+from ._comm_overlap import consume, issue_on_comm_stream
 from ._nvtx import nvtx_range
 from .backward_chunk_provider import _build_backward_chunk_provider
 from .functional import (
@@ -168,6 +169,21 @@ def ring_backward(
         and ring_config.send_backward == SendBackward.SEND_DKV
     )
 
+    # Comm-stream overlap for the re-ringing path: the K/V relay moves to
+    # ``ring_config.comm_stream`` and is issued *before* each step's core (see
+    # ``_LocalChunkProviderOverlap.maybe_forward``), and the dK/dV relay becomes
+    # async + deferred a step (``_DkvRelay``). Only the plain P2P/all-to-all ring
+    # with the LOCAL + SEND_DKV backward is wired for it; every other strategy
+    # keeps its own machinery untouched.
+    overlap = (
+        ring_config.overlap_active
+        and not all_reduce_dkv
+        and ring_config.send_op in (SendOp.P2P, SendOp.ALLTOALL)
+        and ring_config.save_scope == SaveScope.LOCAL
+        and ring_config.send_backward == SendBackward.SEND_DKV
+    )
+    dkv_relay = _DkvRelay(ring_config, group, dq) if overlap else None
+
     chunk_provider = _build_backward_chunk_provider(
         ring_config,
         chunks_to_save,
@@ -185,6 +201,11 @@ def ring_backward(
         with nvtx_range(f"bwd/step{step}"):
             with nvtx_range("get"):
                 kj, vj, kv = chunk_provider.get(step)
+            if overlap:
+                # Prefetch the next chunk's K/V now so its inter-node transfer
+                # runs under this step's core instead of after it.
+                with nvtx_range("maybe_forward"):
+                    chunk_provider.maybe_forward(step, ring_group_size)
             global_chunk_idx = global_chunk_idx_backward(
                 ring_config, local_rank, step, ring_group_size, group
             )
@@ -210,6 +231,9 @@ def ring_backward(
                     if local_rank == step:
                         dk_buf = dk_j
                         dv_buf = dv_j
+                elif overlap:
+                    assert dkv_relay is not None
+                    dkv_relay.step(dk_buf, dv_buf, dk_j, dv_j, step)
                 else:
                     dk_buf, dv_buf = accumulate_dkv(
                         ring_config,
@@ -224,9 +248,15 @@ def ring_backward(
                         group,
                     )
 
-            # No-op for providers that don't re-circulate chunks (e.g. global).
-            with nvtx_range("maybe_forward"):
-                chunk_provider.maybe_forward(step, ring_group_size)
+            if not overlap:
+                # Overlap issues this before the core; otherwise relay here.
+                # No-op for providers that don't re-circulate chunks (e.g. global).
+                with nvtx_range("maybe_forward"):
+                    chunk_provider.maybe_forward(step, ring_group_size)
+
+    if overlap:
+        assert dkv_relay is not None
+        dkv_relay.drain(dk_buf, dv_buf)
 
     if all_reduce_dkv:
         # `dk_buf`/`dv_buf` already hold this rank's final local gradient.
@@ -440,6 +470,89 @@ def _accumulate_dkv_send(
     dk_buf += dkj_r
     dv_buf += dvj_r
     return dk_buf, dv_buf
+
+
+class _DkvRelay:
+    """Async, comm-stream dK/dV relay for the plain P2P ring backward (SEND_DKV).
+
+    The overlap counterpart of :func:`_accumulate_dkv_send`, which does a
+    synchronous ``send_op_fn(async_op=False)`` round trip per step fully
+    serialized with the attention cores. Here each step's partial is staged into
+    a persistent buffer, relayed on ``ring_config.comm_stream`` with
+    ``async_op=True``, and folded into ``dk_buf`` / ``dv_buf`` one step later --
+    so the transfer completes under the next step's core. Two send/receive
+    buffer pairs ping-pong (deferring by exactly one step).
+
+    Step 0 is local (this rank already holds its own chunk), matching
+    :func:`_accumulate_dkv_send`.
+    """
+
+    def __init__(
+        self,
+        ring_config: RingAttentionConfig,
+        group: dist.ProcessGroup,
+        like: torch.Tensor,
+    ) -> None:
+        """Allocate the staging buffers from ``like`` (a per-rank dK/dV tensor)."""
+        self.cfg = ring_config
+        self.group = group
+        self.cs = ring_config.comm_stream
+        shape = (2 * like.shape[0], *like.shape[1:])  # cat(dk, dv) on dim 0
+        self._send = [
+            torch.empty(shape, device=like.device, dtype=like.dtype) for _ in range(2)
+        ]
+        self._recv = [
+            torch.empty(shape, device=like.device, dtype=like.dtype) for _ in range(2)
+        ]
+        self._pending: Optional[tuple[torch.cuda.Event, torch.Tensor]] = None
+        self._work: object = None
+
+    def _drain(self, dk_buf: torch.Tensor, dv_buf: torch.Tensor) -> None:
+        """Fold the in-flight relay's result (if any) into ``dk_buf`` / ``dv_buf``."""
+        if self._pending is None:
+            return
+        event, recv = self._pending
+        consume(event, recv)
+        dk_r, dv_r = torch.chunk(recv, 2, dim=0)
+        dk_buf.add_(dk_r)
+        dv_buf.add_(dv_r)
+        self._pending = None
+
+    def step(
+        self,
+        dk_buf: torch.Tensor,
+        dv_buf: torch.Tensor,
+        dk_j: torch.Tensor,
+        dv_j: torch.Tensor,
+        step: int,
+    ) -> None:
+        """Relay this step's dK/dV partial; fold in the previous step's."""
+        if step == 0:
+            dk_buf.add_(dk_j)
+            dv_buf.add_(dv_j)
+            return
+
+        i = step & 1
+        send, recv = self._send[i], self._recv[i]
+        b = dk_j.shape[0]
+        send[:b].copy_(dk_j)
+        send[b:].copy_(dv_j)
+        # Same routing as `_accumulate_dkv_send`: hand the partial back `step`
+        # ranks along the ring toward the chunk's home rank.
+        direction = step if self.cfg.send_op != SendOp.BROADCAST else -step
+        _, self._work, event = issue_on_comm_stream(
+            self.cs,
+            lambda: self.cfg.p2p_fn(
+                send, recv, direction, group=self.group, async_op=True, step=step
+            ),
+            keep_alive=(send, recv),
+        )
+        self._drain(dk_buf, dv_buf)
+        self._pending = (event, recv)
+
+    def drain(self, dk_buf: torch.Tensor, dv_buf: torch.Tensor) -> None:
+        """Fold in the last outstanding relay. Call once after the ring loop."""
+        self._drain(dk_buf, dv_buf)
 
 
 def _accumulate_dkv_hybrid_broadcast(

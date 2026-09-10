@@ -37,6 +37,7 @@ from jigsaw.modules.attention.config import (
     SendOp,
 )
 
+from ._comm_overlap import consume, issue_on_comm_stream
 from .functional import _compute_kv, bhnd, get_hybrid_topology
 
 
@@ -157,6 +158,10 @@ class _RingForwardChunkProvider(_ForwardChunkProvider):
     def __init__(self, *args: object) -> None:
         """Kick off the first ring send of the local chunk."""
         super().__init__(*args)  # type: ignore[arg-type]
+        self._start_first_send()
+
+    def _start_first_send(self) -> None:
+        """Issue the first ring send (local chunk). Overridden by the overlap variant."""
         self._recv_buf, self._handle = self.config.forward_send_fn(
             self.x_j, self.kv_j, direction=-1, group=self.group, tag=0
         )
@@ -193,6 +198,61 @@ class _RingForwardChunkProvider(_ForwardChunkProvider):
     def global_chunk_idx(self, step: int) -> int:
         """``direction=-1`` ring: after ``step`` receives, ``x_j`` came from here."""
         return (self.local_rank + step) % self.world_size
+
+
+class _RingForwardChunkProviderOverlap(_RingForwardChunkProvider):
+    """:class:`_RingForwardChunkProvider` with the K/V send on a dedicated stream.
+
+    Two persistent receive buffers ping-pong: the send of chunk ``step + 1`` is
+    issued on ``ring_config.comm_stream`` from inside ``get(step)`` -- *before*
+    :func:`~.forward.ring_forward` runs the step-``step`` attention core on the
+    default stream -- so the transfer overlaps that core instead of the
+    host-blocking ``Work.wait()`` the base class does. Selected by
+    :func:`build_forward_chunk_provider` only when
+    :attr:`RingAttentionConfig.overlap_active`.
+    """
+
+    def _start_first_send(self) -> None:
+        """Allocate the ping-pong buffers and kick the local chunk on the comm stream."""
+        self._cs = self.config.comm_stream
+        src = self.x_j if self.send_x else self.kv_j
+        # Two buffers of the circulated tensor's shape. `_pending` names the one
+        # the next `get` will read; the other is free to receive into.
+        self._bufs = [torch.empty_like(src), torch.empty_like(src)]
+        self._pending = 0
+        self._work: object = None
+        self._event: torch.cuda.Event | None = None
+        self._kick(src, into=0, tag=0)
+
+    def _kick(self, src: torch.Tensor, into: int, tag: int) -> None:
+        """Issue a ``direction=-1`` ring send of ``src`` into ``self._bufs[into]``."""
+        buf = self._bufs[into]
+        _, self._work, self._event = issue_on_comm_stream(
+            self._cs,
+            lambda: self.config.send_op_fn(
+                src, buf, direction=-1, group=self.group, async_op=True, tag=tag
+            ),
+            keep_alive=(src, buf),
+        )
+        self._pending = into
+
+    def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Adopt chunk ``step`` off the comm stream and prefetch ``step + 1``."""
+        if step > 0:
+            assert self._event is not None
+            recv_buf = self._bufs[self._pending]
+            consume(self._event, recv_buf)
+            self._recv(recv_buf)
+            if step + 1 < self.world_size:
+                # `_recv` rebound x_j / kv_j onto `recv_buf`; relay it onward into
+                # the *other* buffer. Source and destination differ, and the next
+                # `_kick` waits on the compute stream (which has just read this
+                # buffer in the core) before overwriting it.
+                src = self.x_j if self.send_x else self.kv_j
+                self._kick(src, into=1 - self._pending, tag=step)
+            if self.send_x:
+                self._kv_from_x()
+        return self.kj, self.vj
 
 
 # --------------------------------------------------------------------------- #
@@ -502,6 +562,8 @@ def build_forward_chunk_provider(
         case SendOp.BROADCAST:
             return _BroadcastForwardChunkProvider(*args)
         case SendOp.P2P | SendOp.ALLTOALL:
+            if ring_config.overlap_active:
+                return _RingForwardChunkProviderOverlap(*args)
             return _RingForwardChunkProvider(*args)
         case SendOp.HYBRID_P2P | SendOp.HYBRID_ALLTOALL:
             return _HybridP2PForwardChunkProvider(*args)

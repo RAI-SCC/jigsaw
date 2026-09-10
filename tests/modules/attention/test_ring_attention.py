@@ -774,3 +774,79 @@ def test_ring_hybrid_single_node(
         offloader,
         gpus_per_node=2,
     )
+
+
+# --------------------------------------------------------------------------- #
+# comm-stream overlap (RingAttentionConfig.overlap_comm)
+# --------------------------------------------------------------------------- #
+@pytest.mark.gpu_required
+@pytest.mark.dist(4)
+@pytest.mark.parametrize(
+    "send_in_forward", [config.SendForward.KV, config.SendForward.X]
+)
+@pytest.mark.parametrize(
+    "save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL]
+)
+def test_ring_overlap_comm_parity(
+    device: torch.device,
+    process_mesh_dict_4x1: dict,
+    send_in_forward: config.SendForward,
+    save_scope: config.SaveScope,
+) -> None:
+    """``overlap_comm`` is a pure scheduling change: same out / dq / dk / dv.
+
+    Runs the plain ``SendOp.P2P`` ring forward+backward with the comm-stream
+    overlap off and then on (dedicated CUDA stream + double-buffered K/V
+    circulation, hoisted dK/dV relay) and asserts the results are numerically
+    identical -- the ops and their accumulation order are unchanged, only which
+    stream they run on. ``send_backward`` is ``SEND_DKV`` so ``save_scope=LOCAL``
+    exercises the ``_DkvRelay`` async path and ``GLOBAL`` the all-reduce path
+    (overlap inert there, so it doubles as a no-regression check).
+    """
+    group = process_mesh_dict_4x1["row"]
+    local_rank = dist.get_rank(group=group)
+    world_size = dist.get_world_size(group=group)
+    dtype = torch.bfloat16
+    torch.manual_seed(2)
+    b, h, n_global, d = 3, 6, world_size * 16, 16
+    n_local = n_global // world_size
+
+    w_qkv = torch.randn(3 * d * h, d, device=device, dtype=dtype) / (d**0.5)
+    torch.manual_seed(local_rank)
+    x = (torch.randn(b, n_local, d, device=device, dtype=dtype) / (d**0.5)).contiguous()
+    qkv = x @ w_qkv.mT
+    q, k, v = (
+        t.contiguous()
+        for t in qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
+    )
+    scale = d**-0.5
+    dout = torch.ones(b, h, n_local, d, device=device, dtype=dtype)
+
+    def run(overlap: bool):
+        cfg = config.RingAttentionConfig(
+            device=device,
+            send_in_forward=send_in_forward,
+            send_op=config.SendOp.P2P,
+            save_for_backward=config.SaveBackward.KV,
+            save_scope=save_scope,
+            send_backward=config.SendBackward.SEND_DKV,
+            overlap_comm=overlap,
+        )
+        assert cfg.overlap_active == overlap  # CUDA build => stream created
+        out, lse, chunks, seed, rng = forward.ring_forward(
+            q, k, v, x, w_qkv, scale, 0.0, group, local_rank, world_size, cfg
+        )
+        dq, dk, dv = backward.ring_backward(
+            dout, q, out, x, lse, w_qkv, scale, group, local_rank, world_size,
+            chunks, ring_config=cfg, dropout_p=0.0, base_seed=seed, rng_states=rng,
+        )
+        torch.cuda.synchronize()
+        return out, dq, dk, dv
+
+    ref = run(False)
+    got = run(True)
+    for name, a, c in zip(("out", "dq", "dk", "dv"), ref, got):
+        assert torch.allclose(a, c, atol=1e-3, rtol=0), (
+            f"{name}: overlap changed the result "
+            f"(max |Δ| = {(a.float() - c.float()).abs().max().item():.3e})"
+        )

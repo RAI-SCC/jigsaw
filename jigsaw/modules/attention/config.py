@@ -331,6 +331,7 @@ class RingAttentionConfig:
         offload: Offload = Offload.DISABLED,
         gpus_per_node: int = 4,
         attn_backend: AttnBackend = AttnBackend.SDPA,
+        overlap_comm: bool = False,
     ):
         """Initialize the object.
 
@@ -356,6 +357,17 @@ class RingAttentionConfig:
             Inner per-chunk attention core. ``SDPA`` (default) keeps the
             device-based pick (flash on CUDA, math on CPU); ``TE`` uses the
             TransformerEngine fused core; ``MATH`` the unfused reference.
+        overlap_comm : bool
+            Put the plain P2P/all-to-all ring's K/V circulation -- and the
+            backward dK/dV relay -- on a dedicated CUDA stream with double
+            buffering, so each transfer overlaps the attention core on the
+            default stream (the ``cp_stream`` trick Transformer Engine uses).
+            Only the ``SendOp.P2P`` / ``SendOp.ALLTOALL`` providers honour it,
+            and only on CUDA; on any other device / send_op it is inert and the
+            synchronous path runs unchanged. The backward overlap additionally
+            needs ``save_scope=LOCAL`` and ``send_backward=SEND_DKV`` (the
+            re-ringing path); other backward strategies keep their own
+            machinery. See :attr:`overlap_active`.
 
         """
         if gpus_per_node <= 0:
@@ -369,6 +381,18 @@ class RingAttentionConfig:
         self.gpus_per_node = gpus_per_node
         self.device = device
         self.attn_backend = AttnBackend(attn_backend)
+
+        # Dedicated CUDA stream for the ring's K/V circulation and backward dK/dV
+        # relay. Created once here (the config outlives a single forward/backward)
+        # and shared by both passes. CUDA-only: on CPU / meta devices there is no
+        # stream and ``overlap_active`` stays False, so every provider falls back
+        # to its synchronous path.
+        self.overlap_comm = bool(overlap_comm)
+        self._comm_stream: Optional[torch.cuda.Stream] = (
+            torch.cuda.Stream(device)
+            if self.overlap_comm and torch.device(device).type == "cuda"
+            else None
+        )
 
         # Layout the ring circulates q/k/v/out in, and hands to the inner core.
         # The TE cores (cuDNN / FA2) are natively bshd -- carrying the ring in
@@ -393,6 +417,21 @@ class RingAttentionConfig:
             save_for_backward, save_scope, self.offloader
         )
 
+    @property
+    def comm_stream(self) -> Optional[torch.cuda.Stream]:
+        """Dedicated CUDA stream for ring comm, or ``None`` when overlap is off."""
+        return self._comm_stream
+
+    @property
+    def overlap_active(self) -> bool:
+        """Whether the comm-stream overlap path is actually engaged.
+
+        ``True`` only when ``overlap_comm`` was requested *and* a CUDA stream
+        could be built for it; provider builders gate on this so a non-CUDA
+        device silently keeps the synchronous path.
+        """
+        return self._comm_stream is not None
+
     def wait_offloads(self) -> None:
         """Block until any in-flight activation offloads have completed."""
         if self.offloader is not None:
@@ -408,5 +447,6 @@ class RingAttentionConfig:
             f"save_scope={self.save_scope.name}, "
             f"send_backward={self.send_backward.name}, "
             f"offload={self.offload.name}, "
-            f"attn_backend={self.attn_backend.name})"
+            f"attn_backend={self.attn_backend.name}, "
+            f"overlap_comm={self.overlap_comm})"
         )
