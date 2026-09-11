@@ -169,20 +169,39 @@ def ring_backward(
         and ring_config.send_backward == SendBackward.SEND_DKV
     )
 
-    # Comm-stream overlap for the re-ringing path: the K/V relay moves to
-    # ``ring_config.comm_stream`` and is issued *before* each step's core (see
-    # ``_LocalChunkProviderOverlap.maybe_forward``), and the dK/dV relay becomes
-    # async + deferred a step (``_DkvRelay``). Only the plain P2P/all-to-all ring
-    # with the LOCAL + SEND_DKV backward is wired for it; every other strategy
-    # keeps its own machinery untouched.
-    overlap = (
+    # Comm-stream overlap for the re-ringing path, split into the two things it
+    # independently gates:
+    #
+    #   * `kv_overlap`: the K/V chunk provider itself. Every LOCAL-scope re-ring
+    #     strategy -- plain P2P/all-to-all and all three hybrid ops -- has a
+    #     comm-stream overlap variant (see `_build_backward_chunk_provider`);
+    #     `maybe_forward` has to run *before* each step's core exactly when that
+    #     variant is the one in use, so this also picks the loop order below.
+    #   * `dkv_overlap`: the dK/dV relay (`_DkvRelay`), which additionally needs
+    #     the SEND_DKV direct-swap accumulation (`_accumulate_dkv_send`'s
+    #     shape). HYBRID_BROADCAST's accumulation
+    #     (`_accumulate_dkv_hybrid_broadcast`: an intra-node all-reduce plus a
+    #     conditional inter-node hop) doesn't fit that shape, so it keeps its
+    #     synchronous path even though its K/V provider is overlapped.
+    kv_overlap = (
         ring_config.overlap_active
-        and not all_reduce_dkv
-        and ring_config.send_op in (SendOp.P2P, SendOp.ALLTOALL)
         and ring_config.save_scope == SaveScope.LOCAL
+        and ring_config.send_op
+        in (
+            SendOp.P2P,
+            SendOp.ALLTOALL,
+            SendOp.HYBRID_P2P,
+            SendOp.HYBRID_ALLTOALL,
+            SendOp.HYBRID_BROADCAST,
+        )
+    )
+    dkv_overlap = (
+        kv_overlap
+        and not all_reduce_dkv
+        and ring_config.send_op in (SendOp.P2P, SendOp.ALLTOALL, SendOp.HYBRID_P2P, SendOp.HYBRID_ALLTOALL)
         and ring_config.send_backward == SendBackward.SEND_DKV
     )
-    dkv_relay = _DkvRelay(ring_config, group, dq) if overlap else None
+    dkv_relay = _DkvRelay(ring_config, group, dq) if dkv_overlap else None
 
     chunk_provider = _build_backward_chunk_provider(
         ring_config,
@@ -201,9 +220,9 @@ def ring_backward(
         with nvtx_range(f"bwd/step{step}"):
             with nvtx_range("get"):
                 kj, vj, kv = chunk_provider.get(step)
-            if overlap:
-                # Prefetch the next chunk's K/V now so its inter-node transfer
-                # runs under this step's core instead of after it.
+            if kv_overlap:
+                # Prefetch the next chunk's K/V now so its transfer runs under
+                # this step's core instead of after it.
                 with nvtx_range("maybe_forward"):
                     chunk_provider.maybe_forward(step, ring_group_size)
             global_chunk_idx = global_chunk_idx_backward(
@@ -231,7 +250,7 @@ def ring_backward(
                     if local_rank == step:
                         dk_buf = dk_j
                         dv_buf = dv_j
-                elif overlap:
+                elif dkv_overlap:
                     assert dkv_relay is not None
                     dkv_relay.step(dk_buf, dv_buf, dk_j, dv_j, step)
                 else:
@@ -248,13 +267,13 @@ def ring_backward(
                         group,
                     )
 
-            if not overlap:
+            if not kv_overlap:
                 # Overlap issues this before the core; otherwise relay here.
                 # No-op for providers that don't re-circulate chunks (e.g. global).
                 with nvtx_range("maybe_forward"):
                     chunk_provider.maybe_forward(step, ring_group_size)
 
-    if overlap:
+    if dkv_overlap:
         assert dkv_relay is not None
         dkv_relay.drain(dk_buf, dv_buf)
 
@@ -393,6 +412,10 @@ def _hybrid_dkv_relay_peers(topo: HybridTopology, step: int) -> tuple[int, int]:
     ``rank_at(node_idx - step // gpn, local_idx + step)`` -- hand it straight to
     that owner, and receive (from the mirror-image rank) the partial destined
     for our own chunk.
+
+    Unlike the K/V hops, this one moves along *both* axes at once (a different
+    node and a different node-local index), so it has no counterpart in either
+    sub-group and stays in ring-position space over the full ring group.
     """
     node_step = step // topo.gpus_per_node
     send_to = topo.rank_at(topo.node_idx - node_step, topo.local_idx + step)
@@ -473,18 +496,24 @@ def _accumulate_dkv_send(
 
 
 class _DkvRelay:
-    """Async, comm-stream dK/dV relay for the plain P2P ring backward (SEND_DKV).
+    """Async, comm-stream dK/dV relay for the SEND_DKV ring backward.
 
     The overlap counterpart of :func:`_accumulate_dkv_send`, which does a
-    synchronous ``send_op_fn(async_op=False)`` round trip per step fully
-    serialized with the attention cores. Here each step's partial is staged into
-    a persistent buffer, relayed on ``ring_config.comm_stream`` with
+    synchronous ``p2p_fn(async_op=False)`` round trip per step fully serialized
+    with the attention cores. Here each step's partial is staged into a
+    persistent buffer, relayed on ``ring_config.comm_stream`` with
     ``async_op=True``, and folded into ``dk_buf`` / ``dv_buf`` one step later --
     so the transfer completes under the next step's core. Two send/receive
     buffer pairs ping-pong (deferring by exactly one step).
 
     Step 0 is local (this rank already holds its own chunk), matching
-    :func:`_accumulate_dkv_send`.
+    :func:`_accumulate_dkv_send`. Routing mirrors it too: the plain P2P/all-to-all
+    ring (and ``BROADCAST``, unreachable here -- see :func:`ring_backward`'s
+    ``all_reduce_dkv``) sends ``step`` hops along the ring; ``HYBRID_P2P`` /
+    ``HYBRID_ALLTOALL`` instead hand the partial to
+    :func:`_hybrid_dkv_relay_peers`, which moves along both the node and
+    node-local axes at once. ``HYBRID_BROADCAST`` never reaches this class --
+    see ``ring_backward``'s ``dkv_overlap``.
     """
 
     def __init__(
@@ -497,6 +526,11 @@ class _DkvRelay:
         self.cfg = ring_config
         self.group = group
         self.cs = ring_config.comm_stream
+        self._topo = (
+            get_hybrid_topology(group, ring_config.gpus_per_node)
+            if ring_config.send_op in _INTRA_ROTATING_HYBRIDS
+            else None
+        )
         shape = (2 * like.shape[0], *like.shape[1:])  # cat(dk, dv) on dim 0
         self._send = [
             torch.empty(shape, device=like.device, dtype=like.dtype) for _ in range(2)
@@ -537,15 +571,23 @@ class _DkvRelay:
         b = dk_j.shape[0]
         send[:b].copy_(dk_j)
         send[b:].copy_(dv_j)
-        # Same routing as `_accumulate_dkv_send`: hand the partial back `step`
-        # ranks along the ring toward the chunk's home rank.
-        direction = step if self.cfg.send_op != SendOp.BROADCAST else -step
-        _, self._work, event = issue_on_comm_stream(
-            self.cs,
-            lambda: self.cfg.p2p_fn(
+        # Same routing as `_accumulate_dkv_send`: HYBRID_P2P/HYBRID_ALLTOALL
+        # hand the partial to `_hybrid_dkv_relay_peers` (moves along both the
+        # node and node-local axes); everything else sends `step` ranks along
+        # the ring toward the chunk's home rank.
+        if self._topo is not None:
+            send_recv_ranks = _hybrid_dkv_relay_peers(self._topo, step)
+            produce = lambda: self.cfg.p2p_fn(  # noqa: E731
+                send, recv, send_recv_ranks=send_recv_ranks, group=self.group,
+                async_op=True, step=step,
+            )
+        else:
+            direction = step if self.cfg.send_op != SendOp.BROADCAST else -step
+            produce = lambda: self.cfg.p2p_fn(  # noqa: E731
                 send, recv, direction, group=self.group, async_op=True, step=step
-            ),
-            keep_alive=(send, recv),
+            )
+        _, self._work, event = issue_on_comm_stream(
+            self.cs, produce, keep_alive=(send, recv)
         )
         self._drain(dk_buf, dv_buf)
         self._pending = (event, recv)
@@ -582,20 +624,20 @@ def _accumulate_dkv_hybrid_broadcast(
     dist.all_reduce(dkv, op=dist.ReduceOp.SUM, group=topo.intranode_group)
 
     if node_step != 0:
-        # Inter-node ring hop as a whole-group permutation: every rank hands its
-        # node-sum to its counterpart at node ``node_idx - node_step`` and
-        # receives from ``node_idx + node_step``. Only node-local rank ``phase``
-        # ends up with the partial for a chunk it owns; the rest take part to
-        # keep the collective whole and discard what they receive.
+        # Inter-node ring hop as a permutation of `internode_group`: every rank
+        # hands its node-sum to its counterpart at node ``node_idx - node_step``
+        # and receives from ``node_idx + node_step``. Only node-local rank
+        # ``phase`` ends up with the partial for a chunk it owns; the rest take
+        # part to keep the collective whole and discard what they receive.
         recv = torch.empty_like(dkv)
         recv, _ = ring_config.p2p_fn(
             dkv,
             recv,
             send_recv_ranks=(
-                topo.inter_peer(-node_step),
-                topo.inter_peer(node_step),
+                topo.internode_peer(-node_step),
+                topo.internode_peer(node_step),
             ),
-            group=group,
+            group=topo.internode_group,
             async_op=False,
             step=step,
         )

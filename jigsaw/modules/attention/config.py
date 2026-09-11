@@ -358,16 +358,30 @@ class RingAttentionConfig:
             device-based pick (flash on CUDA, math on CPU); ``TE`` uses the
             TransformerEngine fused core; ``MATH`` the unfused reference.
         overlap_comm : bool
-            Put the plain P2P/all-to-all ring's K/V circulation -- and the
-            backward dK/dV relay -- on a dedicated CUDA stream with double
-            buffering, so each transfer overlaps the attention core on the
-            default stream (the ``cp_stream`` trick Transformer Engine uses).
-            Only the ``SendOp.P2P`` / ``SendOp.ALLTOALL`` providers honour it,
-            and only on CUDA; on any other device / send_op it is inert and the
-            synchronous path runs unchanged. The backward overlap additionally
-            needs ``save_scope=LOCAL`` and ``send_backward=SEND_DKV`` (the
-            re-ringing path); other backward strategies keep their own
-            machinery. See :attr:`overlap_active`.
+            Put the ring's K/V circulation -- and, where the accumulation shape
+            allows it, the backward dK/dV relay -- on a dedicated CUDA stream
+            with double buffering, so each transfer overlaps the attention core
+            on the default stream (the ``cp_stream`` trick Transformer Engine
+            uses). Only CUDA; on any other device it is inert and the
+            synchronous path runs unchanged. Coverage by ``send_op``:
+
+            - ``P2P`` / ``ALLTOALL``: K/V circulation overlapped always; the
+              dK/dV relay too when additionally ``save_scope=LOCAL`` and
+              ``send_backward=SEND_DKV`` (the re-ringing path).
+            - ``HYBRID_P2P`` / ``HYBRID_ALLTOALL``: both the intra- and
+              inter-node K/V hops overlapped; same dK/dV conditions as above
+              (routed via the hybrid dK/dV relay peer lookup instead of the
+              flat ring's).
+            - ``HYBRID_BROADCAST``: both hops' K/V circulation overlapped, but
+              the dK/dV accumulation (an intra-node all-reduce plus a
+              conditional inter-node hop) keeps its synchronous path -- it
+              doesn't fit the direct-swap relay the other ops use.
+            - ``BROADCAST``: inert; every step is a fresh collective with
+              nothing to prefetch ahead of.
+
+            Other backward strategies (``save_scope=GLOBAL`` or
+            ``send_backward=GATHER_DKV``) keep their own machinery regardless
+            of ``send_op``. See :attr:`overlap_active`.
 
         """
         if gpus_per_node <= 0:

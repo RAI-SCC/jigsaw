@@ -14,6 +14,30 @@ pytestmark = [pytest.mark.dist_required]
 
 
 class TestHybridTopology:
+    @staticmethod
+    def _assert_subgroup_peers_agree(
+        topo: functional.HybridTopology, ring_global_ranks: list[int]
+    ) -> None:
+        """The sub-group peer accessors must name the same ranks as the ring ones.
+
+        Every hybrid hop addresses its peer with ``intranode_peer`` /
+        ``internode_peer`` inside the matching sub-group; the chunk-index
+        bookkeeping still reasons in ring positions via ``intra_peer`` /
+        ``inter_peer``. Resolving both through the sub-group's global rank list
+        pins the two spellings to the same physical rank.
+        """
+        intra = dist.get_process_group_ranks(topo.intranode_group)
+        inter = dist.get_process_group_ranks(topo.internode_group)
+        for off in range(-2, 3):
+            assert (
+                intra[topo.intranode_peer(off)]
+                == ring_global_ranks[topo.intra_peer(off)]
+            )
+            assert (
+                inter[topo.internode_peer(off)]
+                == ring_global_ranks[topo.inter_peer(off)]
+            )
+
     @pytest.mark.dist(8)
     @pytest.mark.parametrize("gpus_per_node", [1, 2, 4, 8])
     def test_get_hybrid_topology(
@@ -53,6 +77,8 @@ class TestHybridTopology:
         assert sorted(dist.get_process_group_ranks(topo.internode_group)) == list(
             range(topo.local_idx, world_size, gpus_per_node)
         )
+
+        self._assert_subgroup_peers_agree(topo, dist.get_process_group_ranks(group))
 
         # Cached: same object on the second call.
         assert functional.get_hybrid_topology(group, gpus_per_node) is topo
@@ -108,6 +134,8 @@ class TestHybridTopology:
             ring_global_ranks[node * gpus_per_node + local_idx]
             for node in range(n_nodes)
         )
+        self._assert_subgroup_peers_agree(topo, ring_global_ranks)
+
         # Every member of a sub-group lands on the same underlying group.
         assert functional.get_hybrid_topology(group, gpus_per_node) is topo
 
@@ -745,6 +773,41 @@ def test_ring_hybrid(
     )
 
 
+@pytest.mark.dist(8)
+@_apply_ring_hybrid_parametrize
+def test_ring_hybrid_four_nodes(
+    device: torch.device,
+    process_mesh_dict_2x4: dict,
+    send_in_forward: config.SendForward,
+    save_for_backward: config.SaveBackward,
+    send_op: config.SendOp,
+    save_scope: config.SaveScope,
+    send_backward: config.SendBackward,
+    offloader: config.Offload,
+) -> None:
+    """Verify forward-backward parity for the hybrid ring with >2 inter-node hops.
+
+    Same 8-rank mesh as :func:`test_ring_hybrid`, but ``gpus_per_node=2`` ->
+    ``4 nodes x 2 GPUs``, so the inter-node ring takes 3 hops instead of 1. At
+    ``n_nodes == 2`` (every other hybrid test) ``internode_peer(1)`` and
+    ``internode_peer(-1)`` name the same rank, so a provider that keeps
+    re-sending its *original* chunk every round instead of relaying the chunk
+    it just received is indistinguishable from a correct one -- this is the
+    smallest topology where the two diverge.
+    """
+    _check_ring_hybrid(
+        device,
+        process_mesh_dict_2x4,
+        send_in_forward,
+        save_for_backward,
+        send_op,
+        save_scope,
+        send_backward,
+        offloader,
+        gpus_per_node=2,
+    )
+
+
 @pytest.mark.dist(4)
 @_apply_ring_hybrid_parametrize
 def test_ring_hybrid_single_node(
@@ -830,6 +893,94 @@ def test_ring_overlap_comm_parity(
             save_for_backward=config.SaveBackward.KV,
             save_scope=save_scope,
             send_backward=config.SendBackward.SEND_DKV,
+            overlap_comm=overlap,
+        )
+        assert cfg.overlap_active == overlap  # CUDA build => stream created
+        out, lse, chunks, seed, rng = forward.ring_forward(
+            q, k, v, x, w_qkv, scale, 0.0, group, local_rank, world_size, cfg
+        )
+        dq, dk, dv = backward.ring_backward(
+            dout, q, out, x, lse, w_qkv, scale, group, local_rank, world_size,
+            chunks, ring_config=cfg, dropout_p=0.0, base_seed=seed, rng_states=rng,
+        )
+        torch.cuda.synchronize()
+        return out, dq, dk, dv
+
+    ref = run(False)
+    got = run(True)
+    for name, a, c in zip(("out", "dq", "dk", "dv"), ref, got):
+        assert torch.allclose(a, c, atol=1e-3, rtol=0), (
+            f"{name}: overlap changed the result "
+            f"(max |Δ| = {(a.float() - c.float()).abs().max().item():.3e})"
+        )
+
+
+@pytest.mark.gpu_required
+@pytest.mark.dist(4)
+@pytest.mark.parametrize(
+    "send_in_forward", [config.SendForward.KV, config.SendForward.X]
+)
+@pytest.mark.parametrize(
+    "save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL]
+)
+@pytest.mark.parametrize(
+    "send_op",
+    [
+        config.SendOp.HYBRID_P2P,
+        config.SendOp.HYBRID_ALLTOALL,
+        config.SendOp.HYBRID_BROADCAST,
+    ],
+)
+def test_ring_overlap_comm_parity_hybrid(
+    device: torch.device,
+    process_mesh_dict_4x1: dict,
+    send_in_forward: config.SendForward,
+    save_scope: config.SaveScope,
+    send_op: config.SendOp,
+) -> None:
+    """``overlap_comm`` parity for the hybrid send ops.
+
+    The hybrid twin of :func:`test_ring_overlap_comm_parity`: runs the hybrid
+    ring (``2 nodes x 2 GPUs``, ``gpus_per_node=2``) forward+backward with the
+    comm-stream overlap off and then on and asserts identical results. Covers
+    the intra-/inter-node K/V hop overlap
+    (``_HybridP2PForwardChunkProviderOverlap`` /
+    ``_HybridBroadcastForwardChunkProviderOverlap`` and their backward twins)
+    for all three hybrid send ops, and -- for ``HYBRID_P2P`` /
+    ``HYBRID_ALLTOALL`` with ``save_scope=LOCAL`` -- the hybrid-routed dK/dV
+    relay (``_DkvRelay`` via ``_hybrid_dkv_relay_peers``). ``HYBRID_BROADCAST``
+    at ``LOCAL`` scope exercises its (unoverlapped) dK/dV all-reduce path
+    alongside the overlapped K/V providers, doubling as a no-regression check
+    for that combination.
+    """
+    group = process_mesh_dict_4x1["model"]
+    local_rank = dist.get_rank(group=group)
+    world_size = dist.get_world_size(group=group)
+    dtype = torch.bfloat16
+    torch.manual_seed(2)
+    b, h, n_global, d = 3, 6, world_size * 16, 16
+    n_local = n_global // world_size
+
+    w_qkv = torch.randn(3 * d * h, d, device=device, dtype=dtype) / (d**0.5)
+    torch.manual_seed(local_rank)
+    x = (torch.randn(b, n_local, d, device=device, dtype=dtype) / (d**0.5)).contiguous()
+    qkv = x @ w_qkv.mT
+    q, k, v = (
+        t.contiguous()
+        for t in qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
+    )
+    scale = d**-0.5
+    dout = torch.ones(b, h, n_local, d, device=device, dtype=dtype)
+
+    def run(overlap: bool):
+        cfg = config.RingAttentionConfig(
+            device=device,
+            send_in_forward=send_in_forward,
+            send_op=send_op,
+            save_for_backward=config.SaveBackward.KV,
+            save_scope=save_scope,
+            send_backward=config.SendBackward.SEND_DKV,
+            gpus_per_node=2,
             overlap_comm=overlap,
         )
         assert cfg.overlap_active == overlap  # CUDA build => stream created
