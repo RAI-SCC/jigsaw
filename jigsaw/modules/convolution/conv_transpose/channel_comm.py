@@ -199,6 +199,52 @@ def _over_channels_local(
     return y, span
 
 
+def _over_channels_transpose_grouped_gather(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    b: Optional[torch.Tensor],
+    conv_kwargs: dict[str, Any],
+    channel_group: dist.ProcessGroup,
+    conv_func: ConvTransposeFn,
+    channel_dim: int,
+    in_dim: int,
+    n_spatial_dims: int,
+    post_fn: Optional[PostFn],
+    group_blocks: list[tuple[int, int, int, int]],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Uneven ``groups`` (``channel_grouped``): gather the full input, one transpose conv per group.
+
+    The transpose analogue of
+    :func:`jigsaw.modules.convolution.conv.channel_comm._over_channels_grouped_gather`.
+    ``groups`` is not a multiple of the channel-parallel group size, so a
+    conv-group's channels straddle rank boundaries. The full-channel input is
+    gathered, then this rank's output shard is produced one conv-group at a time
+    -- ``group_blocks`` gives, per group, the local output-channel slice
+    ``[out_lo:out_hi]`` (weight axis ``in_dim + 1``) and the full input-channel
+    slice ``[in_lo:in_hi]`` (weight axis ``in_dim`` / input channel axis). Each
+    partial transpose conv is plain ``groups=1``. ``post_fn`` (the split-axis
+    halo reduce) and the bias are applied once to the concatenated output,
+    matching :func:`_over_channels_all_gather`.
+
+    Returns ``(y, x_full)`` -- ``x_full`` is kept for the backward pass.
+    """
+    x_full = gather_full_channels(x.contiguous(), channel_group, channel_dim)
+
+    pieces = []
+    for out_lo, out_hi, in_lo, in_hi in group_blocks:
+        xg = x_full.narrow(channel_dim, in_lo, in_hi - in_lo)
+        wg = w.narrow(in_dim, in_lo, in_hi - in_lo).narrow(
+            channel_dim, out_lo, out_hi - out_lo
+        )
+        pieces.append(conv_func(xg, wg, **conv_kwargs))
+    y = torch.cat(pieces, dim=channel_dim)
+    if post_fn is not None:
+        y = post_fn(y)
+    if b is not None:
+        y = y + _bias_view(b, n_spatial_dims)
+    return y, x_full
+
+
 def over_channels_transpose(
     x: torch.Tensor,
     w: torch.Tensor,
@@ -211,6 +257,7 @@ def over_channels_transpose(
     channel_comm: str,
     post_fn: Optional[PostFn] = None,
     local: bool = False,
+    group_blocks: Optional[list[tuple[int, int, int, int]]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Channel-parallel transpose convolution for any ``channel_comm`` and dimensionality.
 
@@ -218,12 +265,29 @@ def over_channels_transpose(
     for ``conv_func``; in the halo regime the split-axis padding is folded into
     ``post_fn`` so pass ``0`` for that axis. When ``local`` is set (this rank owns
     whole conv-groups) or the channel group is size one, no exchange happens --
-    see :func:`_over_channels_local`. Otherwise all strategies return the same
-    ``(y, x_full)`` -- see :func:`_over_channels_all_gather` /
+    see :func:`_over_channels_local`. When ``group_blocks`` is given (the
+    uneven-``groups`` ``channel_grouped`` regime) the full input is gathered and
+    transpose-convolved group by group -- see
+    :func:`_over_channels_transpose_grouped_gather`. Otherwise all strategies
+    return the same ``(y, x_full)`` -- see :func:`_over_channels_all_gather` /
     :func:`_over_channels_streaming`.
     """
     channel_dim = -(n_spatial_dims + 1)
     in_dim = -(n_spatial_dims + 2)
+    if group_blocks is not None:
+        return _over_channels_transpose_grouped_gather(
+            x,
+            w,
+            b,
+            conv_kwargs,
+            channel_group,
+            conv_func,
+            channel_dim,
+            in_dim,
+            n_spatial_dims,
+            post_fn,
+            group_blocks,
+        )
     if local or channel_group.size() == 1:
         return _over_channels_local(
             x, w, b, conv_kwargs, conv_func, n_spatial_dims, post_fn
