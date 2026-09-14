@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 from einops import rearrange
 
-from jigsaw import hooks
+from jigsaw import comm, hooks
 from jigsaw.modules import linear
 
 from . import config as attention_config
@@ -233,7 +233,6 @@ class DistributedAttention(torch.nn.Module):
         ring: bool = False,
         ulysses: bool = False,
         ulysses_gpus_per_node: int = 0,
-        ulysses_inter_comm: str = "p2p",
         ulysses_inter_save_scope: attention_config.SaveScope | str = (
             attention_config.SaveScope.LOCAL
         ),
@@ -273,19 +272,10 @@ class DistributedAttention(torch.nn.Module):
             on the fast intra-node fabric; only ``n_nodes`` K/V chunks ever ring
             over the slow one. Needs ``spatial`` divisible by this into a ring of
             ``>= 2``, and ``heads // channel`` divisible by it. ``0`` (default)
-            keeps the flat single-level Ulysses.
-        ulysses_inter_comm: str
-            How the hierarchical scheme moves K/V over the inter-node sub-group
-            (only read when ``ulysses_gpus_per_node > 0``). ``"p2p"`` (default)
-            rings K/V around the ``n_nodes`` peers with a per-step online-softmax
-            merge (``ulysses_inter_save_scope`` applies). ``"all_gather"``
-            gathers every peer's K/V once and runs a single dense attention over
-            the full sequence -- same inter-node bytes as the ring, one
-            attention kernel instead of ``n_nodes``, no merge and no fp32
-            accumulator, at the cost of holding the whole gathered K/V
-            (``n_nodes`` chunks) per rank. The direct analogue, at this level,
-            of Transformer Engine's ``cp_comm_type="a2a+p2p"`` degenerating to a
-            single exchange.
+            keeps the flat single-level Ulysses. The inter-node sub-group always
+            moves K/V by a P2P ring with a per-step online-softmax merge (the
+            analogue of Transformer Engine's ``cp_comm_type="a2a+p2p"``);
+            ``ulysses_inter_save_scope`` / ``ulysses_inter_overlap`` tune it.
         ulysses_inter_save_scope: SaveScope | str
             ``save_scope`` for the hierarchical scheme's inter-node K/V ring
             (only read when ``ulysses_gpus_per_node > 0``). ``LOCAL`` (default)
@@ -303,11 +293,13 @@ class DistributedAttention(torch.nn.Module):
             dK/dV relay) on a dedicated CUDA stream with double buffering, so
             each inter-node transfer overlaps the node-local attention core --
             the ``cp_stream`` trick Transformer Engine's ``a2a+p2p`` uses. Only
-            read when ``ulysses_gpus_per_node > 0`` and
-            ``ulysses_inter_comm == "p2p"``; forwarded to the inter-node ring's
-            :class:`.config.RingAttentionConfig` as ``overlap_comm`` (CUDA-only,
-            inert otherwise). Pairs best with ``ulysses_inter_save_scope=LOCAL``
-            (the re-ringing backward the overlap targets).
+            read when ``ulysses_gpus_per_node > 0``; forwarded to the inter-node
+            ring's :class:`.config.RingAttentionConfig` as ``overlap_comm``
+            (CUDA-only, inert otherwise). Requires
+            ``ulysses_inter_save_scope=LOCAL`` to also overlap the *backward*
+            (the re-ringing dK/dV relay the overlap targets); paired with
+            ``GLOBAL`` only the forward K/V ring overlaps and a warning is
+            emitted.
         attn_backend: AttnBackend | str
             Attention core implementation -- ``"te"``, ``"sdpa"`` (default) or
             ``"math"``. See :class:`.config.AttnBackend`.
@@ -332,12 +324,18 @@ class DistributedAttention(torch.nn.Module):
             else attention_config.SaveScope[ulysses_inter_save_scope]
         )
         self.ulysses_inter_overlap = bool(ulysses_inter_overlap)
-        if ulysses_inter_comm not in ("p2p", "all_gather"):
-            raise ValueError(
-                f"ulysses_inter_comm must be 'p2p' or 'all_gather', got "
-                f"{ulysses_inter_comm!r}"
+        if (
+            self.ulysses_inter_overlap
+            and self.ulysses_gpn
+            and self.ulysses_inter_save_scope == attention_config.SaveScope.GLOBAL
+        ):
+            warnings.warn(
+                "ulysses_inter_overlap with ulysses_inter_save_scope=GLOBAL "
+                "overlaps only the forward inter-node K/V ring: GLOBAL keeps "
+                "every arrived chunk and all-reduces dK/dV, so the backward has "
+                "no re-ringing relay to hide. Use ulysses_inter_save_scope=LOCAL "
+                "to overlap the backward too."
             )
-        self.ulysses_inter_comm = ulysses_inter_comm
         if ring and ulysses:
             raise ValueError("ring and ulysses are mutually exclusive")
 
@@ -393,15 +391,23 @@ class DistributedAttention(torch.nn.Module):
                     # hop, same as GLOBAL would cost (GLOBAL keeps every arrived
                     # K/V chunk but then all-reduces dK/dV each backward step) --
                     # measured a wash there; GLOBAL is expected to pay off only
-                    # at n_nodes >= 4. Either way SendOp.P2P's provider issues
-                    # each inter-node K/V send *before* the matching attention
-                    # block, so the forward exchange overlaps node-local compute.
+                    # at n_nodes >= 4. SendOp.ALLTOALL still runs the same p2p
+                    # ring exchange, just issued as an all-to-all collective
+                    # instead of individual send/recv -- measured faster here.
                     save_scope=self.ulysses_inter_save_scope,
-                    send_op=attention_config.SendOp.P2P,
+                    send_op=attention_config.SendOp.ALLTOALL,
+                    # Relay dK/dV P2P around the inter-node ring (not a global
+                    # buffer + final all-reduce). Pinned, not left to the config
+                    # default, because ``ring_backward`` only takes the
+                    # comm-stream backward-overlap path for LOCAL + SEND_DKV --
+                    # see ``overlap_comm`` below and ``backward.ring_backward``.
+                    send_backward=attention_config.SendBackward.SEND_DKV,
                     attn_backend=self.attn_backend,
                     # cp_stream-style overlap of the inter-node K/V + dK/dV
                     # transfers with the node-local cores (CUDA-only; inert
-                    # otherwise). See `RingAttentionConfig.overlap_comm`.
+                    # otherwise). The backward half of this engages only with
+                    # save_scope=LOCAL (the __init__ warning covers GLOBAL).
+                    # See `RingAttentionConfig.overlap_comm`.
                     overlap_comm=self.ulysses_inter_overlap,
                 )
             else:
@@ -457,11 +463,13 @@ class DistributedAttention(torch.nn.Module):
                 dtype=self.dtype,
             )
 
-        # sync up up spatial parameters
+        # Sync up spatial parameters: one coalesced broadcast per dtype rather
+        # than one blocking round trip per tensor (comm.broadcast_params_).
+        # head_concat's bias gets broadcast twice (DistributedXWT.__init__
+        # already does its own) -- harmless and left alone so DistributedXWT
+        # keeps broadcasting correctly for callers that don't also do this.
+        comm.broadcast_params_(self.parameters(), self.spatial_group, src=0)
         for p in self.parameters():
-            dist.broadcast(
-                p.data, group_src=0, group=self.spatial_group, async_op=False
-            )
             p.register_post_accumulate_grad_hook(
                 hooks.make_grad_sync_hook(self.spatial_group, async_op=True)
             )
@@ -782,35 +790,6 @@ class DistributedAttention(torch.nn.Module):
 
         return core
 
-    def _inter_node_gather_core(
-        self, dropout_p: float
-    ) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
-        """All-gather K/V over the inter-node group, then one dense attention.
-
-        The ``ulysses_inter_comm="all_gather"`` inner core of the hierarchical
-        scheme. After the intra-node all-to-all ``q``/``k``/``v`` cover one
-        node's worth of sequence on ``local_heads // A`` heads;
-        :class:`~.functional.ulysses._SeqAllGather` collects every inter-node
-        peer's K/V shard into the full sequence (its backward reduce-scatters
-        dK/dV), and :meth:`_dense_bshd_core` runs a single attention kernel over
-        it -- no P2P ring, no per-step online-softmax merge, no fp32
-        accumulator. Same inter-node bytes as the ring; one attention call
-        instead of ``n_nodes``.
-        """
-        from .functional.ulysses import _SeqAllGather
-
-        dense = self._dense_bshd_core(dropout_p)
-        group = self._uly_inter_group
-
-        def core(
-            qc: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor
-        ) -> torch.Tensor:
-            k_full = _SeqAllGather.apply(kc, group)
-            v_full = _SeqAllGather.apply(vc, group)
-            return dense(qc, k_full, v_full)
-
-        return core
-
     def _ulysses_attn_core(
         self,
         q: torch.Tensor,
@@ -828,9 +807,7 @@ class DistributedAttention(torch.nn.Module):
 
         Hierarchical (``> 0``, the ``a2a+p2p`` analogue): an all-to-all over the
         intra-node sub-group -> ``[b, seq // n_nodes, local_heads // A, d]``,
-        then over the inter-node sub-group either a P2P ring
-        (``ulysses_inter_comm="p2p"``) or a single K/V all-gather + dense
-        attention (``"all_gather"``), then an all-to-all back.
+        then a P2P ring over the inter-node sub-group, then an all-to-all back.
         """
         from .functional.ulysses import (
             hierarchical_ulysses_attention,
@@ -841,13 +818,9 @@ class DistributedAttention(torch.nn.Module):
         qkv_stack = kwargs.get("qkv_stack")
 
         if self.ulysses_gpn:
-            inter_core = (
-                self._inter_node_gather_core(dropout_p)
-                if self.ulysses_inter_comm == "all_gather"
-                else self._inter_node_ring_core(dropout_p)
-            )
             return hierarchical_ulysses_attention(
-                q, k, v, self._uly_intra_group, inter_core,
+                q, k, v, self._uly_intra_group,
+                self._inter_node_ring_core(dropout_p),
                 qkv_stack=qkv_stack,
             )
         return ulysses_attention(
@@ -1058,7 +1031,6 @@ class Attention(torch.nn.Module):
         ring: bool = True,
         ulysses: bool = False,
         ulysses_gpus_per_node: int = 0,
-        ulysses_inter_comm: str = "p2p",
         ulysses_inter_save_scope: attention_config.SaveScope | str = (
             attention_config.SaveScope.LOCAL
         ),
@@ -1139,7 +1111,6 @@ class Attention(torch.nn.Module):
             ring=ring,
             ulysses=ulysses,
             ulysses_gpus_per_node=ulysses_gpus_per_node,
-            ulysses_inter_comm=ulysses_inter_comm,
             ulysses_inter_save_scope=ulysses_inter_save_scope,
             ulysses_inter_overlap=ulysses_inter_overlap,
             attn_backend=attn_backend,

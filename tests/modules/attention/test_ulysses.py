@@ -175,28 +175,21 @@ class TestUlyssesAttention:
         )
 
     @pytest.mark.dist(4)
-    @pytest.mark.parametrize(
-        ("inter_comm", "inter_save_scope"),
-        [("p2p", "LOCAL"), ("p2p", "GLOBAL"), ("all_gather", "LOCAL")],
-    )
+    @pytest.mark.parametrize("inter_save_scope", ["LOCAL", "GLOBAL"])
     def test_hierarchical_matches_dense_reference(
         self,
         device: torch.device,
         process_mesh_dict_4x1: dict,
-        inter_comm: str,
         inter_save_scope: str,
     ) -> None:
-        """Hierarchical Ulysses (intra-node a2a x inter-node K/V exchange)
+        """Hierarchical Ulysses (intra-node a2a x inter-node K/V P2P ring)
         reproduces the same gathered-sequence dense run as the flat scheme.
 
         ``spatial=4, ulysses_gpus_per_node=2``: a 2-rank intra-node all-to-all
-        nested in a 2-node inter-node exchange. Covered:
-
-        * ``inter_comm="p2p"`` -- the P2P ring, with both backward ``save_scope``s
-          (``LOCAL`` re-rings K/V, ``GLOBAL`` keeps it). Its per-step
-          online-softmax merge adds a few ULP the single-kernel paths do not.
-        * ``inter_comm="all_gather"`` -- one K/V all-gather + one dense kernel
-          (backward reduce-scatters dK/dV).
+        nested in a 2-node inter-node P2P ring, with both backward
+        ``save_scope``s (``LOCAL`` re-rings K/V in the backward, ``GLOBAL``
+        keeps it). The ring's per-step online-softmax merge adds a few ULP the
+        flat single-kernel path does not.
         """
         mesh = process_mesh_dict_4x1
         row = mesh["row"]
@@ -218,7 +211,6 @@ class TestUlyssesAttention:
             ring=False,
             ulysses=True,
             ulysses_gpus_per_node=2,
-            ulysses_inter_comm=inter_comm,
             ulysses_inter_save_scope=inter_save_scope,
             attn_backend="sdpa",
             dtype=dtype,

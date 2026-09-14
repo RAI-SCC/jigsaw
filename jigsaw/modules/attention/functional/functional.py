@@ -108,8 +108,18 @@ class HybridTopology:
     ``% gpus_per_node`` arithmetic.
 
     ``intranode_group`` / ``internode_group`` are the sub-groups containing this
-    rank, provided for collectives (e.g. broadcasts); the P2P ring paths address
-    peers by ring position over the full group instead.
+    rank, and are what every one-level hop -- the intra-node ring/broadcast and
+    the inter-node ring alike -- actually communicates over, so the two levels
+    sit on separate NCCL communicators and can progress independently. Each is
+    built in the obvious order (:func:`get_hybrid_topology`), so this rank's
+    position is ``local_idx`` in ``intranode_group`` and ``node_idx`` in
+    ``internode_group``; :meth:`intranode_peer` / :meth:`internode_peer` return
+    peers in that space.
+
+    :meth:`intra_peer` / :meth:`inter_peer` / :meth:`rank_at` stay in ring-position
+    space over the *full* group -- still needed by hops that move along both axes
+    at once (the backward dK/dV relay, which hands a partial straight to its
+    owner across nodes *and* local indices) and by global-chunk-id arithmetic.
     """
 
     n_nodes: int
@@ -136,6 +146,23 @@ class HybridTopology:
     def inter_peer(self, offset: int) -> int:
         """Ring position ``offset`` steps along this rank's inter-node ring."""
         return self.rank_at(self.node_idx + offset, self.local_idx)
+
+    def intranode_peer(self, offset: int) -> int:
+        """Rank *within* ``intranode_group``, ``offset`` steps along the node's ring.
+
+        ``intranode_group`` lists this node's ranks in node-local-index order, so
+        its rank ``i`` is node-local index ``i`` and this rank sits at
+        ``local_idx``.
+        """
+        return (self.local_idx + offset) % self.gpus_per_node
+
+    def internode_peer(self, offset: int) -> int:
+        """Rank *within* ``internode_group``, ``offset`` steps along the node ring.
+
+        ``internode_group`` lists its members in node order, so its rank ``i`` is
+        node ``i`` and this rank sits at ``node_idx``.
+        """
+        return (self.node_idx + offset) % self.n_nodes
 
 
 _HYBRID_TOPOLOGY_CACHE: dict[tuple[dist.ProcessGroup, int], HybridTopology] = {}
@@ -203,6 +230,11 @@ def get_hybrid_topology(group: dist.ProcessGroup, gpus_per_node: int) -> HybridT
     # each sub-group derives the identical rank list, and
     # `use_local_synchronization=True` keeps the barrier local to those members,
     # so the rings at other mesh coordinates stay independent.
+    #
+    # Member order is load-bearing: `intranode_group` is listed in node-local
+    # index order and `internode_group` in node order, which is what lets
+    # `HybridTopology.intranode_peer` / `.internode_peer` return a sub-group rank
+    # as plain modular arithmetic on `local_idx` / `node_idx`.
     intranode_group = dist.new_group(
         ranks=[ring_global_ranks[p] for p in grid[node_idx]],
         use_local_synchronization=True,

@@ -123,65 +123,6 @@ class _UlyssesAllToAll(torch.autograd.Function):
         return grad_in, None, None
 
 
-class _SeqAllGather(torch.autograd.Function):
-    """All-gather a ``bshd`` K or V shard along the sequence axis over ``group``.
-
-    Forward: ``[b, s_loc, h, d] -> [b, s_loc * G, h, d]`` (``G = group.size()``),
-    sequence blocks in source-rank order (rank ``r``'s shard lands at
-    ``[:, r*s_loc:(r+1)*s_loc]``).
-
-    Backward: reduce-scatter. Every gathered position is attended by every rank,
-    so the gradient for rank ``r``'s shard is the sum, over the group, of each
-    rank's gradient for block ``r`` -- exactly ``reduce_scatter(SUM)``.
-
-    Used by the hierarchical Ulysses "all_gather" inter-node scheme: after the
-    intra-node all-to-all, gather K/V once over the inter-node group and run a
-    single dense attention, instead of a P2P ring + per-step online-softmax
-    merge. Same inter-node bytes as the ring, one attention kernel, no merge.
-    """
-
-    @staticmethod
-    def forward(x: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor:
-        g = dist.get_world_size(group)
-        if g == 1:
-            return x
-        b, s_loc = x.shape[0], x.shape[1]
-        gathered = torch.empty((g * b, *x.shape[1:]), device=x.device, dtype=x.dtype)
-        dist.all_gather_into_tensor(gathered, x.contiguous(), group=group)
-        # [g*b, s_loc, h, d] -> [b, g, s_loc, h, d] -> [b, g*s_loc, h, d]
-        return (
-            gathered.reshape(g, b, *x.shape[1:])
-            .movedim(0, 1)
-            .reshape(b, g * s_loc, *x.shape[2:])
-            .contiguous()
-        )
-
-    @staticmethod
-    def setup_context(ctx, inputs, output) -> None:  # type: ignore[no-untyped-def]
-        x, group = inputs
-        ctx.group = group
-        ctx.s_loc = x.shape[1]
-
-    @staticmethod
-    def backward(ctx, grad_out: torch.Tensor):  # type: ignore[no-untyped-def]
-        group = ctx.group
-        g = dist.get_world_size(group)
-        if g == 1:
-            return grad_out, None
-        b, s_loc = grad_out.shape[0], ctx.s_loc
-        tail = grad_out.shape[2:]
-        # [b, g*s_loc, h, d] -> [g*b, s_loc, h, d], block r = grad for shard r
-        src = (
-            grad_out.reshape(b, g, s_loc, *tail)
-            .movedim(1, 0)
-            .reshape(g * b, s_loc, *tail)
-            .contiguous()
-        )
-        out = torch.empty((b, s_loc, *tail), device=grad_out.device, dtype=grad_out.dtype)
-        dist.reduce_scatter_tensor(out, src, op=dist.ReduceOp.SUM, group=group)
-        return out, None
-
-
 AttnCore = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
 
 

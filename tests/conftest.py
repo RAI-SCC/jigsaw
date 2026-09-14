@@ -130,8 +130,13 @@ def dist_env(
     else:
         assert dist.is_gloo_available()
 
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "12355"
+    # Default to a single-machine rendezvous for local/CI runs; a real launcher
+    # that already computed the job's actual rendezvous host (e.g. run.sh
+    # deriving it from SLURM_JOB_NODELIST) exports MASTER_ADDR itself, and that
+    # must win here or a multi-node run can never actually rendezvous --
+    # "localhost" resolves to a different loopback on every node.
+    os.environ.setdefault("MASTER_ADDR", "localhost")
+    os.environ.setdefault("MASTER_PORT", "12355")
 
     dist.init_process_group(
         backend="nccl" if device.type == "cuda" else "gloo",
