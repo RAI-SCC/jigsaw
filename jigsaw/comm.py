@@ -196,6 +196,15 @@ def comm_1d_alltoall(
     else:
         send_to, recv_from = send_recv_ranks
 
+    # ``dist.all_to_all`` requires every tensor it touches to be contiguous.
+    # Callers can hand this a view with a non-standard memory layout (e.g. a
+    # permute+reshape that happened to avoid a copy) without ever noticing --
+    # the shape checks out, only the strides are wrong. ``.contiguous()`` is a
+    # no-op when the tensor already satisfies that, so this costs nothing on
+    # the common path.
+    data = data.contiguous()
+    buffer = buffer.contiguous()
+
     send_list = [empty] * group.size()
     recv_list = [empty] * group.size()
     send_list[send_to] = data
