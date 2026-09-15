@@ -134,12 +134,15 @@ def ring_backward(
     # Reconcile dtypes before the cores run. Under autocast the forward saves
     # bf16/fp16 tensors (``out``, ``lse`` and the K/V chunks the provider
     # replays) and ``q``/``dout`` may arrive downcast too; the cores matmul
-    # ``q`` against those chunks, so a mixed-dtype pair raises. Run the cores in
-    # the projection weight's (master) precision -- the same
-    # backward-in-master-precision rule ``XWT`` follows when it casts
-    # ``grad_output``/``input`` to ``weight.dtype`` -- so a genuinely bf16/fp16
-    # (or fp64) model keeps its dtype instead of being forced to fp32.
-    core_dtype = w_qkv.dtype
+    # ``q`` against those chunks, so a mixed-dtype pair raises. Run the cores
+    # in ``q``'s own (already-reconciled) precision -- the dtype
+    # ``attn_core_dtype()`` picked in forward (the autocast dtype under AMP,
+    # else the model dtype). ``w_qkv.dtype`` looks equivalent for a genuinely
+    # bf16/fp16 model (weight dtype == compute dtype there), but under
+    # ``master_weights`` the projection weight is the fp32 master copy while
+    # attention itself still runs in the autocast dtype -- using it here would
+    # force q/out back to fp32, which the TE/cuDNN cores don't support.
+    core_dtype = q.dtype
     dout, q = dout.to(core_dtype), q.to(core_dtype)
     out = out.to(core_dtype)
     # ``lse`` is *not* folded into ``core_dtype``: it is a softmax normaliser,
