@@ -237,6 +237,9 @@ class DistributedAttention(torch.nn.Module):
             attention_config.SaveScope.LOCAL
         ),
         ulysses_inter_overlap: bool = False,
+        ulysses_inter_offload: attention_config.Offload | str = (
+            attention_config.Offload.DISABLED
+        ),
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
         dtype: torch.dtype = torch.float32,
         config: Optional[attention_config.RingAttentionConfig] = None,
@@ -300,6 +303,16 @@ class DistributedAttention(torch.nn.Module):
             (the re-ringing dK/dV relay the overlap targets); paired with
             ``GLOBAL`` only the forward K/V ring overlaps and a warning is
             emitted.
+        ulysses_inter_offload: Offload | str
+            ``offload`` for the hierarchical scheme's inter-node K/V ring (only
+            read when ``ulysses_gpus_per_node > 0``): forwarded as-is to the
+            inter-node ring's :class:`.config.RingAttentionConfig`, which is the
+            same ``RingAttentionConfig`` the plain ``ring=True`` path uses --
+            see :class:`.offload.NVLinkActivationOffloader`. ``CPU`` moves the
+            chunk kept for backward (per ``ulysses_inter_save_scope``) to
+            pinned host memory between forward and backward, trading GPU HBM
+            for PCIe/NVLink traffic that the offloader's side streams overlap
+            with compute. ``DISABLED`` (default) keeps it on-device.
         attn_backend: AttnBackend | str
             Attention core implementation -- ``"te"``, ``"sdpa"`` (default) or
             ``"math"``. See :class:`.config.AttnBackend`.
@@ -324,6 +337,11 @@ class DistributedAttention(torch.nn.Module):
             else attention_config.SaveScope[ulysses_inter_save_scope]
         )
         self.ulysses_inter_overlap = bool(ulysses_inter_overlap)
+        self.ulysses_inter_offload = (
+            ulysses_inter_offload
+            if isinstance(ulysses_inter_offload, attention_config.Offload)
+            else attention_config.Offload[ulysses_inter_offload]
+        )
         if (
             self.ulysses_inter_overlap
             and self.ulysses_gpn
@@ -409,6 +427,11 @@ class DistributedAttention(torch.nn.Module):
                     # save_scope=LOCAL (the __init__ warning covers GLOBAL).
                     # See `RingAttentionConfig.overlap_comm`.
                     overlap_comm=self.ulysses_inter_overlap,
+                    # CPU-offload the chunk `save_for_backward` keeps (per
+                    # ulysses_inter_save_scope) between forward and backward --
+                    # same mechanism the plain ring path uses. See
+                    # NVLinkActivationOffloader.
+                    offload=self.ulysses_inter_offload,
                 )
             else:
                 assert self.heads % spatial_group.size() == 0, (
@@ -1035,6 +1058,9 @@ class Attention(torch.nn.Module):
             attention_config.SaveScope.LOCAL
         ),
         ulysses_inter_overlap: bool = False,
+        ulysses_inter_offload: attention_config.Offload | str = (
+            attention_config.Offload.DISABLED
+        ),
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
         **kwargs: Any,
     ) -> "DistributedAttention":
@@ -1067,6 +1093,9 @@ class Attention(torch.nn.Module):
         ulysses: bool
             Run Ulysses (all-to-all, head-parallel) sequence parallelism on the
             "row" dimension instead of the ring. Mutually exclusive with ``ring``.
+        ulysses_inter_offload: Offload | str
+            ``offload`` for the hierarchical scheme's inter-node K/V ring;
+            forwarded to :class:`DistributedAttention`. See its docstring.
         attn_backend: AttnBackend | str
             Attention core implementation (``"te"`` / ``"sdpa"`` / ``"math"``);
             forwarded to :class:`DistributedAttention`. Composes with ``ring``.
@@ -1113,6 +1142,7 @@ class Attention(torch.nn.Module):
             ulysses_gpus_per_node=ulysses_gpus_per_node,
             ulysses_inter_save_scope=ulysses_inter_save_scope,
             ulysses_inter_overlap=ulysses_inter_overlap,
+            ulysses_inter_offload=ulysses_inter_offload,
             attn_backend=attn_backend,
             dtype=attention.dtype,
         )

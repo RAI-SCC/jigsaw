@@ -12,6 +12,7 @@ import torch.distributed as dist
 from einops import rearrange
 
 import jigsaw.modules.attention as attention
+import jigsaw.modules.attention.config as attention_config
 from jigsaw.modules.attention.attention import attn_core_dtype
 from jigsaw.modules.attention.functional.ulysses import (
     _a2a_heads_to_seq,
@@ -176,11 +177,16 @@ class TestUlyssesAttention:
 
     @pytest.mark.dist(4)
     @pytest.mark.parametrize("inter_save_scope", ["LOCAL", "GLOBAL"])
+    @pytest.mark.parametrize(
+        "inter_offload",
+        [attention_config.Offload.DISABLED, attention_config.Offload.CPU],
+    )
     def test_hierarchical_matches_dense_reference(
         self,
         device: torch.device,
         process_mesh_dict_4x1: dict,
         inter_save_scope: str,
+        inter_offload: attention_config.Offload,
     ) -> None:
         """Hierarchical Ulysses (intra-node a2a x inter-node K/V P2P ring)
         reproduces the same gathered-sequence dense run as the flat scheme.
@@ -190,7 +196,15 @@ class TestUlyssesAttention:
         ``save_scope``s (``LOCAL`` re-rings K/V in the backward, ``GLOBAL``
         keeps it). The ring's per-step online-softmax merge adds a few ULP the
         flat single-kernel path does not.
+
+        ``inter_offload=CPU`` additionally routes the inter-node ring's saved
+        K/V chunk through :class:`.offload.NVLinkActivationOffloader` (pinned
+        host memory between forward and backward) -- same mechanism, same
+        parity expectation, as the plain ring's own offload tests.
         """
+        if inter_offload == attention_config.Offload.CPU and device.type != "cuda":
+            pytest.skip("NVLinkActivationOffloader needs CUDA streams")
+
         mesh = process_mesh_dict_4x1
         row = mesh["row"]
         model_group = mesh["model"]
@@ -212,6 +226,7 @@ class TestUlyssesAttention:
             ulysses=True,
             ulysses_gpus_per_node=2,
             ulysses_inter_save_scope=inter_save_scope,
+            ulysses_inter_offload=inter_offload,
             attn_backend="sdpa",
             dtype=dtype,
         )
