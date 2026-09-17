@@ -486,6 +486,12 @@ class DistributedAttention(torch.nn.Module):
                 dtype=self.dtype,
             )
 
+        if self.qk_norm:
+            self.q_norm, self.k_norm = (
+                torch.nn.LayerNorm(embed_dim // heads, device=device),
+                torch.nn.LayerNorm(embed_dim // heads, device=device),
+            )
+
         # Sync up spatial parameters: one coalesced broadcast per dtype rather
         # than one blocking round trip per tensor (comm.broadcast_params_).
         # head_concat's bias gets broadcast twice (DistributedXWT.__init__
@@ -493,14 +499,16 @@ class DistributedAttention(torch.nn.Module):
         # keeps broadcasting correctly for callers that don't also do this.
         comm.broadcast_params_(self.parameters(), self.spatial_group, src=0)
         for p in self.parameters():
+            # A *duplicate* grad-sync hook is not harmless the way the duplicate
+            # broadcast above is: two SUM all-reduces over the same group scale
+            # that gradient by ``spatial_group.size()``. DistributedXWT already
+            # hooks its own ``bias`` over ``row_group``, which is exactly
+            # ``spatial_group`` here, so skip anything a submodule has already
+            # claimed.
+            if getattr(p, "_post_accumulate_grad_hooks", None):
+                continue
             p.register_post_accumulate_grad_hook(
                 hooks.make_grad_sync_hook(self.spatial_group, async_op=True)
-            )
-
-        if self.qk_norm:
-            self.q_norm, self.k_norm = (
-                torch.nn.LayerNorm(embed_dim // heads, device=device),
-                torch.nn.LayerNorm(embed_dim // heads, device=device),
             )
 
         self.heads = heads // self.channel_group.size()
