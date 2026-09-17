@@ -32,9 +32,11 @@ instead of rederiving a mask from an int like :mod:`..math` does.
 from __future__ import annotations
 
 import functools
-from typing import Literal, Optional
+from typing import Optional
 
 import torch
+
+from ._layout import Layout, from_bshd as _from_bshd
 
 try:
     import transformer_engine.pytorch  # noqa: F401  (loads the C++ extension)
@@ -57,21 +59,10 @@ except Exception:  # pragma: no cover - TE not installed (no container)
 
 _LAYOUT = "bshd_bshd_bshd"
 
-#: Layout of the ``q``/``k``/``v``/``out`` tensors a caller hands in and gets back.
-#: cuDNN itself only speaks ``bshd`` (see :data:`_LAYOUT`); ``"bhsd"`` -- the ring's
-#: own convention -- is transposed in and out around the kernel, ``"bshd"`` is
-#: passed straight through.
-Layout = Literal["bhsd", "bshd"]
-
 
 def _to_bshd(t: torch.Tensor, layout: Layout) -> torch.Tensor:
     """Bring ``t`` into the contiguous ``bshd`` the fused kernels require."""
     return t.contiguous() if layout == "bshd" else t.transpose(1, 2).contiguous()
-
-
-def _from_bshd(t: torch.Tensor, layout: Layout) -> torch.Tensor:
-    """Inverse of :func:`_to_bshd`."""
-    return t if layout == "bshd" else t.transpose(1, 2).contiguous()
 
 
 def _shape(q: torch.Tensor, k: torch.Tensor, layout: Layout) -> tuple[int, int, int, int, int]:

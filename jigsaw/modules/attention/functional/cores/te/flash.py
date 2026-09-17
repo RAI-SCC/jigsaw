@@ -28,9 +28,11 @@ for :func:`backward` to replay.
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Optional
 
 import torch
+
+from ._layout import Layout, from_bshd as _from_bshd
 
 try:
     import flash_attn  # noqa: F401  (loads the CUDA extension)
@@ -43,9 +45,6 @@ try:
 except Exception:  # pragma: no cover - flash_attn not installed (no container)
     FLASH_CORE_AVAILABLE = False
 
-
-#: See :data:`..cudnn.Layout`.
-Layout = Literal["bhsd", "bshd"]
 
 #: FA2 requires the head dimension to be a multiple of 8 and at most 256; the
 #: package's own ``FlashAttnFunc`` zero-pads up to the next multiple rather than
@@ -74,11 +73,6 @@ def _to_bshd(t: torch.Tensor, layout: Layout) -> torch.Tensor:
     nothing. cuDNN (:mod:`.cudnn`) is stricter and keeps its own copy.
     """
     return t if layout == "bshd" else t.transpose(1, 2)
-
-
-def _from_bshd(t: torch.Tensor, layout: Layout) -> torch.Tensor:
-    """Inverse of :func:`_to_bshd`."""
-    return t if layout == "bshd" else t.transpose(1, 2).contiguous()
 
 
 def forward(
