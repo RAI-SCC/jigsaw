@@ -1,46 +1,36 @@
 """TransformerEngine's cuDNN fused-attention core (``te.cudnn``).
 
-One of the two kernels ``attn_backend="te"`` dispatches to -- the Hopper-and-newer
-arm; :mod:`.flash` is the Ampere arm. See :mod:`..te` for the rule.
+The Hopper-and-newer arm of ``attn_backend="te"`` (:mod:`.flash` is the Ampere
+arm; see :mod:`..te` for the rule). ``te.DotProductAttention`` returns only the
+output, but the ring needs a per-chunk LSE for its online-softmax merge
+(:func:`...forward._attend_step`) and recomputes ``dQ/dK/dV`` from the
+*global* output/LSE in backward (:func:`...backward.ring_backward`). So this
+module drives ``fused_attn_fwd``/``fused_attn_bwd`` directly, reading the LSE
+from ``aux_ctx_tensors[0]``.
 
-The ring's online-softmax merge (:func:`...forward._attend_step`) needs a per-chunk
-log-sum-exp from every inner attention call, and its backward
-(:func:`...backward.ring_backward`) recomputes ``dQ/dK/dV`` from the *global* output
-and LSE. ``te.DotProductAttention`` returns only the output, so this module drives
-TransformerEngine's cuDNN fused-attention kernels directly via
-``fused_attn_fwd`` / ``fused_attn_bwd``, whose ``aux_ctx_tensors[0]`` is the
-softmax LSE.
-
-The non-ring TE core
+The non-ring core
 (:meth:`~jigsaw.modules.attention.attention.DistributedAttention._transformer_attn_core`)
-goes through here too, with ``layout="bshd"``, and simply drops the LSE: cuDNN
-computes it either way as the running softmax normaliser and writes it out for
-its own backward, so taking it costs one unused ``(b, h, s)`` fp32 tensor.
-What calling the kernels directly buys is the explicit ``fused_attn_bwd``,
-which ``te.DotProductAttention`` hides behind its own ``autograd.Function`` --
-see :class:`~jigsaw.modules.attention.attention.TransformerEngineAttention` for
-what that cost.
+goes through here too with ``layout="bshd"`` and just discards the LSE (cuDNN
+computes it regardless as its own backward's normaliser, so it's a free
+extra). What direct kernel calls buy there is the explicit
+``fused_attn_bwd``, which ``te.DotProductAttention`` hides behind its own
+``autograd.Function`` -- see
+:class:`~jigsaw.modules.attention.attention.TransformerEngineAttention`.
 
-This is also the only TE path that can ever carry FP8, though this core does not
-implement it yet.
+Also the only TE path that can ever carry FP8 (not yet implemented here).
 
-Scope: non-FP8, no bias, no mask, no GQA. ``layout`` selects the caller's
-tensor convention (``"bhsd"`` for the ring, ``"bshd"`` for the non-ring core --
-cuDNN speaks only the latter, so ``"bhsd"`` is transposed in and out); LSE is
-``(b, h, s)`` regardless.
+Scope: non-FP8, no bias, no mask, no GQA. ``layout`` is the caller's tensor
+convention -- ``"bhsd"`` (ring) or ``"bshd"`` (non-ring, cuDNN's native
+layout, no transposes); LSE is ``(b, h, s)`` either way.
 
-Dropout replay follows the same strategy as :mod:`..sdpa`: cuDNN generates its
-own opaque RNG state internally (``aux_ctx_tensors[1]`` from
-``fused_attn_fwd``) rather than accepting a caller-supplied seed, so this core
-threads that state back verbatim as ``rng_state`` for :func:`backward` to
-replay, instead of rederiving a mask from an int like :mod:`..math` does.
+Dropout replay mirrors :mod:`..sdpa`: cuDNN generates its own opaque RNG
+state (``aux_ctx_tensors[1]``) rather than taking a caller seed, so it's
+threaded back verbatim as ``rng_state`` for :func:`backward` to replay,
+instead of rederiving a mask from an int like :mod:`..math` does.
 
-Covered by the ``te_required`` + ``gpu_required`` ring parity test. The
-dropout path is exercised by
-``tests/modules/attention/test_dropout.py::TestSdpaTeCoreDropoutReplay``,
-which recovers the opaque cuDNN mask from the forward output and checks that
-:func:`backward` replays it (verified against transformer_engine 2.12 on an
-NVIDIA A100).
+Covered by the ``te_required`` + ``gpu_required`` ring parity test; dropout
+replay by ``test_dropout.py::TestSdpaTeCoreDropoutReplay`` (verified against
+transformer_engine 2.12 on an A100).
 """
 
 from __future__ import annotations

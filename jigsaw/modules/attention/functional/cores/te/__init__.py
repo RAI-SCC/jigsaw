@@ -1,37 +1,23 @@
 """TransformerEngine attention cores, picked by GPU architecture.
 
-``attn_backend="te"`` means "the kernel TransformerEngine would run here", and
-that is not one kernel:
+``attn_backend="te"`` is not one kernel: :mod:`.cudnn` (TE's fused
+``fused_attn_fwd``/``bwd``, Hopper+/sm90+, the only TE path with FP8) or
+:mod:`.flash` (``flash_attn`` FA2, Ampere/sm80-89 -- mirrors
+``te.DotProductAttention``'s own choice there, where cuDNN measured slower).
+:func:`select_core` is the whole rule, resolved once per module (ring:
+``...config._select_attn_core_forward_fn``; non-ring:
+:meth:`~jigsaw.modules.attention.attention.DistributedAttention._select_attn_core`).
 
-* :mod:`.cudnn` -- TE's own cuDNN fused kernels (``fused_attn_fwd`` /
-  ``fused_attn_bwd``), on **Hopper and newer** (sm90+), where cuDNN ships
-  architecture-specific FMHA kernels. Also the only TE path that can carry FP8.
-* :mod:`.flash` -- the ``flash_attn`` package (Dao-AILab FA2), on **Ampere**
-  (sm80/sm86/sm89). This mirrors what ``te.DotProductAttention`` does itself:
-  its backend selector picks ``flash_attn`` over cuDNN for every non-FP8,
-  no-mask, no-bias shape probed on an A100, and cuDNN was measurably slower
-  there (see ``experiments/`` and the git history of this module).
+``attn_backend="sdpa"`` is separate: torch's own kernels on every architecture,
+the escape hatch when TE's pick is wrong for a given shape.
 
-:func:`select_core` is the whole rule. It is resolved once -- by
-:func:`...config._select_attn_core_forward_fn` for the ring, and by
-:meth:`~jigsaw.modules.attention.attention.DistributedAttention._select_attn_core`
-for the non-ring core -- so nothing branches per call.
+Both cores implement the contract in :mod:`..` (LSE for the ring's
+online-softmax merge, backward recompute from saved global ``out``/``lse``,
+opaque kernel ``rng_state`` for dropout replay, and a ``layout`` arg since each
+kernel only speaks ``bshd``).
 
-``attn_backend="sdpa"`` is deliberately *not* part of this: it means torch's own
-kernels (:mod:`..sdpa` flash on CUDA, :mod:`..math` on CPU) on every
-architecture, and stays the escape hatch when TE's choice is the wrong one for a
-given shape.
-
-Both cores expose the contract in :mod:`..` -- ``forward`` returns the softmax
-LSE the ring's online-softmax merge needs, ``backward`` recomputes ``dQ/dK/dV``
-from the saved *global* ``out``/``lse``, and dropout replay threads the kernel's
-own opaque ``rng_state`` back rather than re-deriving a mask from a seed. Both
-also take ``layout`` (``"bhsd"`` for the ring, ``"bshd"`` for the non-ring
-core), since each underlying kernel speaks only ``bshd``.
-
-Set ``JIGSAW_TE_CORE=cudnn`` or ``JIGSAW_TE_CORE=flash`` to override the
-architecture rule -- mainly so both cores stay testable on whichever GPU is in
-front of you, since the rule otherwise makes one of them unreachable.
+Override the architecture rule with ``JIGSAW_TE_CORE=cudnn|flash`` to keep
+both cores testable on one GPU.
 """
 
 from __future__ import annotations
