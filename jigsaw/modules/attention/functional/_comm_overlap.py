@@ -32,26 +32,11 @@ def issue_on_comm_stream(
 ) -> "tuple[torch.Tensor, Optional[dist.Work], torch.cuda.Event]":
     """Run ``produce`` on ``comm_stream`` and return ``(recv_buf, work, event)``.
 
-    ``comm_stream`` first waits on the compute stream so the send source (freshly
-    produced there) is ready. ``produce`` issues the actual NCCL op, which
-    ProcessGroupNCCL always runs on its *own* internal stream, not whichever one
-    is "current" when the call is made -- so the ``torch.cuda.stream(comm_stream)``
-    context here only decides what that internal stream is told to wait for
-    beforehand, not where the transfer itself completes. ``work.wait()`` is what
-    bridges the two: called with ``comm_stream`` current, it inserts a wait for
-    NCCL's real completion event onto ``comm_stream`` (a stream-side wait, not a
-    host block -- ``Work.wait()`` only blocks the calling CPU thread when there is
-    no current-stream event to enqueue against). *Only after that* is it safe to
-    record ``event`` on ``comm_stream``: recording it any earlier (e.g. right
-    after ``produce()`` returns, before the transfer it kicked off has actually
-    been waited onto this stream) captures a point ``comm_stream`` reaches
-    immediately, before the real transfer lands -- the consumer would then adopt
-    the buffer while it is still being written. Every tensor in ``keep_alive`` --
-    the send source and the receive buffer -- is ``record_stream``'d onto
-    ``comm_stream`` so it survives until the transfer completes even after the
-    Python reference goes away. The consumer does
-    ``torch.cuda.current_stream().wait_event(event)`` before touching ``recv_buf``
-    (see :func:`consume`).
+    ``comm_stream`` waits on the compute stream so the send source is ready, then
+    ``produce`` issues the NCCL op and ``work.wait()`` inserts a stream-side wait
+    for its completion (not a host block -- see :func:`consume` for how the
+    caller later waits on ``event``). ``keep_alive`` tensors are ``record_stream``'d
+    onto ``comm_stream`` so the allocator doesn't recycle them mid-transfer.
     """
     compute = torch.cuda.current_stream()
     comm_stream.wait_stream(compute)
@@ -61,6 +46,10 @@ def issue_on_comm_stream(
             work.wait()
     for t in keep_alive:
         t.record_stream(comm_stream)
+    # `event` must be recorded only after `work.wait()` above has enqueued NCCL's
+    # completion wait onto `comm_stream` -- recording it any earlier would mark a
+    # point this stream reaches immediately, before the transfer actually lands,
+    # letting the consumer adopt the buffer while it's still being written.
     event = torch.cuda.Event()
     event.record(comm_stream)
     return recv_buf, work, event

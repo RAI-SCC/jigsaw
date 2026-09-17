@@ -212,7 +212,15 @@ def attn_core_dtype(x: torch.Tensor) -> torch.dtype:
 
 
 class DistributedAttention(torch.nn.Module):
-    """Distributed attention."""
+    """Distributed multi-head attention, parallelised over ``spatial_group``.
+
+    Three mutually exclusive schemes, selected by ``ring`` / ``ulysses``: plain
+    (each rank attends to its own local sequence shard), ring (K/V circulate
+    around ``spatial_group``), or Ulysses (a single all-to-all trades sequence
+    shard for head shard -- flat, or hierarchical when ``ulysses_gpus_per_node``
+    is also set: intra-node Ulysses nested in an inter-node ring). See
+    :meth:`__init__` for the full parameter reference.
+    """
 
     # type hints
     qkv: torch.nn.Linear | linear.DistributedXWT
@@ -860,10 +868,22 @@ class DistributedAttention(torch.nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass for distributed multi-head attention.
+        """Forward pass for distributed multi-head attention.
 
-        x: (n_batch, vars, n_lat, n_lon)
+        Projects ``x`` to Q/K/V, dispatches to the plain, ring, or Ulysses
+        attention core per the constructor's config, and concatenates heads
+        back to the output projection.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            ``(n_batch, vars, n_lat, n_lon)``, already sharded per
+            ``spatial_group`` / ``channel_group``.
+
+        Returns
+        -------
+        torch.Tensor
+            ``(n_batch, seq_length, output_dim)``.
         """
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.qkv(x)

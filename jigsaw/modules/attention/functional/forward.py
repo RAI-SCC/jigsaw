@@ -235,8 +235,7 @@ def ring_forward(
         with nvtx_range(f"fwd/step{step}"):
             with nvtx_range("get"):
                 kj, vj = provider.get(step)
-            with nvtx_range("save_for_backward"):
-                provider.save_for_backward(step)
+            provider.save_for_backward(step)
             global_chunk_idx = provider.global_chunk_idx(step)
             seed = (
                 combine_dropout_seed(base_seed, local_rank, global_chunk_idx)

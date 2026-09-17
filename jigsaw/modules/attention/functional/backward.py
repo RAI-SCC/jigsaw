@@ -128,7 +128,47 @@ def ring_backward(
     base_seed: Optional[int] = None,
     rng_states: Optional[tuple[Optional[torch.Tensor], ...]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Backward pass for ring attention."""
+    """Backward pass for ring attention.
+
+    Mirrors :func:`~.forward.ring_forward`'s loop: the
+    :class:`~.backward_chunk_provider._BackwardChunkProvider` for
+    ``ring_config.send_op`` makes each chunk current (``get``) and progresses
+    communication (``maybe_forward``); this function runs the attention core
+    per step and accumulates dQ/dK/dV.
+
+    Parameters
+    ----------
+    dout, q, out, lse : torch.Tensor
+        Output gradient, local query, and the forward's output / log-sum-exp,
+        as returned by :func:`~.forward.ring_forward`.
+    x : torch.Tensor
+        Local input sequence chunk.
+    w_qkv : torch.Tensor
+        Fused query, key, and value projection weights.
+    scale : float
+        Attention scaling factor.
+    group : dist.ProcessGroup
+        Distributed process group used for ring communication.
+    local_rank : int
+        Rank within ``group``.
+    ring_group_size : int
+        Number of ranks in ``group``.
+    chunks_to_save : tuple[torch.Tensor, ...]
+        Chunks the forward saved for backward (see :func:`~.forward.ring_forward`).
+    ring_config : RingAttentionConfig
+        Ring-attention configuration.
+    dropout_p : float
+        Attention dropout probability.
+    base_seed : int, optional
+        Dropout base seed from the forward (``None`` if ``dropout_p == 0``).
+    rng_states : tuple[torch.Tensor | None, ...], optional
+        Per-global-chunk RNG state from the forward (see :func:`~.forward._attend_step`).
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Local ``dq``, ``dk``, ``dv``.
+    """
     layout = ring_config.core_layout
     b, h, seq_local, d = bhnd(q.shape, layout)
     # Reconcile dtypes before the cores run. Under autocast the forward saves
