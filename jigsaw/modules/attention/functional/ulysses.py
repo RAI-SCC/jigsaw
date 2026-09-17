@@ -1,34 +1,29 @@
 """Ulysses (DeepSpeed-style) sequence-parallel attention.
 
-An alternative to the ring (:mod:`.forward`) for parallelising attention over
-``spatial_group``. Instead of circulating K/V around a ring of
-``spatial_group.size()`` P2P steps -- each followed by an online-softmax merge --
-Ulysses does a single all-to-all that trades the local *sequence* shard for a
-*head* shard, runs **one** local attention over the full sequence on
-``local_heads / spatial_group.size()`` heads, then an all-to-all back.
+An alternative to the ring (:mod:`.forward`) for parallelising over
+``spatial_group``: instead of circulating K/V through P2P steps with an
+online-softmax merge after each, one all-to-all trades the local *sequence*
+shard for a *head* shard, runs a single local attention over the full
+sequence on ``local_heads / spatial_group.size()`` heads, then all-to-alls
+back.
 
-Trade-off vs. the ring:
+Trade-off vs. the ring: O(1) collectives and one fused kernel instead of many
+small ones plus LSE merges (TE's ``cp_comm_type="a2a"``), but it needs
+``local_heads % P == 0`` (the ring works for any head count), and exposes the
+all-to-all directly when the group crosses a slow multi-node fabric --
+:func:`hierarchical_ulysses_attention` (Ulysses intra-node, ring inter-node,
+the ``cp_comm_type="a2a+p2p"`` analogue) keeps the a2a on the fast fabric.
 
-* O(1) collectives instead of ``spatial_group.size()`` P2P steps, and one big
-  fused attention kernel instead of as many small ones plus their LSE merges --
-  much closer to roofline. This is Transformer Engine's ``cp_comm_type="a2a"``.
-* It needs the head count to divide the group: ``local_heads % P == 0`` where
-  ``local_heads = heads // channel_group.size()``. The ring works for any head
-  count. When the a2a group crosses a slow fabric boundary (multi-node) the
-  all-to-all is exposed; :func:`hierarchical_ulysses_attention` -- Ulysses over
-  an intra-node sub-group nested in a ring over the inter-node one -- is the
-  ``cp_comm_type="a2a+p2p"`` analogue that keeps the a2a on the fast fabric.
-
-The three Q/K/V shards ride **one** all-to-all: the scatter/gather helpers take
-arbitrary leading dims, so a ``[3, b, s, h, d]`` stack goes through a single
+Q/K/V ride one all-to-all: the scatter/gather helpers take arbitrary leading
+dims, so a ``[3, b, s, h, d]`` stack goes through a single
 ``all_to_all_single`` instead of three.
 
-Composes with channel/tensor parallelism unchanged: the all-to-all sits between
-the (already channel-sharded) ``qkv`` projection and ``head_concat``, operating
-on the projected Q/K/V, so it is orthogonal to how ``qkv`` was sharded.
+Composes with channel/tensor parallelism unchanged -- the all-to-all sits
+between the (already channel-sharded) ``qkv`` projection and ``head_concat``,
+orthogonal to how ``qkv`` was sharded.
 
-All tensors here are ``bshd`` -- ``[batch, seq, heads, head_dim]`` -- the layout
-the TE cores speak natively; the SDPA path transposes around its kernel call in
+All tensors here are ``bshd`` (the TE cores' native layout); the SDPA path
+transposes around its kernel call in
 :meth:`..attention.DistributedAttention._ulysses_attn_core`.
 """
 

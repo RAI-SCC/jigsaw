@@ -1,40 +1,29 @@
 """The ``flash_attn`` (FA2) attention core (``te.flash``).
 
-One of the two kernels ``attn_backend="te"`` dispatches to -- the Ampere arm;
-:mod:`.cudnn` is the Hopper-and-newer arm. See :mod:`..te` for the rule.
+The Ampere arm of ``attn_backend="te"`` (:mod:`.cudnn` is the Hopper-and-newer
+arm; see :mod:`..te` for the rule) -- the same kernel ``te.DotProductAttention``
+itself picks over cuDNN on Ampere for non-FP8, no-mask, no-bias shapes, kept
+here so it still exposes the LSE the ring needs.
 
-This is the kernel ``te.DotProductAttention`` itself runs on Ampere: TE's
-backend selector picks ``flash_attn`` over its own cuDNN kernels for every
-non-FP8, no-mask, no-bias shape measured on an A100 (see
-``experiments/probe_selector.py``). Selecting it here keeps ``attn_backend="te"``
-meaning "what TransformerEngine would have run", while still exposing the
-softmax LSE the ring needs.
+Not a TransformerEngine API: TE's own ``FlashAttention`` wrapper throws the LSE
+away, so this module calls the ``flash_attn`` package directly instead. Also
+not :mod:`..sdpa`, which wraps PyTorch's separately-built vendored FA2 fork.
 
-Note what this module is *not*: it is not a TransformerEngine API. TE's own
-``FlashAttention`` wrapper (``attention/dot_product_attention/backends.py``)
-returns only ``out`` and throws the LSE away, so the ring cannot use it. This
-module therefore calls the ``flash_attn`` package directly. Nor is it
-:mod:`..sdpa`, which wraps ``torch.ops.aten._scaled_dot_product_flash_attention``
--- PyTorch's own vendored FA2 fork, a separate build from the Dao-AILab package
-(verified: the aten op never loads ``flash_attn_2_cuda``).
+Entry points: the public ``flash_attn_func`` only yields the LSE via
+``return_attn_probs=True``, which under dropout also materialises a full
+``(b, h, s, s)`` probability tensor and is measurably slower. So this core
+calls the underlying ``_flash_attn_forward``/``_flash_attn_backward`` ops with
+``return_softmax=False`` instead, returning just the LSE and the kernel's own
+dropout ``rng_state`` -- the same posture :mod:`..sdpa` takes with torch's
+equivalent undocumented ops.
 
-Entry points: ``flash_attn``'s public ``flash_attn_func`` only yields the LSE
-via ``return_attn_probs=True``, which under dropout also materialises
-``S_dmask``, a ``(b, h, s, s)`` tensor -- measured at 20.3 ms vs 7.8 ms for the
-same problem without it. So this core calls the underlying
-``_flash_attn_forward`` / ``_flash_attn_backward`` custom ops with
-``return_softmax=False``, which return the LSE and the kernel's own dropout
-``rng_state`` and nothing else. That is the same posture as :mod:`..sdpa`,
-which wraps torch's equivalent undocumented ops.
+Scope: non-FP8, no bias, no mask, no GQA, fp16/bf16. ``layout`` is the caller's
+tensor convention -- ``"bhsd"`` (ring) or ``"bshd"`` (non-ring, FA2's native
+layout); LSE is ``(b, h, s)`` either way, FA2's native shape.
 
-Scope: non-FP8, no bias, no mask, no GQA, fp16/bf16. ``layout`` selects the
-caller's tensor convention (``"bhsd"`` for the ring, ``"bshd"`` for the
-non-ring core -- FA2 speaks only the latter, so ``"bhsd"`` is transposed in and
-out); LSE is ``(b, h, s)`` regardless, which is FA2's native shape.
-
-Dropout replay follows :mod:`..sdpa` / :mod:`.cudnn`: the kernel draws its own
-mask from an internally generated philox state, so :func:`forward` returns that
-``rng_state`` verbatim and the ring threads it back into :func:`backward`.
+Dropout replay follows :mod:`..sdpa`/:mod:`.cudnn`: the kernel draws its own
+mask from an internal philox state, threaded back verbatim as ``rng_state``
+for :func:`backward` to replay.
 """
 
 from __future__ import annotations

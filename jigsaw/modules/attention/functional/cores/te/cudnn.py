@@ -27,10 +27,6 @@ Dropout replay mirrors :mod:`..sdpa`: cuDNN generates its own opaque RNG
 state (``aux_ctx_tensors[1]``) rather than taking a caller seed, so it's
 threaded back verbatim as ``rng_state`` for :func:`backward` to replay,
 instead of rederiving a mask from an int like :mod:`..math` does.
-
-Covered by the ``te_required`` + ``gpu_required`` ring parity test; dropout
-replay by ``test_dropout.py::TestSdpaTeCoreDropoutReplay`` (verified against
-transformer_engine 2.12 on an A100).
 """
 
 from __future__ import annotations

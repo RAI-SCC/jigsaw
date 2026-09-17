@@ -29,35 +29,32 @@ if JIGSAW_TE_AVAILABLE:
         Drives :mod:`.functional.cores.te` -- the same cores the ring's inner
         step uses -- in the non-ring, ``bshd`` configuration, so
         ``attn_backend="te"`` means the same kernel whether or not ``ring`` is
-        set. Which kernel that is depends on the GPU (cuDNN on Hopper+,
-        ``flash_attn`` on Ampere) and is resolved once into ``self.te_core`` by
+        set. Which kernel that is (cuDNN on Hopper+, ``flash_attn`` on Ampere)
+        is resolved once into ``self.te_core`` by
         :func:`.functional.cores.te.select_core`, then passed in as ``core``.
 
-        Replaces a wrapper around ``te.DotProductAttention``. That module is an
-        ``autograd.Function`` internally, hence a graph boundary, so the wrapper
-        had to recompute the whole forward under ``enable_grad`` just to get a
-        graph to differentiate -- fwd, fwd, bwd per training step -- plus a
-        CPU/CUDA RNG snapshot/restore dance so the recompute redrew the
-        forward's dropout mask. Calling the kernels directly gives their real
-        backward and their own ``rng_state`` instead: no recompute, no RNG
-        bookkeeping. Measured on an A100 (b=2, h=8, d=64, bf16), holding the
-        kernel fixed: 1.2x-2.0x faster fwd+bwd across s=512..8192, the wider
-        margins at short sequences where ``DotProductAttention``'s per-call
-        Python (its ``AttentionParams`` backend-selection cache) also disappears.
+        Replaces a wrapper around ``te.DotProductAttention``, which is itself an
+        ``autograd.Function`` -- a graph boundary that forced the old wrapper to
+        recompute the whole forward under ``enable_grad`` just to get something
+        to differentiate, plus an RNG snapshot/restore dance to redraw the same
+        dropout mask. Calling the kernels directly gives their real backward and
+        own ``rng_state`` instead: no recompute, no RNG bookkeeping, measurably
+        faster fwd+bwd, with the biggest wins at short sequences where
+        ``DotProductAttention``'s per-call backend-selection overhead also goes
+        away.
 
         The softmax LSE the cores return is dropped here (the ring needs it for
-        its online-softmax merge; a single un-chunked call does not). That costs
-        nothing: both kernels compute the LSE regardless as the softmax
-        normaliser and write it out for their own backward.
+        its online-softmax merge; a single un-chunked call does not) -- for free,
+        since both kernels compute it regardless as their own backward's
+        normaliser.
 
-        What is given up relative to ``DotProductAttention``: FP8, bias, mask and
-        GQA support, and its per-*shape* backend dispatch. The latter costs
-        little in practice -- for jigsaw's problem class (non-FP8, no mask, no
-        bias, no GQA) TE's selector returns the same verdict for every shape
-        probed on an A100, which is what makes the coarse per-architecture rule
-        in :func:`.functional.cores.te.select_core` a faithful stand-in. Where a
-        kernel cannot serve a shape at all, the core raises rather than falling
-        back silently.
+        Gives up relative to ``DotProductAttention``: FP8, bias, mask, GQA, and
+        its per-shape backend dispatch -- the last costs little since jigsaw's
+        problem class (non-FP8, no mask, no bias, no GQA) gets the same verdict
+        from TE's selector across shapes, which is what makes the coarse
+        per-architecture rule in :func:`.functional.cores.te.select_core` a
+        faithful stand-in. A kernel that cannot serve a shape raises rather than
+        falling back silently.
 
         ``torch.vmap`` support (``torch_blue``'s Bayesian ensembles) survives the
         move: see the :meth:`vmap` staticmethod.
@@ -163,9 +160,6 @@ if JIGSAW_TE_AVAILABLE:
             It re-enters :meth:`forward` via ``apply``, so gradients route
             through :meth:`backward` -- the folded ``q/k/v`` produce the matching
             folded LSE / ``rng_state``, which is what ``fused_attn_bwd`` needs.
-            Forward and grad are checked against a per-member Python loop by
-            ``tests/modules/attention/test_te_vmap_bayesian.py::TestTransformerEngineAttentionVmap``
-            (``te_required`` + ``gpu_required``).
             """
             q_bdim, k_bdim, v_bdim = in_dims[0], in_dims[1], in_dims[2]
 
@@ -276,29 +270,25 @@ class DistributedAttention(torch.nn.Module):
             ``spatial_group.size()``. See :mod:`.functional.ulysses`.
         ulysses_gpus_per_node: int
             When ``> 0`` and ``ulysses`` is set, run the *hierarchical* scheme
-            (the analogue of Transformer Engine's ``cp_comm_type="a2a+p2p"``):
-            an all-to-all over an intra-node sub-group of this many consecutive
+            (Transformer Engine's ``cp_comm_type="a2a+p2p"`` analogue): an
+            all-to-all over an intra-node sub-group of this many consecutive
             spatial ranks, nested in a P2P ring over the inter-node sub-group
-            (``spatial // ulysses_gpus_per_node`` ranks). The all-to-all stays
-            on the fast intra-node fabric; only ``n_nodes`` K/V chunks ever ring
-            over the slow one. Needs ``spatial`` divisible by this into a ring of
-            ``>= 2``, and ``heads // channel`` divisible by it. ``0`` (default)
-            keeps the flat single-level Ulysses. The inter-node sub-group always
-            moves K/V by a P2P ring with a per-step online-softmax merge (the
-            analogue of Transformer Engine's ``cp_comm_type="a2a+p2p"``);
-            ``ulysses_inter_save_scope`` / ``ulysses_inter_overlap`` tune it.
+            (``spatial // ulysses_gpus_per_node`` ranks), so only ``n_nodes``
+            K/V chunks ever ring over the slow fabric. Needs ``spatial``
+            divisible by this into a ring of ``>= 2``, and ``heads // channel``
+            divisible by it. ``0`` (default) keeps the flat single-level
+            Ulysses. ``ulysses_inter_save_scope``/``ulysses_inter_overlap`` tune
+            the inter-node ring.
         ulysses_inter_save_scope: SaveScope | str
             ``save_scope`` for the hierarchical scheme's inter-node K/V ring
             (only read when ``ulysses_gpus_per_node > 0``). ``LOCAL`` (default)
             keeps only this rank's own chunk and re-rings the rest over the
             slow fabric in the backward. ``GLOBAL`` keeps every K/V chunk the
             forward ring received so the backward reads them from memory, at
-            one extra ``n_nodes``-chunk buffer per rank -- but it also routes
-            dK/dV through an all-reduce per backward step, so at ``n_nodes ==
-            2`` (one inter-node hop either way) it is a wash-to-slightly-worse
-            (measured: 181 vs 175 ms median, GH200 8x1 s=131072); the win is
-            expected only at ``n_nodes >= 4``, where ``LOCAL`` re-rings K/V
-            through many hops.
+            one extra ``n_nodes``-chunk buffer per rank, but routes dK/dV
+            through an all-reduce per backward step instead -- worthwhile only
+            once ``n_nodes`` is large enough that ``LOCAL``'s re-ringing costs
+            more than that all-reduce.
         ulysses_inter_overlap: bool
             Put the hierarchical scheme's inter-node K/V ring (and its backward
             dK/dV relay) on a dedicated CUDA stream with double buffering, so
