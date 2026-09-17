@@ -605,8 +605,16 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
         super().__init__(
             ring_config, chunks_to_save, x, w_qkv, b, seq_local, h, d, group
         )
-        self._recv_buf = torch.empty_like(
-            x if ring_config.send_in_forward == SendForward.X else chunks_to_save[0]
+        # Shaped/dtype'd off `x` or `chunks_to_save[0]`, but always allocated on
+        # `x.device`: under CPU offload `chunks_to_save[0]` lives on the host, and
+        # this buffer seeds the Overlap subclasses' `PrefetchBuffer`s, which reuse
+        # it as the NCCL recv destination for every hop of the pass -- a
+        # CPU-templated buffer there fails with "Tensors must be CUDA and dense"
+        # on the first `dist.all_to_all`/`broadcast`. `x` itself is never
+        # offloaded (only the saved chunk is), so its device is always right.
+        template = x if ring_config.send_in_forward == SendForward.X else chunks_to_save[0]
+        self._recv_buf = torch.empty(
+            template.shape, dtype=template.dtype, device=x.device
         )
         self._handle: Optional[dist.Work] = None
         self.local_rank = int(local_rank)
