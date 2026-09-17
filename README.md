@@ -84,11 +84,6 @@ ring, `ulysses_inter_overlap` for the hierarchical scheme's inter-node ring.
 CUDA only; inert elsewhere. See `RingAttentionConfig.__init__` and
 `DistributedAttention.__init__` for the full parameter reference.
 
-Set `JIGSAW_NVTX=1` to annotate the ring's forward/backward loops with NVTX
-ranges (per ring step, and split into comm vs. attention-core sub-ranges) for
-inspection with `nsys`. A no-op — including skipping the annotation
-formatting — when unset.
-
 ## Usage
 _jigsaw_ is designed to follow the interface of PyTorch. The model must be defined exclusively via _jigsaw_ layers. i.e.
 ```

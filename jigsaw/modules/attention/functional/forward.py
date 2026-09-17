@@ -16,7 +16,6 @@ import torch.distributed as dist
 from jigsaw.modules.attention.config import RingAttentionConfig
 
 from ._merge_kernel import fused_online_softmax_merge_
-from ._nvtx import nvtx_range
 from .forward_chunk_provider import build_forward_chunk_provider
 from .functional import bhnd, combine_dropout_seed
 
@@ -122,23 +121,20 @@ def _attend_step(
     threads back opaque kernel RNG state instead of using ``seed`` -- see
     :mod:`.cores`).
     """
-    with nvtx_range("attn/contig"):
-        kjc, vjc = kj.contiguous(), vj.contiguous()
-    with nvtx_range("attn/core"):
-        out_j, l_j, rng_state_j = ring_config.attn_core_forward_fn(
-            q,
-            kjc,
-            vjc,
-            scale,
-            dropout_p,
-            seed=seed,
-            layout=ring_config.core_layout,
-        )
+    kjc, vjc = kj.contiguous(), vj.contiguous()
+    out_j, l_j, rng_state_j = ring_config.attn_core_forward_fn(
+        q,
+        kjc,
+        vjc,
+        scale,
+        dropout_p,
+        seed=seed,
+        layout=ring_config.core_layout,
+    )
 
-    with nvtx_range("attn/merge"):
-        out, lse = _online_softmax_merge_(
-            out, lse, out_j, l_j, layout=ring_config.core_layout
-        )
+    out, lse = _online_softmax_merge_(
+        out, lse, out_j, l_j, layout=ring_config.core_layout
+    )
     return out, lse, rng_state_j
 
 
@@ -232,22 +228,19 @@ def ring_forward(
     rng_states: list[Optional[torch.Tensor]] = [None] * ring_group_size
 
     for step in range(ring_group_size):
-        with nvtx_range(f"fwd/step{step}"):
-            with nvtx_range("get"):
-                kj, vj = provider.get(step)
-            provider.save_for_backward(step)
-            global_chunk_idx = provider.global_chunk_idx(step)
-            seed = (
-                combine_dropout_seed(base_seed, local_rank, global_chunk_idx)
-                if base_seed is not None
-                else None
-            )
-            out, lse, rng_state_j = _attend_step(
-                ring_config, q, kj, vj, scale, dropout_p, out, lse, seed
-            )
-            rng_states[global_chunk_idx] = rng_state_j
-            with nvtx_range("advance"):
-                provider.advance(step, ring_group_size)
+        kj, vj = provider.get(step)
+        provider.save_for_backward(step)
+        global_chunk_idx = provider.global_chunk_idx(step)
+        seed = (
+            combine_dropout_seed(base_seed, local_rank, global_chunk_idx)
+            if base_seed is not None
+            else None
+        )
+        out, lse, rng_state_j = _attend_step(
+            ring_config, q, kj, vj, scale, dropout_p, out, lse, seed
+        )
+        rng_states[global_chunk_idx] = rng_state_j
+        provider.advance(step, ring_group_size)
 
     ring_config.wait_offloads()
     out = out.to(q.dtype)

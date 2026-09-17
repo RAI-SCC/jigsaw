@@ -13,7 +13,6 @@ from jigsaw.modules.attention.config import (
 )
 
 from ._comm_overlap import consume, issue_on_comm_stream
-from ._nvtx import nvtx_range
 from .backward_chunk_provider import _build_backward_chunk_provider
 from .functional import (
     HybridTopology,
@@ -260,61 +259,55 @@ def ring_backward(
     )
 
     for step in range(ring_group_size):
-        with nvtx_range(f"bwd/step{step}"):
-            with nvtx_range("get"):
-                kj, vj, kv = chunk_provider.get(step)
-            if kv_overlap:
-                # Prefetch the next chunk's K/V now so its transfer runs under
-                # this step's core instead of after it.
-                with nvtx_range("maybe_forward"):
-                    chunk_provider.maybe_forward(step, ring_group_size)
-            global_chunk_idx = global_chunk_idx_backward(
-                ring_config, local_rank, step, ring_group_size, group
-            )
-            seed = (
-                combine_dropout_seed(base_seed, local_rank, global_chunk_idx)
-                if base_seed is not None
-                else None
-            )
-            rng_state = rng_states[global_chunk_idx] if rng_states is not None else None
-            with nvtx_range("core"):
-                dq_j, dk_j, dv_j = ring_config.attn_core_backward_fn(
-                    dout, q, kj.to(core_dtype), vj.to(core_dtype), out, lse, scale,
-                    seq_local, seq_local,
-                    dropout_p=dropout_p, seed=seed, rng_state=rng_state, layout=layout,
-                )
-            dq += dq_j
-            del dq_j, kj, vj, kv
+        kj, vj, kv = chunk_provider.get(step)
+        if kv_overlap:
+            # Prefetch the next chunk's K/V now so its transfer runs under
+            # this step's core instead of after it.
+            chunk_provider.maybe_forward(step, ring_group_size)
+        global_chunk_idx = global_chunk_idx_backward(
+            ring_config, local_rank, step, ring_group_size, group
+        )
+        seed = (
+            combine_dropout_seed(base_seed, local_rank, global_chunk_idx)
+            if base_seed is not None
+            else None
+        )
+        rng_state = rng_states[global_chunk_idx] if rng_states is not None else None
+        dq_j, dk_j, dv_j = ring_config.attn_core_backward_fn(
+            dout, q, kj.to(core_dtype), vj.to(core_dtype), out, lse, scale,
+            seq_local, seq_local,
+            dropout_p=dropout_p, seed=seed, rng_state=rng_state, layout=layout,
+        )
+        dq += dq_j
+        del dq_j, kj, vj, kv
 
-            with nvtx_range("dkv_accum"):
-                if all_reduce_dkv:
-                    dist.all_reduce(dk_j, op=dist.ReduceOp.SUM, group=group)
-                    dist.all_reduce(dv_j, op=dist.ReduceOp.SUM, group=group)
-                    if local_rank == step:
-                        dk_buf = dk_j
-                        dv_buf = dv_j
-                elif dkv_overlap:
-                    assert dkv_relay is not None
-                    dkv_relay.step(dk_buf, dv_buf, dk_j, dv_j, step)
-                else:
-                    dk_buf, dv_buf = accumulate_dkv(
-                        ring_config,
-                        dk_buf,
-                        dv_buf,
-                        dk_j,
-                        dv_j,
-                        step,
-                        ring_group_size,
-                        seq_local,
-                        local_rank,
-                        group,
-                    )
+        if all_reduce_dkv:
+            dist.all_reduce(dk_j, op=dist.ReduceOp.SUM, group=group)
+            dist.all_reduce(dv_j, op=dist.ReduceOp.SUM, group=group)
+            if local_rank == step:
+                dk_buf = dk_j
+                dv_buf = dv_j
+        elif dkv_overlap:
+            assert dkv_relay is not None
+            dkv_relay.step(dk_buf, dv_buf, dk_j, dv_j, step)
+        else:
+            dk_buf, dv_buf = accumulate_dkv(
+                ring_config,
+                dk_buf,
+                dv_buf,
+                dk_j,
+                dv_j,
+                step,
+                ring_group_size,
+                seq_local,
+                local_rank,
+                group,
+            )
 
-            if not kv_overlap:
-                # Overlap issues this before the core; otherwise relay here.
-                # No-op for providers that don't re-circulate chunks (e.g. global).
-                with nvtx_range("maybe_forward"):
-                    chunk_provider.maybe_forward(step, ring_group_size)
+        if not kv_overlap:
+            # Overlap issues this before the core; otherwise relay here.
+            # No-op for providers that don't re-circulate chunks (e.g. global).
+            chunk_provider.maybe_forward(step, ring_group_size)
 
     if dkv_overlap:
         assert dkv_relay is not None
