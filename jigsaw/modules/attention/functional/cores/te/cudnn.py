@@ -83,6 +83,21 @@ _LAYOUT = "bshd_bshd_bshd"
 #
 # Parameter names TE has used for the same logical argument, best first.
 _TE_ALIASES: dict[str, tuple[str, ...]] = {
+    # the mandatory block
+    "is_training": ("is_training",),
+    "max_seqlen_q": ("max_seqlen_q",),
+    "max_seqlen_kv": ("max_seqlen_kv",),
+    "cu_seqlens_q": ("cu_seqlens_q",),
+    "cu_seqlens_kv": ("cu_seqlens_kv",),
+    "q": ("q",),
+    "k": ("k",),
+    "v": ("v",),
+    "o": ("o",),
+    "d_o": ("d_o", "do"),
+    "fake_dtype": ("fake_dtype", "qkv_dtype"),
+    "aux_ctx_tensors": ("aux_ctx_tensors",),
+    "fused_attention_backend": ("fused_attention_backend",),
+    # the semantic tail
     "attn_scale": ("attn_scale", "scale"),
     "dropout": ("dropout", "dropout_p"),
     "qkv_layout": ("qkv_layout",),
@@ -93,36 +108,27 @@ _TE_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 @functools.lru_cache(maxsize=None)
-def _te_params(fn: Callable) -> tuple[frozenset[str], int]:
-    """``(parameter names, number of parameters with no default)`` of ``fn``."""
-    params = inspect.signature(fn).parameters
-    return (
-        frozenset(params),
-        sum(1 for p in params.values() if p.default is inspect.Parameter.empty),
-    )
+def _te_params(fn: Callable) -> frozenset[str]:
+    """The parameter names of ``fn``."""
+    return frozenset(inspect.signature(fn).parameters)
 
 
 def _te_call(
     fn: Callable,
-    head: tuple[Any, ...],
     required: dict[str, Any],
     optional: dict[str, Any],
 ) -> Any:
     """Call a TE fused-attn entry point across TE versions.
 
-    ``head`` goes positionally, ``required`` must exist in the installed
-    signature (under one of its :data:`_TE_ALIASES`), ``optional`` is filtered
-    down to what the installed signature accepts.
-    """
-    accepted, n_mandatory = _te_params(fn)
+    *Everything* goes by keyword, including the mandatory block: TE 2.16
+    dropped ``dqkv_dtype`` from ``fused_attn_bwd``'s mandatory arguments, so
+    even that block cannot be passed positionally without drifting.
 
-    if n_mandatory > len(head):
-        raise RuntimeError(
-            f"transformer-engine's {fn.__name__} takes {n_mandatory} mandatory "
-            f"arguments, this core passes {len(head)} positionally. The "
-            f"installed TE is not compatible with this module; signature:\n"
-            f"  {fn.__name__}{inspect.signature(fn)}"
-        )
+    ``required`` must exist in the installed signature (under one of its
+    :data:`_TE_ALIASES`); ``optional`` is filtered down to what the installed
+    signature accepts.
+    """
+    accepted = _te_params(fn)
 
     kwargs: dict[str, Any] = {}
     for logical, value in required.items():
@@ -139,7 +145,21 @@ def _te_call(
             )
     kwargs.update({k: v for k, v in optional.items() if k in accepted})
 
-    return fn(*head, **kwargs)
+    # Anything mandatory we did not supply is a genuine incompatibility; say so
+    # with the signature rather than letting Python raise a bare TypeError.
+    missing = [
+        name
+        for name, p in inspect.signature(fn).parameters.items()
+        if p.default is inspect.Parameter.empty and name not in kwargs
+    ]
+    if missing:
+        raise RuntimeError(
+            f"transformer-engine's {fn.__name__} requires {missing}, which this "
+            f"core does not supply. The installed TE is not compatible with "
+            f"this module; signature:\n  {fn.__name__}{inspect.signature(fn)}"
+        )
+
+    return fn(**kwargs)
 
 
 def _to_bshd(t: torch.Tensor, layout: Layout) -> torch.Tensor:
@@ -236,19 +256,17 @@ def forward(
 
     out, aux, *_ = _te_call(
         fused_attn_fwd,
-        head=(
-            True,  # is_training
-            s_q,
-            s_kv,
-            cu_q,
-            cu_kv,
-            q_b,
-            k_b,
-            v_b,
-            q_b.dtype,  # fake_dtype
-            backend,
-        ),
         required={
+            "is_training": True,
+            "max_seqlen_q": s_q,
+            "max_seqlen_kv": s_kv,
+            "cu_seqlens_q": cu_q,
+            "cu_seqlens_kv": cu_kv,
+            "q": q_b,
+            "k": k_b,
+            "v": v_b,
+            "fake_dtype": q_b.dtype,
+            "fused_attention_backend": backend,
             "attn_scale": scale,
             "dropout": dropout_p,
             "qkv_layout": _LAYOUT,
@@ -265,6 +283,14 @@ def forward(
             "s_quantizer": None,
             "o_quantizer": None,
             "fast_zero_fill": True,
+            # TE >= 2.16 decouples the output format from ``qkv_layout`` and
+            # defaults it to "sbhd", so without this ``out`` comes back
+            # (s, b, h, d) while the ring's accumulator is (b, s, h, d) -- the
+            # merge then dies in ``_online_softmax_merge_`` with a
+            # "doesn't match the broadcast shape" in-place error. On older TE
+            # the parameter does not exist and the output implicitly follows
+            # ``qkv_layout``, which is already what we want.
+            "o_format": "bshd",
             "softmax_type": "vanilla",
             "bottom_right_diagonal": None,
             "rng_gen": None,
@@ -330,22 +356,19 @@ def backward(
 
     dq, dk, dv, *_rest = _te_call(
         fused_attn_bwd,
-        head=(
-            s_q,
-            s_kv,
-            cu_q,
-            cu_kv,
-            q_b,
-            k_b,
-            v_b,
-            o_b,
-            do_b,
-            q_b.dtype,  # fake_dtype
-            TE_DType[q_b.dtype],  # dqkv_dtype
-            aux,
-            backend,
-        ),
         required={
+            "max_seqlen_q": s_q,
+            "max_seqlen_kv": s_kv,
+            "cu_seqlens_q": cu_q,
+            "cu_seqlens_kv": cu_kv,
+            "q": q_b,
+            "k": k_b,
+            "v": v_b,
+            "o": o_b,
+            "d_o": do_b,
+            "fake_dtype": q_b.dtype,
+            "aux_ctx_tensors": aux,
+            "fused_attention_backend": backend,
             "attn_scale": scale,
             "dropout": dropout_p,
             "qkv_layout": _LAYOUT,
@@ -354,12 +377,20 @@ def backward(
             "window_size": (-1, -1),
         },
         optional={
+            # TE < 2.16 wants the dQ/dK/dV dtype spelled out; 2.16 dropped it.
+            "dqkv_dtype": TE_DType[q_b.dtype],
             "cu_seqlens_q_padded": None,
             "cu_seqlens_kv_padded": None,
             "s_quantizer": None,
             "dp_quantizer": None,
             "dqkv_quantizer": None,
             "fast_zero_fill": True,
+            # See the forward: on TE >= 2.16 every tensor format is explicit
+            # and defaults to sbhd/sbh3d. ``o``/``d_o`` are handed in as bshd,
+            # and dQ/dK/dV must come back the same way for _from_bshd.
+            "o_format": "bshd",
+            "do_format": "bshd",
+            "dqkv_layout": _LAYOUT,
             "softmax_type": "vanilla",
             "bottom_right_diagonal": None,
             "deterministic": False,
