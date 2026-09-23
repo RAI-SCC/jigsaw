@@ -32,7 +32,8 @@ instead of rederiving a mask from an int like :mod:`..math` does.
 from __future__ import annotations
 
 import functools
-from typing import Optional
+import inspect
+from typing import Any, Callable, Optional
 
 import torch
 
@@ -58,6 +59,107 @@ except Exception:  # pragma: no cover - TE not installed (no container)
 
 
 _LAYOUT = "bshd_bshd_bshd"
+
+
+# --- transformer-engine ABI compatibility ---------------------------------
+#
+# ``fused_attn_fwd``/``fused_attn_bwd`` live in TE's *private*
+# ``cpp_extensions`` namespace and their parameter list grows between TE
+# releases (page tables, quantizers, softmax_type, bottom_right_diagonal,
+# return_max_logit, cuda_graph, ... were all added over 2.x). Calling them
+# positionally therefore silently misaligns on any TE but the one this module
+# was written against: on TE newer than 2.12 the ``"vanilla"`` meant for
+# ``softmax_type`` lands on ``attn_bias_type`` and the kernel dies with
+# "attn_bias tensor cannot be None when attn_bias_type='vanilla'".
+#
+# So: pass the leading, mandatory block positionally (those parameters have no
+# defaults and are stable), and everything after it by keyword.
+#   * arguments that carry *meaning* for us (scale, dropout, layout, bias/mask
+#     type, window) are required -- if the installed TE has no parameter for
+#     one, that is a hard error, never a silent drop;
+#   * arguments that merely restate a TE default (the Nones, fast_zero_fill,
+#     softmax_type="vanilla", deterministic=False, ...) are passed when the
+#     installed TE accepts them and skipped when it does not.
+#
+# Parameter names TE has used for the same logical argument, best first.
+_TE_ALIASES: dict[str, tuple[str, ...]] = {
+    # the mandatory block
+    "is_training": ("is_training",),
+    "max_seqlen_q": ("max_seqlen_q",),
+    "max_seqlen_kv": ("max_seqlen_kv",),
+    "cu_seqlens_q": ("cu_seqlens_q",),
+    "cu_seqlens_kv": ("cu_seqlens_kv",),
+    "q": ("q",),
+    "k": ("k",),
+    "v": ("v",),
+    "o": ("o",),
+    "d_o": ("d_o", "do"),
+    "fake_dtype": ("fake_dtype", "qkv_dtype"),
+    "aux_ctx_tensors": ("aux_ctx_tensors",),
+    "fused_attention_backend": ("fused_attention_backend",),
+    # the semantic tail
+    "attn_scale": ("attn_scale", "scale"),
+    "dropout": ("dropout", "dropout_p"),
+    "qkv_layout": ("qkv_layout",),
+    "attn_bias_type": ("attn_bias_type",),
+    "attn_mask_type": ("attn_mask_type",),
+    "window_size": ("window_size",),
+}
+
+
+@functools.lru_cache(maxsize=None)
+def _te_params(fn: Callable) -> frozenset[str]:
+    """The parameter names of ``fn``."""
+    return frozenset(inspect.signature(fn).parameters)
+
+
+def _te_call(
+    fn: Callable,
+    required: dict[str, Any],
+    optional: dict[str, Any],
+) -> Any:
+    """Call a TE fused-attn entry point across TE versions.
+
+    *Everything* goes by keyword, including the mandatory block: TE 2.16
+    dropped ``dqkv_dtype`` from ``fused_attn_bwd``'s mandatory arguments, so
+    even that block cannot be passed positionally without drifting.
+
+    ``required`` must exist in the installed signature (under one of its
+    :data:`_TE_ALIASES`); ``optional`` is filtered down to what the installed
+    signature accepts.
+    """
+    accepted = _te_params(fn)
+
+    kwargs: dict[str, Any] = {}
+    for logical, value in required.items():
+        for candidate in _TE_ALIASES[logical]:
+            if candidate in accepted:
+                kwargs[candidate] = value
+                break
+        else:
+            raise RuntimeError(
+                f"transformer-engine's {fn.__name__} has no parameter for "
+                f"'{logical}' (tried {_TE_ALIASES[logical]}). The installed TE "
+                f"is not compatible with this module; signature:\n"
+                f"  {fn.__name__}{inspect.signature(fn)}"
+            )
+    kwargs.update({k: v for k, v in optional.items() if k in accepted})
+
+    # Anything mandatory we did not supply is a genuine incompatibility; say so
+    # with the signature rather than letting Python raise a bare TypeError.
+    missing = [
+        name
+        for name, p in inspect.signature(fn).parameters.items()
+        if p.default is inspect.Parameter.empty and name not in kwargs
+    ]
+    if missing:
+        raise RuntimeError(
+            f"transformer-engine's {fn.__name__} requires {missing}, which this "
+            f"core does not supply. The installed TE is not compatible with "
+            f"this module; signature:\n  {fn.__name__}{inspect.signature(fn)}"
+        )
+
+    return fn(**kwargs)
 
 
 def _to_bshd(t: torch.Tensor, layout: Layout) -> torch.Tensor:
@@ -152,37 +254,50 @@ def forward(
     cu_q = _full_cu_seqlens(b, s_q, q.device)
     cu_kv = _full_cu_seqlens(b, s_kv, q.device)
 
-    out, aux, *_ = fused_attn_fwd(
-        True,  # is_training
-        s_q,
-        s_kv,
-        cu_q,
-        cu_kv,
-        q_b,
-        k_b,
-        v_b,
-        q_b.dtype,  # fake_dtype
-        backend,
-        None,  # attn_bias
-        None,  # cu_seqlens_q_padded
-        None,  # cu_seqlens_kv_padded
-        None,  # page_table_k
-        None,  # page_table_v
-        None,  # s_quantizer
-        None,  # o_quantizer
-        scale,
-        dropout_p,
-        True,  # fast_zero_fill
-        _LAYOUT,
-        "no_bias",
-        "no_mask",
-        "vanilla",
-        (-1, -1),
-        None,  # bottom_right_diagonal
-        None,  # rng_gen
-        None,  # softmax_offset
-        False,  # return_max_logit
-        False,  # cuda_graph
+    out, aux, *_ = _te_call(
+        fused_attn_fwd,
+        required={
+            "is_training": True,
+            "max_seqlen_q": s_q,
+            "max_seqlen_kv": s_kv,
+            "cu_seqlens_q": cu_q,
+            "cu_seqlens_kv": cu_kv,
+            "q": q_b,
+            "k": k_b,
+            "v": v_b,
+            "fake_dtype": q_b.dtype,
+            "fused_attention_backend": backend,
+            "attn_scale": scale,
+            "dropout": dropout_p,
+            "qkv_layout": _LAYOUT,
+            "attn_bias_type": "no_bias",
+            "attn_mask_type": "no_mask",
+            "window_size": (-1, -1),
+        },
+        optional={
+            "attn_bias": None,
+            "cu_seqlens_q_padded": None,
+            "cu_seqlens_kv_padded": None,
+            "page_table_k": None,
+            "page_table_v": None,
+            "s_quantizer": None,
+            "o_quantizer": None,
+            "fast_zero_fill": True,
+            # TE >= 2.16 decouples the output format from ``qkv_layout`` and
+            # defaults it to "sbhd", so without this ``out`` comes back
+            # (s, b, h, d) while the ring's accumulator is (b, s, h, d) -- the
+            # merge then dies in ``_online_softmax_merge_`` with a
+            # "doesn't match the broadcast shape" in-place error. On older TE
+            # the parameter does not exist and the output implicitly follows
+            # ``qkv_layout``, which is already what we want.
+            "o_format": "bshd",
+            "softmax_type": "vanilla",
+            "bottom_right_diagonal": None,
+            "rng_gen": None,
+            "softmax_offset": None,
+            "return_max_logit": False,
+            "cuda_graph": False,
+        },
     )
     # cuDNN returns LSE as (b, h, s_q, 1); the ring wants (b, h, s_q).
     lse = aux[0].squeeze(-1)
@@ -239,36 +354,48 @@ def backward(
         else torch.zeros(2, dtype=torch.int64, device=q.device),
     ]
 
-    dq, dk, dv, *_rest = fused_attn_bwd(
-        s_q,
-        s_kv,
-        cu_q,
-        cu_kv,
-        q_b,
-        k_b,
-        v_b,
-        o_b,
-        do_b,
-        q_b.dtype,  # fake_dtype
-        TE_DType[q_b.dtype],  # dqkv_dtype
-        aux,
-        backend,
-        None,  # cu_seqlens_q_padded
-        None,  # cu_seqlens_kv_padded
-        None,  # s_quantizer
-        None,  # dp_quantizer
-        None,  # dqkv_quantizer
-        scale,
-        dropout_p,
-        True,  # fast_zero_fill
-        _LAYOUT,
-        "no_bias",
-        "no_mask",
-        "vanilla",
-        (-1, -1),
-        None,  # bottom_right_diagonal
-        False,  # deterministic
-        False,  # cuda_graph
+    dq, dk, dv, *_rest = _te_call(
+        fused_attn_bwd,
+        required={
+            "max_seqlen_q": s_q,
+            "max_seqlen_kv": s_kv,
+            "cu_seqlens_q": cu_q,
+            "cu_seqlens_kv": cu_kv,
+            "q": q_b,
+            "k": k_b,
+            "v": v_b,
+            "o": o_b,
+            "d_o": do_b,
+            "fake_dtype": q_b.dtype,
+            "aux_ctx_tensors": aux,
+            "fused_attention_backend": backend,
+            "attn_scale": scale,
+            "dropout": dropout_p,
+            "qkv_layout": _LAYOUT,
+            "attn_bias_type": "no_bias",
+            "attn_mask_type": "no_mask",
+            "window_size": (-1, -1),
+        },
+        optional={
+            # TE < 2.16 wants the dQ/dK/dV dtype spelled out; 2.16 dropped it.
+            "dqkv_dtype": TE_DType[q_b.dtype],
+            "cu_seqlens_q_padded": None,
+            "cu_seqlens_kv_padded": None,
+            "s_quantizer": None,
+            "dp_quantizer": None,
+            "dqkv_quantizer": None,
+            "fast_zero_fill": True,
+            # See the forward: on TE >= 2.16 every tensor format is explicit
+            # and defaults to sbhd/sbh3d. ``o``/``d_o`` are handed in as bshd,
+            # and dQ/dK/dV must come back the same way for _from_bshd.
+            "o_format": "bshd",
+            "do_format": "bshd",
+            "dqkv_layout": _LAYOUT,
+            "softmax_type": "vanilla",
+            "bottom_right_diagonal": None,
+            "deterministic": False,
+            "cuda_graph": False,
+        },
     )
     return (
         _from_bshd(dq, layout),
