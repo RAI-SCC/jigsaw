@@ -34,8 +34,12 @@ from typing import Callable
 import torch
 import torch.distributed as dist
 
+from jigsaw.modules.buffers import get_preallocated_buffer
 
-def _a2a_heads_to_seq(x: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor:
+
+def _a2a_heads_to_seq(
+    x: torch.Tensor, group: dist.ProcessGroup, local_rank: int, device: torch.device
+) -> torch.Tensor:
     """``[..., s_local, h, d] -> [..., s_local * P, h // P, d]`` via one all-to-all.
 
     Scatters the head axis (``-2``) across ``group`` and gathers the sequence
@@ -43,6 +47,11 @@ def _a2a_heads_to_seq(x: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor
     stacks the sequence shards received from every rank in source-rank order --
     exactly how the sequence was sharded across ``group``. Leading dims (batch,
     or a ``3`` for a stacked Q/K/V) are carried through untouched.
+
+    ``local_rank``/``device`` key the recv buffer in :func:`.buffers.get_preallocated_buffer`
+    -- reused across calls from this same call site instead of a fresh
+    ``torch.empty_like`` every forward/backward, which otherwise adds up to a
+    full extra ``send``-sized allocation per call at large ``seq_len``.
     """
     p = dist.get_world_size(group)
     if p == 1:
@@ -52,20 +61,24 @@ def _a2a_heads_to_seq(x: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor
     assert h % p == 0, f"ulysses all-to-all: heads {h} not divisible by group size {p}"
     # [..., s, P, h//P, d] -> [P, ..., s, h//P, d]
     send = x.reshape(*lead, s, p, h // p, d).movedim(nlead + 1, 0).contiguous()
-    recv = torch.empty_like(send)
+    recv = get_preallocated_buffer(send.shape, send.dtype, local_rank, device)
     dist.all_to_all_single(recv, send, group=group)
     # recv[src] is src's local sequence on our head-slice; put P back just
     # before s, so the gathered sequence is source-rank-major.
     return recv.movedim(0, nlead).reshape(*lead, p * s, h // p, d).contiguous()
 
 
-def _a2a_seq_to_heads(x: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor:
+def _a2a_seq_to_heads(
+    x: torch.Tensor, group: dist.ProcessGroup, local_rank: int, device: torch.device
+) -> torch.Tensor:
     """``[..., s_full, h_p, d] -> [..., s_full // P, h_p * P, d]`` -- inverse of
     :func:`_a2a_heads_to_seq`.
 
     Scatters the sequence axis (``-3``) across ``group`` and gathers the head
     axis (``-2``): the heads come back in source-rank order, reconstructing the
     pre-Ulysses head layout.
+
+    ``local_rank``/``device``: see :func:`_a2a_heads_to_seq`.
     """
     p = dist.get_world_size(group)
     if p == 1:
@@ -75,7 +88,7 @@ def _a2a_seq_to_heads(x: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor
     assert s % p == 0, f"ulysses all-to-all: seq {s} not divisible by group size {p}"
     # [..., P, s//P, h_p, d] -> [P, ..., s//P, h_p, d]
     send = x.reshape(*lead, p, s // p, hp, d).movedim(nlead, 0).contiguous()
-    recv = torch.empty_like(send)
+    recv = get_preallocated_buffer(send.shape, send.dtype, local_rank, device)
     dist.all_to_all_single(recv, send, group=group)
     # recv[src] is our sequence-block on src's heads; put P just before h_p, so
     # the gathered heads are source-rank-major (the pre-Ulysses layout).
@@ -94,28 +107,34 @@ class _UlyssesAllToAll(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        x: torch.Tensor, gather_seq: bool, group: dist.ProcessGroup
+        x: torch.Tensor,
+        gather_seq: bool,
+        group: dist.ProcessGroup,
+        local_rank: int,
+        device: torch.device,
     ) -> torch.Tensor:
         return (
-            _a2a_heads_to_seq(x, group)
+            _a2a_heads_to_seq(x, group, local_rank, device)
             if gather_seq
-            else _a2a_seq_to_heads(x, group)
+            else _a2a_seq_to_heads(x, group, local_rank, device)
         )
 
     @staticmethod
     def setup_context(ctx, inputs, output) -> None:  # type: ignore[no-untyped-def]
-        _x, gather_seq, group = inputs
+        _x, gather_seq, group, local_rank, device = inputs
         ctx.gather_seq = gather_seq
         ctx.group = group
+        ctx.local_rank = local_rank
+        ctx.device = device
 
     @staticmethod
     def backward(ctx, grad_out: torch.Tensor):  # type: ignore[no-untyped-def]
         grad_in = (
-            _a2a_seq_to_heads(grad_out, ctx.group)
+            _a2a_seq_to_heads(grad_out, ctx.group, ctx.local_rank, ctx.device)
             if ctx.gather_seq
-            else _a2a_heads_to_seq(grad_out, ctx.group)
+            else _a2a_heads_to_seq(grad_out, ctx.group, ctx.local_rank, ctx.device)
         )
-        return grad_in, None, None
+        return grad_in, None, None, None, None
 
 
 AttnCore = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
@@ -127,6 +146,8 @@ def ulysses_attention(
     v: torch.Tensor,
     group: dist.ProcessGroup,
     core: AttnCore,
+    local_rank: int,
+    device: torch.device,
     qkv_stack: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run ``core`` on the full sequence via a head-parallel Ulysses all-to-all.
@@ -146,6 +167,10 @@ def ulysses_attention(
         ``[b, seq_after_a2a, local_heads // P, head_dim]``. For flat Ulysses
         this is a single dense kernel over the full sequence; for the
         hierarchical scheme it is a P2P ring over the inter-node group.
+    local_rank, device : int, torch.device
+        Forwarded to :func:`.buffers.get_preallocated_buffer` so the a2a recv
+        buffer is cached per call site instead of freshly allocated every
+        forward/backward -- see :func:`_a2a_heads_to_seq`.
     qkv_stack : torch.Tensor, optional
         The contiguous ``[3, b, seq // P, local_heads, head_dim]`` tensor
         ``q``/``k``/``v`` were unbound from (:meth:`DistributedAttention.forward`
@@ -162,9 +187,9 @@ def ulysses_attention(
     # One all-to-all for all three shards: [3, b, s, h, d] -> a2a. Reuse the
     # caller's stacked q/k/v when it has one; else stack the three views here.
     stacked = qkv_stack if qkv_stack is not None else torch.stack((q, k, v))
-    qkv = _UlyssesAllToAll.apply(stacked, True, group)
+    qkv = _UlyssesAllToAll.apply(stacked, True, group, local_rank, device)
     out = core(*qkv.unbind(0))
-    return _UlyssesAllToAll.apply(out, False, group)
+    return _UlyssesAllToAll.apply(out, False, group, local_rank, device)
 
 
 def hierarchical_ulysses_attention(
@@ -173,6 +198,8 @@ def hierarchical_ulysses_attention(
     v: torch.Tensor,
     intra_group: dist.ProcessGroup,
     ring_core: AttnCore,
+    local_rank: int,
+    device: torch.device,
     qkv_stack: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Ulysses over an intra-node sub-group, a P2P ring over the inter-node one.
@@ -191,9 +218,10 @@ def hierarchical_ulysses_attention(
     ``q``/``k``/``v`` are ``bshd`` ``[b, seq // spatial, local_heads, d]``;
     ``ring_core`` gets ``[b, seq // n_nodes, local_heads // A, d]`` (``A =
     intra_group.size()``) and must return the same shape. Needs
-    ``local_heads % A == 0``. ``qkv_stack`` is forwarded to
-    :func:`ulysses_attention` (skips the ``torch.stack``).
+    ``local_heads % A == 0``. ``local_rank``/``device``/``qkv_stack`` are
+    forwarded to :func:`ulysses_attention` (the latter skips the
+    ``torch.stack``).
     """
     return ulysses_attention(
-        q, k, v, intra_group, ring_core, qkv_stack=qkv_stack
+        q, k, v, intra_group, ring_core, local_rank, device, qkv_stack=qkv_stack
     )

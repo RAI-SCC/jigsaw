@@ -42,7 +42,7 @@ class TestUlyssesAllToAll:
         torch.manual_seed(rank)
         x = torch.randn(b, s_loc, h, d, device=device)
 
-        gathered = _a2a_heads_to_seq(x, group)  # [b, s_loc * p, h // p, d]
+        gathered = _a2a_heads_to_seq(x, group, rank, device)  # [b, s_loc * p, h // p, d]
         assert gathered.shape == (b, s_loc * p, h // p, d)
 
         # Sequence axis is source-rank-major: block r is rank r's local x, sliced
@@ -63,27 +63,32 @@ class TestUlyssesAllToAll:
             group,
         )
 
-        back = _a2a_seq_to_heads(gathered, group)  # [b, s_loc, h, d]
+        back = _a2a_seq_to_heads(gathered, group, rank, device)  # [b, s_loc, h, d]
         assert_close("roundtrip is identity", back, x, 1e-6, 1e-6, device, group)
 
         # Fused Q/K/V: a [3, b, s, h, d] stack rides one all-to-all and each
         # slice matches the per-tensor path.
         qkv = torch.stack((x, x + 1, x + 2))
-        fused = _a2a_heads_to_seq(qkv, group)
+        fused = _a2a_heads_to_seq(qkv, group, rank, device)
         assert fused.shape == (3, b, s_loc * p, h // p, d)
         for i in range(3):
             assert_close(
                 f"fused slice {i}",
                 fused[i],
-                _a2a_heads_to_seq(qkv[i].contiguous(), group),
+                _a2a_heads_to_seq(qkv[i].contiguous(), group, rank, device),
                 1e-6,
                 1e-6,
                 device,
                 group,
             )
         assert_close(
-            "fused roundtrip", _a2a_seq_to_heads(fused, group), qkv, 1e-6, 1e-6,
-            device, group,
+            "fused roundtrip",
+            _a2a_seq_to_heads(fused, group, rank, device),
+            qkv,
+            1e-6,
+            1e-6,
+            device,
+            group,
         )
 
 
