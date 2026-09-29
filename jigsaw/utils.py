@@ -264,7 +264,6 @@ def load_model(
         model.load_state_dict(state["model_state"])
         optimizer.load_state_dict(state["optimizer_state"])
         epoch = state["epoch"] + 1
-        # epoch = 0
     except Exception:
         log.warning(
             "could not load model from %s; initialising from scratch", file_path

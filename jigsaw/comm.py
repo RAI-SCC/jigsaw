@@ -304,7 +304,6 @@ def comm_1d_p2p(
         recv_from = (group.rank() - direction) % group_size
     else:
         send_to, recv_from = send_recv_ranks
-    # print(f'R{dist.get_rank()} send to {send_to} recv from {recv_from}. Group size {group_size}')
     tag = tag * 8
 
     send_op = dist.P2POp(dist.isend, data, group_peer=send_to, group=group)
@@ -315,11 +314,9 @@ def comm_1d_p2p(
         dist.barrier()
 
     if not async_op:
-        # send.wait()  # type: ignore[union-attr]
         reqs[0].wait()  # type: ignore[union-attr]
         return buffer, None
     else:
-        # send.wait()  # type: ignore[union-attr]
         return buffer, reqs[0]
 
 
