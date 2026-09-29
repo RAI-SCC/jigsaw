@@ -164,6 +164,8 @@ class TestRingAttention:
             and save_for_backward == config.SaveBackward.X
         ):
             pytest.xfail("not yet supported")
+        if offloader == config.Offload.CPU and device.type != "cuda":
+            pytest.skip("Offload.CPU relies on CUDA streams and needs a cuda device")
 
         process_mesh_dict = process_mesh_dict_4x1
         ring_config = config.RingAttentionConfig(
@@ -528,6 +530,8 @@ def _check_ring_hybrid(
         and save_for_backward == config.SaveBackward.X
     ):
         pytest.xfail("not yet supported")
+    if offloader == config.Offload.CPU and device.type != "cuda":
+        pytest.skip("Offload.CPU relies on CUDA streams and needs a cuda device")
 
     ring_config = config.RingAttentionConfig(
         device=device,

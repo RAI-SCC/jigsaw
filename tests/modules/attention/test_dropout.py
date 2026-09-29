@@ -166,11 +166,11 @@ class TestEvalModeDisablesDropout:
     @pytest.mark.dist_required
     @pytest.mark.dist(4)
     def test_distributed_attention_eval_matches_zero_dropout(
-        self, device: torch.device, process_mesh_dict_4x1: dict
+        self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """Same check as above, for the non-ring SDPA core `DistributedAttention` shares."""
         torch.manual_seed(0)
-        mesh = process_mesh_dict_4x1
+        mesh = process_mesh_dict_2x2
         kwargs = dict(
             in_dim=32,
             embed_dim=32,
