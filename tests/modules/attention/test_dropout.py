@@ -257,13 +257,29 @@ class TestSdpaTeCoreDropoutReplay:
         )
 
         dq, dk, dv = core.backward(
-            grad_out, q, k, v, out, lse, self.SCALE, *extra_bwd,
-            dropout_p=self.P, rng_state=rng,
+            grad_out,
+            q,
+            k,
+            v,
+            out,
+            lse,
+            self.SCALE,
+            *extra_bwd,
+            dropout_p=self.P,
+            rng_state=rng,
         )
         # deterministic given rng_state
         dq2, _, _ = core.backward(
-            grad_out, q, k, v, out, lse, self.SCALE, *extra_bwd,
-            dropout_p=self.P, rng_state=rng,
+            grad_out,
+            q,
+            k,
+            v,
+            out,
+            lse,
+            self.SCALE,
+            *extra_bwd,
+            dropout_p=self.P,
+            rng_state=rng,
         )
         assert torch.equal(dq, dq2)
 
@@ -311,8 +327,13 @@ class TestTeAttnDropoutReplay:
         torch.manual_seed(0)
         return [
             torch.randn(
-                self.B, self.S, self.H, self.D,
-                device="cuda", dtype=torch.bfloat16, requires_grad=requires_grad,
+                self.B,
+                self.S,
+                self.H,
+                self.D,
+                device="cuda",
+                dtype=torch.bfloat16,
+                requires_grad=requires_grad,
             )
             for _ in range(3)
         ]
@@ -328,13 +349,21 @@ class TestTeAttnDropoutReplay:
         q, k, v = self._qkv(requires_grad=False)
 
         attn.train()
-        a = TransformerEngineAttention.apply(q, k, v, attn, _capture_rng_state(q.device))
-        b = TransformerEngineAttention.apply(q, k, v, attn, _capture_rng_state(q.device))
+        a = TransformerEngineAttention.apply(
+            q, k, v, attn, _capture_rng_state(q.device)
+        )
+        b = TransformerEngineAttention.apply(
+            q, k, v, attn, _capture_rng_state(q.device)
+        )
         assert not torch.allclose(a, b)
 
         attn.eval()
-        c = TransformerEngineAttention.apply(q, k, v, attn, _capture_rng_state(q.device))
-        d = TransformerEngineAttention.apply(q, k, v, attn, _capture_rng_state(q.device))
+        c = TransformerEngineAttention.apply(
+            q, k, v, attn, _capture_rng_state(q.device)
+        )
+        d = TransformerEngineAttention.apply(
+            q, k, v, attn, _capture_rng_state(q.device)
+        )
         torch.testing.assert_close(c, d)
 
     def test_restoring_rng_reproduces_the_forward_mask(self) -> None:
@@ -396,7 +425,9 @@ class TestTeAttnDropoutReplay:
         attn.train()
         q, k, v = self._qkv()
 
-        out = TransformerEngineAttention.apply(q, k, v, attn, _capture_rng_state(q.device))
+        out = TransformerEngineAttention.apply(
+            q, k, v, attn, _capture_rng_state(q.device)
+        )
         grad_out = torch.randn_like(out)
         out.backward(grad_out)
 

@@ -183,6 +183,9 @@ def get_hybrid_topology(group: dist.ProcessGroup, gpus_per_node: int) -> HybridT
         ranks=[ring_global_ranks[grid[node][local_idx]] for node in range(n_nodes)],
         use_local_synchronization=True,
     )
+    # This rank is a member of both sub-groups, so neither is NON_GROUP_MEMBER.
+    assert isinstance(intranode_group, dist.ProcessGroup)
+    assert isinstance(internode_group, dist.ProcessGroup)
     topo = HybridTopology(
         n_nodes=n_nodes,
         gpus_per_node=gpus_per_node,

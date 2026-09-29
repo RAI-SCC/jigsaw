@@ -87,7 +87,7 @@ Wrap the forward in `torch.autocast` and run `backward()` outside it, as with pl
 with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
     y = model(x)
 loss = loss_fn(y, target)
-loss.backward()   # outside the autocast region
+loss.backward()  # outside the autocast region
 ```
 
 _jigsaw_'s layers are custom `torch.autograd.Function`s, which `torch.autocast` does **not**
@@ -143,7 +143,7 @@ env is known) only if you want to log before `init_cuda` or override the default
 ```python
 from jigsaw import log
 
-log.info("world_size=%d", world)   # emitted by the print rank only (default: rank 0)
+log.info("world_size=%d", world)  # emitted by the print rank only (default: rank 0)
 log.info_all("process group ready")  # every rank
 log.at(2).debug("q shard %s", q.shape)  # only rank 2 (accepts an int, a list, or "all")
 ```

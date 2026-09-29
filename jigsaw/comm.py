@@ -7,6 +7,19 @@ import torch
 import torch.distributed as dist
 
 
+def all_to_all_async(
+    output_tensor_list: list[torch.Tensor],
+    input_tensor_list: list[torch.Tensor],
+    group: Optional[dist.ProcessGroup] = None,
+) -> dist.Work:
+    """Issue an asynchronous ``dist.all_to_all`` and return its (non-None) handle."""
+    work = dist.all_to_all(
+        output_tensor_list, input_tensor_list, group=group, async_op=True
+    )
+    assert work is not None
+    return work
+
+
 @lru_cache(maxsize=None)
 def get_empty(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     """Return a cached zero-length tensor for ``(device, dtype)``.

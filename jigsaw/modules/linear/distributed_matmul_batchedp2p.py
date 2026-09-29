@@ -8,7 +8,7 @@ but every communication phase is issued through a single
 
 import contextvars
 import functools
-from typing import cast
+from typing import Any, Callable, ParamSpec, TypeVar, cast
 
 import torch
 import torch.distributed as dist
@@ -17,6 +17,9 @@ from jigsaw.comm import resolve_matmul_dtype
 from jigsaw.modules.buffers import get_preallocated_buffer
 
 # mypy: disable-error-code="union-attr"
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 _active_batch: contextvars.ContextVar["_Batch | None"] = contextvars.ContextVar(
     "_active_batch", default=None
@@ -48,14 +51,14 @@ class _Batch:
 
     def add(
         self,
-        op,
+        op: Callable[..., Any],
         tensor: torch.Tensor,
         *,
         dst: int | None,
         src: int | None,
         group_dst: int | None,
         group_src: int | None,
-        group,
+        group: dist.ProcessGroup | None,
         tag: int,
     ) -> _BatchedWork:
         peer = dst if dst is not None else src
@@ -69,9 +72,7 @@ class _Batch:
 
     def _flush(self) -> None:
         if self._reqs is None:
-            self._reqs = (
-                dist.batch_isend_irecv(self._ops) if self._ops else []
-            )
+            self._reqs = dist.batch_isend_irecv(self._ops) if self._ops else []
 
     def wait_at(self, index: int) -> None:
         self._flush()
@@ -100,7 +101,7 @@ class _Batch:
 def isend(
     tensor: torch.Tensor,
     dst: int | None = None,
-    group=None,
+    group: dist.ProcessGroup | None = None,
     tag: int = 0,
     group_dst: int | None = None,
 ) -> _BatchedWork:
@@ -123,7 +124,7 @@ def isend(
 def irecv(
     tensor: torch.Tensor,
     src: int | None = None,
-    group=None,
+    group: dist.ProcessGroup | None = None,
     tag: int = 0,
     group_src: int | None = None,
 ) -> _BatchedWork:
@@ -143,11 +144,11 @@ def irecv(
     )
 
 
-def _batched(fn):
+def _batched(fn: Callable[P, R]) -> Callable[P, R]:
     """Give ``fn`` a fresh communication batch, issued by the time it returns."""
 
     @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         batch = _Batch()
         token = _active_batch.set(batch)
         try:
@@ -1307,15 +1308,9 @@ def xw_eightway(
             send_w_2 = isend(wij, group_dst=2, group=model_group)
             send_w_4 = isend(wij, group_dst=4, group=model_group)
             send_w_6 = isend(wij, group_dst=6, group=model_group)
-            recv_w_2 = irecv(
-                w0[..., split_size:, :], group_src=2, group=model_group
-            )
-            recv_w_4 = irecv(
-                w1[..., :split_size, :], group_src=4, group=model_group
-            )
-            recv_w_6 = irecv(
-                w1[..., split_size:, :], group_src=6, group=model_group
-            )
+            recv_w_2 = irecv(w0[..., split_size:, :], group_src=2, group=model_group)
+            recv_w_4 = irecv(w1[..., :split_size, :], group_src=4, group=model_group)
+            recv_w_6 = irecv(w1[..., split_size:, :], group_src=6, group=model_group)
 
             w0[..., :split_size, :].copy_(wij)
         case 1:
@@ -1327,15 +1322,9 @@ def xw_eightway(
             send_w_3 = isend(wij, group_dst=3, group=model_group)
             send_w_5 = isend(wij, group_dst=5, group=model_group)
             send_w_7 = isend(wij, group_dst=7, group=model_group)
-            recv_w_3 = irecv(
-                w1[..., split_size:, :], group_src=3, group=model_group
-            )
-            recv_w_5 = irecv(
-                w0[..., :split_size, :], group_src=5, group=model_group
-            )
-            recv_w_7 = irecv(
-                w0[..., split_size:, :], group_src=7, group=model_group
-            )
+            recv_w_3 = irecv(w1[..., split_size:, :], group_src=3, group=model_group)
+            recv_w_5 = irecv(w0[..., :split_size, :], group_src=5, group=model_group)
+            recv_w_7 = irecv(w0[..., split_size:, :], group_src=7, group=model_group)
 
             w1[..., :split_size, :].copy_(wij)
         case 2:
@@ -1343,18 +1332,12 @@ def xw_eightway(
             send_x = isend(xij, group_dst=3, group=model_group)
             recv_x = irecv(buffer_x, group_src=3, group=model_group)
             # w: send to 0, 4, 6; recv from 0, 4, 6
-            recv_w_0 = irecv(
-                w0[..., :split_size, :], group_src=0, group=model_group
-            )
+            recv_w_0 = irecv(w0[..., :split_size, :], group_src=0, group=model_group)
             send_w_0 = isend(wij, group_dst=0, group=model_group)
             send_w_4 = isend(wij, group_dst=4, group=model_group)
             send_w_6 = isend(wij, group_dst=6, group=model_group)
-            recv_w_4 = irecv(
-                w1[..., :split_size, :], group_src=4, group=model_group
-            )
-            recv_w_6 = irecv(
-                w1[..., split_size:, :], group_src=6, group=model_group
-            )
+            recv_w_4 = irecv(w1[..., :split_size, :], group_src=4, group=model_group)
+            recv_w_6 = irecv(w1[..., split_size:, :], group_src=6, group=model_group)
 
             w0[..., split_size:, :].copy_(wij)
         case 3:
@@ -1362,19 +1345,13 @@ def xw_eightway(
             recv_x = irecv(buffer_x, group_src=2, group=model_group)
             send_x = isend(xij, group_dst=2, group=model_group)
             # w: send to 1, 5, 7; recv from 1, 5, 7
-            recv_w_1 = irecv(
-                w1[..., :split_size, :], group_src=1, group=model_group
-            )
+            recv_w_1 = irecv(w1[..., :split_size, :], group_src=1, group=model_group)
 
             send_w_1 = isend(wij, group_dst=1, group=model_group)
             send_w_5 = isend(wij, group_dst=5, group=model_group)
             send_w_7 = isend(wij, group_dst=7, group=model_group)
-            recv_w_5 = irecv(
-                w0[..., :split_size, :], group_src=5, group=model_group
-            )
-            recv_w_7 = irecv(
-                w0[..., split_size:, :], group_src=7, group=model_group
-            )
+            recv_w_5 = irecv(w0[..., :split_size, :], group_src=5, group=model_group)
+            recv_w_7 = irecv(w0[..., split_size:, :], group_src=7, group=model_group)
 
             w1[..., split_size:, :].copy_(wij)
         case 4:
@@ -1383,18 +1360,12 @@ def xw_eightway(
             send_x = isend(xij, group_dst=5, group=model_group)
             recv_x = irecv(buffer_x, group_src=5, group=model_group)
             # w: send to 0, 2, 6; recv from 0, 2, 6
-            recv_w_0 = irecv(
-                w0[..., :split_size, :], group_src=0, group=model_group
-            )
-            recv_w_2 = irecv(
-                w0[..., split_size:, :], group_src=2, group=model_group
-            )
+            recv_w_0 = irecv(w0[..., :split_size, :], group_src=0, group=model_group)
+            recv_w_2 = irecv(w0[..., split_size:, :], group_src=2, group=model_group)
             send_w_0 = isend(wij, group_dst=0, group=model_group)
             send_w_2 = isend(wij, group_dst=2, group=model_group)
             send_w_6 = isend(wij, group_dst=6, group=model_group)
-            recv_w_6 = irecv(
-                w1[..., split_size:, :], group_src=6, group=model_group
-            )
+            recv_w_6 = irecv(w1[..., split_size:, :], group_src=6, group=model_group)
 
             w1[..., :split_size, :].copy_(wij)
         case 5:
@@ -1402,19 +1373,13 @@ def xw_eightway(
             recv_x = irecv(buffer_x, group_src=4, group=model_group)
             send_x = isend(xij, group_dst=4, group=model_group)
             # w: send to 1, 3, 7; recv from 1, 3, 7
-            recv_w_1 = irecv(
-                w1[..., :split_size, :], group_src=1, group=model_group
-            )
-            recv_w_3 = irecv(
-                w1[..., split_size:, :], group_src=3, group=model_group
-            )
+            recv_w_1 = irecv(w1[..., :split_size, :], group_src=1, group=model_group)
+            recv_w_3 = irecv(w1[..., split_size:, :], group_src=3, group=model_group)
 
             send_w_1 = isend(wij, group_dst=1, group=model_group)
             send_w_3 = isend(wij, group_dst=3, group=model_group)
             send_w_7 = isend(wij, group_dst=7, group=model_group)
-            recv_w_7 = irecv(
-                w0[..., split_size:, :], group_src=7, group=model_group
-            )
+            recv_w_7 = irecv(w0[..., split_size:, :], group_src=7, group=model_group)
 
             w0[..., :split_size, :].copy_(wij)
         case 6:
@@ -1423,15 +1388,9 @@ def xw_eightway(
             send_x = isend(xij, group_dst=7, group=model_group)
             recv_x = irecv(buffer_x, group_src=7, group=model_group)
             # w: send to 0, 2, 4; recv from 0, 2, 4
-            recv_w_0 = irecv(
-                w0[..., :split_size, :], group_src=0, group=model_group
-            )
-            recv_w_2 = irecv(
-                w0[..., split_size:, :], group_src=2, group=model_group
-            )
-            recv_w_4 = irecv(
-                w1[..., :split_size, :], group_src=4, group=model_group
-            )
+            recv_w_0 = irecv(w0[..., :split_size, :], group_src=0, group=model_group)
+            recv_w_2 = irecv(w0[..., split_size:, :], group_src=2, group=model_group)
+            recv_w_4 = irecv(w1[..., :split_size, :], group_src=4, group=model_group)
 
             send_w_0 = isend(wij, group_dst=0, group=model_group)
             send_w_2 = isend(wij, group_dst=2, group=model_group)
@@ -1443,15 +1402,9 @@ def xw_eightway(
             recv_x = irecv(buffer_x, group_src=6, group=model_group)
             send_x = isend(xij, group_dst=6, group=model_group)
             # w: send to 1, 3, 5; recv from 1, 3, 5
-            recv_w_1 = irecv(
-                w1[..., :split_size, :], group_src=1, group=model_group
-            )
-            recv_w_3 = irecv(
-                w1[..., split_size:, :], group_src=3, group=model_group
-            )
-            recv_w_5 = irecv(
-                w0[..., :split_size, :], group_src=5, group=model_group
-            )
+            recv_w_1 = irecv(w1[..., :split_size, :], group_src=1, group=model_group)
+            recv_w_3 = irecv(w1[..., split_size:, :], group_src=3, group=model_group)
+            recv_w_5 = irecv(w0[..., :split_size, :], group_src=5, group=model_group)
 
             send_w_1 = isend(wij, group_dst=1, group=model_group)
             send_w_3 = isend(wij, group_dst=3, group=model_group)
@@ -2071,15 +2024,9 @@ def fused_xw_xtw_eightway(
             send_w_2 = isend(weight, group_dst=2, group=model_group)
             send_w_4 = isend(weight, group_dst=4, group=model_group)
             send_w_6 = isend(weight, group_dst=6, group=model_group)
-            recv_w_2 = irecv(
-                w0[..., split_size:, :], group_src=2, group=model_group
-            )
-            recv_w_4 = irecv(
-                w1[..., :split_size, :], group_src=4, group=model_group
-            )
-            recv_w_6 = irecv(
-                w1[..., split_size:, :], group_src=6, group=model_group
-            )
+            recv_w_2 = irecv(w0[..., split_size:, :], group_src=2, group=model_group)
+            recv_w_4 = irecv(w1[..., :split_size, :], group_src=4, group=model_group)
+            recv_w_6 = irecv(w1[..., split_size:, :], group_src=6, group=model_group)
 
             w0[..., :split_size, :].copy_(weight)
         case 1:
@@ -2091,15 +2038,9 @@ def fused_xw_xtw_eightway(
             send_w_3 = isend(weight, group_dst=3, group=model_group)
             send_w_5 = isend(weight, group_dst=5, group=model_group)
             send_w_7 = isend(weight, group_dst=7, group=model_group)
-            recv_w_3 = irecv(
-                w1[..., split_size:, :], group_src=3, group=model_group
-            )
-            recv_w_5 = irecv(
-                w0[..., :split_size, :], group_src=5, group=model_group
-            )
-            recv_w_7 = irecv(
-                w0[..., split_size:, :], group_src=7, group=model_group
-            )
+            recv_w_3 = irecv(w1[..., split_size:, :], group_src=3, group=model_group)
+            recv_w_5 = irecv(w0[..., :split_size, :], group_src=5, group=model_group)
+            recv_w_7 = irecv(w0[..., split_size:, :], group_src=7, group=model_group)
 
             w1[..., :split_size, :].copy_(weight)
         case 2:
@@ -2107,18 +2048,12 @@ def fused_xw_xtw_eightway(
             send_x = isend(grad_output, group_dst=3, group=model_group)
             recv_x = irecv(buffer_x, group_src=3, group=model_group)
             # w: send to 0, 4, 6; recv from 0, 4, 6
-            recv_w_0 = irecv(
-                w0[..., :split_size, :], group_src=0, group=model_group
-            )
+            recv_w_0 = irecv(w0[..., :split_size, :], group_src=0, group=model_group)
             send_w_0 = isend(weight, group_dst=0, group=model_group)
             send_w_4 = isend(weight, group_dst=4, group=model_group)
             send_w_6 = isend(weight, group_dst=6, group=model_group)
-            recv_w_4 = irecv(
-                w1[..., :split_size, :], group_src=4, group=model_group
-            )
-            recv_w_6 = irecv(
-                w1[..., split_size:, :], group_src=6, group=model_group
-            )
+            recv_w_4 = irecv(w1[..., :split_size, :], group_src=4, group=model_group)
+            recv_w_6 = irecv(w1[..., split_size:, :], group_src=6, group=model_group)
 
             w0[..., split_size:, :].copy_(weight)
         case 3:
@@ -2126,19 +2061,13 @@ def fused_xw_xtw_eightway(
             recv_x = irecv(buffer_x, group_src=2, group=model_group)
             send_x = isend(grad_output, group_dst=2, group=model_group)
             # w: send to 1, 5, 7; recv from 1, 5, 7
-            recv_w_1 = irecv(
-                w1[..., :split_size, :], group_src=1, group=model_group
-            )
+            recv_w_1 = irecv(w1[..., :split_size, :], group_src=1, group=model_group)
 
             send_w_1 = isend(weight, group_dst=1, group=model_group)
             send_w_5 = isend(weight, group_dst=5, group=model_group)
             send_w_7 = isend(weight, group_dst=7, group=model_group)
-            recv_w_5 = irecv(
-                w0[..., :split_size, :], group_src=5, group=model_group
-            )
-            recv_w_7 = irecv(
-                w0[..., split_size:, :], group_src=7, group=model_group
-            )
+            recv_w_5 = irecv(w0[..., :split_size, :], group_src=5, group=model_group)
+            recv_w_7 = irecv(w0[..., split_size:, :], group_src=7, group=model_group)
 
             w1[..., split_size:, :].copy_(weight)
         case 4:
@@ -2147,18 +2076,12 @@ def fused_xw_xtw_eightway(
             send_x = isend(grad_output, group_dst=5, group=model_group)
             recv_x = irecv(buffer_x, group_src=5, group=model_group)
             # w: send to 0, 2, 6; recv from 0, 2, 6
-            recv_w_0 = irecv(
-                w0[..., :split_size, :], group_src=0, group=model_group
-            )
-            recv_w_2 = irecv(
-                w0[..., split_size:, :], group_src=2, group=model_group
-            )
+            recv_w_0 = irecv(w0[..., :split_size, :], group_src=0, group=model_group)
+            recv_w_2 = irecv(w0[..., split_size:, :], group_src=2, group=model_group)
             send_w_0 = isend(weight, group_dst=0, group=model_group)
             send_w_2 = isend(weight, group_dst=2, group=model_group)
             send_w_6 = isend(weight, group_dst=6, group=model_group)
-            recv_w_6 = irecv(
-                w1[..., split_size:, :], group_src=6, group=model_group
-            )
+            recv_w_6 = irecv(w1[..., split_size:, :], group_src=6, group=model_group)
 
             w1[..., :split_size, :].copy_(weight)
         case 5:
@@ -2166,19 +2089,13 @@ def fused_xw_xtw_eightway(
             recv_x = irecv(buffer_x, group_src=4, group=model_group)
             send_x = isend(grad_output, group_dst=4, group=model_group)
             # w: send to 1, 3, 7; recv from 1, 3, 7
-            recv_w_1 = irecv(
-                w1[..., :split_size, :], group_src=1, group=model_group
-            )
-            recv_w_3 = irecv(
-                w1[..., split_size:, :], group_src=3, group=model_group
-            )
+            recv_w_1 = irecv(w1[..., :split_size, :], group_src=1, group=model_group)
+            recv_w_3 = irecv(w1[..., split_size:, :], group_src=3, group=model_group)
 
             send_w_1 = isend(weight, group_dst=1, group=model_group)
             send_w_3 = isend(weight, group_dst=3, group=model_group)
             send_w_7 = isend(weight, group_dst=7, group=model_group)
-            recv_w_7 = irecv(
-                w0[..., split_size:, :], group_src=7, group=model_group
-            )
+            recv_w_7 = irecv(w0[..., split_size:, :], group_src=7, group=model_group)
 
             w0[..., :split_size, :].copy_(weight)
         case 6:
@@ -2187,15 +2104,9 @@ def fused_xw_xtw_eightway(
             send_x = isend(grad_output, group_dst=7, group=model_group)
             recv_x = irecv(buffer_x, group_src=7, group=model_group)
             # w: send to 0, 2, 4; recv from 0, 2, 4
-            recv_w_0 = irecv(
-                w0[..., :split_size, :], group_src=0, group=model_group
-            )
-            recv_w_2 = irecv(
-                w0[..., split_size:, :], group_src=2, group=model_group
-            )
-            recv_w_4 = irecv(
-                w1[..., :split_size, :], group_src=4, group=model_group
-            )
+            recv_w_0 = irecv(w0[..., :split_size, :], group_src=0, group=model_group)
+            recv_w_2 = irecv(w0[..., split_size:, :], group_src=2, group=model_group)
+            recv_w_4 = irecv(w1[..., :split_size, :], group_src=4, group=model_group)
 
             send_w_0 = isend(weight, group_dst=0, group=model_group)
             send_w_2 = isend(weight, group_dst=2, group=model_group)
@@ -2207,15 +2118,9 @@ def fused_xw_xtw_eightway(
             recv_x = irecv(buffer_x, group_src=6, group=model_group)
             send_x = isend(grad_output, group_dst=6, group=model_group)
             # w: send to 1, 3, 5; recv from 1, 3, 5
-            recv_w_1 = irecv(
-                w1[..., :split_size, :], group_src=1, group=model_group
-            )
-            recv_w_3 = irecv(
-                w1[..., split_size:, :], group_src=3, group=model_group
-            )
-            recv_w_5 = irecv(
-                w0[..., :split_size, :], group_src=5, group=model_group
-            )
+            recv_w_1 = irecv(w1[..., :split_size, :], group_src=1, group=model_group)
+            recv_w_3 = irecv(w1[..., split_size:, :], group_src=3, group=model_group)
+            recv_w_5 = irecv(w0[..., :split_size, :], group_src=5, group=model_group)
 
             send_w_1 = isend(weight, group_dst=1, group=model_group)
             send_w_3 = isend(weight, group_dst=3, group=model_group)
@@ -2245,9 +2150,15 @@ def fused_xw_xtw_eightway(
             t_recv_x_4 = irecv(t_buffer_x_4, group_src=4, group=model_group)
             t_recv_x_6 = irecv(t_buffer_x_6, group_src=6, group=model_group)
 
-            t_buffer_w_2 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_4 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_6 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_2 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_4 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_6 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_send_w_2 = isend(input, group_dst=2, group=model_group)
             t_send_w_4 = isend(input, group_dst=4, group=model_group)
             t_send_w_6 = isend(input, group_dst=6, group=model_group)
@@ -2278,9 +2189,15 @@ def fused_xw_xtw_eightway(
             # t_x0: send to 4, 5; t_x1: send to 6, 7;
             # x: recv from 0, 2, 4, 6
             # w: send to 3, 5, 7; recv from 3, 5, 7
-            t_buffer_w_3 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_5 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_7 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_3 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_5 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_7 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
 
             t_send_w_3 = isend(input, group_dst=3, group=model_group)
             t_send_w_5 = isend(input, group_dst=5, group=model_group)
@@ -2307,9 +2224,15 @@ def fused_xw_xtw_eightway(
             t_recv_x_6 = irecv(t_buffer_x_6, group_src=6, group=model_group)
             # x: recv from 0, 4, 6
             # w: send to 0, 4, 6; recv from 0, 4, 6
-            t_buffer_w_0 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_4 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_6 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_0 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_4 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_6 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_recv_w_0 = irecv(t_buffer_w_0, group_src=0, group=model_group)
             t_send_w_0 = isend(input, group_dst=0, group=model_group)
             t_send_w_4 = isend(input, group_dst=4, group=model_group)
@@ -2341,9 +2264,15 @@ def fused_xw_xtw_eightway(
             # t_x0: send to 4, 5; t_x1: send to 6, 7
             # x: recv from 0, 2, 4, 6
             # w: send to 1, 5, 7; recv from 1, 5, 7
-            t_buffer_w_1 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_5 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_7 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_1 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_5 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_7 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_recv_w_1 = irecv(t_buffer_w_1, group_src=1, group=model_group)
             t_send_w_1 = isend(input, group_dst=1, group=model_group)
             t_send_w_5 = isend(input, group_dst=5, group=model_group)
@@ -2375,9 +2304,15 @@ def fused_xw_xtw_eightway(
             # t_x0: send to 0, 1; t_x1: send to 2, 3
             # x: recv from 1, 3, 5, 7
             # w: send to 0, 2, 6; recv from 0, 2, 6
-            t_buffer_w_0 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_2 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_6 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_0 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_2 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_6 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_recv_w_0 = irecv(t_buffer_w_0, group_src=0, group=model_group)
             t_recv_w_2 = irecv(t_buffer_w_2, group_src=2, group=model_group)
             t_send_w_0 = isend(input, group_dst=0, group=model_group)
@@ -2403,9 +2338,15 @@ def fused_xw_xtw_eightway(
             # t_x0: send to 4; t_x1: send to 6, 7
             # x: recv from 1, 3, 7
             # w: send to 1, 3, 7; recv from 1, 3, 7
-            t_buffer_w_1 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_3 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_7 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_1 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_3 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_7 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_recv_w_1 = irecv(t_buffer_w_1, group_src=1, group=model_group)
             t_recv_w_3 = irecv(t_buffer_w_3, group_src=3, group=model_group)
             t_send_w_1 = isend(input, group_dst=1, group=model_group)
@@ -2436,9 +2377,15 @@ def fused_xw_xtw_eightway(
             # t_x0: send to 0, 1; t_x1: send to 2, 3
             # x: recv from 1, 3, 5, 7
             # w: send to 0, 2, 4; recv from 0, 2, 4
-            t_buffer_w_0 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_2 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_4 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_0 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_2 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_4 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_recv_w_0 = irecv(t_buffer_w_0, group_src=0, group=model_group)
             t_recv_w_2 = irecv(t_buffer_w_2, group_src=2, group=model_group)
             t_recv_w_4 = irecv(t_buffer_w_4, group_src=4, group=model_group)
@@ -2464,16 +2411,21 @@ def fused_xw_xtw_eightway(
             # t_x0: send to 4, 5; t_x1: send to 6
             # x: recv from 1, 3, 5
             # w: send to 1, 3, 5; recv from 1, 3, 5
-            t_buffer_w_1 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_3 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_5 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_1 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_3 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_5 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_recv_w_1 = irecv(t_buffer_w_1, group_src=1, group=model_group)
             t_recv_w_3 = irecv(t_buffer_w_3, group_src=3, group=model_group)
             t_recv_w_5 = irecv(t_buffer_w_5, group_src=5, group=model_group)
             t_send_w_1 = isend(input, group_dst=1, group=model_group)
             t_send_w_3 = isend(input, group_dst=3, group=model_group)
             t_send_w_5 = isend(input, group_dst=5, group=model_group)
-
 
     if dist.get_backend() == "gloo":
         dist.barrier(group=model_group)

@@ -1,6 +1,6 @@
 """Distributed attention modules."""
-import warnings
 
+import warnings
 from typing import Any, Callable, Optional, cast
 
 import torch
@@ -31,9 +31,7 @@ try:
         of CPU + per-device CUDA RNG state around a recompute.
         """
         cpu_state = torch.get_rng_state()
-        cuda_state = (
-            torch.cuda.get_rng_state(device) if device.type == "cuda" else None
-        )
+        cuda_state = torch.cuda.get_rng_state(device) if device.type == "cuda" else None
         return cpu_state, cuda_state
 
     def _restore_rng_state(
@@ -96,7 +94,8 @@ try:
             torch.Tensor
                 Attention output in ``bshd`` format.
             """
-            return attn(q, k, v)
+            out: torch.Tensor = attn(q, k, v)
+            return out
 
         @staticmethod
         def setup_context(ctx: Any, inputs: tuple, output: torch.Tensor) -> None:
@@ -113,13 +112,25 @@ try:
             attn: "te.DotProductAttention",
             rng_state: tuple[torch.Tensor, Optional[torch.Tensor]],
         ) -> tuple[torch.Tensor, int]:
-
+            """Batching rule: fold the vmapped dimension into the batch dimension."""
             q_bdim, k_bdim, v_bdim = in_dims[0], in_dims[1], in_dims[2]
 
             # Move the vmapped dimension to the front for each tensor.
-            q = q.movedim(q_bdim, 0) if q_bdim is not None else q.expand(info.batch_size, *q.shape)
-            k = k.movedim(k_bdim, 0) if k_bdim is not None else k.expand(info.batch_size, *k.shape)
-            v = v.movedim(v_bdim, 0) if v_bdim is not None else v.expand(info.batch_size, *v.shape)
+            q = (
+                q.movedim(q_bdim, 0)
+                if q_bdim is not None
+                else q.expand(info.batch_size, *q.shape)
+            )
+            k = (
+                k.movedim(k_bdim, 0)
+                if k_bdim is not None
+                else k.expand(info.batch_size, *k.shape)
+            )
+            v = (
+                v.movedim(v_bdim, 0)
+                if v_bdim is not None
+                else v.expand(info.batch_size, *v.shape)
+            )
 
             samples = q.shape[0]
             # q/k/v now have shape [samples, batch, seq, heads, head_dim].
@@ -134,9 +145,9 @@ try:
             out = out.unflatten(0, (samples, -1))
             return out, 0
 
-    JIGSAW_TE_AVAILABLE=True
+    JIGSAW_TE_AVAILABLE = True
 except ModuleNotFoundError:
-    JIGSAW_TE_AVAILABLE=False
+    JIGSAW_TE_AVAILABLE = False
 
 
 def attn_core_dtype(x: torch.Tensor) -> torch.dtype:
@@ -371,7 +382,10 @@ class DistributedAttention(torch.nn.Module):
             ]
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, is_causal=False,
+                q,
+                k,
+                v,
+                is_causal=False,
                 dropout_p=self.dropout_p if self.training else 0.0,
             )
         return out
@@ -389,45 +403,50 @@ class DistributedAttention(torch.nn.Module):
         """
         with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.MATH]):
             out = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, is_causal=False,
+                q,
+                k,
+                v,
+                is_causal=False,
                 dropout_p=self.dropout_p if self.training else 0.0,
             )
         return out
 
     def _transformer_attn_core(
-            self,
-            q: torch.Tensor,
-            k: torch.Tensor,
-            v: torch.Tensor,
-            **kwargs: torch.Tensor,
-        ) -> torch.Tensor:
-            """
-            Attention computation.
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        **kwargs: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Attention computation.
 
-            Parameters
-            ----------
-            q: torch.Tensor
-                Query tensor.
-            k: torch.Tensor
-                Keys tensor.
-            v: torch.Tensor
-                Values tensor.
-            kwargs:
-                Additional optional parameters.
+        Parameters
+        ----------
+        q: torch.Tensor
+            Query tensor.
+        k: torch.Tensor
+            Keys tensor.
+        v: torch.Tensor
+            Values tensor.
+        kwargs:
+            Additional optional parameters.
 
-            Returns
-            -------
-            out: torch.Tensor
-                Output of attention computation.
+        Returns
+        -------
+        out: torch.Tensor
+            Output of attention computation.
 
-            """
-            # `self.attn` (a real nn.Module) applies its own training-mode gate
-            # to `attention_dropout` internally, same as any other dropout
-            # module; the RNG snapshot is only for `backward`'s recompute to
-            # replay that same draw (see `_capture_rng_state`).
-            rng_state = _capture_rng_state(q.device)
-            out = TransformerEngineAttention.apply(q, k, v, self.attn, rng_state)
-            return out
+        """
+        # `self.attn` (a real nn.Module) applies its own training-mode gate
+        # to `attention_dropout` internally, same as any other dropout
+        # module; the RNG snapshot is only for `backward`'s recompute to
+        # replay that same draw (see `_capture_rng_state`).
+        rng_state = _capture_rng_state(q.device)
+        out: torch.Tensor = TransformerEngineAttention.apply(
+            q, k, v, self.attn, rng_state
+        )
+        return out
 
     def _ring_attn_core(
         self,
@@ -613,7 +632,10 @@ class Attention(torch.nn.Module):
             ]
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, is_causal=False,
+                q,
+                k,
+                v,
+                is_causal=False,
                 dropout_p=self.dropout_p if self.training else 0.0,
             )
 

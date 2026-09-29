@@ -5,7 +5,7 @@ from typing import Any, cast
 import torch
 import torch.distributed as dist
 
-from jigsaw.comm import get_empty, resolve_matmul_dtype
+from jigsaw.comm import all_to_all_async, get_empty, resolve_matmul_dtype
 from jigsaw.modules.buffers import get_preallocated_buffer
 
 streams = None
@@ -89,9 +89,7 @@ def fused_xw_xtw_twoway(
             xw_send_list = [grad_output, empty]
             xw_recv_list = [buffer_x, empty]
 
-    xw_handle = dist.all_to_all(
-        xw_recv_list, xw_send_list, group=model_group, async_op=True
-    )
+    xw_handle = all_to_all_async(xw_recv_list, xw_send_list, group=model_group)
 
     match mod:
         case 0:
@@ -165,9 +163,7 @@ def xw_transpose_twoway(
             xw_send_list = [xw, empty]
             xw_recv_list = [buffer_xw, empty]
 
-    xw_handle = dist.all_to_all(
-        xw_recv_list, xw_send_list, group=model_group, async_op=True
-    )
+    xw_handle = all_to_all_async(xw_recv_list, xw_send_list, group=model_group)
 
     match mod:
         case 0:
@@ -224,9 +220,7 @@ def xw_twoway(
             xw_send_list = [xij, empty]
             xw_recv_list = [buffer_x, empty]
 
-    xw_handle = dist.all_to_all(
-        xw_recv_list, xw_send_list, group=model_group, async_op=True
-    )
+    xw_handle = all_to_all_async(xw_recv_list, xw_send_list, group=model_group)
 
     match mod:
         case 0:
@@ -282,9 +276,7 @@ def x_transpose_w_twoway(
             xtw_send_list = [xij, empty]
             xtw_recv_list = [buffer_x, empty]
 
-    xtw_handle = dist.all_to_all(
-        xtw_recv_list, xtw_send_list, group=model_group, async_op=True
-    )
+    xtw_handle = all_to_all_async(xtw_recv_list, xtw_send_list, group=model_group)
 
     match mod:
         case 0:
@@ -394,12 +386,8 @@ def xw_transpose_fourway(
                 empty,
             ]
 
-    handle_1 = dist.all_to_all(
-        x_recv_list, x_send_list, group=model_group, async_op=True
-    )
-    handle_2 = dist.all_to_all(
-        w_recv_list, w_send_list, group=model_group, async_op=True
-    )
+    handle_1 = all_to_all_async(x_recv_list, x_send_list, group=model_group)
+    handle_2 = all_to_all_async(w_recv_list, w_send_list, group=model_group)
 
     handle_2.wait()
 
@@ -523,12 +511,8 @@ def xw_fourway(
                 empty,
             ]
 
-    w_handle = dist.all_to_all(
-        w_recv_list, w_send_list, group=model_group, async_op=True
-    )
-    x_handle = dist.all_to_all(
-        x_recv_list, x_send_list, group=model_group, async_op=True
-    )
+    w_handle = all_to_all_async(w_recv_list, w_send_list, group=model_group)
+    x_handle = all_to_all_async(x_recv_list, x_send_list, group=model_group)
 
     w_handle.wait()
 
@@ -700,15 +684,9 @@ def fused_xw_xtw_fourway(
                 empty,
             ]
 
-    x_handle = dist.all_to_all(
-        grad_recv_list, grad_send_list, group=model_group, async_op=True
-    )
-    w_handle = dist.all_to_all(
-        w_recv_list, w_send_list, group=model_group, async_op=True
-    )
-    i_handle = dist.all_to_all(
-        i_recv_list, i_send_list, group=model_group, async_op=True
-    )
+    x_handle = all_to_all_async(grad_recv_list, grad_send_list, group=model_group)
+    w_handle = all_to_all_async(w_recv_list, w_send_list, group=model_group)
+    i_handle = all_to_all_async(i_recv_list, i_send_list, group=model_group)
 
     x_handle.wait()
 
@@ -855,12 +833,8 @@ def x_transpose_w_fourway(
                 empty,
             ]
 
-    x_handle = dist.all_to_all(
-        x_recv_list, x_send_list, group=model_group, async_op=True
-    )
-    w_handle = dist.all_to_all(
-        w_recv_list, w_send_list, group=model_group, async_op=True
-    )
+    x_handle = all_to_all_async(x_recv_list, x_send_list, group=model_group)
+    w_handle = all_to_all_async(w_recv_list, w_send_list, group=model_group)
 
     x_handle.wait()
 
@@ -1106,12 +1080,8 @@ def xw_transpose_eightway_(
                 empty,
             ]
 
-    handle_w = dist.all_to_all(
-        w_recv_list, w_send_list, group=model_group, async_op=True
-    )
-    handle_x = dist.all_to_all(
-        x_recv_list, x_send_list, group=model_group, async_op=True
-    )
+    handle_w = all_to_all_async(w_recv_list, w_send_list, group=model_group)
+    handle_x = all_to_all_async(x_recv_list, x_send_list, group=model_group)
 
     cij = get_preallocated_buffer(
         cast(torch.Size, (*xij.shape[:-1], 2 * wij.shape[-2])),
@@ -1431,12 +1401,8 @@ def xw_transpose_eightway(
                 empty,
             ]
 
-    handle_w = dist.all_to_all(
-        w_recv_list, w_send_list, group=model_group, async_op=True
-    )
-    handle_x = dist.all_to_all(
-        x_recv_list, x_send_list, group=model_group, async_op=True
-    )
+    handle_w = all_to_all_async(w_recv_list, w_send_list, group=model_group)
+    handle_x = all_to_all_async(x_recv_list, x_send_list, group=model_group)
 
     with torch.cuda.stream(streams[0]):
         handle_w.wait()
@@ -1755,12 +1721,8 @@ def xw_eightway_(
                 empty,
             ]
 
-    handle_w = dist.all_to_all(
-        w_recv_list, w_send_list, group=model_group, async_op=True
-    )
-    handle_x = dist.all_to_all(
-        x_recv_list, x_send_list, group=model_group, async_op=True
-    )
+    handle_w = all_to_all_async(w_recv_list, w_send_list, group=model_group)
+    handle_x = all_to_all_async(x_recv_list, x_send_list, group=model_group)
 
     handle_w.wait()
     x0, x1 = torch.split(xij, xij.shape[-1] // 2, dim=-1)
@@ -1938,12 +1900,8 @@ def xw_eightway(
                 w1[..., split_size:, :].contiguous(),
                 empty,
             ]
-            handle_w = dist.all_to_all(
-                w_recv_list, w_send_list, group=model_group, async_op=True
-            )
-            handle_x = dist.all_to_all(
-                x_recv_list, x_send_list, group=model_group, async_op=True
-            )
+            handle_w = all_to_all_async(w_recv_list, w_send_list, group=model_group)
+            handle_x = all_to_all_async(x_recv_list, x_send_list, group=model_group)
             w0[..., :split_size, :].copy_(wij)
         case 1:
             x_send_list = [xij, empty, empty, empty, empty, empty, empty, empty]
@@ -1968,12 +1926,8 @@ def xw_eightway(
                 empty,
                 w0[..., split_size:, :].contiguous(),
             ]
-            handle_w = dist.all_to_all(
-                w_recv_list, w_send_list, group=model_group, async_op=True
-            )
-            handle_x = dist.all_to_all(
-                x_recv_list, x_send_list, group=model_group, async_op=True
-            )
+            handle_w = all_to_all_async(w_recv_list, w_send_list, group=model_group)
+            handle_x = all_to_all_async(x_recv_list, x_send_list, group=model_group)
             w1[..., :split_size, :].copy_(wij)
         case 2:
             x_send_list = [empty, empty, empty, xij, empty, empty, empty, empty]
@@ -1998,12 +1952,8 @@ def xw_eightway(
                 w1[..., split_size:, :].contiguous(),
                 empty,
             ]
-            handle_w = dist.all_to_all(
-                w_recv_list, w_send_list, group=model_group, async_op=True
-            )
-            handle_x = dist.all_to_all(
-                x_recv_list, x_send_list, group=model_group, async_op=True
-            )
+            handle_w = all_to_all_async(w_recv_list, w_send_list, group=model_group)
+            handle_x = all_to_all_async(x_recv_list, x_send_list, group=model_group)
             w0[..., split_size:, :].copy_(wij)
         case 3:
             x_send_list = [empty, empty, xij, empty, empty, empty, empty, empty]
@@ -2028,12 +1978,8 @@ def xw_eightway(
                 empty,
                 w0[..., split_size:, :],
             ]
-            handle_w = dist.all_to_all(
-                w_recv_list, w_send_list, group=model_group, async_op=True
-            )
-            handle_x = dist.all_to_all(
-                x_recv_list, x_send_list, group=model_group, async_op=True
-            )
+            handle_w = all_to_all_async(w_recv_list, w_send_list, group=model_group)
+            handle_x = all_to_all_async(x_recv_list, x_send_list, group=model_group)
             w0[..., split_size:, :].copy_(wij)
         case 4:
             x_send_list = [empty, empty, empty, empty, empty, xij, empty, empty]
@@ -2058,12 +2004,8 @@ def xw_eightway(
                 w1[..., split_size:, :],
                 empty,
             ]
-            handle_w = dist.all_to_all(
-                w_recv_list, w_send_list, group=model_group, async_op=True
-            )
-            handle_x = dist.all_to_all(
-                x_recv_list, x_send_list, group=model_group, async_op=True
-            )
+            handle_w = all_to_all_async(w_recv_list, w_send_list, group=model_group)
+            handle_x = all_to_all_async(x_recv_list, x_send_list, group=model_group)
             w1[..., :split_size, :].copy_(wij)
         case 5:
             x_send_list = [empty, empty, empty, empty, xij, empty, empty, empty]
@@ -2088,12 +2030,8 @@ def xw_eightway(
                 empty,
                 w0[..., split_size:, :],
             ]
-            handle_w = dist.all_to_all(
-                w_recv_list, w_send_list, group=model_group, async_op=True
-            )
-            handle_x = dist.all_to_all(
-                x_recv_list, x_send_list, group=model_group, async_op=True
-            )
+            handle_w = all_to_all_async(w_recv_list, w_send_list, group=model_group)
+            handle_x = all_to_all_async(x_recv_list, x_send_list, group=model_group)
             w0[..., :split_size, :].copy_(wij)
         case 6:
             x_send_list = [empty, empty, empty, empty, empty, empty, empty, xij]
@@ -2118,12 +2056,8 @@ def xw_eightway(
                 empty,
                 empty,
             ]
-            handle_w = dist.all_to_all(
-                w_recv_list, w_send_list, group=model_group, async_op=True
-            )
-            handle_x = dist.all_to_all(
-                x_recv_list, x_send_list, group=model_group, async_op=True
-            )
+            handle_w = all_to_all_async(w_recv_list, w_send_list, group=model_group)
+            handle_x = all_to_all_async(x_recv_list, x_send_list, group=model_group)
             w1[..., split_size:, :].copy_(wij)
         case 7:
             x_send_list = [empty, empty, empty, empty, empty, empty, xij, empty]
@@ -2148,12 +2082,8 @@ def xw_eightway(
                 empty,
                 empty,
             ]
-            handle_w = dist.all_to_all(
-                w_recv_list, w_send_list, group=model_group, async_op=True
-            )
-            handle_x = dist.all_to_all(
-                x_recv_list, x_send_list, group=model_group, async_op=True
-            )
+            handle_w = all_to_all_async(w_recv_list, w_send_list, group=model_group)
+            handle_x = all_to_all_async(x_recv_list, x_send_list, group=model_group)
             w0[..., split_size:, :].copy_(wij)
 
     with torch.cuda.stream(streams[0]):
@@ -2429,12 +2359,8 @@ def x_transpose_w_eightway_(
                 empty,
             ]
 
-    x_handle = dist.all_to_all(
-        x_recv_list, x_send_list, group=model_group, async_op=True
-    )
-    w_handle = dist.all_to_all(
-        w_recv_list, w_send_list, group=model_group, async_op=True
-    )
+    x_handle = all_to_all_async(x_recv_list, x_send_list, group=model_group)
+    w_handle = all_to_all_async(w_recv_list, w_send_list, group=model_group)
 
     x_handle.wait()
 
@@ -2798,12 +2724,8 @@ def x_transpose_w_eightway(
                 empty,
             ]
 
-    x_handle = dist.all_to_all(
-        x_recv_list, x_send_list, group=model_group, async_op=True
-    )
-    w_handle = dist.all_to_all(
-        w_recv_list, w_send_list, group=model_group, async_op=True
-    )
+    x_handle = all_to_all_async(x_recv_list, x_send_list, group=model_group)
+    w_handle = all_to_all_async(w_recv_list, w_send_list, group=model_group)
 
     match mod:
         case 0:
@@ -3468,18 +3390,10 @@ def fused_xw_xtw_eightway(
     # collectives on its stream in submission order, so ``xw_w_handle`` still
     # completes first and waiting on a later handle transitively covers the
     # earlier ones -- the standalone kernels rely on the same ordering.
-    xw_w_handle = dist.all_to_all(
-        xw_w_recv, xw_w_send, group=model_group, async_op=True
-    )
-    xw_x_handle = dist.all_to_all(
-        xw_x_recv, xw_x_send, group=model_group, async_op=True
-    )
-    xtw_x_handle = dist.all_to_all(
-        xtw_x_recv, xtw_x_send, group=model_group, async_op=True
-    )
-    xtw_w_handle = dist.all_to_all(
-        xtw_w_recv, xtw_w_send, group=model_group, async_op=True
-    )
+    xw_w_handle = all_to_all_async(xw_w_recv, xw_w_send, group=model_group)
+    xw_x_handle = all_to_all_async(xw_x_recv, xw_x_send, group=model_group)
+    xtw_x_handle = all_to_all_async(xtw_x_recv, xtw_x_send, group=model_group)
+    xtw_w_handle = all_to_all_async(xtw_w_recv, xtw_w_send, group=model_group)
 
     # Local slice of ``weight`` that this rank keeps for its own ``grad_input``
     # contribution (disjoint from the slices filled by ``xw_w_handle``).

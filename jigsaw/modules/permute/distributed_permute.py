@@ -3,6 +3,7 @@
 import torch
 import torch.distributed as dist
 
+from jigsaw.comm import all_to_all_async
 from jigsaw.modules.buffers import get_preallocated_buffer
 
 
@@ -46,9 +47,7 @@ def x_transpose_twoway(
             x_send_list = [x0, empty]
             x_recv_list = [buffer_x, empty]
 
-    xt_handle = dist.all_to_all(
-        x_recv_list, x_send_list, group=model_group, async_op=True
-    )
+    xt_handle = all_to_all_async(x_recv_list, x_send_list, group=model_group)
 
     match mod:
         case 0:

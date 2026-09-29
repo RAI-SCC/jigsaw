@@ -101,7 +101,9 @@ class DistributedXWT(torch.nn.Module):
         self.parallelism = model_group.size()
 
         self.bias = (
-            torch.nn.Parameter(torch.zeros(bias_dim, dtype=self.dtype, device=self.device))
+            torch.nn.Parameter(
+                torch.zeros(bias_dim, dtype=self.dtype, device=self.device)
+            )
             if bias
             else None
         )

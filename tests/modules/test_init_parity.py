@@ -31,7 +31,9 @@ import jigsaw.modules.linear as linear
 pytestmark = [pytest.mark.dist_required]
 
 
-def _assert_bound(tensor: torch.Tensor, bound: float, *, low_frac: float = 0.85) -> None:
+def _assert_bound(
+    tensor: torch.Tensor, bound: float, *, low_frac: float = 0.85
+) -> None:
     """``tensor`` should be ~U(-bound, bound): comfortably under the bound, and (with
     enough elements) comfortably above ``low_frac * bound`` too."""
     max_abs = tensor.abs().max().item()

@@ -123,9 +123,7 @@ def backward(
         philox_offset = torch.zeros(1, dtype=torch.long, device=q.device)
 
     in_dtype = grad_out.dtype
-    grad_out, q, k, v, out = (
-        t.to(torch.float16) for t in (grad_out, q, k, v, out)
-    )
+    grad_out, q, k, v, out = (t.to(torch.float16) for t in (grad_out, q, k, v, out))
     logsumexp = logsumexp.to(torch.float32)
 
     dq, dk, dv = torch.ops.aten._scaled_dot_product_flash_attention_backward(

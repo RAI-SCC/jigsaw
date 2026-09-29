@@ -624,7 +624,13 @@ class TestConvertToTorch:
             grp,
         )
         assert_close(
-            "head concat weight", dist_head_cat_w, ref_head_cat_w, 1e-8, 1e-5, device, grp
+            "head concat weight",
+            dist_head_cat_w,
+            ref_head_cat_w,
+            1e-8,
+            1e-5,
+            device,
+            grp,
         )
         # Gradient reduction order differs between the sharded head-concat matmul
         # and the serial reference, so this needs the same ~1e-4 slack as the

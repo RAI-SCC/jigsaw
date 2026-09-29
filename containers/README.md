@@ -10,7 +10,7 @@ Base image is `nvcr.io/nvidia/pytorch:26.02-py3`
 - torch 2.11.0a0
 - transformer-engine 2.12.0
 - CUDA 13
-- NCCL 2.29, and 
+- NCCL 2.29, and
 - HPC-X OpenMPI under `/opt/hpcx/ompi`.
 
 `zarr`, `timm`, `xarray`, `h5netcdf`, `mpi4py`, and jigsaw are excluded.
@@ -50,7 +50,7 @@ apptainer exec --nv "$SIF" bash -c \
 
 Then set `JIGSAW_VENV=$ENV` in the site preset.
 
-The `--no-deps` flag on the jigsaw install stops pip from pulling a second `torch` / `torchvision` on top of the image's build. 
+The `--no-deps` flag on the jigsaw install stops pip from pulling a second `torch` / `torchvision` on top of the image's build.
 NOTE: `requirements.txt` is only for bare-metal installs and should not be used here.
 
 ## Running code in the container
@@ -66,7 +66,7 @@ apptainer exec --nv --bind /scratch "$SIF" \
 ```
 
 - `--nv` exposes the GPUs
-- Add `--bind` for any filesystem outside `$HOME` and `$PWD`. 
+- Add `--bind` for any filesystem outside `$HOME` and `$PWD`.
 - Without a venv, drop the `$ENV/bin/` prefix and pass
 `--env PYTHONPATH=/path/to/jigsaw` so the checkout is importable.
 

@@ -26,7 +26,7 @@ A jigsaw module exposes ``global_weight_shape`` / ``global_bias_shape`` and a
 
 import math
 from collections.abc import Sequence
-from typing import Optional, Union
+from typing import Any, Optional, Union, cast
 
 import torch
 import torch.nn.init as _torch_init
@@ -179,7 +179,7 @@ def kaiming_uniform_(
     if tensor.numel() == 0:
         return tensor
     fan = _calculate_correct_fan(tensor, mode, global_shape, fan_in, fan_out)
-    gain = calculate_gain(nonlinearity, a)
+    gain = calculate_gain(cast(Any, nonlinearity), a)
     std = gain / math.sqrt(fan)
     bound = math.sqrt(3.0) * std
     with torch.no_grad():
@@ -201,7 +201,7 @@ def kaiming_normal_(
     if tensor.numel() == 0:
         return tensor
     fan = _calculate_correct_fan(tensor, mode, global_shape, fan_in, fan_out)
-    gain = calculate_gain(nonlinearity, a)
+    gain = calculate_gain(cast(Any, nonlinearity), a)
     std = gain / math.sqrt(fan)
     with torch.no_grad():
         return tensor.normal_(0.0, std, generator=generator)

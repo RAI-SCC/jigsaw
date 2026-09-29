@@ -24,9 +24,7 @@ class LinearCtx(Protocol):
     b: Optional[Parameter]
 
 
-def _setup_linear_ctx(
-    ctx: torch.autograd.function.FunctionCtx, inputs: Any
-) -> None:
+def _setup_linear_ctx(ctx: torch.autograd.function.FunctionCtx, inputs: Any) -> None:
     """
     Populate ``ctx`` for the distributed linear autograd Functions.
 

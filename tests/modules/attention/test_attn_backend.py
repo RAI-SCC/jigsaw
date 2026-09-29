@@ -88,9 +88,7 @@ class TestSelectRingCore:
             _select_attn_core_forward_fn(torch.device("cuda"), "sdpa")
             is sdpa_core.forward
         )
-        assert (
-            _select_attn_core_backward_fn(CPU, "sdpa") is math_core.backward
-        )
+        assert _select_attn_core_backward_fn(CPU, "sdpa") is math_core.backward
 
     def test_string_and_enum_arg_agree(self):
         assert _select_attn_core_forward_fn(

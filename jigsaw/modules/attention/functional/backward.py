@@ -185,9 +185,18 @@ def ring_backward(
         )
         rng_state = rng_states[global_chunk_idx] if rng_states is not None else None
         dq_j, dk_j, dv_j = ring_config.attn_core_backward_fn(
-            dout, q, kj.to(core_dtype), vj.to(core_dtype), out, lse, scale,
-            seq_local, seq_local,
-            dropout_p=dropout_p, seed=seed, rng_state=rng_state,
+            dout,
+            q,
+            kj.to(core_dtype),
+            vj.to(core_dtype),
+            out,
+            lse,
+            scale,
+            seq_local,
+            seq_local,
+            dropout_p=dropout_p,
+            seed=seed,
+            rng_state=rng_state,
         )
         dq += dq_j
         del dq_j, kj, vj, kv

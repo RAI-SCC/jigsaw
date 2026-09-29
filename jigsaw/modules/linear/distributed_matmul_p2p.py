@@ -2083,9 +2083,15 @@ def fused_xw_xtw_eightway(
             t_recv_x_4 = dist.irecv(t_buffer_x_4, group_src=4, group=model_group)
             t_recv_x_6 = dist.irecv(t_buffer_x_6, group_src=6, group=model_group)
 
-            t_buffer_w_2 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_4 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_6 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_2 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_4 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_6 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_send_w_2 = dist.isend(input, group_dst=2, group=model_group)
             t_send_w_4 = dist.isend(input, group_dst=4, group=model_group)
             t_send_w_6 = dist.isend(input, group_dst=6, group=model_group)
@@ -2116,9 +2122,15 @@ def fused_xw_xtw_eightway(
             # t_x0: send to 4, 5; t_x1: send to 6, 7;
             # x: recv from 0, 2, 4, 6
             # w: send to 3, 5, 7; recv from 3, 5, 7
-            t_buffer_w_3 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_5 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_7 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_3 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_5 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_7 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
 
             t_send_w_3 = dist.isend(input, group_dst=3, group=model_group)
             t_send_w_5 = dist.isend(input, group_dst=5, group=model_group)
@@ -2145,9 +2157,15 @@ def fused_xw_xtw_eightway(
             t_recv_x_6 = dist.irecv(t_buffer_x_6, group_src=6, group=model_group)
             # x: recv from 0, 4, 6
             # w: send to 0, 4, 6; recv from 0, 4, 6
-            t_buffer_w_0 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_4 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_6 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_0 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_4 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_6 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_recv_w_0 = dist.irecv(t_buffer_w_0, group_src=0, group=model_group)
             t_send_w_0 = dist.isend(input, group_dst=0, group=model_group)
             t_send_w_4 = dist.isend(input, group_dst=4, group=model_group)
@@ -2179,9 +2197,15 @@ def fused_xw_xtw_eightway(
             # t_x0: send to 4, 5; t_x1: send to 6, 7
             # x: recv from 0, 2, 4, 6
             # w: send to 1, 5, 7; recv from 1, 5, 7
-            t_buffer_w_1 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_5 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_7 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_1 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_5 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_7 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_recv_w_1 = dist.irecv(t_buffer_w_1, group_src=1, group=model_group)
             t_send_w_1 = dist.isend(input, group_dst=1, group=model_group)
             t_send_w_5 = dist.isend(input, group_dst=5, group=model_group)
@@ -2213,9 +2237,15 @@ def fused_xw_xtw_eightway(
             # t_x0: send to 0, 1; t_x1: send to 2, 3
             # x: recv from 1, 3, 5, 7
             # w: send to 0, 2, 6; recv from 0, 2, 6
-            t_buffer_w_0 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_2 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_6 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_0 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_2 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_6 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_recv_w_0 = dist.irecv(t_buffer_w_0, group_src=0, group=model_group)
             t_recv_w_2 = dist.irecv(t_buffer_w_2, group_src=2, group=model_group)
             t_send_w_0 = dist.isend(input, group_dst=0, group=model_group)
@@ -2241,9 +2271,15 @@ def fused_xw_xtw_eightway(
             # t_x0: send to 4; t_x1: send to 6, 7
             # x: recv from 1, 3, 7
             # w: send to 1, 3, 7; recv from 1, 3, 7
-            t_buffer_w_1 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_3 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_7 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_1 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_3 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_7 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_recv_w_1 = dist.irecv(t_buffer_w_1, group_src=1, group=model_group)
             t_recv_w_3 = dist.irecv(t_buffer_w_3, group_src=3, group=model_group)
             t_send_w_1 = dist.isend(input, group_dst=1, group=model_group)
@@ -2274,9 +2310,15 @@ def fused_xw_xtw_eightway(
             # t_x0: send to 0, 1; t_x1: send to 2, 3
             # x: recv from 1, 3, 5, 7
             # w: send to 0, 2, 4; recv from 0, 2, 4
-            t_buffer_w_0 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_2 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_4 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_0 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_2 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_4 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_recv_w_0 = dist.irecv(t_buffer_w_0, group_src=0, group=model_group)
             t_recv_w_2 = dist.irecv(t_buffer_w_2, group_src=2, group=model_group)
             t_recv_w_4 = dist.irecv(t_buffer_w_4, group_src=4, group=model_group)
@@ -2302,16 +2344,21 @@ def fused_xw_xtw_eightway(
             # t_x0: send to 4, 5; t_x1: send to 6
             # x: recv from 1, 3, 5
             # w: send to 1, 3, 5; recv from 1, 3, 5
-            t_buffer_w_1 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_3 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_5 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_1 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_3 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_5 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_recv_w_1 = dist.irecv(t_buffer_w_1, group_src=1, group=model_group)
             t_recv_w_3 = dist.irecv(t_buffer_w_3, group_src=3, group=model_group)
             t_recv_w_5 = dist.irecv(t_buffer_w_5, group_src=5, group=model_group)
             t_send_w_1 = dist.isend(input, group_dst=1, group=model_group)
             t_send_w_3 = dist.isend(input, group_dst=3, group=model_group)
             t_send_w_5 = dist.isend(input, group_dst=5, group=model_group)
-
 
     if dist.get_backend() == "gloo":
         dist.barrier(group=model_group)

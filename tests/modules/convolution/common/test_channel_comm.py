@@ -29,9 +29,7 @@ class TestResolveChannelComm:
 
     def test_auto_resolves_to_all_to_all_on_cuda(self) -> None:
         """``"auto"`` -> ``"all_to_all"`` on CUDA; only the device *type* matters."""
-        assert (
-            resolve_channel_comm("auto", torch.device("cuda", 0)) == "all_to_all"
-        )
+        assert resolve_channel_comm("auto", torch.device("cuda", 0)) == "all_to_all"
 
     @pytest.mark.parametrize("name", list(CHANNEL_COMMS))
     def test_explicit_names_pass_through(self, name: str) -> None:
@@ -90,9 +88,7 @@ class TestResolveChannelHop:
         """NCCL has a real all-to-all, so the hop lookup returns it."""
         if dist.get_backend() != "nccl":
             pytest.skip("only meaningful on the nccl backend")
-        assert (
-            _resolve_channel_hop("all_to_all", dist.group.WORLD) is comm_1d_alltoall
-        )
+        assert _resolve_channel_hop("all_to_all", dist.group.WORLD) is comm_1d_alltoall
 
 
 class TestGatherFullChannels:

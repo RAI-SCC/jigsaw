@@ -76,8 +76,14 @@ class TestTransformerEngineAttentionVmap:
         torch.manual_seed(0)
         return [
             torch.randn(
-                self.E, self.B, self.S, self.H, self.D,
-                device=device, dtype=torch.bfloat16, requires_grad=requires_grad,
+                self.E,
+                self.B,
+                self.S,
+                self.H,
+                self.D,
+                device=device,
+                dtype=torch.bfloat16,
+                requires_grad=requires_grad,
             )
             for _ in range(3)
         ]
@@ -128,9 +134,7 @@ class TestTransformerEngineAttentionVmap:
             )
             f(qi, ki, vi).float().pow(2).sum().backward()
             ref_members.append((qi.grad, ki.grad, vi.grad))
-        ref = tuple(
-            torch.stack([m[j] for m in ref_members]) for j in range(3)
-        )
+        ref = tuple(torch.stack([m[j] for m in ref_members]) for j in range(3))
 
         for name, g, r in zip("qkv", got, ref):
             assert g is not None, f"no grad for {name}"
@@ -144,8 +148,9 @@ _IN = _EMBED = _OUT = 64
 _HEADS = 4
 
 
-def _build_attn(mesh: dict, device: torch.device, backend: str, bayesian: bool,
-                ring: bool = False):
+def _build_attn(
+    mesh: dict, device: torch.device, backend: str, bayesian: bool, ring: bool = False
+):
     model = attention.DistributedAttention(
         in_dim=_IN,
         embed_dim=_EMBED,
@@ -276,12 +281,10 @@ class TestDistributedAttentionEnsembleVmap:
 
     def _fwd(self, mesh, device, backend):
         base, params, buffers, ref_models, x_e = self._build(mesh, device, backend)
-        got = vmap(
-            lambda p, b, x: functional_call(base, (p, b), (x,))
-        )(params, buffers, x_e)
-        ref = torch.stack(
-            [ref_models[i](x_e[i].contiguous()) for i in range(self.E)]
+        got = vmap(lambda p, b, x: functional_call(base, (p, b), (x,)))(
+            params, buffers, x_e
         )
+        ref = torch.stack([ref_models[i](x_e[i].contiguous()) for i in range(self.E)])
         return got, ref
 
     def _grad(self, mesh, device, backend):
@@ -308,8 +311,12 @@ class TestDistributedAttentionEnsembleVmap:
     ) -> None:
         got, ref = self._fwd(process_mesh_dict_2x2, device, "te")
         assert_close(
-            "te ensemble forward", got, ref, **_FWD_TOL,
-            device=device, group=process_mesh_dict_2x2["model"],
+            "te ensemble forward",
+            got,
+            ref,
+            **_FWD_TOL,
+            device=device,
+            group=process_mesh_dict_2x2["model"],
         )
 
     @pytest.mark.dist(4)
@@ -318,8 +325,12 @@ class TestDistributedAttentionEnsembleVmap:
     ) -> None:
         got, ref = self._fwd(process_mesh_dict_2x2, device, "sdpa")
         assert_close(
-            "sdpa ensemble forward", got, ref, **_FWD_TOL,
-            device=device, group=process_mesh_dict_2x2["model"],
+            "sdpa ensemble forward",
+            got,
+            ref,
+            **_FWD_TOL,
+            device=device,
+            group=process_mesh_dict_2x2["model"],
         )
 
     _XWT_VMAP_GRAD = pytest.mark.xfail(
@@ -336,8 +347,12 @@ class TestDistributedAttentionEnsembleVmap:
         got, ref = self._grad(process_mesh_dict_2x2, device, "te")
         for k in got:
             assert_close(
-                f"te ensemble grad[{k}]", got[k], ref[k], **_GRAD_TOL,
-                device=device, group=process_mesh_dict_2x2["model"],
+                f"te ensemble grad[{k}]",
+                got[k],
+                ref[k],
+                **_GRAD_TOL,
+                device=device,
+                group=process_mesh_dict_2x2["model"],
             )
 
     @pytest.mark.dist(4)
@@ -348,8 +363,12 @@ class TestDistributedAttentionEnsembleVmap:
         got, ref = self._grad(process_mesh_dict_2x2, device, "sdpa")
         for k in got:
             assert_close(
-                f"sdpa ensemble grad[{k}]", got[k], ref[k], **_GRAD_TOL,
-                device=device, group=process_mesh_dict_2x2["model"],
+                f"sdpa ensemble grad[{k}]",
+                got[k],
+                ref[k],
+                **_GRAD_TOL,
+                device=device,
+                group=process_mesh_dict_2x2["model"],
             )
 
 
