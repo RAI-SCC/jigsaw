@@ -6,7 +6,11 @@ Code for performing domain- and tensor-parallel training optimized for large ima
 
 ## Environment
 ### Option A: bare metal
-This is an installable library. Requirements can be installed with:
+The library is published on PyPI as `torch-jigsaw`; the import name is `jigsaw`.
+```
+pip install torch-jigsaw
+```
+To work on the source instead, install it in editable mode:
 ```
 pip install -e .
 ```

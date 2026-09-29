@@ -9,7 +9,7 @@ include = ["jigsaw*"]
 jigsaw = ["py.typed"]
 
 [project]
-name = "jigsaw"
+name = "torch-jigsaw"
 version = "0.0.1"
 authors = [
   { name="Deifilia Kieckhefen", email="deifilia.to@gmail.com"},
