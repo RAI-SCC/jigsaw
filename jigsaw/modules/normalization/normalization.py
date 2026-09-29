@@ -242,7 +242,7 @@ class DistributedNoParamLayerNorm(torch.nn.Module):
         self.channel_group = channel_group
 
         self.eps = 1e-5
-        self.layernorm = functional.DistributedNoParamLNFunction().apply
+        self.layernorm = functional.DistributedNoParamLNFunction.apply
 
     def get_parameter_count(self) -> int:
         """Return 0 parameters in this layer norm."""
