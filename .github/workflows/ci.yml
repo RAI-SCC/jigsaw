@@ -19,7 +19,7 @@ jobs:
           python-version: "3.12"
       - name: Install linters
         run: |
-          pip install ruff mypy
+          pip install ruff==0.15.12 mypy
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install --no-deps -e .
       - run: ruff check .
