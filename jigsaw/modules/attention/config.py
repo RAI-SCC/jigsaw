@@ -1,4 +1,4 @@
-"""Config for attention."""
+"""Configuration of ring attention."""
 
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -14,42 +14,42 @@ from jigsaw.offload import NVLinkActivationOffloader
 # enums
 # --------------------------------------------------------------------------- #
 class SendForward(Enum):
-    """Enum for sending X or KV."""
+    """Tensor communicated in the forward pass."""
 
     X = 0
     KV = 1
 
 
 class SaveBackward(Enum):
-    """Enum for saving X or KV."""
+    """Tensor saved for the backward pass."""
 
     X = 0
     KV = 1
 
 
 class SaveScope(Enum):
-    """Enum for saving X or KV locally or globally."""
+    """Scope of the tensor saved for the backward pass."""
 
     LOCAL = 0
     GLOBAL = 1
 
 
 class Offload(Enum):
-    """Enum for offloading to CPU."""
+    """Activation offloading policy."""
 
     DISABLED = 0
     CPU = 1
 
 
 class SendBackward(Enum):
-    """Enum for accumulating DKV in the backward pass."""
+    """Strategy for accumulating dK and dV in the backward pass."""
 
     SEND_DKV = 0
     GATHER_DKV = 1
 
 
 class SendOp(Enum):
-    """Enum for communication operation."""
+    """Communication operation of the ring."""
 
     ALLTOALL = 0
     P2P = 1
@@ -62,17 +62,10 @@ class SendOp(Enum):
 class AttnBackend(str, Enum):
     """Attention core implementation.
 
-    Applies to both the plain :class:`~..attention.DistributedAttention` core and
-    the ring's per-chunk inner attention.
-
-    - ``TE``: TransformerEngine fused (cuDNN) kernels. CUDA + ``transformer_engine``
-      only; the ring uses :mod:`.functional.cores.te`.
-    - ``SDPA``: PyTorch scaled-dot-product attention -- the flash kernel on CUDA
-      (with a math fallback), the math kernel on CPU. Default.
-    - ``MATH``: the unfused ``softmax(QK^T)V`` reference. Any device/shape/dtype.
-
-    ``ring`` is a separate switch (see ``DistributedAttention``); it composes with
-    every backend here.
+    - ``TE``: TransformerEngine fused kernels. Requires CUDA and
+      ``transformer_engine``.
+    - ``SDPA``: PyTorch scaled-dot-product attention.
+    - ``MATH``: unfused reference implementation.
     """
 
     TE = "te"
@@ -101,7 +94,7 @@ SaveForBackwardFn = Callable[[torch.Tensor, torch.Tensor], Optional[torch.Tensor
 def _select_offloader(
     offload: Offload, device: torch.device
 ) -> Optional[NVLinkActivationOffloader]:
-    """Build the activation offloader for the configured policy."""
+    """Return the activation offloader for a policy, or ``None``."""
     match offload:
         case Offload.DISABLED:
             return None
@@ -112,7 +105,7 @@ def _select_offloader(
 
 
 def _te_core_or_raise() -> None:
-    """Guard: the TE fused-attention core needs ``transformer_engine`` + CUDA."""
+    """Raise if the TE core is unavailable."""
     from .functional.cores.te import TE_CORE_AVAILABLE
 
     if not TE_CORE_AVAILABLE:
@@ -124,11 +117,7 @@ def _te_core_or_raise() -> None:
 def _select_attn_core_forward_fn(
     device: torch.device, attn_backend: AttnBackend = AttnBackend.SDPA
 ) -> AttnCoreFn:
-    """Pick the ring inner-attention forward core for ``device`` / ``attn_backend``.
-
-    ``SDPA`` keeps the historical device-based pick (flash on CUDA, math on CPU).
-    Cores live in :mod:`.functional.cores`; each exposes ``forward`` / ``backward``.
-    """
+    """Select the forward core of the ring's inner attention."""
     from .functional.cores import math as math_core
     from .functional.cores import sdpa as sdpa_core
 
@@ -153,7 +142,7 @@ def _select_attn_core_forward_fn(
 def _select_attn_core_backward_fn(
     device: torch.device, attn_backend: AttnBackend = AttnBackend.SDPA
 ) -> AttnCoreFn:
-    """Pick the ring inner-attention backward core for ``device`` / ``attn_backend``."""
+    """Select the backward core of the ring's inner attention."""
     from .functional.cores import math as math_core
     from .functional.cores import sdpa as sdpa_core
 
@@ -176,11 +165,7 @@ def _select_attn_core_backward_fn(
 
 
 def _select_p2p_fn(send_op: SendOp) -> CommFn:
-    """Pick the primitive for the inter-node hop and the backward dK/dV relay.
-
-    Point-to-point, except the all-to-all-flavoured ops. ``gloo`` has no
-    all-to-all, so it always falls back to p2p.
-    """
+    """Select the communication function for inter-node hops and the dK/dV relay."""
     if dist.get_backend() == "gloo":
         return comm.comm_1d_p2p
     alltoall = {SendOp.ALLTOALL, SendOp.BROADCAST, SendOp.HYBRID_ALLTOALL}
@@ -188,13 +173,7 @@ def _select_p2p_fn(send_op: SendOp) -> CommFn:
 
 
 def _select_send_op_fn(send_op: SendOp) -> CommFn:
-    """Pick the primitive for the ring's per-step send.
-
-    ``BROADCAST`` uses a real broadcast; the all-to-all-flavoured ops (including
-    both hybrid rings, whose intra-node step is a masked all-to-all) use
-    ``comm_1d_alltoall``; everything else is p2p. ``gloo`` always falls back to
-    p2p.
-    """
+    """Select the communication function for the ring's per-step send."""
     if dist.get_backend() == "gloo":
         return comm.comm_1d_p2p
     if send_op == SendOp.BROADCAST:
@@ -206,12 +185,9 @@ def _select_send_op_fn(send_op: SendOp) -> CommFn:
 def _select_forward_send_fn(
     send_op: SendOp, send_in_forward: SendForward, send_op_fn: CommFn
 ) -> ForwardSendFn:
-    """Return ``send(x, kv, **kw) -> (recv_buf, handle)`` for the forward ring.
+    """Select the send function of the forward ring.
 
-    Two shapes: a broadcast send (``BROADCAST``) and a per-neighbour ring send
-    (everything else -- the hybrid ops drive their own communication and only
-    take this so config construction is uniform). Both send ``x`` or ``kv`` per
-    ``send_in_forward``.
+    The returned callable has signature ``send(x, kv, **kw) -> (recv_buf, handle)``.
     """
     send_kv = send_in_forward == SendForward.KV
 
@@ -252,10 +228,10 @@ def _select_forward_send_fn(
 
 
 def _select_forward_recv_fn(send_in_forward: SendForward) -> ForwardRecvFn:
-    """Return ``recv(recv_buf, xj, kv_j, kj, vj) -> (xj, kv_j, kj, vj)``.
+    """Select the receive function of the forward ring.
 
-    ``X``: the buffer is the new ``xj`` and K/V are recomputed by the caller.
-    ``KV``: the buffer is the new ``kv_j``; ``kj / vj`` are its two halves.
+    The returned callable has signature
+    ``recv(recv_buf, xj, kv_j, kj, vj) -> (xj, kv_j, kj, vj)``.
     """
     send_kv = send_in_forward == SendForward.KV
 
@@ -278,12 +254,11 @@ def _select_save_for_backward_fn(
     save_scope: SaveScope,
     offloader: Optional[NVLinkActivationOffloader],
 ) -> SaveForBackwardFn:
-    """Return ``save(x, kv) -> tensor`` capturing the chunk kept for backward.
+    """Select the function that captures the tensor kept for backward.
 
-    Picks ``x`` or ``kv`` per ``save_for_backward``, then: offload to CPU when an
-    offloader is set; else ``.clone()`` for GLOBAL scope (the source buffer is
-    overwritten by the next ring recv); else pass the tensor through untouched.
-    ``save_for_backward`` values other than X / KV keep nothing.
+    The returned callable has signature ``save(x, kv) -> tensor``. It offloads
+    the tensor if an offloader is set, clones it for ``GLOBAL`` scope, and
+    otherwise returns it unchanged.
     """
     want_x = save_for_backward == SaveBackward.X
     if not (want_x or save_for_backward == SaveBackward.KV):
@@ -304,13 +279,10 @@ def _select_save_for_backward_fn(
 # config
 # --------------------------------------------------------------------------- #
 class RingAttentionConfig:
-    """Config class for ring attention.
+    """Configuration of ring attention.
 
-    Bundles every policy decision (what to send, what to save, how to
-    accumulate dK/dV, whether to offload) together with the concrete
-    callables that implement each policy, so the forward/backward loops
-    only ever call `self.config.<thing>` and never branch on raw enums
-    themselves.
+    Holds the communication, saving and offloading policies together with the
+    functions that implement them.
     """
 
     def __init__(
@@ -325,7 +297,7 @@ class RingAttentionConfig:
         gpus_per_node: int = 4,
         attn_backend: AttnBackend = AttnBackend.SDPA,
     ):
-        """Initialize the object.
+        """Initialize the configuration.
 
         Parameters
         ----------
@@ -346,10 +318,7 @@ class RingAttentionConfig:
         gpus_per_node : int
             Number of ranks assigned to each node for hybrid communication.
         attn_backend : AttnBackend
-            Inner per-chunk attention core. ``SDPA`` (default) keeps the
-            device-based pick (flash on CUDA, math on CPU); ``TE`` uses the
-            TransformerEngine fused core; ``MATH`` the unfused reference.
-
+            Attention core of the per-chunk inner attention.
         """
         if gpus_per_node <= 0:
             raise ValueError("gpus_per_node must be positive")
@@ -382,12 +351,12 @@ class RingAttentionConfig:
         )
 
     def wait_offloads(self) -> None:
-        """Block until any in-flight activation offloads have completed."""
+        """Wait for pending activation offloads."""
         if self.offloader is not None:
             self.offloader.wait_offloads()
 
     def __repr__(self) -> str:
-        """Return string representation of config class."""
+        """Return a string representation of the configuration."""
         return (
             f"RingAttentionConfig("
             f"send_in_forward={self.send_in_forward.name}, "

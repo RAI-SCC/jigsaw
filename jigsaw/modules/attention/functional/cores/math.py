@@ -1,22 +1,7 @@
-"""Unfused ``softmax(QK^T)V`` reference core for the ring inner step.
+"""Unfused reference attention core for the ring's inner attention.
 
-Runs for any device / shape / dtype and is what the SDPA selectors fall back to
-on CPU. The backward takes the ring's globally normalised ``out`` / ``logsumexp``
-and recomputes ``dQ/dK/dV`` from them directly.
-
-Dropout is applied post-softmax (inverted dropout: kept elements scaled by
-``1 / (1 - dropout_p)``), matching ``torch.nn.functional.scaled_dot_product_attention``'s
-convention. ``logsumexp`` is computed from the *pre*-dropout scores -- dropout
-doesn't change the normalising constant, and the ring's online-softmax merge
-(:func:`..forward._online_softmax_merge`) needs the undropped value to combine
-chunks correctly.
-
-Since this core has no opaque kernel-internal RNG state to thread back (unlike
-:mod:`.sdpa` / :mod:`.te`), it reconstructs its dropout mask from ``seed``: an
-int the ring independently recomputes identically in the forward and backward
-loops (see :func:`..functional.combine_dropout_seed`), rather than a saved
-tensor. A dedicated ``torch.Generator`` seeded from it keeps the draw
-reproducible without disturbing the ambient default RNG stream.
+Dropout is applied after the softmax and replayed from ``seed``. The
+log-sum-exp is computed before dropout.
 """
 
 from __future__ import annotations
@@ -27,12 +12,7 @@ import torch
 
 
 def _dropout_mask(shape: torch.Size, device: torch.device, seed: int) -> torch.Tensor:
-    """Boolean keep-mask for ``shape``, reproducible given ``seed``.
-
-    Drawn in float32 via a dedicated ``torch.Generator`` (not the ambient
-    default RNG), so forward and backward can each build the identical mask
-    from nothing but ``seed`` -- no mask/state tensor needs saving.
-    """
+    """Return a boolean dropout keep-mask that is reproducible from ``seed``."""
     generator = torch.Generator(device=device).manual_seed(seed)
     return torch.rand(shape, generator=generator, device=device, dtype=torch.float32)
 
@@ -45,10 +25,27 @@ def forward(
     dropout_p: float = 0.0,
     seed: Optional[int] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    """Vanilla attention forward pass. Returns ``(out, logsumexp, rng_state)``.
+    """Compute attention.
 
-    ``rng_state`` is always ``None`` -- this core replays dropout from ``seed``
-    instead (see module docstring).
+    Parameters
+    ----------
+    q, k, v : torch.Tensor
+        Query, key and value, shaped ``(b, h, s, d)``.
+    scale : float, optional
+        Softmax scale. Defaults to ``d ** -0.5``.
+    dropout_p : float
+        Dropout probability.
+    seed : int, optional
+        Seed of the dropout mask.
+
+    Returns
+    -------
+    out : torch.Tensor
+        Attention output.
+    logsumexp : torch.Tensor
+        Log-sum-exp of the scores.
+    rng_state : None
+        Always ``None``.
     """
     scale = scale or (q.size(-1) ** -0.5)
     scores = (q @ k.mT) * scale
@@ -76,15 +73,35 @@ def backward(
     rng_state: Optional[torch.Tensor] = None,  # noqa: ARG001 - unused, interface parity
     **kwargs: Any,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Vanilla attention backward pass using saved (global) LSE. Returns (dq, dk, dv).
+    """Compute the attention gradients from the saved output and log-sum-exp.
 
-    With dropout, ``p`` (the un-dropped, globally-normalised softmax share
-    recomputed below) needs converting to the *dropped* probabilities actually
-    multiplied by ``v`` in forward before it can be used for ``dv``, and the
-    upstream gradient needs converting the other way (``dPd -> dP``) before the
-    softmax-Jacobian step; both conversions are the same ``mask / (1 - p)``
-    dropout replayed from ``seed``. The row-sum correction term ``d`` is
-    unaffected by dropout (it uses the actual, already-dropped, saved ``out``).
+    Parameters
+    ----------
+    grad_out : torch.Tensor
+        Gradient of the output.
+    q, k, v : torch.Tensor
+        Query, key and value, shaped ``(b, h, s, d)``.
+    out : torch.Tensor
+        Saved attention output.
+    logsumexp : torch.Tensor
+        Saved log-sum-exp.
+    scale : float
+        Softmax scale.
+    dropout_p : float
+        Dropout probability.
+    seed : int, optional
+        Seed of the dropout mask.
+    rng_state : torch.Tensor, optional
+        Unused.
+    *args : Any
+        Unused.
+    **kwargs : Any
+        Unused.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Gradients ``(dq, dk, dv)``.
     """
     attn = (q @ k.mT) * scale  # (B, H, Sq, Sk)
     p = torch.exp(attn - logsumexp.unsqueeze(-1))  # global norm via saved lse

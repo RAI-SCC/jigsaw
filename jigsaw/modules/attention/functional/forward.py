@@ -1,10 +1,4 @@
-"""Ring attention forward implementation.
-
-A single driver loop (:func:`ring_forward`) handles every communication strategy
-by delegating to a :class:`~.forward_chunk_provider._ForwardChunkProvider`,
-mirroring how :func:`.backward.ring_backward` delegates to a
-:class:`~.backward_chunk_provider._BackwardChunkProvider`.
-"""
+"""Ring attention forward pass."""
 
 from __future__ import annotations
 
@@ -20,12 +14,7 @@ from .functional import combine_dropout_seed
 
 
 def _draw_base_seed(device: torch.device) -> int:
-    """Draw a fresh per-call dropout base seed from the ambient default RNG.
-
-    Consumed once per ring-attention forward; every per-chunk sub-seed
-    (:func:`..functional.combine_dropout_seed`) derives from it deterministically,
-    so only this one int needs saving for backward to replay every chunk's mask.
-    """
+    """Draw a dropout base seed from the default RNG."""
     return int(torch.randint(0, 2**31 - 1, (1,), device=device).item())
 
 
@@ -39,19 +28,15 @@ def _online_softmax_merge(
 
     Parameters
     ----------
-    o1 : torch.Tensor
-        Output tensor for the first partial result.
-    l1 : torch.Tensor
-        Log-sum-exp values for the first partial result.
-    o2 : torch.Tensor
-        Output tensor for the second partial result.
-    l2 : torch.Tensor
-        Log-sum-exp values for the second partial result.
+    o1, o2 : torch.Tensor
+        Outputs of the two partial results.
+    l1, l2 : torch.Tensor
+        Log-sum-exp values of the two partial results.
 
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor]
-        Result returned by the operation.
+        Merged output and log-sum-exp.
     """
     l_new = torch.logaddexp(l1, l2)
     e1 = torch.exp(l1 - l_new)
@@ -71,13 +56,12 @@ def _attend_step(
     lse: torch.Tensor,
     seed: Optional[int],
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    """Run the attention core on (q, kj, vj) and merge into the running (out, lse).
+    """Attend to one chunk and merge it into the running output.
 
-    kj/vj may be views into a KV buffer; flash attention requires contiguous
-    inputs, so they're materialized here. Returns the merged ``(out, lse)``
-    plus this step's ``rng_state`` (``None`` unless the core is one that
-    threads back opaque kernel RNG state instead of using ``seed`` -- see
-    :mod:`.cores`).
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
+        Merged output and log-sum-exp, and the ``rng_state`` of the core.
     """
     out_j, l_j, rng_state_j = ring_config.attn_core_forward_fn(
         q, kj.contiguous(), vj.contiguous(), scale, dropout_p, seed=seed
@@ -109,14 +93,7 @@ def ring_forward(
     Optional[int],
     tuple[torch.Tensor | None, ...],
 ]:
-    """Forward pass for ring attention.
-
-    One loop over ``ring_group_size`` ring steps: the
-    :class:`~.forward_chunk_provider._ForwardChunkProvider` for
-    ``ring_config.send_op`` makes each chunk current (``get``), records it for
-    the backward pass (``save_for_backward``), and progresses communication
-    (``advance``); this function only runs the attention core and the online
-    softmax merge.
+    """Run the forward pass of ring attention.
 
     Parameters
     ----------
@@ -127,11 +104,11 @@ def ring_forward(
     w_qkv : torch.Tensor
         Fused query, key, and value projection weights.
     scale : float
-        Attention scaling factor.
+        Softmax scale.
     dropout_p : float
-        Attention dropout probability.
+        Dropout probability.
     group : dist.ProcessGroup
-        Distributed process group used for ring communication.
+        Process group of the ring.
     local_rank : int
         Rank within ``group``.
     ring_group_size : int
@@ -142,9 +119,8 @@ def ring_forward(
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...], int | None, tuple[torch.Tensor | None, ...]]
-        Attention output, log-sum-exp values, the chunks saved for backward,
-        the dropout base seed (``None`` if ``dropout_p == 0``), and per-global-chunk
-        RNG state (see :func:`_attend_step`).
+        Output, log-sum-exp, chunks saved for backward, dropout base seed
+        (``None`` without dropout) and per-chunk RNG states.
     """
     b, heads, n_local, d = q.shape
     out = torch.zeros_like(q)

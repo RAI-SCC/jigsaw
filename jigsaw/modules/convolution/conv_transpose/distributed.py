@@ -1,33 +1,8 @@
-"""Distributed N-D transpose-convolution implementation.
+"""Kernels of the distributed transpose convolution.
 
-One module serves ``F.conv_transpose1d`` / ``F.conv_transpose2d`` /
-``F.conv_transpose3d``. Input is ``(N, C, *spatial)`` with
-``len(spatial) == config.n_spatial``; the channels are split across the channel
-group and the domain is split across the spatial group(s).
-
-The spatial split is described by ``spatial_groups``: an ``n_spatial``-tuple
-aligned with the trailing spatial axes, where an entry is ``None`` (or a group
-of size 1) when that axis is not split. The default (a single group) splits the
-last (width) axis only.
-
-Two regimes are selected by
-:class:`~jigsaw.modules.convolution.conv_transpose.config.ConvTransposeNdConfig`:
-
-* ``stride == kernel_size`` (and no dilation/padding on the split axes): every
-  spatial rank's raw output tiles the global output with no overlap, so the
-  spatial split needs no communication (:func:`conv_transpose_nway`).
-* ``stride != kernel_size``: neighbouring ranks' raw outputs overlap and must be
-  summed, then cropped and re-sharded -- a "transpose halo" exchange
-  (:func:`conv_transpose_halo_nway`), run once per split axis. That exchange is
-  dimension-agnostic and lives in :mod:`jigsaw.modules.convolution.conv_transpose.halo`.
-
-Both regimes cooperate with the channel-parallel group through
-:func:`jigsaw.modules.convolution.conv_transpose.channel_comm.over_channels_transpose`, which
-supports every ``channel_comm`` strategy and any group size. In the halo regime
-the per-axis transpose-halo reduce is handed to ``over_channels_transpose`` as a
-``post_fn``: the ``"all_gather"`` strategy applies it once to the fused output,
-while the streaming (``"p2p"`` / ``"all_to_all"``) strategies apply it once to
-the output accumulated slab by slab around the ring.
+Without halo (``stride == kernel_size``) each spatial rank computes its own
+slice. Otherwise the overlapping raw outputs of neighboring ranks are summed
+along each split axis.
 """
 
 from typing import Any, Optional
@@ -55,13 +30,9 @@ def _grad_input_weight(
     config: Any,
     output_mask: tuple[bool, bool, bool] = (True, True, False),
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Local ``grad_input`` / ``grad_weight`` for a transpose convolution.
+    """Compute the local input and weight gradients.
 
-    ``torch.ops.aten.convolution_backward`` returns both at once; ``grad_bias``
-    is handled separately (the spatial reduction is a parameter hook).
-    ``output_mask`` selects which grads to actually compute -- a masked-off entry
-    comes back as ``None`` -- so the caller can split the two into separate
-    passes and overlap the second with the channel-group reduce of the first.
+    ``output_mask`` selects the gradients to compute. The others are ``None``.
     """
     g_x, g_w, _ = config.conv_transpose_grad_fn(
         grad_output.to(weight.dtype),  # handles autocast
@@ -82,12 +53,9 @@ def _grad_input_weight(
 def _channel_reduce_grad_input(
     g_x: torch.Tensor, channel_group: dist.ProcessGroup, config: Any
 ) -> tuple[torch.Tensor, Optional[dist.Work]]:
-    """Sum the grad wrt input across the channel group, keeping this rank's shard.
+    """Sum the input gradient over the channel group and keep the local shard.
 
-    In the ``channel_local`` regime (every rank owns whole conv-groups) the
-    forward did no channel exchange, so ``g_x`` is already this rank's complete
-    channel shard and no reduction is needed. Otherwise this is the
-    :func:`_reduce_scatter_channels` over the full-channel grad.
+    No reduction is needed if each rank owns whole conv-groups.
     """
     if config.channel_local:
         return g_x.contiguous(), None
@@ -104,17 +72,10 @@ def _grad_input_weight_reduced(
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Local ``grad_input`` / ``grad_weight`` with ``grad_input`` reduced over channels.
+    """Compute the input and weight gradients, reducing the input gradient over channels.
 
-    ``grad_input`` needs a channel-group sum in the gather regime (each rank holds
-    the grad for its own output-channel slice); it needs none in the
-    ``channel_local`` regime (the rank owns whole conv-groups, so its ``g_x`` is
-    already complete) or for a channel group of one. ``grad_weight`` never needs a
-    channel reduction (the spatial reduction is a parameter hook). When a real
-    channel-group reduce is pending -- and the op is not vmapped, where a masked
-    ``convolution_backward`` output cannot be stacked -- the two grads are
-    computed in separate passes so the grad-weight pass overlaps the
-    reduce-scatter of grad_input; otherwise a single fused pass feeds the reduce.
+    The weight gradient is computed after the asynchronous reduction of the
+    input gradient is started, unless the model is vmapped.
     """
     reduce_pending = channel_group.size() > 1 and not config.channel_local
     if reduce_pending and not config.bayesian:
@@ -166,15 +127,12 @@ def conv_transpose_nway(
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Distributed transpose conv for the no-halo regime (``stride == kernel``).
+    """Apply the transpose convolution without halo exchange (``stride == kernel_size``).
 
-    Every spatial rank transpose-convolves its own domain slice independently --
-    this holds for a split along one axis or several -- while the channel group
-    cooperates through :func:`over_channels_transpose`. The split axes carry no
-    padding/dilation so the raw outputs tile the global output exactly.
-
-    Returns ``(y, x_full)`` where ``x_full`` is the gathered full-channel input
-    kept for the backward pass.
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Output and the full-channel input kept for the backward pass.
     """
     if _needs_halo(spatial_groups, padding, dilation):
         return conv_transpose_halo_nway(
@@ -211,13 +169,7 @@ def conv_transpose_nway_backward(
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Backward for the no-halo regime.
-
-    Each rank holds the full-channel grad wrt input for its own output-channel
-    slice; summing those across the channel group and keeping this rank's channel
-    slice yields ``g_x``. ``g_w`` needs no channel reduction (spatial ranks are
-    reduced by the parameter hook).
-    """
+    """Compute the gradients of the transpose convolution without halo exchange."""
     if _needs_halo(spatial_groups, padding, dilation):
         return conv_transpose_halo_nway_backward(
             grad_output,
@@ -256,17 +208,15 @@ def conv_transpose_halo_nway(
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Distributed transpose conv for the halo regime (``stride != kernel``).
+    """Apply the transpose convolution with halo reduction (``stride != kernel_size``).
 
-    Transpose-convolves the local domain slice with no split-axis padding, then
-    for every split spatial axis folds the overlapping raw outputs onto their
-    owning ranks (:func:`transpose_halo_reduce`) and adds the bias afterwards so
-    overlapped positions are not double-counted. The fold is handed to
-    :func:`over_channels_transpose` as a ``post_fn`` so it runs once on the
-    channel-accumulated output, whichever ``config.channel_comm`` is in use.
+    The overlapping raw outputs are summed along each split axis before the bias
+    is added.
 
-    Returns ``(y, x_full)`` where ``x_full`` is the gathered full-channel input
-    kept for the backward pass.
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Output and the full-channel input kept for the backward pass.
     """
     if not isinstance(padding, tuple):
         raise NotImplementedError(
@@ -322,14 +272,7 @@ def conv_transpose_halo_nway_backward(
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Backward for the halo regime.
-
-    ``grad_output`` (this rank's output shard) is expanded back to the raw local
-    output span (:func:`transpose_halo_expand`, once per split axis), then the
-    local transpose-conv backward gives the full-channel ``g_x`` and the local
-    ``g_w``. ``g_x`` is reduce-scattered across the channel group to this rank's
-    channel shard; ``g_w`` is reduced across spatial ranks by the parameter hook.
-    """
+    """Compute the gradients of the transpose convolution with halo reduction."""
     grad_raw = grad_output
     for idx, axis, group in reversed(list(_split_axes(spatial_groups))):
         grad_raw = transpose_halo_expand(

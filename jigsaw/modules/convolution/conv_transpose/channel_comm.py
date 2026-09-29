@@ -1,33 +1,8 @@
-"""Channel-parallel input exchange for the distributed 1/2/3-D transpose convs.
+"""Channel-parallel input exchange of the distributed transpose convolution.
 
-The transpose analogue of :mod:`jigsaw.modules.convolution.conv.channel_comm`.
-Each rank owns a contiguous ``C_in / G`` slice of the input channels and the
-matching slice of the weight's *output* channels (the weight still carries every
-input channel, on its leading axis). Three interchangeable strategies reassemble
-the full-channel input and produce this rank's output-channel slice, selected by
-``config.channel_comm``:
-
-* ``"all_gather"`` -- gather every rank's input-channel slice in one shot, then
-  run a single fused transpose convolution.
-* ``"p2p"`` -- circulate the slices one hop at a time with batched ``isend`` /
-  ``irecv`` (:func:`jigsaw.comm.comm_1d_p2p`), overlapping each partial transpose
-  convolution with the next transfer.
-* ``"all_to_all"`` -- the same ring schedule, each hop a masked all-to-all
-  (:func:`jigsaw.comm.comm_1d_alltoall`). Needs a backend with all-to-all support
-  (NCCL); gloo has none.
-
-Two axes differ from the plain-convolution version. The input-channel axis of the
-transpose weight is its *leading* axis, at ``-(n_spatial_dims + 2)`` (the plain
-weight keeps it at ``-(n_spatial_dims + 1)``). And the split-axis spatial
-exchange happens *after* the convolution -- the raw local outputs of neighbouring
-ranks overlap and are folded back with :func:`transpose_halo_reduce` -- so it is
-passed as a ``post_fn`` applied to the accumulated output rather than a
-``halo_fn`` applied to the input. ``transpose_halo_reduce`` is linear, so folding
-once after the channel sum matches folding each slab. The bias is likewise added
-after ``post_fn`` so overlapped positions are not double-counted.
-
-:func:`jigsaw.modules.convolution.common.channel_comm.resolve_channel_comm` turns
-the user-facing ``"auto"`` into a concrete name.
+See :mod:`jigsaw.modules.convolution.conv.channel_comm`. The spatial halo
+reduction is applied to the accumulated output through ``post_fn``, and the bias
+is added afterwards.
 """
 
 from typing import Any, Callable, Optional
@@ -56,15 +31,7 @@ PostFn = Callable[[torch.Tensor], torch.Tensor]
 
 
 def _bias_view(b: torch.Tensor, n_spatial_dims: int) -> torch.Tensor:
-    """Reshape the bias to broadcast against the conv output.
-
-    ``b`` is the raw bias parameter -- ``(C_out,)`` normally, or ``(S, C_out)``
-    under ``vmap``. Its channel axis has to land at ``-(n_spatial_dims + 1)`` of
-    the output: a singleton batch axis ahead of it, ``n_spatial_dims`` singleton
-    spatial axes behind, and any leading ``vmap`` axis kept untouched -- the
-    mirror of :meth:`ConvTransposeNdConfig._sum_grad_bias`. A plain ``(-1, 1,
-    ..., 1)`` view would fold the ``vmap`` axis into the channels instead.
-    """
+    """Reshape the bias to broadcast against the output."""
     return b.view(*b.shape[:-1], 1, b.shape[-1], *((1,) * n_spatial_dims))
 
 
@@ -79,10 +46,12 @@ def _over_channels_all_gather(
     n_spatial_dims: int,
     post_fn: Optional[PostFn],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``channel_comm="all_gather"``: gather every slice, then one fused transpose conv.
+    """Gather all channel slices, then apply the transpose convolution once.
 
-    Returns ``(y, x_full)`` -- ``x_full`` is the gathered full-channel input kept
-    for the backward pass.
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Output and the full-channel input kept for the backward pass.
     """
     x_full = gather_full_channels(x.contiguous(), channel_group, channel_dim)
 
@@ -107,14 +76,15 @@ def _over_channels_streaming(
     post_fn: Optional[PostFn],
     hop_fn: _HopFn,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Ring channel-parallel transpose conv; ``hop_fn`` is the per-step transport.
+    """Circulate the channel slices in a ring and apply the transpose convolution to each.
 
-    The channel slices travel one hop per step around the ring while each partial
-    transpose convolution overlaps the next transfer. ``post_fn`` (the split-axis
-    halo reduce) and the bias are applied once to the accumulated output.
+    ``hop_fn`` is the communication function of one hop. ``post_fn`` and the bias
+    are applied to the accumulated output.
 
-    Returns ``(y, x_full)`` where ``x_full`` is the full-channel input,
-    reassembled slab by slab, kept for the backward pass.
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Output and the full-channel input kept for the backward pass.
     """
     group_size = channel_group.size()
     rank = channel_group.rank()
@@ -182,13 +152,12 @@ def _over_channels_local(
     n_spatial_dims: int,
     post_fn: Optional[PostFn],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """No channel exchange: transpose-convolve this rank's channel shard directly.
+    """Apply the transpose convolution to the local channel shard without communication.
 
-    Used when the channel group is size one, or when it owns whole conv-groups
-    (``conv_kwargs["groups"]`` carries ``groups_local``). ``w`` is this rank's
-    shard and already carries only the input channels it needs. ``post_fn`` (the
-    split-axis halo reduce) and the bias are applied once to the output, matching
-    the streaming path. Returns ``(y, x)`` -- ``x`` is kept for the backward pass.
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Output and the input kept for the backward pass.
     """
     span = x.contiguous()
     y = conv_func(span, w, **conv_kwargs)
@@ -212,15 +181,15 @@ def over_channels_transpose(
     post_fn: Optional[PostFn] = None,
     local: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Channel-parallel transpose convolution for any ``channel_comm`` and dimensionality.
+    """Apply the transpose convolution over the channel-parallel group.
 
-    ``conv_kwargs`` holds ``stride`` / ``padding`` / ``dilation`` (and ``groups``)
-    for ``conv_func``; in the halo regime the split-axis padding is folded into
-    ``post_fn`` so pass ``0`` for that axis. When ``local`` is set (this rank owns
-    whole conv-groups) or the channel group is size one, no exchange happens --
-    see :func:`_over_channels_local`. Otherwise all strategies return the same
-    ``(y, x_full)`` -- see :func:`_over_channels_all_gather` /
-    :func:`_over_channels_streaming`.
+    ``conv_kwargs`` holds the arguments of ``conv_func``. In the halo case the
+    padding of the split axis is applied by ``post_fn`` and must be ``0`` here.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Output and the input kept for the backward pass.
     """
     channel_dim = -(n_spatial_dims + 1)
     in_dim = -(n_spatial_dims + 2)

@@ -1,12 +1,4 @@
-"""Distributed regression losses wrapped as ``torch.nn`` modules.
-
-These losses are elementwise, so ``reduce_groups`` must list *every* group across
-which the input is partitioned (spatial and channel alike).  The ``"mean"`` /
-``"sum"`` reduction is all-reduced over those groups so the returned scalar
-matches the value the non-distributed loss would produce on the gathered tensor.
-With ``reduce_groups=()`` every module reduces to a plain call of the
-corresponding ``torch.nn.functional`` loss on the local tensor.
-"""
+"""Distributed regression losses as ``torch.nn`` modules."""
 
 import torch
 
@@ -15,7 +7,7 @@ from . import functional as fr
 
 
 class DistributedMSELoss(torch.nn.Module):
-    """Mean-squared-error / L2 loss over a tensor sharded arbitrarily on a mesh."""
+    """Mean-squared-error loss of a sharded input."""
 
     def __init__(
         self,
@@ -27,7 +19,7 @@ class DistributedMSELoss(torch.nn.Module):
 
         Parameters
         ----------
-        reduce_groups : GroupsArg
+        reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
             Every group across which the input is partitioned.
         reduction : str
             ``"none"``, ``"sum"`` or ``"mean"``.
@@ -37,11 +29,24 @@ class DistributedMSELoss(torch.nn.Module):
         self.reduction = reduction
 
     def get_parameter_count(self) -> int:
-        """Return ``0``; the loss holds no trainable parameters."""
+        """Return the number of local parameters."""
         return 0
 
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Compute the distributed MSE loss for this rank's shard."""
+        """Compute the loss of the local shard.
+
+        Parameters
+        ----------
+        input : torch.Tensor
+            Predictions.
+        target : torch.Tensor
+            Targets with the shape of ``input``.
+
+        Returns
+        -------
+        torch.Tensor
+            Local loss for ``"none"``, otherwise the reduced scalar loss.
+        """
         return fr.distributed_mse_loss(
             input,
             target,
@@ -51,7 +56,7 @@ class DistributedMSELoss(torch.nn.Module):
 
 
 class DistributedL1Loss(torch.nn.Module):
-    """Mean-absolute-error / L1 loss over a tensor sharded arbitrarily on a mesh."""
+    """Mean-absolute-error loss of a sharded input."""
 
     def __init__(
         self,
@@ -63,7 +68,7 @@ class DistributedL1Loss(torch.nn.Module):
 
         Parameters
         ----------
-        reduce_groups : GroupsArg
+        reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
             Every group across which the input is partitioned.
         reduction : str
             ``"none"``, ``"sum"`` or ``"mean"``.
@@ -73,11 +78,24 @@ class DistributedL1Loss(torch.nn.Module):
         self.reduction = reduction
 
     def get_parameter_count(self) -> int:
-        """Return ``0``; the loss holds no trainable parameters."""
+        """Return the number of local parameters."""
         return 0
 
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Compute the distributed L1 loss for this rank's shard."""
+        """Compute the loss of the local shard.
+
+        Parameters
+        ----------
+        input : torch.Tensor
+            Predictions.
+        target : torch.Tensor
+            Targets with the shape of ``input``.
+
+        Returns
+        -------
+        torch.Tensor
+            Local loss for ``"none"``, otherwise the reduced scalar loss.
+        """
         return fr.distributed_l1_loss(
             input,
             target,
@@ -87,7 +105,7 @@ class DistributedL1Loss(torch.nn.Module):
 
 
 class DistributedSmoothL1Loss(torch.nn.Module):
-    """Smooth-L1 (Huber) loss over a tensor sharded arbitrarily on a mesh."""
+    """Smooth-L1 loss of a sharded input."""
 
     def __init__(
         self,
@@ -100,10 +118,10 @@ class DistributedSmoothL1Loss(torch.nn.Module):
 
         Parameters
         ----------
-        reduce_groups : GroupsArg
+        reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
             Every group across which the input is partitioned.
         beta : float
-            Transition point between the quadratic and linear regimes.
+            Transition point between the quadratic and the linear regime.
         reduction : str
             ``"none"``, ``"sum"`` or ``"mean"``.
         """
@@ -113,11 +131,24 @@ class DistributedSmoothL1Loss(torch.nn.Module):
         self.reduction = reduction
 
     def get_parameter_count(self) -> int:
-        """Return ``0``; the loss holds no trainable parameters."""
+        """Return the number of local parameters."""
         return 0
 
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Compute the distributed smooth-L1 loss for this rank's shard."""
+        """Compute the loss of the local shard.
+
+        Parameters
+        ----------
+        input : torch.Tensor
+            Predictions.
+        target : torch.Tensor
+            Targets with the shape of ``input``.
+
+        Returns
+        -------
+        torch.Tensor
+            Local loss for ``"none"``, otherwise the reduced scalar loss.
+        """
         return fr.distributed_smooth_l1_loss(
             input,
             target,

@@ -1,1 +1,1 @@
-"""Imports for Permute modules."""
+"""Distributed permutation."""

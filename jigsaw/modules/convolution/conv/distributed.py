@@ -1,33 +1,8 @@
-"""Distributed N-D convolution implementation.
+"""Kernels of the distributed convolution.
 
-One module serves ``F.conv1d`` / ``F.conv2d`` / ``F.conv3d``. Input is
-``(N, C, *spatial)`` with ``len(spatial) == config.n_spatial``; the domain is
-split across the spatial group(s) and the channels are split across the channel
-group.
-
-The spatial split is described by ``spatial_groups``: an ``n_spatial``-tuple
-aligned with the trailing spatial axes, where an entry is ``None`` (or a group
-of size 1) when that axis is not split. The default (a single group) splits the
-last (width) axis only.
-
-Two regimes are selected by :class:`~jigsaw.modules.convolution.conv.config.ConvNdConfig`:
-
-* ``stride == kernel_size`` (and no dilation/padding on the split axes): the
-  spatial split needs no communication -- every spatial rank convolves its own
-  domain slice independently (:func:`conv_nway`).
-* ``stride != kernel_size``: neighbouring output positions share input
-  positions, so each spatial rank pulls the missing rows/columns from the other
-  ranks with a halo exchange -- one per split axis -- and convolves
-  (:func:`conv_halo_nway`). The halo exchange is dimension-agnostic and lives in
-  :mod:`jigsaw.modules.convolution.conv.halo`.
-
-Both regimes cooperate with the channel-parallel group through
-:func:`jigsaw.modules.convolution.conv.channel_comm.over_channels`, which supports every
-``channel_comm`` strategy and any group size. In the halo regime the halo
-exchange is handed to ``over_channels`` as a ``halo_fn``: the ``"all_gather"``
-strategy applies it once to the gathered full-channel tensor, while the
-streaming (``"p2p"`` / ``"all_to_all"``) strategies apply it to each channel
-slab as the slabs travel around the ring, overlapping it with the next hop.
+Without halo (``stride == kernel_size``) each spatial rank convolves its own
+slice. Otherwise a halo exchange along each split axis precedes the
+convolution.
 """
 
 from typing import Any, Optional
@@ -48,12 +23,9 @@ from .halo import halo_gather, halo_scatter_add
 def _channel_reduce_grad_input(
     g_x: torch.Tensor, channel_group: dist.ProcessGroup, config: Any
 ) -> tuple[torch.Tensor, Optional[dist.Work]]:
-    """Sum the grad wrt input across the channel group, keeping this rank's shard.
+    """Sum the input gradient over the channel group and keep the local shard.
 
-    In the ``channel_local`` regime (every rank owns whole conv-groups) the
-    forward did no channel exchange, so ``g_x`` is already this rank's complete
-    channel shard and no reduction is needed. Otherwise this is the
-    :func:`_reduce_scatter_channels` over the full-channel grad.
+    No reduction is needed if each rank owns whole conv-groups.
     """
     if config.channel_local:
         return g_x.contiguous(), None
@@ -74,14 +46,12 @@ def conv_nway(
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Distributed N-D convolution for the no-halo regime (``stride == kernel``).
+    """Convolve without halo exchange (``stride == kernel_size``).
 
-    Every spatial rank convolves its own domain slice independently -- this
-    holds for a split along one axis or several -- while the channel group
-    cooperates through :func:`jigsaw.modules.convolution.conv.channel_comm.over_channels`.
-
-    Returns ``(y, x_full)`` where ``x_full`` is the gathered full-channel input
-    kept for the backward pass.
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Output and the full-channel input kept for the backward pass.
     """
     if _needs_halo(spatial_groups, padding, dilation):
         return conv_halo_nway(
@@ -119,13 +89,7 @@ def conv_nway_backward(
     bayesian: bool,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Backward for the no-halo regime.
-
-    Each rank holds the full-channel grad wrt input for its own output-channel
-    slice; summing those across the channel group and keeping this rank's channel
-    slice yields ``g_x``. ``g_w`` needs no channel reduction (spatial ranks are
-    reduced by the parameter hook).
-    """
+    """Compute the gradients of the convolution without halo exchange."""
     if _needs_halo(spatial_groups, padding, dilation):
         return conv_halo_nway_backward(
             grad_output,
@@ -188,19 +152,12 @@ def conv_halo_nway(
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Distributed N-D convolution for the halo regime (``stride != kernel``).
+    """Convolve with a halo exchange along each split axis (``stride != kernel_size``).
 
-    Builds a ``halo_fn`` that, for every split spatial axis, pulls the missing
-    rows/columns from the other spatial ranks, and hands it to
-    :func:`~jigsaw.modules.convolution.conv.channel_comm.over_channels` together with the
-    channel-parallel work. ``over_channels`` invokes ``halo_fn`` once on the
-    gathered full-channel tensor (``channel_comm="all_gather"``) or once per
-    channel slab as the slabs stream around the ring (``"p2p"`` /
-    ``"all_to_all"``); either way this rank ends with its output-channel *and*
-    output-position slice.
-
-    Returns ``(y, x_need)`` where ``x_need`` is the halo-padded full-channel
-    input kept for the backward pass.
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Output and the halo-padded full-channel input kept for the backward pass.
     """
     if not isinstance(padding, tuple):
         raise NotImplementedError(
@@ -253,16 +210,7 @@ def conv_halo_nway_backward(
     bayesian: bool,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Backward for the halo regime.
-
-    ``g_w`` comes straight from the halo-padded input and this rank's
-    ``grad_output`` (spatial ranks are summed by the parameter hook); it depends
-    on nothing the halo exchange produces, so it is enqueued first and runs
-    alongside the halo exchange rather than after it. ``g_x`` is computed on the
-    halo-padded span, folded back onto the owning spatial ranks
-    (:func:`halo_scatter_add`, once per split axis), reduced+scattered across the
-    channel group and returned as this rank's channel shard.
-    """
+    """Compute the gradients of the convolution with halo exchange."""
     local_padding = _local_padding(padding, spatial_groups)
 
     g_x_need = config.conv_input_fn(

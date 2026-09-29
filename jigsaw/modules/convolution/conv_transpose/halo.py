@@ -1,24 +1,8 @@
-"""Spatial halo exchange for the distributed *transpose* convolution.
+"""Halo exchange of the distributed transpose convolution.
 
-The transpose convolution is a scatter: every input position spreads its
-contribution over ``dilation * (kernel - 1) + 1`` output positions, so when the
-domain is split along a tensor's spatial axis each spatial rank produces a *raw*
-local output that is wider than its input slice and whose edges **overlap** the
-neighbouring ranks' raw outputs. The globally correct output is the sum of every
-rank's placed raw output, cropped to the global output size and re-sharded evenly
-across the group.
-
-* :func:`transpose_halo_reduce` (forward): sum the overlapping raw-output pieces
-  onto their owning rank and keep that rank's even output shard.
-* :func:`transpose_halo_expand` (backward, the reverse): hand every raw-output
-  column its gradient, pulled from whichever rank owns that output column.
-
-Both routines take an ``axis`` argument and operate on that axis directly,
-matching :mod:`jigsaw.modules.convolution.conv.halo`; the uneven, Gloo-safe
-all-to-all (:func:`exchange_along_axis`) is shared by both via
-:mod:`jigsaw.modules.convolution.common.halo`. A domain split along *several*
-spatial axes (height *and* width, or depth/height/width) is handled by calling
-the exchange once per split axis.
+The raw local outputs of neighboring ranks overlap. :func:`transpose_halo_reduce`
+sums the overlaps onto the owning ranks in the forward pass and
+:func:`transpose_halo_expand` is its reverse in the backward pass.
 """
 
 import torch
@@ -36,18 +20,14 @@ def produced_output_span(
     padding: int,
     dilation: int,
 ) -> tuple[int, int, int, int]:
-    """Where rank ``rank``'s raw local transpose-conv output sits globally.
+    """Return the global position of the raw local output of a rank.
 
-    Running ``F.conv_transpose1d`` (``padding = 0``) on this rank's owned input
-    slice yields a raw output of width ``wloc`` whose column ``i`` maps to global
-    output column ``base + i`` (unpadded coordinates -- ``base`` can be negative
-    and ``base + wloc`` can exceed the global output size; those columns fall in
-    the transpose conv's cropped-away border).
-
-    The global output size is divided evenly across the group, so rank ``r`` keeps
-    global output columns ``[r * out_local, (r + 1) * out_local)``.
-
-    Returns ``(base, wloc, out_local, global_out)``.
+    Returns
+    -------
+    tuple[int, int, int, int]
+        ``(base, wloc, out_local, global_out)``: local column ``i`` of the raw
+        output maps to global column ``base + i`` in unpadded coordinates, and
+        each rank keeps ``out_local`` of the ``global_out`` columns.
     """
     extent = dilation * (kernel - 1) + 1  # effective kernel span
     global_in = group_size * local_in_size
@@ -76,15 +56,14 @@ def transpose_halo_reduce(
     dilation: int,
     axis: int = -1,
 ) -> torch.Tensor:
-    """Fold overlapping raw transpose-conv outputs onto their owning rank.
+    """Sum the overlapping raw outputs onto their owning ranks along ``axis``.
 
-    ``y_raw`` is this rank's raw local output (width ``wloc`` along ``axis``).
-    Every rank sends the parts of its raw span that fall in each peer's output
-    shard and receives + **sums** the parts of its own shard that the peers
-    produced. Columns outside ``[0, global_out)`` are dropped. Operates on
-    ``axis`` directly -- no whole-tensor transpose.
+    Columns outside the global output are dropped.
 
-    Returns this rank's output shard, ``out_local`` wide along ``axis``.
+    Returns
+    -------
+    torch.Tensor
+        Output shard of this rank.
     """
     axis %= y_raw.dim()
     group_size = spatial_group.size()
@@ -151,17 +130,15 @@ def transpose_halo_expand(
     dilation: int,
     axis: int = -1,
 ) -> torch.Tensor:
-    """Reverse of :func:`transpose_halo_reduce`: grad wrt the raw local output.
+    """Gather the gradient of the raw local output from the owning ranks along ``axis``.
 
-    ``grad_local`` is the grad wrt this rank's output shard. Every raw-output
-    column belongs to exactly one rank's shard, so this is a plain uneven
-    all-to-all (no summation): each rank pulls the gradient for every column of
-    its raw span from whichever rank owns that output column. Columns outside
-    ``[0, global_out)`` stay zero. Operates on ``axis`` directly -- no
-    whole-tensor transpose.
+    This is the reverse of :func:`transpose_halo_reduce`. Columns outside the
+    global output are zero.
 
-    Returns the grad wrt this rank's raw local output, ``wloc`` wide along
-    ``axis``.
+    Returns
+    -------
+    torch.Tensor
+        Gradient of the raw local output.
     """
     axis %= grad_local.dim()
     group_size = spatial_group.size()

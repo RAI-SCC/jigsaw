@@ -1,4 +1,4 @@
-"""Utility functions to setup distributed environment."""
+"""Utilities for distributed setup and checkpointing."""
 
 import os
 import subprocess
@@ -11,7 +11,13 @@ from jigsaw import log
 
 
 def set_all_seeds(seed: int = 0) -> None:
-    """Initialize all random seeds."""
+    """Seed the PyTorch CPU and CUDA random number generators.
+
+    Parameters
+    ----------
+    seed : int
+        Seed value.
+    """
     os.environ["PL_GLOBAL_SEED"] = str(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -19,7 +25,7 @@ def set_all_seeds(seed: int = 0) -> None:
 
 @dataclass(frozen=True)
 class LaunchEnv:
-    """Resolved distributed-launch parameters.
+    """Distributed launch parameters.
 
     Attributes
     ----------
@@ -30,11 +36,11 @@ class LaunchEnv:
     local_rank : int
         Rank within the node (selects the local GPU).
     master_addr : str
-        Rendezvous host for ``init_method="env://"``.
+        Rendezvous host.
     master_port : str
         Rendezvous port.
     source : str
-        Which launcher was detected: ``"slurm"``, ``"torchrun"`` or ``"single"``.
+        Detected launcher: ``"slurm"``, ``"torchrun"`` or ``"single"``.
     """
 
     rank: int
@@ -46,25 +52,21 @@ class LaunchEnv:
 
 
 def resolve_launch_env(strict: bool = False) -> LaunchEnv:
-    """Read the distributed-launch contract from the environment.
+    """Read the launch parameters from the environment.
 
-    Supports both ``srun`` (``SLURM_PROCID`` / ``SLURM_NTASKS`` /
-    ``SLURM_LOCALID``) and ``torchrun`` (``RANK`` / ``WORLD_SIZE`` /
-    ``LOCAL_RANK``). ``MASTER_ADDR`` is taken from the environment, else derived
-    from ``SLURM_JOB_NODELIST``, else falls back to ``localhost``;
-    ``MASTER_PORT`` defaults to ``29500``. Both are written back to
-    ``os.environ`` so a subsequent ``init_method="env://"`` sees them.
+    Supports ``srun`` and ``torchrun``. ``MASTER_ADDR`` and ``MASTER_PORT`` are
+    written back to ``os.environ``.
 
     Parameters
     ----------
     strict : bool
-        If ``True``, raise ``RuntimeError`` when neither a SLURM nor a torchrun
-        launcher is detected instead of assuming a single-process run.
+        Raise ``RuntimeError`` if no launcher is detected instead of assuming a
+        single process.
 
     Returns
     -------
     LaunchEnv
-        The resolved parameters.
+        Resolved launch parameters.
     """
     if os.getenv("SLURM_PROCID") is not None:
         source = "slurm"
@@ -115,15 +117,18 @@ def resolve_launch_env(strict: bool = False) -> LaunchEnv:
 
 
 def init_cuda() -> tuple[torch.device, int, int, int]:
-    """
-    Initialize DistributedDataParallel.
+    """Select the local CUDA device and initialize the NCCL process group.
 
     Returns
     -------
-    device: String
-    slurm_localid: int
-    rank: int
-    world_size: int
+    device : torch.device
+        Local CUDA device.
+    local_rank : int
+        Rank within the node.
+    rank : int
+        Global rank.
+    world_size : int
+        Total number of processes.
     """
     env = resolve_launch_env()
     rank, world_size, slurm_localid = env.rank, env.world_size, env.local_rank
@@ -159,7 +164,18 @@ def init_cuda() -> tuple[torch.device, int, int, int]:
 
 
 def count_parameters(model: torch.nn.Module) -> int:
-    """Return number of parameters in model."""
+    """Count the trainable parameters of a model.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Model to inspect.
+
+    Returns
+    -------
+    int
+        Number of parameters with ``requires_grad``.
+    """
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
@@ -175,7 +191,25 @@ def save_model(
     epoch: int,
     model_name: str = "model",
 ) -> None:  # noqa: D103
-    """Save model weights, optimizer state, epoch."""
+    """Save the model and optimizer state and the epoch to ``<file_path>/<model_name>_<rank>.pt``.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Model to save.
+    optimizer : torch.optim.Optimizer
+        Optimizer to save.
+    scheduler : object
+        Unused.
+    file_path : str
+        Output directory.
+    rank : int
+        Rank, used in the file name.
+    epoch : int
+        Current epoch.
+    model_name : str
+        File name prefix.
+    """
     file_path = f"{file_path}/{model_name}_{rank}.pt"
     state = {
         "model_state": model.state_dict(),
@@ -193,7 +227,35 @@ def load_model(
     model_parallel: bool = False,
     parallelism: int = 4,
 ) -> tuple[torch.nn.Module, torch.optim.Optimizer, int]:
-    """Load model from state dict."""
+    """Load model and optimizer state from a checkpoint.
+
+    Starts from epoch 0 if the checkpoint cannot be loaded.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Model to load into.
+    optimizer : torch.optim.Optimizer
+        Optimizer to load into.
+    file_path : str
+        Checkpoint file, or the directory containing ``model_<rank>.pt`` if
+        ``model_parallel`` is set.
+    rank : int
+        Global rank.
+    model_parallel : bool
+        Select the checkpoint file by ``rank % parallelism``.
+    parallelism : int
+        Model-parallel size.
+
+    Returns
+    -------
+    model : torch.nn.Module
+        Loaded model.
+    optimizer : torch.optim.Optimizer
+        Loaded optimizer.
+    epoch : int
+        Epoch to resume from.
+    """
     if model_parallel:
         load_rank = rank % parallelism
         file_path = f"{file_path}/model_{load_rank}.pt"
@@ -212,7 +274,13 @@ def load_model(
 
 
 def setup_precision(tf32: bool) -> None:
-    """Configure matmul and cudnn TF32."""
+    """Enable or disable TF32 for matmul and cuDNN.
+
+    Parameters
+    ----------
+    tf32 : bool
+        Whether to allow TF32.
+    """
     torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
     torch.backends.cudnn.allow_tf32 = bool(tf32)
     return

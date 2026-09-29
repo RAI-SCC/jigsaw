@@ -1,19 +1,7 @@
-"""SDPA flash-attention core for the ring inner step (CUDA).
+"""Flash-attention core for the ring's inner attention (CUDA).
 
-Wraps the two undocumented
-``torch.ops.aten._scaled_dot_product_flash_attention{,_backward}`` ops, which --
-unlike ``F.scaled_dot_product_attention`` -- return the softmax log-sum-exp the
-ring's online-softmax merge and explicit-LSE backward need.
-
-On CPU the selectors fall back to :mod:`.math`; see
-:func:`..config._select_attn_core_forward_fn`.
-
-The dropout path threads through the two extra tensors the flash kernel needs
-to reproduce its mask, on top of the replay strategy the no-dropout path
-already uses. It needs CUDA, so it is skipped where no GPU is present;
-``tests/modules/attention/test_dropout.py::TestSdpaTeCoreDropoutReplay``
-recovers the opaque mask from the forward output and checks that
-:func:`backward` replays it (verified on an NVIDIA A100).
+Wraps ``torch.ops.aten._scaled_dot_product_flash_attention`` and its backward,
+which return the log-sum-exp needed by the ring.
 """
 
 from __future__ import annotations
@@ -31,24 +19,27 @@ def forward(
     dropout_p: float,
     seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    """Flash attention forward pass. Returns ``(out, logsumexp, rng_state)``.
+    """Compute flash attention.
 
-    Calling convention for the two undocumented
-    ``torch.ops.aten._scaled_dot_product_flash_attention{,_backward}`` ops,
-    worked out against a naive ``softmax(q @ k.mT * scale) @ v`` autograd
-    reference and ``F.scaled_dot_product_attention``:
+    Parameters
+    ----------
+    q, k, v : torch.Tensor
+        Query, key and value, shaped ``(b, h, s, d)``.
+    scale : float
+        Softmax scale.
+    dropout_p : float
+        Dropout probability.
+    seed : int, optional
+        Unused.
 
-    * ``q``/``k``/``v``/``out``/``grad_out`` are ``(B, H, S, d)`` -- heads
-      *before* sequence -- and contiguous. The public ``(B, S, H, d)`` layout
-      must be transposed first (ring attention already works in ``(B, H, S, d)``).
-    * forward returns ``(out, logsumexp, cum_seq_q, cum_seq_k, max_q, max_k,
-      philox_seed, philox_offset, debug_attn_mask)``; ``philox_seed`` /
-      ``philox_offset`` are the kernel's own dropout RNG state -- opaque and
-      generated internally (the op takes no seed input)
-    * ``max_q`` / ``max_k`` (backward) are the query / key sequence lengths.
-    * ``cum_seq_q`` / ``cum_seq_k`` (backward) are for nested/ragged batches
-      only and stay ``None`` here.
-    * backward returns ``(dq, dk, dv)`` in the same ``(B, H, S, d)`` layout.
+    Returns
+    -------
+    out : torch.Tensor
+        Attention output.
+    logsumexp : torch.Tensor
+        Log-sum-exp of the scores.
+    rng_state : torch.Tensor | None
+        Dropout RNG state of the kernel, ``None`` without dropout.
     """
     q, k, v = [x.to(torch.float16) for x in (q, k, v)]
     (
@@ -99,22 +90,33 @@ def backward(
     seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
     rng_state: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Backward call to flash attention. Returns (dq, dk, dv).
+    """Compute the flash-attention gradients.
 
-    ``rng_state`` -- the flattened ``[*philox_seed, philox_offset]`` tensor
-    :func:`forward` packed for this same chunk -- is split back here (offset is
-    the last element) and replayed so the kernel reconstructs the identical
-    dropout mask it applied in forward; without it (``None``, the
-    ``dropout_p == 0`` case) any same-device int64 tensors work, hence zeros.
+    Parameters
+    ----------
+    grad_out : torch.Tensor
+        Gradient of the output.
+    q, k, v : torch.Tensor
+        Query, key and value, shaped ``(b, h, s, d)``.
+    out : torch.Tensor
+        Saved attention output.
+    logsumexp : torch.Tensor
+        Saved log-sum-exp.
+    scale : float
+        Softmax scale.
+    max_q, max_k : float
+        Query and key sequence lengths.
+    dropout_p : float
+        Dropout probability.
+    seed : int, optional
+        Unused.
+    rng_state : torch.Tensor, optional
+        Dropout RNG state returned by :func:`forward`.
 
-    See :func:`forward` for the ``(B, H, S, d)`` layout and the meaning of
-    ``max_q`` / ``max_k`` / ``cum_seq_*``.
-
-    ``q``/``k``/``v``/``out``/``grad_out`` are cast to fp16 to match
-    :func:`forward`, and ``logsumexp`` to fp32: the flash backward kernel reads
-    it as fp32 and returns garbage for a 16-bit ``logsumexp`` (the ring's
-    :func:`..backward.ring_backward` hands it back downcast to the model dtype).
-    Gradients are returned in the input dtype.
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Gradients ``(dq, dk, dv)`` in the input dtype.
     """
     if rng_state is not None:
         philox_seed, philox_offset = rng_state[:-1], rng_state[-1]

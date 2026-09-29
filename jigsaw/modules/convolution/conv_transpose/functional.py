@@ -1,14 +1,4 @@
-"""Autograd definition for the distributed N-D transpose convolution.
-
-One :class:`ConvTransposeNd` autograd Function serves ``F.conv_transpose1d`` /
-``F.conv_transpose2d`` / ``F.conv_transpose3d``; the spatial rank is carried by
-``config.n_spatial`` (the length of the normalised ``kernel_size``). The
-1-/2-/3-D modules pick their dimension by constructing a
-:class:`~jigsaw.modules.convolution.conv_transpose.config.ConvTransposeNdConfig` of the
-matching arity.
-
-The transpose analogue of :mod:`jigsaw.modules.convolution.conv.functional`.
-"""
+"""Autograd function of the distributed transpose convolution."""
 
 from typing import Any, Optional, Protocol, cast
 
@@ -21,7 +11,7 @@ from .config import ConvTransposeNdConfig
 
 
 class ConvTransposeNdCtx(Protocol):
-    """Protocol for the values stashed on ``ctx`` between forward and backward."""
+    """Attributes stored on the autograd context."""
 
     local_in_spatial: tuple[int, ...]
     stride: int | tuple[int, ...]
@@ -34,12 +24,7 @@ class ConvTransposeNdCtx(Protocol):
 
 
 class ConvTransposeNd(torch.autograd.Function):
-    """Autograd function for the distributed N-D transpose convolution.
-
-    Handles both the no-halo regime (``stride == kernel_size``) and the halo
-    regime (``stride != kernel_size``); the kernels are picked by
-    :class:`~jigsaw.modules.convolution.conv_transpose.config.ConvTransposeNdConfig`.
-    """
+    """Autograd function of the distributed transpose convolution."""
 
     @staticmethod
     def forward(
@@ -53,11 +38,12 @@ class ConvTransposeNd(torch.autograd.Function):
         channel_group: dist.ProcessGroup,
         config: ConvTransposeNdConfig,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass of the distributed ConvTransposeNd function.
+        """Compute the local output slice.
 
-        Returns ``(y, x_aug)`` where ``y`` is this rank's output-channel (and,
-        in the halo regime, output-position) slice and ``x_aug`` is the gathered
-        full-channel input kept for the backward pass.
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            Output and the input kept for the backward pass.
         """
         # Opt into autocast: this Function hides the inner ``F.conv_transpose*``
         # from autocast's op-level policy, and the kernels size their
@@ -83,7 +69,7 @@ class ConvTransposeNd(torch.autograd.Function):
         inputs: Any,
         output: tuple[torch.Tensor, torch.Tensor],
     ) -> None:
-        """Stash tensors and metadata needed for the backward pass."""
+        """Save tensors and metadata for the backward pass."""
         (
             x,
             weight,
@@ -130,16 +116,7 @@ class ConvTransposeNd(torch.autograd.Function):
         None,
         None,
     ]:
-        """Backward pass of the distributed ConvTransposeNd.
-
-        ``g_b`` is the local ``grad_output`` sum (spatial ranks are reduced by
-        the parameter hook). ``g_x`` / ``g_w`` are delegated to the regime-
-        specific kernel picked in :class:`ConvTransposeNdConfig`: in the no-halo
-        regime each rank holds the full-channel grad wrt input for its own
-        output-channel slice and only the channel group is reduced; in the halo
-        regime the grad is additionally folded back onto the owning spatial
-        ranks.
-        """
+        """Compute the gradients of the input, weight and bias."""
         c = cast(ConvTransposeNdCtx, ctx)
         x_aug, weight = c.saved_tensors
         config = c.config
@@ -190,7 +167,7 @@ class ConvTransposeNd(torch.autograd.Function):
         channel_group: dist.ProcessGroup,
         config: ConvTransposeNdConfig,
     ) -> tuple[torch.Tensor, Optional[int]]:
-        """Handle vmap for the distributed ConvTransposeNd."""
+        """Batching rule for ``torch.vmap``."""
         out = ConvTransposeNd.apply(
             x,
             weight,

@@ -37,19 +37,7 @@ def _local_scope_global_chunk_idx(
     ring_group_size: int,
     group: dist.ProcessGroup,
 ) -> int:
-    """Global chunk id backward ``step`` holds, for ``SaveScope.LOCAL``.
-
-    Independent of ``send_backward``: :class:`~.backward_chunk_provider._LocalChunkProvider`
-    (and its hybrid / broadcast siblings) re-circulate chunks the same way
-    regardless of how dK/dV are later accumulated.
-
-    NOTE: the ``BROADCAST`` case is unreachable from :func:`accumulate_dkv` --
-    ``ring_backward``'s ``all_reduce_dkv`` shortcut catches every
-    ``send_op == BROADCAST and save_scope == LOCAL`` combination before it gets
-    there, regardless of ``send_backward`` -- so it was previously inert; it's
-    only exercised now via the dropout-seed lookup this function was extracted
-    to also serve.
-    """
+    """Return the global chunk index held at backward ``step`` for ``SaveScope.LOCAL``."""
     match ring_config.send_op:
         case SendOp.HYBRID_P2P | SendOp.HYBRID_BROADCAST | SendOp.HYBRID_ALLTOALL:
             # The chunk sits on node `node_idx - step // gpn` (the inter-node
@@ -83,14 +71,7 @@ def global_chunk_idx_backward(
     ring_group_size: int,
     group: dist.ProcessGroup,
 ) -> int:
-    """Global chunk id that backward ``step`` processes, for any save_scope/send_op.
-
-    ``GLOBAL`` scope: the forward stored ``chunks_to_save`` by global chunk id
-    and :class:`~.backward_chunk_provider._GlobalChunkProvider` looks it up
-    directly, so ``step`` *is* the global chunk id. ``LOCAL`` scope
-    re-circulates chunks around the ring, so the mapping depends on
-    ``send_op`` -- see :func:`_local_scope_global_chunk_idx`.
-    """
+    """Return the global chunk index processed at backward ``step``."""
     if ring_config.save_scope == SaveScope.GLOBAL:
         return step
     return _local_scope_global_chunk_idx(
@@ -120,7 +101,13 @@ def ring_backward(
     base_seed: Optional[int] = None,
     rng_states: Optional[tuple[Optional[torch.Tensor], ...]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Backward pass for ring attention."""
+    """Run the backward pass of ring attention.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Gradients ``(dq, dk, dv)``.
+    """
     b, h, seq_local, d = q.shape
     # Reconcile dtypes before the cores run. Under autocast the forward saves
     # bf16/fp16 tensors (``out``, ``lse`` and the K/V chunks the provider
@@ -239,27 +226,14 @@ def ring_backward(
 # backward: dK/dV accumulation across the ring
 # --------------------------------------------------------------------------- #
 def _use_global_dkv_buffer(ring_config: RingAttentionConfig) -> bool:
-    """Whether dK/dV accumulate into a global-sized buffer + a final all-reduce.
-
-    True for GATHER_DKV always. HYBRID_BROADCAST + LOCAL folds into a
-    local-sized buffer instead (see :func:`_accumulate_dkv_hybrid_broadcast`):
-    an intra-node all-reduce collapses the per-node partials, then the node-sum
-    is relayed to its owning node over the inter-node ring.
-    """
+    """Return whether dK and dV accumulate in a global-sized buffer."""
     return ring_config.send_backward == SendBackward.GATHER_DKV
 
 
 def get_dkv_buffer(
     ring_config: RingAttentionConfig, q: torch.Tensor, ring_group_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Allocate the dK, dV buffers appropriate for the accumulation strategy.
-
-    Global buffer (see :func:`_use_global_dkv_buffer`): one global-sized buffer
-        that every step writes its chunk into at the right offset, all-reduced
-        at the end.
-    Otherwise (SEND_DKV relay): a local-sized buffer that dK/dV are added into,
-        with partial sums P2P-relayed around the ring each step.
-    """
+    """Allocate the dK and dV buffers of the accumulation strategy."""
     if _use_global_dkv_buffer(ring_config):
         shape = [*q.shape[0:2], ring_group_size * q.shape[2], *q.shape[3:]]
     else:
@@ -282,7 +256,7 @@ def accumulate_dkv(
     local_rank: int,
     group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fold this step's locally computed dk_j, dv_j into the running dK, dV."""
+    """Accumulate the dK and dV of one step into the buffers."""
     if not _use_global_dkv_buffer(ring_config):
         if (
             ring_config.send_op == SendOp.HYBRID_BROADCAST
@@ -313,30 +287,25 @@ def _accumulate_dkv_gather(
     seq_local: int,
     global_chunk_idx: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Scatter-add this step's dk, dv into their slot of the global buffer.
-
-    Used when each rank stores the full global size of dk, dv buffers.
+    """Add the dk and dv of one step to their slot in the global buffers.
 
     Parameters
     ----------
-    dk_buf: torch.Tensor
-        Buffer for accumulating dk.
-    dv_buf: torch.Tensor
-        Buffer for accumulating dv.
-    dk_j: torch.Tensor
-        Local result for dk for step j.
-    dv_j: torch.Tensor
-        Local result for dv for step j.
-    seq_local: int
+    dk_buf : torch.Tensor
+        Buffer accumulating dk.
+    dv_buf : torch.Tensor
+        Buffer accumulating dv.
+    dk_j, dv_j : torch.Tensor
+        Gradients of the current step.
+    seq_local : int
         Local sequence length.
-    global_chunk_idx: int
+    global_chunk_idx : int
         Index of the sequence chunk represented by the local gradients.
 
     Returns
     -------
-    dk_buf, dv_buf: torch.Tensor, torch.Tensor
-        Accumulated buffers for dk and dv.
+    tuple[torch.Tensor, torch.Tensor]
+        Updated dk and dv buffers.
     """
     lo, hi = global_chunk_idx * seq_local, (global_chunk_idx + 1) * seq_local
     dk_buf[:, :, lo:hi] += dk_j
@@ -345,13 +314,7 @@ def _accumulate_dkv_gather(
 
 
 def _hybrid_dkv_relay_peers(topo: HybridTopology, step: int) -> tuple[int, int]:
-    """(send_to, recv_from) for relaying a dK/dV partial to its home rank.
-
-    At backward ``step`` this rank holds the gradient for the chunk owned by
-    ``rank_at(node_idx - step // gpn, local_idx + step)`` -- hand it straight to
-    that owner, and receive (from the mirror-image rank) the partial destined
-    for our own chunk.
-    """
+    """Return the ranks to send a dK/dV partial to and receive one from."""
     node_step = step // topo.gpus_per_node
     send_to = topo.rank_at(topo.node_idx - node_step, topo.local_idx + step)
     recv_from = topo.rank_at(topo.node_idx + node_step, topo.local_idx - step)
@@ -367,33 +330,27 @@ def _accumulate_dkv_send(
     step: int,
     group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Send dk and dv to the corresponding rank.
-
-    After a rank computes dk and dv on the chunk of the data that it sees,
-    send the values back to the home rank for accumulation.
+    """Relay dk and dv to the rank owning the chunk.
 
     Parameters
     ----------
-    ring_config: RingAttentionConfig
-        Configuration for ring attention.
-    dk_buf: torch.Tensor
-        Buffer to accumulate dk.
-    dv_buf: torch.Tensor
-        Buffer to accumulate dv.
-    dk_j: torch.Tensor
-        Local result of dk.
-    dv_j: torch.Tensor
-        Local result of dv.
-    step: int
-        Step.
-    group: dist.ProcessGroup
-        Process group for ring attention.
+    ring_config : RingAttentionConfig
+        Ring-attention configuration.
+    dk_buf : torch.Tensor
+        Buffer accumulating dk.
+    dv_buf : torch.Tensor
+        Buffer accumulating dv.
+    dk_j, dv_j : torch.Tensor
+        Gradients of the current step.
+    step : int
+        Current ring step.
+    group : dist.ProcessGroup
+        Process group of the ring.
 
     Returns
     -------
-    dk_buf, dv_buf: torch.Tensor, torch.Tensor
-        Accumulated values of dk and dv.
+    tuple[torch.Tensor, torch.Tensor]
+        Updated dk and dv buffers.
     """
     if step == 0:
         dk_buf += dk_j
@@ -439,16 +396,7 @@ def _accumulate_dkv_hybrid_broadcast(
     step: int,
     group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fold a HYBRID_BROADCAST + LOCAL step's dK/dV into local-sized buffers.
-
-    The intra-node broadcast makes every rank on a node compute a partial for
-    the *same* chunk ``(node_idx - node_step, phase)``, so the ``gpus_per_node``
-    partials are first summed with an intra-node all-reduce. When that chunk
-    lives on another node (``node_step != 0``) the node-sum is relayed to it
-    over the inter-node ring, and the mirror node hands back the partial for our
-    own chunk. Only the chunk owner -- node-local rank ``phase`` -- keeps a
-    partial.
-    """
+    """Accumulate dK and dV of a hybrid broadcast step into local-sized buffers."""
     topo = get_hybrid_topology(group, ring_config.gpus_per_node)
     node_step, phase = divmod(step, topo.gpus_per_node)
     is_owner = topo.local_idx == phase
@@ -491,31 +439,27 @@ def postprocess_dkv(
     seq_local: int,
     group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Postprocess the dk and dv results at the end.
-
-    If global dk, dv values are gathered, we need to perform an all-reduction
-    and final slide to match the per-rank values.
+    """Reduce the global dk and dv buffers and select the local slice.
 
     Parameters
     ----------
-    ring_config: RingAttentionConfig
-        Configuration class for ring attention.
-    dk_buf: torch.Tensor
-        Buffer where the intermediate values of dk are stored.
-    dv_buf: torch.Tensor
-        Buffer where the intermediate values of dv are stored.
-    local_rank: int
-        Local rank within ring group.
-    seq_local: int
-        Length of local sequence.
-    group: dist.ProcessGroup
-        Process group upon which ring attention is computed.
+    ring_config : RingAttentionConfig
+        Ring-attention configuration.
+    dk_buf : torch.Tensor
+        Buffer accumulating dk.
+    dv_buf : torch.Tensor
+        Buffer accumulating dv.
+    local_rank : int
+        Rank within the ring group.
+    seq_local : int
+        Local sequence length.
+    group : dist.ProcessGroup
+        Process group of the ring.
 
     Returns
     -------
-    dk_buf, dv_buf: tuple[torch.Tensor, torch.Tensor]
-        Final results of dk and dv that correspond to each rank.
+    tuple[torch.Tensor, torch.Tensor]
+        Local dk and dv.
     """
     if _use_global_dkv_buffer(ring_config):
         dist.all_reduce(dk_buf, op=dist.ReduceOp.SUM, group=group)

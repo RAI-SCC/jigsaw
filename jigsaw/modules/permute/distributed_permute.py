@@ -1,4 +1,4 @@
-"""Implementation of distributed permutation functions."""
+"""Distributed permutation kernels."""
 
 import torch
 import torch.distributed as dist
@@ -13,24 +13,23 @@ def x_transpose_twoway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched transpose (x_transpose) operation distributed across two processes.
+    """Transpose a batched matrix distributed across two processes.
 
-    Parameters.
+    Parameters
     ----------
     x : torch.Tensor
-        The input tensor.
+        Local input.
     local_rank : int
-        Local model rank.
+        Rank within the model group.
     device : torch.device
-        Device to perform computation on.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    x_transpose: torch.Tensor
-        Local transposed tensor.
+    torch.Tensor
+        Local transposed output.
     """
     mod = local_rank % 2
 
@@ -92,22 +91,23 @@ def x_transpose_fourway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched transpose (x_transpose) operation distributed across four processes.
+    """Transpose a batched matrix distributed across four processes.
 
-    Parameters.
+    Parameters
     ----------
-    X : torch.Tensor
-        Local input tensor to be transposed.
+    x : torch.Tensor
+        Local input.
     local_rank : int
-        Local model rank.
+        Rank within the model group.
     device : torch.device
-        Device to perform computation on.
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    X : torch.Tensor
-        The transposed tensor.
+    torch.Tensor
+        Local transposed output.
     """
     mod = local_rank % 4
     empty = torch.empty(0, device=device, dtype=x.dtype)
@@ -158,22 +158,23 @@ def x_transpose_eightway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched transpose (x_transpose) operation distributed across eight processes.
+    """Transpose a batched matrix distributed across eight processes.
 
-    Parameters.
+    Parameters
     ----------
-    X : torch.Tensor
-        Local input tensor to be transposed.
+    xij : torch.Tensor
+        Local input.
     local_rank : int
-        Local model rank.
+        Rank within the model group.
     device : torch.device
-        Device to perform computation on.
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    X : torch.Tensor
-        The transposed tensor.
+    torch.Tensor
+        Local transposed output.
     """
     mod = local_rank % 8
     empty = torch.empty(0, device=device, dtype=torch.float32)

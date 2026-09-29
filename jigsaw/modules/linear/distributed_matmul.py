@@ -1,4 +1,4 @@
-"""Distributed matrix multiplication implementation."""
+"""Distributed matmul kernels using all-to-all communication."""
 
 from typing import Any, cast
 
@@ -15,24 +15,25 @@ streamz = None
 def fused_xw_xtw_oneway(
     grad_output: torch.Tensor, weight: torch.Tensor, input: torch.Tensor, **kwargs: Any
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Trivially fused calculation to calculate grad_input and grad_weight in backward pass of a linear layer.
+    """Compute the input and weight gradients on a single process.
+
+    The gradients are ``grad_output @ weight`` and ``grad_output.mT @ input``.
 
     Parameters
     ----------
-    grad_output: torch.Tensor
-        Output with respect to the gradient.
-    weight: torch.Tensor
-        Model weights.
-    input: torch.Tensor
-        Model input.
-    kwargs: Any
-        Additional inputs.
+    grad_output : torch.Tensor
+        Gradient of the output.
+    weight : torch.Tensor
+        Local weight matrix.
+    input : torch.Tensor
+        Local input matrix.
+    **kwargs : Any
+        Unused.
 
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor]
-    Gradient with respect to the input and gradient of the weights.
+        Gradients of the input and the weight.
     """
     grad_input = grad_output @ weight
     grad_weight = grad_output.mT @ input
@@ -47,28 +48,29 @@ def fused_xw_xtw_twoway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Fused calculation to calculate grad_input and grad_weight in backward pass of a linear layer.
+    """Compute the input and weight gradients on two processes with all-to-all communication.
+
+    The gradients are ``grad_output @ weight`` and ``grad_output.mT @ input``.
 
     Parameters
     ----------
-    grad_output: torch.Tensor
-        Output with respect to the gradient.
-    weight: torch.Tensor
-        Model weights.
-    input: torch.Tensor
-        Model input.
-    local_rank: int
-        Local model rank.
-    device: torch.device
-        Device upon which computations occur.
-    model_group: dist.ProcessGroup
-        Process group of the domain- and tensor-parallel group of this linear layer.
+    grad_output : torch.Tensor
+        Gradient of the output.
+    weight : torch.Tensor
+        Local weight matrix.
+    input : torch.Tensor
+        Local input matrix.
+    local_rank : int
+        Rank within the model group.
+    device : torch.device
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor]
-    Gradient with respect to the input and gradient of the weights.
+        Gradients of the input and the weight.
     """
     mod = local_rank % 2
     w0, w1 = torch.split(weight, weight.shape[-2] // 2, dim=-2)
@@ -116,8 +118,7 @@ def xw_transpose_twoway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (XWT) multiplication distributed across two processes.
+    """Compute ``x @ w.mT`` on two processes with all-to-all communication.
 
     Parameters
     ----------
@@ -125,16 +126,16 @@ def xw_transpose_twoway(
         Local input matrix.
     wij : torch.Tensor
         Local weight matrix.
-    device : torch.device
-        Device to perform computation on.
     local_rank : int
-        Local local_rank.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Rank within the model group.
+    device : torch.device
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 2
@@ -186,8 +187,7 @@ def xw_twoway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (XW) multiplication distributed across two processes.
+    """Compute ``x @ w`` on two processes with all-to-all communication.
 
     Parameters
     ----------
@@ -195,16 +195,16 @@ def xw_twoway(
         Local input matrix.
     wij : torch.Tensor
         Local weight matrix.
-    device : torch.device
-        Device to perform computation on.
     local_rank : int
-        Global local_rank.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Rank within the model group.
+    device : torch.device
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 2
@@ -242,8 +242,7 @@ def x_transpose_w_twoway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (x_transposeW) multiplication distributed across two processes.
+    """Compute ``x.mT @ w`` on two processes with all-to-all communication.
 
     Parameters
     ----------
@@ -251,16 +250,16 @@ def x_transpose_w_twoway(
         Local input matrix.
     wij : torch.Tensor
         Local weight matrix.
-    device : torch.device
-        The device on which to perform the operations.
     local_rank : int
-        Local model rank.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Rank within the model group.
+    device : torch.device
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 2
@@ -300,8 +299,7 @@ def xw_transpose_fourway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (XWT) multiplication distributed across four processes.
+    """Compute ``x @ w.mT`` on four processes with all-to-all communication.
 
     Parameters
     ----------
@@ -310,15 +308,15 @@ def xw_transpose_fourway(
     wij : torch.Tensor
         Local weight matrix.
     local_rank : int
-        Local model rank.
+        Rank within the model group.
     device : torch.device
-        Device to perform computation on.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 4
@@ -423,8 +421,7 @@ def xw_fourway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (XW) multiplication distributed across four processes.
+    """Compute ``x @ w`` on four processes with all-to-all communication.
 
     Parameters
     ----------
@@ -433,11 +430,11 @@ def xw_fourway(
     wij : torch.Tensor
         Local weight matrix.
     local_rank : int
-        Local model rank.
+        Rank within the model group.
     device : torch.device
-        Device to perform computation on.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
@@ -549,28 +546,29 @@ def fused_xw_xtw_fourway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Fused calculation to calculate grad_input and grad_weight in backward pass of a linear layer.
+    """Compute the input and weight gradients on four processes with all-to-all communication.
+
+    The gradients are ``grad_output @ weight`` and ``grad_output.mT @ input``.
 
     Parameters
     ----------
-    grad_output: torch.Tensor
-        Output with respect to the gradient.
-    weight: torch.Tensor
-        Model weights.
-    input: torch.Tensor
-        Model input.
-    local_rank: int
-        Local model rank.
-    device: torch.device
-        Device upon which computations occur.
-    model_group: dist.ProcessGroup
-        Process group of the domain- and tensor-parallel group of this linear layer.
+    grad_output : torch.Tensor
+        Gradient of the output.
+    weight : torch.Tensor
+        Local weight matrix.
+    input : torch.Tensor
+        Local input matrix.
+    local_rank : int
+        Rank within the model group.
+    device : torch.device
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor]
-    Gradient with respect to the input and gradient of the weights.
+        Gradients of the input and the weight.
     """
     mod = local_rank % 4
     empty = get_empty(device, grad_output.dtype)
@@ -744,8 +742,7 @@ def x_transpose_w_fourway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (x_transposeW) multiplication distributed across four processes.
+    """Compute ``x.mT @ w`` on four processes with all-to-all communication.
 
     Parameters
     ----------
@@ -754,15 +751,15 @@ def x_transpose_w_fourway(
     wij : torch.Tensor
         Local weight matrix.
     local_rank : int
-        Local model rank.
+        Rank within the model group.
     device : torch.device
-        Device to perform computation on.
+        Device of the computation.
     model_group : dist.ProcessGroup
-        Process group for an individual model-parallel instance.
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 4
@@ -870,8 +867,7 @@ def xw_transpose_eightway_(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (XWT) multiplication distributed across four processes.
+    """Compute ``x @ w.mT`` on eight processes with all-to-all communication.
 
     Parameters
     ----------
@@ -880,15 +876,15 @@ def xw_transpose_eightway_(
     wij : torch.Tensor
         Local weight matrix.
     local_rank : int
-        Local model rank.
+        Rank within the model group.
     device : torch.device
-        Device to perform computation on.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 8
@@ -1191,25 +1187,24 @@ def xw_transpose_eightway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (XWT) multiplication distributed across four processes.
+    """Compute ``x @ w.mT`` on eight processes with all-to-all communication.
 
-    Parameters.
+    Parameters
     ----------
     xij : torch.Tensor
         Local input matrix.
     wij : torch.Tensor
         Local weight matrix.
     local_rank : int
-        Local model rank.
+        Rank within the model group.
     device : torch.device
-        Device to perform computation on.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 8
@@ -1511,8 +1506,7 @@ def xw_eightway_(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (XW) multiplication distributed across eight processes.
+    """Compute ``x @ w`` on eight processes with all-to-all communication.
 
     Parameters
     ----------
@@ -1521,15 +1515,15 @@ def xw_eightway_(
     wij : torch.Tensor
         Local weight matrix.
     local_rank : int
-        Local model rank.
+        Rank within the model group.
     device : torch.device
-        Device to perform computation on.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     # mod = rank % 8
@@ -1832,25 +1826,24 @@ def xw_eightway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (XW) multiplication distributed across eight processes.
+    """Compute ``x @ w`` on eight processes with all-to-all communication.
 
-    Parameters.
+    Parameters
     ----------
     xij : torch.Tensor
         Local input matrix.
     wij : torch.Tensor
         Local weight matrix.
     local_rank : int
-        Local model rank.
+        Rank within the model group.
     device : torch.device
-        Device to perform computation on.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 8
@@ -2145,25 +2138,24 @@ def x_transpose_w_eightway_(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (XWT) multiplication distributed across four processes.
+    """Compute ``x.mT @ w`` on eight processes with all-to-all communication.
 
-    Parameters.
+    Parameters
     ----------
     xij : torch.Tensor
         Local input matrix.
     wij : torch.Tensor
         Local weight matrix.
     local_rank : int
-        Local model rank.
+        Rank within the model group.
     device : torch.device
-        Device to perform computation on.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 8
@@ -2452,8 +2444,7 @@ def x_transpose_w_eightway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (x_transposeW) multiplication distributed across eight processes.
+    """Compute ``x.mT @ w`` on eight processes with all-to-all communication.
 
     Parameters
     ----------
@@ -2462,15 +2453,15 @@ def x_transpose_w_eightway(
     wij : torch.Tensor
         Local weight matrix.
     local_rank : int
-        Local model rank.
+        Rank within the model group.
     device : torch.device
-        Device to perform computation on.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 8
@@ -2839,37 +2830,29 @@ def fused_xw_xtw_eightway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Fused calculation of grad_input and grad_weight in the backward pass of a linear layer.
+    """Compute the input and weight gradients on eight processes with all-to-all communication.
 
-    Computes ``grad_input = grad_output @ weight`` (as in :func:`xw_eightway`) and
-    ``grad_weight = grad_output.mT @ input`` (as in :func:`x_transpose_w_eightway`)
-    across eight processes using the ``all_to_all`` collective. Rather than running
-    the two collective kernels back to back, this hand-merged kernel posts the
-    ``all_to_all`` exchanges of *both* operations up front, so the communication of
-    one overlaps the computation of the other. The per-rank exchange patterns and
-    the multi-stream compute schedules are lifted verbatim from the two standalone
-    kernels; only the interleaving is new.
+    The gradients are ``grad_output @ weight`` and ``grad_output.mT @ input``.
 
     Parameters
     ----------
-    grad_output: torch.Tensor
-        Output with respect to the gradient.
-    weight: torch.Tensor
-        Model weights.
-    input: torch.Tensor
-        Model input.
-    local_rank: int
-        Local model rank.
-    device: torch.device
-        Device upon which computations occur.
-    model_group: dist.ProcessGroup
-        Process group of the domain- and tensor-parallel group of this linear layer.
+    grad_output : torch.Tensor
+        Gradient of the output.
+    weight : torch.Tensor
+        Local weight matrix.
+    input : torch.Tensor
+        Local input matrix.
+    local_rank : int
+        Rank within the model group.
+    device : torch.device
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor]
-    Gradient with respect to the input and gradient of the weights.
+        Gradients of the input and the weight.
     """
     mod = local_rank % 8
     empty = get_empty(device, torch.float32)

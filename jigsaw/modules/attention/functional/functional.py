@@ -1,4 +1,4 @@
-"""Ring attention forward-backward implementations."""
+"""Ring attention autograd function."""
 
 from __future__ import annotations
 
@@ -14,18 +14,21 @@ _SEED_MODULUS = 2**31 - 1
 
 
 def combine_dropout_seed(base_seed: int, local_rank: int, global_chunk_idx: int) -> int:
-    """Deterministic per-(rank, global chunk) sub-seed derived from one shared ``base_seed``.
+    """Derive a dropout seed for one (rank, chunk) pair from a base seed.
 
-    Lets the ring's per-chunk dropout core (:mod:`.cores.math`) regenerate the
-    identical mask in the forward and backward loops from three plain integers
-    instead of saving a mask/RNG-state tensor per ring step -- mirroring how
-    the SDPA/TE cores instead thread back the *actual* opaque RNG state their
-    kernels generate (see :func:`.forward.ring_forward` /
-    :func:`.backward.ring_backward`). ``base_seed`` is drawn once per
-    ring-attention call and identifies the pass; ``global_chunk_idx`` -- not
-    the raw ring step -- identifies the (query-owning-rank, key/value chunk)
-    pairing, since forward and backward may visit the same pairing at
-    different loop steps.
+    Parameters
+    ----------
+    base_seed : int
+        Base seed of the ring-attention call.
+    local_rank : int
+        Rank within the ring.
+    global_chunk_idx : int
+        Global index of the key/value chunk.
+
+    Returns
+    -------
+    int
+        Seed of the dropout mask.
     """
     return (
         base_seed ^ (local_rank * 1_000_003) ^ (global_chunk_idx * 999_999_937)
@@ -68,20 +71,10 @@ def _compute_kv(
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class HybridTopology:
-    """Node/rank layout of a 1-D ring split into equal-sized nodes.
+    """Layout of a 1-D ring split into nodes of equal size.
 
-    The ring's ranks (``group.size()`` of them) are cut into ``n_nodes``
-    contiguous nodes of ``gpus_per_node`` ranks each. Ring position ``p``
-    (``0 <= p < group.size()``) owns global sequence chunk ``p`` and lives at
-    ``(p // gpus_per_node, p % gpus_per_node)``. Every peer lookup a hybrid ring
-    needs -- the next rank along the intra-node ring, the next along the
-    inter-node ring, or the rank at an arbitrary ``(node, local)`` -- is a table
-    lookup here, so callers never open-code ``// gpus_per_node`` /
-    ``% gpus_per_node`` arithmetic.
-
-    ``intranode_group`` / ``internode_group`` are the sub-groups containing this
-    rank, provided for collectives (e.g. broadcasts); the P2P ring paths address
-    peers by ring position over the full group instead.
+    Ring position ``p`` owns sequence chunk ``p`` and lives at node
+    ``p // gpus_per_node`` and local index ``p % gpus_per_node``.
     """
 
     n_nodes: int
@@ -94,19 +87,19 @@ class HybridTopology:
 
     @property
     def ring_rank(self) -> int:
-        """Position of this rank in the ring (``node_idx * gpn + local_idx``)."""
+        """Return the position of this rank in the ring."""
         return self.node_idx * self.gpus_per_node + self.local_idx
 
     def rank_at(self, node: int, local: int) -> int:
-        """Ring position at ``(node, local)``, both taken modulo their extent."""
+        """Return the ring position at ``(node, local)``, both taken modulo their extent."""
         return self._grid[node % self.n_nodes][local % self.gpus_per_node]
 
     def intra_peer(self, offset: int) -> int:
-        """Ring position ``offset`` steps along this rank's intra-node ring."""
+        """Return the ring position ``offset`` steps along the intra-node ring."""
         return self.rank_at(self.node_idx, self.local_idx + offset)
 
     def inter_peer(self, offset: int) -> int:
-        """Ring position ``offset`` steps along this rank's inter-node ring."""
+        """Return the ring position ``offset`` steps along the inter-node ring."""
         return self.rank_at(self.node_idx + offset, self.local_idx)
 
 
@@ -114,38 +107,24 @@ _HYBRID_TOPOLOGY_CACHE: dict[tuple[dist.ProcessGroup, int], HybridTopology] = {}
 
 
 def get_hybrid_topology(group: dist.ProcessGroup, gpus_per_node: int) -> HybridTopology:
-    """Build (and cache) the :class:`HybridTopology` for ``group``.
-
-    ``group`` is the ring itself -- typically one dimension of a larger device
-    mesh (e.g. the ``row`` group of a ``(dp, row, col)`` mesh), so the ring's
-    world size is ``group.size()``, *not* the global world size. Ring position
-    ``p`` (``0 <= p < group.size()``) is the rank ``p`` of ``group``; it maps to
-    global rank ``dist.get_process_group_ranks(group)[p]``.
-
-    The intra-/inter-node sub-groups are created with
-    ``use_local_synchronization=True`` so that the rings living at the other mesh
-    coordinates can build their own sub-groups concurrently -- only the members
-    of each sub-group synchronise, so ranks outside this ring never have to enter
-    (or even know about) these ``new_group`` calls. The result is cached per
-    ``(group, gpus_per_node)``; the group object is the key directly so a freed
-    process group can never alias a live one (as ``id(group)`` could).
+    """Build and cache the :class:`HybridTopology` of a ring.
 
     Parameters
     ----------
     group : dist.ProcessGroup
-        The ring's process group (one mesh dimension, or the whole world).
+        Process group of the ring.
     gpus_per_node : int
         Number of consecutive ring ranks that share a node.
 
     Returns
     -------
     HybridTopology
+        Topology of the ring.
 
     Raises
     ------
     ValueError
-        If ``gpus_per_node`` is not positive or the ring size
-        (``group.size()``) is not divisible by ``gpus_per_node``.
+        If ``gpus_per_node`` is not positive or does not divide the ring size.
     """
     key = (group, gpus_per_node)
     cached = _HYBRID_TOPOLOGY_CACHE.get(key)
@@ -200,7 +179,7 @@ def get_hybrid_topology(group: dist.ProcessGroup, gpus_per_node: int) -> HybridT
 
 
 class RingCtx(Protocol):
-    """Protocol for types stored within ctx."""
+    """Attributes stored on the autograd context."""
 
     scale: float
     local_rank: int
@@ -219,7 +198,7 @@ class RingCtx(Protocol):
 # autograd.Function glue
 # --------------------------------------------------------------------------- #
 class RingAttentionFunction(torch.autograd.Function):
-    """Ring Attention autograd function."""
+    """Ring attention autograd function."""
 
     @staticmethod
     def forward(
@@ -245,11 +224,11 @@ class RingAttentionFunction(torch.autograd.Function):
         w_qkv : torch.Tensor
             Fused query, key, and value projection weights.
         scale : float
-            Attention scaling factor.
+            Softmax scale.
         dropout_p : float
-            Attention dropout probability.
+            Dropout probability.
         group : dist.ProcessGroup
-            Distributed process group used for ring communication.
+            Process group of the ring.
         local_rank : int
             Rank within the process group.
         config : RingAttentionConfig
@@ -258,11 +237,8 @@ class RingAttentionFunction(torch.autograd.Function):
         Returns
         -------
         tuple[torch.Tensor, torch.Tensor, tuple]
-            Attention output, log-sum-exp values, saved chunks, the dropout
-            base seed (``None`` if ``dropout_p == 0``), and per-global-chunk
-            RNG state for cores that need it replayed verbatim (``.sdpa`` /
-            ``.te``; all ``None`` for ``.math``, which rederives its mask from
-            the base seed instead -- see :mod:`.cores`).
+            Output, log-sum-exp, saved chunks, dropout base seed (``None``
+            without dropout) and per-chunk RNG states.
         """
         ring_group_size = dist.get_world_size(group)
         from .forward import ring_forward
@@ -356,15 +332,13 @@ class RingAttentionFunction(torch.autograd.Function):
         dout : torch.Tensor
             Gradient of the attention output.
         grad_l : torch.Tensor
-            Gradient placeholder for the non-differentiable log-sum-exp output.
+            Gradient placeholder for the log-sum-exp.
         grad_kv_chunks : list
-            Gradient placeholders for saved non-differentiable chunks.
+            Gradient placeholders for the saved chunks.
         grad_base_seed : None
-            Gradient placeholder for the non-differentiable (and non-tensor)
-            dropout base seed.
+            Gradient placeholder for the dropout base seed.
         grad_rng_states : list
-            Gradient placeholders for the saved (non-differentiable) per-chunk
-            RNG state.
+            Gradient placeholders for the per-chunk RNG states.
 
         Returns
         -------

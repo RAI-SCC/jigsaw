@@ -1,21 +1,4 @@
-"""Input-side spatial halo exchange for the distributed N-D convolution.
-
-The domain is split along one or more of a tensor's spatial axes across the
-matching ``spatial_group``. When ``stride != kernel_size`` neighbouring output
-positions share input positions, so before convolving every rank must pull the
-input positions it is missing from the other ranks (:func:`halo_gather`); the
-backward pass folds the borrowed-position gradients back onto their owners
-(:func:`halo_scatter_add`). The uneven, Gloo-safe all-to-all underneath
-(:func:`exchange_along_axis`) is shared with the transpose halo via
-:mod:`jigsaw.modules.convolution.common.halo`.
-
-Both routines take an ``axis`` argument and operate on that axis directly,
-treating every other axis opaquely, so the same code serves Conv1d
-(``(N, C, L)``) and Conv2d (``(N, C, H, W)``) -- the caller passes the single set
-of split-axis conv parameters (kernel, stride, padding, dilation along that
-axis). A domain split along *several* spatial axes (height *and* width, or
-depth/height/width) is handled by calling the exchange once per split axis.
-"""
+"""Input-side halo exchange of the distributed convolution."""
 
 import torch
 import torch.distributed as dist
@@ -32,16 +15,13 @@ def needed_input_span(
     padding: int,
     dilation: int,
 ) -> tuple[int, int, int, int]:
-    """Input positions rank ``rank`` needs to produce its output block.
+    """Return the input span needed by a rank to compute its output block.
 
-    The global output size along the split axis is divided evenly across the
-    spatial group, so rank ``r`` produces global output positions
-    ``[r * out_local, (r + 1) * out_local)``. Producing them needs global *input*
-    positions (unpadded coordinates, so the left edge can be negative and the
-    right edge can exceed the global size -- those positions are the
-    convolution's zero padding) ``[lo, hi)``.
-
-    Returns ``(lo, hi, need_size, out_local)`` with ``hi - lo == need_size``.
+    Returns
+    -------
+    tuple[int, int, int, int]
+        ``(lo, hi, need_size, out_local)``, where ``[lo, hi)`` are the global
+        input positions in unpadded coordinates.
     """
     extent = dilation * (kernel - 1) + 1  # effective kernel span
     global_in = group_size * local_in_size
@@ -69,15 +49,14 @@ def halo_gather(
     dilation: int,
     axis: int = -1,
 ) -> tuple[torch.Tensor, int]:
-    """Assemble this rank's halo-padded input slice along ``axis``.
+    """Gather the halo-padded input slice along ``axis``.
 
-    Every rank can compute every other rank's needed span locally, so the
-    exchange is a single uneven all-to-all: send each peer the part of my owned
-    positions that lies in *its* span, receive the parts of *my* span that live
-    on the peers. Out-of-bounds positions (the convolution's zero padding) are
-    left as zeros. Operates on ``axis`` directly -- no whole-tensor transpose.
+    Positions outside the global input are zero.
 
-    Returns ``(x_need, out_local)``.
+    Returns
+    -------
+    tuple[torch.Tensor, int]
+        ``(x_need, out_local)``.
     """
     axis %= x_full.dim()
     group_size = spatial_group.size()
@@ -145,16 +124,14 @@ def halo_scatter_add(
     local_in_size: int,
     axis: int = -1,
 ) -> torch.Tensor:
-    """Reverse of :func:`halo_gather`: fold halo-position grads back to owners.
+    """Sum the gradients of halo positions onto their owning ranks.
 
-    ``g_x_need`` is the grad wrt this rank's halo-padded input span along
-    ``axis``. Every input position that was borrowed by several ranks collects a
-    contribution from each, so the reverse exchange *sums* overlapping pieces
-    onto the owning rank. Operates on ``axis`` directly -- no whole-tensor
-    transpose.
+    This is the reverse of :func:`halo_gather`.
 
-    Returns the grad wrt this rank's owned input positions, size
-    ``local_in_size`` along ``axis``.
+    Returns
+    -------
+    torch.Tensor
+        Gradient of the locally owned input positions.
     """
     axis %= g_x_need.dim()
     group_size = spatial_group.size()

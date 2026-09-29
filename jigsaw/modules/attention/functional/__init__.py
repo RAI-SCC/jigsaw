@@ -1,4 +1,4 @@
-"""Functional implementations for distributed attention."""
+"""Functional implementation of ring attention."""
 
 from .backward import ring_backward
 from .forward import ring_forward

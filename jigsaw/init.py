@@ -1,27 +1,8 @@
-"""Shard-aware re-implementation of :mod:`torch.nn.init`.
+"""Shard-aware versions of :mod:`torch.nn.init`.
 
-Every distributed jigsaw layer holds only a *slice* of its weight: the linear
-layer shards both weight axes over the row/column groups, the convolutions shard
-the output-channel axis over the channel group (and replicate over the spatial
-groups). ``torch.nn.init`` infers the fan from ``tensor.shape``, so calling it on
-such a slice keys the distribution off the local shard size and produces a layer
-whose statistics drift from the equivalent non-distributed module.
-
-The initializers here take an explicit ``global_shape`` (or a raw ``fan_in`` /
-``fan_out``) describing the *whole*, unsharded parameter. The fan is computed
-from that; the actual draw still fills only the local tensor. Because the
-per-element distribution is what the fan controls, the concatenation of every
-rank's shard is then distributed exactly as the non-distributed parameter would
-be.
-
-With no ``global_shape`` / ``fan_in`` / ``fan_out`` argument every function is a
-drop-in for its :mod:`torch.nn.init` namesake, so a model can call these
-unconditionally whether or not it ends up sharded.
-
-A jigsaw module exposes ``global_weight_shape`` / ``global_bias_shape`` and a
-``reset_parameters`` method; override that method (or call these helpers with
-``global_shape=module.global_weight_shape``) to change a layer's init the way
-``torch.nn.Module.reset_parameters`` is overridden for ``torch.nn`` layers.
+The initializers take the shape of the unsharded parameter (``global_shape``)
+or explicit fans, so that the fans do not depend on the local shard size.
+Without these arguments they match their :mod:`torch.nn.init` namesakes.
 """
 
 import math
@@ -62,21 +43,19 @@ ShapeLike = Union[torch.Tensor, torch.Size, Sequence[int]]
 
 
 def _as_shape(shape: ShapeLike) -> tuple[int, ...]:
-    """Normalize a tensor / ``Size`` / int-sequence to a plain shape tuple."""
+    """Convert a tensor, ``Size`` or int sequence to a shape tuple."""
     if isinstance(shape, torch.Tensor):
         return tuple(shape.shape)
     return tuple(int(s) for s in shape)
 
 
 def _calculate_fan_in_and_fan_out(shape: ShapeLike) -> tuple[int, int]:
-    """
-    Fan-in / fan-out of a weight, computed exactly as ``torch.nn.init`` does.
+    """Compute ``(fan_in, fan_out)`` of a weight as ``torch.nn.init`` does.
 
     Parameters
     ----------
     shape : torch.Tensor | torch.Size | Sequence[int]
-        The weight, or its shape. Pass the *global* (unsharded) shape to get the
-        fan of the whole parameter rather than of a local shard.
+        Weight or its shape.
 
     Returns
     -------
@@ -105,7 +84,7 @@ def _resolve_fans(
     fan_in: Optional[int],
     fan_out: Optional[int],
 ) -> tuple[int, int]:
-    """Pick the fans from (in order of precedence) explicit args, ``global_shape``, ``tensor``."""
+    """Resolve the fans from explicit arguments, ``global_shape`` or ``tensor``, in that order."""
     if global_shape is not None:
         gi, go = _calculate_fan_in_and_fan_out(global_shape)
     else:
@@ -124,7 +103,7 @@ def _calculate_correct_fan(
     fan_in: Optional[int] = None,
     fan_out: Optional[int] = None,
 ) -> int:
-    """``fan_in`` or ``fan_out`` per ``mode`` ('fan_in' / 'fan_out'), fan source resolved as in :func:`_resolve_fans`."""
+    """Return the fan selected by ``mode``."""
     mode = mode.lower()
     valid_modes = ("fan_in", "fan_out")
     if mode not in valid_modes:
@@ -144,32 +123,25 @@ def kaiming_uniform_(
     fan_in: Optional[int] = None,
     fan_out: Optional[int] = None,
 ) -> torch.Tensor:
-    """
-    Kaiming-uniform init, drawing from a distribution keyed off the *global* fan.
-
-    Identical to :func:`torch.nn.init.kaiming_uniform_` except for the three
-    keyword-only arguments. The tensor is filled in place; only its own elements
-    are written, so on a shard the result is the matching slice of the global
-    Kaiming-uniform draw.
+    """Fill a tensor with the Kaiming-uniform distribution.
 
     Parameters
     ----------
     tensor : torch.Tensor
         Local tensor (shard) to fill in place.
     a : float
-        Negative slope of the rectifier used after this layer (``leaky_relu``).
+        Negative slope of the rectifier used after this layer.
     mode : {'fan_in', 'fan_out'}
-        Whether to preserve the variance in the forward (``fan_in``) or backward
-        (``fan_out``) pass.
+        Fan that preserves the variance in the forward or backward pass.
     nonlinearity : str
         Nonlinearity name for :func:`torch.nn.init.calculate_gain`.
     generator : torch.Generator, optional
         RNG to draw from.
     global_shape : torch.Tensor | torch.Size | Sequence[int], optional
-        Shape of the whole, unsharded weight. When given, the fan is computed
-        from it instead of from ``tensor``.
+        Shape of the unsharded weight. The fans are computed from it instead of
+        from ``tensor``.
     fan_in, fan_out : int, optional
-        Explicit fans, overriding both ``global_shape`` and ``tensor``.
+        Explicit fans, overriding ``global_shape`` and ``tensor``.
 
     Returns
     -------
@@ -197,7 +169,31 @@ def kaiming_normal_(
     fan_in: Optional[int] = None,
     fan_out: Optional[int] = None,
 ) -> torch.Tensor:
-    """Kaiming-normal counterpart of :func:`kaiming_uniform_`; see it for the extra arguments."""
+    """Fill a tensor with the Kaiming-normal distribution.
+
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Local tensor (shard) to fill in place.
+    a : float
+        Negative slope of the rectifier used after this layer.
+    mode : {'fan_in', 'fan_out'}
+        Fan that preserves the variance in the forward or backward pass.
+    nonlinearity : str
+        Nonlinearity name for :func:`torch.nn.init.calculate_gain`.
+    generator : torch.Generator, optional
+        RNG to draw from.
+    global_shape : torch.Tensor | torch.Size | Sequence[int], optional
+        Shape of the unsharded weight. The fans are computed from it instead of
+        from ``tensor``.
+    fan_in, fan_out : int, optional
+        Explicit fans, overriding ``global_shape`` and ``tensor``.
+
+    Returns
+    -------
+    torch.Tensor
+        ``tensor``, filled in place.
+    """
     if tensor.numel() == 0:
         return tensor
     fan = _calculate_correct_fan(tensor, mode, global_shape, fan_in, fan_out)
@@ -216,11 +212,26 @@ def xavier_uniform_(
     fan_in: Optional[int] = None,
     fan_out: Optional[int] = None,
 ) -> torch.Tensor:
-    """
-    Xavier/Glorot-uniform init keyed off the *global* fans.
+    """Fill a tensor with the Xavier-uniform distribution.
 
-    Identical to :func:`torch.nn.init.xavier_uniform_` bar the keyword-only
-    ``global_shape`` / ``fan_in`` / ``fan_out`` (see :func:`kaiming_uniform_`).
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Local tensor (shard) to fill in place.
+    gain : float
+        Scaling factor.
+    generator : torch.Generator, optional
+        RNG to draw from.
+    global_shape : torch.Tensor | torch.Size | Sequence[int], optional
+        Shape of the unsharded weight. The fans are computed from it instead of
+        from ``tensor``.
+    fan_in, fan_out : int, optional
+        Explicit fans, overriding ``global_shape`` and ``tensor``.
+
+    Returns
+    -------
+    torch.Tensor
+        ``tensor``, filled in place.
     """
     if tensor.numel() == 0:
         return tensor
@@ -240,7 +251,27 @@ def xavier_normal_(
     fan_in: Optional[int] = None,
     fan_out: Optional[int] = None,
 ) -> torch.Tensor:
-    """Xavier-normal counterpart of :func:`xavier_uniform_`."""
+    """Fill a tensor with the Xavier-normal distribution.
+
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Local tensor (shard) to fill in place.
+    gain : float
+        Scaling factor.
+    generator : torch.Generator, optional
+        RNG to draw from.
+    global_shape : torch.Tensor | torch.Size | Sequence[int], optional
+        Shape of the unsharded weight. The fans are computed from it instead of
+        from ``tensor``.
+    fan_in, fan_out : int, optional
+        Explicit fans, overriding ``global_shape`` and ``tensor``.
+
+    Returns
+    -------
+    torch.Tensor
+        ``tensor``, filled in place.
+    """
     if tensor.numel() == 0:
         return tensor
     fi, fo = _resolve_fans(tensor, global_shape, fan_in, fan_out)

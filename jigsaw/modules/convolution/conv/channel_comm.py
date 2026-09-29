@@ -1,31 +1,12 @@
-"""Channel-parallel input exchange for the distributed 1/2/3-D convolutions.
+"""Channel-parallel input exchange of the distributed convolution.
 
-Each rank owns a contiguous ``C_in / G`` slice of the input channels and the
-matching slice of the weight's *output* channels (the weight still carries every
-input channel). Three interchangeable strategies reassemble the full-channel
-input and produce this rank's output-channel slice, selected by
-``config.channel_comm``:
+The input channels are split over the channel group. The strategy
+``config.channel_comm`` selects how the full-channel input is assembled:
 
-* ``"all_gather"`` -- gather every rank's input-channel slice in one shot, then
-  run a single fused convolution. Simple and fast, but its transient memory peak
-  is ``~2 * C_in`` (the gather list plus the concatenated copy).
-* ``"p2p"`` -- circulate the slices one hop at a time with batched ``isend`` /
-  ``irecv`` (:func:`jigsaw.comm.comm_1d_p2p`), overlapping each partial
-  convolution with the next transfer, keeping the peak to ``C_in`` plus two
-  slice buffers.
-* ``"all_to_all"`` -- the same ring schedule, each hop a masked all-to-all
-  (:func:`jigsaw.comm.comm_1d_alltoall`): an empty tensor goes to every rank
-  except the ring neighbour. Needs a backend with all-to-all support (NCCL);
-  gloo has none.
-
-Every routine is dimension-agnostic: for an ``n_spatial_dims``-D convolution the
-input-channel axis sits at ``-(n_spatial_dims + 1)`` in both ``x`` and ``w``
-(leading batch / vmap axes and trailing kernel axes stay opaque). The halo
-regime passes a ``halo_fn`` that pulls the missing split-axis positions from the
-spatial group before each partial convolution; the no-halo regime leaves it
-``None``. Strategy resolution and the per-hop transport / gather primitives are
-shared with the transpose driver via
-:mod:`jigsaw.modules.convolution.common.channel_comm`.
+* ``"all_gather"`` gathers all slices at once.
+* ``"p2p"`` circulates the slices in a ring with batched ``isend`` and
+  ``irecv``, overlapping each partial convolution with the next transfer.
+* ``"all_to_all"`` uses the same ring with masked all-to-all hops (NCCL only).
 """
 
 from typing import Any, Callable, Optional
@@ -55,11 +36,12 @@ def _over_channels_all_gather(
     channel_dim: int,
     halo_fn: Optional[HaloFn],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``channel_comm="all_gather"``: gather every slice, then one fused conv.
+    """Gather all channel slices, then convolve once.
 
-    Returns ``(y, x_full)`` -- ``x_full`` is the full-channel input (additionally
-    halo-padded along the split axis when ``halo_fn`` is given) kept for the
-    backward pass.
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Output and the full-channel input kept for the backward pass.
     """
     x_full = gather_full_channels(x.contiguous(), channel_group, channel_dim)
     if halo_fn is not None:
@@ -83,16 +65,14 @@ def _over_channels_streaming(
     halo_fn: Optional[HaloFn],
     hop_fn: _HopFn,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Ring channel-parallel conv; ``hop_fn`` is the per-step transport.
+    """Circulate the channel slices in a ring and convolve each one.
 
-    The channel slices travel one hop per step around the ring while each partial
-    convolution overlaps the next transfer. When ``halo_fn`` is given every slab
-    is first halo-gathered along the split axis, so the spatial exchange happens
-    once per channel slab rather than once for the whole full-channel tensor.
+    ``hop_fn`` is the communication function of one hop.
 
-    Returns ``(y, x_full)`` where ``x_full`` is the full-channel input (halo-
-    padded when ``halo_fn`` is given), reassembled slab by slab, kept for the
-    backward pass.
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Output and the full-channel input kept for the backward pass.
     """
     group_size = channel_group.size()
     rank = channel_group.rank()
@@ -160,13 +140,12 @@ def _over_channels_local(
     conv_func: ConvFn,
     halo_fn: Optional[HaloFn],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """No channel exchange: convolve this rank's channel shard directly.
+    """Convolve the local channel shard without channel communication.
 
-    Used when the channel group is size one, or when it owns whole conv-groups
-    (``conv_kwargs["groups"]`` carries ``groups_local``). ``w`` is this rank's
-    output-channel shard and already carries only the input channels it needs, so
-    there is nothing to gather. Returns ``(y, x_prepared)`` -- ``x_prepared`` is
-    the (halo-padded, in the halo regime) shard kept for the backward pass.
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Output and the input shard kept for the backward pass.
     """
     span = x.contiguous()
     if halo_fn is not None:
@@ -191,15 +170,15 @@ def over_channels(
     halo_fn: Optional[HaloFn] = None,
     local: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Channel-parallel convolution for any ``channel_comm`` and dimensionality.
+    """Convolve over the channel-parallel group with the configured strategy.
 
-    ``conv_kwargs`` holds ``stride`` / ``padding`` / ``dilation`` (and ``groups``)
-    for ``conv_func``; in the halo regime the split-axis padding is already
-    materialised into the ``halo_fn`` output, so pass ``0`` for that axis. When
-    ``local`` is set (this rank owns whole conv-groups) or the channel group is
-    size one, no exchange happens -- see :func:`_over_channels_local`. Otherwise
-    all strategies return the same ``(y, x_full)`` -- see
-    :func:`_over_channels_all_gather` / :func:`_over_channels_streaming`.
+    ``conv_kwargs`` holds the arguments of ``conv_func``. In the halo case the
+    padding of the split axis is applied by ``halo_fn`` and must be ``0`` here.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Output and the input kept for the backward pass.
     """
     channel_dim = -(n_spatial_dims + 1)
     if local or channel_group.size() == 1:

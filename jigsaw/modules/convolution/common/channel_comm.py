@@ -1,15 +1,4 @@
-"""Channel-parallel primitives shared by the distributed conv / conv-transpose kernels.
-
-Each rank owns a contiguous ``C_in / G`` slice of the input channels and the
-matching slice of the weight's output channels. The strategy that reassembles the
-full-channel input -- ``"all_gather"`` (one shot), ``"p2p"`` (batched ``isend`` /
-``irecv`` ring) or ``"all_to_all"`` (masked all-to-all ring) -- is selected by
-``config.channel_comm``; the streaming drivers live in
-:mod:`jigsaw.modules.convolution.conv.channel_comm` /
-:mod:`jigsaw.modules.convolution.conv_transpose.channel_comm`. This module holds
-the strategy resolution, the per-hop transport lookup, the full-channel gather and
-the weight input-channel slicer they share.
-"""
+"""Channel-parallel primitives of the convolution kernels."""
 
 from typing import Callable, Optional
 
@@ -36,10 +25,9 @@ _CHANNEL_HOP_FNS: dict[str, _HopFn] = {
 
 
 def resolve_channel_comm(channel_comm: str, device: torch.device) -> str:
-    """Resolve ``"auto"`` from ``device`` and validate the result.
+    """Resolve the channel communication strategy.
 
-    ``"auto"`` -> ``"all_to_all"`` on CUDA (NCCL has a real all-to-all),
-    ``"p2p"`` (batched ``isend`` / ``irecv``) everywhere else.
+    ``"auto"`` resolves to ``"all_to_all"`` on CUDA and ``"p2p"`` otherwise.
     """
     if channel_comm == "auto":
         channel_comm = "all_to_all" if device.type == "cuda" else "p2p"
@@ -54,25 +42,22 @@ def resolve_channel_comm(channel_comm: str, device: torch.device) -> str:
 def resolve_conv_groups(
     groups: int, in_channels: int, out_channels: int, channel_group_size: int
 ) -> tuple[bool, int]:
-    """Validate ``groups`` against the channel-parallel split and resolve the regime.
+    """Validate ``groups`` against the channel group size ``G``.
 
-    A grouped convolution only mixes channels *within* a group, so once the
-    channel-parallel group owns whole conv-groups the convolution needs no
-    cross-rank channel exchange at all -- every rank runs a plain (grouped) native
-    conv on its own channel shard. That holds exactly when ``groups`` is a
-    multiple of the channel-parallel group size ``G`` (``G == 1`` included).
+    Returns
+    -------
+    channel_local : bool
+        Whether ``groups`` is a multiple of ``G``, so that each rank convolves
+        its own channels without channel communication.
+    groups_local : int
+        Number of groups of the local convolution.
 
-    Returns ``(channel_local, groups_local)``:
-
-    * ``channel_local`` -- ``True`` when ``groups % G == 0``: the forward/backward
-      run entirely on this rank's channel shard, with ``groups_local`` groups and
-      no channel-group communication. ``False`` only for ``groups == 1`` with
-      ``G > 1`` -- the historical full-channel-gather path.
-    * ``groups_local`` -- the ``groups=`` value the local (sharded) native conv is
-      called with: ``groups // G`` in the local regime, ``1`` in the gather one.
-
-    ``groups > 1`` that is not a multiple of ``G`` (so several channel ranks would
-    share one conv-group) is not implemented.
+    Raises
+    ------
+    ValueError
+        If ``groups`` is invalid or does not divide the channel counts.
+    NotImplementedError
+        If ``groups > 1`` is not a multiple of ``G``.
     """
     if groups < 1:
         raise ValueError(f"groups must be >= 1, got {groups}")
@@ -93,10 +78,12 @@ def resolve_conv_groups(
 
 
 def _resolve_channel_hop(channel_comm: str, channel_group: dist.ProcessGroup) -> _HopFn:
-    """Per-hop transport for a streaming ``channel_comm`` (``"p2p"`` / ``"all_to_all"``).
+    """Return the communication function of a streaming ``channel_comm``.
 
-    ``"all_to_all"`` needs a backend with all-to-all support; gloo has none, so it
-    raises there -- pass ``"p2p"`` instead.
+    Raises
+    ------
+    RuntimeError
+        If ``"all_to_all"`` is requested on a gloo group.
     """
     if channel_comm == "all_to_all" and dist.get_backend(channel_group) == "gloo":
         raise RuntimeError(
@@ -109,12 +96,10 @@ def _resolve_channel_hop(channel_comm: str, channel_group: dist.ProcessGroup) ->
 def gather_full_channels(
     x: torch.Tensor, channel_group: dist.ProcessGroup, channel_dim: int
 ) -> torch.Tensor:
-    """All-gather the channel-parallel input slices into a full-channel tensor.
+    """All-gather the channel slices into a full-channel tensor.
 
-    Each rank owns a contiguous ``C_in / G`` slice of the input channels; the
-    group all-gathers them and concatenates along ``channel_dim``. This rank's
-    own slice is spliced back in so it stays wired into the autograd graph.
-    Group size one is the identity.
+    The local slice is kept in the autograd graph. A group of size one is the
+    identity.
     """
     group_size = channel_group.size()
     if group_size == 1:
@@ -130,5 +115,5 @@ def gather_full_channels(
 def _in_channel_block(
     w: torch.Tensor, channel_dim: int, block: int, width: int
 ) -> torch.Tensor:
-    """Contiguous ``width``-wide input-channel block ``block`` of the weight."""
+    """Return input-channel block ``block`` of the weight."""
     return w.narrow(channel_dim, block * width, width).contiguous()

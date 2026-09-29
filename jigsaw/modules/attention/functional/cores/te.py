@@ -1,28 +1,7 @@
-"""TransformerEngine fused-attention core for the ring inner step.
+"""TransformerEngine fused-attention core for the ring's inner attention.
 
-The ring's online-softmax merge (:func:`..forward._attend_step`) needs a per-chunk
-log-sum-exp from every inner attention call, and its backward
-(:func:`..backward.ring_backward`) recomputes ``dQ/dK/dV`` from the *global* output
-and LSE. ``te.DotProductAttention`` returns only the output, so this module drives
-TransformerEngine's cuDNN fused-attention kernels directly via
-``fused_attn_fwd`` / ``fused_attn_bwd``, whose ``aux_ctx_tensors[0]`` is the
-softmax LSE.
-
-Scope: non-FP8, no bias, no mask, ``bshd`` layout. Tensors follow the ring's
-``(b, h, s, d)`` convention on the way in and out; LSE is ``(b, h, s)``.
-
-Dropout replay follows the same strategy as :mod:`.sdpa`: cuDNN generates its
-own opaque RNG state internally (``aux_ctx_tensors[1]`` from
-``fused_attn_fwd``) rather than accepting a caller-supplied seed, so this core
-threads that state back verbatim as ``rng_state`` for :func:`backward` to
-replay, instead of rederiving a mask from an int like :mod:`.math` does.
-
-Covered by the ``te_required`` + ``gpu_required`` ring parity test. The
-dropout path is exercised by
-``tests/modules/attention/test_dropout.py::TestSdpaTeCoreDropoutReplay``,
-which recovers the opaque cuDNN mask from the forward output and checks that
-:func:`backward` replays it (verified against transformer_engine 2.12 on an
-NVIDIA A100).
+Calls ``fused_attn_fwd`` and ``fused_attn_bwd`` directly to obtain the
+log-sum-exp. Supports no bias, no mask and no FP8.
 """
 
 from __future__ import annotations
@@ -54,7 +33,7 @@ _LAYOUT = "bshd_bshd_bshd"
 
 
 def _full_cu_seqlens(batch: int, seqlen: int, device: torch.device) -> torch.Tensor:
-    """``[0, s, 2s, ..., b*s]`` int32 offsets for an unpadded ``bshd`` batch."""
+    """Return the ``int32`` cumulative sequence lengths of an unpadded batch."""
     return torch.arange(
         0, (batch + 1) * seqlen, seqlen, dtype=torch.int32, device=device
     )
@@ -69,7 +48,7 @@ def _fused_attn_backend(
     head_dim: int,
     dropout_p: float,
 ) -> "tex.NVTE_Fused_Attn_Backend":
-    """Ask cuDNN which fused-attention sub-backend serves this problem shape."""
+    """Return the cuDNN fused-attention sub-backend for a problem shape."""
     backend = tex.get_fused_attn_backend(
         is_training,
         TE_DType[dtype],
@@ -108,11 +87,27 @@ def forward(
     dropout_p: float,
     seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    """TE fused attention forward.
+    """Compute TE fused attention.
 
-    Returns ``(out (b,h,s,d), logsumexp (b,h,s), rng_state)`` -- ``rng_state``
-    is cuDNN's own opaque dropout RNG state (``None`` when ``dropout_p == 0``),
-    threaded back for :func:`backward` to replay (see module docstring).
+    Parameters
+    ----------
+    q, k, v : torch.Tensor
+        Query, key and value, shaped ``(b, h, s, d)``.
+    scale : float
+        Softmax scale.
+    dropout_p : float
+        Dropout probability.
+    seed : int, optional
+        Unused.
+
+    Returns
+    -------
+    out : torch.Tensor
+        Attention output.
+    logsumexp : torch.Tensor
+        Log-sum-exp of the scores.
+    rng_state : torch.Tensor | None
+        Dropout RNG state of the kernel, ``None`` without dropout.
     """
     b, h, s_q, d = q.shape
     s_kv = k.shape[2]
@@ -173,15 +168,31 @@ def backward(
     rng_state: Optional[torch.Tensor] = None,
     **__: object,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """TE fused attention backward from the saved (global) ``out`` / ``logsumexp``.
+    """Compute the TE fused-attention gradients.
 
-    ``fused_attn_bwd`` recomputes ``S = scale * QK^T``, ``P = exp(S - lse)`` and
-    the dot-product-attention gradients using the passed ``o`` and ``lse``; with
-    the ring's globally normalised ``out`` / ``lse`` this yields the correct
-    per-chunk ``dQ/dK/dV``. ``rng_state`` -- cuDNN's own dropout RNG state,
-    threaded back from this same chunk's :func:`forward` call -- reproduces the
-    identical dropout mask; ``None`` (the ``dropout_p == 0`` case) falls back
-    to a placeholder, matching cuDNN's own "unused" convention for no-dropout.
+    Parameters
+    ----------
+    grad_out : torch.Tensor
+        Gradient of the output.
+    q, k, v : torch.Tensor
+        Query, key and value, shaped ``(b, h, s, d)``.
+    out : torch.Tensor
+        Saved attention output.
+    logsumexp : torch.Tensor
+        Saved log-sum-exp.
+    scale : float
+        Softmax scale.
+    dropout_p : float
+        Dropout probability.
+    seed : int, optional
+        Unused.
+    rng_state : torch.Tensor, optional
+        Dropout RNG state returned by :func:`forward`.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Gradients ``(dq, dk, dv)``.
     """
     b, h, s_q, d = q.shape
     s_kv = k.shape[2]

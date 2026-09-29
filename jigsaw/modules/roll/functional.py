@@ -1,4 +1,4 @@
-"""Autograd definition for roll functions."""
+"""Autograd function of the distributed roll."""
 
 from typing import Any, Optional, Protocol, cast
 
@@ -10,7 +10,7 @@ from .config import RollConfig
 
 
 class RollCtx(Protocol):
-    """Protocol for types stored within ctx."""
+    """Attributes stored on the autograd context."""
 
     saved_tensors: tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]
     local_rank: int
@@ -23,7 +23,7 @@ class RollCtx(Protocol):
 
 
 class RollFunction(torch.autograd.Function):
-    """Autograd wrapper for distributed roll over an arbitrary process mesh."""
+    """Autograd function of the distributed roll."""
 
     @staticmethod
     def forward(
@@ -35,7 +35,30 @@ class RollFunction(torch.autograd.Function):
         empty: torch.Tensor,
         config: RollConfig,
     ) -> torch.Tensor:
-        """Forward pass of distributed roll."""
+        """Roll the local tensor and exchange the halos.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local tensor.
+        shifts : tuple[int, ...]
+            Shift along each dimension of ``dims``.
+        dims : tuple[int, ...]
+            Dimensions to roll.
+        distributed_dims : tuple[int, ...]
+            Dimensions across which ``x`` is partitioned.
+        spatial_groups : tuple[dist.ProcessGroup, ...]
+            Process group of each entry of ``distributed_dims``.
+        empty : torch.Tensor
+            Placeholder tensor for ranks that exchange no data.
+        config : RollConfig
+            Kernel selection.
+
+        Returns
+        -------
+        torch.Tensor
+            Rolled local tensor.
+        """
         return dist_roll.distributed_roll(
             x,
             shifts,
@@ -60,7 +83,7 @@ class RollFunction(torch.autograd.Function):
         ],
         output: torch.Tensor,
     ) -> None:
-        """Context for roll function."""
+        """Save the tensors and metadata for the backward pass."""
         _, shifts, dims, distributed_dims, spatial_groups, empty, config = inputs
         c = cast(RollCtx, ctx)
         c.shifts = shifts
@@ -74,7 +97,21 @@ class RollFunction(torch.autograd.Function):
     def backward(
         ctx: RollCtx, grad_output: torch.Tensor
     ) -> tuple[torch.Tensor, None, None, None, None, None, None]:
-        """Backward pass of distributed roll."""
+        """Compute the gradient of the distributed roll.
+
+        Parameters
+        ----------
+        ctx : RollCtx
+            Autograd context.
+        grad_output : torch.Tensor
+            Gradient of the output.
+
+        Returns
+        -------
+        tuple[torch.Tensor, None, None, None, None, None, None]
+            Gradient of the input, followed by ``None`` for the non-differentiable
+            arguments.
+        """
         neg_shifts = tuple(-s for s in ctx.shifts)
         grad_input = dist_roll.distributed_roll(
             grad_output,
@@ -99,7 +136,7 @@ class RollFunction(torch.autograd.Function):
         empty: torch.Tensor,
         config: RollConfig,
     ) -> tuple[torch.Tensor, int]:
-        """Vmap for dealing with roll operations."""
+        """Batching rule for ``torch.vmap``."""
         out = RollFunction.apply(
             x, shifts, dims, distributed_dims, spatial_groups, empty, config
         )

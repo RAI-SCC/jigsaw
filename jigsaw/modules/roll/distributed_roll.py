@@ -1,4 +1,4 @@
-"""Implementation of distributed roll functions."""
+"""Distributed roll kernels."""
 
 from typing import Callable, Tuple
 
@@ -14,29 +14,32 @@ def exchange_halo_1d(
     empty: torch.Tensor,
     comm_halo_1d_fn: Callable,
 ) -> torch.Tensor:
-    """Exchange a halo of `window_size` along tensor `dim` over a 1D process group.
+    """Exchange a halo along one dimension of a tensor.
 
-    Positive window_size: send leading slice to rank-1, receive into leading slice from rank+1.
-    Negative window_size: send trailing slice to rank+1, receive into trailing slice from rank-1.
+    For a positive ``window_size`` the leading slice is sent to the previous rank and
+    replaced by the slice received from the next rank. For a negative ``window_size``
+    the trailing slice is sent to the next rank and replaced by the slice received
+    from the previous rank.
 
     Parameters
     ----------
-    x: torch.Tensor
-        Data tensor.
-    dim: int
-        Dimension whetere the data should be exchanged
-    window_size: int
-        Size of halo to be communicated.
-    group: dist.ProcessGroup
-        Process group where communication occurs.
-    empty: torch.Tensor
-        Empty tensor for computation reasons.
-    comm_halo_1d_fn: Callable
-        Relevant function to communicate the halo.
+    x : torch.Tensor
+        Local tensor, modified in place.
+    dim : int
+        Dimension along which the halo is exchanged.
+    window_size : int
+        Signed size of the halo.
+    group : dist.ProcessGroup
+        Process group along which the halo is exchanged.
+    empty : torch.Tensor
+        Unused.
+    comm_halo_1d_fn : Callable
+        Function performing the communication.
 
     Returns
     -------
-        Data with halo already appended.
+    torch.Tensor
+        ``x`` with the received halo.
     """
     if window_size == 0:
         return x
@@ -70,33 +73,34 @@ def distributed_roll(
     empty: torch.Tensor,
     exchange_halo_1d_fn: Callable,
 ) -> torch.Tensor:
-    """
-    Distributed roll function.
-
-    Roll `x` by `shifts` along `dims`; for each dim in `distributed_dims`,
-    exchange a halo on the corresponding process group.
+    """Roll a tensor and exchange the halos of its distributed dimensions.
 
     Parameters
     ----------
-    x: torch.Tensor
-        Data to roll.
-    shifts: Tuple[int, ...]
-        The number of places by which the elements of the tensor are shifted. If shifts is a tuple, dims must be a tuple of the same size, and each dimension will be rolled by the corresponding value.
-    dims: Tuple[int, ...]
-        Axes along which to roll.
-    distributed_dims: list[int]
-        Axes to roll, upon which the data is spatially distributed
-    spatial_process_groups: list[dist.ProcessGroup]
-        Corresponding process groups to distributed_dims.
-    empty: torch.Tensor
-        Empty tensor for computation purposes.
-    exchange_halo_1d_fn: Callable
-        Communication function for given backend.
+    x : torch.Tensor
+        Local tensor.
+    shifts : tuple[int, ...]
+        Shift along each dimension of ``dims``.
+    dims : tuple[int, ...]
+        Dimensions to roll.
+    distributed_dims : list[int]
+        Dimensions across which ``x`` is partitioned. Each must appear in ``dims``.
+    spatial_process_groups : list[dist.ProcessGroup]
+        Process group of each entry of ``distributed_dims``.
+    empty : torch.Tensor
+        Passed on to :func:`exchange_halo_1d`, which does not use it.
+    exchange_halo_1d_fn : Callable
+        Function performing the communication of a halo.
 
     Returns
     -------
-    x: torch.Tensor
-        Rolled tensor.
+    torch.Tensor
+        Rolled local tensor.
+
+    Raises
+    ------
+    ValueError
+        If an entry of ``distributed_dims`` is not in ``dims``.
     """
     x = torch.roll(x, shifts=shifts, dims=dims)
 

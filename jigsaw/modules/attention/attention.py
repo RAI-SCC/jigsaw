@@ -1,4 +1,4 @@
-"""Distributed attention modules."""
+"""Attention modules."""
 
 import warnings
 from typing import Any, Callable, Optional, cast
@@ -20,16 +20,7 @@ try:
     def _capture_rng_state(
         device: torch.device,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Snapshot the ambient RNG so a later recompute can replay it exactly.
-
-        ``TransformerEngineAttention.backward`` recomputes ``attn(q, k, v)``
-        from scratch to get an autograd graph to differentiate; if ``attn``
-        applies dropout, that recompute must draw the *same* mask as the
-        original forward call, not a fresh one, or the gradient corresponds to
-        a different dropout mask than the one that actually produced the
-        forward output. Mirrors ``torch.utils.checkpoint``'s own save/restore
-        of CPU + per-device CUDA RNG state around a recompute.
-        """
+        """Return the CPU and CUDA RNG states, so that a recompute can replay them."""
         cpu_state = torch.get_rng_state()
         cuda_state = torch.cuda.get_rng_state(device) if device.type == "cuda" else None
         return cpu_state, cuda_state
@@ -43,25 +34,11 @@ try:
             torch.cuda.set_rng_state(cuda_state, device)
 
     class TransformerEngineAttention(torch.autograd.Function):
-        """Autograd wrapper around ``te.DotProductAttention`` that supports ``torch.vmap``.
+        """Autograd function around ``te.DotProductAttention`` supporting ``torch.vmap``.
 
-        ``transformer_engine``'s fused attention kernels are opaque C++/CUDA extensions
-        that do not register a batching rule, so calling them inside ``torch.vmap``
-        (as ``torch_blue`` does for Bayesian sampling) fails.
-
-        By routing the call through a custom ``autograd.Function`` with a ``vmap``
-        staticmethod we get full control over what happens under vmap: we simply fold the
-        vmapped (samples) dimension into the batch dimension, run the kernel once as a
-        *normal, un-vmapped* forward, then unfold the result. Outside of vmap the function
-        is a thin pass-through to ``attn``.
-
-        The dropout-replay path (``rng_state``) is covered by
-        ``tests/modules/attention/test_dropout.py::TestTeAttnDropoutReplay``
-        (``te_required`` + ``gpu_required``): restoring the captured state makes
-        the backward recompute reproduce the forward mask bit-for-bit, its
-        gradients match autograd through that replayed forward, and the ambient
-        RNG stream is left untouched (verified against transformer_engine 2.12
-        on an NVIDIA A100).
+        Under ``torch.vmap`` the vmapped dimension is folded into the batch
+        dimension. The RNG state is restored in the backward recompute so that
+        dropout masks match.
         """
 
         @staticmethod
@@ -76,18 +53,12 @@ try:
 
             Parameters
             ----------
-            q, k, v: torch.Tensor
-                Query/key/value tensors in ``bshd`` format
-                (``[batch, seq, heads, head_dim]``).
-            attn: te.DotProductAttention
-                The transformer-engine attention module to call.
-            rng_state: tuple[torch.Tensor, torch.Tensor | None]
-                RNG snapshot captured just before this call (by
-                :meth:`DistributedAttention._transformer_attn_core`), so
-                ``backward``'s recompute can replay the identical dropout mask
-                (see :func:`_capture_rng_state`). Not itself used here --
-                threaded through only so :meth:`setup_context` can stash it on
-                ``ctx``.
+            q, k, v : torch.Tensor
+                Query, key and value in ``bshd`` format.
+            attn : te.DotProductAttention
+                Attention module to call.
+            rng_state : tuple[torch.Tensor, torch.Tensor | None]
+                RNG state captured before the call, for the backward recompute.
 
             Returns
             -------
@@ -99,7 +70,7 @@ try:
 
         @staticmethod
         def setup_context(ctx: Any, inputs: tuple, output: torch.Tensor) -> None:
-            """No context is needed; gradients flow through ``attn`` itself."""
+            """Do nothing; gradients flow through ``attn``."""
             return None
 
         @staticmethod
@@ -112,7 +83,7 @@ try:
             attn: "te.DotProductAttention",
             rng_state: tuple[torch.Tensor, Optional[torch.Tensor]],
         ) -> tuple[torch.Tensor, int]:
-            """Batching rule: fold the vmapped dimension into the batch dimension."""
+            """Fold the vmapped dimension into the batch dimension."""
             q_bdim, k_bdim, v_bdim = in_dims[0], in_dims[1], in_dims[2]
 
             # Move the vmapped dimension to the front for each tensor.
@@ -151,17 +122,20 @@ except ModuleNotFoundError:
 
 
 def attn_core_dtype(x: torch.Tensor) -> torch.dtype:
-    """Dtype to run the attention core (q/k/v / SDPA / TE) in.
+    """Return the dtype of the attention core.
 
-    * Under autocast: the autocast dtype, so an ``autocast(float16)`` region
-      stays fp16 instead of being silently forced to bf16.
-    * Otherwise on CUDA: bf16, so the SDPA / TE flash kernel stays eligible --
-      it rejects fp32 -- instead of dropping to the slower tf32/fp32 math path.
-    * On CPU (no flash kernel): keep the incoming dtype; the SDPA math backend
-      handles fp32 directly.
+    This is the autocast dtype under autocast, bf16 on CUDA and the input dtype
+    otherwise.
 
-    Shared by :class:`DistributedAttention` and the serial :class:`Attention` so
-    ``convert_to_jigsaw`` parity holds.
+    Parameters
+    ----------
+    x : torch.Tensor
+        Input tensor.
+
+    Returns
+    -------
+    torch.dtype
+        Dtype of the attention core.
     """
     if torch.is_autocast_enabled(x.device.type):
         return torch.get_autocast_dtype(x.device.type)
@@ -171,7 +145,7 @@ def attn_core_dtype(x: torch.Tensor) -> torch.dtype:
 
 
 class DistributedAttention(torch.nn.Module):
-    """Distributed attention."""
+    """Distributed multi-head attention."""
 
     # type hints
     qkv: torch.nn.Linear | linear.DistributedXWT
@@ -194,23 +168,41 @@ class DistributedAttention(torch.nn.Module):
         dtype: torch.dtype = torch.float32,
         config: Optional[attention_config.RingAttentionConfig] = None,
     ):
-        """
+        """Initialize the module.
 
-        Torch Module to perform distributed multi-headed attention.
-
-        x_features: int
-            global number of x features
-        embed_dim: int
-            global embedding dimension
-        output_dim: int
-            global
-        ring: bool
-            Run ring (sequence-parallel) attention over ``spatial_group``. A
-            separate switch from ``attn_backend``: the ring's inner per-chunk
-            attention still uses the chosen backend.
-        attn_backend: AttnBackend | str
-            Attention core implementation -- ``"te"``, ``"sdpa"`` (default) or
-            ``"math"``. See :class:`.config.AttnBackend`.
+        Parameters
+        ----------
+        in_dim : int
+            Global input dimension.
+        embed_dim : int
+            Global embedding dimension, shared by all heads.
+        out_dim : int
+            Global output dimension.
+        heads : int
+            Global number of heads.
+        dropout_p : float
+            Dropout probability.
+        local_rank : int
+            Rank within the model group.
+        device : torch.device
+            Device of the module.
+        spatial_group : dist.ProcessGroup
+            Process group along the sequence dimension.
+        channel_group : dist.ProcessGroup
+            Process group along the channel dimension.
+        bayesian : bool
+            Whether the linear layers are Bayesian.
+        qk_norm : bool
+            Whether to normalize queries and keys.
+        ring : bool
+            Whether to use ring attention over ``spatial_group``.
+        attn_backend : AttnBackend | str
+            Attention core, ``"te"``, ``"sdpa"`` or ``"math"``.
+        dtype : torch.dtype
+            Data type of the parameters.
+        config : RingAttentionConfig, optional
+            Ring-attention configuration. Defaults to a configuration for
+            ``attn_backend``.
         """
         super().__init__()
         self.local_rank = local_rank
@@ -308,12 +300,7 @@ class DistributedAttention(torch.nn.Module):
 
     @staticmethod
     def _resolve_backend(attn_backend: AttnBackend) -> AttnBackend:
-        """Downgrade ``TE`` to ``SDPA`` when transformer_engine is not installed.
-
-        Deliberately asymmetric with :class:`~.config.RingAttentionConfig`, which
-        raises instead: a plain (non-ring) ``DistributedAttention`` stays usable
-        outside the container.
-        """
+        """Fall back from ``TE`` to ``SDPA`` if transformer_engine is unavailable."""
         if attn_backend is AttnBackend.TE and not JIGSAW_TE_AVAILABLE:
             warnings.warn(
                 "attn_backend='te' but transformer_engine is unavailable; "
@@ -325,11 +312,7 @@ class DistributedAttention(torch.nn.Module):
     def _select_attn_core(
         self, embed_dim: int, heads: int
     ) -> Callable[..., torch.Tensor]:
-        """Resolve ``self.attn_backend`` to its non-ring attention core.
-
-        The ``TE`` arm also builds the ``te.DotProductAttention`` module that
-        :meth:`_transformer_attn_core` calls.
-        """
+        """Return the non-ring attention core of ``self.attn_backend``."""
         match self.attn_backend:
             case AttnBackend.TE:
                 self.attn = te.DotProductAttention(
@@ -355,25 +338,19 @@ class DistributedAttention(torch.nn.Module):
         v: torch.Tensor,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Attention computation.
+        """Compute attention.
 
         Parameters
         ----------
-        q: torch.Tensor
-            Query tensor.
-        k: torch.Tensor
-            Keys tensor.
-        v: torch.Tensor
-            Values tensor.
-        kwargs:
-            Additional optional parameters.
+        q, k, v : torch.Tensor
+            Query, key and value.
+        **kwargs : torch.Tensor
+            Unused.
 
         Returns
         -------
-        out: torch.Tensor
-            Output of attention computation.
-
+        torch.Tensor
+            Attention output.
         """
         with torch.nn.attention.sdpa_kernel(
             [
@@ -397,10 +374,7 @@ class DistributedAttention(torch.nn.Module):
         v: torch.Tensor,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
-        """Unfused ``softmax(QK^T)V`` reference core (``attn_backend='math'``).
-
-        Forces the MATH SDPA backend, so it runs for any shape / dtype / device.
-        """
+        """Compute attention with the unfused math backend."""
         with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.MATH]):
             out = torch.nn.functional.scaled_dot_product_attention(
                 q,
@@ -418,25 +392,19 @@ class DistributedAttention(torch.nn.Module):
         v: torch.Tensor,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Attention computation.
+        """Compute attention.
 
         Parameters
         ----------
-        q: torch.Tensor
-            Query tensor.
-        k: torch.Tensor
-            Keys tensor.
-        v: torch.Tensor
-            Values tensor.
-        kwargs:
-            Additional optional parameters.
+        q, k, v : torch.Tensor
+            Query, key and value.
+        **kwargs : torch.Tensor
+            Unused.
 
         Returns
         -------
-        out: torch.Tensor
-            Output of attention computation.
-
+        torch.Tensor
+            Attention output.
         """
         # `self.attn` (a real nn.Module) applies its own training-mode gate
         # to `attention_dropout` internally, same as any other dropout
@@ -456,27 +424,21 @@ class DistributedAttention(torch.nn.Module):
         x: torch.Tensor,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Ring attention computation.
+        """Compute ring attention.
 
         Parameters
         ----------
-        q: torch.Tensor
-            Query tensor.
-        k: torch.Tensor
-            Keys tensor.
-        v: torch.Tensor
-            Values tensor.
-        x: torch.Tensor
-            Input data.
-        kwargs:
-            Additional optional parameters.
+        q, k, v : torch.Tensor
+            Query, key and value.
+        x : torch.Tensor
+            Local input chunk.
+        **kwargs : torch.Tensor
+            Unused.
 
         Returns
         -------
-        out: torch.Tensor
-            Output of attention computation.
-
+        torch.Tensor
+            Attention output.
         """
         out = RingAttentionFunction.apply(
             q,
@@ -494,10 +456,17 @@ class DistributedAttention(torch.nn.Module):
         return out
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass for distributed multi-head attention.
+        """Compute distributed multi-head attention.
 
-        x: (n_batch, vars, n_lat, n_lon)
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Attention output.
         """
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.qkv(x)
@@ -535,12 +504,7 @@ class DistributedAttention(torch.nn.Module):
 
 
 class Attention(torch.nn.Module):
-    """
-    Multi-headed Attention module compatible with jigsaw conversion.
-
-    Multi-attention, starting from qkv mapping and ending with head concatenation.
-    Uses torch's SDPA for the attn_core calculation.
-    """
+    """Multi-head attention that can be converted with :meth:`convert_to_jigsaw`."""
 
     def __init__(
         self,
@@ -553,28 +517,27 @@ class Attention(torch.nn.Module):
         qk_norm: bool = False,
         dtype: torch.dtype = torch.float32,
     ):
-        """
-        Initialize Attention module.
+        """Initialize the module.
 
         Parameters
         ----------
-        in_dim: int
-            Input dimension of the incoming data.
-        embed_dim: int
-            Embedding dimension to be shared amongst all heads (global, not per-head).
-            Must be divisible by heads.
-        out_dim: int
+        in_dim : int
+            Input dimension.
+        embed_dim : int
+            Embedding dimension shared by all heads. Must be divisible by
+            ``heads``.
+        out_dim : int
             Output dimension.
-        heads: int
-            Number of attention heads.
-        device: torch.device
-            Device upon which computations occur.
-        dropout_p: float
+        heads : int
+            Number of heads.
+        device : torch.device
+            Device of the module.
+        dropout_p : float
             Dropout probability.
-        qk_norm: bool
-            Boolean flag for whether to apply qk_norm before attn_core.
-        dtype: torch.dtype
-            Data type of the model and data.
+        qk_norm : bool
+            Whether to normalize queries and keys.
+        dtype : torch.dtype
+            Data type of the parameters.
         """
         super().__init__()
         self.qkv = torch.nn.Linear(
@@ -605,25 +568,19 @@ class Attention(torch.nn.Module):
     def _attn_core(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, **kwargs: torch.Tensor
     ) -> torch.Tensor:
-        """
-        Attention computation.
+        """Compute attention.
 
         Parameters
         ----------
-        q: torch.Tensor
-            Query tensor.
-        k: torch.Tensor
-            Keys tensor.
-        v: torch.Tensor
-            Values tensor.
-        kwargs:
-            Additional optional parameters.
+        q, k, v : torch.Tensor
+            Query, key and value.
+        **kwargs : torch.Tensor
+            Unused.
 
         Returns
         -------
-        out: torch.Tensor
-            Output of attention computation.
-
+        torch.Tensor
+            Attention output.
         """
         with torch.nn.attention.sdpa_kernel(
             [
@@ -642,21 +599,17 @@ class Attention(torch.nn.Module):
         return out
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of multi-headed attention.
-
-        Automatically uses the torch SDPA backend.
+        """Compute multi-head attention.
 
         Parameters
         ----------
-        x: torch.Tensor
-            Tensor upon which to calculate attention.
+        x : torch.Tensor
+            Input tensor.
 
         Returns
         -------
-        out: torch.Tensor
-            Result of multi-headed attention.
-
+        torch.Tensor
+            Attention output.
         """
         qkv = self.qkv(x)
         qkv = qkv.reshape(qkv.shape[0], qkv.shape[1], 3, self.heads, self.head_dim)
@@ -684,37 +637,37 @@ class Attention(torch.nn.Module):
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
         **kwargs: Any,
     ) -> "DistributedAttention":
-        """
-        Convert attention module to jigsaw distributed module.
+        """Convert an attention module to a :class:`DistributedAttention`.
 
-        Expects a 2D process mesh to be passed. The "sequence/token" dimension should
-        be the rows, whereas the channel dimension is the columns.
+        The rows of the process mesh split the sequence and the columns split
+        the channels.
 
         Parameters
         ----------
-        attention: Attention
-            Instance of (non-distributed) multi-headed attention module defined within jigsaw.
-            This is the only supported version of Attention that can be auto-converted.
-        process_mesh_dict: dict
-            Process mesh dict that comtains row, column, and model process groups.
-        device: torch.device
-            Device that computations are performed on.
-        row_kw: str
-            Key for accessing row process groups.
-        col_kw: str
-            Key for accessing col process groups.
-        model_kw: str
-            Key for accessing model process groups.
-            Model process group should contain the Union of the row and column groups.
-        ring: bool
-            Boolean flag for whether ring attention should be computed on the "row" dimension.
-            If not, the "row" dimension will simply perform attention in parallel over the different
-            domains. This is useful for, domain-parallel i.e., Windowed attention.
-        attn_backend: AttnBackend | str
-            Attention core implementation (``"te"`` / ``"sdpa"`` / ``"math"``);
-            forwarded to :class:`DistributedAttention`. Composes with ``ring``.
-        kwargs: Any
-            Additional inputs.
+        attention : Attention
+            Module to convert.
+        process_mesh_dict : dict
+            Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
+        device : torch.device
+            Device of the converted module.
+        row_kw : str
+            Key of the row process group.
+        col_kw : str
+            Key of the column process group.
+        model_kw : str
+            Key of the model process group.
+        ring : bool
+            Whether to use ring attention over the rows. Otherwise, each row
+            attends within its own chunk.
+        attn_backend : AttnBackend | str
+            Attention core, ``"te"``, ``"sdpa"`` or ``"math"``.
+        **kwargs : Any
+            Unused.
+
+        Returns
+        -------
+        DistributedAttention
+            Converted module.
         """
         channel_size = process_mesh_dict[col_kw].size()
         channel_rank = process_mesh_dict[col_kw].rank()

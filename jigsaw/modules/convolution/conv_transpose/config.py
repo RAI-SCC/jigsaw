@@ -1,14 +1,4 @@
-"""Config setup for the distributed N-D transpose convolution.
-
-One :class:`ConvTransposeNdConfig` serves ``F.conv_transpose1d`` /
-``F.conv_transpose2d`` / ``F.conv_transpose3d``; the spatial rank is inferred from
-``len(kernel_size)`` and selects the native forward primitive. The grad-input /
-grad-weight primitive (``torch.ops.aten.convolution_backward``) and every other
-selection rule (the no-halo vs halo regime split, the grad-bias reduction, the
-bayesian vmapping) are dimension-independent.
-
-The transpose analogue of :class:`jigsaw.modules.convolution.conv.config.ConvNdConfig`.
-"""
+"""Kernel selection for the distributed transpose convolution."""
 
 from typing import Any, Callable, Optional
 
@@ -25,7 +15,7 @@ _CONV_TRANSPOSE_FN = (F.conv_transpose1d, F.conv_transpose2d, F.conv_transpose3d
 
 
 class ConvTransposeNdConfig:
-    """Selection strategy for the N-D transpose-conv kernels used in fwd/bwd."""
+    """Selection of the transpose-convolution kernels of the forward and backward pass."""
 
     # type hints
     n_spatial: int
@@ -44,35 +34,27 @@ class ConvTransposeNdConfig:
         channel_comm: str = "auto",
         groups: int = 1,
     ):
-        """
-        Initialize selection strategy for the N-D transpose convolution.
+        """Initialize the configuration.
 
-        bayesian: bool
-            Flag for whether the model is bayesian.
-        channel_group: dist.ProcessGroup
-            Tensor-parallel process group.
-        bias: torch.Tensor | None
-            Bias if applicable.
-        kernel_size: tuple[int, ...]
-            Kernel size of the convolution; its length is the spatial rank.
-        stride: tuple[int, ...]
-            Size of the stride.
-        device: torch.device
-            Device upon which communication occurs.
-        channel_comm: str
-            How the channel-parallel group exchanges input slices in the forward
-            pass: ``"all_gather"`` (one-shot gather), ``"p2p"`` (double-buffered
-            batched p2p that overlaps comm with compute and lowers the memory
-            peak) or ``"all_to_all"`` (same ring over masked all-to-all hops,
-            NCCL only). ``"auto"`` (the default) picks ``"all_to_all"`` on a
-            CUDA ``device`` and ``"p2p"`` otherwise.
-        groups: int
-            Transpose-convolution groups (PyTorch semantics). When ``groups`` is
-            a multiple of the channel-parallel group size ``G`` every rank owns
-            whole conv-groups: the kernels run a plain grouped transpose conv on
-            this rank's channel shard with ``groups_local = groups // G`` groups
-            and no channel-group communication. ``groups == 1`` keeps the
-            full-channel-gather path.
+        Parameters
+        ----------
+        bayesian : bool
+            Whether the model is Bayesian.
+        channel_group : dist.ProcessGroup
+            Channel process group.
+        bias : torch.Tensor | None
+            Bias, if any.
+        kernel_size : tuple[int, ...]
+            Kernel size. Its length is the number of spatial dimensions.
+        stride : tuple[int, ...]
+            Stride.
+        device : torch.device
+            Device of the module.
+        channel_comm : str
+            Channel communication strategy: ``"all_gather"``, ``"p2p"``,
+            ``"all_to_all"`` or ``"auto"``.
+        groups : int
+            Number of convolution groups.
         """
         self.n_spatial = len(kernel_size)
         self.bayesian = bayesian
@@ -104,19 +86,14 @@ class ConvTransposeNdConfig:
             )
 
     def _conv_transpose_fn_selection(self, bayesian: bool) -> Callable:
-        """Select the forward primitive, vmapped when the model is bayesian."""
+        """Select the forward primitive."""
         conv_transpose = _CONV_TRANSPOSE_FN[self.n_spatial - 1]
         if bayesian:
             return torch.vmap(conv_transpose)
         return conv_transpose
 
     def _conv_transpose_grad_fn_selection(self, bayesian: bool) -> Callable:
-        """Select the transpose-conv backward primitive, vmapped if bayesian.
-
-        ``torch.ops.aten.convolution_backward`` is dimension-independent -- the
-        spatial rank rides along in the ``stride`` / ``padding`` / ``dilation``
-        lists -- so the same op serves every spatial rank.
-        """
+        """Select the backward primitive."""
         if bayesian:
             return torch.vmap(
                 torch.ops.aten.convolution_backward,
@@ -126,13 +103,13 @@ class ConvTransposeNdConfig:
         return torch.ops.aten.convolution_backward
 
     def _reshape_weights_selection(self, bayesian: bool) -> Callable:
-        """Select the weight-reshape helper (a no-op unless bayesian)."""
+        """Select the weight-reshape function."""
         if bayesian:
             return self._reshape_weights
         return self._no_reshape_weights
 
     def _reshape_weights(self, w: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        """Broadcast the weights over the vmap (batch) dimension."""
+        """Broadcast the weights over the vmap dimension."""
         return w.expand(x.shape[0], *w.shape)
 
     def _no_reshape_weights(self, w: torch.Tensor, **kwargs: Any) -> torch.Tensor:
@@ -140,7 +117,7 @@ class ConvTransposeNdConfig:
         return w
 
     def _grad_bias_selection(self, bias: Optional[torch.Tensor]) -> Callable:
-        """Select the grad-bias reducer; the spatial reduction is done by a hook."""
+        """Select the grad-bias function."""
         if bias is None:
             return self._no_bias
         return self._sum_grad_bias
@@ -150,11 +127,6 @@ class ConvTransposeNdConfig:
         return None
 
     def _sum_grad_bias(self, grad_output: torch.Tensor) -> torch.Tensor:
-        """Sum ``grad_output`` over batch and spatial axes, leaving the channels.
-
-        Negative axes so the vmap (bayesian) leading axis is left untouched:
-        ``(N, C, *spatial)`` sums the batch axis at ``-(n_spatial + 2)`` and the
-        trailing ``n_spatial`` spatial axes, leaving the channel axis.
-        """
+        """Sum ``grad_output`` over the batch and spatial axes."""
         n = self.n_spatial
         return grad_output.sum(dim=(-(n + 2), *range(-n, 0)))

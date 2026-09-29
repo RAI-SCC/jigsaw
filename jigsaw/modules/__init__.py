@@ -1,4 +1,4 @@
-"""Expose jigsaw layers as typical PyTorch layers."""
+"""Distributed jigsaw layers."""
 # jigsaw/modules/__init__.py
 # from .attention.attention import DistributedAttention as DistributedAttention
 # from .conv.convolutions import Conv2d as Conv2d

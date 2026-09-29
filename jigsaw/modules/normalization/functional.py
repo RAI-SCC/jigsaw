@@ -1,4 +1,4 @@
-"""Autograd definition for autograd functions."""
+"""Autograd functions of the distributed normalization layers."""
 
 from typing import Any, Optional, Protocol, cast
 
@@ -9,7 +9,7 @@ from jigsaw.autocast import promote_to_fp32_under_autocast
 
 
 class DistributedLNFunction(torch.autograd.Function):
-    """Autograd function for distributed LayerNorm."""
+    """Autograd function of the distributed LayerNorm."""
 
     @staticmethod
     def forward(
@@ -20,7 +20,29 @@ class DistributedLNFunction(torch.autograd.Function):
         channel_group: dist.ProcessGroup,
         eps: float,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Perform forward pass for distributed layer norm."""
+        """Normalize ``x`` over a last dimension sharded across ``channel_group``.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input.
+        weight : torch.Tensor
+            Local scale.
+        bias : torch.Tensor | None
+            Local shift.
+        spatial_group : dist.ProcessGroup
+            Process group over which the parameter gradients are reduced.
+        channel_group : dist.ProcessGroup
+            Process group across which the last dimension is partitioned.
+        eps : float
+            Term added to the variance for numerical stability.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+            Output, normalized input, scale and variance plus ``eps``. All but the
+            output are kept for the backward pass.
+        """
         x, weight, bias = promote_to_fp32_under_autocast(x, weight, bias)
         # Compute mean and variance locally
         local_mean = x.mean(dim=-1, keepdim=True)
@@ -45,7 +67,7 @@ class DistributedLNFunction(torch.autograd.Function):
         inputs: tuple,
         output: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
     ) -> None:
-        """Set up context for distributed layer norm."""
+        """Save the tensors and metadata for the backward pass."""
         x, weight, bias, spatial_group, channel_group, eps = inputs
         _, x_norm, weight, var = output
 
@@ -67,7 +89,7 @@ class DistributedLNFunction(torch.autograd.Function):
         channel_group: dist.ProcessGroup,
         eps: float,
     ) -> tuple[torch.Tensor, int]:
-        """Define vmap for distributed layer norm."""
+        """Batching rule for ``torch.vmap``."""
         out = DistributedLNFunction.apply(
             x, weight, bias, spatial_group, channel_group, eps
         )
@@ -82,7 +104,23 @@ class DistributedLNFunction(torch.autograd.Function):
         weight_grad: None,
         var_grad: None,
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None]:
-        """Perform backward pass for distributed layer norm."""
+        """Compute the gradients of the distributed LayerNorm.
+
+        Parameters
+        ----------
+        ctx : torch.autograd.function.FunctionCtx
+            Autograd context.
+        grad_output : torch.Tensor
+            Gradient of the output.
+        x_norm_grad, weight_grad, var_grad : None
+            Unused; the corresponding outputs are non-differentiable.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None, None, None]
+            Gradients of the input, weight and bias, followed by ``None`` for the
+            non-differentiable arguments.
+        """
         x_norm, weight, std = ctx.saved_tensors  # type: ignore[attr-defined]
         # Match the forward compute dtype: under autocast the saved tensors are
         # fp32 while ``grad_output`` arrives in the autocast dtype.
@@ -137,20 +175,36 @@ class DistributedLNFunction(torch.autograd.Function):
 
 
 class NoParamLNCtx(Protocol):
-    """Context object for NoParamLN."""
+    """Attributes stored on the autograd context."""
 
     x_norm: torch.Tensor
     std: torch.Tensor
 
 
 class DistributedNoParamLNFunction(torch.autograd.Function):
-    """Autograd function for distributed LayerNorm."""
+    """Autograd function of the distributed LayerNorm without parameters."""
 
     @staticmethod
     def forward(
         x: torch.Tensor, channel_group: dist.ProcessGroup, eps: float
     ) -> tuple[torch.Tensor, float]:
-        """Perform forward pass for distributed layer norm with no parameters."""
+        """Normalize ``x`` over a last dimension sharded across ``channel_group``.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input.
+        channel_group : dist.ProcessGroup
+            Process group across which the last dimension is partitioned.
+        eps : float
+            Term added to the variance for numerical stability.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            Normalized input and the variance plus ``eps``, which is kept for the
+            backward pass.
+        """
         (x,) = promote_to_fp32_under_autocast(x)
         # Compute mean and variance locally
 
@@ -180,7 +234,7 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
         inputs: tuple[torch.Tensor, dist.ProcessGroup, float],
         output: tuple[torch.Tensor, torch.Tensor],
     ) -> None:
-        """Set up context for distributed layer norm with no params."""
+        """Save the tensors and metadata for the backward pass."""
         x, channel_group, eps = inputs
         x_norm, var = output
 
@@ -198,7 +252,7 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
         channel_group: dist.ProcessGroup,
         eps: float,
     ) -> tuple[torch.Tensor, int]:
-        """Define vmap for distributed NoParameter LN."""
+        """Batching rule for ``torch.vmap``."""
         out = DistributedNoParamLNFunction.apply(x, channel_group, eps)
 
         return out, 0
@@ -207,7 +261,23 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
     def backward(
         ctx: NoParamLNCtx, grad_output: torch.Tensor, var_grad: None
     ) -> tuple[torch.Tensor | None, ...]:
-        """Define backward pass for layer norm with no parameters."""
+        """Compute the gradient of the distributed LayerNorm without parameters.
+
+        Parameters
+        ----------
+        ctx : NoParamLNCtx
+            Autograd context.
+        grad_output : torch.Tensor
+            Gradient of the output.
+        var_grad : None
+            Unused; the variance output is non-differentiable.
+
+        Returns
+        -------
+        tuple[torch.Tensor | None, ...]
+            Gradient of the input, followed by ``None`` for the non-differentiable
+            arguments.
+        """
         x_norm, std = ctx.saved_tensors  # type: ignore[attr-defined]
         # Match the forward compute dtype (fp32 under autocast).
         grad_output = grad_output.to(x_norm.dtype)
@@ -243,16 +313,18 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
 
 
 class SoftMaxCtx(Protocol):
-    """Protocol for types stored within ctx."""
+    """Attributes stored on the autograd context."""
 
     dim: int
     group: dist.ProcessGroup
 
 
 class _DistributedSoftmax(torch.autograd.Function):
+    """Autograd function of the distributed softmax."""
+
     @staticmethod
     def forward(x: torch.Tensor, dim: int, group: dist.ProcessGroup) -> torch.Tensor:
-        """Overloaded Autograd function for distributed SoftMax."""
+        """Compute the softmax over a dimension sharded across ``group``."""
         (x,) = promote_to_fp32_under_autocast(x)
         # local exponentials
         local_max = x.amax(dim=-1, keepdim=True)
@@ -274,13 +346,7 @@ class _DistributedSoftmax(torch.autograd.Function):
     def setup_context(
         ctx: torch.autograd.function.FunctionCtx, inputs: tuple, output: torch.Tensor
     ) -> None:
-        """
-        Set up context for distributed Softmax.
-
-        ctx: FunctionCtx
-        inputs: tuple(x, dim, group)
-        output: softmax
-        """
+        """Save the softmax and metadata for the backward pass."""
         _, dim, group = inputs
         out = output
         ctx.save_for_backward(out)
@@ -293,14 +359,7 @@ class _DistributedSoftmax(torch.autograd.Function):
     def backward(
         ctx: SoftMaxCtx, grad_out: torch.Tensor
     ) -> tuple[torch.Tensor, None, None]:
-        """
-        Backward pass of distributed SoftMax.
-
-        Inputs
-        ------
-        ctx: Function context
-        grad_out: gradient wrt output
-        """
+        """Compute the gradient of the input."""
         (out,) = ctx.saved_tensors  # type: ignore[attr-defined]
         # Match the forward compute dtype (fp32 under autocast).
         grad_out = grad_out.to(out.dtype)
@@ -326,7 +385,7 @@ class _DistributedSoftmax(torch.autograd.Function):
         dim: int,
         group: dist.ProcessGroup,
     ) -> tuple[torch.Tensor, int]:
-        """Vmap rule for softmax."""
+        """Batching rule for ``torch.vmap``."""
         out = _DistributedSoftmax.apply(x, dim, group)
 
         return out, 0
