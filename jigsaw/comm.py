@@ -13,7 +13,7 @@ def all_to_all_async(
     group: Optional[dist.ProcessGroup] = None,
 ) -> dist.Work:
     """Issue an asynchronous ``dist.all_to_all`` and return its (non-None) handle."""
-    work = dist.all_to_all(
+    work: Optional[dist.Work] = dist.all_to_all(
         output_tensor_list, input_tensor_list, group=group, async_op=True
     )
     assert work is not None
