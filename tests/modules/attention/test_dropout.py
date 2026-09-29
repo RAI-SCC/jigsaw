@@ -190,7 +190,8 @@ class TestEvalModeDisablesDropout:
         model.eval()
         model_no_dropout.eval()
 
-        x = torch.randn(2, 8, 32, device=device)
+        # The channel dim is sharded over the column group.
+        x = torch.randn(2, 8, 32 // mesh["col"].size(), device=device)
         with torch.no_grad():
             out_dropout_eval = model(x)
             out_never_dropout = model_no_dropout(x)
