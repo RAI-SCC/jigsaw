@@ -2,10 +2,11 @@
 requires = ["setuptools >= 61.0"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = [
-    "jigsaw"
-]
+[tool.setuptools.packages.find]
+include = ["jigsaw*"]
+
+[tool.setuptools.package-data]
+jigsaw = ["py.typed"]
 
 [project]
 name = "jigsaw"
@@ -16,6 +17,8 @@ authors = [
 description = "The Jigsaw domain- and tensor-parallelization scheme"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Development Status :: 3 - Alpha",
