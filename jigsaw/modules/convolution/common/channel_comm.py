@@ -28,6 +28,24 @@ def resolve_channel_comm(channel_comm: str, device: torch.device) -> str:
     """Resolve the channel communication strategy.
 
     ``"auto"`` resolves to ``"all_to_all"`` on CUDA and ``"p2p"`` otherwise.
+
+    Parameters
+    ----------
+    channel_comm : str
+        Channel communication strategy: ``"all_gather"``, ``"p2p"``,
+        ``"all_to_all"`` or ``"auto"``.
+    device : torch.device
+        Device of the module.
+
+    Returns
+    -------
+    str
+        Resolved strategy.
+
+    Raises
+    ------
+    ValueError
+        If ``channel_comm`` is not a valid strategy.
     """
     if channel_comm == "auto":
         channel_comm = "all_to_all" if device.type == "cuda" else "p2p"
@@ -43,6 +61,17 @@ def resolve_conv_groups(
     groups: int, in_channels: int, out_channels: int, channel_group_size: int
 ) -> tuple[bool, int]:
     """Validate ``groups`` against the channel group size ``G``.
+
+    Parameters
+    ----------
+    groups : int
+        Number of convolution groups.
+    in_channels : int
+        Number of input channels.
+    out_channels : int
+        Number of output channels.
+    channel_group_size : int
+        Size ``G`` of the channel group.
 
     Returns
     -------
@@ -100,6 +129,20 @@ def gather_full_channels(
 
     The local slice is kept in the autograd graph. A group of size one is the
     identity.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Local channel slice.
+    channel_group : dist.ProcessGroup
+        Process group splitting the channels.
+    channel_dim : int
+        Dimension holding the channels.
+
+    Returns
+    -------
+    torch.Tensor
+        Full-channel tensor.
     """
     group_size = channel_group.size()
     if group_size == 1:

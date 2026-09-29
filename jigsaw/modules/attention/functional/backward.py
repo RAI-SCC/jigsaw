@@ -71,7 +71,26 @@ def global_chunk_idx_backward(
     ring_group_size: int,
     group: dist.ProcessGroup,
 ) -> int:
-    """Return the global chunk index processed at backward ``step``."""
+    """Return the global chunk index processed at backward ``step``.
+
+    Parameters
+    ----------
+    ring_config : RingAttentionConfig
+        Ring-attention configuration.
+    local_rank : int
+        Rank within the ring.
+    step : int
+        Current ring step.
+    ring_group_size : int
+        Number of ranks in the ring.
+    group : dist.ProcessGroup
+        Process group of the ring.
+
+    Returns
+    -------
+    int
+        Global index of the key/value chunk.
+    """
     if ring_config.save_scope == SaveScope.GLOBAL:
         return step
     return _local_scope_global_chunk_idx(
@@ -102,6 +121,39 @@ def ring_backward(
     rng_states: Optional[tuple[Optional[torch.Tensor], ...]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run the backward pass of ring attention.
+
+    Parameters
+    ----------
+    dout : torch.Tensor
+        Gradient of the output.
+    q : torch.Tensor
+        Local query.
+    out : torch.Tensor
+        Saved attention output.
+    x : torch.Tensor
+        Local input sequence chunk.
+    lse : torch.Tensor
+        Saved log-sum-exp.
+    w_qkv : torch.Tensor
+        Fused query, key, and value projection weights.
+    scale : float
+        Softmax scale.
+    group : dist.ProcessGroup
+        Process group of the ring.
+    local_rank : int
+        Rank within the ring.
+    ring_group_size : int
+        Number of ranks in the ring.
+    chunks_to_save : tuple[torch.Tensor, ...]
+        Chunks saved in the forward pass.
+    ring_config : RingAttentionConfig
+        Ring-attention configuration.
+    dropout_p : float
+        Dropout probability.
+    base_seed : int, optional
+        Dropout base seed of the forward pass.
+    rng_states : tuple[torch.Tensor | None, ...], optional
+        Per-chunk RNG states of the forward pass.
 
     Returns
     -------
@@ -233,7 +285,23 @@ def _use_global_dkv_buffer(ring_config: RingAttentionConfig) -> bool:
 def get_dkv_buffer(
     ring_config: RingAttentionConfig, q: torch.Tensor, ring_group_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Allocate the dK and dV buffers of the accumulation strategy."""
+    """Allocate the dK and dV buffers of the accumulation strategy.
+
+    Parameters
+    ----------
+    ring_config : RingAttentionConfig
+        Ring-attention configuration.
+    q : torch.Tensor
+        Local query, which sets the shape, device and dtype of the buffers.
+    ring_group_size : int
+        Number of ranks in the ring.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Zero-initialized dk and dv buffers. They span the full sequence if the
+        strategy gathers the gradients and the local sequence otherwise.
+    """
     if _use_global_dkv_buffer(ring_config):
         shape = [*q.shape[0:2], ring_group_size * q.shape[2], *q.shape[3:]]
     else:
@@ -256,7 +324,34 @@ def accumulate_dkv(
     local_rank: int,
     group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Accumulate the dK and dV of one step into the buffers."""
+    """Accumulate the dK and dV of one step into the buffers.
+
+    Parameters
+    ----------
+    ring_config : RingAttentionConfig
+        Ring-attention configuration.
+    dk_buf : torch.Tensor
+        Buffer accumulating dk.
+    dv_buf : torch.Tensor
+        Buffer accumulating dv.
+    dk_j, dv_j : torch.Tensor
+        Gradients of the current step.
+    step : int
+        Current ring step.
+    ring_group_size : int
+        Number of ranks in the ring.
+    seq_local : int
+        Local sequence length.
+    local_rank : int
+        Rank within the ring.
+    group : dist.ProcessGroup
+        Process group of the ring.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Updated dk and dv buffers.
+    """
     if not _use_global_dkv_buffer(ring_config):
         if (
             ring_config.send_op == SendOp.HYBRID_BROADCAST

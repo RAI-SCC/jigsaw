@@ -16,6 +16,26 @@ def exchange_along_axis(
 
     ``send_parts[p]`` is sent to rank ``p``. The result holds the slices received
     from every rank, with sizes ``recv_sizes`` along ``axis``.
+
+    Parameters
+    ----------
+    spatial_group : dist.ProcessGroup
+        Process group of the split axis.
+    template : torch.Tensor
+        Tensor whose device and dtype the exchanged slices follow.
+    send_parts : list[torch.Tensor]
+        Slice sent to each rank.
+    send_sizes : list[int]
+        Size along ``axis`` of each slice in ``send_parts``.
+    recv_sizes : list[int]
+        Size along ``axis`` of the slice received from each rank.
+    axis : int
+        Axis along which the slices are exchanged.
+
+    Returns
+    -------
+    list[torch.Tensor]
+        Slice received from each rank.
     """
     axis %= template.dim()
     other = (*template.shape[:axis], *template.shape[axis + 1 :])

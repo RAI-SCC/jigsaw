@@ -172,8 +172,31 @@ def over_channels(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Convolve over the channel-parallel group with the configured strategy.
 
-    ``conv_kwargs`` holds the arguments of ``conv_func``. In the halo case the
-    padding of the split axis is applied by ``halo_fn`` and must be ``0`` here.
+    Parameters
+    ----------
+    x : torch.Tensor
+        Local input.
+    w : torch.Tensor
+        Local weight.
+    b : torch.Tensor | None
+        Local bias.
+    conv_kwargs : dict[str, Any]
+        Keyword arguments of ``conv_func``. In the halo case the padding of the
+        split axis is applied by ``halo_fn`` and must be ``0`` here.
+    channel_group : dist.ProcessGroup
+        Process group splitting the channels.
+    conv_func : ConvFn
+        Convolution primitive.
+    n_spatial_dims : int
+        Number of spatial dimensions.
+    channel_comm : str
+        Channel communication strategy: ``"all_gather"``, ``"p2p"`` or
+        ``"all_to_all"``.
+    halo_fn : HaloFn, optional
+        Halo exchange applied to the input.
+    local : bool
+        Whether each rank owns whole convolution groups, so that no channel
+        communication is needed.
 
     Returns
     -------

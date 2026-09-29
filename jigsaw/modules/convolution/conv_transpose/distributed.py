@@ -129,6 +129,30 @@ def conv_transpose_nway(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply the transpose convolution without halo exchange (``stride == kernel_size``).
 
+    Delegates to :func:`conv_transpose_halo_nway` if a split axis has padding or
+    dilation.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Local input.
+    w : torch.Tensor
+        Local weight.
+    b : torch.Tensor | None
+        Local bias.
+    stride : tuple[int, ...]
+        Stride of each spatial axis.
+    padding : str | tuple[int, ...]
+        Padding of each spatial axis or a padding mode.
+    dilation : tuple[int, ...]
+        Dilation of each spatial axis.
+    spatial_groups : tuple[dist.ProcessGroup | None, ...]
+        Process group of each spatial axis, ``None`` if the axis is not split.
+    channel_group : dist.ProcessGroup
+        Process group splitting the channels.
+    config : ConvTransposeNdConfig
+        Kernel selection.
+
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor]
@@ -169,7 +193,39 @@ def conv_transpose_nway_backward(
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute the gradients of the transpose convolution without halo exchange."""
+    """Compute the gradients of the transpose convolution without halo exchange.
+
+    Delegates to :func:`conv_transpose_halo_nway_backward` if a split axis has
+    padding or dilation.
+
+    Parameters
+    ----------
+    grad_output : torch.Tensor
+        Gradient of the output.
+    x_aug : torch.Tensor
+        Full-channel input kept from the forward pass.
+    weight : torch.Tensor
+        Local weight.
+    stride : tuple[int, ...]
+        Stride of each spatial axis.
+    padding : tuple[int, ...]
+        Padding of each spatial axis.
+    dilation : tuple[int, ...]
+        Dilation of each spatial axis.
+    local_in_spatial : tuple[int, ...]
+        Spatial sizes of the local input shard.
+    spatial_groups : tuple[dist.ProcessGroup | None, ...]
+        Process group of each spatial axis, ``None`` if the axis is not split.
+    channel_group : dist.ProcessGroup
+        Process group splitting the channels.
+    config : ConvTransposeNdConfig
+        Kernel selection.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Gradients of the input and the weight.
+    """
     if _needs_halo(spatial_groups, padding, dilation):
         return conv_transpose_halo_nway_backward(
             grad_output,
@@ -213,10 +269,36 @@ def conv_transpose_halo_nway(
     The overlapping raw outputs are summed along each split axis before the bias
     is added.
 
+    Parameters
+    ----------
+    x : torch.Tensor
+        Local input.
+    w : torch.Tensor
+        Local weight.
+    b : torch.Tensor | None
+        Local bias.
+    stride : tuple[int, ...]
+        Stride of each spatial axis.
+    padding : str | tuple[int, ...]
+        Padding of each spatial axis. Strings are unsupported.
+    dilation : tuple[int, ...]
+        Dilation of each spatial axis.
+    spatial_groups : tuple[dist.ProcessGroup | None, ...]
+        Process group of each spatial axis, ``None`` if the axis is not split.
+    channel_group : dist.ProcessGroup
+        Process group splitting the channels.
+    config : ConvTransposeNdConfig
+        Kernel selection.
+
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor]
         Output and the full-channel input kept for the backward pass.
+
+    Raises
+    ------
+    NotImplementedError
+        If ``padding`` is a string.
     """
     if not isinstance(padding, tuple):
         raise NotImplementedError(
@@ -272,7 +354,36 @@ def conv_transpose_halo_nway_backward(
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute the gradients of the transpose convolution with halo reduction."""
+    """Compute the gradients of the transpose convolution with halo reduction.
+
+    Parameters
+    ----------
+    grad_output : torch.Tensor
+        Gradient of the output.
+    x_aug : torch.Tensor
+        Full-channel input kept from the forward pass.
+    weight : torch.Tensor
+        Local weight.
+    stride : tuple[int, ...]
+        Stride of each spatial axis.
+    padding : tuple[int, ...]
+        Padding of each spatial axis.
+    dilation : tuple[int, ...]
+        Dilation of each spatial axis.
+    local_in_spatial : tuple[int, ...]
+        Spatial sizes of the local input shard.
+    spatial_groups : tuple[dist.ProcessGroup | None, ...]
+        Process group of each spatial axis, ``None`` if the axis is not split.
+    channel_group : dist.ProcessGroup
+        Process group splitting the channels.
+    config : ConvTransposeNdConfig
+        Kernel selection.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Gradients of the input and the weight.
+    """
     grad_raw = grad_output
     for idx, axis, group in reversed(list(_split_axes(spatial_groups))):
         grad_raw = transpose_halo_expand(

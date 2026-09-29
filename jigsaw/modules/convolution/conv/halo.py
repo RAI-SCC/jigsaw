@@ -17,11 +17,34 @@ def needed_input_span(
 ) -> tuple[int, int, int, int]:
     """Return the input span needed by a rank to compute its output block.
 
+    Parameters
+    ----------
+    rank : int
+        Rank within the spatial group.
+    group_size : int
+        Size of the spatial group.
+    local_in_size : int
+        Size of the local input shard along the split axis.
+    kernel : int
+        Kernel size along the split axis.
+    stride : int
+        Stride along the split axis.
+    padding : int
+        Padding along the split axis.
+    dilation : int
+        Dilation along the split axis.
+
     Returns
     -------
     tuple[int, int, int, int]
         ``(lo, hi, need_size, out_local)``, where ``[lo, hi)`` are the global
         input positions in unpadded coordinates.
+
+    Raises
+    ------
+    NotImplementedError
+        If the global output size along the split axis is not divisible by
+        ``group_size``.
     """
     extent = dilation * (kernel - 1) + 1  # effective kernel span
     global_in = group_size * local_in_size
@@ -53,10 +76,29 @@ def halo_gather(
 
     Positions outside the global input are zero.
 
+    Parameters
+    ----------
+    x_full : torch.Tensor
+        Local input with all channels.
+    spatial_group : dist.ProcessGroup
+        Process group of the split axis.
+    kernel : int
+        Kernel size along the split axis.
+    stride : int
+        Stride along the split axis.
+    padding : int
+        Padding along the split axis.
+    dilation : int
+        Dilation along the split axis.
+    axis : int
+        Split axis of ``x_full``.
+
     Returns
     -------
-    tuple[torch.Tensor, int]
-        ``(x_need, out_local)``.
+    x_need : torch.Tensor
+        Halo-padded input slice.
+    out_local : int
+        Size of the local output along ``axis``.
     """
     axis %= x_full.dim()
     group_size = spatial_group.size()
@@ -127,6 +169,25 @@ def halo_scatter_add(
     """Sum the gradients of halo positions onto their owning ranks.
 
     This is the reverse of :func:`halo_gather`.
+
+    Parameters
+    ----------
+    g_x_need : torch.Tensor
+        Gradient of the halo-padded input slice.
+    spatial_group : dist.ProcessGroup
+        Process group of the split axis.
+    kernel : int
+        Kernel size along the split axis.
+    stride : int
+        Stride along the split axis.
+    padding : int
+        Padding along the split axis.
+    dilation : int
+        Dilation along the split axis.
+    local_in_size : int
+        Size of the local input shard along ``axis``.
+    axis : int
+        Split axis of ``g_x_need``.
 
     Returns
     -------

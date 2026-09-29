@@ -48,6 +48,29 @@ def conv_nway(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Convolve without halo exchange (``stride == kernel_size``).
 
+    Delegates to :func:`conv_halo_nway` if a split axis has padding or dilation.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Local input.
+    w : torch.Tensor
+        Local weight.
+    b : torch.Tensor | None
+        Local bias.
+    stride : tuple[int, ...]
+        Stride of each spatial axis.
+    padding : str | tuple[int, ...]
+        Padding of each spatial axis or a padding mode.
+    dilation : tuple[int, ...]
+        Dilation of each spatial axis.
+    spatial_groups : tuple[dist.ProcessGroup | None, ...]
+        Process group of each spatial axis, ``None`` if the axis is not split.
+    channel_group : dist.ProcessGroup
+        Process group splitting the channels.
+    config : ConvNdConfig
+        Kernel selection.
+
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor]
@@ -89,7 +112,41 @@ def conv_nway_backward(
     bayesian: bool,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute the gradients of the convolution without halo exchange."""
+    """Compute the gradients of the convolution without halo exchange.
+
+    Delegates to :func:`conv_halo_nway_backward` if a split axis has padding or
+    dilation.
+
+    Parameters
+    ----------
+    grad_output : torch.Tensor
+        Gradient of the output.
+    x_aug : torch.Tensor
+        Full-channel input kept from the forward pass.
+    weight : torch.Tensor
+        Local weight.
+    stride : tuple[int, ...]
+        Stride of each spatial axis.
+    padding : tuple[int, ...]
+        Padding of each spatial axis.
+    dilation : tuple[int, ...]
+        Dilation of each spatial axis.
+    local_in_spatial : tuple[int, ...]
+        Spatial sizes of the local input shard.
+    spatial_groups : tuple[dist.ProcessGroup | None, ...]
+        Process group of each spatial axis, ``None`` if the axis is not split.
+    channel_group : dist.ProcessGroup
+        Process group splitting the channels.
+    bayesian : bool
+        Whether the model is Bayesian.
+    config : ConvNdConfig
+        Kernel selection.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Gradients of the input and the weight.
+    """
     if _needs_halo(spatial_groups, padding, dilation):
         return conv_halo_nway_backward(
             grad_output,
@@ -154,10 +211,36 @@ def conv_halo_nway(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Convolve with a halo exchange along each split axis (``stride != kernel_size``).
 
+    Parameters
+    ----------
+    x : torch.Tensor
+        Local input.
+    w : torch.Tensor
+        Local weight.
+    b : torch.Tensor | None
+        Local bias.
+    stride : tuple[int, ...]
+        Stride of each spatial axis.
+    padding : str | tuple[int, ...]
+        Padding of each spatial axis. Strings are unsupported.
+    dilation : tuple[int, ...]
+        Dilation of each spatial axis.
+    spatial_groups : tuple[dist.ProcessGroup | None, ...]
+        Process group of each spatial axis, ``None`` if the axis is not split.
+    channel_group : dist.ProcessGroup
+        Process group splitting the channels.
+    config : ConvNdConfig
+        Kernel selection.
+
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor]
         Output and the halo-padded full-channel input kept for the backward pass.
+
+    Raises
+    ------
+    NotImplementedError
+        If ``padding`` is a string.
     """
     if not isinstance(padding, tuple):
         raise NotImplementedError(
@@ -210,7 +293,38 @@ def conv_halo_nway_backward(
     bayesian: bool,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute the gradients of the convolution with halo exchange."""
+    """Compute the gradients of the convolution with halo exchange.
+
+    Parameters
+    ----------
+    grad_output : torch.Tensor
+        Gradient of the output.
+    x_aug : torch.Tensor
+        Halo-padded full-channel input kept from the forward pass.
+    weight : torch.Tensor
+        Local weight.
+    stride : tuple[int, ...]
+        Stride of each spatial axis.
+    padding : tuple[int, ...]
+        Padding of each spatial axis.
+    dilation : tuple[int, ...]
+        Dilation of each spatial axis.
+    local_in_spatial : tuple[int, ...]
+        Spatial sizes of the local input shard.
+    spatial_groups : tuple[dist.ProcessGroup | None, ...]
+        Process group of each spatial axis, ``None`` if the axis is not split.
+    channel_group : dist.ProcessGroup
+        Process group splitting the channels.
+    bayesian : bool
+        Whether the model is Bayesian.
+    config : ConvNdConfig
+        Kernel selection.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Gradients of the input and the weight.
+    """
     local_padding = _local_padding(padding, spatial_groups)
 
     g_x_need = config.conv_input_fn(

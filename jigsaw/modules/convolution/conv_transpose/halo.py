@@ -22,12 +22,35 @@ def produced_output_span(
 ) -> tuple[int, int, int, int]:
     """Return the global position of the raw local output of a rank.
 
+    Parameters
+    ----------
+    rank : int
+        Rank within the spatial group.
+    group_size : int
+        Size of the spatial group.
+    local_in_size : int
+        Size of the local input shard along the split axis.
+    kernel : int
+        Kernel size along the split axis.
+    stride : int
+        Stride along the split axis.
+    padding : int
+        Padding along the split axis.
+    dilation : int
+        Dilation along the split axis.
+
     Returns
     -------
     tuple[int, int, int, int]
         ``(base, wloc, out_local, global_out)``: local column ``i`` of the raw
         output maps to global column ``base + i`` in unpadded coordinates, and
         each rank keeps ``out_local`` of the ``global_out`` columns.
+
+    Raises
+    ------
+    NotImplementedError
+        If the global output size along the split axis is not divisible by
+        ``group_size``.
     """
     extent = dilation * (kernel - 1) + 1  # effective kernel span
     global_in = group_size * local_in_size
@@ -59,6 +82,25 @@ def transpose_halo_reduce(
     """Sum the overlapping raw outputs onto their owning ranks along ``axis``.
 
     Columns outside the global output are dropped.
+
+    Parameters
+    ----------
+    y_raw : torch.Tensor
+        Raw local output of the transpose convolution.
+    spatial_group : dist.ProcessGroup
+        Process group of the split axis.
+    local_in_size : int
+        Size of the local input shard along the split axis.
+    kernel : int
+        Kernel size along the split axis.
+    stride : int
+        Stride along the split axis.
+    padding : int
+        Padding along the split axis.
+    dilation : int
+        Dilation along the split axis.
+    axis : int
+        Split axis of the tensor.
 
     Returns
     -------
@@ -134,6 +176,25 @@ def transpose_halo_expand(
 
     This is the reverse of :func:`transpose_halo_reduce`. Columns outside the
     global output are zero.
+
+    Parameters
+    ----------
+    grad_local : torch.Tensor
+        Gradient of the output shard of this rank.
+    spatial_group : dist.ProcessGroup
+        Process group of the split axis.
+    local_in_size : int
+        Size of the local input shard along the split axis.
+    kernel : int
+        Kernel size along the split axis.
+    stride : int
+        Stride along the split axis.
+    padding : int
+        Padding along the split axis.
+    dilation : int
+        Dilation along the split axis.
+    axis : int
+        Split axis of the tensor.
 
     Returns
     -------

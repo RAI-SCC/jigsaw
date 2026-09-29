@@ -117,7 +117,15 @@ class _ForwardChunkProvider(ABC):
         )
 
     def advance(self, step: int, world_size: int) -> None:
-        """Progress communication so that chunk ``step + 1`` is available."""
+        """Progress communication so that chunk ``step + 1`` is available.
+
+        Parameters
+        ----------
+        step : int
+            Current ring step.
+        world_size : int
+            Number of ranks in the ring.
+        """
         return
 
     def result(self) -> tuple[Optional[torch.Tensor], ...]:

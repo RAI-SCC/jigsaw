@@ -183,8 +183,31 @@ def over_channels_transpose(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply the transpose convolution over the channel-parallel group.
 
-    ``conv_kwargs`` holds the arguments of ``conv_func``. In the halo case the
-    padding of the split axis is applied by ``post_fn`` and must be ``0`` here.
+    Parameters
+    ----------
+    x : torch.Tensor
+        Local input.
+    w : torch.Tensor
+        Local weight.
+    b : torch.Tensor | None
+        Local bias.
+    conv_kwargs : dict[str, Any]
+        Keyword arguments of ``conv_func``. In the halo case the padding of the
+        split axis is applied by ``post_fn`` and must be ``0`` here.
+    channel_group : dist.ProcessGroup
+        Process group splitting the channels.
+    conv_func : ConvTransposeFn
+        Transpose convolution primitive.
+    n_spatial_dims : int
+        Number of spatial dimensions.
+    channel_comm : str
+        Channel communication strategy: ``"all_gather"``, ``"p2p"`` or
+        ``"all_to_all"``.
+    post_fn : PostFn, optional
+        Operation applied to the accumulated output, such as the halo reduction.
+    local : bool
+        Whether each rank owns whole convolution groups, so that no channel
+        communication is needed.
 
     Returns
     -------

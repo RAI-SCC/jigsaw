@@ -12,7 +12,22 @@ def all_to_all_async(
     input_tensor_list: list[torch.Tensor],
     group: Optional[dist.ProcessGroup] = None,
 ) -> dist.Work:
-    """Issue an asynchronous ``dist.all_to_all`` and return its work handle."""
+    """Issue an asynchronous ``dist.all_to_all`` and return its work handle.
+
+    Parameters
+    ----------
+    output_tensor_list : list[torch.Tensor]
+        Buffers receiving the data of each rank.
+    input_tensor_list : list[torch.Tensor]
+        Data sent to each rank.
+    group : dist.ProcessGroup, optional
+        Process group of the exchange.
+
+    Returns
+    -------
+    dist.Work
+        Handle to wait on.
+    """
     work: Optional[dist.Work] = dist.all_to_all(
         output_tensor_list, input_tensor_list, group=group, async_op=True
     )
