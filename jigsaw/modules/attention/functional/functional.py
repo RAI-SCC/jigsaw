@@ -288,7 +288,7 @@ class RingAttentionFunction(torch.autograd.Function):
             q,
             out,
             x,
-            lse.mT,
+            lse,
             w_qkv,
             *chunks_to_save,  # *[t for pair in chunks_to_save for t in pair]
             *rng_states,

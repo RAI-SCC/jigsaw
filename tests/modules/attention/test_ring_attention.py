@@ -761,3 +761,55 @@ def test_ring_hybrid_single_node(
         offloader,
         gpus_per_node=2,
     )
+
+
+@pytest.mark.dist(4)
+def test_ring_autograd_function_matches_full_attention(
+    device: torch.device, process_mesh_dict_4x1: dict
+) -> None:
+    """``RingAttentionFunction`` gives the gradients of full attention.
+
+    Goes through the autograd wrapper (``setup_context`` saves the log-sum-exp for the
+    backward) with ``heads != local sequence length``; a transposed saved ``lse``
+    crashes there and is only silently wrong when the two happen to be equal.
+    """
+    mesh = process_mesh_dict_4x1
+    group = mesh["row"]
+    rank, world = group.rank(), group.size()
+    b, h, n_local, d = 2, 3, 8, 8
+    assert h != n_local
+
+    torch.manual_seed(0)  # identical full tensors on every rank
+    q_full, k_full, v_full, g_full = (
+        torch.randn(b, h, world * n_local, d, device=device) for _ in range(4)
+    )
+    shard = slice(rank * n_local, (rank + 1) * n_local)
+    q, k, v = (
+        t[:, :, shard].clone().contiguous().requires_grad_(True)
+        for t in (q_full, k_full, v_full)
+    )
+    q_ref, k_ref, v_ref = (
+        t.clone().requires_grad_(True) for t in (q_full, k_full, v_full)
+    )
+    out_ref = torch.nn.functional.scaled_dot_product_attention(q_ref, k_ref, v_ref)
+    out_ref.backward(g_full)
+
+    # ``KV`` sends the keys/values themselves, so ``x`` and ``w_qkv`` are not read.
+    x = torch.randn(b, n_local, d, device=device)
+    w_qkv = torch.randn(3 * h * d, d, device=device)
+    ring_config = config.RingAttentionConfig(
+        device=device, gpus_per_node=world, send_in_forward=config.SendForward.KV
+    )
+    out = functional.RingAttentionFunction.apply(
+        q, k, v, x, w_qkv, d**-0.5, 0.0, group, rank, ring_config
+    )[0]
+    out.backward(g_full[:, :, shard].contiguous())
+
+    for name, got, ref in (
+        ("out", out, out_ref),
+        ("dq", q.grad, q_ref.grad),
+        ("dk", k.grad, k_ref.grad),
+        ("dv", v.grad, v_ref.grad),
+    ):
+        assert got is not None and ref is not None
+        assert_close(name, got, ref[:, :, shard], 1e-4, 1e-4, device, mesh["model"])
