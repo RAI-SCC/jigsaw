@@ -37,11 +37,11 @@ ENV=$HOME/envs/jigsaw-te
 
 apptainer exec --nv "$SIF" python -m venv --system-site-packages "$ENV"
 
-# jigsaw plus the pure-Python deps the image is missing, without touching
-# torch / TE / mpi4py
+# jigsaw without touching torch / TE / mpi4py; its only other runtime
+# dependency is einops. Add whatever your own data pipeline needs (zarr,
+# xarray, ...) the same way.
 apptainer exec --nv "$SIF" "$ENV/bin/pip" install --no-build-isolation --no-deps -e ..
-apptainer exec --nv "$SIF" "$ENV/bin/pip" install --no-build-isolation \
-    zarr timm xarray h5netcdf
+apptainer exec --nv "$SIF" "$ENV/bin/pip" install --no-build-isolation einops
 
 # mpi4py, built against the image's OpenMPI
 apptainer exec --nv "$SIF" bash -c \
@@ -51,7 +51,6 @@ apptainer exec --nv "$SIF" bash -c \
 Then set `JIGSAW_VENV=$ENV` in the site preset.
 
 The `--no-deps` flag on the jigsaw install stops pip from pulling a second `torch` / `torchvision` on top of the image's build.
-NOTE: `requirements.txt` is only for bare-metal installs and should not be used here.
 
 ## Running code in the container
 

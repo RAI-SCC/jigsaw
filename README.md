@@ -5,11 +5,12 @@ Code for performing domain- and tensor-parallel training optimized for large ima
 - jigsaw/modules contains the implementations of the individual modules. Currently supported operations are ```nn.Linear, nn.Conv2d, nn.ConvTranspose2d, F.roll, Attention (with or without ring), and  non-parameterized matrix multiplications```.
 
 ## Environment
+### Option A: bare metal
 This is an installable library. Requirements can be installed with:
 ```
 pip install -e .
 ```
-The dev environment (necessary for running tests) can be installed with
+This installs `torch` and `einops`, the library's only runtime dependencies. The dev environment (necessary for running tests) can be installed with
 ```
 pip install -e .[dev]
 ```
@@ -64,20 +65,41 @@ See [`scripts/README.md`](scripts/README.md) for the full launch contract and
 every `JIGSAW_*` knob.
 
 ## Usage
-_jigsaw_ is designed to follow the interface of PyTorch. The model must be defined exclusively via _jigsaw_ layers. i.e.
-```
+_jigsaw_ follows the interface of PyTorch: build the model from _jigsaw_ layers, then train it as usual. Each layer takes the *global* (unsharded) dimensions and the process groups of a [process mesh](#process-mesh), and allocates only its local shard.
+
+```python
+import torch
+import jigsaw
+from jigsaw.utils import init_cuda, set_all_seeds
+
+device, _, rank, world_size = init_cuda()  # NCCL init from the SLURM / torchrun env
+mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})  # 4 ranks, one model replica
+
+
 class Linear(torch.nn.Module):
-   def __init__(self, global_in_dim, global_out_dim, process_mesh_dict):
-      self.lin = jigsaw.DistributedXWT(global_in_dim, global_out_dim, process_mesh_dict)
-   def forward(self, x):
-      return self.lin(x)
+    def __init__(self, in_dim, out_dim, mesh, device):
+        super().__init__()
+        self.lin = jigsaw.linear.DistributedXWT(
+            in_dim=in_dim,
+            out_dim=out_dim,
+            bias=True,
+            local_rank=mesh["model"].rank(),
+            device=device,
+            model_group=mesh["model"],
+            column_group=mesh["col"],
+            row_group=mesh["row"],
+        )
+
+    def forward(self, x):
+        return self.lin(x)  # x is this rank's shard, split over "col" in its last dim
+
+
+# Give every model-parallel rank its own seed so the shards are initialized independently.
+set_all_seeds(mesh["model"].rank())
+model = Linear(1024, 1024, mesh, device)
 ```
-When initializing the models, ensure that each model-parallel rank has a different random seed, thus insuring true randomness in the initialization. The DP wrapper will handle weight initialization synchronization across data-parallel ranks.
-```
-local_rank = model_group.rank()
-set_all_seeds(local_rank)
-model = Linear(global_in_dim, global_out_dim, process_mesh_dict)
-```
+
+Run it with one process per GPU, e.g. `torchrun --nproc-per-node 4 train.py` or `srun` (see [Launching](#launching)).
 
 ### Mixed precision (autocast)
 
@@ -167,6 +189,6 @@ As domain parallelism is applied throughout the model training process, the data
 For a model-parallel group:
 ```
 set_all_seeds(0) # constant number for all instances of the model-parallel group
-dataloader = torch.nn.DataLoader(...) # Define the dataloader here
+dataloader = torch.utils.data.DataLoader(...) # Define the dataloader here
 # The Dataset must return the correct shard of the data samples.
 ```

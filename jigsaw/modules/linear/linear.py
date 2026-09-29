@@ -46,9 +46,9 @@ class DistributedXWT(torch.nn.Module):
         Parameters
         ----------
         in_dim : int
-            Input dimension of the local weight.
+            Input dimension of the global (unsharded) weight.
         out_dim : int
-            Output dimension of the local weight.
+            Output dimension of the global (unsharded) weight.
         bias : bool
             Whether to add a bias.
         local_rank : int

@@ -23,19 +23,13 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Development Status :: 3 - Alpha",
 ]
-# Bare-metal install: `pip install -e .` pulls everything below.
-# Container install: the NGC image already ships torch (+ transformer-engine,
-# not listed here - it is environment-provided, never a pip dep). Install with
-# `pip install --no-deps -e .` plus the pure-Python extras, see
-# containers/README.md.
+# The library itself only imports torch and einops. transformer-engine is an
+# optional, environment-provided accelerator (see containers/README.md) and is
+# never a pip dependency. Bare-metal install: `pip install -e .`; container
+# install: `pip install --no-deps -e .` on top of the image's torch.
 dependencies = [
-    "torch",
-    "zarr",
-    "timm",
-    "pyyaml",
-    "xarray",
-    "matplotlib",
-    "einops"
+    "torch>=2.6",
+    "einops>=0.6",
 ]
 
 [project.optional-dependencies]
@@ -45,13 +39,11 @@ dev = [
     "coverage",
     "pytest-cov",
     "mpi4py>=4.1.1",
-    "hypothesis>=6.1.1",
 
     # QA
     "pre-commit",
     "ruff",
     "mypy",
-
 ]
 docs = [
     "sphinx",
@@ -59,7 +51,6 @@ docs = [
     "myst-parser",
     "numpy",
 ]
-scripts = []
 
 # Mypy
 [tool.mypy]
