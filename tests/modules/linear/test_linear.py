@@ -1052,3 +1052,35 @@ class TestBackward:
             device,
             model_group,
         )
+
+
+class TestParameterCount:
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("bias", [True, False])
+    def test_local_counts_sum_to_the_global_parameter_count(
+        self, device: torch.device, process_mesh_dict_2x2: dict, bias: bool
+    ) -> None:
+        """The bias is replicated over the row group, so it is counted once overall."""
+        mesh = process_mesh_dict_2x2
+        in_dim, out_dim = 6, 8
+        layer = linear.DistributedXWT(
+            in_dim,
+            out_dim,
+            bias,
+            dist.get_rank(group=mesh["model"]),
+            device,
+            mesh["model"],
+            mesh["col"],
+            mesh["row"],
+            False,
+        ).to(device)
+
+        local = layer.get_parameter_count()
+        expected_local = layer.weight.numel() + (
+            layer.bias.numel() // mesh["row"].size() if bias else 0
+        )
+        total = torch.tensor([local], dtype=torch.int64, device=device)
+        dist.all_reduce(total, group=mesh["model"])
+        expected_total = in_dim * out_dim + (out_dim if bias else 0)
+        assert all_ranks_ok(local == expected_local, device, mesh["model"])
+        assert all_ranks_ok(total.item() == expected_total, device, mesh["model"])

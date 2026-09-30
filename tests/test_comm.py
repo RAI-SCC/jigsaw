@@ -156,6 +156,31 @@ class TestOneDP2PValidation:
             comm.comm_1d_p2p(torch.ones(1), torch.zeros(1), group=FakeGroup(0, 2))
 
 
+class TestBatchWork:
+    class _Work:
+        def __init__(self, done: bool):
+            self.done, self.waited = done, []
+
+        def wait(self, *args, **kwargs):
+            self.waited.append((args, kwargs))
+            self.done = True
+
+        def is_completed(self) -> bool:
+            return self.done
+
+    def test_wait_waits_on_every_work_and_forwards_arguments(self):
+        works = [self._Work(False), self._Work(False)]
+        assert comm._BatchWork(works).wait(timeout=3) is True
+        assert all(w.waited == [((), {"timeout": 3})] for w in works)
+
+    def test_is_completed_needs_every_work_to_be_done(self):
+        works = [self._Work(True), self._Work(False)]
+        batch = comm._BatchWork(works)
+        assert not batch.is_completed()
+        batch.wait()
+        assert batch.is_completed()
+
+
 def test_2way_p2p_invalid_rank():
     with pytest.raises(ValueError, match="not valid"):
         comm.comm_2way_p2p(

@@ -108,6 +108,14 @@ class TestGlobalShapeOverride:
         bound = 1.0 / math.sqrt(1000)
         assert shard.abs().max().item() <= bound + 1e-6
 
+    def test_explicit_fan_out_overrides_global_shape(self) -> None:
+        torch.manual_seed(0)
+        shard = torch.empty(1, 1000)
+        init.xavier_uniform_(shard, global_shape=(5, 5), fan_out=1000)
+        # ``fan_in`` still comes from the global shape.
+        bound = math.sqrt(6.0 / (5 + 1000))
+        assert shard.abs().max().item() <= bound + 1e-6
+
     def test_sharded_shards_concatenate_to_the_global_distribution(self) -> None:
         """Filling two shards independently with the same global_shape reproduces
         (in distribution) a single non-sharded draw over the concatenation."""

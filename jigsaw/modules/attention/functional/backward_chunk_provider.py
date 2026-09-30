@@ -615,12 +615,21 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProviderHybrid):
         node_step = step // self._gpn
         if step % self._gpn == 0:
             assert self._internode_recv_buf is not None
+            # Launching the relay replaces ``_internode_recv_buf`` with the (still
+            # empty) buffer of the next hop, so keep the chunk that just arrived.
+            arrived = self._internode_recv_buf
             if node_step < self.topo.n_nodes - 1:
                 # Relay the inter-node chunk one more hop along the node ring.
-                self._launch_inter_backward(self._internode_recv_buf, step)
+                self._launch_inter_backward(arrived, step)
             # At a node boundary the intra-node ring restarts from the chunk
             # that just arrived over the inter-node link.
-            self._recv_buf = self._internode_recv_buf
+            self._recv_buf = arrived
+
+        if (step + 1) % self._gpn == 0:
+            # The next chunk arrives over the inter-node link, so an intra-node
+            # send would never be waited on -- and overwriting its handle and
+            # receive buffer while it is in flight hangs Gloo.
+            return
 
         self._launch_intra_backward(self._recv_buf, step)
 

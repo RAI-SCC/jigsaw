@@ -6,6 +6,7 @@ import sys
 import warnings
 
 import pytest
+import torch
 import torch.distributed as dist
 
 from jigsaw import log
@@ -379,6 +380,20 @@ class TestConfigureLogging:
         log.configure_logging("INFO", **kw)
         assert calls[0] == "enable" and len(calls) == 2
 
+    def test_faulthandler_skips_the_signal_where_sigusr1_is_missing(
+        self, isolated_config, monkeypatch
+    ):
+        import faulthandler
+
+        calls = []
+        monkeypatch.setattr(faulthandler, "is_enabled", lambda: False)
+        monkeypatch.setattr(faulthandler, "enable", lambda: calls.append("enable"))
+        monkeypatch.setattr(faulthandler, "register", lambda sig: calls.append(sig))
+        monkeypatch.delattr(log.signal, "SIGUSR1", raising=False)
+        kw = self._kw() | {"enable_faulthandler": True}
+        log.configure_logging("INFO", **kw)
+        assert calls == ["enable"]
+
 
 class TestHelpers:
     def test_timed_logs_duration(self, records, monkeypatch):
@@ -403,6 +418,17 @@ class TestHelpers:
         with log.timed("sync", barrier=True, cuda_sync=True, group="g"):
             pass
         assert calls == ["g", "g"]
+
+    def test_timed_synchronizes_cuda_before_stopping_the_clock(
+        self, records, monkeypatch
+    ):
+        synced = []
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "synchronize", lambda: synced.append(1))
+        monkeypatch.setattr(log, "_rank_world", lambda: (0, 1))
+        with log.timed("gpu", cuda_sync=True):
+            pass
+        assert synced == [1]
 
     def test_die_logs_tears_down_and_exits(self, records, monkeypatch):
         exits, torn = [], []
