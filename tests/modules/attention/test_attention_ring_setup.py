@@ -1,11 +1,10 @@
-"""Ring wiring of ``DistributedAttention``, without the ring being driven end to end.
+"""Ring wiring of ``DistributedAttention``.
 
 ``test_attention_module.py`` runs ``RingAttentionFunction`` through autograd and the
-non-ring modules. What it leaves out is the glue around it: ``convert_to_jigsaw(ring=True)``
-(which picks ``_ring_attn_core``), the ``_ring_attn_core`` wrapper itself, and the error for
-a backend the module does not know. The wrapper is called on a stand-in ``self`` because a
-complete ``DistributedAttention(ring=True)`` forward needs ``DistributedXWT`` kernels that do
-not exist for a spatial axis > 1 combined with a channel axis of 1.
+non-ring modules, and ``test_attention_convert.py`` converts a serial module with
+``ring=True`` and compares it end to end. What is left is the glue around the ring: the
+construction checks, the ``_ring_attn_core`` wrapper on a stand-in ``self``, and the error
+for a backend the module does not know.
 """
 
 from types import SimpleNamespace
@@ -95,21 +94,6 @@ class TestRingConstruction:
                 ring=True,
                 attn_backend="math",
             )
-
-    @pytest.mark.dist(4)
-    @pytest.mark.xfail(
-        strict=True,
-        raises=RuntimeError,
-        reason="convert_to_jigsaw(ring=True) cannot work on any mesh: DistributedAttention "
-        "needs a spatial group > 1, but the QKV weight copy only fits a row group of 1",
-    )
-    def test_convert_to_jigsaw_with_ring(
-        self, device: torch.device, process_mesh_dict_4x1: dict
-    ) -> None:
-        serial = attention.Attention(DIM, DIM, DIM, HEADS, device)
-        attention.Attention.convert_to_jigsaw(
-            serial, process_mesh_dict_4x1, device, ring=True, attn_backend="math"
-        )
 
 
 @pytest.mark.dist_required

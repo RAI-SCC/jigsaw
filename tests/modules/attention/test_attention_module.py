@@ -6,10 +6,9 @@
 * ``DistributedAttention`` non-ring paths that the other files do not reach (the math
   backend, ``qk_norm``), plus the single-process helpers.
 
-``DistributedAttention(ring=True)`` is deliberately not driven end-to-end here: the ring
-recomputes K/V as ``x @ w_qkv.mT`` on the local shard, which is only right when the channel
-axis is not split, while ``DistributedXWT`` (used for ``head_concat``) has no kernel for a
-mesh with a spatial axis > 1 and channel axis 1.
+``DistributedAttention(ring=True)`` end to end is covered by ``test_attention_convert.py``.
+The ring recomputes K/V as ``x @ w_qkv.mT`` on the local shard, which is only right when the
+channel axis is not split, so it requires a channel group of size 1.
 """
 
 import pytest

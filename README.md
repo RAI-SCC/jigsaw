@@ -28,7 +28,9 @@ container that choice warns and falls back to `sdpa`.
 `attn_backend` selects the attention core — `te`, `sdpa` (default, PyTorch
 flash/​math SDPA) or `math` (unfused reference). `ring` (sequence-parallel
 attention) is a **separate** switch that composes with any backend: `ring=True`
-still runs its inner per-chunk attention through the chosen core.
+still runs its inner per-chunk attention through the chosen core. Ring attention
+splits the sequence over the mesh rows and needs an unsharded channel dimension,
+so the mesh columns must have size 1; without `ring`, columns split the heads.
 
 The container is also useful without TE — a pinned CUDA/NCCL stack for
 reproducible scaling and parameter studies — in which case the defaults

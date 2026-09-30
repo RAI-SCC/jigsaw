@@ -149,6 +149,7 @@ class DistributedAttention(torch.nn.Module):
 
     # type hints
     qkv: torch.nn.Linear | linear.DistributedXWT
+    head_concat: torch.nn.Linear | linear.DistributedXWT
 
     def __init__(
         self,
@@ -167,8 +168,13 @@ class DistributedAttention(torch.nn.Module):
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
         dtype: torch.dtype = torch.float32,
         config: Optional[attention_config.RingAttentionConfig] = None,
+        out_bias: bool = True,
     ):
         """Initialize the module.
+
+        The weights are replicated over ``spatial_group``, which splits the
+        sequence, and sharded over ``channel_group``, which splits the heads.
+        Their gradients are summed over ``spatial_group``.
 
         Parameters
         ----------
@@ -183,7 +189,8 @@ class DistributedAttention(torch.nn.Module):
         dropout_p : float
             Dropout probability.
         local_rank : int
-            Rank within the model group.
+            Rank within the channel group. Kept for compatibility: the module
+            reads the channel rank and the ring rank from the groups.
         device : torch.device
             Device of the module.
         spatial_group : dist.ProcessGroup
@@ -195,7 +202,10 @@ class DistributedAttention(torch.nn.Module):
         qk_norm : bool
             Whether to normalize queries and keys.
         ring : bool
-            Whether to use ring attention over ``spatial_group``.
+            Whether to use ring attention over ``spatial_group``. The ring
+            recomputes the keys and values of remote chunks from the remote
+            input with the local QKV weight, so it needs an unsharded channel
+            dimension: ``channel_group`` must have size 1.
         attn_backend : AttnBackend | str
             Attention core, ``"te"``, ``"sdpa"`` or ``"math"``.
         dtype : torch.dtype
@@ -203,6 +213,8 @@ class DistributedAttention(torch.nn.Module):
         config : RingAttentionConfig, optional
             Ring-attention configuration. Defaults to a configuration for
             ``attn_backend``.
+        out_bias : bool
+            Whether the output projection has a bias.
         """
         super().__init__()
         self.local_rank = local_rank
@@ -237,6 +249,10 @@ class DistributedAttention(torch.nn.Module):
             assert spatial_group.size() > 1, (
                 "Cannot perform ring attention if spatial size is 1."
             )
+            assert channel_group.size() == 1, (
+                "Ring attention needs an unsharded channel dimension, but the "
+                f"channel group has size {channel_group.size()}."
+            )
             self.attn_core = self._ring_attn_core
         else:
             self.attn_core = self._select_attn_core(embed_dim, heads)
@@ -250,7 +266,7 @@ class DistributedAttention(torch.nn.Module):
                 in_dim,
                 embed_dim * 3,
                 bias=False,
-                local_rank=self.local_rank,
+                local_rank=self.channel_group.rank(),
                 device=self.device,
                 model_group=self.channel_group,
                 row_group=self.spatial_group,
@@ -259,27 +275,41 @@ class DistributedAttention(torch.nn.Module):
                 dtype=self.dtype,
             )
 
-        self.head_concat = linear.DistributedXWT(
-            embed_dim,
-            out_dim,
-            bias=True,
-            local_rank=self.local_rank,
-            device=self.device,
-            model_group=self.channel_group,
-            row_group=self.spatial_group,
-            column_group=self.channel_group,
-            bayesian=bayesian,
-            dtype=self.dtype,
-        )
+        if channel_group.size() == 1:
+            self.head_concat = torch.nn.Linear(
+                embed_dim, out_dim, bias=out_bias, device=device, dtype=self.dtype
+            )
+        else:
+            self.head_concat = linear.DistributedXWT(
+                embed_dim,
+                out_dim,
+                bias=out_bias,
+                local_rank=self.channel_group.rank(),
+                device=self.device,
+                model_group=self.channel_group,
+                row_group=self.spatial_group,
+                column_group=self.channel_group,
+                bayesian=bayesian,
+                dtype=self.dtype,
+            )
 
-        # sync up up spatial parameters
+        # The weights are replicated over the spatial group: sync them up and
+        # sum their gradients. ``DistributedXWT`` already sums its own bias
+        # gradient over its row group, which is the spatial group here.
+        already_synced = (
+            {id(self.head_concat.bias)}
+            if isinstance(self.head_concat, linear.DistributedXWT)
+            and self.head_concat.bias is not None
+            else set()
+        )
         for p in self.parameters():
             dist.broadcast(
                 p.data, group_src=0, group=self.spatial_group, async_op=False
             )
-            p.register_post_accumulate_grad_hook(
-                hooks.make_grad_sync_hook(self.spatial_group, async_op=True)
-            )
+            if id(p) not in already_synced:
+                p.register_post_accumulate_grad_hook(
+                    hooks.make_grad_sync_hook(self.spatial_group, async_op=True)
+                )
 
         if self.qk_norm:
             self.q_norm, self.k_norm = (
@@ -449,7 +479,7 @@ class DistributedAttention(torch.nn.Module):
             self.scale,
             self.dropout_p if self.training else 0.0,
             self.spatial_group,
-            self.local_rank,
+            self.spatial_group.rank(),
             self.config,
         )[0]
         out = cast(torch.Tensor, out)
@@ -640,7 +670,8 @@ class Attention(torch.nn.Module):
         """Convert an attention module to a :class:`DistributedAttention`.
 
         The rows of the process mesh split the sequence and the columns split
-        the channels.
+        the heads. The weights are replicated over the rows and sharded over
+        the columns.
 
         Parameters
         ----------
@@ -655,10 +686,11 @@ class Attention(torch.nn.Module):
         col_kw : str
             Key of the column process group.
         model_kw : str
-            Key of the model process group.
+            Key of the model process group. Unused, the ranks come from the
+            row and column groups.
         ring : bool
-            Whether to use ring attention over the rows. Otherwise, each row
-            attends within its own chunk.
+            Whether to use ring attention over the rows, which needs a column
+            group of size 1. Otherwise, each row attends within its own chunk.
         attn_backend : AttnBackend | str
             Attention core, ``"te"``, ``"sdpa"`` or ``"math"``.
         **kwargs : Any
@@ -671,26 +703,15 @@ class Attention(torch.nn.Module):
         """
         channel_size = process_mesh_dict[col_kw].size()
         channel_rank = process_mesh_dict[col_kw].rank()
-        spatial_size = process_mesh_dict[row_kw].size()
+        spatial_group = process_mesh_dict[row_kw]
 
         assert attention.heads % channel_size == 0, (
             f"num_heads={attention.heads} not divisible by channel size {channel_size}"
         )
-        assert attention.embed_dim % spatial_size == 0, (
-            f"embed_dim={attention.embed_dim} not divisible by spatial size {spatial_size}"
+        assert not ring or channel_size == 1, (
+            f"ring attention needs an unsharded channel dimension, but the "
+            f"'{col_kw}' group has size {channel_size}"
         )
-
-        heads_per_shard = attention.heads // channel_size
-
-        # --- shard the fused QKV ---
-        # W has shape [3*embed_dim, in_dim]
-        # Now, W has shape [3, heads, head_dim, input_dim]
-        w = attention.qkv.weight.data.view(
-            3,
-            attention.heads,
-            attention.embed_dim // attention.heads,
-            attention.in_dim,
-        ).clone()
 
         instance = DistributedAttention(
             in_dim=attention.in_dim,
@@ -698,59 +719,61 @@ class Attention(torch.nn.Module):
             out_dim=attention.out_dim,
             heads=attention.heads,
             dropout_p=attention.dropout_p,
-            local_rank=process_mesh_dict[model_kw].rank(),
-            device=attention.device,
-            spatial_group=process_mesh_dict[row_kw],
+            local_rank=channel_rank,
+            device=device,
+            spatial_group=spatial_group,
             channel_group=process_mesh_dict[col_kw],
             bayesian=False,
             qk_norm=attention.qk_norm,
             ring=ring,
             attn_backend=attn_backend,
             dtype=attention.dtype,
+            out_bias=attention.head_concat.bias is not None,
         )
 
-        # Build the Distributed Linear and overwrite its weight
-        instance.qkv = linear.DistributedXWT.convert_to_jigsaw(
-            attention.qkv,
-            process_mesh_dict,
-            device,
-            row_kw,
-            col_kw,
-            col_kw,
-        )  # type: ignore[assignment]
-        if ring:
-            instance.attn_core = DistributedAttention._ring_attn_core  # type: ignore[assignment]
-
-        # [3*embed_dim, input_dim]
-        # Now, local W has shape [3*embed_dim, embed_dim//channel size]
-        w_as_list = list(torch.tensor_split(w, channel_size, dim=1))
-        # now a list of tensors: [3, :local_heads, head_dim, in_features]
-
-        w_as_list = [w.reshape(-1, instance.in_dim) for w in w_as_list]
-
-        w_local_col_shard = 3 * attention.embed_dim // channel_size
-        head_shard_size = w_as_list[0].shape[1] // channel_size
-
-        # need to remap the data by swapping around head and final dimension
-        for i in range(channel_size):
-            instance.qkv.weight.data[
-                i * w_local_col_shard : (i + 1) * w_local_col_shard
-            ] = w_as_list[i][
-                ...,
-                channel_rank * head_shard_size : (channel_rank + 1) * head_shard_size,
+        # The weights are replicated over the spatial group and sharded over the
+        # channel group, so only the channel rank picks a slice.
+        # QKV: the serial weight has shape [3 * embed_dim, in_dim], read as
+        # [3, heads, head_dim, in_dim]. Block ``i`` of the local weight holds the
+        # rows of head shard ``i``; the local columns are this rank's input shard.
+        head_shards = torch.tensor_split(
+            attention.qkv.weight.data.view(
+                3, attention.heads, attention.head_dim, attention.in_dim
+            ),
+            channel_size,
+            dim=1,
+        )
+        in_shard = attention.in_dim // channel_size
+        qkv_blocks = [
+            shard.reshape(-1, attention.in_dim)[
+                :, channel_rank * in_shard : (channel_rank + 1) * in_shard
             ]
+            for shard in head_shards
+        ]
+        instance.qkv.weight.data.copy_(torch.cat(qkv_blocks, dim=0))
 
-        instance.head_concat = linear.DistributedXWT.convert_to_jigsaw(
-            attention.head_concat,
-            process_mesh_dict,
-            device,
-            row_kw,
-            col_kw,
-            col_kw,
-        )  # type: ignore[assignment]
+        # Head concat: columns are the heads of this channel rank.
+        embed_shard = attention.embed_dim // channel_size
+        instance.head_concat.weight.data.copy_(
+            attention.head_concat.weight.data[
+                :, channel_rank * embed_shard : (channel_rank + 1) * embed_shard
+            ]
+        )
+        serial_bias, local_bias = attention.head_concat.bias, instance.head_concat.bias
+        if serial_bias is not None and local_bias is not None:
+            out_shard = attention.out_dim // channel_size
+            local_bias.data.copy_(
+                serial_bias.data[
+                    channel_rank * out_shard : (channel_rank + 1) * out_shard
+                ]
+            )
+
+        # The serial weights need not agree across the spatial group.
+        for p in instance.parameters():
+            dist.broadcast(p.data, group_src=0, group=spatial_group)
 
         # Update head count to reflect local shard
-        instance.heads = heads_per_shard
+        instance.heads = attention.heads // channel_size
         # embed_dim attribute: keep global value, since forward uses embed_dim // heads
         # which still gives head_dim correctly
 
