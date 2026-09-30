@@ -137,7 +137,21 @@ class RollFunction(torch.autograd.Function):
         config: RollConfig,
     ) -> tuple[torch.Tensor, int]:
         """Batching rule for ``torch.vmap``."""
+        bdim = in_dims[0]
+        assert bdim is not None  # ``x`` is the only tensor input
+        x = x.movedim(bdim, 0)
+
+        # ``dims`` are logical; the batch dimension now sits in front of them.
+        def _shift(ds: tuple[int, ...]) -> tuple[int, ...]:
+            return tuple(d + 1 if d >= 0 else d for d in ds)
+
         out = RollFunction.apply(
-            x, shifts, dims, distributed_dims, spatial_groups, empty, config
+            x,
+            shifts,
+            _shift(dims),
+            _shift(distributed_dims),
+            spatial_groups,
+            empty,
+            config,
         )
         return out, 0

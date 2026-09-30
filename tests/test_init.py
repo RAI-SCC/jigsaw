@@ -146,3 +146,28 @@ class TestEmptyTensor:
         t = torch.empty(4, 0)
         out = init.xavier_uniform_(t, global_shape=(4, 8))
         assert out.numel() == 0
+
+    def test_kaiming_normal_noop_on_empty(self) -> None:
+        out = init.kaiming_normal_(torch.empty(0, 4), global_shape=(8, 4))
+        assert out.numel() == 0
+
+    def test_xavier_normal_noop_on_empty(self) -> None:
+        out = init.xavier_normal_(torch.empty(4, 0), global_shape=(4, 8))
+        assert out.numel() == 0
+
+
+class TestModeValidation:
+    @pytest.mark.parametrize("fn", [init.kaiming_uniform_, init.kaiming_normal_])
+    def test_unknown_mode_is_rejected(self, fn) -> None:
+        with pytest.raises(ValueError, match="Mode fan_avg not supported"):
+            fn(torch.empty(4, 4), mode="fan_avg")
+
+    def test_mode_is_case_insensitive(self) -> None:
+        a = _seeded(init.kaiming_normal_, torch.empty(8, 5), mode="FAN_OUT")
+        b = _seeded(init.kaiming_normal_, torch.empty(8, 5), mode="fan_out")
+        assert torch.equal(a, b)
+
+    def test_explicit_fans_override_the_tensor(self) -> None:
+        got = _seeded(init.kaiming_normal_, torch.empty(8, 5), fan_in=100)
+        want = _seeded(torch.nn.init.normal_, torch.empty(8, 5), std=math.sqrt(2 / 100))
+        assert torch.allclose(got, want)
