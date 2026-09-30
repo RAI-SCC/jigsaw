@@ -5,6 +5,7 @@ import torch
 
 import jigsaw.convert as convert
 from jigsaw.modules.attention import Attention, DistributedAttention
+from jigsaw.modules.attention.attention import attn_core_dtype
 from jigsaw.modules.linear import DistributedXWT
 from jigsaw.modules.roll import Roll
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
@@ -415,9 +416,13 @@ class TestConvertToTorch:
                     v.shape[0], v.shape[1], self.num_heads, v.shape[2] // self.num_heads
                 )
 
-                q = q.permute(0, 2, 1, 3).to(torch.bfloat16)
-                k = k.permute(0, 2, 1, 3).to(torch.bfloat16)
-                v = v.permute(0, 2, 1, 3).to(torch.bfloat16)
+                # Match the dtype of jigsaw's attention core: bf16 on CUDA, the
+                # input dtype (fp32) otherwise. A bf16 reference on CPU differs
+                # from the fp32 core by bf16 rounding, well above the tolerances.
+                core_dtype = attn_core_dtype(x)
+                q = q.permute(0, 2, 1, 3).to(core_dtype)
+                k = k.permute(0, 2, 1, 3).to(core_dtype)
+                v = v.permute(0, 2, 1, 3).to(core_dtype)
 
                 with torch.nn.attention.sdpa_kernel(
                     [

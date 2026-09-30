@@ -170,15 +170,25 @@ class DistributedGroupNorm(torch.nn.Module):
         self.device = device
         self.dtype = dtype
         self.bias = bias
-        self.group_norm = torch.nn.GroupNorm(
+        self.group_norm = self._build_group_norm()
+
+    def _build_group_norm(self) -> torch.nn.GroupNorm:
+        """Return a ``GroupNorm`` of the current local shape.
+
+        Older ``torch.nn.GroupNorm`` (e.g. 2.9) has no ``bias=`` argument, so a
+        disabled bias is dropped here instead, as newer torch does for ``bias=False``.
+        """
+        group_norm = torch.nn.GroupNorm(
             self.num_local_groups,
             self.num_channels,
             eps=self.eps,
             affine=self.affine,
             device=self.device,
             dtype=self.dtype,
-            bias=self.bias,
         )
+        if self.affine and not self.bias:
+            group_norm.register_parameter("bias", None)
+        return group_norm
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply the layer.
@@ -247,15 +257,7 @@ class DistributedGroupNorm(torch.nn.Module):
         self.num_channels = new_num_channels
         self.num_local_groups = new_num_local_groups
         self.channel_group = to_channel
-        self.group_norm = torch.nn.GroupNorm(
-            self.num_local_groups,
-            self.num_channels,
-            eps=self.eps,
-            affine=self.affine,
-            device=self.device,
-            dtype=self.dtype,
-            bias=self.bias,
-        )
+        self.group_norm = self._build_group_norm()
         if weight_slice is not None:
             self.group_norm.weight.data = weight_slice
         if bias_slice is not None and self.group_norm.bias is not None:

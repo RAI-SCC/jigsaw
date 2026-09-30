@@ -248,6 +248,23 @@ def comm_1d_alltoall(
     return buffer, handle
 
 
+class _BatchWork:
+    """Wait handle over the works of one ``dist.batch_isend_irecv`` call."""
+
+    def __init__(self, works: list[dist.Work]) -> None:
+        self._works = works
+
+    def wait(self, *args: Any, **kwargs: Any) -> bool:
+        """Block until every send and receive of the batch has completed."""
+        for work in self._works:
+            work.wait(*args, **kwargs)
+        return True
+
+    def is_completed(self) -> bool:
+        """Return whether every send and receive of the batch has completed."""
+        return all(work.is_completed() for work in self._works)
+
+
 def comm_1d_p2p(
     data: torch.Tensor,
     buffer: torch.Tensor,
@@ -310,14 +327,13 @@ def comm_1d_p2p(
     recv_op = dist.P2POp(dist.irecv, buffer, group_peer=recv_from, group=group)
     reqs = dist.batch_isend_irecv([send_op, recv_op])
 
-    if dist.get_backend() == "gloo":
-        dist.barrier()
-
+    # NCCL coalesces the batch into one work; gloo returns one per op. Wait on all
+    # of them, or the receive may still be in flight when ``buffer`` is read.
+    handle = _BatchWork(reqs)
     if not async_op:
-        reqs[0].wait()  # type: ignore[union-attr]
+        handle.wait()
         return buffer, None
-    else:
-        return buffer, reqs[0]
+    return buffer, handle  # type: ignore[return-value]
 
 
 def comm_broadcast(
