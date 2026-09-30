@@ -1,0 +1,112 @@
+"""Domain parallelism only: split the image over the ranks, replicate the weights.
+
+A U-Net-style denoiser is trained on images that are cut into a 2x2 grid of tiles,
+one tile per rank. No parameter is sharded -- every rank holds the full model -- so
+memory per rank only shrinks with the *activations*, which is what dominates for
+large images. This is the simplest way to use jigsaw.
+
+What jigsaw does for you:
+  * ``DistributedConv2D`` swaps a halo with its neighbours, so a 3x3 convolution
+    gives the same result on a tile border as on the undivided image.
+  * The weights are broadcast from rank 0 at construction and their gradients are
+    all-reduced over the spatial groups in a backward hook, so a plain
+    ``torch.optim`` optimizer keeps the replicas identical.
+  * ``DistributedMSELoss`` reduces over the tiles: every rank sees the loss of the
+    whole image.
+
+Run with one process per GPU (or 4 CPU processes):
+
+    torchrun --nproc-per-node 4 examples/domain_parallel.py
+"""
+
+import torch
+import torch.nn as nn
+from _common import setup, shard
+
+import jigsaw
+from jigsaw import log
+from jigsaw.utils_aggregate import gather_results
+
+device, rank, world_size = setup()
+
+# One axis per split dimension: "sh" splits the height, "sw" the width. The channel
+# axis "col" has size 1, i.e. no tensor parallelism. The mesh also gets a "model"
+# group spanning all four ranks.
+mesh = jigsaw.make_process_mesh({"sh": 2, "sw": 2, "col": 1})
+spatial = (mesh["sh"], mesh["sw"])  # groups splitting (H, W)
+
+
+def conv(cin: int, cout: int, stride: int = 1) -> nn.Module:
+    """A 3x3 distributed convolution with 'same' padding."""
+    return jigsaw.convolution.DistributedConv2D(
+        cin,
+        cout,
+        kernel_size=3,
+        stride=stride,
+        padding=1,
+        device=device,
+        spatial_group=spatial,
+        channel_group=mesh["col"],
+    )
+
+
+def up(cin: int, cout: int) -> nn.Module:
+    """A stride-2 transposed convolution that doubles the resolution."""
+    return jigsaw.convolution.DistributedConv2DTranspose(
+        cin,
+        cout,
+        kernel_size=2,
+        stride=2,
+        device=device,
+        spatial_group=spatial,
+        channel_group=mesh["col"],
+    )
+
+
+model = nn.Sequential(
+    conv(1, 16),
+    nn.GELU(),
+    conv(16, 32, stride=2),  # halves the resolution
+    nn.GELU(),
+    up(32, 16),
+    nn.GELU(),
+    conv(16, 1),
+)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+# Every rank averages over the *global* image, so all ranks log the same number.
+loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=spatial)
+
+
+def make_batch(step: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return this rank's tile of a noisy input and its clean target.
+
+    Every rank draws the *same* global batch (same seed) and keeps only its tile.
+    In a real pipeline the Dataset reads just that tile from disk instead.
+    """
+    g = torch.Generator().manual_seed(step)
+    clean = torch.nn.functional.avg_pool2d(  # smooth random fields
+        torch.randn(4, 1, 64, 64, generator=g), kernel_size=5, stride=1, padding=2
+    )
+    noisy = clean + 0.3 * torch.randn(clean.shape, generator=g)
+
+    def tile(x: torch.Tensor) -> torch.Tensor:
+        return shard(shard(x, -2, mesh["sh"]), -1, mesh["sw"]).to(device)
+
+    return tile(noisy), tile(clean)
+
+
+for step in range(100):
+    x, y = make_batch(step)  # each (4, 1, 32, 32): a quarter of the 64x64 image
+    loss = loss_fn(model(x), y)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    if step % 20 == 0:
+        log.info("step %3d  loss %.4f", step, loss.item())
+
+# To look at a full prediction, gather the tiles: `gather_results` stitches the last
+# two dimensions back together (the "row" axis is the height, "col" the width).
+with torch.no_grad():
+    pred = gather_results(model(x), mesh, pm_key_row="sh", pm_key_col="sw")
+log.info("local tile %s -> gathered prediction %s", tuple(x.shape), tuple(pred.shape))

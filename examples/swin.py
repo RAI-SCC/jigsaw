@@ -1,0 +1,266 @@
+"""A Swin Transformer trained with domain parallelism: window attention needs no ring.
+
+Swin attends inside small non-overlapping windows and alternates two layouts:
+
+    W-MSA    windows on a fixed grid
+    SW-MSA   the same grid, after the feature map is shifted by half a window
+
+Cut the feature map into a 2x2 grid of tiles, one tile per rank, and choose the tile
+size to be a multiple of the window size. Then every window lies inside one tile and
+almost everything is local:
+
+    window attention    no communication -- a batch of small independent attentions
+    patch merging       no communication -- a 2x2 neighbourhood never spans two tiles
+    MLP, layer norm     no communication -- they act on one token at a time
+    shift               ``DistributedRoll`` -- the only layer that talks to neighbours
+
+The shift is a cyclic ``torch.roll`` of the *whole* map, so a few rows and columns have
+to cross the tile borders. ``DistributedRoll`` does exactly that: a halo exchange with
+the neighbouring tiles, wrapping around the border of the image.
+
+Two details that are easy to get wrong with a split image:
+
+  * The mask of the shifted windows (tokens that were wrapped around the image border
+    must not attend to each other) depends on the *global* position of a window, so
+    each rank builds it from the position of its tile.
+  * The weights are replicated, and ``jigsaw`` only synchronises the ones inside its own
+    layers. ``replicate`` below does the same for the plain PyTorch layers: broadcast
+    the weights from rank 0 and all-reduce their gradients over the tiles.
+
+Tokens are channels-last, ``(B, H / sh, W / sw, C)``; the convolutions that embed and
+recover the patches are channels-first, as in PyTorch. This is a denoiser, so it ends
+with a transposed convolution rather than a classification head.
+
+Run with one process per GPU (or 4 CPU processes):
+
+    torchrun --nproc-per-node 4 examples/swin.py
+"""
+
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+import torch.nn.functional as F
+from _common import setup, shard
+
+import jigsaw
+from jigsaw import hooks, log
+
+device, rank, world_size = setup()
+
+mesh = jigsaw.make_process_mesh({"sh": 2, "sw": 2, "col": 1})
+sh, sw, model_group = mesh["sh"], mesh["sw"], mesh["model"]
+spatial = (sh, sw)  # groups splitting (H, W)
+
+IN_CHANNELS, PATCH, WINDOW = 1, 2, 4
+DIMS, HEADS, DEPTHS = (32, 64), (2, 4), (2, 2)  # per stage
+H, W = 64, 64  # global image size
+
+
+def replicate(module: nn.Module) -> nn.Module:
+    """Give every rank the same copy of ``module``, and keep the copies identical.
+
+    Every rank sees only its tile, so its gradient is only a part of the total. Summing
+    the parts over the tiles gives every rank the gradient of the whole image.
+    """
+    for p in module.parameters():
+        dist.broadcast(p.data, group_src=0, group=model_group)
+        p.register_post_accumulate_grad_hook(hooks.make_grad_sync_hook(model_group))
+    return module
+
+
+def windows(x: torch.Tensor) -> torch.Tensor:
+    """Cut a tile ``(B, h, w, C)`` into windows ``(B, nW, WINDOW * WINDOW, C)``."""
+    b, h, w, c = x.shape
+    x = x.view(b, h // WINDOW, WINDOW, w // WINDOW, WINDOW, c)
+    return x.permute(0, 1, 3, 2, 4, 5).reshape(b, -1, WINDOW * WINDOW, c)
+
+
+def unwindows(x: torch.Tensor, h: int, w: int) -> torch.Tensor:
+    """Inverse of :func:`windows`."""
+    b, c = x.shape[0], x.shape[-1]
+    x = x.view(b, h // WINDOW, w // WINDOW, WINDOW, WINDOW, c)
+    return x.permute(0, 1, 3, 2, 4, 5).reshape(b, h, w, c)
+
+
+def relative_position_index() -> torch.Tensor:
+    """Index into the bias table for every pair of positions inside a window."""
+    ij = torch.stack(torch.meshgrid(*[torch.arange(WINDOW)] * 2, indexing="ij"))
+    ij = ij.flatten(1)  # (2, N)
+    rel = ij[:, :, None] - ij[:, None, :] + (WINDOW - 1)  # (2, N, N), in [0, 2W - 2]
+    return rel[0] * (2 * WINDOW - 1) + rel[1]
+
+
+def shift_mask(h: int, w: int, shift: int) -> torch.Tensor:
+    """Mask ``(nW, N, N)`` of the windows of this tile after rolling the map by -shift.
+
+    Rolling moves the top rows and left columns of the *image* to its bottom and right.
+    Inside a window, the tokens from the two sides of the image border must not attend
+    to each other, so give every token the id of the region it came from and let tokens
+    attend to those with the same id. The border lies at the *global* position, so the
+    region of a token follows from where this rank's tile sits in the token grid.
+    """
+
+    def region(local_size: int, group: dist.ProcessGroup) -> torch.Tensor:
+        size = local_size * group.size()  # global size of the token grid
+        idx = group.rank() * local_size + torch.arange(local_size)
+        return (idx >= size - WINDOW).long() + (idx >= size - shift).long()
+
+    rows, cols = region(h, sh), region(w, sw)
+    ids = (rows[:, None] * 3 + cols[None, :])[None, :, :, None]  # (1, h, w, 1)
+    ids = windows(ids).squeeze(-1).squeeze(0)  # (nW, N)
+    same = ids[:, :, None] == ids[:, None, :]
+    return torch.zeros(same.shape).masked_fill(~same, float("-inf"))
+
+
+class WindowAttention(nn.Module):
+    """Multi-head attention inside windows, with a learned relative position bias."""
+
+    def __init__(self, dim: int, heads: int, tile: tuple[int, int], shift: int) -> None:
+        super().__init__()
+        self.heads = heads
+        self.qkv = nn.Linear(dim, 3 * dim)
+        self.proj = nn.Linear(dim, dim)
+        self.bias_table = nn.Parameter(torch.zeros((2 * WINDOW - 1) ** 2, heads))
+        nn.init.trunc_normal_(self.bias_table, std=0.02)
+        replicate(self)
+
+        self.register_buffer("index", relative_position_index(), persistent=False)
+        if shift:
+            mask = shift_mask(*tile, shift).to(device)
+            self.register_buffer("mask", mask, persistent=False)
+        else:
+            self.mask = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, h, w, c = x.shape
+        x = windows(x)  # (B, nW, N, C): the windows are just a batch dimension
+        n = x.shape[2]
+        qkv = self.qkv(x).view(b, -1, n, 3, self.heads, c // self.heads)
+        q, k, v = qkv.permute(3, 0, 1, 4, 2, 5).unbind(0)  # (B, nW, heads, N, d)
+
+        bias = self.bias_table[self.index.view(-1)].view(n, n, -1).permute(2, 0, 1)
+        if self.mask is not None:
+            bias = bias[None] + self.mask[:, None]  # (nW, heads, N, N)
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
+        out = out.transpose(2, 3).reshape(b, -1, n, c)
+        return unwindows(self.proj(out), h, w)
+
+
+class SwinBlock(nn.Module):
+    """``x + attn(norm(x))``, then ``x + mlp(norm(x))``; the windows may be shifted."""
+
+    def __init__(
+        self, dim: int, heads: int, tile: tuple[int, int], shift: int = 0
+    ) -> None:
+        super().__init__()
+        self.norm1 = replicate(nn.LayerNorm(dim))
+        self.attn = WindowAttention(dim, heads, tile, shift)
+        self.norm2 = replicate(nn.LayerNorm(dim))
+        self.mlp = replicate(
+            nn.Sequential(nn.Linear(dim, 4 * dim), nn.GELU(), nn.Linear(4 * dim, dim))
+        )
+
+        def roll(shift: int) -> nn.Module:
+            return jigsaw.roll.DistributedRoll(
+                shifts=(shift, shift),
+                dims=(1, 2),  # the two spatial axes of (B, H, W, C) ...
+                distributed_dims=(1, 2),  # ... both are split ...
+                spatial_groups=spatial,  # ... over "sh" and "sw"
+                device=device,
+            )
+
+        # Shifting by -shift moves the windows; the opposite roll puts the result back.
+        self.shift = roll(-shift) if shift else nn.Identity()
+        self.unshift = roll(shift) if shift else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.unshift(self.attn(self.shift(self.norm1(x))))
+        return x + self.mlp(self.norm2(x))
+
+
+class PatchMerging(nn.Module):
+    """Halve the resolution: concatenate every 2x2 group of tokens, project to 2C."""
+
+    def __init__(self, dim: int) -> None:
+        super().__init__()
+        self.norm = replicate(nn.LayerNorm(4 * dim))
+        self.reduce = replicate(nn.Linear(4 * dim, 2 * dim, bias=False))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # A tile has an even size and starts on an even row and column, so its 2x2
+        # groups are exactly those of the undivided map: no communication.
+        x = torch.cat(
+            [x[:, 0::2, 0::2], x[:, 1::2, 0::2], x[:, 0::2, 1::2], x[:, 1::2, 1::2]],
+            dim=-1,
+        )
+        return self.reduce(self.norm(x))
+
+
+class Swin(nn.Module):
+    """Patch embedding -> Swin stages joined by patch merging -> patch recovery."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        conv_kwargs = dict(
+            device=device, spatial_group=spatial, channel_group=mesh["col"]
+        )
+        # kernel == stride: the patches do not overlap, so there is no halo to exchange.
+        self.embed = jigsaw.convolution.DistributedConv2D(
+            IN_CHANNELS, DIMS[0], kernel_size=PATCH, stride=PATCH, **conv_kwargs
+        )
+
+        tile = (H // PATCH // sh.size(), W // PATCH // sw.size())  # local token grid
+        stages: list[nn.Module] = []
+        for i, (dim, heads, depth) in enumerate(zip(DIMS, HEADS, DEPTHS)):
+            # The tile must hold a whole number of windows, and the shift a window.
+            assert tile[0] % WINDOW == 0 and tile[1] % WINDOW == 0, tile
+            blocks = [
+                SwinBlock(dim, heads, tile, shift=0 if j % 2 == 0 else WINDOW // 2)
+                for j in range(depth)
+            ]
+            if i < len(DIMS) - 1:
+                blocks.append(PatchMerging(dim))
+                tile = (tile[0] // 2, tile[1] // 2)
+            stages.append(nn.Sequential(*blocks))
+        self.stages = nn.Sequential(*stages)
+
+        scale = PATCH * 2 ** (len(DIMS) - 1)  # pixels per token of the last stage
+        self.norm = replicate(nn.LayerNorm(DIMS[-1]))
+        self.recover = jigsaw.convolution.DistributedConv2DTranspose(
+            DIMS[-1], IN_CHANNELS, kernel_size=scale, stride=scale, **conv_kwargs
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        z = self.embed(x).permute(0, 2, 3, 1)  # channels-last: (B, H', W', C)
+        z = self.norm(self.stages(z))
+        z = z.permute(0, 3, 1, 2).contiguous()  # back to channels-first
+        return x + self.recover(z)  # predict a correction to the input
+
+
+model = Swin()
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=spatial)
+n_params = sum(p.numel() for p in model.parameters())
+log.info("parameters per rank (all replicated): %d", n_params)
+
+
+def make_batch(step: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return this rank's tile of a noisy input and its clean target."""
+    g = torch.Generator().manual_seed(step)
+    clean = F.avg_pool2d(torch.randn(4, IN_CHANNELS, H, W, generator=g), 5, 1, 2)
+    noisy = clean + 0.3 * torch.randn(clean.shape, generator=g)
+
+    def tile(x: torch.Tensor) -> torch.Tensor:
+        return shard(shard(x, -2, sh), -1, sw).to(device)
+
+    return tile(noisy), tile(clean)
+
+
+for step in range(100):
+    x, y = make_batch(step)  # each (4, 1, H / 2, W / 2)
+    loss = loss_fn(model(x), y)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    if step % 20 == 0:
+        log.info("step %3d  loss %.4f", step, loss.item())
