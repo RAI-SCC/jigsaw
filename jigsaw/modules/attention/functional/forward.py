@@ -240,6 +240,15 @@ def ring_forward(
             ring_config, q, kj, vj, scale, dropout_p, out, lse, seed
         )
         rng_states[global_chunk_idx] = rng_state_j
+        # Drain this step's D2H offload behind its attention core (a free wait:
+        # the copy had the whole core to finish). Two reasons it's per step, not
+        # once after the loop: (1) the offloader holds a GPU ref to each chunk
+        # until drained, so draining at the end kept all ring_group_size chunks
+        # resident and the forward peak O(P); (2) with overlap_comm the chunk
+        # lives in a ping-pong recv buffer that the next step's kick overwrites,
+        # and the comm stream only waits on the compute stream -- this puts the
+        # D2H on the compute stream's timeline before that kick is issued.
+        ring_config.wait_offloads()
         provider.advance(step, ring_group_size)
 
     ring_config.wait_offloads()

@@ -850,12 +850,10 @@ class DistributedAttention(torch.nn.Module):
             return hierarchical_ulysses_attention(
                 q, k, v, self._uly_intra_group,
                 self._inter_node_ring_core(dropout_p),
-                self.local_rank, self.device,
                 qkv_stack=qkv_stack,
             )
         return ulysses_attention(
             q, k, v, self.spatial_group, self._dense_bshd_core(dropout_p),
-            self.local_rank, self.device,
             qkv_stack=qkv_stack,
         )
 
