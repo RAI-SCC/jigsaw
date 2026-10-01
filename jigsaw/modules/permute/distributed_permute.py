@@ -1,4 +1,8 @@
-"""Distributed permutation kernels."""
+"""Distributed permutation kernels.
+
+The kernels exchange unequal blocks with ``dist.all_to_all``, so they need a
+backend with all-to-all support (NCCL, not gloo).
+"""
 
 import torch
 import torch.distributed as dist
@@ -51,37 +55,28 @@ def x_transpose_twoway(
     match mod:
         case 0:
             x0 = x0.mT
-
-            x_shape = x0.shape
-            if len(x_shape) >= 3:
-                x_transpose = torch.empty(
-                    *x_shape[:-2], x0.shape[-2] * 2, x0.shape[-1], device=device
-                )
-                x_transpose[..., : x0.shape[-2], :] = x0
-            else:
-                x_transpose = torch.empty(x0.shape[0] * 2, x0.shape[1], device=device)
-                x_transpose[: x0.shape[1]] = x0
+            x_transpose = torch.empty(
+                *x0.shape[:-2],
+                x0.shape[-2] * 2,
+                x0.shape[-1],
+                dtype=x.dtype,
+                device=device,
+            )
+            x_transpose[..., : x0.shape[-2], :] = x0
             xt_handle.wait()
-            if len(x_shape) >= 3:
-                x_transpose[..., x0.shape[-2] :, :] = buffer_x.mT
-            else:
-                x_transpose[x0.shape[1] :, :] = buffer_x.mT
+            x_transpose[..., x0.shape[-2] :, :] = buffer_x.mT
         case 1:
             x1 = x1.mT
-            x_shape = x1.shape
-            if len(x_shape) >= 3:
-                x_transpose = torch.empty(
-                    *x_shape[:-2], x1.shape[-2] * 2, x1.shape[-1], device=device
-                )
-                x_transpose[..., x1.shape[-2] :, :] = x1
-            else:
-                x_transpose = torch.empty(x1.shape[1] * 2, x1.shape[2], device=device)
-                x_transpose[x1.shape[1] :] = x1
+            x_transpose = torch.empty(
+                *x1.shape[:-2],
+                x1.shape[-2] * 2,
+                x1.shape[-1],
+                dtype=x.dtype,
+                device=device,
+            )
+            x_transpose[..., x1.shape[-2] :, :] = x1
             xt_handle.wait()
-            if len(x_shape) >= 3:
-                x_transpose[..., : x1.shape[-2], :] = buffer_x.mT
-            else:
-                x_transpose[: x1.shape[1], :] = buffer_x.mT
+            x_transpose[..., : x1.shape[-2], :] = buffer_x.mT
     return x_transpose
 
 
@@ -177,7 +172,7 @@ def x_transpose_eightway(
         Local transposed output.
     """
     mod = local_rank % 8
-    empty = torch.empty(0, device=device, dtype=torch.float32)
+    empty = torch.empty(0, device=device, dtype=xij.dtype)
 
     # split upon last dimension
     x0, x1 = torch.split(xij, xij.shape[-1] // 2, dim=-1)
