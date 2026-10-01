@@ -44,8 +44,8 @@ class TestConfusionMatrixSerial:
         )
         assert torch.equal(cm, expected)
 
-    def test_single_group_is_accepted_where_a_sequence_is_expected(self):
-        logits, target, expected = _case()
+    def test_single_group_is_accepted_where_a_sequence_is_expected(self, device):
+        logits, target, expected = (t.to(device) for t in _case())
         world = dist.group.WORLD
         cm = seg.distributed_confusion_matrix(
             logits, target, NUM_CLASSES, reduce_groups=world

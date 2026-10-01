@@ -156,8 +156,10 @@ class TestSingletonGroupPrimitives:
         out, handle = _reduce_scatter_channels(g_x, _singleton_group(), n=1)
         assert handle is None and torch.equal(out, g_x)
 
-    def test_exchange_with_nothing_to_send_returns_empty_slices(self) -> None:
-        template = torch.randn(2, 3, 4)
+    def test_exchange_with_nothing_to_send_returns_empty_slices(
+        self, device: torch.device
+    ) -> None:
+        template = torch.randn(2, 3, 4, device=device)
         part = template.narrow(-1, 0, 0)
         (recv,) = exchange_along_axis(
             _singleton_group(), template, [part], [0], [0], axis=-1

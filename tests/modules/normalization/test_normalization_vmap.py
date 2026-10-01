@@ -11,14 +11,13 @@ import torch.distributed as dist
 
 from jigsaw.modules.normalization import normalization as norm
 
-CPU = torch.device("cpu")
 E, B, S, C = 3, 2, 4, 6
 
 
 @pytest.fixture
-def batched():
+def batched(device):
     g = torch.Generator().manual_seed(0)
-    return torch.randn(E, B, S, C, generator=g, dtype=torch.double)
+    return torch.randn(E, B, S, C, generator=g, dtype=torch.double).to(device)
 
 
 def _loop(module, x):
@@ -31,15 +30,15 @@ def test_softmax_vmap_matches_loop(batched):
     assert torch.allclose(torch.vmap(module)(batched), _loop(module, batched))
 
 
-def test_noparam_layernorm_vmap_matches_loop(batched):
-    module = norm.DistributedNoParamLayerNorm(dist.get_rank(), CPU, dist.group.WORLD)
+def test_noparam_layernorm_vmap_matches_loop(batched, device):
+    module = norm.DistributedNoParamLayerNorm(dist.get_rank(), device, dist.group.WORLD)
     assert module.get_parameter_count() == 0
     assert torch.allclose(torch.vmap(module)(batched), _loop(module, batched))
 
 
-def test_layernorm_vmap_matches_loop_and_counts_parameters(batched):
+def test_layernorm_vmap_matches_loop_and_counts_parameters(batched, device):
     module = norm.DistributedLayerNorm(
-        C, dist.get_rank(), CPU, dist.group.WORLD, dist.group.WORLD
+        C, dist.get_rank(), device, dist.group.WORLD, dist.group.WORLD
     ).double()
     with torch.no_grad():
         module.weight.copy_(torch.linspace(0.5, 1.5, C))

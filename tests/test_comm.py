@@ -3,7 +3,8 @@
 Gloo's ``all_to_all`` needs equal-sized tensors on every rank, which the zero-length
 placeholders used by the all-to-all halo/ring helpers violate, so those helpers are
 checked against a recording fake of ``dist.all_to_all`` (they are exercised for real
-on NCCL). The p2p and broadcast helpers run for real on two ranks.
+on NCCL). The p2p and broadcast helpers run for real on two ranks, on the session
+device.
 """
 
 from types import SimpleNamespace
@@ -195,26 +196,26 @@ class TestTwoRanks:
         return dist.group.WORLD
 
     @pytest.mark.parametrize("async_op", [True, False])
-    def test_2way_p2p_swaps_data(self, group, async_op):
+    def test_2way_p2p_swaps_data(self, device, group, async_op):
         rank = dist.get_rank()
-        data = torch.full((3,), float(rank + 1))
-        buffer = torch.zeros(3)
+        data = torch.full((3,), float(rank + 1), device=device)
+        buffer = torch.zeros(3, device=device)
         out, handles = comm.comm_2way_p2p(
-            data, buffer, torch.empty(0), group, async_op=async_op
+            data, buffer, torch.empty(0, device=device), group, async_op=async_op
         )
         assert len(handles) == 2
         for handle in handles:
             if handle is not None:
                 handle.wait()
         assert out is buffer
-        assert torch.equal(buffer, torch.full((3,), float(2 - rank)))
+        assert torch.equal(buffer.cpu(), torch.full((3,), float(2 - rank)))
 
     @pytest.mark.parametrize("async_op", [True, False])
     @pytest.mark.parametrize("direction", [1, -1])
-    def test_1d_p2p_ring_shift(self, group, async_op, direction):
+    def test_1d_p2p_ring_shift(self, device, group, async_op, direction):
         rank = dist.get_rank()
-        data = torch.full((2,), float(rank))
-        buffer = torch.zeros(2)
+        data = torch.full((2,), float(rank), device=device)
+        buffer = torch.zeros(2, device=device)
         out, handle = comm.comm_1d_p2p(
             data, buffer, direction=direction, group=group, async_op=async_op
         )
@@ -222,13 +223,15 @@ class TestTwoRanks:
         if handle is not None:
             handle.wait()
         assert out is buffer
-        assert torch.equal(buffer, torch.full((2,), float((rank - direction) % 2)))
+        assert torch.equal(
+            buffer.cpu(), torch.full((2,), float((rank - direction) % 2))
+        )
 
-    def test_1d_p2p_explicit_ranks(self, group):
+    def test_1d_p2p_explicit_ranks(self, device, group):
         rank = dist.get_rank()
-        buffer = torch.zeros(1)
+        buffer = torch.zeros(1, device=device)
         comm.comm_1d_p2p(
-            torch.tensor([float(rank)]),
+            torch.tensor([float(rank)], device=device),
             buffer,
             send_recv_ranks=[1 - rank, 1 - rank],
             group=group,
@@ -238,10 +241,11 @@ class TestTwoRanks:
 
     @pytest.mark.parametrize("src", [0, 1])
     @pytest.mark.parametrize("async_op", [True, False])
-    def test_broadcast(self, group, src, async_op):
+    def test_broadcast(self, device, group, src, async_op):
         data = torch.full((4,), 5.0) if dist.get_rank() == src else torch.zeros(4)
+        data = data.to(device)
         out, handle = comm.comm_broadcast(data, src, group, async_op=async_op)
         if handle is not None:
             handle.wait()
         assert out is data
-        assert torch.equal(data, torch.full((4,), 5.0))
+        assert torch.equal(data.cpu(), torch.full((4,), 5.0))
