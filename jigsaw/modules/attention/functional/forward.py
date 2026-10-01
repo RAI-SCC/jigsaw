@@ -142,8 +142,21 @@ def ring_forward(
             if base_seed is not None
             else None
         )
+        # A chunk recomputed from a received ``x`` comes out in ``w_qkv``'s dtype,
+        # while ``q`` is already in the core dtype (bf16 on CUDA): the cores
+        # matmul ``q`` against the chunk, so a mixed-dtype pair raises. Fold the
+        # chunk into ``q``'s dtype here, as ``ring_backward`` does for its cores;
+        # the provider keeps (and saves) the chunk in its original precision.
         out, lse, rng_state_j = _attend_step(
-            ring_config, q, kj, vj, scale, dropout_p, out, lse, seed
+            ring_config,
+            q,
+            kj.to(q.dtype),
+            vj.to(q.dtype),
+            scale,
+            dropout_p,
+            out,
+            lse,
+            seed,
         )
         rng_states[global_chunk_idx] = rng_state_j
         provider.advance(step, ring_group_size)

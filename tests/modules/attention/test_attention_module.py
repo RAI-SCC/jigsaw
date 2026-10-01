@@ -134,7 +134,9 @@ class TestDistributedAttentionPaths:
         out = gather_1d_results(
             model(_channel_shard(x_global, mesh)), mesh, dim=-1, pm_key="col"
         )
-        assert_close("output", out, y_ref.detach(), 1e-4, 1e-4, device, mesh["model"])
+        # On CUDA both run in bf16, the serial module on the flash kernel: ~1e-3 apart.
+        tol = 5e-3 if device.type == "cuda" else 1e-4
+        assert_close("output", out, y_ref.detach(), tol, tol, device, mesh["model"])
 
     @pytest.mark.dist(4)
     def test_qk_norm_forward_backward(

@@ -25,6 +25,20 @@ IN_DIM, EMBED_DIM, OUT_DIM, HEADS = 16, 16, 16, 4
 BATCH, SEQ = 2, 16
 
 
+def _tols(device: torch.device) -> dict[str, float]:
+    """Tolerances of a ``check_parity`` against the serial module.
+
+    On CUDA the attention core runs in bf16 (``attn_core_dtype``), and the serial module
+    uses the flash kernel where ``attn_backend="math"`` does not: the two differ by bf16
+    rounding. That is ~1e-3 on the output and, summed over the tokens, ~1e-2 on the
+    weight gradients (which are O(1) here); a wrong shard or weight layout is off by
+    the size of the entries themselves.
+    """
+    if device.type == "cuda":
+        return dict(atol=5e-3, rtol=5e-3, grad_atol=5e-2, grad_rtol=5e-3)
+    return dict(atol=1e-4, rtol=1e-4)
+
+
 def _serial(device: torch.device, out_bias: bool) -> attention.Attention:
     torch.manual_seed(0)  # identical reference on every rank
     serial = attention.Attention(IN_DIM, EMBED_DIM, OUT_DIM, HEADS, device)
@@ -106,8 +120,7 @@ class TestConvertWithRing:
             param_rules=rules,
             process_mesh_dict=mesh,
             device=device,
-            atol=1e-4,
-            rtol=1e-4,
+            **_tols(device),
         )
         model = seen[0]
         assert model.ring
@@ -168,8 +181,7 @@ class TestConvertWithoutRing:
             param_rules=rules,
             process_mesh_dict=mesh,
             device=device,
-            atol=1e-4,
-            rtol=1e-4,
+            **_tols(device),
             serial_forward=_windowed(mesh["row"].size()),
         )
 
@@ -196,8 +208,7 @@ class TestConvertWithoutRing:
             param_rules=rules,
             process_mesh_dict=mesh,
             device=device,
-            atol=1e-4,
-            rtol=1e-4,
+            **_tols(device),
             serial_forward=_windowed(mesh["row"].size()),
         )
 
