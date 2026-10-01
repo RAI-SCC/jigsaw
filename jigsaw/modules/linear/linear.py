@@ -506,9 +506,7 @@ class _DistributedMatMul(torch.nn.Module):
         """Return the number of parameters, which is always 0."""
         return 0
 
-    def forward(
-        self, x: torch.Tensor, w: torch.Tensor, b: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, w: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         """Apply the distributed matmul.
 
         Parameters
@@ -517,8 +515,8 @@ class _DistributedMatMul(torch.nn.Module):
             Local input.
         w : torch.Tensor
             Local weight.
-        b : torch.Tensor | None
-            Local bias.
+        **kwargs : Any
+            Unused. The operation has no bias.
 
         Returns
         -------
@@ -528,7 +526,7 @@ class _DistributedMatMul(torch.nn.Module):
         cij = self.matmul(
             x,
             w,
-            b,
+            None,
             self.local_rank,
             self.device,
             self.config,

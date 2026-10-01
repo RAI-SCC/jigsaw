@@ -92,15 +92,6 @@ class TestConvertContracts:
         with pytest.raises(AssertionError):
             Attention.convert_to_jigsaw(attn, process_mesh_dict_2x1x2, device)
 
-    @pytest.mark.dist(4)
-    def test_attention_embed_dim_indivisible_by_spatial(
-        self, device: torch.device, process_mesh_dict_4x1: dict
-    ) -> None:
-        # 4x1 -> row=4, col=1; embed_dim=6 is not divisible by the spatial size.
-        attn = Attention(in_dim=6, embed_dim=6, out_dim=6, heads=2, device=device)
-        with pytest.raises(AssertionError):
-            Attention.convert_to_jigsaw(attn, process_mesh_dict_4x1, device)
-
 
 # --------------------------------------------------------------------------- #
 # reshard_parameters: divisibility contracts

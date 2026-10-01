@@ -254,10 +254,21 @@ class _HybridForwardChunkProvider(_ForwardChunkProvider):
         self._inter_handle: Optional[dist.Work] = None
 
     def _launch_inter_forward(self, node_step: int) -> None:
-        """Start the inter-node send of the local chunk."""
+        """Start the inter-node send.
+
+        The first round sends the local chunk. Later rounds relay the chunk that
+        just arrived, so that with more than two nodes the chunk of node
+        ``node_idx + node_step`` reaches this rank rather than that of its
+        neighbour again.
+        """
         buf = torch.empty_like(self.x_j if self.send_x else self.kv_j)
+        if node_step == 0:
+            data = self.x.clone() if self.send_x else self.kv.clone()
+        else:
+            assert self._inter_recv_buf is not None
+            data = self._inter_recv_buf.clone()
         self._inter_recv_buf, self._inter_handle = self.config.p2p_fn(
-            data=(self.x.clone() if self.send_x else self.kv.clone()),
+            data=data,
             buffer=buf,
             send_recv_ranks=self._inter_ranks,
             group=self.group,

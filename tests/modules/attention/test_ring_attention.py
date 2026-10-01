@@ -732,6 +732,37 @@ def test_ring_hybrid(
     )
 
 
+@pytest.mark.dist(6)
+@_apply_ring_hybrid_parametrize
+def test_ring_hybrid_three_nodes(
+    device: torch.device,
+    process_mesh_dict_2x3: dict,
+    send_in_forward: config.SendForward,
+    save_for_backward: config.SaveBackward,
+    send_op: config.SendOp,
+    save_scope: config.SaveScope,
+    send_backward: config.SendBackward,
+    offloader: config.Offload,
+) -> None:
+    """Verify forward-backward parity for the hybrid ring on 6 ranks.
+
+    Runs the ring as ``3 nodes x 2 GPUs`` (``gpus_per_node=2``). Two nodes are not
+    enough to exercise the inter-node relay (a chunk hopped on to a further node),
+    which only happens while ``node_step < n_nodes - 1``.
+    """
+    _check_ring_hybrid(
+        device,
+        process_mesh_dict_2x3,
+        send_in_forward,
+        save_for_backward,
+        send_op,
+        save_scope,
+        send_backward,
+        offloader,
+        gpus_per_node=2,
+    )
+
+
 @pytest.mark.dist(4)
 @_apply_ring_hybrid_parametrize
 def test_ring_hybrid_single_node(

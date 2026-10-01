@@ -150,7 +150,12 @@ class _DistributedLogSoftmax(torch.autograd.Function):
         group: Optional[dist.ProcessGroup],
     ) -> tuple[torch.Tensor, int]:
         """Batching rule for ``torch.vmap``."""
-        return _DistributedLogSoftmax.apply(x, dim, group), 0
+        bdim = in_dims[0]
+        assert bdim is not None  # ``x`` is the only tensor input
+        x = x.movedim(bdim, 0)
+        # ``dim`` is logical; the batch dimension now sits in front of it.
+        batched_dim = dim + 1 if dim >= 0 else dim
+        return _DistributedLogSoftmax.apply(x, batched_dim, group), 0
 
 
 def distributed_log_softmax(
