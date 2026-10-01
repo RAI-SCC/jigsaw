@@ -183,7 +183,9 @@ class DistributedAttention(torch.nn.Module):
 
         The weights are replicated over ``spatial_group``, which splits the
         sequence, and sharded over ``channel_group``, which splits the heads.
-        Their gradients are summed over ``spatial_group``.
+        Their gradients are summed over ``spatial_group``. The query and key
+        norms act on a single head, so they are replicated over both groups and
+        their gradients are summed over both.
 
         Parameters
         ----------
@@ -214,9 +216,10 @@ class DistributedAttention(torch.nn.Module):
             Whether to use ring attention over ``spatial_group``. By default
             the ring recomputes the keys and values of remote chunks from the
             remote input with the local QKV weight, which needs an unsharded
-            channel dimension: ``channel_group`` must have size 1, unless
-            ``config`` makes the ring send and save the keys and values
-            themselves (``send_in_forward=SendForward.KV`` and
+            channel dimension and no ``qk_norm``: ``channel_group`` must have
+            size 1 and ``qk_norm`` must be off, unless ``config`` makes the ring
+            send and save the keys and values themselves
+            (``send_in_forward=SendForward.KV`` and
             ``save_for_backward=SaveBackward.KV``).
         attn_backend : AttnBackend | str
             Attention core, ``"te"``, ``"sdpa"`` or ``"math"``.
@@ -273,6 +276,14 @@ class DistributedAttention(torch.nn.Module):
                 "Ring attention needs an unsharded channel dimension, but the "
                 f"channel group has size {channel_group.size()}. With a channel "
                 "split, pass a config with send_in_forward=SendForward.KV and "
+                "save_for_backward=SaveBackward.KV."
+            )
+            # Likewise, a remote chunk's keys rebuilt from its input would miss
+            # the key norm.
+            assert not qk_norm or sends_and_saves_kv, (
+                "Ring attention with qk_norm needs the normalized keys of the "
+                "remote chunks. Pass a config with "
+                "send_in_forward=SendForward.KV and "
                 "save_for_backward=SaveBackward.KV."
             )
             self.attn_core = self._ring_attn_core
@@ -338,6 +349,18 @@ class DistributedAttention(torch.nn.Module):
                 torch.nn.LayerNorm(embed_dim // heads, device=device),
                 torch.nn.LayerNorm(embed_dim // heads, device=device),
             )
+            # The norms act on the unsharded head dimension, so they are
+            # replicated over the spatial and the channel group: sum their
+            # gradients over both.
+            norm_sync_groups = [
+                g for g in (self.spatial_group, self.channel_group) if g.size() > 1
+            ]
+            if norm_sync_groups:
+                for norm in (self.q_norm, self.k_norm):
+                    for p in norm.parameters():
+                        p.register_post_accumulate_grad_hook(
+                            hooks.make_grad_sync_hook(norm_sync_groups)
+                        )
 
         self.heads = heads // self.channel_group.size()
         self.scale = (embed_dim // heads) ** -0.5
@@ -714,8 +737,8 @@ class Attention(torch.nn.Module):
             row and column groups.
         ring : bool
             Whether to use ring attention over the rows. With its default
-            ``config`` that needs a column group of size 1, see
-            :class:`DistributedAttention`. Otherwise, each row attends within
+            ``config`` that needs a column group of size 1 and no ``qk_norm``,
+            see :class:`DistributedAttention`. Otherwise, each row attends within
             its own chunk.
         attn_backend : AttnBackend | str
             Attention core, ``"te"``, ``"sdpa"`` or ``"math"``.
