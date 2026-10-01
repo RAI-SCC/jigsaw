@@ -110,6 +110,27 @@ class TestRingAttentionFunction:
         self._run(process_mesh_dict_4x1, device, **kwargs)
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            dict(send_op=cfg.SendOp.BROADCAST),
+            dict(
+                send_op=cfg.SendOp.BROADCAST,
+                send_backward=cfg.SendBackward.GATHER_DKV,
+                save_scope=cfg.SaveScope.LOCAL,
+            ),
+            dict(send_op=cfg.SendOp.HYBRID_BROADCAST),
+            dict(send_op=cfg.SendOp.HYBRID_BROADCAST, gpus_per_node=1),
+        ],
+        ids=["broadcast", "broadcast_gather", "hybrid_one_node", "hybrid_two_nodes"],
+    )
+    def test_broadcast_on_replicated_ring(
+        self, device, process_mesh_dict_2x2x1, kwargs
+    ):
+        """The ring of the second replica does not hold global ranks ``0..n-1``."""
+        self._run(process_mesh_dict_2x2x1, device, **kwargs)
+
+    @pytest.mark.dist(4)
     def test_hybrid_topology_two_nodes(self, device, process_mesh_dict_4x1):
         """A 4-ring split into 2 nodes of 2 uses the intra/inter-node hybrid path."""
         self._run(process_mesh_dict_4x1, device, gpus_per_node=2)
@@ -131,6 +152,35 @@ class TestDistributedAttentionPaths:
             serial, mesh, device, ring=False, attn_backend="math"
         )
         assert model.attn_core == model._attn_core_math
+        out = gather_1d_results(
+            model(_channel_shard(x_global, mesh)), mesh, dim=-1, pm_key="col"
+        )
+        # On CUDA both run in bf16, the serial module on the flash kernel: ~1e-3 apart.
+        tol = 5e-3 if device.type == "cuda" else 1e-4
+        assert_close("output", out, y_ref.detach(), tol, tol, device, mesh["model"])
+
+    @pytest.mark.dist(4)
+    def test_qk_norm_convert_matches_serial(
+        self, device: torch.device, process_mesh_dict_2x1x2: dict
+    ) -> None:
+        """The serial module applies its query/key norms and conversion keeps them."""
+        mesh = process_mesh_dict_2x1x2
+        torch.manual_seed(1)
+        serial = attention.Attention(DIM, DIM, DIM, HEADS, device, qk_norm=True)
+        with torch.no_grad():
+            for norm in (serial.q_norm, serial.k_norm):
+                norm.weight.uniform_(0.5, 1.5)
+                norm.bias.uniform_(-0.5, 0.5)
+        x_global = torch.randn(1, 10, DIM, device=device)
+        y_ref = serial(x_global)
+
+        plain = attention.Attention(DIM, DIM, DIM, HEADS, device)
+        plain.load_state_dict(serial.state_dict(), strict=False)
+        assert not torch.allclose(plain(x_global), y_ref, atol=1e-2)
+
+        model = attention.Attention.convert_to_jigsaw(
+            serial, mesh, device, ring=False, attn_backend="math"
+        )
         out = gather_1d_results(
             model(_channel_shard(x_global, mesh)), mesh, dim=-1, pm_key="col"
         )

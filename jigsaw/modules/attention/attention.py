@@ -607,8 +607,8 @@ class Attention(torch.nn.Module):
         self.dtype = dtype
         if qk_norm:
             self.q_norm, self.k_norm = (
-                torch.nn.RMSNorm(self.head_dim),
-                torch.nn.RMSNorm(self.head_dim),
+                torch.nn.LayerNorm(self.head_dim, device=device),
+                torch.nn.LayerNorm(self.head_dim, device=device),
             )
 
     def _attn_core(
@@ -660,7 +660,14 @@ class Attention(torch.nn.Module):
         qkv = self.qkv(x)
         qkv = qkv.reshape(qkv.shape[0], qkv.shape[1], 3, self.heads, self.head_dim)
 
-        q, k, v = qkv.permute(2, 0, 3, 1, 4).to(attn_core_dtype(x))
+        core_dtype = attn_core_dtype(x)
+        if self.qk_norm:
+            q, k, v = qkv.permute(2, 0, 3, 1, 4)
+            q = self.q_norm(q).to(core_dtype)
+            k = self.k_norm(k).to(core_dtype)
+            v = v.to(core_dtype)
+        else:
+            q, k, v = qkv.permute(2, 0, 3, 1, 4).to(core_dtype)
         out = self.attn_core(q=q, k=k, v=v, x=x)
 
         # out has shape [B, h, N, d]
@@ -786,6 +793,11 @@ class Attention(torch.nn.Module):
                     channel_rank * out_shard : (channel_rank + 1) * out_shard
                 ]
             )
+
+        # The query/key norms act on the unsharded head dimension.
+        if attention.qk_norm:
+            instance.q_norm.load_state_dict(attention.q_norm.state_dict())
+            instance.k_norm.load_state_dict(attention.k_norm.state_dict())
 
         # The serial weights need not agree across the spatial group.
         for p in instance.parameters():

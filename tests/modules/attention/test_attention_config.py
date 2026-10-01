@@ -168,7 +168,7 @@ class TestForwardSendRecv:
         monkeypatch.setattr(
             dist,
             "broadcast",
-            lambda t, src, group, async_op: seen.append((t, src)) or "work",
+            lambda t, group_src, group, async_op: seen.append((t, group_src)) or "work",
         )
         x, kv = torch.ones(2), torch.zeros(3)
         send = cfg._select_forward_send_fn(
