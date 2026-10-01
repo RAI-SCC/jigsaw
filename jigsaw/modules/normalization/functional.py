@@ -327,7 +327,7 @@ class _DistributedSoftmax(torch.autograd.Function):
         """Compute the softmax over a dimension sharded across ``group``."""
         (x,) = promote_to_fp32_under_autocast(x)
         # local exponentials
-        local_max = x.amax(dim=-1, keepdim=True)
+        local_max = x.amax(dim=dim, keepdim=True)
         dist.all_reduce(local_max, op=dist.ReduceOp.MAX, group=group)
 
         y = torch.exp(x - local_max)
@@ -386,6 +386,7 @@ class _DistributedSoftmax(torch.autograd.Function):
         group: dist.ProcessGroup,
     ) -> tuple[torch.Tensor, int]:
         """Batching rule for ``torch.vmap``."""
-        out = _DistributedSoftmax.apply(x, dim, group)
+        # The batch dimension is in front, so a non-negative ``dim`` moves by one.
+        out = _DistributedSoftmax.apply(x, dim + 1 if dim >= 0 else dim, group)
 
         return out, 0
