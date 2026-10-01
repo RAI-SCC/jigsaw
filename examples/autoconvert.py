@@ -35,6 +35,7 @@ from _common import setup, shard
 import jigsaw
 from jigsaw import log
 from jigsaw.convert import convert_to_jigsaw
+from jigsaw.utils import setup_precision
 from jigsaw.utils_aggregate import gather_1d_results
 
 
@@ -64,6 +65,10 @@ class PatchMLP(nn.Module):
 def main() -> None:
     """Convert :class:`PatchMLP`, then check forward, backward and the way back."""
     device, rank, world_size = setup()
+    # On Ampere and newer GPUs cuDNN runs fp32 convolutions in TF32 by default (~1e-3
+    # relative error), and the sharded and the full convolution do not round alike.
+    # Compare in true fp32, so that the tolerances below mean something.
+    setup_precision(tf32=False)
     mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})
     row, col = mesh["row"], mesh["col"]
 

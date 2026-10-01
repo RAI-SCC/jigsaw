@@ -1377,6 +1377,7 @@ def xw_eightway(
             recv_x.wait()
             recv_w_1.wait()
             recv_w_3.wait()
+            send_w_1.wait()
     cij1 = torch.matmul(buffer_x, w1)
     cij = cij0 + cij1
     return cij
@@ -1773,6 +1774,8 @@ def x_transpose_w_eightway(
             recv_w_6.wait()
             send_w_6.wait()
             cij3 = torch.matmul(buffer_x_7, buffer_w_6)
+            send_x_2.wait()
+            send_w_2.wait()
         case 5:
             recv_x_1.wait()
             recv_w_1.wait()
@@ -1819,6 +1822,7 @@ def x_transpose_w_eightway(
             recv_x_5.wait()
             recv_w_5.wait()
             cij3 = torch.matmul(buffer_x_5, buffer_w_5)
+            send_w_5.wait()
     cij = cij0 + cij1 + cij2 + cij3
 
     return cij
@@ -2546,6 +2550,8 @@ def fused_xw_xtw_eightway(
             t_recv_w_6.wait()
             t_send_w_6.wait()
             t_cij3 = torch.matmul(t_buffer_x_7, t_buffer_w_6)
+            t_send_x_2.wait()
+            t_send_w_2.wait()
         case 5:
             t_recv_x_1.wait()
             t_recv_w_1.wait()
@@ -2592,6 +2598,8 @@ def fused_xw_xtw_eightway(
             t_recv_x_5.wait()
             t_recv_w_5.wait()
             t_cij3 = torch.matmul(t_buffer_x_5, t_buffer_w_5)
+            send_w_1.wait()
+            t_send_w_5.wait()
     grad_weight = t_cij0 + t_cij1 + t_cij2 + t_cij3
 
     return grad_input, grad_weight
