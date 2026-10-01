@@ -31,9 +31,11 @@ import pytest
 import torch
 
 import jigsaw.convert as convert
+from jigsaw.modules import convolution, roll
 from jigsaw.modules.attention import Attention
 from jigsaw.modules.linear.linear import _SUPPORTED_XWT_LAYOUTS
 from jigsaw.modules.normalization import normalization as norm
+from jigsaw.utils_aggregate import gather_1d_results
 from tests.parity import all_ranks_ok, assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -351,3 +353,123 @@ class TestDtypeRoundTrip:
             assert_close(
                 "bias", back.bias.data, ref.bias.data, 1e-12, 1e-12, device, grp
             )
+
+
+# --------------------------------------------------------------------------- #
+# convert_to_jigsaw: mesh axes, devices, forwarded options
+# --------------------------------------------------------------------------- #
+class TestConvertAxesDevicesOptions:
+    @pytest.mark.dist(4)
+    def test_linear_divisibility_follows_the_shard_axes(
+        self, device: torch.device, process_mesh_dict_4x1: dict
+    ) -> None:
+        """The columns shard ``in_features``, the rows ``out_features``."""
+        mesh = process_mesh_dict_4x1
+        torch.manual_seed(0)  # every rank must build the same reference
+        ref = torch.nn.Linear(3, 4, device=device)  # in=3 need not divide row=4
+        jm = convert.convert_to_jigsaw(copy.deepcopy(ref), mesh, device)
+        w, b = jm.merge_weights(mesh)
+        group = mesh["model"]
+        assert_close("merged weight", w, ref.weight.data, 1e-6, 1e-6, device, group)
+        assert_close("merged bias", b, ref.bias.data, 1e-6, 1e-6, device, group)
+
+        lin = torch.nn.Linear(4, 3, device=device)  # out=3 not divisible by row=4
+        with pytest.raises(AssertionError, match="rows"):
+            convert.convert_to_jigsaw(lin, mesh, device)
+
+    @pytest.mark.dist(4)
+    def test_linear_from_cpu_lands_on_the_device(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """Weight and bias of a CPU layer both move to the target device."""
+        torch.manual_seed(0)
+        jm = convert.convert_to_jigsaw(
+            torch.nn.Linear(8, 8), process_mesh_dict_2x2, device
+        )
+        assert jm.weight.device.type == device.type
+        assert jm.bias.device == jm.weight.device
+        assert jm(torch.randn(2, 3, 4, device=device)).shape == (2, 3, 4)
+
+    @pytest.mark.dist(4)
+    def test_options_of_one_converter_reach_a_mixed_model(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """``ring`` is an attention option; the other layers must accept it."""
+        torch.manual_seed(0)
+        model = torch.nn.Sequential(
+            torch.nn.Conv2d(4, 4, 2, 2, device=device),
+            torch.nn.ConvTranspose2d(4, 4, 2, 2, device=device),
+            roll.Roll(shifts=(1, 1), dims=(-3, -2)),
+            torch.nn.Linear(4, 4, device=device),
+            Attention(8, 8, 8, 2, device),
+        )
+        out = convert.convert_to_jigsaw(
+            model, process_mesh_dict_2x2, device, ring=False
+        )
+        assert [type(m).__name__ for m in out] == [
+            "DistributedConv2D",
+            "DistributedConv2DTranspose",
+            "DistributedRoll",
+            "DistributedXWT",
+            "DistributedAttention",
+        ]
+        assert out[4].ring is False
+
+    @pytest.mark.dist(4)
+    def test_roll_with_dims_counted_from_the_front(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """The default split of dimension ``-2`` matches ``dims=(1, 2)`` in 4-D."""
+        mesh = process_mesh_dict_2x2
+        jr = convert.convert_to_jigsaw(
+            roll.Roll(shifts=(2, 3), dims=(1, 2)), mesh, device
+        )
+        torch.manual_seed(mesh["model"].rank())
+        x = torch.randn(1, 8, 8, 16, device=device)
+        x_global = gather_1d_results(x, mesh, dim=2, pm_key="row")
+        y = gather_1d_results(jr(x), mesh, dim=2, pm_key="row")
+        ref = torch.roll(x_global, shifts=(2, 3), dims=(1, 2))
+        assert_close("roll forward", y, ref, 1e-6, 1e-6, device, mesh["model"])
+
+    @pytest.mark.dist(4)
+    def test_roll_default_split_uses_row_kw(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        m = process_mesh_dict_2x2
+        alias = {"tok": m["row"], "chan": m["col"], "mp": m["model"]}
+        jr = convert.convert_to_jigsaw(
+            roll.Roll(shifts=(1,), dims=(-2,)),
+            alias,
+            device,
+            row_kw="tok",
+            col_kw="chan",
+            model_kw="mp",
+        )
+        assert jr.spatial_groups == (m["row"],)
+
+
+# --------------------------------------------------------------------------- #
+# dtype of freshly built layers
+# --------------------------------------------------------------------------- #
+class TestConstructorDtype:
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize(
+        "cls", [convolution.DistributedConv2D, convolution.DistributedConv2DTranspose]
+    )
+    def test_conv_parameters_have_the_requested_dtype(
+        self, device: torch.device, process_mesh_dict_2x2: dict, cls: type
+    ) -> None:
+        mesh = process_mesh_dict_2x2
+        layer = cls(4, 4, 3, device, mesh["row"], mesh["col"], dtype=torch.float64)
+        assert layer.weight.dtype == torch.float64
+        assert layer.bias.dtype == torch.float64
+
+    @pytest.mark.parametrize("qk_norm", [False, True])
+    def test_serial_attention_has_the_requested_dtype(
+        self, device: torch.device, qk_norm: bool
+    ) -> None:
+        attn = Attention(8, 8, 8, 2, device, qk_norm=qk_norm, dtype=torch.float64)
+        assert {p.dtype for p in attn.parameters()} == {torch.float64}
+        assert {p.device.type for p in attn.parameters()} == {device.type}
+        x = torch.randn(2, 6, 8, device=device, dtype=torch.float64)
+        assert attn(x).dtype == torch.float64
