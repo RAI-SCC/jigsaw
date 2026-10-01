@@ -5,13 +5,13 @@
 was never exercised under ``vmap`` -- these tests pin it, at increasing levels
 of integration:
 
-1. :class:`TestTransformerEngineAttentionVmap` -- the
-   :class:`~jigsaw.modules.attention.attention.TransformerEngineAttention`
-   ``autograd.Function`` alone. It is the only piece that *has* to route through
-   a custom Function under vmap (``te``'s fused kernels register no batching
-   rule); its ``vmap`` staticmethod folds the members axis into the batch,
-   runs one un-vmapped call, and unfolds. Forward + grad vs a Python loop.
-   **Passes.**
+1. :class:`TestTransformerEngineAttentionVmap` --
+   :func:`~jigsaw.modules.attention.attention.te_attention` alone. Under vmap it
+   routes through the ``TransformerEngineAttention`` ``autograd.Function``
+   (``te``'s fused kernels register no batching rule), whose ``vmap``
+   staticmethod folds the members axis into the batch, runs one un-vmapped
+   call, and unfolds; a plain call goes straight to ``te``. Forward + grad vs
+   a Python loop. **Passes.**
 2. :class:`TestDistributedAttentionPlain` -- a plain (no vmap, no ensemble)
    ``DistributedAttention`` forward+backward on a channel-parallel mesh, sdpa
    and te. **Passes.** Regression guards for two fixes: ``forward`` now casts
@@ -49,7 +49,7 @@ _GRAD_TOL = dict(atol=3e-2, rtol=3e-2)  # grads flow through the bf16 core
 
 
 # --------------------------------------------------------------------------- #
-# 1. TransformerEngineAttention (the autograd.Function) under torch.vmap
+# 1. te_attention (TransformerEngineAttention's batching rule) under torch.vmap
 # --------------------------------------------------------------------------- #
 @pytest.mark.gpu_required
 @pytest.mark.te_required
@@ -89,17 +89,13 @@ class TestTransformerEngineAttentionVmap:
         ]
 
     def test_forward_matches_loop(self, device: torch.device) -> None:
-        from jigsaw.modules.attention.attention import (
-            TransformerEngineAttention,
-            _capture_rng_state,
-        )
+        from jigsaw.modules.attention.attention import te_attention
 
         attn = self._attn()
         qe, ke, ve = self._qkv(device)
-        rng_state = _capture_rng_state(device)
 
         def f(q, k, v):
-            return TransformerEngineAttention.apply(q, k, v, attn, rng_state)
+            return te_attention(q, k, v, attn)
 
         got = vmap(f)(qe, ke, ve)
         assert got.shape == (self.E, self.B, self.S, self.H * self.D)
@@ -112,17 +108,13 @@ class TestTransformerEngineAttentionVmap:
         torch.testing.assert_close(got, ref, **_FWD_TOL)
 
     def test_grad_matches_loop(self, device: torch.device) -> None:
-        from jigsaw.modules.attention.attention import (
-            TransformerEngineAttention,
-            _capture_rng_state,
-        )
+        from jigsaw.modules.attention.attention import te_attention
 
         attn = self._attn()
         qe, ke, ve = self._qkv(device, requires_grad=True)
-        rng_state = _capture_rng_state(device)
 
         def f(q, k, v):
-            return TransformerEngineAttention.apply(q, k, v, attn, rng_state)
+            return te_attention(q, k, v, attn)
 
         vmap(f)(qe, ke, ve).float().pow(2).sum().backward()
         got = (qe.grad, ke.grad, ve.grad)

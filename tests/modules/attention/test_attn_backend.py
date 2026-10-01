@@ -259,17 +259,14 @@ class TestBackendWithTe:
         assert TE_CORE_AVAILABLE is True
 
     def test_te_attn_forward_backward_matches_sdpa(self, device):
-        """``TransformerEngineAttention`` runs fwd/bwd and tracks SDPA in bf16.
+        """``te_attention`` runs fwd/bwd and tracks SDPA in bf16.
 
         Ported from the standalone ``test_transformer_engine.py`` so the numeric
         check survives that file's removal on ``refactor/tests``.
         """
         import transformer_engine.pytorch as te
 
-        from jigsaw.modules.attention.attention import (
-            TransformerEngineAttention,
-            _capture_rng_state,
-        )
+        from jigsaw.modules.attention.attention import te_attention
 
         batch, seq, heads, head_dim = 2, 16, 4, 32
         attn = te.DotProductAttention(
@@ -290,8 +287,7 @@ class TestBackendWithTe:
         for t in (q, k, v):
             t.requires_grad_(True)
 
-        rng_state = _capture_rng_state(device)
-        out = TransformerEngineAttention.apply(q, k, v, attn, rng_state)
+        out = te_attention(q, k, v, attn)
         assert out.shape == (batch, seq, heads * head_dim)
 
         out.sum().backward()

@@ -17,28 +17,15 @@ from .functional.functional import RingAttentionFunction
 try:
     import transformer_engine.pytorch as te
 
-    def _capture_rng_state(
-        device: torch.device,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Return the CPU and CUDA RNG states, so that a recompute can replay them."""
-        cpu_state = torch.get_rng_state()
-        cuda_state = torch.cuda.get_rng_state(device) if device.type == "cuda" else None
-        return cpu_state, cuda_state
-
-    def _restore_rng_state(
-        state: tuple[torch.Tensor, Optional[torch.Tensor]], device: torch.device
-    ) -> None:
-        cpu_state, cuda_state = state
-        torch.set_rng_state(cpu_state)
-        if cuda_state is not None:
-            torch.cuda.set_rng_state(cuda_state, device)
-
     class TransformerEngineAttention(torch.autograd.Function):
-        """Autograd function around ``te.DotProductAttention`` supporting ``torch.vmap``.
+        """Batching rule for ``te.DotProductAttention`` under ``torch.vmap``.
 
-        Under ``torch.vmap`` the vmapped dimension is folded into the batch
-        dimension. The RNG state is restored in the backward recompute so that
-        dropout masks match.
+        TE's fused kernels have no batching rule, so the vmapped dimension is
+        folded into the batch dimension. Only :func:`te_attention` should call
+        this, and only under ``torch.vmap``: a custom ``autograd.Function`` is a
+        graph boundary, so a plain call would discard TE's own graph. The
+        ``vmap`` staticmethod runs below the vmap level instead, where TE
+        records its graph as usual.
         """
 
         @staticmethod
@@ -47,7 +34,6 @@ try:
             k: torch.Tensor,
             v: torch.Tensor,
             attn: "te.DotProductAttention",
-            rng_state: tuple[torch.Tensor, Optional[torch.Tensor]],
         ) -> torch.Tensor:
             """Run TE dot-product attention.
 
@@ -57,8 +43,6 @@ try:
                 Query, key and value in ``bshd`` format.
             attn : te.DotProductAttention
                 Attention module to call.
-            rng_state : tuple[torch.Tensor, torch.Tensor | None]
-                RNG state captured before the call, for the backward recompute.
 
             Returns
             -------
@@ -70,7 +54,7 @@ try:
 
         @staticmethod
         def setup_context(ctx: Any, inputs: tuple, output: torch.Tensor) -> None:
-            """Do nothing; gradients flow through ``attn``."""
+            """Save nothing; TE records its own graph in :meth:`vmap`."""
             return None
 
         @staticmethod
@@ -81,7 +65,6 @@ try:
             k: torch.Tensor,
             v: torch.Tensor,
             attn: "te.DotProductAttention",
-            rng_state: tuple[torch.Tensor, Optional[torch.Tensor]],
         ) -> tuple[torch.Tensor, int]:
             """Fold the vmapped dimension into the batch dimension."""
             q_bdim, k_bdim, v_bdim = in_dims[0], in_dims[1], in_dims[2]
@@ -115,6 +98,32 @@ try:
             # Unfold the samples dimension back out to the front.
             out = out.unflatten(0, (samples, -1))
             return out, 0
+
+    def te_attention(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn: "te.DotProductAttention",
+    ) -> torch.Tensor:
+        """Run TE dot-product attention, with TE's own backward.
+
+        Parameters
+        ----------
+        q, k, v : torch.Tensor
+            Query, key and value in ``bshd`` format.
+        attn : te.DotProductAttention
+            Attention module to call.
+
+        Returns
+        -------
+        torch.Tensor
+            Attention output in ``bshd`` format.
+        """
+        if any(torch._C._functorch.is_functorch_wrapped_tensor(t) for t in (q, k, v)):
+            out: torch.Tensor = TransformerEngineAttention.apply(q, k, v, attn)
+        else:
+            out = attn(q, k, v)
+        return out
 
     JIGSAW_TE_AVAILABLE = True
 except ModuleNotFoundError:
@@ -450,14 +459,8 @@ class DistributedAttention(torch.nn.Module):
             Attention output.
         """
         # `self.attn` (a real nn.Module) applies its own training-mode gate
-        # to `attention_dropout` internally, same as any other dropout
-        # module; the RNG snapshot is only for `backward`'s recompute to
-        # replay that same draw (see `_capture_rng_state`).
-        rng_state = _capture_rng_state(q.device)
-        out: torch.Tensor = TransformerEngineAttention.apply(
-            q, k, v, self.attn, rng_state
-        )
-        return out
+        # to `attention_dropout` internally, same as any other dropout module.
+        return te_attention(q, k, v, self.attn)
 
     def _ring_attn_core(
         self,
