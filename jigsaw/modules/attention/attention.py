@@ -346,8 +346,8 @@ class DistributedAttention(torch.nn.Module):
 
         if self.qk_norm:
             self.q_norm, self.k_norm = (
-                torch.nn.LayerNorm(embed_dim // heads, device=device),
-                torch.nn.LayerNorm(embed_dim // heads, device=device),
+                torch.nn.LayerNorm(embed_dim // heads, device=device, dtype=dtype),
+                torch.nn.LayerNorm(embed_dim // heads, device=device, dtype=dtype),
             )
             # The norms act on the unsharded head dimension, so they are
             # replicated over the spatial and the channel group: sum their
@@ -614,9 +614,14 @@ class Attention(torch.nn.Module):
             out_features=3 * embed_dim,
             bias=False,
             device=device,
+            dtype=dtype,
         )
         self.head_concat = torch.nn.Linear(
-            in_features=embed_dim, out_features=out_dim, bias=False, device=device
+            in_features=embed_dim,
+            out_features=out_dim,
+            bias=False,
+            device=device,
+            dtype=dtype,
         )
         self.heads = heads
         self.device = device
@@ -630,8 +635,8 @@ class Attention(torch.nn.Module):
         self.dtype = dtype
         if qk_norm:
             self.q_norm, self.k_norm = (
-                torch.nn.LayerNorm(self.head_dim, device=device),
-                torch.nn.LayerNorm(self.head_dim, device=device),
+                torch.nn.LayerNorm(self.head_dim, device=device, dtype=dtype),
+                torch.nn.LayerNorm(self.head_dim, device=device, dtype=dtype),
             )
 
     def _attn_core(
