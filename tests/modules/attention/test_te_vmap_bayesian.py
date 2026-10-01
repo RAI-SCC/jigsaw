@@ -387,12 +387,13 @@ class TestRingVmap:
 
     @pytest.mark.dist(4)
     def test_ring_vmap_currently_unsupported(
-        self, device: torch.device, process_mesh_dict_2x2: dict
+        self, device: torch.device, process_mesh_dict_4x1: dict
     ) -> None:
+        # ``4x1``: with its default config the ring needs an unsharded channel axis.
         model = _build_attn(
-            process_mesh_dict_2x2, device, "sdpa", bayesian=False, ring=True
+            process_mesh_dict_4x1, device, "sdpa", bayesian=False, ring=True
         )
-        x_e = _local_x(process_mesh_dict_2x2, device, members=2)
+        x_e = _local_x(process_mesh_dict_4x1, device, members=2)
 
         with pytest.raises((RuntimeError, NotImplementedError)):
             vmap(model)(x_e)

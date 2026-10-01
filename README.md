@@ -29,8 +29,11 @@ container that choice warns and falls back to `sdpa`.
 flash/​math SDPA) or `math` (unfused reference). `ring` (sequence-parallel
 attention) is a **separate** switch that composes with any backend: `ring=True`
 still runs its inner per-chunk attention through the chosen core. Ring attention
-splits the sequence over the mesh rows and needs an unsharded channel dimension,
-so the mesh columns must have size 1; without `ring`, columns split the heads.
+splits the sequence over the mesh rows and by default needs an unsharded channel
+dimension, so the mesh columns must have size 1; without `ring`, columns split the
+heads. To combine the two, pass a `RingAttentionConfig` that sends and saves the
+keys and values (`send_in_forward=SendForward.KV`, `save_for_backward=SaveBackward.KV`),
+as [`examples/vit.py`](examples/vit.py) does.
 
 The container is also useful without TE — a pinned CUDA/NCCL stack for
 reproducible scaling and parameter studies — in which case the defaults

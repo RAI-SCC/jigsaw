@@ -5,8 +5,9 @@ replicated over the rows and sharded over the columns. Every test converts a ser
 ``Attention`` and compares output, input gradient, parameter values and parameter
 gradients with the serial module through ``check_parity``.
 
-* **Ring** (``ring=True``) needs an unsharded channel axis, so it runs on a ``4x1`` mesh and
-  the reference is the plain serial module on the whole sequence.
+* **Ring** (``ring=True``) needs an unsharded channel axis by default, so it runs on a
+  ``4x1`` mesh, and on ``2x2`` with a ``config`` that sends and saves the keys and values.
+  The reference is the plain serial module on the whole sequence.
 * **No ring** makes every row attend within its own chunk, so the reference attends over
   each row's window separately. That runs on ``4x1`` (spatial only) and on ``2x2``
   (spatial and channel).
@@ -19,6 +20,13 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.modules.attention as attention
+from jigsaw.modules.attention.config import (
+    RingAttentionConfig,
+    SaveBackward,
+    SaveScope,
+    SendForward,
+    SendOp,
+)
 from tests.parity import REPLICATED, ShardSpec, assert_close, check_parity
 
 IN_DIM, EMBED_DIM, OUT_DIM, HEADS = 16, 16, 16, 4
@@ -127,6 +135,50 @@ class TestConvertWithRing:
         assert model.attn_core == model._ring_attn_core
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("out_bias", [False, True])
+    def test_matches_serial_attention_with_a_channel_split(
+        self, device: torch.device, process_mesh_dict_2x2: dict, out_bias: bool
+    ) -> None:
+        """``config`` reaches the ring: sending and saving K/V allows a channel split."""
+        mesh = process_mesh_dict_2x2
+        config = RingAttentionConfig(
+            device=device,
+            send_in_forward=SendForward.KV,
+            save_for_backward=SaveBackward.KV,
+            send_op=SendOp.P2P,
+            save_scope=SaveScope.LOCAL,
+            attn_backend="math",
+        )
+        seen: list[attention.DistributedAttention] = []
+
+        def build(module: torch.nn.Module) -> torch.nn.Module:
+            model = attention.Attention.convert_to_jigsaw(
+                module, mesh, device, ring=True, attn_backend="math", config=config
+            )
+            seen.append(model)
+            return model
+
+        rules: dict = {
+            "qkv.weight": _unpermute_qkv(mesh, device),
+            "head_concat.weight": ShardSpec(row=REPLICATED, col=1),
+        }
+        if out_bias:
+            rules["head_concat.bias"] = ShardSpec(row=REPLICATED, col=0)
+        check_parity(
+            serial_module=_serial(device, out_bias),
+            build_distributed=build,
+            input_shape=(BATCH, SEQ, IN_DIM),
+            input_spec=ShardSpec(row=1, col=2),
+            output_spec=ShardSpec(row=1, col=2),
+            param_rules=rules,
+            process_mesh_dict=mesh,
+            device=device,
+            **_tols(device),
+        )
+        assert seen[0].ring
+        assert seen[0].config is config
+
+    @pytest.mark.dist(4)
     def test_rejects_a_channel_split(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
@@ -154,6 +206,50 @@ class TestConvertWithRing:
                 channel_group=mesh["col"],
                 ring=True,
             )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize(
+        "send, save, accepted",
+        [
+            (SendForward.KV, SaveBackward.KV, True),
+            (SendForward.X, SaveBackward.KV, False),
+            (SendForward.KV, SaveBackward.X, False),
+        ],
+        ids=["send_kv_save_kv", "send_x", "save_x"],
+    )
+    def test_channel_split_needs_a_ring_that_sends_and_saves_kv(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        send: SendForward,
+        save: SaveBackward,
+        accepted: bool,
+    ) -> None:
+        """A channel split is fine as long as no chunk's K/V is rebuilt from ``x``."""
+        mesh = process_mesh_dict_2x2
+
+        def build() -> attention.DistributedAttention:
+            return attention.DistributedAttention(
+                in_dim=IN_DIM,
+                embed_dim=EMBED_DIM,
+                out_dim=OUT_DIM,
+                heads=HEADS,
+                dropout_p=0.0,
+                local_rank=mesh["col"].rank(),
+                device=device,
+                spatial_group=mesh["row"],
+                channel_group=mesh["col"],
+                ring=True,
+                config=RingAttentionConfig(
+                    device=device, send_in_forward=send, save_for_backward=save
+                ),
+            )
+
+        if accepted:
+            assert build().ring
+        else:
+            with pytest.raises(AssertionError, match="unsharded channel"):
+                build()
 
 
 @pytest.mark.dist_required

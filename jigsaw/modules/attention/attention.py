@@ -202,10 +202,13 @@ class DistributedAttention(torch.nn.Module):
         qk_norm : bool
             Whether to normalize queries and keys.
         ring : bool
-            Whether to use ring attention over ``spatial_group``. The ring
-            recomputes the keys and values of remote chunks from the remote
-            input with the local QKV weight, so it needs an unsharded channel
-            dimension: ``channel_group`` must have size 1.
+            Whether to use ring attention over ``spatial_group``. By default
+            the ring recomputes the keys and values of remote chunks from the
+            remote input with the local QKV weight, which needs an unsharded
+            channel dimension: ``channel_group`` must have size 1, unless
+            ``config`` makes the ring send and save the keys and values
+            themselves (``send_in_forward=SendForward.KV`` and
+            ``save_for_backward=SaveBackward.KV``).
         attn_backend : AttnBackend | str
             Attention core, ``"te"``, ``"sdpa"`` or ``"math"``.
         dtype : torch.dtype
@@ -249,9 +252,19 @@ class DistributedAttention(torch.nn.Module):
             assert spatial_group.size() > 1, (
                 "Cannot perform ring attention if spatial size is 1."
             )
-            assert channel_group.size() == 1, (
+            # With a channel split the local QKV weight is only a shard, too
+            # little to rebuild a remote chunk's keys and values from its input:
+            # the ring then has to send and save the keys and values themselves.
+            sends_and_saves_kv = (
+                config is not None
+                and config.send_in_forward == attention_config.SendForward.KV
+                and config.save_for_backward == attention_config.SaveBackward.KV
+            )
+            assert channel_group.size() == 1 or sends_and_saves_kv, (
                 "Ring attention needs an unsharded channel dimension, but the "
-                f"channel group has size {channel_group.size()}."
+                f"channel group has size {channel_group.size()}. With a channel "
+                "split, pass a config with send_in_forward=SendForward.KV and "
+                "save_for_backward=SaveBackward.KV."
             )
             self.attn_core = self._ring_attn_core
         else:
@@ -665,6 +678,7 @@ class Attention(torch.nn.Module):
         model_kw: str = "model",
         ring: bool = True,
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
+        config: Optional[attention_config.RingAttentionConfig] = None,
         **kwargs: Any,
     ) -> "DistributedAttention":
         """Convert an attention module to a :class:`DistributedAttention`.
@@ -689,10 +703,15 @@ class Attention(torch.nn.Module):
             Key of the model process group. Unused, the ranks come from the
             row and column groups.
         ring : bool
-            Whether to use ring attention over the rows, which needs a column
-            group of size 1. Otherwise, each row attends within its own chunk.
+            Whether to use ring attention over the rows. With its default
+            ``config`` that needs a column group of size 1, see
+            :class:`DistributedAttention`. Otherwise, each row attends within
+            its own chunk.
         attn_backend : AttnBackend | str
             Attention core, ``"te"``, ``"sdpa"`` or ``"math"``.
+        config : RingAttentionConfig, optional
+            Ring-attention configuration. Defaults to a configuration for
+            ``attn_backend``.
         **kwargs : Any
             Unused.
 
@@ -707,10 +726,6 @@ class Attention(torch.nn.Module):
 
         assert attention.heads % channel_size == 0, (
             f"num_heads={attention.heads} not divisible by channel size {channel_size}"
-        )
-        assert not ring or channel_size == 1, (
-            f"ring attention needs an unsharded channel dimension, but the "
-            f"'{col_kw}' group has size {channel_size}"
         )
 
         instance = DistributedAttention(
@@ -729,6 +744,7 @@ class Attention(torch.nn.Module):
             attn_backend=attn_backend,
             dtype=attention.dtype,
             out_bias=attention.head_concat.bias is not None,
+            config=config,
         )
 
         # The weights are replicated over the spatial group and sharded over the

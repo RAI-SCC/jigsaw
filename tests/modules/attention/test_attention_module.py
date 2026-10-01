@@ -7,8 +7,8 @@
   backend, ``qk_norm``), plus the single-process helpers.
 
 ``DistributedAttention(ring=True)`` end to end is covered by ``test_attention_convert.py``.
-The ring recomputes K/V as ``x @ w_qkv.mT`` on the local shard, which is only right when the
-channel axis is not split, so it requires a channel group of size 1.
+By default the ring recomputes K/V as ``x @ w_qkv.mT`` on the local shard, which is only
+right when the channel axis is not split, so it then requires a channel group of size 1.
 """
 
 import pytest
