@@ -105,6 +105,8 @@ model = Linear(1024, 1024, mesh, device)
 
 Run it with one process per GPU, e.g. `torchrun --nproc-per-node 4 train.py` or `srun` (see [Launching](#launching)).
 
+Complete, runnable scripts -- a CNN, a Vision Transformer, a Swin Transformer, a dataloader, converting an existing model, re-sharding a trained one -- are in [`examples/`](examples/README.md). Each runs with `torchrun --nproc-per-node 4`, on GPUs or on the CPU.
+
 ### Mixed precision (autocast)
 
 Wrap the forward in `torch.autocast` and run `backward()` outside it, as with plain PyTorch:

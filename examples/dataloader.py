@@ -43,14 +43,6 @@ import jigsaw
 from jigsaw import log
 from jigsaw.utils_aggregate import gather_results
 
-device, rank, world_size = setup()
-
-# "dp" enumerates the replicas; the other axes split one replica over 2 ranks.
-mesh = jigsaw.make_process_mesh(
-    {"dp": 2, "sh": 2, "sw": 1, "col": 1}, model_parallel_axes=("sh", "sw", "col")
-)
-dp = mesh["dp"]
-
 N, C, H, W = 16, 2, 16, 16  # samples, channels, global image size
 
 
@@ -82,77 +74,93 @@ class TileDataset(Dataset):
         return torch.from_numpy(np.ascontiguousarray(tile)), i
 
 
-# --- a small dataset on disk, written by rank 0 ---------------------------------------
-if rank == 0:
-    root = Path(tempfile.mkdtemp())
-    samples = np.lib.format.open_memmap(
-        root / "samples.npy", mode="w+", dtype=np.float32, shape=(N, C, H, W)
+def main(num_workers: int = 2) -> None:
+    """Draw batches on 2 replicas x 2 tiles and check that they fit together."""
+    device, rank, world_size = setup()
+
+    # "dp" enumerates the replicas; the other axes split one replica over 2 ranks.
+    mesh = jigsaw.make_process_mesh(
+        {"dp": 2, "sh": 2, "sw": 1, "col": 1}, model_parallel_axes=("sh", "sw", "col")
     )
-    samples[:] = np.random.default_rng(0).standard_normal((N, C, H, W))
-    samples.flush()
-paths = [root if rank == 0 else None]
-dist.broadcast_object_list(paths, src=0)  # every rank needs to know where it is
-root = paths[0]
+    dp = mesh["dp"]
 
-# --- the dataloader -------------------------------------------------------------------
-# Dimensions of a sample are (C, H, W) = (0, 1, 2): split the height over "sh" and the
-# width over "sw" (a size-1 axis is a no-op). To also split the channels over "col",
-# add ``0: mesh["col"]``.
-dataset = TileDataset(root / "samples.npy", splits={1: mesh["sh"], 2: mesh["sw"]})
+    # --- a small dataset on disk, written by rank 0 ---------------------------------------
+    # (/tmp is local to a node: with several nodes, use a shared file system instead.)
+    if rank == 0:
+        root = Path(tempfile.mkdtemp())
+        samples = np.lib.format.open_memmap(
+            root / "samples.npy", mode="w+", dtype=np.float32, shape=(N, C, H, W)
+        )
+        samples[:] = np.random.default_rng(0).standard_normal((N, C, H, W))
+        samples.flush()
+    paths = [root if rank == 0 else None]
+    dist.broadcast_object_list(paths, src=0)  # every rank needs to know where it is
+    root = paths[0]
 
-sampler = DistributedSampler(
-    dataset,
-    num_replicas=dp.size(),  # not world_size ...
-    rank=dp.rank(),  # ... and not the global rank
-    shuffle=True,
-    seed=0,  # the same on every rank: the replicas then draw disjoint samples
-    drop_last=True,
-)
-loader = DataLoader(
-    dataset,
-    batch_size=2,
-    sampler=sampler,
-    num_workers=2,  # each worker reads tiles, never whole samples
-    drop_last=True,  # every replica runs the same number of steps
-    pin_memory=device.type == "cuda",
-)
+    # --- the dataloader ---------------------------------------------------------------------
+    # Dimensions of a sample are (C, H, W) = (0, 1, 2): split the height over "sh" and
+    # the width over "sw" (a size-1 axis is a no-op). To also split the channels over
+    # "col", add ``0: mesh["col"]``.
+    dataset = TileDataset(root / "samples.npy", splits={1: mesh["sh"], 2: mesh["sw"]})
 
-# --- draw batches and check them ------------------------------------------------------
-full = np.load(root / "samples.npy", mmap_mode="r")  # only used for the check
+    sampler = DistributedSampler(
+        dataset,
+        num_replicas=dp.size(),  # not world_size ...
+        rank=dp.rank(),  # ... and not the global rank
+        shuffle=True,
+        seed=0,  # the same on every rank: the replicas then draw disjoint samples
+        drop_last=True,
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=2,
+        sampler=sampler,
+        num_workers=num_workers,  # each worker reads tiles, never whole samples
+        drop_last=True,  # every replica runs the same number of steps
+        pin_memory=device.type == "cuda",
+    )
 
-for epoch in range(2):
-    sampler.set_epoch(epoch)  # reshuffle; the same order on the ranks of a replica
-    for step, (x, idx) in enumerate(loader):
-        x = x.to(device)  # (B, C, H / sh, W / sw): what a domain-parallel model takes
+    # --- draw batches and check them --------------------------------------------------------
+    full = np.load(root / "samples.npy", mmap_mode="r")  # only used for the check
 
-        # 1. The ranks of a replica hold tiles of the same samples ...
-        same = [torch.empty_like(idx) for _ in range(mesh["model"].size())]
-        dist.all_gather(same, idx.to(device), group=mesh["model"])
-        assert all((i.cpu() == idx).all() for i in same)
+    for epoch in range(2):
+        sampler.set_epoch(epoch)  # reshuffle; the same order on the ranks of a replica
+        for step, (x, idx) in enumerate(loader):
+            x = x.to(device)  # (B, C, H / sh, W / sw): what a domain-parallel model takes
 
-        # ... and the tiles fit together into those samples.
-        whole = gather_results(x, mesh, pm_key_row="sh", pm_key_col="sw")
-        assert np.array_equal(whole.cpu().numpy(), full[idx.numpy()])
+            # 1. The ranks of a replica hold tiles of the same samples ...
+            #    (The gather buffers live on ``device``: NCCL only moves GPU tensors.)
+            same = [torch.empty_like(idx, device=device) for _ in range(mesh["model"].size())]
+            dist.all_gather(same, idx.to(device), group=mesh["model"])
+            assert all((i.cpu() == idx).all() for i in same)
 
-        # 2. The other replica draws different samples.
-        seen = [torch.empty_like(idx) for _ in range(dp.size())]
-        dist.all_gather(seen, idx.to(device), group=dp)
-        flat = torch.cat([i.cpu() for i in seen])
-        assert len(flat.unique()) == len(flat)
+            # ... and the tiles fit together into those samples.
+            whole = gather_results(x, mesh, pm_key_row="sh", pm_key_col="sw")
+            assert np.array_equal(whole.cpu().numpy(), full[idx.numpy()])
 
-        if epoch == 0 and step == 0:
-            log.log_ranks(
-                "replica %d, tile %d of %d: samples %s, batch %s",
-                dp.rank(),
-                mesh["sh"].rank(),
-                mesh["sh"].size(),
-                idx.tolist(),
-                tuple(x.shape),
-                level=logging.INFO,
-            )
+            # 2. The other replica draws different samples.
+            seen = [torch.empty_like(idx, device=device) for _ in range(dp.size())]
+            dist.all_gather(seen, idx.to(device), group=dp)
+            flat = torch.cat([i.cpu() for i in seen])
+            assert len(flat.unique()) == len(flat)
 
-log.info("%d steps per epoch: all checks passed", step + 1)
+            if epoch == 0 and step == 0:
+                log.log_ranks(
+                    "replica %d, tile %d of %d: samples %s, batch %s",
+                    dp.rank(),
+                    mesh["sh"].rank(),
+                    mesh["sh"].size(),
+                    idx.tolist(),
+                    tuple(x.shape),
+                    level=logging.INFO,
+                )
 
-dist.barrier()
-if rank == 0:
-    shutil.rmtree(root)
+    log.info("%d steps per epoch: all checks passed", step + 1)
+
+    dist.barrier()
+    if rank == 0:
+        shutil.rmtree(root)
+
+
+if __name__ == "__main__":
+    main()

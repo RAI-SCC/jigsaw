@@ -130,8 +130,10 @@ def dist_env(
     else:
         assert dist.is_gloo_available()
 
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "12355"
+    # Single-node by default; a multi-node run (e.g. 8 ranks over two 4-GPU
+    # nodes under srun) points every rank at rank 0's host instead.
+    os.environ["MASTER_ADDR"] = os.environ.get("JIGSAW_TEST_MASTER_ADDR", "localhost")
+    os.environ["MASTER_PORT"] = os.environ.get("JIGSAW_TEST_MASTER_PORT", "12355")
 
     dist.init_process_group(
         backend="nccl" if device.type == "cuda" else "gloo",
@@ -168,6 +170,22 @@ def device(request: Any) -> torch.device:
         local_id = mpi_rank % torch.cuda.device_count()
         device = torch.device("cuda", local_id)
         return device
+
+
+@pytest.fixture(autouse=True)
+def restore_torch_numerics() -> Generator[None, None, None]:
+    """Undo a test's changes to torch's global numerics settings.
+
+    Some tests switch on ``torch.use_deterministic_algorithms`` for a reproducible
+    reference. Left on, it makes every later cuBLAS matmul on the GPU raise (unless
+    ``CUBLAS_WORKSPACE_CONFIG`` is set), failing unrelated tests further down the run.
+    """
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    tf32 = torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
+    yield
+    torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
+    torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = tf32
 
 
 @pytest.fixture(autouse=False)

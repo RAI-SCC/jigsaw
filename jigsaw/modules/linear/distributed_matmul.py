@@ -1079,6 +1079,9 @@ def xw_transpose_eightway(
     handle_w = all_to_all_async(w_recv_list, w_send_list, group=model_group)
     handle_x = all_to_all_async(x_recv_list, x_send_list, group=model_group)
 
+    # The side streams must see the caller's inputs before they read them.
+    for s in streams:
+        s.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(streams[0]):
         handle_w.wait()
     with torch.cuda.stream(streams[1]):
@@ -1208,7 +1211,6 @@ def xw_eightway(
     """
     mod = local_rank % 8
     empty = get_empty(device, torch.float32)
-    streams: list[torch.cuda.Stream] = [torch.cuda.Stream() for _ in range(2)]
 
     w0 = get_preallocated_buffer(
         cast(torch.Size, (*wij.shape[:-2], wij.shape[-2] * 2, wij.shape[-1])),
@@ -1246,11 +1248,11 @@ def xw_eightway(
             w_recv_list = [
                 empty,
                 empty,
-                w0[..., split_size:, :].contiguous(),
+                w0[..., split_size:, :],
                 empty,
-                w1[..., :split_size, :].contiguous(),
+                w1[..., :split_size, :],
                 empty,
-                w1[..., split_size:, :].contiguous(),
+                w1[..., split_size:, :],
                 empty,
             ]
             handle_w = all_to_all_async(w_recv_list, w_send_list, group=model_group)
@@ -1273,11 +1275,11 @@ def xw_eightway(
                 empty,
                 empty,
                 empty,
-                w1[..., split_size:, :].contiguous(),
+                w1[..., split_size:, :],
                 empty,
-                w0[..., :split_size, :].contiguous(),
+                w0[..., :split_size, :],
                 empty,
-                w0[..., split_size:, :].contiguous(),
+                w0[..., split_size:, :],
             ]
             handle_w = all_to_all_async(w_recv_list, w_send_list, group=model_group)
             handle_x = all_to_all_async(x_recv_list, x_send_list, group=model_group)
@@ -1296,13 +1298,13 @@ def xw_eightway(
             ]
             w_send_list = [wij, empty, empty, empty, wij, empty, wij, empty]
             w_recv_list = [
-                w0[..., :split_size, :].contiguous(),
+                w0[..., :split_size, :],
                 empty,
                 empty,
                 empty,
-                w1[..., :split_size, :].contiguous(),
+                w1[..., :split_size, :],
                 empty,
-                w1[..., split_size:, :].contiguous(),
+                w1[..., split_size:, :],
                 empty,
             ]
             handle_w = all_to_all_async(w_recv_list, w_send_list, group=model_group)
@@ -1333,7 +1335,7 @@ def xw_eightway(
             ]
             handle_w = all_to_all_async(w_recv_list, w_send_list, group=model_group)
             handle_x = all_to_all_async(x_recv_list, x_send_list, group=model_group)
-            w0[..., split_size:, :].copy_(wij)
+            w1[..., split_size:, :].copy_(wij)
         case 4:
             x_send_list = [empty, empty, empty, empty, empty, xij, empty, empty]
             x_recv_list = [
@@ -1439,53 +1441,12 @@ def xw_eightway(
             handle_x = all_to_all_async(x_recv_list, x_send_list, group=model_group)
             w0[..., split_size:, :].copy_(wij)
 
-    with torch.cuda.stream(streams[0]):
-        handle_w.wait()
-        cij0 = torch.matmul(xij, w0)
-    match mod:
-        case 0:
-            with torch.cuda.stream(streams[1]):
-                handle_w.wait()
-                handle_x.wait()
-                cij1 = torch.matmul(x_recv_list[1], w1)
-        case 1:
-            with torch.cuda.stream(streams[1]):
-                handle_w.wait()
-                handle_x.wait()
-                cij1 = torch.matmul(x_recv_list[0], w1)
-        case 2:
-            with torch.cuda.stream(streams[1]):
-                handle_w.wait()
-                handle_x.wait()
-                cij1 = torch.matmul(x_recv_list[3], w1)
-        case 3:
-            with torch.cuda.stream(streams[1]):
-                handle_w.wait()
-                handle_x.wait()
-                cij1 = torch.matmul(x_recv_list[2], w1)
-        case 4:
-            with torch.cuda.stream(streams[1]):
-                handle_w.wait()
-                handle_x.wait()
-                cij1 = torch.matmul(x_recv_list[5], w1)
-        case 5:
-            with torch.cuda.stream(streams[1]):
-                handle_w.wait()
-                handle_x.wait()
-                cij1 = torch.matmul(x_recv_list[4], w1)
-        case 6:
-            with torch.cuda.stream(streams[1]):
-                handle_w.wait()
-                handle_x.wait()
-                cij1 = torch.matmul(x_recv_list[7], w1)
-        case 7:
-            with torch.cuda.stream(streams[1]):
-                handle_w.wait()
-                handle_x.wait()
-                cij1 = torch.matmul(x_recv_list[6], w1)
-
-    for s in streams:
-        s.synchronize()
+    # On the current stream, so the matmuls see the local block copied into w0 / w1.
+    handle_w.wait()
+    cij0 = torch.matmul(xij, w0)
+    handle_x.wait()
+    # x arrives from the partner rank: 0 <-> 1, 2 <-> 3, 4 <-> 5, 6 <-> 7.
+    cij1 = torch.matmul(x_recv_list[mod ^ 1], w1)
 
     cij = cij0 + cij1
     return cij
@@ -1525,7 +1486,7 @@ def x_transpose_w_eightway(
     x0, x1 = x0.contiguous(), x1.contiguous()
 
     x_transpose_shape = x0.shape
-    streamz: list[torch.cuda.Stream] = [torch.cuda.Stream() for _ in range(2)]
+    streamz: list[torch.cuda.Stream] = [torch.cuda.Stream() for _ in range(4)]
 
     match mod:
         case 0:
@@ -1772,6 +1733,10 @@ def x_transpose_w_eightway(
     x_handle = all_to_all_async(x_recv_list, x_send_list, group=model_group)
     w_handle = all_to_all_async(w_recv_list, w_send_list, group=model_group)
 
+    # The side streams must see what the current stream wrote (the split halves of x,
+    # the local weight block) before they read it.
+    for s in streamz:
+        s.wait_stream(torch.cuda.current_stream())
     match mod:
         case 0:
             with torch.cuda.stream(streamz[0]):
@@ -1960,11 +1925,11 @@ def fused_xw_xtw_eightway(
             xw_w_recv = [
                 empty,
                 empty,
-                w0[..., split_size:, :].contiguous(),
+                w0[..., split_size:, :],
                 empty,
-                w1[..., :split_size, :].contiguous(),
+                w1[..., :split_size, :],
                 empty,
-                w1[..., split_size:, :].contiguous(),
+                w1[..., split_size:, :],
                 empty,
             ]
             xtw_x_send = [empty, xt0, xt1, xt1, empty, empty, empty, empty]
@@ -2020,11 +1985,11 @@ def fused_xw_xtw_eightway(
                 empty,
                 empty,
                 empty,
-                w1[..., split_size:, :].contiguous(),
+                w1[..., split_size:, :],
                 empty,
-                w0[..., :split_size, :].contiguous(),
+                w0[..., :split_size, :],
                 empty,
-                w0[..., split_size:, :].contiguous(),
+                w0[..., split_size:, :],
             ]
             xtw_x_send = [empty, empty, empty, empty, xt0, xt0, xt1, xt1]
             xtw_x_recv = [
@@ -2078,13 +2043,13 @@ def fused_xw_xtw_eightway(
             ]
             xw_w_send = [weight, empty, empty, empty, weight, empty, weight, empty]
             xw_w_recv = [
-                w0[..., :split_size, :].contiguous(),
+                w0[..., :split_size, :],
                 empty,
                 empty,
                 empty,
-                w1[..., :split_size, :].contiguous(),
+                w1[..., :split_size, :],
                 empty,
-                w1[..., split_size:, :].contiguous(),
+                w1[..., split_size:, :],
                 empty,
             ]
             xtw_x_send = [xt0, xt0, empty, xt1, empty, empty, empty, empty]
@@ -2442,7 +2407,7 @@ def fused_xw_xtw_eightway(
         case 2:
             w0[..., split_size:, :].copy_(weight)
         case 3:
-            w0[..., split_size:, :].copy_(weight)
+            w1[..., split_size:, :].copy_(weight)
         case 4:
             w1[..., :split_size, :].copy_(weight)
         case 5:
@@ -2453,6 +2418,10 @@ def fused_xw_xtw_eightway(
             w0[..., split_size:, :].copy_(weight)
 
     # ---- grad_input (XW) computation ----
+    # The side streams must see what the current stream wrote (the split halves of x,
+    # the local weight block) before they read it.
+    for s in xw_streams:
+        s.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(xw_streams[0]):
         xw_w_handle.wait()
         gi_cij0 = torch.matmul(grad_output, w0)
@@ -2504,6 +2473,10 @@ def fused_xw_xtw_eightway(
     grad_input = gi_cij0 + gi_cij1
 
     # ---- grad_weight (XtW) computation ----
+    # The side streams must see what the current stream wrote (the split halves of x,
+    # the local weight block) before they read it.
+    for s in xtw_streamz:
+        s.wait_stream(torch.cuda.current_stream())
     match mod:
         case 0:
             with torch.cuda.stream(xtw_streamz[0]):

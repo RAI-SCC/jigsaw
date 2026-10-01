@@ -61,43 +61,54 @@ class PatchMLP(nn.Module):
         return self.recover(z)
 
 
-device, rank, world_size = setup()
-mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})
-row, col = mesh["row"], mesh["col"]
+def main() -> None:
+    """Convert :class:`PatchMLP`, then check forward, backward and the way back."""
+    device, rank, world_size = setup()
+    mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})
+    row, col = mesh["row"], mesh["col"]
 
-# The same seed on every rank gives every rank the same full model to convert from.
-torch.manual_seed(0)
-reference = PatchMLP().to(device)
-model = convert_to_jigsaw(copy.deepcopy(reference), mesh, device)
-log.info("converted layers: %s", [type(m).__name__ for m in model.children()])
+    # The same seed on every rank gives every rank the same full model to convert from.
+    torch.manual_seed(0)
+    reference = PatchMLP().to(device)
+    model = convert_to_jigsaw(copy.deepcopy(reference), mesh, device)
+    log.info("converted layers: %s", [type(m).__name__ for m in model.children()])
 
-x = torch.randn(2, 4, 32, 64, device=device)  # same full input on every rank
-x_local = shard(shard(x, 1, col), -1, row)  # channels over "col", width over "row"
+    x = torch.randn(2, 4, 32, 64, device=device)  # same full input on every rank
+    x_local = shard(shard(x, 1, col), -1, row)  # channels over "col", width over "row"
 
-# --- forward: the gathered output equals the original model's output ---
-with torch.no_grad():
-    expected = reference(x)
-    out = model(x_local)
-    out = gather_1d_results(out, mesh, dim=1, pm_key="col")  # channels
-    out = gather_1d_results(out, mesh, dim=-1, pm_key="row")  # width
-log.info("forward   max |converted - original| = %.2e", (out - expected).abs().max())
-log.info("(for scale: max |original| = %.2e)", expected.abs().max())
+    # --- forward: the gathered output equals the original model's output ---
+    with torch.no_grad():
+        expected = reference(x)
+        out = model(x_local)
+        out = gather_1d_results(out, mesh, dim=1, pm_key="col")  # channels
+        out = gather_1d_results(out, mesh, dim=-1, pm_key="row")  # width
+    err = (out - expected).abs().max()
+    log.info("forward   max |converted - original| = %.2e", err)
+    log.info("(for scale: max |original| = %.2e)", expected.abs().max())
+    torch.testing.assert_close(out, expected, atol=1e-5, rtol=1e-4)
 
-# --- backward: the gradient of a weight shard equals the same slice of the original ---
-reference(x).square().mean().backward()
-loss = jigsaw.loss.DistributedMSELoss(reduce_groups=(row, col))
-loss(model(x_local), torch.zeros_like(x_local)).backward()
+    # --- backward: the gradient of a weight shard equals the same slice of the original
+    reference(x).square().mean().backward()
+    loss = jigsaw.loss.DistributedMSELoss(reduce_groups=(row, col))
+    loss(model(x_local), torch.zeros_like(x_local)).backward()
 
-# `fc1.weight` is (4E, E): rows split over "row", columns over "col".
-ref_grad = reference.fc1.weight.grad
-n_rows, n_cols = ref_grad.shape[0] // row.size(), ref_grad.shape[1] // col.size()
-ref_shard = ref_grad[
-    row.rank() * n_rows : (row.rank() + 1) * n_rows,
-    col.rank() * n_cols : (col.rank() + 1) * n_cols,
-]
-err = (model.fc1.weight.grad - ref_shard).abs().max() / ref_shard.abs().max()
-log.info("backward  max relative error of the fc1.weight.grad shard = %.2e", err)
+    # `fc1.weight` is (4E, E): rows split over "row", columns over "col".
+    ref_grad = reference.fc1.weight.grad
+    n_rows, n_cols = ref_grad.shape[0] // row.size(), ref_grad.shape[1] // col.size()
+    ref_shard = ref_grad[
+        row.rank() * n_rows : (row.rank() + 1) * n_rows,
+        col.rank() * n_cols : (col.rank() + 1) * n_cols,
+    ]
+    err = (model.fc1.weight.grad - ref_shard).abs().max() / ref_shard.abs().max()
+    log.info("backward  max relative error of the fc1.weight.grad shard = %.2e", err)
+    assert err < 1e-4, err
 
-# --- and back: merge the shards into a plain nn.Linear on every rank ---
-plain = model.fc1.convert_to_torch(mesh)
-log.info("fc1 merged back into %s", plain)
+    # --- and back: merge the shards into a plain nn.Linear on every rank ---
+    plain = model.fc1.convert_to_torch(mesh)
+    log.info("fc1 merged back into %s", plain)
+    torch.testing.assert_close(plain.weight, reference.fc1.weight)
+    torch.testing.assert_close(plain.bias, reference.fc1.bias)
+
+
+if __name__ == "__main__":
+    main()

@@ -23,31 +23,32 @@ Run with one process per GPU (or 4 CPU processes):
 """
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from _common import setup, shard
 
 import jigsaw
 from jigsaw import log
-from jigsaw.modules.attention.config import RingAttentionConfig, SendForward
+from jigsaw.modules.attention.config import (
+    RingAttentionConfig,
+    SaveScope,
+    SendForward,
+    SendOp,
+)
 from jigsaw.utils import set_all_seeds
-
-device, rank, world_size = setup()
-
-mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})
-row, col, model_group = mesh["row"], mesh["col"], mesh["model"]
-
-# Every rank needs its own seed so that the shards are initialised independently.
-set_all_seeds(model_group.rank())
 
 IN_CHANNELS, PATCH, DIM, HEADS, DEPTH = 4, 4, 64, 4, 2
 H, W = 32, 64  # global image size
+
+Mesh = dict[str, dist.ProcessGroup]
 
 
 class Block(nn.Module):
     """Pre-norm transformer block: ``x + attn(norm(x))``, then ``x + mlp(norm(x))``."""
 
-    def __init__(self) -> None:
+    def __init__(self, mesh: Mesh, device: torch.device) -> None:
         super().__init__()
+        row, col, model_group = mesh["row"], mesh["col"], mesh["model"]
 
         def norm() -> nn.Module:
             return jigsaw.normalization.DistributedLayerNorm(
@@ -88,8 +89,11 @@ class Block(nn.Module):
                 # the default, the input x) is required with a channel split: x is
                 # only a slice of the features, too little to rebuild K and V from.
                 send_in_forward=SendForward.KV,
-                # Ring ranks per node. The default, 4, needs a ring of at least 4.
-                gpus_per_node=row.size(),
+                # With the heads split over "col", these two must not stay at their
+                # defaults (HYBRID_P2P, GLOBAL): the gradients come out wrong, while
+                # the forward pass is still exact. tests/test_examples.py checks them.
+                send_op=SendOp.P2P,
+                save_scope=SaveScope.LOCAL,
             ),
         )
         self.mlp = nn.Sequential(linear(DIM, 4 * DIM), nn.GELU(), linear(4 * DIM, DIM))
@@ -126,8 +130,9 @@ def sincos_pos_embed(
 class ViT(nn.Module):
     """Patch embedding -> position embedding -> transformer blocks -> patch recovery."""
 
-    def __init__(self) -> None:
+    def __init__(self, mesh: Mesh, device: torch.device) -> None:
         super().__init__()
+        row, col, model_group = mesh["row"], mesh["col"], mesh["model"]
         conv_kwargs = dict(
             kernel_size=PATCH,
             stride=PATCH,  # non-overlapping patches: no halo exchange needed
@@ -138,7 +143,7 @@ class ViT(nn.Module):
         self.embed = jigsaw.convolution.DistributedConv2D(
             IN_CHANNELS, DIM, **conv_kwargs
         )
-        self.blocks = nn.ModuleList([Block() for _ in range(DEPTH)])
+        self.blocks = nn.ModuleList([Block(mesh, device) for _ in range(DEPTH)])
         self.norm = jigsaw.normalization.DistributedLayerNorm(
             DIM // col.size(), model_group.rank(), device, row, col
         )
@@ -172,13 +177,9 @@ class ViT(nn.Module):
         return x + self.recover(z)  # predict a correction to the input
 
 
-model = ViT()
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=(row, col))
-log.info("local parameters per rank: %d", jigsaw.utils.count_parameters(model))
-
-
-def make_batch(step: int) -> tuple[torch.Tensor, torch.Tensor]:
+def make_batch(
+    step: int, mesh: Mesh, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Return this rank's shard of a noisy input and its clean target."""
     g = torch.Generator().manual_seed(step)
     clean = torch.nn.functional.avg_pool2d(
@@ -187,16 +188,37 @@ def make_batch(step: int) -> tuple[torch.Tensor, torch.Tensor]:
     noisy = clean + 0.3 * torch.randn(clean.shape, generator=g)
 
     def local(x: torch.Tensor) -> torch.Tensor:
-        return shard(shard(x, 1, col), -1, row).to(device)
+        return shard(shard(x, 1, mesh["col"]), -1, mesh["row"]).to(device)
 
     return local(noisy), local(clean)
 
 
-for step in range(100):
-    x, y = make_batch(step)  # each (4, C / col, H, W / row)
-    loss = loss_fn(model(x), y)
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-    if step % 20 == 0:
-        log.info("step %3d  loss %.4f", step, loss.item())
+def main(steps: int = 100) -> list[float]:
+    """Train the ViT for ``steps`` steps and return the loss of every step."""
+    device, rank, world_size = setup()
+
+    mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})
+
+    # Every rank needs its own seed so that the shards are initialised independently.
+    set_all_seeds(mesh["model"].rank())
+
+    model = ViT(mesh, device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=(mesh["row"], mesh["col"]))
+    log.info("local parameters per rank: %d", jigsaw.utils.count_parameters(model))
+
+    losses = []
+    for step in range(steps):
+        x, y = make_batch(step, mesh, device)  # each (4, C / col, H, W / row)
+        loss = loss_fn(model(x), y)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        losses.append(loss.item())
+        if step % 20 == 0:
+            log.info("step %3d  loss %.4f", step, losses[-1])
+    return losses
+
+
+if __name__ == "__main__":
+    main()
