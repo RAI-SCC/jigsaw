@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import mpi4py.MPI as MPI
 import pytest
@@ -100,6 +101,18 @@ def test_script_is_importable_and_guarded(name: str) -> None:
     assert 'if __name__ == "__main__":' in source
 
 
+def _load_common(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    """Import ``examples/_common.py``, the helpers the tutorials share."""
+    monkeypatch.syspath_prepend(str(EXAMPLES))
+    spec = importlib.util.spec_from_file_location(
+        "jigsaw_example_common", EXAMPLES / "_common.py"
+    )
+    assert spec is not None and spec.loader is not None
+    common = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(common)
+    return common
+
+
 @pytest.mark.parametrize(
     ("env", "world_size", "expected"),
     [
@@ -116,11 +129,31 @@ def test_processes_on_this_node(
         monkeypatch.delenv(var, raising=False)
     for var, value in env.items():
         monkeypatch.setenv(var, value)
-    monkeypatch.syspath_prepend(str(EXAMPLES))
-    spec = importlib.util.spec_from_file_location(
-        "jigsaw_example_common", EXAMPLES / "_common.py"
-    )
-    assert spec is not None and spec.loader is not None
-    common = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(common)
-    assert common._processes_on_this_node(world_size) == expected
+    assert _load_common(monkeypatch)._processes_on_this_node(world_size) == expected
+
+
+@pytest.mark.parametrize(
+    ("visible", "env", "expected"),
+    [
+        (4, {}, 4),  # torchrun: every process sees the node's GPUs
+        (0, {}, 0),  # no GPU
+        (1, {}, 1),  # one GPU for all the processes, as on a laptop
+        # srun binding one GPU to each task: one is visible, the step has four
+        (1, {"SLURM_PROCID": "2", "SLURM_STEP_GPUS": "0,1,2,3"}, 4),
+        (1, {"SLURM_PROCID": "0", "SLURM_STEP_GPUS": "0"}, 1),  # a one-GPU step
+        (4, {"SLURM_PROCID": "2", "SLURM_STEP_GPUS": "0,1,2,3"}, 4),  # srun, unbound
+        (0, {"SLURM_PROCID": "2", "SLURM_STEP_GPUS": "0,1,2,3"}, 0),  # no CUDA at all
+        (1, {"SLURM_STEP_GPUS": "0,1,2,3"}, 1),  # torchrun inside an allocation
+    ],
+)
+def test_gpus_on_this_node(
+    monkeypatch: pytest.MonkeyPatch, visible: int, env: dict, expected: int
+) -> None:
+    """The GPU count ``setup()`` uses also holds when ``srun`` binds a GPU per task."""
+    for var in ("SLURM_PROCID", "SLURM_STEP_GPUS"):
+        monkeypatch.delenv(var, raising=False)
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
+    common = _load_common(monkeypatch)
+    monkeypatch.setattr(common.torch.cuda, "device_count", lambda: visible)
+    assert common._gpus_on_this_node() == expected
