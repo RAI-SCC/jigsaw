@@ -179,7 +179,6 @@ def xw_transpose_twoway(
     return cij
 
 
-@torch.compile
 def xw_twoway(
     xij: torch.Tensor,
     wij: torch.Tensor,

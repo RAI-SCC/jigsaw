@@ -17,6 +17,20 @@ def _processes_on_this_node(world_size: int) -> int:
     return world_size
 
 
+def _gpus_on_this_node() -> int:
+    """Number of GPUs the launched processes on this node have between them.
+
+    Usually every process sees all of them. Some clusters make ``srun`` bind one GPU
+    to each task instead: a process then sees a single device, and ``SLURM_STEP_GPUS``
+    lists the ones the tasks of this node were given.
+    """
+    n_gpus = torch.cuda.device_count()
+    step_gpus = os.getenv("SLURM_STEP_GPUS", "")
+    if n_gpus == 1 and step_gpus and os.getenv("SLURM_PROCID") is not None:
+        n_gpus = len(step_gpus.split(","))
+    return n_gpus
+
+
 def setup() -> tuple[torch.device, int, int]:
     """Initialise ``torch.distributed`` and return ``(device, rank, world_size)``.
 
@@ -26,7 +40,7 @@ def setup() -> tuple[torch.device, int, int]:
     with ``torchrun --nproc-per-node 4``.
     """
     env = resolve_launch_env()
-    n_gpus = torch.cuda.device_count()
+    n_gpus = _gpus_on_this_node()
     if n_gpus and n_gpus >= _processes_on_this_node(env.world_size):
         device, _, rank, world_size = init_cuda()
         return device, rank, world_size

@@ -211,13 +211,7 @@ class DistributedAttention(torch.nn.Module):
         qk_norm : bool
             Whether to normalize queries and keys.
         ring : bool
-            Whether to use ring attention over ``spatial_group``. By default
-            the ring recomputes the keys and values of remote chunks from the
-            remote input with the local QKV weight, which needs an unsharded
-            channel dimension: ``channel_group`` must have size 1, unless
-            ``config`` makes the ring send and save the keys and values
-            themselves (``send_in_forward=SendForward.KV`` and
-            ``save_for_backward=SaveBackward.KV``).
+            Whether to use ring attention over ``spatial_group``.
         attn_backend : AttnBackend | str
             Attention core, ``"te"``, ``"sdpa"`` or ``"math"``.
         dtype : torch.dtype
@@ -273,6 +267,14 @@ class DistributedAttention(torch.nn.Module):
                 "Ring attention needs an unsharded channel dimension, but the "
                 f"channel group has size {channel_group.size()}. With a channel "
                 "split, pass a config with send_in_forward=SendForward.KV and "
+                "save_for_backward=SaveBackward.KV."
+            )
+            # A remote chunk's keys rebuilt from its input would miss
+            # the key norm.
+            assert not qk_norm or sends_and_saves_kv, (
+                "Ring attention with qk_norm needs the normalized keys of the "
+                "remote chunks. Pass a config with "
+                "send_in_forward=SendForward.KV and "
                 "save_for_backward=SaveBackward.KV."
             )
             self.attn_core = self._ring_attn_core
@@ -335,9 +337,21 @@ class DistributedAttention(torch.nn.Module):
 
         if self.qk_norm:
             self.q_norm, self.k_norm = (
-                torch.nn.LayerNorm(embed_dim // heads, device=device),
-                torch.nn.LayerNorm(embed_dim // heads, device=device),
+                torch.nn.LayerNorm(embed_dim // heads, device=device, dtype=dtype),
+                torch.nn.LayerNorm(embed_dim // heads, device=device, dtype=dtype),
             )
+            # The norms act on the unsharded head dimension, so they are
+            # replicated over the spatial and the channel group: sum their
+            # gradients over both.
+            norm_sync_groups = [
+                g for g in (self.spatial_group, self.channel_group) if g.size() > 1
+            ]
+            if norm_sync_groups:
+                for norm in (self.q_norm, self.k_norm):
+                    for p in norm.parameters():
+                        p.register_post_accumulate_grad_hook(
+                            hooks.make_grad_sync_hook(norm_sync_groups)
+                        )
 
         self.heads = heads // self.channel_group.size()
         self.scale = (embed_dim // heads) ** -0.5
@@ -591,9 +605,14 @@ class Attention(torch.nn.Module):
             out_features=3 * embed_dim,
             bias=False,
             device=device,
+            dtype=dtype,
         )
         self.head_concat = torch.nn.Linear(
-            in_features=embed_dim, out_features=out_dim, bias=False, device=device
+            in_features=embed_dim,
+            out_features=out_dim,
+            bias=False,
+            device=device,
+            dtype=dtype,
         )
         self.heads = heads
         self.device = device
@@ -607,8 +626,8 @@ class Attention(torch.nn.Module):
         self.dtype = dtype
         if qk_norm:
             self.q_norm, self.k_norm = (
-                torch.nn.RMSNorm(self.head_dim),
-                torch.nn.RMSNorm(self.head_dim),
+                torch.nn.LayerNorm(self.head_dim, device=device, dtype=dtype),
+                torch.nn.LayerNorm(self.head_dim, device=device, dtype=dtype),
             )
 
     def _attn_core(
@@ -660,7 +679,14 @@ class Attention(torch.nn.Module):
         qkv = self.qkv(x)
         qkv = qkv.reshape(qkv.shape[0], qkv.shape[1], 3, self.heads, self.head_dim)
 
-        q, k, v = qkv.permute(2, 0, 3, 1, 4).to(attn_core_dtype(x))
+        core_dtype = attn_core_dtype(x)
+        if self.qk_norm:
+            q, k, v = qkv.permute(2, 0, 3, 1, 4)
+            q = self.q_norm(q).to(core_dtype)
+            k = self.k_norm(k).to(core_dtype)
+            v = v.to(core_dtype)
+        else:
+            q, k, v = qkv.permute(2, 0, 3, 1, 4).to(core_dtype)
         out = self.attn_core(q=q, k=k, v=v, x=x)
 
         # out has shape [B, h, N, d]
@@ -707,8 +733,8 @@ class Attention(torch.nn.Module):
             row and column groups.
         ring : bool
             Whether to use ring attention over the rows. With its default
-            ``config`` that needs a column group of size 1, see
-            :class:`DistributedAttention`. Otherwise, each row attends within
+            ``config`` that needs a column group of size 1 and no ``qk_norm``,
+            see :class:`DistributedAttention`. Otherwise, each row attends within
             its own chunk.
         attn_backend : AttnBackend | str
             Attention core, ``"te"``, ``"sdpa"`` or ``"math"``.
@@ -786,6 +812,11 @@ class Attention(torch.nn.Module):
                     channel_rank * out_shard : (channel_rank + 1) * out_shard
                 ]
             )
+
+        # The query/key norms act on the unsharded head dimension.
+        if attention.qk_norm:
+            instance.q_norm.load_state_dict(attention.q_norm.state_dict())
+            instance.k_norm.load_state_dict(attention.k_norm.state_dict())
 
         # The serial weights need not agree across the spatial group.
         for p in instance.parameters():

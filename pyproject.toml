@@ -23,13 +23,16 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Development Status :: 3 - Alpha",
 ]
-# The library itself only imports torch and einops. transformer-engine is an
+# The library itself only imports torch and einops. numpy is never imported
+# directly, but torch does not pull it in and needs it for
+# `dist.all_gather_object` (used by `jigsaw.log`). transformer-engine is an
 # optional, environment-provided accelerator (see containers/README.md) and is
 # never a pip dependency. Bare-metal install: `pip install -e .`; container
 # install: `pip install --no-deps -e .` on top of the image's torch.
 dependencies = [
     "torch>=2.6",
     "einops>=0.6",
+    "numpy",
 ]
 
 [project.optional-dependencies]
@@ -71,6 +74,13 @@ show_error_codes =true
 warn_unused_ignores=false
 follow_imports = "normal"
 follow_untyped_imports = true
+
+# numpy is only reached through torch. Its stubs use syntax newer than the
+# `python_version` checked against above, which stops mypy before it gets to jigsaw.
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
 
 # Ruff
 [tool.ruff]

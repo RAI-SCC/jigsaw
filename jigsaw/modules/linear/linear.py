@@ -216,15 +216,21 @@ class DistributedXWT(torch.nn.Module):
         model_kw : str
             Key of the model process group.
         **kwargs : Any
-            Forwarded to the constructor.
+            Unused. Accepts the options of the other converters, which
+            :func:`jigsaw.convert.convert_to_jigsaw` passes to every layer.
 
         Returns
         -------
         DistributedXWT
             Distributed layer with the weights and bias of ``model``.
         """
-        assert model.in_features % process_mesh_dict[row_kw].size() == 0, (
-            "in_features is not divisible by process mesh rows"
+        # The columns shard the input dimension of the weight and the bias, the
+        # rows the output dimension of the weight.
+        assert model.in_features % process_mesh_dict[col_kw].size() == 0, (
+            "in_features is not divisible by process mesh columns"
+        )
+        assert model.out_features % process_mesh_dict[row_kw].size() == 0, (
+            "out_features is not divisible by process mesh rows"
         )
         assert model.out_features % process_mesh_dict[col_kw].size() == 0, (
             "out_features is not divisible by process mesh columns"
@@ -260,9 +266,11 @@ class DistributedXWT(torch.nn.Module):
             instance.bias, torch.Tensor
         ):
             bias_size = model.out_features // process_mesh_dict[col_kw].size()
-            instance.bias.data = model.bias.data[
-                col_rank * bias_size : (col_rank + 1) * bias_size
-            ].clone()
+            instance.bias.data = (
+                model.bias.data[col_rank * bias_size : (col_rank + 1) * bias_size]
+                .clone()
+                .to(device)
+            )
         return instance
 
     def convert_to_torch(

@@ -84,7 +84,8 @@ def distributed_roll(
     dims : tuple[int, ...]
         Dimensions to roll.
     distributed_dims : list[int]
-        Dimensions across which ``x`` is partitioned. Each must appear in ``dims``.
+        Dimensions across which ``x`` is partitioned. Each must appear in ``dims``,
+        counted from either end.
     spatial_process_groups : list[dist.ProcessGroup]
         Process group of each entry of ``distributed_dims``.
     empty : torch.Tensor
@@ -104,14 +105,15 @@ def distributed_roll(
     """
     x = torch.roll(x, shifts=shifts, dims=dims)
 
-    dim_to_shift = dict(zip(dims, shifts))
+    # Compare the dimensions as counted from the front: ``-2`` is ``2`` in 4-D.
+    dim_to_shift = {d % x.ndim: s for d, s in zip(dims, shifts)}
     for d, pg in zip(distributed_dims, spatial_process_groups):
-        if d not in dim_to_shift:
+        if d % x.ndim not in dim_to_shift:
             raise ValueError(f"distributed dim {d} not in dims {dims}")
         x = exchange_halo_1d(
             x,
             dim=d,
-            window_size=dim_to_shift[d],
+            window_size=dim_to_shift[d % x.ndim],
             group=pg,
             empty=empty,
             comm_halo_1d_fn=exchange_halo_1d_fn,

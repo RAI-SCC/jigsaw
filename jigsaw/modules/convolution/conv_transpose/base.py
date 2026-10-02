@@ -167,10 +167,12 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         )
         w_out = self.out_channels // self._groups_local
         self.weight = torch.nn.parameter.Parameter(
-            torch.zeros(w_in, w_out, *self.kernel_size, device=device)
+            torch.zeros(w_in, w_out, *self.kernel_size, device=device, dtype=dtype)
         )
         self.bias = (
-            torch.nn.parameter.Parameter(torch.zeros(self.out_channels, device=device))
+            torch.nn.parameter.Parameter(
+                torch.zeros(self.out_channels, device=device, dtype=dtype)
+            )
             if bias
             else None
         )
@@ -243,6 +245,7 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         row_kw: str = "row",
         col_kw: str = "col",
         model_kw: str = "model",
+        **kwargs: Any,
     ) -> "_DistributedConvTransposeNd":
         """Convert a ``torch.nn.ConvTranspose{1,2,3}d`` to a distributed transpose convolution.
 
@@ -260,6 +263,9 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             Key of the channel process group.
         model_kw : str
             Key of the model process group.
+        **kwargs : Any
+            Unused. Accepts the options of the other converters, which
+            :func:`jigsaw.convert.convert_to_jigsaw` passes to every layer.
 
         Returns
         -------

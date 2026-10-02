@@ -141,9 +141,12 @@ def init_cuda() -> tuple[torch.device, int, int, int]:
         slurm_localid,
         env.source,
     )
-    # Initialize GPUs and dataloaders
-    device = torch.device(f"cuda:{slurm_localid}")
-    torch.cuda.set_device(slurm_localid)
+    # Initialize GPUs and dataloaders. A scheduler that binds one GPU to each task
+    # (`srun` on some clusters) leaves a single visible device, which is cuda:0
+    # whatever the local rank.
+    device_id = slurm_localid if torch.cuda.device_count() != 1 else 0
+    device = torch.device(f"cuda:{device_id}")
+    torch.cuda.set_device(device_id)
 
     # Initialize DistributedDataParallel.
     dist.init_process_group(

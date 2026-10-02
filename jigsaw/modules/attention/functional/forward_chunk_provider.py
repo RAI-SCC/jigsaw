@@ -399,10 +399,9 @@ class _HybridBroadcastForwardChunkProvider(_HybridForwardChunkProvider):
                 self._launch_inter_forward(node_step)
 
         assert self._own_buf is not None and self._own_kv is not None
-        src = self.topo.rank_at(self.topo.node_idx, inner)
         is_src = self.topo.local_idx == inner
         recv_buf = self._own_buf if is_src else torch.empty_like(self._own_buf)
-        dist.broadcast(recv_buf, src=src, group=self._intranode_group)
+        dist.broadcast(recv_buf, group_src=inner, group=self._intranode_group)
 
         if self.send_x:
             self.x_j = recv_buf

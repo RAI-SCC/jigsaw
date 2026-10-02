@@ -430,7 +430,7 @@ class _LocalChunkProviderBroadcast(_LocalChunkProvider):
             send_buf if self.local_rank == step else torch.empty_like(send_buf)
         )
         self._handle = dist.broadcast(
-            self._recv_buf, src=step, group=self.group, async_op=True
+            self._recv_buf, group_src=step, group=self.group, async_op=True
         )
 
         assert self._handle is not None
@@ -676,12 +676,12 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProviderHybrid):
 
         # Intra-node broadcast. The source rank reuses its own buffer in place;
         # everyone else receives into scratch.
-        src = self.topo.rank_at(self.topo.node_idx, step)
-        is_src = self.topo.local_idx == step % self._gpn
+        src = step % self._gpn
+        is_src = self.topo.local_idx == src
         self._recv_buf = (
             self._node_chunk if is_src else torch.empty_like(self._node_chunk)
         )
-        dist.broadcast(self._recv_buf, src=src, group=self.intranode_group)
+        dist.broadcast(self._recv_buf, group_src=src, group=self.intranode_group)
 
         return self._kv_from(self._recv_buf)
 

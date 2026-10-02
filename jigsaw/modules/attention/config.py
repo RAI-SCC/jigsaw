@@ -222,7 +222,9 @@ def _select_forward_send_fn(
     ) -> tuple[torch.Tensor, Optional[dist.Work]]:
         buf = kv if send_kv else x
         recv = buf if src_rank == local_rank else torch.empty_like(buf)
-        return recv, dist.broadcast(recv, src=src_rank, group=group, async_op=True)
+        return recv, dist.broadcast(
+            recv, group_src=src_rank, group=group, async_op=True
+        )
 
     return broadcast_send if send_op == SendOp.BROADCAST else ring_send
 

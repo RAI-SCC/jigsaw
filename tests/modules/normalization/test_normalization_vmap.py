@@ -24,8 +24,9 @@ def _loop(module, x):
     return torch.stack([module(x[i]) for i in range(x.shape[0])])
 
 
-def test_softmax_vmap_matches_loop(batched):
-    module = norm.DistributedSoftMax(dist.group.WORLD, dim=-1)
+@pytest.mark.parametrize("dim", [-1, 1])
+def test_softmax_vmap_matches_loop(batched, dim):
+    module = norm.DistributedSoftMax(dist.group.WORLD, dim=dim)
     assert module.get_parameter_count() == 0
     assert torch.allclose(torch.vmap(module)(batched), _loop(module, batched))
 

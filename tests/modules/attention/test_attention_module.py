@@ -110,6 +110,27 @@ class TestRingAttentionFunction:
         self._run(process_mesh_dict_4x1, device, **kwargs)
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            dict(send_op=cfg.SendOp.BROADCAST),
+            dict(
+                send_op=cfg.SendOp.BROADCAST,
+                send_backward=cfg.SendBackward.GATHER_DKV,
+                save_scope=cfg.SaveScope.LOCAL,
+            ),
+            dict(send_op=cfg.SendOp.HYBRID_BROADCAST),
+            dict(send_op=cfg.SendOp.HYBRID_BROADCAST, gpus_per_node=1),
+        ],
+        ids=["broadcast", "broadcast_gather", "hybrid_one_node", "hybrid_two_nodes"],
+    )
+    def test_broadcast_on_replicated_ring(
+        self, device, process_mesh_dict_2x2x1, kwargs
+    ):
+        """The ring of the second replica does not hold global ranks ``0..n-1``."""
+        self._run(process_mesh_dict_2x2x1, device, **kwargs)
+
+    @pytest.mark.dist(4)
     def test_hybrid_topology_two_nodes(self, device, process_mesh_dict_4x1):
         """A 4-ring split into 2 nodes of 2 uses the intra/inter-node hybrid path."""
         self._run(process_mesh_dict_4x1, device, gpus_per_node=2)
@@ -137,6 +158,119 @@ class TestDistributedAttentionPaths:
         # On CUDA both run in bf16, the serial module on the flash kernel: ~1e-3 apart.
         tol = 5e-3 if device.type == "cuda" else 1e-4
         assert_close("output", out, y_ref.detach(), tol, tol, device, mesh["model"])
+
+    @pytest.mark.dist(4)
+    def test_qk_norm_convert_matches_serial(
+        self, device: torch.device, process_mesh_dict_2x1x2: dict
+    ) -> None:
+        """The serial module applies its query/key norms and conversion keeps them."""
+        mesh = process_mesh_dict_2x1x2
+        torch.manual_seed(1)
+        serial = attention.Attention(DIM, DIM, DIM, HEADS, device, qk_norm=True)
+        with torch.no_grad():
+            for norm in (serial.q_norm, serial.k_norm):
+                norm.weight.uniform_(0.5, 1.5)
+                norm.bias.uniform_(-0.5, 0.5)
+        x_global = torch.randn(1, 10, DIM, device=device)
+        y_ref = serial(x_global)
+
+        plain = attention.Attention(DIM, DIM, DIM, HEADS, device)
+        plain.load_state_dict(serial.state_dict(), strict=False)
+        assert not torch.allclose(plain(x_global), y_ref, atol=1e-2)
+
+        model = attention.Attention.convert_to_jigsaw(
+            serial, mesh, device, ring=False, attn_backend="math"
+        )
+        out = gather_1d_results(
+            model(_channel_shard(x_global, mesh)), mesh, dim=-1, pm_key="col"
+        )
+        # On CUDA both run in bf16, the serial module on the flash kernel: ~1e-3 apart.
+        tol = 5e-3 if device.type == "cuda" else 1e-4
+        assert_close("output", out, y_ref.detach(), tol, tol, device, mesh["model"])
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize(
+        "mesh_name, ring",
+        [
+            ("process_mesh_dict_2x2", False),
+            ("process_mesh_dict_4x1", False),
+            ("process_mesh_dict_4x1", True),
+        ],
+        ids=["2x2", "4x1", "4x1_ring"],
+    )
+    def test_qk_norm_gradients_match_serial(
+        self,
+        request: pytest.FixtureRequest,
+        device: torch.device,
+        mesh_name: str,
+        ring: bool,
+    ) -> None:
+        """The norms are replicated over the whole mesh: every rank gets the full gradient."""
+        mesh = request.getfixturevalue(mesh_name)
+        row = mesh["row"]
+        n_local = 6
+        torch.manual_seed(1)
+        serial = attention.Attention(DIM, DIM, DIM, HEADS, device, qk_norm=True)
+        with torch.no_grad():
+            for norm in (serial.q_norm, serial.k_norm):
+                norm.weight.uniform_(0.5, 1.5)
+                norm.bias.uniform_(-0.5, 0.5)
+        x_global = torch.randn(BATCH, row.size() * n_local, DIM, device=device)
+        grad_global = torch.randn_like(x_global)
+
+        # Without the ring each row attends within its own chunk.
+        chunks = [x_global] if ring else x_global.chunk(row.size(), dim=1)
+        y_ref = torch.cat([serial(c) for c in chunks], dim=1)
+        y_ref.backward(grad_global)
+
+        # The ring has to send the normalized keys instead of rebuilding them.
+        config = (
+            cfg.RingAttentionConfig(
+                device=device,
+                attn_backend="math",
+                send_in_forward=cfg.SendForward.KV,
+                save_for_backward=cfg.SaveBackward.KV,
+            )
+            if ring
+            else None
+        )
+        model = attention.Attention.convert_to_jigsaw(
+            serial, mesh, device, ring=ring, attn_backend="math", config=config
+        )
+        sl = slice(row.rank() * n_local, (row.rank() + 1) * n_local)
+        y = model(_channel_shard(x_global[:, sl], mesh))
+        y.backward(_channel_shard(grad_global[:, sl], mesh))
+
+        # On CUDA the attention core runs in bf16.
+        tol = 5e-2 if device.type == "cuda" else 1e-4
+        group = mesh["model"]
+        y_ref_local = _channel_shard(y_ref.detach()[:, sl], mesh)
+        assert_close("output", y.detach(), y_ref_local, tol, tol, device, group)
+        for norm_name in ("q_norm", "k_norm"):
+            for p_name in ("weight", "bias"):
+                got = getattr(getattr(model, norm_name), p_name).grad
+                ref = getattr(getattr(serial, norm_name), p_name).grad
+                assert_close(
+                    f"{norm_name}.{p_name} grad", got, ref, tol, tol, device, group
+                )
+        if mesh["col"].size() == 1:
+            # Summed over all tokens, so the bf16 rounding grows with the entries.
+            ref = serial.qkv.weight.grad
+            atol = tol * max(1.0, float(ref.abs().max()))
+            assert_close(
+                "qkv grad", model.qkv.weight.grad, ref, atol, tol, device, group
+            )
+
+    @pytest.mark.dist(4)
+    def test_ring_with_qk_norm_needs_kv_config(
+        self, device: torch.device, process_mesh_dict_4x1: dict
+    ) -> None:
+        """A ring that rebuilds remote keys from the input would skip the key norm."""
+        serial = attention.Attention(DIM, DIM, DIM, HEADS, device, qk_norm=True)
+        with pytest.raises(AssertionError, match="qk_norm"):
+            attention.Attention.convert_to_jigsaw(
+                serial, process_mesh_dict_4x1, device, ring=True
+            )
 
     @pytest.mark.dist(4)
     def test_qk_norm_forward_backward(
