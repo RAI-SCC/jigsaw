@@ -619,11 +619,14 @@ class TestConvertToTorch:
             device,
             grp,
         )
+        # Gradient reduction order differs between the sharded qkv matmul and
+        # the serial reference, so this needs the same ~1e-4 slack as the
+        # other gradient checks in this test rather than allclose's 1e-5 default.
         assert_close(
             "qkv weight grad sum",
             dist_qkv_grad.sum(),
             ref_qkv_grad.sum(),
-            1e-5,
+            1e-4,
             1e-5,
             device,
             grp,
