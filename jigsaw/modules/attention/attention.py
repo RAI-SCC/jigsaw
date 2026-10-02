@@ -183,7 +183,7 @@ class DistributedAttention(torch.nn.Module):
 
         The weights are replicated over ``spatial_group``, which splits the
         sequence, and sharded over ``channel_group``, which splits the heads.
-        Their gradients are summed over ``spatial_group``. 
+        Their gradients are summed over ``spatial_group``.
 
         Parameters
         ----------
@@ -211,7 +211,7 @@ class DistributedAttention(torch.nn.Module):
         qk_norm : bool
             Whether to normalize queries and keys.
         ring : bool
-            Whether to use ring attention over ``spatial_group``. 
+            Whether to use ring attention over ``spatial_group``.
         attn_backend : AttnBackend | str
             Attention core, ``"te"``, ``"sdpa"`` or ``"math"``.
         dtype : torch.dtype
