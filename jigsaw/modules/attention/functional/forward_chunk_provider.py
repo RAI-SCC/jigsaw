@@ -21,7 +21,7 @@ from jigsaw.modules.attention.config import (
 )
 
 from ._comm_overlap import PrefetchBuffer, consume, issue_on_comm_stream
-from .functional import _compute_kv, bhnd, get_hybrid_topology
+from .ring import _compute_kv, bhnd, get_hybrid_topology
 
 
 # --------------------------------------------------------------------------- #

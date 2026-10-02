@@ -18,7 +18,7 @@ import torch.distributed as dist
 import jigsaw.modules.attention as attention
 from jigsaw.modules.attention import config as cfg
 from jigsaw.modules.attention.attention import attn_core_dtype
-from jigsaw.modules.attention.functional.functional import RingAttentionFunction
+from jigsaw.modules.attention.functional.ring import RingAttentionFunction
 from jigsaw.utils_aggregate import gather_1d_results
 from tests.parity import assert_close
 

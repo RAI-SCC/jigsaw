@@ -12,7 +12,7 @@ from jigsaw.modules import linear
 from . import config as attention_config
 from .config import AttnBackend
 from .functional.cores import te as te_core
-from .functional.functional import RingAttentionFunction, get_hybrid_topology
+from .functional.ring import RingAttentionFunction, get_hybrid_topology
 
 #: Whether ``attn_backend="te"`` can be run at all. Both TE paths -- the ring's
 #: inner core and :class:`TransformerEngineAttention` below -- go through
@@ -604,7 +604,7 @@ class DistributedAttention(torch.nn.Module):
         With channel/tensor parallelism the fused ``qkv`` projection is split
         across the channel group (a distributed ``DistributedXWT`` matmul), so
         the ring cannot rebuild K/V from a circulated ``x`` chunk with the plain
-        local matmul in :func:`..functional.functional._compute_kv`. The ring
+        local matmul in :func:`..functional.ring._compute_kv`. The ring
         must instead circulate the already-projected K/V directly -- i.e.
         ``send_in_forward=KV`` *and* ``save_for_backward=KV`` (the only pairing
         that never calls ``_compute_kv``, forward or backward). A default config

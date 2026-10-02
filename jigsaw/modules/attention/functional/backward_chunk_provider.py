@@ -19,7 +19,7 @@ from jigsaw.modules.attention.config import (
 from jigsaw.offload import NVLinkActivationOffloader
 
 from ._comm_overlap import PrefetchBuffer, consume, issue_on_comm_stream
-from .functional import _compute_kv, get_hybrid_topology
+from .ring import _compute_kv, get_hybrid_topology
 
 
 def _build_backward_chunk_provider(

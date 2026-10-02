@@ -30,7 +30,7 @@ from jigsaw.modules.attention.functional.cores import math as math_core
 from jigsaw.modules.attention.functional.cores import sdpa as sdpa_core
 from jigsaw.modules.attention.functional.cores.te import cudnn as te_cudnn_core
 from jigsaw.modules.attention.functional.cores.te import flash as te_flash_core
-from jigsaw.modules.attention.functional.functional import combine_dropout_seed
+from jigsaw.modules.attention.functional.ring import combine_dropout_seed
 
 
 class TestMathCoreDropout:

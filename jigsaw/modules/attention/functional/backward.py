@@ -14,7 +14,7 @@ from jigsaw.modules.attention.config import (
 
 from ._comm_overlap import consume, issue_on_comm_stream
 from .backward_chunk_provider import _build_backward_chunk_provider
-from .functional import (
+from .ring import (
     HybridTopology,
     bhnd,
     combine_dropout_seed,

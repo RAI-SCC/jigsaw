@@ -11,7 +11,7 @@ from jigsaw.modules.attention.config import RingAttentionConfig
 
 from ._merge_kernel import fused_online_softmax_merge_
 from .forward_chunk_provider import build_forward_chunk_provider
-from .functional import bhnd, combine_dropout_seed
+from .ring import bhnd, combine_dropout_seed
 
 
 def _draw_base_seed(device: torch.device) -> int:

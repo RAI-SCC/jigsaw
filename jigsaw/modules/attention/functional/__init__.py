@@ -1,8 +1,8 @@
-"""Functional implementation of ring attention."""
+"""Functional implementation of ring and Ulysses context-parallel attention."""
 
 from .backward import ring_backward
 from .forward import ring_forward
-from .functional import (
+from .ring import (
     HybridTopology,
     RingAttentionFunction,
     get_hybrid_topology,
