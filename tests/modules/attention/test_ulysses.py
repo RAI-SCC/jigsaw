@@ -46,13 +46,11 @@ class TestUlyssesAllToAll:
         assert gathered.shape == (b, s_loc * p, h // p, d)
 
         # Sequence axis is source-rank-major: block r is rank r's local x, sliced
-        # to this rank's head window.
+        # to this rank's head window -- gather every rank's *full* local x first,
+        # then slice each by our own window (the one every source sent to us).
         head0 = rank * (h // p)
-        ref_blocks = gather_1d_results_list(
-            x[:, :, head0 : head0 + h // p, :].contiguous(),
-            {"g": group},
-            pm_key="g",
-        )
+        full_blocks = gather_1d_results_list(x.contiguous(), {"g": group}, pm_key="g")
+        ref_blocks = [block[:, :, head0 : head0 + h // p, :] for block in full_blocks]
         assert_close(
             "gather matches all_gather",
             gathered,

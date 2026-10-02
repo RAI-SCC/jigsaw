@@ -262,15 +262,17 @@ class TestDistributedAttentionPaths:
             )
 
     @pytest.mark.dist(4)
-    def test_ring_with_qk_norm_needs_kv_config(
+    def test_ring_with_qk_norm_auto_builds_a_kv_config(
         self, device: torch.device, process_mesh_dict_4x1: dict
     ) -> None:
-        """A ring that rebuilds remote keys from the input would skip the key norm."""
+        """A ring that rebuilds remote keys from the input would skip the key norm,
+        so qk_norm auto-selects the KV-circulating policy, same as a channel split."""
         serial = attention.Attention(DIM, DIM, DIM, HEADS, device, qk_norm=True)
-        with pytest.raises(AssertionError, match="qk_norm"):
-            attention.Attention.convert_to_jigsaw(
-                serial, process_mesh_dict_4x1, device, ring=True
-            )
+        model = attention.Attention.convert_to_jigsaw(
+            serial, process_mesh_dict_4x1, device, ring=True
+        )
+        assert model.config.send_in_forward is cfg.SendForward.KV
+        assert model.config.save_for_backward is cfg.SaveBackward.KV
 
     @pytest.mark.dist(4)
     def test_qk_norm_forward_backward(

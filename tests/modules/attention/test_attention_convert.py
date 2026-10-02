@@ -179,33 +179,36 @@ class TestConvertWithRing:
         assert seen[0].config is config
 
     @pytest.mark.dist(4)
-    def test_rejects_a_channel_split(
+    def test_auto_builds_a_kv_config_for_a_channel_split(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
+        """No explicit config needed: a channel split auto-selects the KV policy."""
         serial = _serial(device, out_bias=False)
-        with pytest.raises(AssertionError, match="unsharded channel"):
-            attention.Attention.convert_to_jigsaw(
-                serial, process_mesh_dict_2x2, device, ring=True
-            )
+        model = attention.Attention.convert_to_jigsaw(
+            serial, process_mesh_dict_2x2, device, ring=True
+        )
+        assert model.config.send_in_forward is SendForward.KV
+        assert model.config.save_for_backward is SaveBackward.KV
 
     @pytest.mark.dist(4)
-    def test_constructor_rejects_a_channel_split(
+    def test_constructor_auto_builds_a_kv_config_for_a_channel_split(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         mesh = process_mesh_dict_2x2
-        with pytest.raises(AssertionError, match="unsharded channel"):
-            attention.DistributedAttention(
-                in_dim=IN_DIM,
-                embed_dim=EMBED_DIM,
-                out_dim=OUT_DIM,
-                heads=HEADS,
-                dropout_p=0.0,
-                local_rank=mesh["col"].rank(),
-                device=device,
-                spatial_group=mesh["row"],
-                channel_group=mesh["col"],
-                ring=True,
-            )
+        model = attention.DistributedAttention(
+            in_dim=IN_DIM,
+            embed_dim=EMBED_DIM,
+            out_dim=OUT_DIM,
+            heads=HEADS,
+            dropout_p=0.0,
+            local_rank=mesh["col"].rank(),
+            device=device,
+            spatial_group=mesh["row"],
+            channel_group=mesh["col"],
+            ring=True,
+        )
+        assert model.config.send_in_forward is SendForward.KV
+        assert model.config.save_for_backward is SaveBackward.KV
 
     @pytest.mark.dist(4)
     @pytest.mark.parametrize(
@@ -248,7 +251,7 @@ class TestConvertWithRing:
         if accepted:
             assert build().ring
         else:
-            with pytest.raises(AssertionError, match="unsharded channel"):
+            with pytest.raises(ValueError, match="channel/tensor parallelism"):
                 build()
 
 

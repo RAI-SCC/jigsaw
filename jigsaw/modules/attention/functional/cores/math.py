@@ -124,7 +124,12 @@ def backward(
         Gradients ``(dq, dk, dv)``.
     """
     attn = (q @ k.mT) * scale  # (B, H, Sq, Sk)
-    p = torch.exp(attn - logsumexp.unsqueeze(-1))  # global norm via saved lse
+    # The ring's accumulator keeps `logsumexp` in at least fp32 (see
+    # `_online_softmax_merge_`) regardless of q/k/v's working dtype; cast it
+    # down first so the subtraction doesn't promote `p` (and everything built
+    # from it below) to fp32, which the final matmuls against bf16/fp16
+    # grad_out/k/q would then reject as a dtype mismatch.
+    p = torch.exp(attn - logsumexp.unsqueeze(-1).to(attn.dtype))  # global norm via saved lse
 
     keep = None
     if dropout_p > 0.0:

@@ -418,31 +418,16 @@ class DistributedAttention(torch.nn.Module):
             "heads is not divisible by channel group size"
         )
 
+        # Resolved here (rather than at its usual place below) so the
+        # explicit-config validation inside it -- channel split and/or
+        # qk_norm need send_in_forward=KV and save_for_backward=KV -- runs
+        # before anything else gets built from a config that would be
+        # rejected anyway.
+        self.config = self._resolve_ring_config(ring, config, device)
+
         if self.ring:
             assert spatial_group.size() > 1, (
                 "Cannot perform ring attention if spatial size is 1."
-            )
-            # With a channel split the local QKV weight is only a shard, too
-            # little to rebuild a remote chunk's keys and values from its input:
-            # the ring then has to send and save the keys and values themselves.
-            sends_and_saves_kv = (
-                config is not None
-                and config.send_in_forward == attention_config.SendForward.KV
-                and config.save_for_backward == attention_config.SaveBackward.KV
-            )
-            assert channel_group.size() == 1 or sends_and_saves_kv, (
-                "Ring attention needs an unsharded channel dimension, but the "
-                f"channel group has size {channel_group.size()}. With a channel "
-                "split, pass a config with send_in_forward=SendForward.KV and "
-                "save_for_backward=SaveBackward.KV."
-            )
-            # A remote chunk's keys rebuilt from its input would miss
-            # the key norm.
-            assert not qk_norm or sends_and_saves_kv, (
-                "Ring attention with qk_norm needs the normalized keys of the "
-                "remote chunks. Pass a config with "
-                "send_in_forward=SendForward.KV and "
-                "save_for_backward=SaveBackward.KV."
             )
             self.attn_core = self._ring_attn_core
         elif self.ulysses:
@@ -588,11 +573,6 @@ class DistributedAttention(torch.nn.Module):
                 hooks.make_grad_sync_hook(self.spatial_group, async_op=True)
             )
 
-        self.heads = heads // self.channel_group.size()
-        self.scale = (embed_dim // heads) ** -0.5
-
-        self.config = self._resolve_ring_config(ring, config, device)
-
     def _resolve_ring_config(
         self,
         ring: bool,
@@ -604,35 +584,41 @@ class DistributedAttention(torch.nn.Module):
         With channel/tensor parallelism the fused ``qkv`` projection is split
         across the channel group (a distributed ``DistributedXWT`` matmul), so
         the ring cannot rebuild K/V from a circulated ``x`` chunk with the plain
-        local matmul in :func:`..functional.ring._compute_kv`. The ring
-        must instead circulate the already-projected K/V directly -- i.e.
-        ``send_in_forward=KV`` *and* ``save_for_backward=KV`` (the only pairing
-        that never calls ``_compute_kv``, forward or backward). A default config
-        is built that way; an explicit one is required to already be.
+        local matmul in :func:`..functional.ring._compute_kv`. ``qk_norm`` needs
+        the same thing for a different reason: the key norm is a separate
+        module step applied after the projection, not fused into it, so a
+        remote chunk's K/V rebuilt from its circulated ``x`` would miss it.
+        Either case needs the ring to circulate the already-projected K/V
+        directly -- i.e. ``send_in_forward=KV`` *and* ``save_for_backward=KV``
+        (the only pairing that never calls ``_compute_kv``, forward or
+        backward). A default config is built that way; an explicit one is
+        required to already be.
         """
         if not ring:
             return config
 
-        channel_parallel = self.channel_group.size() > 1
+        needs_kv = self.channel_group.size() > 1 or self.qk_norm
         if config is None:
             kwargs: dict = dict(device=device, attn_backend=self.attn_backend)
-            if channel_parallel:
+            if needs_kv:
                 kwargs.update(
                     send_in_forward=attention_config.SendForward.KV,
                     save_for_backward=attention_config.SaveBackward.KV,
                 )
             return attention_config.RingAttentionConfig(**kwargs)
 
-        if channel_parallel and (
+        if needs_kv and (
             config.send_in_forward != attention_config.SendForward.KV
             or config.save_for_backward != attention_config.SaveBackward.KV
         ):
             raise ValueError(
-                "ring attention with channel/tensor parallelism "
-                f"(channel_group.size()={self.channel_group.size()}) needs "
-                "send_in_forward=KV and save_for_backward=KV -- the qkv "
-                "projection is sharded across the channel group, so the ring "
-                "cannot recompute K/V from a circulated x chunk. Got "
+                "ring attention with channel/tensor parallelism or qk_norm "
+                f"(channel_group.size()={self.channel_group.size()}, "
+                f"qk_norm={self.qk_norm}) needs send_in_forward=KV and "
+                "save_for_backward=KV -- the qkv projection is sharded across "
+                "the channel group and/or the normalized keys only exist "
+                "after the local projection, so the ring cannot recompute "
+                "K/V from a circulated x chunk. Got "
                 f"send_in_forward={config.send_in_forward.name}, "
                 f"save_for_backward={config.save_for_backward.name}."
             )

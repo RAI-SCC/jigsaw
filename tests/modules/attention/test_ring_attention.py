@@ -3,7 +3,7 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.modules.attention.config as config
-from jigsaw.modules.attention.functional import backward, forward, functional
+from jigsaw.modules.attention.functional import backward, forward, ring
 from jigsaw.modules.attention.functional.cores import te as te_cores
 from jigsaw.utils_aggregate import (
     gather_1d_results,
@@ -16,7 +16,7 @@ pytestmark = [pytest.mark.dist_required]
 class TestHybridTopology:
     @staticmethod
     def _assert_subgroup_peers_agree(
-        topo: functional.HybridTopology, ring_global_ranks: list[int]
+        topo: ring.HybridTopology, ring_global_ranks: list[int]
     ) -> None:
         """The sub-group peer accessors must name the same ranks as the ring ones.
 
@@ -57,8 +57,8 @@ class TestHybridTopology:
         world_size = dist.get_world_size(group)
         rank = dist.get_rank(group)
 
-        functional._HYBRID_TOPOLOGY_CACHE.pop((group, gpus_per_node), None)
-        topo = functional.get_hybrid_topology(group, gpus_per_node)
+        ring._HYBRID_TOPOLOGY_CACHE.pop((group, gpus_per_node), None)
+        topo = ring.get_hybrid_topology(group, gpus_per_node)
 
         assert topo.gpus_per_node == gpus_per_node
         assert topo.n_nodes == world_size // gpus_per_node
@@ -81,7 +81,7 @@ class TestHybridTopology:
         self._assert_subgroup_peers_agree(topo, dist.get_process_group_ranks(group))
 
         # Cached: same object on the second call.
-        assert functional.get_hybrid_topology(group, gpus_per_node) is topo
+        assert ring.get_hybrid_topology(group, gpus_per_node) is topo
 
     @pytest.mark.dist(8)
     @pytest.mark.parametrize("gpus_per_node", [1, 2, 4])
@@ -111,8 +111,8 @@ class TestHybridTopology:
         world_size = len(ring_global_ranks)
         assert world_size == 4  # ring size == size(row), not the global world size
 
-        functional._HYBRID_TOPOLOGY_CACHE.pop((group, gpus_per_node), None)
-        topo = functional.get_hybrid_topology(group, gpus_per_node)
+        ring._HYBRID_TOPOLOGY_CACHE.pop((group, gpus_per_node), None)
+        topo = ring.get_hybrid_topology(group, gpus_per_node)
 
         ring_pos = dist.get_rank(group)
         node_idx, local_idx = divmod(ring_pos, gpus_per_node)
@@ -137,7 +137,7 @@ class TestHybridTopology:
         self._assert_subgroup_peers_agree(topo, ring_global_ranks)
 
         # Every member of a sub-group lands on the same underlying group.
-        assert functional.get_hybrid_topology(group, gpus_per_node) is topo
+        assert ring.get_hybrid_topology(group, gpus_per_node) is topo
 
     @pytest.mark.dist(4)
     def test_get_hybrid_topology_rejects_bad_args(self, device: torch.device) -> None:
@@ -152,9 +152,9 @@ class TestHybridTopology:
         assert group is not None
 
         with pytest.raises(ValueError, match="gpus_per_node must be positive"):
-            functional.get_hybrid_topology(group, 0)
+            ring.get_hybrid_topology(group, 0)
         with pytest.raises(ValueError, match="divisible by gpus_per_node"):
-            functional.get_hybrid_topology(group, 3)
+            ring.get_hybrid_topology(group, 3)
 
 
 class TestRingAttention:
@@ -911,7 +911,7 @@ def test_ring_autograd_function_matches_full_attention(
     ring_config = config.RingAttentionConfig(
         device=device, gpus_per_node=world, send_in_forward=config.SendForward.KV
     )
-    out = functional.RingAttentionFunction.apply(
+    out = ring.RingAttentionFunction.apply(
         q, k, v, x, w_qkv, d**-0.5, 0.0, group, rank, ring_config
     )[0]
     out.backward(g_full[:, :, shard].contiguous())
