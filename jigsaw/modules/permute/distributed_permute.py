@@ -1,14 +1,57 @@
 """Distributed permutation kernels.
 
-The kernels exchange unequal blocks with ``dist.all_to_all``, so they need a
-backend with all-to-all support (NCCL, not gloo).
+The kernels exchange unequal blocks between the ranks: with ``dist.all_to_all``
+where the backend supports it, and point-to-point on gloo, which does not.
 """
+
+from typing import Optional
 
 import torch
 import torch.distributed as dist
 
 from jigsaw.comm import all_to_all_async
 from jigsaw.modules.buffers import get_preallocated_buffer
+
+
+def _exchange(
+    recv_list: list[torch.Tensor],
+    send_list: list[torch.Tensor],
+    group: dist.ProcessGroup,
+) -> list[dist.Work]:
+    """Start the exchange of one tensor per peer and return its work handles.
+
+    Parameters
+    ----------
+    recv_list : list[torch.Tensor]
+        Buffers receiving the data of each rank, empty for no data.
+    send_list : list[torch.Tensor]
+        Data sent to each rank, empty for no data.
+    group : dist.ProcessGroup
+        Process group of the exchange.
+
+    Returns
+    -------
+    list[dist.Work]
+        Handles to wait on.
+    """
+    if dist.get_backend(group) != "gloo":
+        return [all_to_all_async(recv_list, send_list, group=group)]
+
+    # gloo's all-to-all needs equally sized tensors, so talk to each peer directly.
+    works: list[Optional[dist.Work]] = []
+    for peer, data in enumerate(send_list):
+        if data.numel() > 0:
+            works.append(dist.isend(data, group_dst=peer, group=group))
+    for peer, buffer in enumerate(recv_list):
+        if buffer.numel() > 0:
+            works.append(dist.irecv(buffer, group_src=peer, group=group))
+    return [work for work in works if work is not None]
+
+
+def _wait(works: list[dist.Work]) -> None:
+    """Block until every exchange in ``works`` has completed."""
+    for work in works:
+        work.wait()
 
 
 def x_transpose_twoway(
@@ -50,7 +93,7 @@ def x_transpose_twoway(
             x_send_list = [x0, empty]
             x_recv_list = [buffer_x, empty]
 
-    xt_handle = all_to_all_async(x_recv_list, x_send_list, group=model_group)
+    xt_works = _exchange(x_recv_list, x_send_list, model_group)
 
     match mod:
         case 0:
@@ -63,7 +106,7 @@ def x_transpose_twoway(
                 device=device,
             )
             x_transpose[..., : x0.shape[-2], :] = x0
-            xt_handle.wait()
+            _wait(xt_works)
             x_transpose[..., x0.shape[-2] :, :] = buffer_x.mT
         case 1:
             x1 = x1.mT
@@ -75,7 +118,7 @@ def x_transpose_twoway(
                 device=device,
             )
             x_transpose[..., x1.shape[-2] :, :] = x1
-            xt_handle.wait()
+            _wait(xt_works)
             x_transpose[..., : x1.shape[-2], :] = buffer_x.mT
     return x_transpose
 
@@ -132,7 +175,7 @@ def x_transpose_fourway(
             x_send_list = [empty, empty, empty, empty]
             x_recv_list = [empty, empty, empty, empty]
 
-    dist.all_to_all(x_recv_list, x_send_list, group=model_group)
+    _wait(_exchange(x_recv_list, x_send_list, model_group))
 
     match mod:
         case 0:
@@ -237,6 +280,6 @@ def x_transpose_eightway(
             cij1.copy_(x1)
             x_recv_list = [empty, empty, empty, empty, empty, cij0, empty, empty]
 
-    dist.all_to_all(x_recv_list, x_send_list, group=model_group, async_op=False)
+    _wait(_exchange(x_recv_list, x_send_list, model_group))
     cij = torch.concat([cij0, cij1], dim=-2).mT.contiguous()
     return cij

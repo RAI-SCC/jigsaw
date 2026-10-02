@@ -10,15 +10,14 @@ transpose on the same mesh.
 Every rank builds the same global matrix from a seed, so the reference shard is
 sliced locally and no gather is needed.
 
-The kernels exchange unequal blocks with ``dist.all_to_all``, which gloo does
-not support, so the tests are skipped on gloo.
+The kernels run on both backends: ``dist.all_to_all`` on NCCL, point-to-point on
+gloo.
 """
 
 from typing import Callable
 
 import pytest
 import torch
-import torch.distributed as dist
 
 from jigsaw.modules.buffers import clear_preallocated_buffers
 from jigsaw.modules.permute.distributed_permute import (
@@ -86,9 +85,7 @@ def _check_transpose(
 
 @pytest.fixture(autouse=True)
 def _fresh_buffers():
-    """Skip on gloo and start every test without cached communication buffers."""
-    if dist.get_backend() == "gloo":
-        pytest.skip("the transpose kernels need a non-gloo backend (all_to_all)")
+    """Start every test without cached communication buffers."""
     clear_preallocated_buffers()
     yield
     clear_preallocated_buffers()
