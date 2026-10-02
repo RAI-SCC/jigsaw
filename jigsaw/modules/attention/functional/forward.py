@@ -240,6 +240,8 @@ def ring_forward(
             ring_config, q, kj, vj, scale, dropout_p, out, lse, seed
         )
         rng_states[global_chunk_idx] = rng_state_j
+        # Drain this step's D2H offload behind its attention core
+        ring_config.wait_offloads()
         provider.advance(step, ring_group_size)
 
     ring_config.wait_offloads()
