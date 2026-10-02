@@ -1,37 +1,29 @@
-"""Rank-aware logging for distributed Jigsaw runs.
+"""Rank-aware logging.
 
-A thin layer over the standard :mod:`logging` module that keeps distributed
-output readable:
+Records carry the rank and elapsed time. Ordinary calls emit from one print
+rank only, while :func:`at` and :func:`info_all` select other ranks.
 
-* every record is stamped with ``[rank/world]`` and an elapsed-time marker;
-* a configurable *print rank* means ordinary :func:`info` / :func:`debug` / ...
-  calls emit from one rank only, while :func:`at` and :func:`info_all` opt
-  specific ranks (or all of them) back in;
-* an optional per-rank log file is written alongside the shared console stream;
-* :func:`assert_all_agree`, :func:`timed`, :func:`log_ranks` and :func:`die`
-  cover the common distributed-debugging moves, and :func:`configure_logging`
-  wires up :mod:`faulthandler` plus a rank-aware ``excepthook`` so a crashing
-  rank fails the job instead of hanging its peers.
+Examples
+--------
+>>> from jigsaw import log
+>>> log.configure_logging()  # doctest: +SKIP
+>>> log.info("world_size=%d", 4)  # doctest: +SKIP
+>>> log.at(2).debug("q shard %s", (2, 3))  # doctest: +SKIP
+>>> log.info_all("process group ready")  # doctest: +SKIP
 
-Typical use::
-
-    from jigsaw import log
-
-    log.configure_logging()  # once, after the launcher env is known
-    log.info("world_size=%d", world)  # emitted by the print rank only
-    log.at(2).debug("q shard %s", q.shape)
-    log.info_all("process group ready")  # every rank
-
-Environment variables read by :func:`configure_logging` (explicit arguments win):
+Notes
+-----
+:func:`configure_logging` reads these environment variables, which explicit
+arguments override:
 
 ``JIGSAW_LOG_LEVEL``
-    Root level for the ``jigsaw`` logger (default ``"INFO"``).
+    Level of the ``jigsaw`` logger (default ``"INFO"``).
 ``JIGSAW_LOG_RANK``
     Default print rank (default ``0``).
 ``JIGSAW_LOG_DIR``
-    Directory for per-rank ``rank_<NNNN>.log`` files (default: no file output).
+    Directory for per-rank log files (default: none).
 ``JIGSAW_LOG_FORMAT``
-    ``"json"`` for one JSON object per line, anything else for the human format.
+    ``"json"`` for JSON lines, otherwise the human-readable format.
 """
 
 from __future__ import annotations
@@ -108,10 +100,10 @@ def _local_rank() -> int:
 
 
 def _resolve_targets(spec: Any) -> set[int] | None:
-    """Turn a :data:`RankSpec` (or ``None``) into an emitting-rank set.
+    """Resolve a :data:`RankSpec` to a set of emitting ranks.
 
-    ``None`` defers to the :func:`only_rank` scope, then to the configured
-    print rank. ``"all"`` returns ``None`` meaning "do not filter by rank".
+    ``None`` defers to :func:`only_rank`, then to the print rank. ``"all"``
+    returns ``None``, meaning no rank filtering.
     """
     if spec is None:
         spec = _scope_ranks
@@ -142,7 +134,7 @@ class _RankFilter(logging.Filter):
 
 
 class _HumanFormatter(logging.Formatter):
-    """``  12.34s [1/8] INFO    attention.ring: message`` with optional colour."""
+    """Single-line human-readable formatter with optional color."""
 
     _COLOURS = {
         logging.DEBUG: "\033[38;5;245m",
@@ -174,7 +166,7 @@ class _HumanFormatter(logging.Formatter):
 
 
 class _JsonFormatter(logging.Formatter):
-    """One JSON object per line, for machine-parsed scaling runs."""
+    """Formatter emitting one JSON object per record."""
 
     def format(self, record: logging.LogRecord) -> str:
         """Render ``record`` as a JSON object."""
@@ -207,37 +199,36 @@ def configure_logging(
     enable_faulthandler: bool = True,
     force: bool = False,
 ) -> logging.Logger:
-    """Install Jigsaw's logging handlers. Idempotent unless ``force`` is set.
+    """Install the jigsaw logging handlers.
+
+    Does nothing if already configured, unless ``force`` is set.
 
     Parameters
     ----------
-    level : str or int, optional
+    level : str | int, optional
         Level for the ``jigsaw`` logger. Falls back to ``$JIGSAW_LOG_LEVEL``
         then ``"INFO"``.
     rank : int, optional
-        Rank that ordinary :func:`info` / :func:`debug` / ... calls emit from.
-        Falls back to ``$JIGSAW_LOG_RANK`` then ``0``.
+        Print rank. Falls back to ``$JIGSAW_LOG_RANK`` then ``0``.
     log_dir : path-like, optional
-        Directory in which each rank writes its full stream to
-        ``rank_<NNNN>.log``. Falls back to ``$JIGSAW_LOG_DIR``; if still unset,
-        no file is written.
+        Directory for per-rank ``rank_<NNNN>.log`` files. Falls back to
+        ``$JIGSAW_LOG_DIR``; no file is written if unset.
     as_json : bool, optional
         Emit JSON lines instead of the human format. Falls back to
         ``$JIGSAW_LOG_FORMAT == "json"``.
     colour : bool, optional
-        ANSI-colour the console stream. Defaults to "on when stderr is a TTY
-        and ``$NO_COLOR`` is unset".
+        Color the console stream. Defaults to on if stderr is a TTY and
+        ``$NO_COLOR`` is unset.
     capture_warnings : bool
         Route :mod:`warnings` through logging.
     install_excepthook : bool
         Install a rank-aware ``sys.excepthook`` that logs the traceback and
-        tears the process group down instead of hanging the job.
+        tears down the process group.
     enable_faulthandler : bool
-        Enable :mod:`faulthandler` and, where supported, register ``SIGUSR1``
-        to dump every thread's stack -- handy when a rank is wedged in a
-        collective (``kill -USR1 <pid>``).
+        Enable :mod:`faulthandler` and, where supported, dump all thread stacks
+        on ``SIGUSR1``.
     force : bool
-        Reconfigure even when already configured.
+        Reconfigure if already configured.
 
     Returns
     -------
@@ -327,13 +318,13 @@ def get_logger(name: str | None = None) -> logging.Logger:
     Parameters
     ----------
     name : str, optional
-        Sub-name such as ``"attention.ring"``. ``None`` (the default) returns
-        the root ``jigsaw`` logger. A name already rooted at ``jigsaw`` is
-        returned unchanged.
+        Sub-name such as ``"attention.ring"``. ``None`` returns the ``jigsaw``
+        logger.
 
     Returns
     -------
     logging.Logger
+        Logger.
     """
     if not name:
         return logging.getLogger(_LOGGER_NAME)
@@ -349,11 +340,7 @@ _base = logging.getLogger(_LOGGER_NAME)
 # rank-targeted logging
 # --------------------------------------------------------------------------- #
 class _RankLogger:
-    """Logging proxy bound to a fixed :data:`RankSpec`.
-
-    Returned by :func:`at`; also backs the module-level :func:`info` and
-    friends (bound to ``None``, i.e. "the configured print rank").
-    """
+    """Logging proxy bound to a :data:`RankSpec`."""
 
     __slots__ = ("_ranks",)
 
@@ -417,16 +404,17 @@ error_all = _ALL.error
 
 
 def at(ranks: Any) -> _RankLogger:
-    """Return a logging proxy that emits only from ``ranks``.
+    """Return a logging proxy that emits from ``ranks`` only.
 
     Parameters
     ----------
-    ranks : int, iterable of int, or ``"all"``
-        Rank(s) that should emit records made through the proxy.
+    ranks : int | Iterable[int] | "all"
+        Ranks that emit records.
 
     Returns
     -------
     _RankLogger
+        Logging proxy.
 
     Examples
     --------
@@ -437,12 +425,12 @@ def at(ranks: Any) -> _RankLogger:
 
 
 def set_print_rank(rank: int) -> None:
-    """Set the rank that ordinary :func:`info` / :func:`debug` / ... emit from.
+    """Set the print rank.
 
     Parameters
     ----------
     rank : int
-        New default print rank.
+        Rank that ordinary log calls emit from.
     """
     global _print_rank
     _print_rank = rank
@@ -450,16 +438,12 @@ def set_print_rank(rank: int) -> None:
 
 @contextmanager
 def only_rank(ranks: Any) -> Iterator[None]:
-    """Route default log calls through ``ranks`` for the duration of the block.
+    """Emit default log calls from ``ranks`` inside the block.
 
     Parameters
     ----------
-    ranks : int, iterable of int, or ``"all"``
-        Rank(s) allowed to emit inside the ``with`` block.
-
-    Yields
-    ------
-    None
+    ranks : int | Iterable[int] | "all"
+        Ranks that emit inside the block.
     """
     global _scope_ranks
     previous = _scope_ranks
@@ -474,10 +458,7 @@ _seen_once: set[tuple[str, int, str]] = set()
 
 
 def log_once(msg: str, *args: object, level: int = logging.INFO) -> None:
-    """Log ``msg`` the first time this call site runs, then stay silent there.
-
-    Keyed on ``(filename, lineno, msg)`` so a message inside a hot loop is
-    printed once per source location.
+    """Log ``msg`` only the first time a call site runs.
 
     Parameters
     ----------
@@ -486,7 +467,7 @@ def log_once(msg: str, *args: object, level: int = logging.INFO) -> None:
     *args : object
         Format arguments.
     level : int
-        Logging level (default ``logging.INFO``).
+        Logging level.
     """
     frame: FrameType | None = sys._getframe(1)
     filename = frame.f_code.co_filename if frame else "?"
@@ -504,10 +485,9 @@ def log_ranks(
     level: int = logging.DEBUG,
     group: dist.ProcessGroup | None = None,
 ) -> None:
-    """Gather one line from every rank and print them, in rank order, from rank 0.
+    """Gather one message per rank and log them in rank order from rank 0.
 
-    Runs an ``all_gather_object`` collective, so it must be called from every
-    rank in ``group`` and never from a hot path.
+    Collective: must be called on every rank in ``group``.
 
     Parameters
     ----------
@@ -516,9 +496,9 @@ def log_ranks(
     *args : object
         Format arguments.
     level : int
-        Logging level (default ``logging.DEBUG``); skipped entirely if disabled.
+        Logging level. Nothing is gathered if the level is disabled.
     group : torch.distributed.ProcessGroup, optional
-        Process group to gather over (default: the world group).
+        Process group. Defaults to the world group.
     """
     if not _base.isEnabledFor(level):
         return
@@ -541,27 +521,26 @@ def assert_all_agree(
     group: dist.ProcessGroup | None = None,
     fatal: bool = True,
 ) -> bool:
-    """Check that ``value`` is identical on every rank; report it if not.
+    """Check that ``value`` is identical on every rank.
 
-    Runs an ``all_gather_object`` collective, so it must be called from every
-    rank in ``group``.
+    Collective: must be called on every rank in ``group``.
 
     Parameters
     ----------
     name : str
-        Label for the checked quantity, used in the log message.
+        Label used in the log message.
     value : object
         Rank-local value. Must be picklable and support ``==``.
     group : torch.distributed.ProcessGroup, optional
-        Process group (default: the world group).
+        Process group. Defaults to the world group.
     fatal : bool
-        On mismatch, call :func:`die` (default) rather than log an error and
-        return ``False``.
+        Call :func:`die` on mismatch instead of logging an error and returning
+        ``False``.
 
     Returns
     -------
     bool
-        ``True`` when every rank agrees (always ``True`` outside distributed).
+        Whether all ranks agree. Always ``True`` outside distributed runs.
     """
     if not (dist.is_available() and dist.is_initialized()):
         return True
@@ -598,19 +577,13 @@ def timed(
     label : str
         Name of the timed region.
     level : int
-        Level for the result line (default ``logging.INFO``).
+        Level of the result line.
     barrier : bool
-        ``dist.barrier`` before and after the block, so the measurement
-        reflects the slowest rank rather than local skew.
+        Call ``dist.barrier`` before and after the block.
     cuda_sync : bool
-        ``torch.cuda.synchronize`` before stopping the clock, so queued GPU
-        work is included.
+        Call ``torch.cuda.synchronize`` before stopping the clock.
     group : torch.distributed.ProcessGroup, optional
         Process group for the barriers.
-
-    Yields
-    ------
-    None
     """
     in_dist = dist.is_available() and dist.is_initialized()
     if barrier and in_dist:
@@ -629,10 +602,9 @@ def timed(
 
 
 def die(msg: str, *args: object, code: int = 1) -> NoReturn:
-    """Log a fatal error on the calling rank, tear the group down, and exit.
+    """Log a fatal error, tear down the process group and exit.
 
-    Uses ``os._exit`` after flushing handlers so a pending NCCL collective
-    cannot turn the exit into a hang.
+    Exits with ``os._exit`` after flushing the handlers.
 
     Parameters
     ----------
@@ -641,7 +613,7 @@ def die(msg: str, *args: object, code: int = 1) -> NoReturn:
     *args : object
         Format arguments.
     code : int
-        Process exit status (default ``1``).
+        Exit status.
     """
     _ALL._log(logging.CRITICAL, msg, args, stacklevel=1)
     for handler in logging.getLogger(_LOGGER_NAME).handlers:
@@ -654,7 +626,7 @@ def die(msg: str, *args: object, code: int = 1) -> NoReturn:
 # crash / hang diagnosis
 # --------------------------------------------------------------------------- #
 def _teardown_process_group() -> None:
-    """Best-effort process-group shutdown; never raises."""
+    """Destroy the process group, ignoring errors."""
     if not (dist.is_available() and dist.is_initialized()):
         return
     try:
@@ -664,7 +636,7 @@ def _teardown_process_group() -> None:
 
 
 def _install_excepthook() -> None:
-    """Install a rank-aware ``sys.excepthook`` (chained to the previous one)."""
+    """Install a rank-aware ``sys.excepthook`` chained to the previous one."""
     previous = sys.excepthook
 
     def hook(

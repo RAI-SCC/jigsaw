@@ -1,4 +1,4 @@
-"""Gradient hook definitions."""
+"""Gradient hooks."""
 
 from collections.abc import Sequence
 from typing import Any, Callable
@@ -14,33 +14,25 @@ def make_grad_sync_hook(
     op: Any = dist.ReduceOp.SUM,
     async_op: bool = True,
 ) -> Callable:
-    """
-    Define hook for grad_weight synchronization.
+    """Create a hook that all-reduces parameter gradients.
 
-    If async_op=True, the all_reduction will overlap with the backward pass.
-    All collective operations will occur before optimizers step.
-
-    Otherwise, all_reduction is blocking.
-
-    ``group`` may be a single process group or a sequence of them. A sequence is
-    used when the domain is split along several spatial axes: a SUM all-reduce
-    over each axis group in turn is equivalent to one all-reduce over the whole
-    spatial grid. Multiple groups are always reduced sequentially (blocking), so
-    the in-place ``param.grad`` buffer is never touched by two collectives at
-    once.
+    With ``async_op=True`` the all-reduce overlaps with the backward pass and
+    completes before the optimizer step. A sequence of groups is reduced
+    sequentially and blocking.
 
     Parameters
     ----------
-    group: dist.ProcessGroup | Sequence[dist.ProcessGroup]
+    group : dist.ProcessGroup | Sequence[dist.ProcessGroup]
         Process group(s) the gradients should be synchronized over.
-    op: dist.ReduceOp
-        Type of reduction.
-    async_op: bool
-        Flag for whether communication is blocking or not (single group only).
+    op : dist.ReduceOp
+        Reduction operation.
+    async_op : bool
+        Whether to communicate asynchronously (single group only).
 
     Returns
     -------
-    hook: Callable
+    Callable
+        Post-accumulate-grad hook.
     """
     groups = [group] if isinstance(group, dist.ProcessGroup) else list(group)
     handles: list[torch.distributed.Work] = []
@@ -58,7 +50,6 @@ def make_grad_sync_hook(
         ----------
         param : Parameter
             Parameter whose gradient is processed.
-
         """
         if param.grad is None:
             return
@@ -77,23 +68,19 @@ def make_grad_sync_hook(
 
 
 def make_grad_scaling_hook(parallelism: int) -> Callable:
-    """
-    Scale the gradient with parallelism.
+    """Create a hook that divides parameter gradients by the parallelism.
 
-    Required if we want strict equivalence with non-parallel case when reduction
-    in the loss function = 'mean'. Implemented for correctness.
-
-    Another alternative is to use:
-    loss = F.loss_function(y, y', reduction='mean') / parallelism
+    Matches the non-parallel result when the loss uses ``reduction='mean'``.
 
     Parameters
     ----------
-    parallelism: int
-        Scaling factor for grad.
+    parallelism : int
+        Scaling factor for the gradient.
 
     Returns
     -------
-    hook: Callable
+    Callable
+        Post-accumulate-grad hook.
     """
 
     def hook(param: Parameter) -> None:
@@ -103,7 +90,6 @@ def make_grad_scaling_hook(parallelism: int) -> Callable:
         ----------
         param : Parameter
             Parameter whose gradient is processed.
-
         """
         if param.grad is not None:
             param.grad = param.grad / parallelism

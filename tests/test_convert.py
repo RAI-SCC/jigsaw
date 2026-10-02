@@ -5,6 +5,7 @@ import torch
 
 import jigsaw.convert as convert
 from jigsaw.modules.attention import Attention, DistributedAttention
+from jigsaw.modules.attention.attention import attn_core_dtype
 from jigsaw.modules.linear import DistributedXWT
 from jigsaw.modules.roll import Roll
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
@@ -415,9 +416,13 @@ class TestConvertToTorch:
                     v.shape[0], v.shape[1], self.num_heads, v.shape[2] // self.num_heads
                 )
 
-                q = q.permute(0, 2, 1, 3).to(torch.bfloat16)
-                k = k.permute(0, 2, 1, 3).to(torch.bfloat16)
-                v = v.permute(0, 2, 1, 3).to(torch.bfloat16)
+                # Match the dtype of jigsaw's attention core: bf16 on CUDA, the
+                # input dtype (fp32) otherwise. A bf16 reference on CPU differs
+                # from the fp32 core by bf16 rounding, well above the tolerances.
+                core_dtype = attn_core_dtype(x)
+                q = q.permute(0, 2, 1, 3).to(core_dtype)
+                k = k.permute(0, 2, 1, 3).to(core_dtype)
+                v = v.permute(0, 2, 1, 3).to(core_dtype)
 
                 with torch.nn.attention.sdpa_kernel(
                     [
@@ -614,17 +619,26 @@ class TestConvertToTorch:
             device,
             grp,
         )
+        # Gradient reduction order differs between the sharded qkv matmul and
+        # the serial reference, so this needs the same ~1e-4 slack as the
+        # other gradient checks in this test rather than allclose's 1e-5 default.
         assert_close(
             "qkv weight grad sum",
             dist_qkv_grad.sum(),
             ref_qkv_grad.sum(),
-            1e-5,
+            1e-4,
             1e-5,
             device,
             grp,
         )
         assert_close(
-            "head concat weight", dist_head_cat_w, ref_head_cat_w, 1e-8, 1e-5, device, grp
+            "head concat weight",
+            dist_head_cat_w,
+            ref_head_cat_w,
+            1e-8,
+            1e-5,
+            device,
+            grp,
         )
         # Gradient reduction order differs between the sharded head-concat matmul
         # and the serial reference, so this needs the same ~1e-4 slack as the

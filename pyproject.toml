@@ -2,13 +2,14 @@
 requires = ["setuptools >= 61.0"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = [
-    "jigsaw"
-]
+[tool.setuptools.packages.find]
+include = ["jigsaw*"]
+
+[tool.setuptools.package-data]
+jigsaw = ["py.typed"]
 
 [project]
-name = "jigsaw"
+name = "torch-jigsaw"
 version = "0.0.1"
 authors = [
   { name="Deifilia Kieckhefen", email="deifilia.to@gmail.com"},
@@ -16,23 +17,22 @@ authors = [
 description = "The Jigsaw domain- and tensor-parallelization scheme"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Development Status :: 3 - Alpha",
 ]
-# Bare-metal install: `pip install -e .` pulls everything below.
-# Container install: the NGC image already ships torch (+ transformer-engine,
-# not listed here - it is environment-provided, never a pip dep). Install with
-# `pip install --no-deps -e .` plus the pure-Python extras, see
-# containers/README.md.
+# The library itself only imports torch and einops. numpy is never imported
+# directly, but torch does not pull it in and needs it for
+# `dist.all_gather_object` (used by `jigsaw.log`). transformer-engine is an
+# optional, environment-provided accelerator (see containers/README.md) and is
+# never a pip dependency. Bare-metal install: `pip install -e .`; container
+# install: `pip install --no-deps -e .` on top of the image's torch.
 dependencies = [
-    "torch",
-    "zarr",
-    "timm",
-    "pyyaml",
-    "xarray",
-    "matplotlib",
-    "einops"
+    "torch>=2.6",
+    "einops>=0.6",
+    "numpy",
 ]
 
 [project.optional-dependencies]
@@ -42,13 +42,11 @@ dev = [
     "coverage",
     "pytest-cov",
     "mpi4py>=4.1.1",
-    "hypothesis>=6.1.1",
 
     # QA
     "pre-commit",
     "ruff",
     "mypy",
-
 ]
 docs = [
     "sphinx",
@@ -56,7 +54,6 @@ docs = [
     "myst-parser",
     "numpy",
 ]
-scripts = []
 
 # Mypy
 [tool.mypy]
@@ -78,6 +75,13 @@ warn_unused_ignores=false
 follow_imports = "normal"
 follow_untyped_imports = true
 
+# numpy is only reached through torch. Its stubs use syntax newer than the
+# `python_version` checked against above, which stops mypy before it gets to jigsaw.
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
 # Ruff
 [tool.ruff]
 target-version = "py312"
@@ -89,6 +93,9 @@ ignore = ["E501", "NPY201", "N812"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["D", "F403"]
+# Triton kernels: UPPERCASE params are the ecosystem convention for
+# `tl.constexpr` / shape arguments.
+"jigsaw/modules/attention/functional/_merge_kernel.py" = ["N803"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"

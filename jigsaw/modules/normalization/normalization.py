@@ -1,4 +1,4 @@
-"""Implementation of distributed normalization layers."""
+"""Distributed normalization layers."""
 
 from typing import Optional
 
@@ -11,7 +11,7 @@ from . import functional
 
 
 class DistributedLayerNorm(torch.nn.Module):
-    """LayerNorm with synchronized gradients across a process group."""
+    """LayerNorm over a channel-sharded last dimension."""
 
     def __init__(
         self,
@@ -21,7 +21,21 @@ class DistributedLayerNorm(torch.nn.Module):
         row_group: dist.ProcessGroup,
         col_group: dist.ProcessGroup,
     ):
-        """Initialize torch module for distributed layer norm."""
+        """Initialize the layer.
+
+        Parameters
+        ----------
+        local_dim : int
+            Size of the local shard of the normalized dimension.
+        local_rank : int
+            Rank within the model group.
+        device : torch.device
+            Device of the module.
+        row_group : dist.ProcessGroup
+            Process group over which the parameter gradients are reduced.
+        col_group : dist.ProcessGroup
+            Process group across which the normalized dimension is partitioned.
+        """
         super().__init__()
         self.local_rank = local_rank
         self.device = device
@@ -36,7 +50,7 @@ class DistributedLayerNorm(torch.nn.Module):
         self.layernorm = functional.DistributedLNFunction.apply
 
     def get_parameter_count(self) -> int:
-        """Return parameter count for distributed layer norm."""
+        """Return the number of local parameters."""
         return (self.weight.numel() + self.bias.numel()) // dist.get_world_size(
             group=self.spatial_group
         )
@@ -48,12 +62,18 @@ class DistributedLayerNorm(torch.nn.Module):
         pm_row_key: str = "row",
         pm_col_key: str = "col",
     ) -> None:
-        """
-        Re-slice the channel-sharded ``weight`` / ``bias`` onto ``to_process_mesh``.
+        """Reshard the weight and bias from one process mesh onto another.
 
-        Both are ``(local_dim,)`` sharded over the channel (``col``) group. The
-        gathered global parameters are unchanged; the module is rebound to
-        ``to_process_mesh``.
+        The module is rebound to the new mesh.
+
+        Parameters
+        ----------
+        from_process_mesh : dict[str, dist.ProcessGroup]
+            Process groups of the current mesh.
+        to_process_mesh : dict[str, dist.ProcessGroup]
+            Process groups of the new mesh.
+        pm_row_key, pm_col_key : str
+            Keys of the row and column process groups in both meshes.
         """
         from_col, to_col = from_process_mesh[pm_col_key], to_process_mesh[pm_col_key]
         normalized_global = self.normalized_dim * from_col.size()
@@ -85,14 +105,25 @@ class DistributedLayerNorm(torch.nn.Module):
         self.local_rank = to_process_mesh.get("model", to_col).rank()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Call forward function for distributed layer norm."""
+        """Apply the layer.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input.
+
+        Returns
+        -------
+        torch.Tensor
+            Local output.
+        """
         return self.layernorm(  # type: ignore[no-any-return]
             x, self.weight, self.bias, self.spatial_group, self.channel_group, self.eps
         )[0]
 
 
 class DistributedGroupNorm(torch.nn.Module):
-    """Distributed Group Norm wrapped in module."""
+    """GroupNorm over a channel-sharded input."""
 
     def __init__(  # type: ignore[no-untyped-def]
         self,
@@ -105,27 +136,26 @@ class DistributedGroupNorm(torch.nn.Module):
         bias=True,
         channel_group: Optional[dist.ProcessGroup] = None,
     ):
-        """Initialize the object.
+        """Initialize the layer.
 
         Parameters
         ----------
-        num_local_groups : Any
-            Number of normalization groups local to each rank.
-        num_channels : Any
-            Number of channels normalized by the layer.
-        eps : Any
-            Numerical stability epsilon.
-        affine : Any
-            Whether the normalization layer has learnable affine parameters.
-        device : Any
-            Device on which tensors and communication are placed.
-        dtype : Any
-            Data type used for tensor values.
-        bias : Any
-            Optional bias parameter.
-        channel_group : Optional[dist.ProcessGroup]
-            Process group used for channel or tensor parallelism.
-
+        num_local_groups : int
+            Number of normalization groups of the local shard.
+        num_channels : int
+            Number of channels of the local shard.
+        eps : float
+            Term added to the variance for numerical stability.
+        affine : bool
+            Whether the layer has learnable affine parameters.
+        device : torch.device, optional
+            Device of the module.
+        dtype : torch.dtype, optional
+            Data type of the parameters.
+        bias : bool
+            Whether the affine transformation has a bias.
+        channel_group : dist.ProcessGroup, optional
+            Process group across which the channels are partitioned.
         """
         super().__init__()
 
@@ -140,22 +170,38 @@ class DistributedGroupNorm(torch.nn.Module):
         self.device = device
         self.dtype = dtype
         self.bias = bias
-        self.group_norm = torch.nn.GroupNorm(
+        self.group_norm = self._build_group_norm()
+
+    def _build_group_norm(self) -> torch.nn.GroupNorm:
+        """Return a ``GroupNorm`` of the current local shape.
+
+        Older ``torch.nn.GroupNorm`` (e.g. 2.9) has no ``bias=`` argument, so a
+        disabled bias is dropped here instead, as newer torch does for ``bias=False``.
+        """
+        group_norm = torch.nn.GroupNorm(
             self.num_local_groups,
             self.num_channels,
             eps=self.eps,
             affine=self.affine,
             device=self.device,
             dtype=self.dtype,
-            bias=self.bias,
         )
+        if self.affine and not self.bias:
+            group_norm.register_parameter("bias", None)
+        return group_norm
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Normalize this rank's channel shard.
+        """Apply the layer.
 
-        ``num_global_groups = num_local_groups * channel_group.size()``, so every
-        channel-parallel rank owns whole normalization groups and a plain local
-        ``GroupNorm`` on the channel shard needs no cross-rank statistics.
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input.
+
+        Returns
+        -------
+        torch.Tensor
+            Local output.
         """
         return self.group_norm(x)  # type: ignore[no-any-return]
 
@@ -166,13 +212,18 @@ class DistributedGroupNorm(torch.nn.Module):
         pm_row_key: str = "row",
         pm_col_key: str = "col",
     ) -> None:
-        """
-        Re-slice the channel-sharded affine parameters onto ``to_process_mesh``.
+        """Reshard the affine parameters from one process mesh onto another.
 
-        ``weight`` / ``bias`` are ``(num_channels_local,)`` sharded over the
-        channel (``col``) group. The global affine parameters are unchanged; the
-        inner ``torch.nn.GroupNorm`` is rebuilt for the new local group / channel
-        counts and the module is rebound to ``to_process_mesh``.
+        The module is rebound to the new mesh.
+
+        Parameters
+        ----------
+        from_process_mesh : dict[str, dist.ProcessGroup]
+            Process groups of the current mesh.
+        to_process_mesh : dict[str, dist.ProcessGroup]
+            Process groups of the new mesh.
+        pm_row_key, pm_col_key : str
+            Keys of the row and column process groups in both meshes.
         """
         to_channel = to_process_mesh[pm_col_key]
         assert self.num_global_groups % to_channel.size() == 0, (
@@ -206,15 +257,7 @@ class DistributedGroupNorm(torch.nn.Module):
         self.num_channels = new_num_channels
         self.num_local_groups = new_num_local_groups
         self.channel_group = to_channel
-        self.group_norm = torch.nn.GroupNorm(
-            self.num_local_groups,
-            self.num_channels,
-            eps=self.eps,
-            affine=self.affine,
-            device=self.device,
-            dtype=self.dtype,
-            bias=self.bias,
-        )
+        self.group_norm = self._build_group_norm()
         if weight_slice is not None:
             self.group_norm.weight.data = weight_slice
         if bias_slice is not None and self.group_norm.bias is not None:
@@ -222,19 +265,21 @@ class DistributedGroupNorm(torch.nn.Module):
 
 
 class DistributedNoParamLayerNorm(torch.nn.Module):
-    """LayerNorm with synchronized gradients across a process group."""
+    """LayerNorm without parameters over a channel-sharded last dimension."""
 
     def __init__(
         self, rank: int, device: torch.device, channel_group: dist.ProcessGroup
     ) -> None:
-        """
-        Initialize DistributedNoParamLayerNorm.
+        """Initialize the layer.
 
-        inputs
-        ------
-        rank: int
-        device: torch.device
-        channel_group: dist.ProcessGroup
+        Parameters
+        ----------
+        rank : int
+            Rank within the model group.
+        device : torch.device
+            Device of the module.
+        channel_group : dist.ProcessGroup
+            Process group across which the normalized dimension is partitioned.
         """
         super().__init__()
         self.rank = rank
@@ -242,30 +287,40 @@ class DistributedNoParamLayerNorm(torch.nn.Module):
         self.channel_group = channel_group
 
         self.eps = 1e-5
-        self.layernorm = functional.DistributedNoParamLNFunction().apply
+        self.layernorm = functional.DistributedNoParamLNFunction.apply
 
     def get_parameter_count(self) -> int:
-        """Return 0 parameters in this layer norm."""
+        """Return the number of local parameters."""
         return 0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Call forward pass for layer norm."""
+        """Apply the layer.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input.
+
+        Returns
+        -------
+        torch.Tensor
+            Local output.
+        """
         return self.layernorm(x, self.channel_group, self.eps)[0]  # type: ignore[no-any-return]
 
 
 class DistributedSoftMax(torch.nn.Module):
-    """Distributed Softmax operation."""
+    """Softmax over a sharded dimension."""
 
     def __init__(self, group: dist.ProcessGroup, dim: int = -1):
-        """Initialize the object.
+        """Initialize the layer.
 
         Parameters
         ----------
         group : dist.ProcessGroup
-            Process group used for distributed communication.
+            Process group across which ``dim`` is partitioned.
         dim : int
-            Dimension along which the operation is applied.
-
+            Dimension along which the softmax is applied.
         """
         super().__init__()
         self.dim = dim
@@ -273,9 +328,20 @@ class DistributedSoftMax(torch.nn.Module):
         self.softmax = functional._DistributedSoftmax.apply
 
     def get_parameter_count(self) -> int:
-        """Return parameter count of softmax."""
+        """Return the number of local parameters."""
         return 0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass of distributed softmax."""
+        """Apply the layer.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input.
+
+        Returns
+        -------
+        torch.Tensor
+            Local output.
+        """
         return self.softmax(x, self.dim, self.group)  # type: ignore[no-any-return]

@@ -1,4 +1,4 @@
-"""Convert to jigsaw module."""
+"""Conversion of PyTorch models to jigsaw modules."""
 
 from typing import Any, Callable
 
@@ -35,32 +35,29 @@ def convert_to_jigsaw(
     model_kw: str = "model",
     **kwargs: bool,
 ) -> torch.nn.Module | Any:
-    """
-    Convert pytorch model into jigsaw distributed model.
-
-    Note that this function changes the model in-place. Make a copy of the
-    existing model if you want to retain it.
+    """Convert a PyTorch model into a jigsaw distributed model in place.
 
     Parameters
     ----------
-    model: torch.nn.Module
+    model : torch.nn.Module
         PyTorch model.
-    process_mesh_dict: dict
-        Process mesh dict that comtains row, column, and model process groups.
-    device: torch.device
-        Device that this model is on.
-    row_kw: str
-        Key for process mesh dict row the model rows.
-    col_kw: str
-        Key for process mesh dict row the model cols.
-    model_kw: str
-        Key for process mesh dict row the model (rows x columns).
-    **kwargs:
-        Additional keyword arguments passed to :func: `convert_to_jigsaw`
+    process_mesh_dict : dict
+        Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
+    device : torch.device
+        Device of the model.
+    row_kw : str
+        Key of the row process group.
+    col_kw : str
+        Key of the column process group.
+    model_kw : str
+        Key of the model (rows x columns) process group.
+    **kwargs : Any
+        Forwarded to the ``convert_to_jigsaw`` of each converted module.
 
-    Return
-    ------
-    Distributed model.
+    Returns
+    -------
+    torch.nn.Module
+        The converted model.
     """
     # 1. Container match: hand off entirely, do NOT recurse afterward
     container_fn = container_converters.get(type(model))

@@ -1,8 +1,4 @@
-"""Distributed classification losses: cross-entropy, NLL and binary cross-entropy.
-
-* :mod:`~jigsaw.modules.loss.classification.functional` -- functional forms;
-* :mod:`~jigsaw.modules.loss.classification.loss` -- ``torch.nn`` module wrappers.
-"""
+"""Distributed classification losses."""
 
 from .functional import (
     distributed_bce_with_logits as distributed_bce_with_logits,

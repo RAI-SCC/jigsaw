@@ -5,11 +5,16 @@ Code for performing domain- and tensor-parallel training optimized for large ima
 - jigsaw/modules contains the implementations of the individual modules. Currently supported operations are ```nn.Linear, nn.Conv2d, nn.ConvTranspose2d, F.roll, Attention (with or without ring), and  non-parameterized matrix multiplications```.
 
 ## Environment
-This is an installable library. Requirements can be installed with:
+### Option A: bare metal
+The library is published on PyPI as `torch-jigsaw`; the import name is `jigsaw`.
+```
+pip install torch-jigsaw
+```
+To work on the source instead, install it in editable mode:
 ```
 pip install -e .
 ```
-The dev environment (necessary for running tests) can be installed with
+This installs `torch` and `einops`, the library's only runtime dependencies. The dev environment (necessary for running tests) can be installed with
 ```
 pip install -e .[dev]
 ```
@@ -23,7 +28,12 @@ container that choice warns and falls back to `sdpa`.
 `attn_backend` selects the attention core — `te`, `sdpa` (default, PyTorch
 flash/​math SDPA) or `math` (unfused reference). `ring` (sequence-parallel
 attention) is a **separate** switch that composes with any backend: `ring=True`
-still runs its inner per-chunk attention through the chosen core.
+still runs its inner per-chunk attention through the chosen core. Ring attention
+splits the sequence over the mesh rows and by default needs an unsharded channel
+dimension, so the mesh columns must have size 1; without `ring`, columns split the
+heads. To combine the two, pass a `RingAttentionConfig` that sends and saves the
+keys and values (`send_in_forward=SendForward.KV`, `save_for_backward=SaveBackward.KV`),
+as [`examples/vit.py`](examples/vit.py) does.
 
 The container is also useful without TE — a pinned CUDA/NCCL stack for
 reproducible scaling and parameter studies — in which case the defaults
@@ -63,21 +73,65 @@ sbatch experiments/train.sbatch
 See [`scripts/README.md`](scripts/README.md) for the full launch contract and
 every `JIGSAW_*` knob.
 
+### Sequence parallelism: ring vs. Ulysses
+
+`DistributedAttention` offers two mutually exclusive ways to parallelise
+attention over `spatial_group`, on top of `attn_backend`:
+
+- `ring=True` — K/V circulate around `spatial_group` in a P2P ring, with a
+  per-step online-softmax merge. Works for any head count.
+- `ulysses=True` — a single all-to-all trades the local sequence shard for a
+  head shard, runs one dense attention over the full sequence, then an
+  all-to-all brings it back. Needs `heads // channel_group.size()` divisible
+  by `spatial_group.size()`. Set `ulysses_gpus_per_node > 0` to run the
+  *hierarchical* scheme instead — Ulysses over an intra-node sub-group nested
+  in a P2P ring over the inter-node one — which keeps the all-to-all on the
+  fast intra-node fabric.
+
+Both schemes can overlap their K/V communication with the attention core on a
+dedicated CUDA stream: `overlap_comm` on `RingAttentionConfig` for the plain
+ring, `ulysses_inter_overlap` for the hierarchical scheme's inter-node ring.
+CUDA only; inert elsewhere. See `RingAttentionConfig.__init__` and
+`DistributedAttention.__init__` for the full parameter reference.
+
 ## Usage
-_jigsaw_ is designed to follow the interface of PyTorch. The model must be defined exclusively via _jigsaw_ layers. i.e.
-```
+_jigsaw_ follows the interface of PyTorch: build the model from _jigsaw_ layers, then train it as usual. Each layer takes the *global* (unsharded) dimensions and the process groups of a [process mesh](#process-mesh), and allocates only its local shard.
+
+```python
+import torch
+import jigsaw
+from jigsaw.utils import init_cuda, set_all_seeds
+
+device, _, rank, world_size = init_cuda()  # NCCL init from the SLURM / torchrun env
+mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})  # 4 ranks, one model replica
+
+
 class Linear(torch.nn.Module):
-   def __init__(self, global_in_dim, global_out_dim, process_mesh_dict):
-      self.lin = jigsaw.DistributedXWT(global_in_dim, global_out_dim, process_mesh_dict)
-   def forward(self, x):
-      return self.lin(x)
+    def __init__(self, in_dim, out_dim, mesh, device):
+        super().__init__()
+        self.lin = jigsaw.linear.DistributedXWT(
+            in_dim=in_dim,
+            out_dim=out_dim,
+            bias=True,
+            local_rank=mesh["model"].rank(),
+            device=device,
+            model_group=mesh["model"],
+            column_group=mesh["col"],
+            row_group=mesh["row"],
+        )
+
+    def forward(self, x):
+        return self.lin(x)  # x is this rank's shard, split over "col" in its last dim
+
+
+# Give every model-parallel rank its own seed so the shards are initialized independently.
+set_all_seeds(mesh["model"].rank())
+model = Linear(1024, 1024, mesh, device)
 ```
-When initializing the models, ensure that each model-parallel rank has a different random seed, thus insuring true randomness in the initialization. The DP wrapper will handle weight initialization synchronization across data-parallel ranks.
-```
-local_rank = model_group.rank()
-set_all_seeds(local_rank)
-model = Linear(global_in_dim, global_out_dim, process_mesh_dict)
-```
+
+Run it with one process per GPU, e.g. `torchrun --nproc-per-node 4 train.py` or `srun` (see [Launching](#launching)).
+
+Complete, runnable scripts -- a CNN, a Vision Transformer, a Swin Transformer, a dataloader, converting an existing model, re-sharding a trained one -- are in [`examples/`](examples/README.md). Each runs with `torchrun --nproc-per-node 4`, on GPUs or on the CPU.
 
 ### Mixed precision (autocast)
 
@@ -87,7 +141,7 @@ Wrap the forward in `torch.autocast` and run `backward()` outside it, as with pl
 with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
     y = model(x)
 loss = loss_fn(y, target)
-loss.backward()   # outside the autocast region
+loss.backward()  # outside the autocast region
 ```
 
 _jigsaw_'s layers are custom `torch.autograd.Function`s, which `torch.autocast` does **not**
@@ -143,7 +197,7 @@ env is known) only if you want to log before `init_cuda` or override the default
 ```python
 from jigsaw import log
 
-log.info("world_size=%d", world)   # emitted by the print rank only (default: rank 0)
+log.info("world_size=%d", world)  # emitted by the print rank only (default: rank 0)
 log.info_all("process group ready")  # every rank
 log.at(2).debug("q shard %s", q.shape)  # only rank 2 (accepts an int, a list, or "all")
 ```
@@ -167,6 +221,6 @@ As domain parallelism is applied throughout the model training process, the data
 For a model-parallel group:
 ```
 set_all_seeds(0) # constant number for all instances of the model-parallel group
-dataloader = torch.nn.DataLoader(...) # Define the dataloader here
+dataloader = torch.utils.data.DataLoader(...) # Define the dataloader here
 # The Dataset must return the correct shard of the data samples.
 ```

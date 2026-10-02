@@ -1,4 +1,4 @@
-"""Jigsaw management package. This package provides classes for distributed model training."""
+"""Distributed model-parallel training modules."""
 
 from . import init as init
 from . import log as log

@@ -1,12 +1,4 @@
-"""Shared base for the distributed 1-/2-/3-D convolutions.
-
-Mirrors PyTorch's ``torch.nn.modules.conv._ConvNd`` -> ``Conv{1,2,3}d`` layering:
-:class:`_DistributedConvNd` holds every dimension-independent piece (parameter
-init, spatial/channel process-group bookkeeping, gradient sync, weight
-merge/reshard, torch <-> jigsaw conversion, the ``forward`` fast-path routing)
-and the concrete classes in :mod:`jigsaw.modules.convolution.conv.conv` only pin
-``_n_spatial``.
-"""
+"""Base class of the distributed convolutions."""
 
 import math
 from collections.abc import Sequence
@@ -29,7 +21,7 @@ _TORCH_CONV_CLS = {1: torch.nn.Conv1d, 2: torch.nn.Conv2d, 3: torch.nn.Conv3d}
 
 
 class _DistributedConvNd(torch.nn.Module):
-    """Distributed N-D convolution; concrete subclasses set ``_n_spatial``."""
+    """Distributed N-D convolution. Subclasses set ``_n_spatial``."""
 
     # spatial rank (1, 2 or 3); pinned by the concrete subclass.
     _n_spatial: int
@@ -69,57 +61,45 @@ class _DistributedConvNd(torch.nn.Module):
         channel_comm: str = "auto",
         config: Optional[ConvNdConfig] = None,
     ):
-        """
-        Distributed N-D convolution.
-
-        input shape of forward pass: ``(N, Cin, *spatial)``
-        output shape of forward pass: ``(N, Cout, *spatial')``
+        """Initialize the module.
 
         Parameters
         ----------
-        in_channels: int
-            Number of in_channels globally.
-        out_channels: int
-            Number of out_channels globally.
-        kernel_size: int | tuple[int, ...]
+        in_channels : int
+            Global number of input channels.
+        out_channels : int
+            Global number of output channels.
+        kernel_size : int | tuple[int, ...]
             Kernel size.
-        device: torch.device
-            Device where the computations will be done.
-        spatial_group: dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]]
-            Domain-parallel ranks. A single process group splits the domain
-            along the last (width) axis only (the historical behaviour). A
-            sequence is taken axis-by-axis and may split several spatial axes;
-            ``None`` (or a group of size 1) marks an axis that is not split.
-        channel_group: dist.ProcessGroup
-            Process group for channel-parallel ranks.
-        stride: int | tuple[int, ...]
+        device : torch.device
+            Device of the module.
+        spatial_group : dist.ProcessGroup | Sequence[dist.ProcessGroup | None]
+            Process groups splitting the spatial axes. A single group splits
+            the last axis. In a sequence, ``None`` or a group of size 1 marks an
+            axis that is not split.
+        channel_group : dist.ProcessGroup
+            Process group splitting the channels.
+        stride : int | tuple[int, ...]
             Stride in the convolution.
-        padding: str | tuple[int, ...]
-            Padding. String padding is unsupported once a halo exchange is
-            needed (``stride != kernel_size``).
-        dilation: int | tuple[int, ...]
+        padding : str | tuple[int, ...]
+            Padding. Strings are unsupported if ``stride != kernel_size``.
+        dilation : int | tuple[int, ...]
             Dilation.
-        groups: int
-            Number of blocked connections from input to output channels
-            (PyTorch grouped-convolution semantics). Must be ``1`` or a multiple
-            of ``channel_group.size()``; in the latter case each channel-parallel
-            rank owns whole conv-groups and the forward/backward run with no
-            channel-group communication.
-        bias: bool
-            Flag for whether bias is present.
-        bayesian: bool
-            Flag for whether model is vmapped.
-        dtype: torch.dtype
-            Data type of the convolution.
-        channel_comm: str
-            Channel-parallel forward exchange: ``"all_gather"``, ``"p2p"``
-            (double-buffered batched p2p, overlaps comm/compute, lower memory
-            peak) or ``"all_to_all"`` (same ring over masked all-to-all hops,
-            NCCL only). ``"auto"`` (default) -> ``"all_to_all"`` on a CUDA
-            ``device``, else ``"p2p"``. Ignored when ``config`` is supplied.
-        config: Optional[ConvNdConfig]
-            Configuration and selection strategy of the convolutional layer.
-            If None, this will be initialized here.
+        groups : int
+            Number of groups. Must be ``1`` or a multiple of
+            ``channel_group.size()``.
+        bias : bool
+            Whether to add a bias.
+        bayesian : bool
+            Whether the model is Bayesian.
+        dtype : torch.dtype
+            Data type of the parameters.
+        channel_comm : str
+            Channel communication strategy: ``"all_gather"``, ``"p2p"``,
+            ``"all_to_all"`` or ``"auto"``. Ignored if ``config`` is given.
+        config : ConvNdConfig, optional
+            Kernel selection. Defaults to a configuration built from the
+            arguments.
         """
         super().__init__()
         to_ntuple = _ntuple(self._n_spatial)
@@ -178,10 +158,13 @@ class _DistributedConvNd(torch.nn.Module):
                 self.in_channels // groups,
                 *self.kernel_size,
                 device=device,
+                dtype=dtype,
             )
         )
         self.bias = (
-            torch.nn.parameter.Parameter(torch.zeros(self.out_channels, device=device))
+            torch.nn.parameter.Parameter(
+                torch.zeros(self.out_channels, device=device, dtype=dtype)
+            )
             if bias
             else None
         )
@@ -222,21 +205,9 @@ class _DistributedConvNd(torch.nn.Module):
         )
 
     def reset_parameters(self) -> None:
-        """
-        Re-draw ``weight`` (and ``bias``) from the same distribution as ``torch.nn.Conv{1,2,3}d``.
+        """Initialize the parameters like ``torch.nn.Conv{1,2,3}d``.
 
-        PyTorch draws ``weight`` from ``kaiming_uniform_(a=sqrt(5))`` and
-        ``bias`` from ``U(-1/sqrt(fan_in), 1/sqrt(fan_in))``, both keyed off the
-        *global* ``fan_in = (C_in / groups) * prod(kernel)``. Each
-        channel-parallel rank fills only its own output-channel weight/bias
-        shard, so the channel-sharded parameter is distributed exactly as the
-        non-distributed one would be. (The subsequent broadcast to every
-        spatial rank only replicates that draw; it does not change its
-        distribution.)
-
-        Override this method in a subclass, or call :mod:`jigsaw.init` helpers
-        directly with ``global_shape=self.global_weight_shape``, to install a
-        different init scheme.
+        The fans are computed from the global weight shape.
         """
         init.kaiming_uniform_(
             self.weight, a=math.sqrt(5), global_shape=self.global_weight_shape
@@ -248,11 +219,11 @@ class _DistributedConvNd(torch.nn.Module):
 
     @property
     def spatial_world_size(self) -> int:
-        """Number of spatial ranks the parameters are replicated across."""
+        """Return the number of spatial ranks the parameters are replicated over."""
         return math.prod(g.size() for g in self._spatial_sync_groups)
 
     def get_parameter_count(self) -> int:
-        """Return effective number of local parameters for the module."""
+        """Return the number of local parameters."""
         replicas = self.spatial_world_size
         num_param = 0 if self.bias is None else self.bias.numel() // replicas
         return num_param + self.weight.numel() // replicas
@@ -266,30 +237,32 @@ class _DistributedConvNd(torch.nn.Module):
         row_kw: str = "row",
         col_kw: str = "col",
         model_kw: str = "model",
+        **kwargs: Any,
     ) -> "_DistributedConvNd":
-        """
-        Convert a ``torch.nn.Conv{1,2,3}d`` to jigsaw based on the given mesh.
+        """Convert a ``torch.nn.Conv{1,2,3}d`` to a distributed convolution.
 
         Parameters
         ----------
-        model: torch.nn.Conv1d | torch.nn.Conv2d | torch.nn.Conv3d
+        model : torch.nn.Conv1d | torch.nn.Conv2d | torch.nn.Conv3d
             Instance to convert.
-        process_mesh_dict: dict
-            Process mesh dict containing row, column, and model process groups.
-        device: torch.device
-            Device upon which computation happens.
-        row_kw: str
-            Key for accessing domain process groups.
-        col_kw: str
-            Key for accessing channel process groups.
-        model_kw: str
-            Key for accessing model process groups. Should contain the union of
-            the row and column groups.
+        process_mesh_dict : dict
+            Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
+        device : torch.device
+            Device of the converted module.
+        row_kw : str
+            Key of the spatial process group.
+        col_kw : str
+            Key of the channel process group.
+        model_kw : str
+            Key of the model process group.
+        **kwargs : Any
+            Unused. Accepts the options of the other converters, which
+            :func:`jigsaw.convert.convert_to_jigsaw` passes to every layer.
 
         Returns
         -------
-        model: _DistributedConvNd
-            The jigsaw layer, carrying the weights and bias of the input layer.
+        _DistributedConvNd
+            Distributed convolution with the weights of ``model``.
         """
         assert model.in_channels % process_mesh_dict[col_kw].size() == 0, (
             "in_channels is not divisible by process mesh cols"
@@ -339,19 +312,23 @@ class _DistributedConvNd(torch.nn.Module):
         col_kw: str = "col",
         model_kw: str = "model",
     ) -> torch.nn.modules.conv._ConvNd:
-        """
-        Convert this jigsaw conv layer back to a ``torch.nn.Conv{1,2,3}d``.
+        """Convert this jigsaw conv layer back to a ``torch.nn.Conv{1,2,3}d``.
 
         Parameters
         ----------
-        process_mesh_dict: dict
-            Process mesh dict containing row, column, and model process groups.
-        row_kw: str
-            Key for accessing row process groups.
-        col_kw: str
-            Key for accessing col process groups.
-        model_kw: str
-            Key for accessing model process groups.
+        process_mesh_dict : dict
+            Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
+        row_kw : str
+            Key of the spatial process group.
+        col_kw : str
+            Key of the channel process group.
+        model_kw : str
+            Key of the model process group.
+
+        Returns
+        -------
+        torch.nn.modules.conv._ConvNd
+            Convolution with the merged weights.
         """
         weights, bias = self.merge_weights(process_mesh_dict, col_kw)
         torch_cls: Any = _TORCH_CONV_CLS[self._n_spatial]
@@ -380,22 +357,21 @@ class _DistributedConvNd(torch.nn.Module):
         process_mesh_dict: dict,
         col_kw: str = "col",
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Merge the channel-sharded weights (and bias) into global tensors.
+        """Merge the channel-sharded weights and bias into global tensors.
 
         Parameters
         ----------
-        process_mesh_dict: dict
-            Process mesh dict containing row, column, and model process groups.
-        col_kw: str
-            Key for accessing col process groups.
+        process_mesh_dict : dict
+            Process groups keyed by ``col_kw``.
+        col_kw : str
+            Key of the channel process group.
 
         Returns
         -------
-        global_weights: torch.Tensor
+        global_weights : torch.Tensor
             Merged weights.
-        global_bias: Optional[torch.Tensor]
-            Merged bias, if it exists.
+        global_bias : torch.Tensor | None
+            Merged bias, if any.
         """
         global_weights = gather_1d_results(
             self.weight, process_mesh_dict, dim=0, pm_key=col_kw
@@ -415,15 +391,22 @@ class _DistributedConvNd(torch.nn.Module):
         pm_col_key: str = "col",
         pm_model_key: str = "model",
     ) -> None:
-        """
-        Re-slice the channel-sharded ``weight`` / ``bias`` onto a new process mesh.
+        """Reshard the weight and bias onto a new process mesh.
 
-        The gathered global parameters are unchanged; only which output-channel
-        slice this rank holds moves. The module is also rebound to
-        ``to_process_mesh_dict`` -- spatial/channel process groups, the
-        channel-local regime, the kernel-selection ``config`` and the
-        spatial-group grad-sync hooks -- so a forward/backward pass on the new
-        mesh is immediately valid.
+        The module is rebound to the new mesh.
+
+        Parameters
+        ----------
+        from_process_mesh_dict : dict
+            Process groups of the current mesh.
+        to_process_mesh_dict : dict
+            Process groups of the new mesh.
+        pm_row_key : str
+            Key of the spatial process group.
+        pm_col_key : str
+            Key of the channel process group.
+        pm_model_key : str
+            Key of the model process group.
         """
         from_weight_shape_local = self.weight.shape
         weight_shape_global = (
@@ -524,12 +507,7 @@ class _DistributedConvNd(torch.nn.Module):
                 dist.broadcast(p.data, group_src=0, group=g)
 
     def _needs_halo(self) -> bool:
-        """Whether a spatially-split conv would need neighbour halos.
-
-        With ``stride == kernel_size``, no padding and no dilation every output
-        position depends on exactly one spatial rank's input, so the split needs
-        no communication. Anything else does.
-        """
+        """Return whether the spatial split requires a halo exchange."""
         zero = (0,) * self._n_spatial
         unit = (1,) * self._n_spatial
         zero_pad = self.padding == zero or self.padding == "valid"
@@ -538,22 +516,10 @@ class _DistributedConvNd(torch.nn.Module):
         )
 
     def _forward_local(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass when this rank owns whole conv-groups (no channel comm).
+        """Convolve the local shard with the native convolution.
 
-        Covers ``channel_group.size() == 1`` and, for a grouped conv, any channel
-        group whose size divides ``groups`` -- either way nothing has to be
-        gathered over the channel dimension and the custom autograd Function buys
-        nothing: native ``conv{1,2,3}d`` (with ``groups_local`` groups) plus the
-        spatial-group gradient hooks on ``weight`` / ``bias`` produce the same
-        result. This fast path only covers the exact-tiling case: no split
-        spatial axis (any ``stride`` / ``padding`` / ``dilation``), or a split
-        that tiles with no overlap (``stride == kernel_size``, no padding /
-        dilation). Halo-needing splits are handled too, but via ``_conv_apply``
-        -- ``forward`` routes them there and they should never reach here.
-
-        The guard below is therefore defensive: running native ``conv`` on a
-        local shard that needs a halo would silently give wrong values at the
-        shard seams, so turn that into a loud error instead.
+        Used if no channel communication is needed. Raises if the spatial split
+        requires a halo exchange.
         """
         if self._spatial_sync_groups and self._needs_halo():
             raise NotImplementedError(
@@ -583,19 +549,17 @@ class _DistributedConvNd(torch.nn.Module):
         return cast(torch.Tensor, y)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of the distributed N-D convolution.
+        """Apply the distributed convolution.
 
         Parameters
         ----------
         x : torch.Tensor
-            Local input tensor of shape ``(N, Cin / n_channel, *spatial / n_spatial)``.
+            Local input of shape ``(N, Cin / n_channel, *spatial / n_spatial)``.
 
         Returns
         -------
         torch.Tensor
-            Local output tensor of shape
-            ``(N, Cout / n_channel, *spatial' / n_spatial)``.
+            Local output of shape ``(N, Cout / n_channel, *spatial' / n_spatial)``.
         """
         # When every channel-parallel rank owns whole conv-groups
         # (``_channel_local`` -- always true with no channel split) the custom

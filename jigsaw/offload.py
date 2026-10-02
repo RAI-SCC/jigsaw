@@ -1,26 +1,22 @@
-"""Offloading class."""
+"""Activation offloading to host memory."""
 
 import torch
 
 
 class NVLinkActivationOffloader:
-    """
-    Offloader with proper stream management.
+    """Offload activations to pinned CPU memory on a side stream.
 
-    D2H copies run on a side stream so they overlap with compute.
-    The source GPU tensor must stay alive until the copy finishes; we track
-    pending copies via CUDA events and provide wait_offloads() to drain them
-    before the caller drops references.
+    Device-to-host copies overlap with compute. Source tensors must stay alive
+    until :meth:`wait_offloads` is called.
     """
 
     def __init__(self, device: torch.device) -> None:
-        """Initialize the object.
+        """Initialize the offloader.
 
         Parameters
         ----------
         device : torch.device
             Device on which tensors and communication are placed.
-
         """
         self.device = device
         self.d2h_stream = torch.cuda.Stream(device)
@@ -31,12 +27,17 @@ class NVLinkActivationOffloader:
         self.name = "NVLinkActivationOffloader"
 
     def offload(self, tensor: torch.Tensor) -> torch.Tensor:
-        """
-        Offload tensor to CPU.
+        """Copy a tensor to pinned CPU memory asynchronously.
 
-        Async D2H copy on side stream. Returns pinned CPU tensor.
-        IMPORTANT: caller must NOT free `tensor` until wait_offloads() is called,
-        because the copy is still in flight on the side stream.
+        Parameters
+        ----------
+        tensor : torch.Tensor
+            GPU tensor, which must not be freed until :meth:`wait_offloads`.
+
+        Returns
+        -------
+        torch.Tensor
+            Pinned CPU tensor.
         """
         cpu = torch.empty(
             tensor.shape, dtype=tensor.dtype, pin_memory=True, device="cpu"
@@ -52,12 +53,7 @@ class NVLinkActivationOffloader:
         return cpu
 
     def wait_offloads(self) -> None:
-        """
-        Wait to offload.
-
-        Block current stream on all pending D2H events, then drop GPU refs
-        so the memory can actually be freed.
-        """
+        """Block the current stream on pending copies and release GPU references."""
         cur = torch.cuda.current_stream(self.device)
         for _, ev in self._pending_d2h:
             cur.wait_event(ev)
@@ -66,9 +62,19 @@ class NVLinkActivationOffloader:
     def prefetch(
         self, cpu_tensor: torch.Tensor
     ) -> tuple[torch.Tensor, torch.cuda.Event]:
-        """Prefetch tensor from CPU.
+        """Copy a CPU tensor to the device asynchronously.
 
-        Async H2D on side stream. Returns (gpu_tensor, event).
+        Parameters
+        ----------
+        cpu_tensor : torch.Tensor
+            Pinned CPU tensor.
+
+        Returns
+        -------
+        gpu : torch.Tensor
+            Tensor on the device.
+        event : torch.cuda.Event
+            Event recorded when the copy completes.
         """
         self.h2d_stream.wait_stream(torch.cuda.current_stream(self.device))
         with torch.cuda.stream(self.h2d_stream):
@@ -78,8 +84,11 @@ class NVLinkActivationOffloader:
         return gpu, event
 
     def wait_prefetch(self, event: torch.cuda.Event) -> None:
-        """Wait for prefetching.
+        """Make the current stream wait for a prefetch to complete.
 
-        Make current stream wait on a prefetch to complete.
+        Parameters
+        ----------
+        event : torch.cuda.Event
+            Event returned by :meth:`prefetch`.
         """
         torch.cuda.current_stream(self.device).wait_event(event)

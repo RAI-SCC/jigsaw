@@ -73,9 +73,14 @@ ALL_KINDS = ["linear", *CONV_KINDS]
 
 
 def _n_spatial(kind: str) -> int:
-    return {"conv1d": 1, "conv2d": 2, "conv3d": 3, "convT1d": 1, "convT2d": 2, "convT3d": 3}[
-        kind
-    ]
+    return {
+        "conv1d": 1,
+        "conv2d": 2,
+        "conv3d": 3,
+        "convT1d": 1,
+        "convT2d": 2,
+        "convT3d": 3,
+    }[kind]
 
 
 def _local_input(jm: torch.nn.Module, kind: str, device: torch.device) -> torch.Tensor:
@@ -147,7 +152,9 @@ class TestConvertRoundTrip:
         back = jm.convert_to_torch(mesh)
 
         grp = mesh["model"]
-        assert_close("weight", back.weight.data, ref.weight.data, 1e-6, 1e-6, device, grp)
+        assert_close(
+            "weight", back.weight.data, ref.weight.data, 1e-6, 1e-6, device, grp
+        )
         if bias:
             assert_close("bias", back.bias.data, ref.bias.data, 1e-6, 1e-6, device, grp)
         else:
@@ -157,10 +164,10 @@ class TestConvertRoundTrip:
         if kind == "linear":
             x = torch.randn(2, 5, ref.weight.shape[1], device=device)
         else:
-            x = torch.randn(2, ref.in_channels, *([12] * _n_spatial(kind)), device=device)
-        assert_close(
-            "forward", back(x), ref(x), 1e-5, 1e-5, device, grp
-        )
+            x = torch.randn(
+                2, ref.in_channels, *([12] * _n_spatial(kind)), device=device
+            )
+        assert_close("forward", back(x), ref(x), 1e-5, 1e-5, device, grp)
 
 
 # --------------------------------------------------------------------------- #
@@ -278,7 +285,9 @@ class TestReshardMatchesDirect:
         grp = to_mesh["model"]
         assert all_ranks_ok(
             direct.weight.shape == reshuffled.weight.shape, device, grp
-        ), f"{kind}: weight shard shape {reshuffled.weight.shape} != {direct.weight.shape}"
+        ), (
+            f"{kind}: weight shard shape {reshuffled.weight.shape} != {direct.weight.shape}"
+        )
         assert_close(
             "weight shard",
             reshuffled.weight.data,
@@ -364,7 +373,9 @@ class TestReshardLimits:
         """A grouped transpose conv whose target channel group owns whole
         conv-groups is explicitly rejected rather than silently mis-resharded."""
         mesh = process_mesh_dict_2x2
-        ct = torch.nn.ConvTranspose2d(8, 8, 2, stride=2, groups=4, bias=False, device=device)
+        ct = torch.nn.ConvTranspose2d(
+            8, 8, 2, stride=2, groups=4, bias=False, device=device
+        )
         jm = convert.convert_to_jigsaw(copy.deepcopy(ct), mesh, device)
         with pytest.raises(NotImplementedError):
             jm.reshard_parameters(mesh, mesh)

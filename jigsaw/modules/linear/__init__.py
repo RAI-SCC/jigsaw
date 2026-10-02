@@ -1,3 +1,3 @@
-"""Expose distributed linear layers to public interface."""
+"""Distributed linear layers."""
 
 from .linear import DistributedXWT as DistributedXWT

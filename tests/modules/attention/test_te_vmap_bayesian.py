@@ -11,7 +11,11 @@ of integration:
    a custom Function under vmap (``te``'s fused kernels register no batching
    rule); its ``vmap`` staticmethod folds the members axis into the batch,
    runs one un-vmapped call, and unfolds. Forward + grad vs a Python loop.
-   **Passes.**
+   **Passes** -- including after the wrapper moved off
+   ``te.DotProductAttention`` onto the fused kernels directly: the fold makes
+   the folded ``q/k/v`` produce a matching folded LSE / ``rng_state``, so the
+   re-entrant ``apply`` inside the rule sends gradients through the wrapper's
+   own ``fused_attn_bwd`` backward.
 2. :class:`TestDistributedAttentionPlain` -- a plain (no vmap, no ensemble)
    ``DistributedAttention`` forward+backward on a channel-parallel mesh, sdpa
    and te. **Passes.** Regression guards for two fixes: ``forward`` now casts
@@ -40,6 +44,7 @@ import torch.distributed as dist
 from torch.func import functional_call, grad, stack_module_state, vmap
 
 from jigsaw.modules.attention import attention
+from jigsaw.modules.attention.functional.cores import te as te_cores
 from tests.parity import assert_close
 
 # TE fused attention needs fp16/bf16 and (on CUDA) the attn core runs bf16
@@ -49,7 +54,7 @@ _GRAD_TOL = dict(atol=3e-2, rtol=3e-2)  # grads flow through the bf16 core
 
 
 # --------------------------------------------------------------------------- #
-# 1. TransformerEngineAttention (the autograd.Function) under torch.vmap
+# 1. te_attention (TransformerEngineAttention's batching rule) under torch.vmap
 # --------------------------------------------------------------------------- #
 @pytest.mark.gpu_required
 @pytest.mark.te_required
@@ -57,43 +62,39 @@ class TestTransformerEngineAttentionVmap:
     """The wrapper's ``vmap`` staticmethod folds members into batch and unfolds."""
 
     E, B, H, S, D = 3, 2, 4, 16, 32
-
-    def _attn(self):
-        import transformer_engine.pytorch as te
-
-        a = te.DotProductAttention(
-            num_attention_heads=self.H,
-            kv_channels=self.D,
-            num_gqa_groups=self.H,
-            qkv_format="bshd",
-            attn_mask_type="no_mask",
-            attention_dropout=0.0,
-        )
-        a.eval()
-        return a
+    SCALE = D**-0.5
 
     def _qkv(self, device, requires_grad=False):
         torch.manual_seed(0)
         return [
             torch.randn(
-                self.E, self.B, self.S, self.H, self.D,
-                device=device, dtype=torch.bfloat16, requires_grad=requires_grad,
+                self.E,
+                self.B,
+                self.S,
+                self.H,
+                self.D,
+                device=device,
+                dtype=torch.bfloat16,
+                requires_grad=requires_grad,
             )
             for _ in range(3)
         ]
 
-    def test_forward_matches_loop(self, device: torch.device) -> None:
-        from jigsaw.modules.attention.attention import (
-            TransformerEngineAttention,
-            _capture_rng_state,
-        )
+    @staticmethod
+    def _f(q, k, v, scale, core):
+        from jigsaw.modules.attention.attention import TransformerEngineAttention
 
-        attn = self._attn()
+        # apply() returns (out, logsumexp, rng_state); only the output is used
+        # outside the ring.
+        return TransformerEngineAttention.apply(q, k, v, scale, 0.0, core)[0]
+
+    def test_forward_matches_loop(self, device: torch.device) -> None:
         qe, ke, ve = self._qkv(device)
-        rng_state = _capture_rng_state(device)
+
+        core = te_cores.select_core(device)
 
         def f(q, k, v):
-            return TransformerEngineAttention.apply(q, k, v, attn, rng_state)
+            return self._f(q, k, v, self.SCALE, core)
 
         got = vmap(f)(qe, ke, ve)
         assert got.shape == (self.E, self.B, self.S, self.H * self.D)
@@ -106,17 +107,12 @@ class TestTransformerEngineAttentionVmap:
         torch.testing.assert_close(got, ref, **_FWD_TOL)
 
     def test_grad_matches_loop(self, device: torch.device) -> None:
-        from jigsaw.modules.attention.attention import (
-            TransformerEngineAttention,
-            _capture_rng_state,
-        )
-
-        attn = self._attn()
         qe, ke, ve = self._qkv(device, requires_grad=True)
-        rng_state = _capture_rng_state(device)
+
+        core = te_cores.select_core(device)
 
         def f(q, k, v):
-            return TransformerEngineAttention.apply(q, k, v, attn, rng_state)
+            return self._f(q, k, v, self.SCALE, core)
 
         vmap(f)(qe, ke, ve).float().pow(2).sum().backward()
         got = (qe.grad, ke.grad, ve.grad)
@@ -128,9 +124,7 @@ class TestTransformerEngineAttentionVmap:
             )
             f(qi, ki, vi).float().pow(2).sum().backward()
             ref_members.append((qi.grad, ki.grad, vi.grad))
-        ref = tuple(
-            torch.stack([m[j] for m in ref_members]) for j in range(3)
-        )
+        ref = tuple(torch.stack([m[j] for m in ref_members]) for j in range(3))
 
         for name, g, r in zip("qkv", got, ref):
             assert g is not None, f"no grad for {name}"
@@ -144,8 +138,9 @@ _IN = _EMBED = _OUT = 64
 _HEADS = 4
 
 
-def _build_attn(mesh: dict, device: torch.device, backend: str, bayesian: bool,
-                ring: bool = False):
+def _build_attn(
+    mesh: dict, device: torch.device, backend: str, bayesian: bool, ring: bool = False
+):
     model = attention.DistributedAttention(
         in_dim=_IN,
         embed_dim=_EMBED,
@@ -276,12 +271,10 @@ class TestDistributedAttentionEnsembleVmap:
 
     def _fwd(self, mesh, device, backend):
         base, params, buffers, ref_models, x_e = self._build(mesh, device, backend)
-        got = vmap(
-            lambda p, b, x: functional_call(base, (p, b), (x,))
-        )(params, buffers, x_e)
-        ref = torch.stack(
-            [ref_models[i](x_e[i].contiguous()) for i in range(self.E)]
+        got = vmap(lambda p, b, x: functional_call(base, (p, b), (x,)))(
+            params, buffers, x_e
         )
+        ref = torch.stack([ref_models[i](x_e[i].contiguous()) for i in range(self.E)])
         return got, ref
 
     def _grad(self, mesh, device, backend):
@@ -308,8 +301,12 @@ class TestDistributedAttentionEnsembleVmap:
     ) -> None:
         got, ref = self._fwd(process_mesh_dict_2x2, device, "te")
         assert_close(
-            "te ensemble forward", got, ref, **_FWD_TOL,
-            device=device, group=process_mesh_dict_2x2["model"],
+            "te ensemble forward",
+            got,
+            ref,
+            **_FWD_TOL,
+            device=device,
+            group=process_mesh_dict_2x2["model"],
         )
 
     @pytest.mark.dist(4)
@@ -318,8 +315,12 @@ class TestDistributedAttentionEnsembleVmap:
     ) -> None:
         got, ref = self._fwd(process_mesh_dict_2x2, device, "sdpa")
         assert_close(
-            "sdpa ensemble forward", got, ref, **_FWD_TOL,
-            device=device, group=process_mesh_dict_2x2["model"],
+            "sdpa ensemble forward",
+            got,
+            ref,
+            **_FWD_TOL,
+            device=device,
+            group=process_mesh_dict_2x2["model"],
         )
 
     _XWT_VMAP_GRAD = pytest.mark.xfail(
@@ -336,8 +337,12 @@ class TestDistributedAttentionEnsembleVmap:
         got, ref = self._grad(process_mesh_dict_2x2, device, "te")
         for k in got:
             assert_close(
-                f"te ensemble grad[{k}]", got[k], ref[k], **_GRAD_TOL,
-                device=device, group=process_mesh_dict_2x2["model"],
+                f"te ensemble grad[{k}]",
+                got[k],
+                ref[k],
+                **_GRAD_TOL,
+                device=device,
+                group=process_mesh_dict_2x2["model"],
             )
 
     @pytest.mark.dist(4)
@@ -348,8 +353,12 @@ class TestDistributedAttentionEnsembleVmap:
         got, ref = self._grad(process_mesh_dict_2x2, device, "sdpa")
         for k in got:
             assert_close(
-                f"sdpa ensemble grad[{k}]", got[k], ref[k], **_GRAD_TOL,
-                device=device, group=process_mesh_dict_2x2["model"],
+                f"sdpa ensemble grad[{k}]",
+                got[k],
+                ref[k],
+                **_GRAD_TOL,
+                device=device,
+                group=process_mesh_dict_2x2["model"],
             )
 
 
@@ -368,12 +377,13 @@ class TestRingVmap:
 
     @pytest.mark.dist(4)
     def test_ring_vmap_currently_unsupported(
-        self, device: torch.device, process_mesh_dict_2x2: dict
+        self, device: torch.device, process_mesh_dict_4x1: dict
     ) -> None:
+        # ``4x1``: with its default config the ring needs an unsharded channel axis.
         model = _build_attn(
-            process_mesh_dict_2x2, device, "sdpa", bayesian=False, ring=True
+            process_mesh_dict_4x1, device, "sdpa", bayesian=False, ring=True
         )
-        x_e = _local_x(process_mesh_dict_2x2, device, members=2)
+        x_e = _local_x(process_mesh_dict_4x1, device, members=2)
 
         with pytest.raises((RuntimeError, NotImplementedError)):
             vmap(model)(x_e)

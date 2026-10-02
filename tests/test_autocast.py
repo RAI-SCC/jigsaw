@@ -111,10 +111,14 @@ class TestAutocastLinear:
         group = pm["model"]
 
         torch.manual_seed(0)
-        x = torch.randn(1, 10, in_dim // 2, device=device, dtype=base_dtype).contiguous()
+        x = torch.randn(
+            1, 10, in_dim // 2, device=device, dtype=base_dtype
+        ).contiguous()
 
         y, dx = _forward_backward(model, x, device, autocast_dtype, autocast=True)
-        y_ref, dx_ref = _forward_backward(model, x, device, autocast_dtype, autocast=False)
+        y_ref, dx_ref = _forward_backward(
+            model, x, device, autocast_dtype, autocast=False
+        )
 
         assert y.dtype == autocast_dtype, f"forward output is {y.dtype}"
         assert dx.dtype == base_dtype, f"input grad is {dx.dtype}, not the param dtype"
@@ -248,7 +252,9 @@ class TestAutocastAttention:
         atol, rtol = _ATTN_TOL
         for name, g, r in zip(("out", "dq", "dk", "dv"), got, ref):
             assert torch.isfinite(g).all(), f"non-finite ring {name}"
-            assert_close(f"ring {name}", g.float(), r.float(), atol, rtol, device, ring_group)
+            assert_close(
+                f"ring {name}", g.float(), r.float(), atol, rtol, device, ring_group
+            )
 
 
 @pytest.mark.parametrize("autocast_dtype", _AUTOCAST_DTYPES)
@@ -268,15 +274,21 @@ class TestAutocastFp32List:
             model, x_low.float(), device, autocast_dtype, autocast=False
         )
 
-        assert y.dtype == torch.float32, f"fp32-list op returned {y.dtype} under autocast"
-        assert dx.dtype == autocast_dtype, f"input grad is {dx.dtype}, not the leaf dtype"
+        assert y.dtype == torch.float32, (
+            f"fp32-list op returned {y.dtype} under autocast"
+        )
+        assert dx.dtype == autocast_dtype, (
+            f"input grad is {dx.dtype}, not the leaf dtype"
+        )
         assert torch.isfinite(y).all(), "non-finite output"
         assert torch.isfinite(dx).all(), "non-finite input grad"
 
         # Same values, fp32, no autocast: the fp32-list op must match it closely.
         assert_close("output", y, y_ref, 1e-4, 1e-4, device, group)
         atol, rtol = _TOL[autocast_dtype]
-        assert_close("input grad", dx.float(), dx_ref.float(), atol, rtol, device, group)
+        assert_close(
+            "input grad", dx.float(), dx_ref.float(), atol, rtol, device, group
+        )
 
     @pytest.mark.dist(4)
     def test_autocast_layernorm(
@@ -363,7 +375,9 @@ class TestAutocastConv:
 
         assert y.dtype == autocast_dtype, f"conv output is {y.dtype}"
         assert dx.dtype == torch.float32, f"input grad is {dx.dtype}, not fp32"
-        assert model.weight.grad is not None and model.weight.grad.dtype == torch.float32
+        assert (
+            model.weight.grad is not None and model.weight.grad.dtype == torch.float32
+        )
         assert torch.isfinite(y).all(), "non-finite output"
         assert torch.isfinite(dx).all(), "non-finite input grad"
 

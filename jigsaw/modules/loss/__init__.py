@@ -1,15 +1,4 @@
-"""Expose distributed loss functions to the public interface.
-
-The implementation is split by problem type:
-
-* :mod:`jigsaw.modules.loss.common` -- shared collectives / autograd primitives;
-* :mod:`jigsaw.modules.loss.classification` -- cross-entropy, NLL, BCE
-  (``functional`` forms and ``torch.nn`` module wrappers);
-* :mod:`jigsaw.modules.loss.regression` -- L2 (MSE), L1, smooth-L1
-  (``functional`` forms and ``torch.nn`` module wrappers).
-
-Distributed segmentation metrics live in :mod:`jigsaw.modules.metrics`.
-"""
+"""Distributed classification and regression losses."""
 
 from .classification import (
     DistributedBCELoss as DistributedBCELoss,

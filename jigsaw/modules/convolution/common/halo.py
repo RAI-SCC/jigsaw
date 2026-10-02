@@ -1,10 +1,4 @@
-"""Single-axis exchange primitive shared by the conv / conv-transpose halo kernels.
-
-Both :mod:`jigsaw.modules.convolution.conv.halo` (input-side halo gather /
-scatter-add) and :mod:`jigsaw.modules.convolution.conv_transpose.halo`
-(output-side overlap reduce / expand) move data between spatial ranks with the
-same uneven, Gloo-compatible all-to-all along one tensor axis.
-"""
+"""Halo exchange primitive shared by the convolution kernels."""
 
 import torch
 import torch.distributed as dist
@@ -18,17 +12,30 @@ def exchange_along_axis(
     recv_sizes: list[int],
     axis: int = -1,
 ) -> list[torch.Tensor]:
-    """Uneven all-to-all of ``axis`` slices, in spatial-rank order.
+    """Exchange slices along ``axis`` with all spatial ranks in an uneven all-to-all.
 
-    ``send_parts[p]`` (size ``send_sizes[p]`` along ``axis``, possibly zero) goes
-    to rank ``p``; the returned list holds what every rank sent back, split to
-    ``recv_sizes`` (each entry a view along ``axis`` of one receive buffer).
+    ``send_parts[p]`` is sent to rank ``p``. The result holds the slices received
+    from every rank, with sizes ``recv_sizes`` along ``axis``.
 
-    Implemented with ``all_to_all_single`` (uneven split sizes, Gloo-compatible),
-    which splits dim 0 -- so ``axis`` is moved to the front for the transfer
-    only. The caller keeps its tensors in their natural layout, so a split along
-    a non-innermost spatial axis costs one staging copy of the halo slabs rather
-    than a transpose of the whole tensor.
+    Parameters
+    ----------
+    spatial_group : dist.ProcessGroup
+        Process group of the split axis.
+    template : torch.Tensor
+        Tensor whose device and dtype the exchanged slices follow.
+    send_parts : list[torch.Tensor]
+        Slice sent to each rank.
+    send_sizes : list[int]
+        Size along ``axis`` of each slice in ``send_parts``.
+    recv_sizes : list[int]
+        Size along ``axis`` of the slice received from each rank.
+    axis : int
+        Axis along which the slices are exchanged.
+
+    Returns
+    -------
+    list[torch.Tensor]
+        Slice received from each rank.
     """
     axis %= template.dim()
     other = (*template.shape[:axis], *template.shape[axis + 1 :])

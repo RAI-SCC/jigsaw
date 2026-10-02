@@ -1,10 +1,4 @@
-"""Distributed classification losses: cross-entropy, NLL and binary cross-entropy.
-
-The class dimension (``dim``, ``1`` by convention) may be sharded across
-``channel_group``; the batch/spatial dimensions may be sharded across
-``reduce_groups``.  See :mod:`jigsaw.modules.loss.common` for the shared
-primitives and the collective-communication rationale.
-"""
+"""Distributed classification loss functions."""
 
 from typing import Any, Optional
 
@@ -33,33 +27,7 @@ def _nll_terms(
     dim: int,
     channel_group: Optional[dist.ProcessGroup],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return ``(per_element_nll, per_element_weight, valid_mask)``.
-
-    ``log_probs`` holds this rank's shard of the class dimension ``dim``.  The
-    true-class log-probability is gathered locally where the target lands in this
-    rank's class range and summed across ``channel_group``.
-
-    Parameters
-    ----------
-    log_probs : torch.Tensor
-        Log-probabilities, class dimension ``dim`` sharded.
-    target : torch.Tensor
-        Class indices, shape ``log_probs.shape`` without ``dim``.
-    weight : Optional[torch.Tensor]
-        Per-class weight of length ``C_global`` (replicated on every rank).
-    ignore_index : int
-        Target value whose elements contribute neither loss nor normalization.
-    dim : int
-        Class dimension of ``log_probs``.
-    channel_group : Optional[dist.ProcessGroup]
-        Group across which ``dim`` is partitioned.
-
-    Returns
-    -------
-    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-        Per-element NLL, per-element weight (``0`` on ignored elements), and the
-        boolean validity mask.
-    """
+    """Compute the per-element NLL, weight and validity mask."""
     n_local = log_probs.shape[dim]
     offset = _group_rank(channel_group) * n_local
 
@@ -95,31 +63,33 @@ def distributed_nll_loss(
     channel_group: Optional[dist.ProcessGroup] = None,
     reduce_groups: GroupsArg = None,
 ) -> torch.Tensor:
-    """Distributed negative log-likelihood loss (see :func:`torch.nn.functional.nll_loss`).
+    """Compute the negative log-likelihood loss of a class-sharded input.
+
+    Equivalent to :func:`torch.nn.functional.nll_loss`.
 
     Parameters
     ----------
     log_probs : torch.Tensor
-        Log-probabilities with the (possibly sharded) class dimension at ``dim``.
+        Log-probabilities with the class dimension ``dim`` holding the local shard.
     target : torch.Tensor
-        Class indices, shape ``log_probs.shape`` with ``dim`` removed.
-    weight : Optional[torch.Tensor]
-        Per-class weight of length ``C_global`` (replicated on every rank).
+        Class indices, with ``dim`` removed from the shape of ``log_probs``.
+    weight : torch.Tensor, optional
+        Per-class weight of the global class dimension.
     ignore_index : int
-        Target value to skip.
+        Target value that contributes neither loss nor normalization.
     reduction : str
-        ``"none"``, ``"sum"`` or ``"mean"``.  ``"none"`` returns the local shard.
+        ``"none"``, ``"sum"`` or ``"mean"``.
     dim : int
         Class dimension.
-    channel_group : Optional[dist.ProcessGroup]
-        Group sharding the class dimension.
-    reduce_groups : GroupsArg
-        Groups sharding the batch/spatial dimensions.
+    channel_group : dist.ProcessGroup, optional
+        Group across which the class dimension is partitioned.
+    reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
+        Groups across which the batch and spatial dimensions are partitioned.
 
     Returns
     -------
     torch.Tensor
-        The reduced loss.
+        Local loss for ``"none"``, otherwise the reduced scalar loss.
     """
     dim = dim % log_probs.ndim
     groups = _normalize_groups(reduce_groups)
@@ -131,19 +101,7 @@ def distributed_nll_loss(
 
 
 class _ChannelParallelCrossEntropy(torch.autograd.Function):
-    """Fused cross-entropy over a class dimension sharded across ``channel_group``.
-
-    Evaluates the loss straight from the logits -- the full ``log_softmax``
-    tensor is never formed.  Forward issues a single MAX all-reduce (numerical
-    stability) and a single SUM all-reduce that carries ``sum_exp``, the gathered
-    target-logit contribution and, when ``label_smoothing`` is on, the class sum
-    of the shifted logits.  The backward is the closed form
-    ``softmax - (1 - eps) * onehot - eps / C_global`` scaled by the incoming
-    gradient and the per-element weight, and needs no collective.
-
-    ``local_idx`` / ``local_hit`` / ``elem_weight`` carry no gradient and are
-    precomputed by the caller from ``target`` / ``weight`` / ``ignore_index``.
-    """
+    """Autograd function of the cross-entropy over a class-sharded input."""
 
     @staticmethod
     def forward(
@@ -155,7 +113,7 @@ class _ChannelParallelCrossEntropy(torch.autograd.Function):
         dim: int,
         channel_group: Optional[dist.ProcessGroup],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return ``(per_element_loss, softmax)``; ``softmax`` feeds the backward."""
+        """Compute the per-element loss and the softmax saved for the backward pass."""
         n_global = logits.shape[dim] * _group_size(channel_group)
 
         shift = logits.amax(dim=dim, keepdim=True)
@@ -199,7 +157,7 @@ class _ChannelParallelCrossEntropy(torch.autograd.Function):
         inputs: tuple,
         output: tuple[torch.Tensor, torch.Tensor],
     ) -> None:
-        """Save ``softmax`` and the target bookkeeping for the local backward."""
+        """Save the tensors and metadata for the backward pass."""
         _, local_idx, local_hit, elem_weight, label_smoothing, dim, channel_group = (
             inputs
         )
@@ -216,7 +174,7 @@ class _ChannelParallelCrossEntropy(torch.autograd.Function):
         grad_per_element: torch.Tensor,
         _grad_softmax: Optional[torch.Tensor],
     ) -> tuple[Optional[torch.Tensor], ...]:
-        """``grad_logits = grad * weight * (softmax - (1 - eps) onehot - eps / C)``."""
+        """Compute the gradient of the logits."""
         softmax, local_idx, local_hit, elem_weight = ctx.saved_tensors  # type: ignore[attr-defined]
         dim = ctx.dim  # type: ignore[attr-defined]
         eps = ctx.label_smoothing  # type: ignore[attr-defined]
@@ -243,11 +201,7 @@ class _ChannelParallelCrossEntropy(torch.autograd.Function):
         dim: int,
         channel_group: Optional[dist.ProcessGroup],
     ) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[int, int]]:
-        """Vmap rule: front-load every batched argument and shift the class dim.
-
-        The class collectives act on the class dimension alone, so a batched
-        call is just the unbatched op with one extra leading dimension.
-        """
+        """Batching rule for ``torch.vmap``."""
 
         def _front(t: torch.Tensor, bdim: Optional[int]) -> torch.Tensor:
             if bdim is None:
@@ -283,39 +237,43 @@ def distributed_cross_entropy(
     channel_group: Optional[dist.ProcessGroup] = None,
     reduce_groups: GroupsArg = None,
 ) -> torch.Tensor:
-    """Distributed cross-entropy loss (see :func:`torch.nn.functional.cross_entropy`).
+    """Compute the cross-entropy loss of a class-sharded input.
 
-    ``target`` may be class indices (shape ``logits.shape`` without ``dim``) or
-    class probabilities (same shape as ``logits``, class dimension sharded like
-    ``logits``).  Probability targets support neither ``ignore_index``,
-    ``weight`` nor ``label_smoothing`` -- matching the constraints that would
-    otherwise make the reference ambiguous.
+    Equivalent to :func:`torch.nn.functional.cross_entropy`.
 
     Parameters
     ----------
     logits : torch.Tensor
-        Unnormalized scores with the (possibly sharded) class dimension at ``dim``.
+        Unnormalized scores with the class dimension ``dim`` holding the local shard.
     target : torch.Tensor
-        Class indices or class probabilities.
-    weight : Optional[torch.Tensor]
-        Per-class weight of length ``C_global`` (replicated on every rank).
+        Class indices, with ``dim`` removed from the shape of ``logits``, or class
+        probabilities with the shape of ``logits``.
+    weight : torch.Tensor, optional
+        Per-class weight of the global class dimension.
     ignore_index : int
-        Target value to skip (index targets only).
+        Target value that contributes neither loss nor normalization. Only applies
+        to class-index targets.
     reduction : str
         ``"none"``, ``"sum"`` or ``"mean"``.
     label_smoothing : float
-        Amount of label smoothing in ``[0, 1)``; requires ``weight is None``.
+        Label smoothing in ``[0, 1)``.
     dim : int
         Class dimension.
-    channel_group : Optional[dist.ProcessGroup]
-        Group sharding the class dimension.
-    reduce_groups : GroupsArg
-        Groups sharding the batch/spatial dimensions.
+    channel_group : dist.ProcessGroup, optional
+        Group across which the class dimension is partitioned.
+    reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
+        Groups across which the batch and spatial dimensions are partitioned.
 
     Returns
     -------
     torch.Tensor
-        The reduced loss.
+        Local loss for ``"none"``, otherwise the reduced scalar loss.
+
+    Raises
+    ------
+    NotImplementedError
+        If ``weight`` is combined with probability targets or ``label_smoothing``,
+        or if ``label_smoothing`` is combined with probability targets.
     """
     dim = dim % logits.ndim
     groups = _normalize_groups(reduce_groups)
@@ -363,29 +321,27 @@ def distributed_binary_cross_entropy(
     reduction: str = "mean",
     reduce_groups: GroupsArg = None,
 ) -> torch.Tensor:
-    """Distributed binary cross-entropy (see :func:`torch.nn.functional.binary_cross_entropy`).
+    """Compute the binary cross-entropy of a sharded input.
 
-    Every dimension is treated as an ordinary element dimension, so ``target`` and
-    ``probs`` share a shape and ``reduce_groups`` must list *every* group across
-    which that shape is partitioned (channel group included).
+    Equivalent to :func:`torch.nn.functional.binary_cross_entropy`.
 
     Parameters
     ----------
     probs : torch.Tensor
-        Predicted probabilities in ``[0, 1]`` (this rank's shard).
+        Predicted probabilities in ``[0, 1]``.
     target : torch.Tensor
-        Binary / soft targets in ``[0, 1]`` (same shard as ``probs``).
-    weight : Optional[torch.Tensor]
-        Elementwise weight broadcastable to ``probs`` (this rank's shard).
+        Targets in ``[0, 1]`` with the shape of ``probs``.
+    weight : torch.Tensor, optional
+        Elementwise weight broadcastable to ``probs``.
     reduction : str
         ``"none"``, ``"sum"`` or ``"mean"``.
-    reduce_groups : GroupsArg
+    reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
         Every group across which ``probs`` is partitioned.
 
     Returns
     -------
     torch.Tensor
-        The reduced loss.
+        Local loss for ``"none"``, otherwise the reduced scalar loss.
     """
     groups = _normalize_groups(reduce_groups)
     if reduction == "none":
@@ -404,27 +360,29 @@ def distributed_bce_with_logits(
     reduction: str = "mean",
     reduce_groups: GroupsArg = None,
 ) -> torch.Tensor:
-    """Distributed BCE-with-logits (see :func:`torch.nn.functional.binary_cross_entropy_with_logits`).
+    """Compute the binary cross-entropy with logits of a sharded input.
+
+    Equivalent to :func:`torch.nn.functional.binary_cross_entropy_with_logits`.
 
     Parameters
     ----------
     logits : torch.Tensor
-        Unnormalized scores (this rank's shard).
+        Unnormalized scores.
     target : torch.Tensor
-        Binary / soft targets in ``[0, 1]`` (same shard as ``logits``).
-    weight : Optional[torch.Tensor]
+        Targets in ``[0, 1]`` with the shape of ``logits``.
+    weight : torch.Tensor, optional
         Elementwise weight broadcastable to ``logits``.
-    pos_weight : Optional[torch.Tensor]
-        Weight of positive examples, broadcastable to the class dimension.
+    pos_weight : torch.Tensor, optional
+        Weight of the positive examples, broadcastable to the class dimension.
     reduction : str
         ``"none"``, ``"sum"`` or ``"mean"``.
-    reduce_groups : GroupsArg
+    reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
         Every group across which ``logits`` is partitioned.
 
     Returns
     -------
     torch.Tensor
-        The reduced loss.
+        Local loss for ``"none"``, otherwise the reduced scalar loss.
     """
     groups = _normalize_groups(reduce_groups)
     if reduction == "none":

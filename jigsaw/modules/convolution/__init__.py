@@ -1,13 +1,4 @@
-"""Distributed N-D convolution and transpose convolution.
-
-Two sibling packages -- :mod:`~jigsaw.modules.convolution.conv` and
-:mod:`~jigsaw.modules.convolution.conv_transpose` -- each unify the 1-/2-/3-D
-case behind one dimension-independent implementation (``base`` module,
-``functional`` autograd Function, ``config`` kernel selection, ``distributed``
-kernels, ``channel_comm`` channel-parallel driver, ``halo`` spatial exchange).
-Pieces that do not differ between the forward and transpose case live in
-:mod:`~jigsaw.modules.convolution.common`.
-"""
+"""Distributed convolution and transpose convolution."""
 
 from .conv import ConvNd as ConvNd
 from .conv import ConvNdConfig as ConvNdConfig

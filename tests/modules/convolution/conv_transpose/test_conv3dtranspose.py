@@ -195,8 +195,13 @@ def _conv3d_transpose_reference_check(
         device,
         model_group,
     )
+    # The bias gradient sums grad_output over the batch and every spatial axis, which
+    # is thousands of terms. F.conv_transpose3d accumulates them in fp32 and is off
+    # by more than the tolerance (the sharded sum is the more accurate one), so the
+    # reference is that sum in float64.
+    bias_grad_ref = grad_global.double().sum(dim=(0, 2, 3, 4)).to(b_grad_global.dtype)
     assert_close(
-        "bias grad", b_grad_global, bias_global.grad, 1e-4, 1e-4, device, model_group
+        "bias grad", b_grad_global, bias_grad_ref, 1e-4, 1e-4, device, model_group
     )
 
 

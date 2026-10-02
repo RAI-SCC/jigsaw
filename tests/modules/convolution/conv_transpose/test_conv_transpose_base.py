@@ -48,9 +48,7 @@ class TestConvTransposeParameterCount:
 
         assert conv.spatial_world_size == mesh["row"].size() == 2
         replicas = conv.spatial_world_size
-        expected = (
-            conv.weight.numel() // replicas + conv.bias.numel() // replicas
-        )
+        expected = conv.weight.numel() // replicas + conv.bias.numel() // replicas
         assert conv.get_parameter_count() == expected
 
     @pytest.mark.dist(4)
@@ -71,10 +69,7 @@ class TestConvTransposeParameterCount:
         ).to(device)
 
         assert conv.spatial_world_size == 1
-        assert (
-            conv.get_parameter_count()
-            == conv.weight.numel() + conv.bias.numel()
-        )
+        assert conv.get_parameter_count() == conv.weight.numel() + conv.bias.numel()
 
     @pytest.mark.dist(4)
     def test_bias_false_is_excluded_from_the_count(
@@ -95,8 +90,7 @@ class TestConvTransposeParameterCount:
 
         assert conv.bias is None
         assert (
-            conv.get_parameter_count()
-            == conv.weight.numel() // conv.spatial_world_size
+            conv.get_parameter_count() == conv.weight.numel() // conv.spatial_world_size
         )
 
 
