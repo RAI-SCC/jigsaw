@@ -1,18 +1,4 @@
-"""Distributed transpose kernels against a serial ``.mT``.
-
-Each kernel bakes in one ``row x col`` arrangement of the model ranks, the same
-ones the XWT kernels use: ``x_transpose_twoway`` a 1x2 in-split,
-``x_transpose_fourway`` a 2x2 mesh and ``x_transpose_eightway`` a 4x2 mesh, with
-``rank = row * n_cols + col``. A rank holds block ``(row, col)`` of the last two
-dimensions of the global matrix and gets back block ``(row, col)`` of its
-transpose on the same mesh.
-
-Every rank builds the same global matrix from a seed, so the reference shard is
-sliced locally and no gather is needed.
-
-The kernels run on both backends: ``dist.all_to_all`` on NCCL, point-to-point on
-gloo.
-"""
+"""Distributed transpose kernels against a serial permute operation."""
 
 from typing import Callable
 
