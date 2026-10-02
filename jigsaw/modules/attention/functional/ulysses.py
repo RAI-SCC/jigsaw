@@ -96,9 +96,7 @@ class _UlyssesAllToAll(torch.autograd.Function):
         x: torch.Tensor, gather_seq: bool, group: dist.ProcessGroup
     ) -> torch.Tensor:
         return (
-            _a2a_heads_to_seq(x, group)
-            if gather_seq
-            else _a2a_seq_to_heads(x, group)
+            _a2a_heads_to_seq(x, group) if gather_seq else _a2a_seq_to_heads(x, group)
         )
 
     @staticmethod
@@ -193,6 +191,4 @@ def hierarchical_ulysses_attention(
     ``local_heads % A == 0``. ``qkv_stack`` is forwarded to
     :func:`ulysses_attention` (skips the ``torch.stack``).
     """
-    return ulysses_attention(
-        q, k, v, intra_group, ring_core, qkv_stack=qkv_stack
-    )
+    return ulysses_attention(q, k, v, intra_group, ring_core, qkv_stack=qkv_stack)

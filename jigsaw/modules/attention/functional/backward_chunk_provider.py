@@ -224,7 +224,13 @@ class _GlobalChunkProvider(_BackwardChunkProvider):
             return kv[0].contiguous(), kv[1].contiguous(), kv
         elif self.config.save_for_backward == SaveBackward.X:
             kv, kj, vj = _compute_kv(
-                chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d, self.config.core_layout
+                chunk,
+                self.w_qkv,
+                self.b,
+                self.seq_local,
+                self.h,
+                self.d,
+                self.config.core_layout,
             )
             return kj.contiguous(), vj.contiguous(), kv
         else:
@@ -309,7 +315,13 @@ class _LocalChunkProvider(_BackwardChunkProvider):
         if self.config.save_for_backward == SaveBackward.KV:
             return chunk
         kv, _, _ = _compute_kv(
-            chunk, self.w_qkv, self.b, self.seq_local, self.h, self.d, self.config.core_layout
+            chunk,
+            self.w_qkv,
+            self.b,
+            self.seq_local,
+            self.h,
+            self.d,
+            self.config.core_layout,
         )
         return kv
 
@@ -331,7 +343,13 @@ class _LocalChunkProvider(_BackwardChunkProvider):
         """
         if self.config.send_in_forward == SendForward.X:
             kv, kj, vj = _compute_kv(
-                recv_buf, self.w_qkv, self.b, self.seq_local, self.h, self.d, self.config.core_layout
+                recv_buf,
+                self.w_qkv,
+                self.b,
+                self.seq_local,
+                self.h,
+                self.d,
+                self.config.core_layout,
             )
             return kj.contiguous(), vj.contiguous(), kv
         kv = recv_buf
@@ -368,7 +386,13 @@ class _LocalChunkProvider(_BackwardChunkProvider):
             if self.config.send_in_forward == SendForward.X:
                 # Local Q always attends its own local K/V on step 0.
                 kv, kj, vj = _compute_kv(
-                    self.x, self.w_qkv, self.b, self.seq_local, self.h, self.d, self.config.core_layout
+                    self.x,
+                    self.w_qkv,
+                    self.b,
+                    self.seq_local,
+                    self.h,
+                    self.d,
+                    self.config.core_layout,
                 )
             else:
                 kj, vj = kv[0].contiguous(), kv[1].contiguous()
@@ -441,14 +465,17 @@ class _LocalChunkProviderOverlap(_LocalChunkProvider):
         """Return chunk ``step`` -- local on step 0, else adopted off the comm stream."""
         if step == 0:
             kv = self._kv0()
-            send_buf = (
-                self.x if self.config.send_in_forward == SendForward.X else kv
-            )
+            send_buf = self.x if self.config.send_in_forward == SendForward.X else kv
             self._bufs = [torch.empty_like(send_buf), torch.empty_like(send_buf)]
             self._kick(send_buf, into=0, step=step)
             if self.config.send_in_forward == SendForward.X:
                 kv, kj, vj = _compute_kv(
-                    self.x, self.w_qkv, self.b, self.seq_local, self.h, self.d,
+                    self.x,
+                    self.w_qkv,
+                    self.b,
+                    self.seq_local,
+                    self.h,
+                    self.d,
                     self.config.core_layout,
                 )
             else:
@@ -578,7 +605,9 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
         # CPU-templated buffer there fails with "Tensors must be CUDA and dense"
         # on the first `dist.all_to_all`/`broadcast`. `x` itself is never
         # offloaded (only the saved chunk is), so its device is always right.
-        template = x if ring_config.send_in_forward == SendForward.X else chunks_to_save[0]
+        template = (
+            x if ring_config.send_in_forward == SendForward.X else chunks_to_save[0]
+        )
         self._recv_buf = torch.empty(
             template.shape, dtype=template.dtype, device=x.device
         )
@@ -667,7 +696,13 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProviderHybrid):
             if self.config.send_in_forward == SendForward.X:
                 # Local Q always attends its own local K/V on step 0.
                 kv, kj, vj = _compute_kv(
-                    self.x, self.w_qkv, self.b, self.seq_local, self.h, self.d, self.config.core_layout
+                    self.x,
+                    self.w_qkv,
+                    self.b,
+                    self.seq_local,
+                    self.h,
+                    self.d,
+                    self.config.core_layout,
                 )
             else:
                 kj, vj = kv[0].contiguous(), kv[1].contiguous()
@@ -776,8 +811,12 @@ class _LocalChunkProviderHybridP2POverlap(_LocalChunkProviderHybridP2P):
 
         def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
             return self.config.send_op_fn(
-                src, buf, send_recv_ranks=self._intra_ranks, group=self._intra_group,
-                async_op=True, step=step,
+                src,
+                buf,
+                send_recv_ranks=self._intra_ranks,
+                group=self._intra_group,
+                async_op=True,
+                step=step,
             )
 
         self._intra_buf.kick(produce, extra_keep_alive=(src,))
@@ -792,7 +831,13 @@ class _LocalChunkProviderHybridP2POverlap(_LocalChunkProviderHybridP2P):
 
             if self.config.send_in_forward == SendForward.X:
                 kv, kj, vj = _compute_kv(
-                    self.x, self.w_qkv, self.b, self.seq_local, self.h, self.d, self.config.core_layout
+                    self.x,
+                    self.w_qkv,
+                    self.b,
+                    self.seq_local,
+                    self.h,
+                    self.d,
+                    self.config.core_layout,
                 )
             else:
                 kj, vj = kv[0].contiguous(), kv[1].contiguous()

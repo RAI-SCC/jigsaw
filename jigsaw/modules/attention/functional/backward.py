@@ -240,7 +240,8 @@ def ring_backward(
     dkv_overlap = (
         kv_overlap
         and not all_reduce_dkv
-        and ring_config.send_op in (SendOp.P2P, SendOp.ALLTOALL, SendOp.HYBRID_P2P, SendOp.HYBRID_ALLTOALL)
+        and ring_config.send_op
+        in (SendOp.P2P, SendOp.ALLTOALL, SendOp.HYBRID_P2P, SendOp.HYBRID_ALLTOALL)
         and ring_config.send_backward == SendBackward.SEND_DKV
     )
     dkv_relay = _DkvRelay(ring_config, group, dq) if dkv_overlap else None
@@ -645,8 +646,12 @@ class _DkvRelay:
         if self._topo is not None:
             send_recv_ranks = _hybrid_dkv_relay_peers(self._topo, step)
             produce = lambda: self.cfg.p2p_fn(  # noqa: E731
-                send, recv, send_recv_ranks=send_recv_ranks, group=self.group,
-                async_op=True, step=step,
+                send,
+                recv,
+                send_recv_ranks=send_recv_ranks,
+                group=self.group,
+                async_op=True,
+                step=step,
             )
         else:
             direction = step if self.cfg.send_op != SendOp.BROADCAST else -step

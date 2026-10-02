@@ -1,4 +1,5 @@
 """Distributed attention modules."""
+
 import warnings
 from typing import Any, Callable, Optional, cast
 
@@ -97,9 +98,7 @@ if JIGSAW_TE_AVAILABLE:
                 :meth:`setup_context` can hand them to :meth:`backward`; callers
                 take ``[0]``.
             """
-            out, lse, rng_state = core.forward(
-                q, k, v, scale, dropout_p, layout="bshd"
-            )
+            out, lse, rng_state = core.forward(q, k, v, scale, dropout_p, layout="bshd")
             return out.flatten(-2), lse, rng_state
 
         @staticmethod
@@ -436,7 +435,9 @@ class DistributedAttention(torch.nn.Module):
             )
             if self.ulysses_gpn:
                 a = self.ulysses_gpn
-                assert spatial_group.size() % a == 0 and spatial_group.size() // a >= 2, (
+                assert (
+                    spatial_group.size() % a == 0 and spatial_group.size() // a >= 2
+                ), (
                     f"hierarchical ulysses needs spatial ({spatial_group.size()}) "
                     f"to split into an intra-node a2a group of {a} and an "
                     f"inter-node ring of >= 2; use ulysses_gpus_per_node=0 for "
@@ -844,9 +845,7 @@ class DistributedAttention(torch.nn.Module):
         layout = self._uly_ring_cfg.core_layout
         inter_rank = dist.get_rank(self._uly_inter_group)
 
-        def core(
-            qc: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor
-        ) -> torch.Tensor:
+        def core(qc: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor) -> torch.Tensor:
             if layout == "bhsd":
                 qc, kc, vc = (t.transpose(1, 2).contiguous() for t in (qc, kc, vc))
             out = RingAttentionFunction.apply(
@@ -897,12 +896,19 @@ class DistributedAttention(torch.nn.Module):
 
         if self.ulysses_gpn:
             return hierarchical_ulysses_attention(
-                q, k, v, self._uly_intra_group,
+                q,
+                k,
+                v,
+                self._uly_intra_group,
                 self._inter_node_ring_core(dropout_p),
                 qkv_stack=qkv_stack,
             )
         return ulysses_attention(
-            q, k, v, self.spatial_group, self._dense_bshd_core(dropout_p),
+            q,
+            k,
+            v,
+            self.spatial_group,
+            self._dense_bshd_core(dropout_p),
             qkv_stack=qkv_stack,
         )
 

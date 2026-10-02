@@ -969,8 +969,7 @@ def test_ring_overlap_comm_parity(
     x = (torch.randn(b, n_local, d, device=device, dtype=dtype) / (d**0.5)).contiguous()
     qkv = x @ w_qkv.mT
     q, k, v = (
-        t.contiguous()
-        for t in qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
+        t.contiguous() for t in qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
     )
     scale = d**-0.5
     dout = torch.ones(b, h, n_local, d, device=device, dtype=dtype)
@@ -990,8 +989,21 @@ def test_ring_overlap_comm_parity(
             q, k, v, x, w_qkv, scale, 0.0, group, local_rank, world_size, cfg
         )
         dq, dk, dv = backward.ring_backward(
-            dout, q, out, x, lse, w_qkv, scale, group, local_rank, world_size,
-            chunks, ring_config=cfg, dropout_p=0.0, base_seed=seed, rng_states=rng,
+            dout,
+            q,
+            out,
+            x,
+            lse,
+            w_qkv,
+            scale,
+            group,
+            local_rank,
+            world_size,
+            chunks,
+            ring_config=cfg,
+            dropout_p=0.0,
+            base_seed=seed,
+            rng_states=rng,
         )
         torch.cuda.synchronize()
         return out, dq, dk, dv
@@ -1056,8 +1068,7 @@ def test_ring_overlap_comm_parity_hybrid(
     x = (torch.randn(b, n_local, d, device=device, dtype=dtype) / (d**0.5)).contiguous()
     qkv = x @ w_qkv.mT
     q, k, v = (
-        t.contiguous()
-        for t in qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
+        t.contiguous() for t in qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
     )
     scale = d**-0.5
     dout = torch.ones(b, h, n_local, d, device=device, dtype=dtype)
@@ -1078,8 +1089,21 @@ def test_ring_overlap_comm_parity_hybrid(
             q, k, v, x, w_qkv, scale, 0.0, group, local_rank, world_size, cfg
         )
         dq, dk, dv = backward.ring_backward(
-            dout, q, out, x, lse, w_qkv, scale, group, local_rank, world_size,
-            chunks, ring_config=cfg, dropout_p=0.0, base_seed=seed, rng_states=rng,
+            dout,
+            q,
+            out,
+            x,
+            lse,
+            w_qkv,
+            scale,
+            group,
+            local_rank,
+            world_size,
+            chunks,
+            ring_config=cfg,
+            dropout_p=0.0,
+            base_seed=seed,
+            rng_states=rng,
         )
         torch.cuda.synchronize()
         return out, dq, dk, dv

@@ -478,8 +478,12 @@ class _HybridP2PForwardChunkProviderOverlap(_HybridP2PForwardChunkProvider):
 
         def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
             return self.config.send_op_fn(
-                src, buf, send_recv_ranks=self._intra_ranks, group=self._intra_group,
-                async_op=True, tag=inner,
+                src,
+                buf,
+                send_recv_ranks=self._intra_ranks,
+                group=self._intra_group,
+                async_op=True,
+                tag=inner,
             )
 
         self._intra_buf.kick(produce, extra_keep_alive=(src,))
