@@ -7,13 +7,19 @@ distributed twin, carrying the weights over -- each rank keeps only its shard of
     nn.Linear                       -> DistributedXWT
     nn.Conv{1,2,3}d                 -> DistributedConv{1,2,3}D
     nn.ConvTranspose{1,2,3}d        -> DistributedConv{1,2,3}DTranspose
+    nn.LayerNorm                    -> DistributedLayerNorm
     jigsaw.attention.Attention      -> DistributedAttention
     jigsaw.roll.Roll                -> DistributedRoll
 
 Everything else (activations, reshapes, ...) is left alone, which is fine as long as it
-is elementwise or only touches the *local* shapes. Layers the converter does not know,
-such as ``nn.LayerNorm``, would silently compute on the shard only -- swap those by hand
-(see ``vit.py``).
+is elementwise or only touches the *local* shapes. A layer the converter does not know
+would silently compute on the shard only if it touches the sharded dimension -- swap
+those by hand (see ``vit.py``).
+
+``nn.LayerNorm`` is only converted when its normalized dimension is actually sharded at
+that point in the model; pass ``convert_layer_norm=False`` to leave it a plain
+``nn.LayerNorm`` instead -- correct only if that dimension is replicated (not split)
+there, and worth it to skip the distributed version's extra all-reduces.
 
 The converted model then expects sharded inputs: the mesh's "row" axis splits the
 image width (or the token sequence), its "col" axis splits the channels.

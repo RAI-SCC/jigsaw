@@ -1,6 +1,6 @@
 """Distributed normalization layers."""
 
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
@@ -54,6 +54,164 @@ class DistributedLayerNorm(torch.nn.Module):
         return (self.weight.numel() + self.bias.numel()) // dist.get_world_size(
             group=self.spatial_group
         )
+
+    @classmethod
+    def convert_to_jigsaw(
+        cls,
+        model: torch.nn.LayerNorm,
+        process_mesh_dict: dict,
+        device: torch.device,
+        row_kw: str = "row",
+        col_kw: str = "col",
+        model_kw: str = "model",
+        **kwargs: Any,
+    ) -> "DistributedLayerNorm":
+        """Convert a ``torch.nn.LayerNorm`` to a :class:`DistributedLayerNorm`.
+
+        Parameters
+        ----------
+        model : torch.nn.LayerNorm
+            Layer to convert. Must normalize a single trailing dimension (no
+            multi-axis ``normalized_shape``) and have both a weight and a bias
+            (``elementwise_affine=True``, ``bias=True``).
+        process_mesh_dict : dict
+            Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
+        device : torch.device
+            Device of the converted module.
+        row_kw : str
+            Key of the row process group. The converted layer replicates its
+            weight and bias across this group, and reduces their gradients
+            over it -- correct only if the input is also replicated (not
+            sharded) across the same group, as it is for the row/column split
+            used by :func:`jigsaw.convert.convert_to_jigsaw`.
+        col_kw : str
+            Key of the column process group across which the normalized
+            dimension is partitioned.
+        model_kw : str
+            Key of the model process group.
+        **kwargs : Any
+            Unused. Accepts the options of the other converters, which
+            :func:`jigsaw.convert.convert_to_jigsaw` passes to every layer.
+
+        Returns
+        -------
+        DistributedLayerNorm
+            Distributed layer with the weight and bias of ``model``.
+
+        Raises
+        ------
+        NotImplementedError
+            If ``model`` normalizes more than one dimension, or has no weight
+            or no bias -- convert those by hand (e.g. onto
+            :class:`DistributedNoParamLayerNorm`).
+        """
+        if len(model.normalized_shape) != 1:
+            raise NotImplementedError(
+                "DistributedLayerNorm only normalizes a single trailing "
+                f"dimension; got normalized_shape={model.normalized_shape}"
+            )
+        if model.weight is None or model.bias is None:
+            raise NotImplementedError(
+                "DistributedLayerNorm always has both a weight and a bias; "
+                "convert a LayerNorm without one of them by hand"
+            )
+
+        normalized_dim = model.normalized_shape[0]
+        col_group = process_mesh_dict[col_kw]
+        assert normalized_dim % col_group.size() == 0, (
+            "normalized_shape is not divisible by process mesh columns"
+        )
+        local_dim = normalized_dim // col_group.size()
+        col_rank = col_group.rank()
+
+        instance = cls(
+            local_dim=local_dim,
+            local_rank=process_mesh_dict[model_kw].rank(),
+            device=device,
+            row_group=process_mesh_dict[row_kw],
+            col_group=col_group,
+        )
+        instance.eps = model.eps
+        instance.weight.data = (
+            model.weight.data[col_rank * local_dim : (col_rank + 1) * local_dim]
+            .clone()
+            .to(device)
+        )
+        instance.bias.data = (
+            model.bias.data[col_rank * local_dim : (col_rank + 1) * local_dim]
+            .clone()
+            .to(device)
+        )
+        return instance
+
+    def merge_weights(
+        self,
+        from_process_mesh: dict,
+        row_kw: str = "row",
+        col_kw: str = "col",
+        model_kw: str = "model",
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Merge the sharded weight and bias into global tensors.
+
+        Parameters
+        ----------
+        from_process_mesh : dict
+            Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
+        row_kw : str
+            Key of the row process group. Unused: the weight and bias are
+            already replicated (not sharded) across it.
+        col_kw : str
+            Key of the column process group.
+        model_kw : str
+            Key of the model process group. Unused.
+
+        Returns
+        -------
+        global_weight : torch.Tensor
+            Merged weight.
+        global_bias : torch.Tensor
+            Merged bias.
+        """
+        global_weight = gather_1d_results(
+            self.weight, from_process_mesh, dim=0, pm_key=col_kw
+        )
+        global_bias = gather_1d_results(
+            self.bias, from_process_mesh, dim=0, pm_key=col_kw
+        )
+        return global_weight, global_bias
+
+    def convert_to_torch(
+        self,
+        process_mesh_dict: dict,
+        row_kw: str = "row",
+        col_kw: str = "col",
+        model_kw: str = "model",
+    ) -> torch.nn.LayerNorm:
+        """Convert the layer to a ``torch.nn.LayerNorm``.
+
+        Parameters
+        ----------
+        process_mesh_dict : dict
+            Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
+        row_kw : str
+            Key of the row process group.
+        col_kw : str
+            Key of the column process group.
+        model_kw : str
+            Key of the model process group.
+
+        Returns
+        -------
+        torch.nn.LayerNorm
+            Layer with the merged weight and bias.
+        """
+        weight, bias = self.merge_weights(process_mesh_dict, row_kw, col_kw, model_kw)
+        layer_norm = torch.nn.LayerNorm(
+            weight.shape[0], eps=self.eps, device=self.device, dtype=weight.dtype
+        )
+        layer_norm.weight.data = weight
+        layer_norm.bias.data = bias
+        return layer_norm
 
     def reshard_parameters(
         self,

@@ -94,6 +94,76 @@ class TestConvertContracts:
         with pytest.raises(AssertionError):
             Attention.convert_to_jigsaw(attn, process_mesh_dict_2x1x2, device)
 
+    @pytest.mark.dist(4)
+    def test_layer_norm_normalized_dim_indivisible_by_col(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        ln = torch.nn.LayerNorm(3, device=device)  # 3 not divisible by col=2
+        with pytest.raises(AssertionError):
+            convert.convert_to_jigsaw(ln, process_mesh_dict_2x2, device)
+
+
+# --------------------------------------------------------------------------- #
+# convert_to_jigsaw: LayerNorm configurations it explicitly refuses
+# --------------------------------------------------------------------------- #
+class TestLayerNormConvertRejections:
+    """Configurations ``DistributedLayerNorm`` cannot represent must raise,
+    rather than silently drop the mismatch (e.g. fabricate a zero bias)."""
+
+    @pytest.mark.dist(4)
+    def test_multi_dim_normalized_shape_rejected(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        ln = torch.nn.LayerNorm([4, 4], device=device)
+        with pytest.raises(NotImplementedError):
+            convert.convert_to_jigsaw(ln, process_mesh_dict_2x2, device)
+
+    @pytest.mark.dist(4)
+    def test_no_elementwise_affine_rejected(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        ln = torch.nn.LayerNorm(4, elementwise_affine=False, device=device)
+        with pytest.raises(NotImplementedError):
+            convert.convert_to_jigsaw(ln, process_mesh_dict_2x2, device)
+
+    @pytest.mark.dist(4)
+    def test_no_bias_rejected(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        ln = torch.nn.LayerNorm(4, bias=False, device=device)
+        with pytest.raises(NotImplementedError):
+            convert.convert_to_jigsaw(ln, process_mesh_dict_2x2, device)
+
+
+# --------------------------------------------------------------------------- #
+# convert_layer_norm=False: nn.LayerNorm is left untouched
+# --------------------------------------------------------------------------- #
+class TestConvertLayerNormFlag:
+    @pytest.mark.dist(4)
+    def test_flag_off_leaves_plain_layer_norm(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        model = torch.nn.Sequential(
+            torch.nn.Linear(4, 4, device=device),
+            torch.nn.LayerNorm(4, device=device),
+        )
+        norm_before = model[1]
+        out = convert.convert_to_jigsaw(
+            model, process_mesh_dict_2x2, device, convert_layer_norm=False
+        )
+        assert out[1] is norm_before, "LayerNorm is left untouched when opted out"
+
+    @pytest.mark.dist(4)
+    def test_flag_defaults_to_converting_layer_norm(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        model = torch.nn.Sequential(
+            torch.nn.Linear(4, 4, device=device),
+            torch.nn.LayerNorm(4, device=device),
+        )
+        out = convert.convert_to_jigsaw(model, process_mesh_dict_2x2, device)
+        assert isinstance(out[1], norm.DistributedLayerNorm)
+
 
 # --------------------------------------------------------------------------- #
 # reshard_parameters: divisibility contracts
