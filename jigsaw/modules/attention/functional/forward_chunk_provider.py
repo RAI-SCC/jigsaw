@@ -7,7 +7,7 @@ Each provider implements one communication strategy through the hooks ``get``,
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, cast
 
 import torch
 import torch.distributed as dist
@@ -215,6 +215,7 @@ class _RingForwardChunkProviderOverlap(_RingForwardChunkProvider):
     def _kick(self, src: torch.Tensor, into: int, tag: int) -> None:
         """Issue a ``direction=-1`` ring send of ``src`` into ``self._bufs[into]``."""
         buf = self._bufs[into]
+        assert self._cs is not None
         _, self._work, self._event = issue_on_comm_stream(
             self._cs,
             lambda: self.config.send_op_fn(
@@ -461,13 +462,16 @@ class _HybridP2PForwardChunkProviderOverlap(_HybridP2PForwardChunkProvider):
         src = self.x_j if self.send_x else self.kv_j
 
         def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
-            return self.config.p2p_fn(
-                data=src,
-                buffer=buf,
-                send_recv_ranks=self._inter_ranks,
-                group=self._inter_group,
-                async_op=True,
-                tag=node_step,
+            return cast(
+                "tuple[torch.Tensor, Optional[dist.Work]]",
+                self.config.p2p_fn(
+                    data=src,
+                    buffer=buf,
+                    send_recv_ranks=self._inter_ranks,
+                    group=self._inter_group,
+                    async_op=True,
+                    tag=node_step,
+                ),
             )
 
         self._inter_buf.kick(produce, extra_keep_alive=(src,))
@@ -477,9 +481,16 @@ class _HybridP2PForwardChunkProviderOverlap(_HybridP2PForwardChunkProvider):
         src = self.x_j if self.send_x else self.kv_j
 
         def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
-            return self.config.send_op_fn(
-                src, buf, send_recv_ranks=self._intra_ranks, group=self._intra_group,
-                async_op=True, tag=inner,
+            return cast(
+                "tuple[torch.Tensor, Optional[dist.Work]]",
+                self.config.send_op_fn(
+                    src,
+                    buf,
+                    send_recv_ranks=self._intra_ranks,
+                    group=self._intra_group,
+                    async_op=True,
+                    tag=inner,
+                ),
             )
 
         self._intra_buf.kick(produce, extra_keep_alive=(src,))
@@ -606,13 +617,16 @@ class _HybridBroadcastForwardChunkProviderOverlap(_HybridBroadcastForwardChunkPr
         src = self.x_j if self.send_x else self.kv_j
 
         def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
-            return self.config.p2p_fn(
-                data=src,
-                buffer=buf,
-                send_recv_ranks=self._inter_ranks,
-                group=self._inter_group,
-                async_op=True,
-                tag=node_step,
+            return cast(
+                "tuple[torch.Tensor, Optional[dist.Work]]",
+                self.config.p2p_fn(
+                    data=src,
+                    buffer=buf,
+                    send_recv_ranks=self._inter_ranks,
+                    group=self._inter_group,
+                    async_op=True,
+                    tag=node_step,
+                ),
             )
 
         self._inter_buf.kick(produce, extra_keep_alive=(src,))

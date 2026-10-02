@@ -168,7 +168,9 @@ def _to_bshd(t: torch.Tensor, layout: Layout) -> torch.Tensor:
     return t.contiguous() if layout == "bshd" else t.transpose(1, 2).contiguous()
 
 
-def _shape(q: torch.Tensor, k: torch.Tensor, layout: Layout) -> tuple[int, int, int, int, int]:
+def _shape(
+    q: torch.Tensor, k: torch.Tensor, layout: Layout
+) -> tuple[int, int, int, int, int]:
     """``(batch, heads, seqlen_q, seqlen_kv, head_dim)`` for either layout."""
     if layout == "bshd":
         b, s_q, h, d = q.shape
@@ -336,9 +338,7 @@ def backward(
     regardless.
     """
     b, h, s_q, s_kv, d = _shape(q, k, layout)
-    q_b, k_b, v_b, o_b, do_b = (
-        _to_bshd(t, layout) for t in (q, k, v, out, grad_out)
-    )
+    q_b, k_b, v_b, o_b, do_b = (_to_bshd(t, layout) for t in (q, k, v, out, grad_out))
     backend = _fused_attn_backend(True, q_b.dtype, h, s_q, s_kv, d, dropout_p)
     cu_q = _full_cu_seqlens(b, s_q, q.device)
     cu_kv = _full_cu_seqlens(b, s_kv, q.device)

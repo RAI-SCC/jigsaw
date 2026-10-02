@@ -139,13 +139,13 @@ class TestDistributedAttention:
             send_in_forward=attn_config.SendForward.KV,
             save_for_backward=attn_config.SaveBackward.KV,
         )
-        model = _build_distributed(
-            process_mesh_dict_2x2, device, ring=True, config=cfg
-        )
+        model = _build_distributed(process_mesh_dict_2x2, device, ring=True, config=cfg)
 
         local_seq_len = 14
         local_channels = _IN_DIM // process_mesh_dict_2x2["col"].size()
-        x = torch.randn(2, local_seq_len, local_channels, device=device, requires_grad=True)
+        x = torch.randn(
+            2, local_seq_len, local_channels, device=device, requires_grad=True
+        )
         out = model(x)
         assert out.shape == x.shape
         out.sum().backward()

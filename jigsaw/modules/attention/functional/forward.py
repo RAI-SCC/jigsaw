@@ -202,7 +202,9 @@ def ring_forward(
     # ``lse`` is always ``(b, h, n)`` -- both the SDPA and TE cores emit and
     # consume it in that shape regardless of the q/k/v layout; the merge
     # transposes the blend weight instead (see ``_online_softmax_merge_``).
-    lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=acc_dtype)
+    lse = torch.full(
+        (b, heads, n_local), float("-inf"), device=q.device, dtype=acc_dtype
+    )
 
     base_seed = _draw_base_seed(q.device) if dropout_p > 0.0 else None
     rng_states: list[Optional[torch.Tensor]] = [None] * ring_group_size

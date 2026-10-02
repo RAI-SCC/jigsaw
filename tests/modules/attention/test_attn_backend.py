@@ -132,6 +132,10 @@ class TestTeCoreSelection:
         [((8, 0), "flash"), ((8, 6), "flash"), ((9, 0), "cudnn"), ((10, 0), "cudnn")],
     )
     def test_architecture_rule(self, monkeypatch, capability, expected):
+        # Pure selection logic -- force both arms "available" so this passes
+        # without transformer_engine/flash_attn installed (e.g. CPU-only CI).
+        monkeypatch.setattr(te_cores.cudnn, "CUDNN_CORE_AVAILABLE", True)
+        monkeypatch.setattr(te_cores.flash, "FLASH_CORE_AVAILABLE", True)
         monkeypatch.delenv("JIGSAW_TE_CORE", raising=False)
         monkeypatch.setattr(
             torch.cuda, "get_device_capability", lambda device=None: capability
@@ -141,6 +145,9 @@ class TestTeCoreSelection:
 
     def test_falls_back_when_preferred_arm_missing(self, monkeypatch):
         """A container without ``flash_attn`` still runs ``te`` on Ampere."""
+        # cuDNN must look available for the fallback to land there, independent
+        # of whether transformer_engine is actually installed in this environment.
+        monkeypatch.setattr(te_cores.cudnn, "CUDNN_CORE_AVAILABLE", True)
         monkeypatch.delenv("JIGSAW_TE_CORE", raising=False)
         monkeypatch.setattr(
             torch.cuda, "get_device_capability", lambda device=None: (8, 0)

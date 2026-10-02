@@ -29,7 +29,7 @@ transposes around its kernel call in
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, cast
 
 import torch
 import torch.distributed as dist
@@ -96,9 +96,7 @@ class _UlyssesAllToAll(torch.autograd.Function):
         x: torch.Tensor, gather_seq: bool, group: dist.ProcessGroup
     ) -> torch.Tensor:
         return (
-            _a2a_heads_to_seq(x, group)
-            if gather_seq
-            else _a2a_seq_to_heads(x, group)
+            _a2a_heads_to_seq(x, group) if gather_seq else _a2a_seq_to_heads(x, group)
         )
 
     @staticmethod
@@ -163,7 +161,7 @@ def ulysses_attention(
     stacked = qkv_stack if qkv_stack is not None else torch.stack((q, k, v))
     qkv = _UlyssesAllToAll.apply(stacked, True, group)
     out = core(*qkv.unbind(0))
-    return _UlyssesAllToAll.apply(out, False, group)
+    return cast(torch.Tensor, _UlyssesAllToAll.apply(out, False, group))
 
 
 def hierarchical_ulysses_attention(
@@ -193,6 +191,4 @@ def hierarchical_ulysses_attention(
     ``local_heads % A == 0``. ``qkv_stack`` is forwarded to
     :func:`ulysses_attention` (skips the ``torch.stack``).
     """
-    return ulysses_attention(
-        q, k, v, intra_group, ring_core, qkv_stack=qkv_stack
-    )
+    return ulysses_attention(q, k, v, intra_group, ring_core, qkv_stack=qkv_stack)
