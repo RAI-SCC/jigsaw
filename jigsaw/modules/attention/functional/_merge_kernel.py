@@ -51,7 +51,7 @@ _KERNEL_USABLE = _TRITON_AVAILABLE and os.environ.get(
 if _TRITON_AVAILABLE:
 
     @triton.jit
-    def _merge_kernel(
+    def _merge_kernel(  # type: ignore[no-untyped-def]
         o1_ptr,  # (n_rows, D), mutated in place; any float dtype
         o2_ptr,  # (n_rows, D), this step's partial output
         l1_ptr,  # (n_rows,) fp32, running log-sum-exp, contiguous (b, h, n)

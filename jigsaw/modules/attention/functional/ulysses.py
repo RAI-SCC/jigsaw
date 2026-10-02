@@ -29,7 +29,7 @@ transposes around its kernel call in
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, cast
 
 import torch
 import torch.distributed as dist
@@ -161,7 +161,7 @@ def ulysses_attention(
     stacked = qkv_stack if qkv_stack is not None else torch.stack((q, k, v))
     qkv = _UlyssesAllToAll.apply(stacked, True, group)
     out = core(*qkv.unbind(0))
-    return _UlyssesAllToAll.apply(out, False, group)
+    return cast(torch.Tensor, _UlyssesAllToAll.apply(out, False, group))
 
 
 def hierarchical_ulysses_attention(
