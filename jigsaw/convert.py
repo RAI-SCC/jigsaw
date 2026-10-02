@@ -22,6 +22,11 @@ mapped_modules: dict[type[torch.nn.Module], Any] = {
     torch.nn.ConvTranspose3d: convolution.DistributedConv3DTranspose,
     roll.Roll: roll.DistributedRoll,
     torch.nn.LayerNorm: normalization.DistributedLayerNorm,
+    torch.nn.GroupNorm: normalization.DistributedGroupNorm,
+    torch.nn.Softmax: normalization.DistributedSoftMax,
+    linear.MatMulXWT: linear.DistributedMatMulXWT,
+    linear.MatMulXW: linear.DistributedMatMulXW,
+    linear.MatMulXTW: linear.DistributedMatMulXTW,
 }
 container_converters: dict[type[torch.nn.Module], Callable[..., torch.nn.Module]] = {
     attention.Attention: attention.Attention.convert_to_jigsaw

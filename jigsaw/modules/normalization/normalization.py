@@ -65,15 +65,16 @@ class DistributedLayerNorm(torch.nn.Module):
         col_kw: str = "col",
         model_kw: str = "model",
         **kwargs: Any,
-    ) -> "DistributedLayerNorm":
-        """Convert a ``torch.nn.LayerNorm`` to a :class:`DistributedLayerNorm`.
+    ) -> "DistributedLayerNorm | DistributedNoParamLayerNorm":
+        """Convert a ``torch.nn.LayerNorm`` to its distributed equivalent.
 
         Parameters
         ----------
         model : torch.nn.LayerNorm
             Layer to convert. Must normalize a single trailing dimension (no
-            multi-axis ``normalized_shape``) and have both a weight and a bias
-            (``elementwise_affine=True``, ``bias=True``).
+            multi-axis ``normalized_shape``), and either have both a weight
+            and a bias (``elementwise_affine=True``, ``bias=True``) or
+            neither (``elementwise_affine=False``).
         process_mesh_dict : dict
             Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
         device : torch.device
@@ -95,20 +96,32 @@ class DistributedLayerNorm(torch.nn.Module):
 
         Returns
         -------
-        DistributedLayerNorm
-            Distributed layer with the weight and bias of ``model``.
+        DistributedLayerNorm | DistributedNoParamLayerNorm
+            Distributed layer with the weight and bias of ``model``, or, when
+            ``model`` has neither (``elementwise_affine=False``), a
+            :class:`DistributedNoParamLayerNorm`.
 
         Raises
         ------
         NotImplementedError
-            If ``model`` normalizes more than one dimension, or has no weight
-            or no bias -- convert those by hand (e.g. onto
-            :class:`DistributedNoParamLayerNorm`).
+            If ``model`` normalizes more than one dimension, or has exactly
+            one of a weight or a bias (``bias=False`` with
+            ``elementwise_affine=True``) -- convert that by hand.
         """
         if len(model.normalized_shape) != 1:
             raise NotImplementedError(
                 "DistributedLayerNorm only normalizes a single trailing "
                 f"dimension; got normalized_shape={model.normalized_shape}"
+            )
+        if model.weight is None and model.bias is None:
+            return DistributedNoParamLayerNorm.convert_to_jigsaw(
+                model,
+                process_mesh_dict=process_mesh_dict,
+                device=device,
+                row_kw=row_kw,
+                col_kw=col_kw,
+                model_kw=model_kw,
+                **kwargs,
             )
         if model.weight is None or model.bias is None:
             raise NotImplementedError(
@@ -348,6 +361,177 @@ class DistributedGroupNorm(torch.nn.Module):
             group_norm.register_parameter("bias", None)
         return group_norm
 
+    @classmethod
+    def convert_to_jigsaw(
+        cls,
+        model: torch.nn.GroupNorm,
+        process_mesh_dict: dict,
+        device: torch.device,
+        row_kw: str = "row",
+        col_kw: str = "col",
+        model_kw: str = "model",
+        **kwargs: Any,
+    ) -> "DistributedGroupNorm":
+        """Convert a ``torch.nn.GroupNorm`` to a :class:`DistributedGroupNorm`.
+
+        Channels are partitioned across ``col_kw`` so that no normalization
+        group straddles two shards: this requires ``num_groups`` itself (not
+        just ``num_channels``) to divide the column group size.
+
+        Parameters
+        ----------
+        model : torch.nn.GroupNorm
+            Layer to convert.
+        process_mesh_dict : dict
+            Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
+        device : torch.device
+            Device of the converted module.
+        row_kw : str
+            Key of the row process group. Unused: the layer has no collective
+            to reduce over it, since each shard normalizes whole groups
+            independently.
+        col_kw : str
+            Key of the column process group across which the channels (and
+            thus groups) are partitioned.
+        model_kw : str
+            Key of the model process group. Unused.
+        **kwargs : Any
+            Unused. Accepts the options of the other converters, which
+            :func:`jigsaw.convert.convert_to_jigsaw` passes to every layer.
+
+        Returns
+        -------
+        DistributedGroupNorm
+            Distributed layer with the weight and bias of ``model``.
+
+        Raises
+        ------
+        AssertionError
+            If ``num_groups`` or ``num_channels`` is not divisible by the
+            column group size.
+        """
+        col_group = process_mesh_dict[col_kw]
+        assert model.num_groups % col_group.size() == 0, (
+            "num_groups is not divisible by process mesh columns"
+        )
+        assert model.num_channels % col_group.size() == 0, (
+            "num_channels is not divisible by process mesh columns"
+        )
+        local_groups = model.num_groups // col_group.size()
+        local_channels = model.num_channels // col_group.size()
+        col_rank = col_group.rank()
+
+        instance = cls(
+            num_local_groups=local_groups,
+            num_channels=local_channels,
+            eps=model.eps,
+            affine=model.affine,
+            device=device,
+            dtype=model.weight.dtype if model.weight is not None else None,
+            bias=model.bias is not None,
+            channel_group=col_group,
+        )
+        if model.affine:
+            instance.group_norm.weight.data = (
+                model.weight.data[
+                    col_rank * local_channels : (col_rank + 1) * local_channels
+                ]
+                .clone()
+                .to(device)
+            )
+            if model.bias is not None:
+                instance.group_norm.bias.data = (
+                    model.bias.data[
+                        col_rank * local_channels : (col_rank + 1) * local_channels
+                    ]
+                    .clone()
+                    .to(device)
+                )
+        return instance
+
+    def merge_weights(
+        self,
+        from_process_mesh: dict,
+        row_kw: str = "row",
+        col_kw: str = "col",
+        model_kw: str = "model",
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Merge the sharded weight and bias into global tensors.
+
+        Parameters
+        ----------
+        from_process_mesh : dict
+            Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
+        row_kw : str
+            Key of the row process group. Unused.
+        col_kw : str
+            Key of the column process group.
+        model_kw : str
+            Key of the model process group. Unused.
+
+        Returns
+        -------
+        global_weight : torch.Tensor | None
+            Merged weight, or ``None`` if the layer is not affine.
+        global_bias : torch.Tensor | None
+            Merged bias, or ``None`` if the layer is not affine or has no bias.
+        """
+        if not self.affine:
+            return None, None
+        global_weight = gather_1d_results(
+            self.group_norm.weight, from_process_mesh, dim=0, pm_key=col_kw
+        )
+        global_bias = None
+        if self.group_norm.bias is not None:
+            global_bias = gather_1d_results(
+                self.group_norm.bias, from_process_mesh, dim=0, pm_key=col_kw
+            )
+        return global_weight, global_bias
+
+    def convert_to_torch(
+        self,
+        process_mesh_dict: dict,
+        row_kw: str = "row",
+        col_kw: str = "col",
+        model_kw: str = "model",
+    ) -> torch.nn.GroupNorm:
+        """Convert the layer to a ``torch.nn.GroupNorm``.
+
+        Parameters
+        ----------
+        process_mesh_dict : dict
+            Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
+        row_kw : str
+            Key of the row process group. Unused.
+        col_kw : str
+            Key of the column process group.
+        model_kw : str
+            Key of the model process group. Unused.
+
+        Returns
+        -------
+        torch.nn.GroupNorm
+            Layer with the merged weight and bias.
+        """
+        weight, bias = self.merge_weights(process_mesh_dict, row_kw, col_kw, model_kw)
+        num_channels = self.num_channels * process_mesh_dict[col_kw].size()
+        group_norm = torch.nn.GroupNorm(
+            self.num_global_groups,
+            num_channels,
+            eps=self.eps,
+            affine=self.affine,
+            device=self.device,
+            dtype=self.dtype,
+        )
+        if self.affine:
+            assert weight is not None
+            group_norm.weight.data = weight
+            if bias is not None:
+                group_norm.bias.data = bias
+            elif group_norm.bias is not None:
+                group_norm.register_parameter("bias", None)
+        return group_norm
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply the layer.
 
@@ -426,7 +610,11 @@ class DistributedNoParamLayerNorm(torch.nn.Module):
     """LayerNorm without parameters over a channel-sharded last dimension."""
 
     def __init__(
-        self, rank: int, device: torch.device, channel_group: dist.ProcessGroup
+        self,
+        rank: int,
+        device: torch.device,
+        channel_group: dist.ProcessGroup,
+        normalized_dim: Optional[int] = None,
     ) -> None:
         """Initialize the layer.
 
@@ -438,11 +626,16 @@ class DistributedNoParamLayerNorm(torch.nn.Module):
             Device of the module.
         channel_group : dist.ProcessGroup
             Process group across which the normalized dimension is partitioned.
+        normalized_dim : int, optional
+            Size of the local shard of the normalized dimension. Not needed by
+            the forward pass (it reads the shape off the input), only tracked
+            so :meth:`convert_to_torch` can rebuild the global shape.
         """
         super().__init__()
         self.rank = rank
         self.device = device
         self.channel_group = channel_group
+        self.normalized_dim = normalized_dim
 
         self.eps = 1e-5
         self.layernorm = functional.DistributedNoParamLNFunction.apply
@@ -450,6 +643,116 @@ class DistributedNoParamLayerNorm(torch.nn.Module):
     def get_parameter_count(self) -> int:
         """Return the number of local parameters."""
         return 0
+
+    @classmethod
+    def convert_to_jigsaw(
+        cls,
+        model: torch.nn.LayerNorm,
+        process_mesh_dict: dict,
+        device: torch.device,
+        row_kw: str = "row",
+        col_kw: str = "col",
+        model_kw: str = "model",
+        **kwargs: Any,
+    ) -> "DistributedNoParamLayerNorm":
+        """Convert a parameter-free ``torch.nn.LayerNorm`` to a :class:`DistributedNoParamLayerNorm`.
+
+        Parameters
+        ----------
+        model : torch.nn.LayerNorm
+            Layer to convert. Must normalize a single trailing dimension and
+            have neither a weight nor a bias (``elementwise_affine=False``).
+        process_mesh_dict : dict
+            Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
+        device : torch.device
+            Device of the converted module.
+        row_kw : str
+            Key of the row process group. Unused: there are no parameters to
+            replicate or reduce gradients for.
+        col_kw : str
+            Key of the column process group across which the normalized
+            dimension is partitioned.
+        model_kw : str
+            Key of the model process group.
+        **kwargs : Any
+            Unused. Accepts the options of the other converters, which
+            :func:`jigsaw.convert.convert_to_jigsaw` passes to every layer.
+
+        Returns
+        -------
+        DistributedNoParamLayerNorm
+            Distributed layer equivalent to ``model``.
+
+        Raises
+        ------
+        NotImplementedError
+            If ``model`` normalizes more than one dimension, or has a weight
+            or a bias.
+        """
+        if len(model.normalized_shape) != 1:
+            raise NotImplementedError(
+                "DistributedNoParamLayerNorm only normalizes a single trailing "
+                f"dimension; got normalized_shape={model.normalized_shape}"
+            )
+        if model.weight is not None or model.bias is not None:
+            raise NotImplementedError(
+                "DistributedNoParamLayerNorm has no weight or bias; convert a "
+                "LayerNorm with either of them by hand"
+            )
+
+        normalized_dim = model.normalized_shape[0]
+        col_group = process_mesh_dict[col_kw]
+        assert normalized_dim % col_group.size() == 0, (
+            "normalized_shape is not divisible by process mesh columns"
+        )
+        local_dim = normalized_dim // col_group.size()
+
+        instance = cls(
+            rank=process_mesh_dict[model_kw].rank(),
+            device=device,
+            channel_group=col_group,
+            normalized_dim=local_dim,
+        )
+        instance.eps = model.eps
+        return instance
+
+    def convert_to_torch(
+        self, process_mesh_dict: dict, col_kw: str = "col"
+    ) -> torch.nn.LayerNorm:
+        """Convert the layer to a parameter-free ``torch.nn.LayerNorm``.
+
+        Parameters
+        ----------
+        process_mesh_dict : dict
+            Process groups keyed by ``col_kw``.
+        col_kw : str
+            Key of the column process group across which the normalized
+            dimension is partitioned.
+
+        Returns
+        -------
+        torch.nn.LayerNorm
+            Layer with ``elementwise_affine=False`` and the global normalized
+            shape.
+
+        Raises
+        ------
+        ValueError
+            If the layer was not built by :meth:`convert_to_jigsaw`, so the
+            global normalized dimension is unknown.
+        """
+        if self.normalized_dim is None:
+            raise ValueError(
+                "normalized_dim is unknown; this instance was not built by "
+                "convert_to_jigsaw"
+            )
+        normalized_dim = self.normalized_dim * process_mesh_dict[col_kw].size()
+        return torch.nn.LayerNorm(
+            normalized_dim,
+            eps=self.eps,
+            elementwise_affine=False,
+            device=self.device,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply the layer.
@@ -488,6 +791,71 @@ class DistributedSoftMax(torch.nn.Module):
     def get_parameter_count(self) -> int:
         """Return the number of local parameters."""
         return 0
+
+    @classmethod
+    def convert_to_jigsaw(
+        cls,
+        model: torch.nn.Softmax,
+        process_mesh_dict: dict,
+        device: torch.device,
+        row_kw: str = "row",
+        col_kw: str = "col",
+        model_kw: str = "model",
+        **kwargs: Any,
+    ) -> "DistributedSoftMax":
+        """Convert a ``torch.nn.Softmax`` to a :class:`DistributedSoftMax`.
+
+        Parameters
+        ----------
+        model : torch.nn.Softmax
+            Layer to convert. Unused beyond ``dim``, since the operation has
+            no parameters.
+        process_mesh_dict : dict
+            Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
+        device : torch.device
+            Device of the converted module. Unused.
+        row_kw : str
+            Key of the row process group. Unused.
+        col_kw : str
+            Key of the column process group across which ``model.dim`` is
+            partitioned -- correct only when the input is actually sharded
+            along that dimension across ``col_kw``, as it is for the
+            row/column split used by :func:`jigsaw.convert.convert_to_jigsaw`.
+        model_kw : str
+            Key of the model process group. Unused.
+        **kwargs : Any
+            Unused. Accepts the options of the other converters, which
+            :func:`jigsaw.convert.convert_to_jigsaw` passes to every layer.
+
+        Returns
+        -------
+        DistributedSoftMax
+            Distributed layer over ``process_mesh_dict[col_kw]``.
+
+        Raises
+        ------
+        NotImplementedError
+            If ``model.dim`` is ``None``. Plain ``nn.Softmax`` then infers the
+            dimension from the input shape at call time (with a deprecation
+            warning); replicating that heuristic here without seeing the
+            input would risk silently normalizing over the wrong axis.
+        """
+        if model.dim is None:
+            raise NotImplementedError(
+                "DistributedSoftMax requires an explicit dim; convert a "
+                "Softmax with dim=None by hand"
+            )
+        return cls(group=process_mesh_dict[col_kw], dim=model.dim)
+
+    def convert_to_torch(self) -> torch.nn.Softmax:
+        """Convert the layer to a ``torch.nn.Softmax``.
+
+        Returns
+        -------
+        torch.nn.Softmax
+            Layer with the same ``dim``.
+        """
+        return torch.nn.Softmax(dim=self.dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply the layer.
