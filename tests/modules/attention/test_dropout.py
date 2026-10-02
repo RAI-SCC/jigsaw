@@ -206,13 +206,21 @@ class TestEvalModeDisablesDropout:
 _CORES = [
     pytest.param(sdpa_core, torch.float16, (32, 32), 3e-3, id="sdpa"),
     pytest.param(
-        te_cudnn_core, torch.bfloat16, (), 2e-2, id="te-cudnn",
+        te_cudnn_core,
+        torch.bfloat16,
+        (),
+        2e-2,
+        id="te-cudnn",
         marks=pytest.mark.te_required,
     ),
     # te.flash needs flash_attn rather than transformer_engine, but the marker
     # gates on the container that ships both.
     pytest.param(
-        te_flash_core, torch.bfloat16, (), 2e-2, id="te-flash",
+        te_flash_core,
+        torch.bfloat16,
+        (),
+        2e-2,
+        id="te-flash",
         marks=pytest.mark.te_required,
     ),
 ]
@@ -360,9 +368,7 @@ class TestTeAttnDropoutReplay:
     def _apply(self, q, k, v, dropout_p, core):
         from jigsaw.modules.attention.attention import TransformerEngineAttention
 
-        return TransformerEngineAttention.apply(
-            q, k, v, self.SCALE, dropout_p, core
-        )[0]
+        return TransformerEngineAttention.apply(q, k, v, self.SCALE, dropout_p, core)[0]
 
     def _bhsd(self, t):
         """``[b, s, h*d]`` (the wrapper's output layout) -> ``[b, h, s, d]``."""
@@ -405,7 +411,9 @@ class TestTeAttnDropoutReplay:
         ref_out = (p_soft * kept / (1 - self.P)) @ vg
         ref_out.backward(self._bhsd(grad_out).float())
 
-        for name, got, ref in zip("qkv", (q.grad, k.grad, v.grad), (qg.grad, kg.grad, vg.grad)):
+        for name, got, ref in zip(
+            "qkv", (q.grad, k.grad, v.grad), (qg.grad, kg.grad, vg.grad)
+        ):
             assert got is not None, f"no grad for {name}"
             torch.testing.assert_close(
                 got.float().transpose(1, 2), ref, atol=self.TOL, rtol=self.TOL
@@ -420,7 +428,9 @@ class TestTeAttnDropoutReplay:
         out.backward(grad_out)
 
         torch.manual_seed(1)
-        kept = (torch.rand(self.B, self.H, self.S, self.S, device="cuda") > self.P).float()
+        kept = (
+            torch.rand(self.B, self.H, self.S, self.S, device="cuda") > self.P
+        ).float()
         qg, kg, vg = (
             t.detach().transpose(1, 2).float().clone().requires_grad_(True)
             for t in (q, k, v)

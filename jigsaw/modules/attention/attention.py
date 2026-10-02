@@ -469,7 +469,7 @@ class DistributedAttention(torch.nn.Module):
             assert spatial_group.size() > 1, (
                 "Cannot perform ring attention if spatial size is 1."
             )
-            self.attn_core = self._ring_attn_core
+            self.attn_core: Callable[..., torch.Tensor] = self._ring_attn_core
         elif self.ulysses:
             assert spatial_group.size() > 1, (
                 "Cannot perform ulysses attention if spatial size is 1."
@@ -546,12 +546,12 @@ class DistributedAttention(torch.nn.Module):
             self.qkv = linear.DistributedXWT(
                 in_dim,
                 embed_dim * 3,
-                bias=False,
                 local_rank=self.channel_group.rank(),
                 device=self.device,
                 model_group=self.channel_group,
-                row_group=self.spatial_group,
                 column_group=self.channel_group,
+                row_group=self.spatial_group,
+                bias=False,
                 bayesian=bayesian,
                 dtype=self.dtype,
             )
@@ -568,12 +568,12 @@ class DistributedAttention(torch.nn.Module):
             self.head_concat = linear.DistributedXWT(
                 embed_dim,
                 out_dim,
-                bias=out_bias,
                 local_rank=self.channel_group.rank(),
                 device=self.device,
                 model_group=self.channel_group,
-                row_group=self.spatial_group,
                 column_group=self.channel_group,
+                row_group=self.spatial_group,
+                bias=out_bias,
                 bayesian=bayesian,
                 dtype=self.dtype,
             )
@@ -893,7 +893,10 @@ class DistributedAttention(torch.nn.Module):
                 out, _lse, _rng = TransformerEngineAttention.apply(
                     qc, kc, vc, self.scale, dropout_p, self.te_core
                 )  # [b, s, h * d]
-                return out.unflatten(-1, (qc.shape[-2], qc.shape[-1]))
+                out = cast(torch.Tensor, out)
+                return cast(
+                    torch.Tensor, out.unflatten(-1, (qc.shape[-2], qc.shape[-1]))
+                )
         else:
 
             def core(

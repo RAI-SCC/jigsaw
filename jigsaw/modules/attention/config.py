@@ -2,7 +2,7 @@
 
 import warnings
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 
 import torch
 import torch.distributed as dist
@@ -158,7 +158,7 @@ def _select_attn_core_forward_fn(
             _te_core_or_raise()
             from .functional.cores import te as te_core
 
-            return te_core.select_core(device).forward
+            return cast(AttnCoreFn, te_core.select_core(device).forward)
         case AttnBackend.MATH:
             return math_core.forward
         case AttnBackend.SDPA:
@@ -183,7 +183,7 @@ def _select_attn_core_backward_fn(
             _te_core_or_raise()
             from .functional.cores import te as te_core
 
-            return te_core.select_core(device).backward
+            return cast(AttnCoreFn, te_core.select_core(device).backward)
         case AttnBackend.MATH:
             return math_core.backward
         case AttnBackend.SDPA:

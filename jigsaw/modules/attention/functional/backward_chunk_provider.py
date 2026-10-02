@@ -451,6 +451,7 @@ class _LocalChunkProviderOverlap(_LocalChunkProvider):
     def _kick(self, src: torch.Tensor, into: int, step: int) -> None:
         """Issue a ``direction=-1`` ring send of ``src`` into ``self._bufs[into]``."""
         assert self._bufs is not None
+        assert self._cs is not None
         buf = self._bufs[into]
         _, self._work, self._event = issue_on_comm_stream(
             self._cs,
@@ -795,13 +796,16 @@ class _LocalChunkProviderHybridP2POverlap(_LocalChunkProviderHybridP2P):
         """Prefetch this round's inter-node hop on the comm stream."""
 
         def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
-            return self.config.p2p_fn(
-                data=data,
-                buffer=buf,
-                send_recv_ranks=self._inter_ranks,
-                group=self._inter_group,
-                async_op=True,
-                tag=step % self._gpn,
+            return cast(
+                "tuple[torch.Tensor, Optional[dist.Work]]",
+                self.config.p2p_fn(
+                    data=data,
+                    buffer=buf,
+                    send_recv_ranks=self._inter_ranks,
+                    group=self._inter_group,
+                    async_op=True,
+                    tag=step % self._gpn,
+                ),
             )
 
         self._inter_buf.kick(produce, extra_keep_alive=(data,))
@@ -810,13 +814,16 @@ class _LocalChunkProviderHybridP2POverlap(_LocalChunkProviderHybridP2P):
         """Prefetch this step's intra-node hop on the comm stream."""
 
         def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
-            return self.config.send_op_fn(
-                src,
-                buf,
-                send_recv_ranks=self._intra_ranks,
-                group=self._intra_group,
-                async_op=True,
-                step=step,
+            return cast(
+                "tuple[torch.Tensor, Optional[dist.Work]]",
+                self.config.send_op_fn(
+                    src,
+                    buf,
+                    send_recv_ranks=self._intra_ranks,
+                    group=self._intra_group,
+                    async_op=True,
+                    step=step,
+                ),
             )
 
         self._intra_buf.kick(produce, extra_keep_alive=(src,))
@@ -979,13 +986,16 @@ class _LocalChunkProviderHybridBroadcastOverlap(_LocalChunkProviderHybridBroadca
         """Prefetch this round's inter-node hop on the comm stream."""
 
         def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
-            return self.config.p2p_fn(
-                data=data,
-                buffer=buf,
-                send_recv_ranks=self._inter_ranks,
-                group=self._inter_group,
-                async_op=True,
-                tag=step % self._gpn,
+            return cast(
+                "tuple[torch.Tensor, Optional[dist.Work]]",
+                self.config.p2p_fn(
+                    data=data,
+                    buffer=buf,
+                    send_recv_ranks=self._inter_ranks,
+                    group=self._inter_group,
+                    async_op=True,
+                    tag=step % self._gpn,
+                ),
             )
 
         self._inter_buf.kick(produce, extra_keep_alive=(data,))

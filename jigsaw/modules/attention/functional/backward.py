@@ -679,6 +679,7 @@ class _DkvRelay:
             produce = lambda: self.cfg.p2p_fn(  # noqa: E731
                 send, recv, direction, group=self.group, async_op=True, step=step
             )
+        assert self.cs is not None
         _, self._work, event = issue_on_comm_stream(
             self.cs, produce, keep_alive=(send, recv)
         )

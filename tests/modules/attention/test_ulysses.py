@@ -80,8 +80,13 @@ class TestUlyssesAllToAll:
                 group,
             )
         assert_close(
-            "fused roundtrip", _a2a_seq_to_heads(fused, group), qkv, 1e-6, 1e-6,
-            device, group,
+            "fused roundtrip",
+            _a2a_seq_to_heads(fused, group),
+            qkv,
+            1e-6,
+            1e-6,
+            device,
+            group,
         )
 
 
@@ -92,9 +97,13 @@ def _dense_reference(
     """Replay ``DistributedAttention.forward`` on the full (un-sharded) sequence
     with a single dense SDPA call -- the thing Ulysses must reproduce."""
     qkv = model.qkv(x_full)
-    q, k, v = rearrange(
-        qkv, "... n s (three h d) -> three ... n h s d", three=3, h=model.heads
-    ).to(attn_core_dtype(x_full)).unbind(0)
+    q, k, v = (
+        rearrange(
+            qkv, "... n s (three h d) -> three ... n h s d", three=3, h=model.heads
+        )
+        .to(attn_core_dtype(x_full))
+        .unbind(0)
+    )
     with torch.nn.attention.sdpa_kernel(
         [
             torch.nn.attention.SDPBackend.FLASH_ATTENTION,
@@ -250,7 +259,9 @@ class TestUlyssesAttention:
         out_local.backward(dout_full[:, r0 : r0 + s_loc, :])
         out_ref.backward(dout_full)
         dx_full = gather_1d_results(x_local.grad, mesh, dim=1, pm_key="row")
-        assert_close("input grad", dx_full, x_full.grad, atol, 1e-4, device, model_group)
+        assert_close(
+            "input grad", dx_full, x_full.grad, atol, 1e-4, device, model_group
+        )
 
     @pytest.mark.dist(4)
     def test_composes_with_channel_parallel(

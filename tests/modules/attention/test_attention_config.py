@@ -115,9 +115,7 @@ class TestCoreSelection:
         monkeypatch.setattr(te_core, "TE_CORE_AVAILABLE", True)
         # ``select_core`` resolves non-CUDA devices to ``cudnn`` (see its docstring).
         assert cfg._select_attn_core_forward_fn(CPU, AttnBackend.TE) is cudnn.forward
-        assert (
-            cfg._select_attn_core_backward_fn(CPU, AttnBackend.TE) is cudnn.backward
-        )
+        assert cfg._select_attn_core_backward_fn(CPU, AttnBackend.TE) is cudnn.backward
 
     def test_te_backend_raises_without_transformer_engine(self, monkeypatch):
         from jigsaw.modules.attention.functional.cores import te as te_core

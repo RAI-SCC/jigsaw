@@ -412,5 +412,7 @@ def broadcast_params_(
             continue
         flat = _flatten_dense_tensors([p.data for p in bucket])
         dist.broadcast(flat, group_src=src, group=group)
-        for p, synced in zip(bucket, _unflatten_dense_tensors(flat, [p.data for p in bucket])):
+        for p, synced in zip(
+            bucket, _unflatten_dense_tensors(flat, [p.data for p in bucket])
+        ):
             p.data.copy_(synced)

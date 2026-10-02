@@ -53,12 +53,12 @@ class TestWeightMerging:
         linear_layer = linear.DistributedXWT(
             in_dim=local_in_dim,
             out_dim=local_out_dim,
-            bias=True,
             local_rank=from_pm_dict["model"].rank(),
             device=device,
             model_group=from_pm_dict["model"],
-            row_group=from_pm_dict["row"],
             column_group=from_pm_dict["col"],
+            row_group=from_pm_dict["row"],
+            bias=True,
             bayesian=False,
         )
         assert isinstance(linear_layer.weight, torch.Tensor)
@@ -145,23 +145,23 @@ class TestWeightMerging:
                 self.linear1 = linear.DistributedXWT(
                     in_dim,
                     hidden_dim,
-                    bias=True,
                     local_rank=from_pm_dict["model"].rank(),
                     device=device,
                     model_group=from_pm_dict["model"],
-                    row_group=from_pm_dict["row"],
                     column_group=from_pm_dict["col"],
+                    row_group=from_pm_dict["row"],
+                    bias=True,
                 )
 
                 self.linear2 = linear.DistributedXWT(
                     hidden_dim,
                     out_dim,
-                    bias=True,
                     local_rank=from_pm_dict["model"].rank(),
                     device=device,
                     model_group=from_pm_dict["model"],
-                    row_group=from_pm_dict["row"],
                     column_group=from_pm_dict["col"],
+                    row_group=from_pm_dict["row"],
+                    bias=True,
                 )
                 self.activation = torch.nn.GELU()
 
