@@ -13,7 +13,9 @@ from ..config import RingAttentionConfig
 _SEED_MODULUS = 2**31 - 1
 
 
-def combine_dropout_seed(base_seed: int, local_rank: int, global_chunk_idx: int) -> int:
+def _combine_dropout_seed(
+    base_seed: int, local_rank: int, global_chunk_idx: int
+) -> int:
     """Derive a dropout seed for one (rank, chunk) pair from a base seed.
 
     Parameters
@@ -42,12 +44,12 @@ def combine_dropout_seed(base_seed: int, local_rank: int, global_chunk_idx: int)
 _SEQ_DIM = {"bhsd": 2, "bshd": 1}
 
 
-def seq_dim(layout: str) -> int:
+def _seq_dim(layout: str) -> int:
     """Axis holding the sequence in a ring q/k/v/out tensor of ``layout``."""
     return _SEQ_DIM[layout]
 
 
-def bhnd(shape: torch.Size, layout: str) -> tuple[int, int, int, int]:
+def _bhnd(shape: torch.Size, layout: str) -> tuple[int, int, int, int]:
     """``(b, h, n, d)`` from a ring q/k/v/out ``shape`` in ``layout``."""
     b, x, y, d = shape
     return (b, y, x, d) if layout == "bshd" else (b, x, y, d)

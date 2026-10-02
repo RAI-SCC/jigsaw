@@ -21,7 +21,7 @@ from jigsaw.modules.attention.config import (
 )
 
 from ._comm_overlap import PrefetchBuffer, consume, issue_on_comm_stream
-from .ring import _compute_kv, bhnd, get_hybrid_topology
+from .ring import _bhnd, _compute_kv, get_hybrid_topology
 
 
 # --------------------------------------------------------------------------- #
@@ -67,7 +67,7 @@ class _ForwardChunkProvider(ABC):
         self.local_rank = local_rank
         self.world_size = world_size
         self.layout = ring_config.core_layout
-        self.b, self.h, self.n_local, self.d = bhnd(q.shape, self.layout)
+        self.b, self.h, self.n_local, self.d = _bhnd(q.shape, self.layout)
         self.send_x = ring_config.send_in_forward == SendForward.X
 
         # Local KV, kept private so an in-flight send can never alias k / v.

@@ -6,7 +6,7 @@ The GPU-free checks:
   via seed replay, the exact backward a plain autograd graph gives for the
   same forward dropout mask -- the mechanism ``ring_forward`` /
   ``ring_backward`` rely on to keep forward and backward masks in sync.
-* ``combine_dropout_seed`` is a deterministic function of its inputs.
+* ``_combine_dropout_seed`` is a deterministic function of its inputs.
 * dropout is gated by ``self.training`` for the non-ring ``Attention`` /
   ``DistributedAttention`` cores (eval mode must be deterministic and
   bit-identical to a ``dropout_p=0`` module with the same weights).
@@ -30,7 +30,7 @@ from jigsaw.modules.attention.functional.cores import math as math_core
 from jigsaw.modules.attention.functional.cores import sdpa as sdpa_core
 from jigsaw.modules.attention.functional.cores.te import cudnn as te_cudnn_core
 from jigsaw.modules.attention.functional.cores.te import flash as te_flash_core
-from jigsaw.modules.attention.functional.ring import combine_dropout_seed
+from jigsaw.modules.attention.functional.ring import _combine_dropout_seed
 
 
 class TestMathCoreDropout:
@@ -114,16 +114,16 @@ class TestMathCoreDropout:
 
 
 class TestDropoutSeedDerivation:
-    """``combine_dropout_seed`` is what keeps a ring's forward and backward masks in sync."""
+    """``_combine_dropout_seed`` is what keeps a ring's forward and backward masks in sync."""
 
     def test_deterministic(self) -> None:
-        assert combine_dropout_seed(42, 0, 3) == combine_dropout_seed(42, 0, 3)
+        assert _combine_dropout_seed(42, 0, 3) == _combine_dropout_seed(42, 0, 3)
 
     def test_varies_with_each_input(self) -> None:
-        base = combine_dropout_seed(42, 0, 3)
-        assert combine_dropout_seed(42, 1, 3) != base
-        assert combine_dropout_seed(42, 0, 4) != base
-        assert combine_dropout_seed(43, 0, 3) != base
+        base = _combine_dropout_seed(42, 0, 3)
+        assert _combine_dropout_seed(42, 1, 3) != base
+        assert _combine_dropout_seed(42, 0, 4) != base
+        assert _combine_dropout_seed(43, 0, 3) != base
 
 
 class TestEvalModeDisablesDropout:

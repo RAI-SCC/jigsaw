@@ -11,7 +11,7 @@ from jigsaw.modules.attention.config import RingAttentionConfig
 
 from ._merge_kernel import fused_online_softmax_merge_
 from .forward_chunk_provider import build_forward_chunk_provider
-from .ring import bhnd, combine_dropout_seed
+from .ring import _bhnd, _combine_dropout_seed
 
 
 def _draw_base_seed(device: torch.device) -> int:
@@ -197,7 +197,7 @@ def ring_forward(
     )
 
     acc_dtype = torch.promote_types(q.dtype, torch.float32)
-    b, heads, n_local, _ = bhnd(q.shape, ring_config.core_layout)
+    b, heads, n_local, _ = _bhnd(q.shape, ring_config.core_layout)
     out = torch.zeros(q.shape, device=q.device, dtype=acc_dtype)
     # ``lse`` is always ``(b, h, n)`` -- both the SDPA and TE cores emit and
     # consume it in that shape regardless of the q/k/v layout; the merge
@@ -212,7 +212,7 @@ def ring_forward(
         provider.save_for_backward(step)
         global_chunk_idx = provider.global_chunk_idx(step)
         seed = (
-            combine_dropout_seed(base_seed, local_rank, global_chunk_idx)
+            _combine_dropout_seed(base_seed, local_rank, global_chunk_idx)
             if base_seed is not None
             else None
         )

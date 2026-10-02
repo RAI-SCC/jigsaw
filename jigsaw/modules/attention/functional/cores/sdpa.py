@@ -33,6 +33,9 @@ def forward(
         Dropout probability.
     seed : int, optional
         Unused.
+    layout : str
+        Kept for interface parity with the other cores; sdpa only accepts
+        ``"bhsd"``.
 
     Returns
     -------
@@ -118,6 +121,9 @@ def backward(
         Unused.
     rng_state : torch.Tensor, optional
         Dropout RNG state returned by :func:`forward`.
+    layout : str
+        Kept for interface parity with the other cores; sdpa only accepts
+        ``"bhsd"``.
 
     Returns
     -------

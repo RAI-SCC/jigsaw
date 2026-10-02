@@ -60,8 +60,7 @@ def _a2a_heads_to_seq(x: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor
 
 
 def _a2a_seq_to_heads(x: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor:
-    """``[..., s_full, h_p, d] -> [..., s_full // P, h_p * P, d]`` -- inverse of
-    :func:`_a2a_heads_to_seq`.
+    """``[..., s_full, h_p, d] -> [..., s_full // P, h_p * P, d]`` -- inverse of :func:`_a2a_heads_to_seq`.
 
     Scatters the sequence axis (``-3``) across ``group`` and gathers the head
     axis (``-2``): the heads come back in source-rank order, reconstructing the

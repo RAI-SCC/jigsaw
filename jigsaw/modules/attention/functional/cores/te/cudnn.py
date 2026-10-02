@@ -37,7 +37,8 @@ from typing import Any, Callable, Optional
 
 import torch
 
-from ._layout import Layout, from_bshd as _from_bshd
+from ._layout import Layout
+from ._layout import from_bshd as _from_bshd
 
 try:
     import transformer_engine.pytorch  # noqa: F401  (loads the C++ extension)
@@ -109,7 +110,7 @@ _TE_ALIASES: dict[str, tuple[str, ...]] = {
 
 @functools.lru_cache(maxsize=None)
 def _te_params(fn: Callable) -> frozenset[str]:
-    """The parameter names of ``fn``."""
+    """Return the parameter names of ``fn``."""
     return frozenset(inspect.signature(fn).parameters)
 
 

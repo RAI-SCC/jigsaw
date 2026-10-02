@@ -14,7 +14,7 @@ chunks correctly.
 Since this core has no opaque kernel-internal RNG state to thread back (unlike
 :mod:`.sdpa` / :mod:`.te`), it reconstructs its dropout mask from ``seed``: an
 int the ring independently recomputes identically in the forward and backward
-loops (see :func:`..functional.combine_dropout_seed`), rather than a saved
+loops (see :func:`..functional._combine_dropout_seed`), rather than a saved
 tensor. A dedicated ``torch.Generator`` seeded from it keeps the draw
 reproducible without disturbing the ambient default RNG stream.
 """
@@ -54,6 +54,9 @@ def forward(
         Dropout probability.
     seed : int, optional
         Seed of the dropout mask.
+    layout : str
+        Kept for interface parity with the other cores; math only accepts
+        ``"bhsd"``.
 
     Returns
     -------

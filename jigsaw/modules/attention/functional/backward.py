@@ -16,10 +16,10 @@ from ._comm_overlap import consume, issue_on_comm_stream
 from .backward_chunk_provider import _build_backward_chunk_provider
 from .ring import (
     HybridTopology,
-    bhnd,
-    combine_dropout_seed,
+    _bhnd,
+    _combine_dropout_seed,
+    _seq_dim,
     get_hybrid_topology,
-    seq_dim,
 )
 
 # Hybrid send-ops whose backward chunk provider rotates chunks intra-node as well
@@ -169,7 +169,7 @@ def ring_backward(
         Local ``dq``, ``dk``, ``dv``.
     """
     layout = ring_config.core_layout
-    b, h, seq_local, d = bhnd(q.shape, layout)
+    b, h, seq_local, d = _bhnd(q.shape, layout)
     # Reconcile dtypes before the cores run. Under autocast the forward saves
     # bf16/fp16 tensors (``out``, ``lse`` and the K/V chunks the provider
     # replays) and ``q``/``dout`` may arrive downcast too; the cores matmul
@@ -268,7 +268,7 @@ def ring_backward(
             ring_config, local_rank, step, ring_group_size, group
         )
         seed = (
-            combine_dropout_seed(base_seed, local_rank, global_chunk_idx)
+            _combine_dropout_seed(base_seed, local_rank, global_chunk_idx)
             if base_seed is not None
             else None
         )
@@ -365,7 +365,7 @@ def get_dkv_buffer(
     shape = list(q.shape)
     if _use_global_dkv_buffer(ring_config):
         # Global buffer spans every rank's chunk along the sequence axis.
-        sd = seq_dim(ring_config.core_layout)
+        sd = _seq_dim(ring_config.core_layout)
         shape[sd] = ring_group_size * shape[sd]
     return (
         torch.zeros(shape, device=q.device, dtype=q.dtype),
@@ -437,7 +437,7 @@ def accumulate_dkv(
         dv_j,
         seq_local,
         global_chunk_idx,
-        seq_dim(ring_config.core_layout),
+        _seq_dim(ring_config.core_layout),
     )
 
 
@@ -464,6 +464,8 @@ def _accumulate_dkv_gather(
         Local sequence length.
     global_chunk_idx : int
         Index of the sequence chunk represented by the local gradients.
+    sd : int
+        Sequence axis of ``dk_buf``/``dv_buf``.
 
     Returns
     -------
@@ -739,7 +741,7 @@ def postprocess_dkv(
     if _use_global_dkv_buffer(ring_config):
         dist.all_reduce(dk_buf, op=dist.ReduceOp.SUM, group=group)
         dist.all_reduce(dv_buf, op=dist.ReduceOp.SUM, group=group)
-        sd = seq_dim(ring_config.core_layout)
+        sd = _seq_dim(ring_config.core_layout)
         lo = local_rank * seq_local
         return (
             dk_buf.narrow(sd, lo, seq_local),

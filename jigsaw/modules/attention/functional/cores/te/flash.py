@@ -32,7 +32,8 @@ from typing import Optional
 
 import torch
 
-from ._layout import Layout, from_bshd as _from_bshd
+from ._layout import Layout
+from ._layout import from_bshd as _from_bshd
 
 try:
     import flash_attn  # noqa: F401  (loads the CUDA extension)

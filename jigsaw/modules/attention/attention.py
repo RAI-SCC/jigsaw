@@ -73,16 +73,16 @@ if JIGSAW_TE_AVAILABLE:
 
             Parameters
             ----------
-            q, k, v: torch.Tensor
+            q, k, v : torch.Tensor
                 Query/key/value tensors in ``bshd`` format
                 (``[batch, seq, heads, head_dim]``), fp16 or bf16.
-            scale: float
+            scale : float
                 Softmax scale (``head_dim ** -0.5`` for the callers here --
                 ``te.DotProductAttention``'s default).
-            dropout_p: float
+            dropout_p : float
                 Attention dropout probability. Already gated on training mode by
                 the caller; this function has no ``self.training`` to consult.
-            core: module
+            core : module
                 The TE core to run -- :mod:`.functional.cores.te.cudnn` or
                 :mod:`.functional.cores.te.flash`, resolved once per module by
                 :func:`.functional.cores.te.select_core`.
@@ -717,8 +717,7 @@ class DistributedAttention(torch.nn.Module):
         v: torch.Tensor,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Attention computation on the TransformerEngine kernels.
+        """Attention computation on the TransformerEngine kernels.
 
         Runs ``self.te_core`` -- cuDNN on Hopper+, ``flash_attn`` on Ampere --
         shared with the ring's inner core; see
@@ -727,20 +726,19 @@ class DistributedAttention(torch.nn.Module):
 
         Parameters
         ----------
-        q: torch.Tensor
+        q : torch.Tensor
             Query tensor, ``bshd`` (``[batch, seq, heads, head_dim]``).
-        k: torch.Tensor
+        k : torch.Tensor
             Keys tensor, ``bshd``.
-        v: torch.Tensor
+        v : torch.Tensor
             Values tensor, ``bshd``.
-        kwargs:
-            Additional optional parameters.
+        **kwargs : torch.Tensor
+            Unused.
 
         Returns
         -------
-        out: torch.Tensor
+        torch.Tensor
             Output of attention computation, ``[batch, seq, heads * head_dim]``.
-
         """
         # There is no dropout nn.Module here to apply its own training-mode
         # gate, so gate it the way the sdpa/math cores do.
@@ -791,7 +789,7 @@ class DistributedAttention(torch.nn.Module):
     def _dense_bshd_core(
         self, dropout_p: float
     ) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
-        """A single dense-attention call on ``bshd`` ``q``/``k``/``v``.
+        """Build a single dense-attention call on ``bshd`` ``q``/``k``/``v``.
 
         The resolved TE kernel (``bshd``-native) or torch SDPA (transposed to
         ``bhsd`` around the call and back). Used as the inner core of flat
@@ -832,7 +830,7 @@ class DistributedAttention(torch.nn.Module):
     def _inter_node_ring_core(
         self, dropout_p: float
     ) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
-        """A P2P ring over the inter-node group on ``bshd`` ``q``/``k``/``v``.
+        """Build a P2P ring over the inter-node group on ``bshd`` ``q``/``k``/``v``.
 
         The inner core of the hierarchical Ulysses scheme: after the intra-node
         all-to-all, ``q``/``k``/``v`` cover one node's worth of sequence on
