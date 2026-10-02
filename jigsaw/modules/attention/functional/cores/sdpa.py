@@ -1,19 +1,7 @@
-"""SDPA flash-attention core for the ring inner step (CUDA).
+"""Flash-attention core for the ring's inner attention (CUDA).
 
-Wraps the two undocumented
-``torch.ops.aten._scaled_dot_product_flash_attention{,_backward}`` ops, which --
-unlike ``F.scaled_dot_product_attention`` -- return the softmax log-sum-exp the
-ring's online-softmax merge and explicit-LSE backward need.
-
-On CPU the selectors fall back to :mod:`.math`; see
-:func:`..config._select_attn_core_forward_fn`.
-
-The dropout path threads through the two extra tensors the flash kernel needs
-to reproduce its mask, on top of the replay strategy the no-dropout path
-already uses. It needs CUDA, so it is skipped where no GPU is present;
-``tests/modules/attention/test_dropout.py::TestSdpaTeCoreDropoutReplay``
-recovers the opaque mask from the forward output and checks that
-:func:`backward` replays it (verified on an NVIDIA A100).
+Wraps ``torch.ops.aten._scaled_dot_product_flash_attention`` and its backward,
+which return the log-sum-exp needed by the ring.
 """
 
 from __future__ import annotations
@@ -53,7 +41,12 @@ def _build_bias(
         return None
     neg = torch.finfo(dtype).min
     bias = torch.zeros(
-        key_mask.shape[0] if key_mask is not None else 1, 1, sq, sk, dtype=dtype, device=device
+        key_mask.shape[0] if key_mask is not None else 1,
+        1,
+        sq,
+        sk,
+        dtype=dtype,
+        device=device,
     )
     if causal:
         causal_exclude = torch.triu(
@@ -77,13 +70,28 @@ def forward(
     causal: bool = False,
     key_mask: Optional[torch.Tensor] = None,
     seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
+    *,
+    layout: str = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    """Flash attention forward pass. Returns ``(out, logsumexp, rng_state)``.
+    """Compute flash attention.
 
-    Calling convention for the two undocumented
-    ``torch.ops.aten._scaled_dot_product_flash_attention{,_backward}`` ops,
-    worked out against a naive ``softmax(q @ k.mT * scale) @ v`` autograd
-    reference and ``F.scaled_dot_product_attention``:
+    Parameters
+    ----------
+    q, k, v : torch.Tensor
+        Query, key and value, shaped ``(b, h, s, d)``.
+    scale : float
+        Softmax scale.
+    dropout_p : float
+        Dropout probability.
+    causal : bool
+        Whether to apply the causal triangular mask.
+    key_mask : torch.Tensor, optional
+        Boolean key-padding mask, ``[B, Sk]``, ``True`` = attend.
+    seed : int, optional
+        Unused.
+    layout : str
+        Kept for interface parity with the other cores; sdpa only accepts
+        ``"bhsd"``.
 
     * ``q``/``k``/``v``/``out``/``grad_out`` are ``(B, H, S, d)`` -- heads
       *before* sequence -- and contiguous. The public ``(B, S, H, d)`` layout
@@ -111,7 +119,19 @@ def forward(
     the two masks compose. CUDA-only, like the flash op; unverified against a
     GPU in this repo (no CUDA device available in the environment this was
     written in) -- verify before relying on it in production.
+
+    Returns
+    -------
+    out : torch.Tensor
+        Attention output.
+    logsumexp : torch.Tensor
+        Log-sum-exp of the scores.
+    rng_state : torch.Tensor | None
+        Dropout RNG state of the kernel, ``None`` without dropout.
     """
+    assert layout == "bhsd", (
+        f"sdpa core is bhsd-only; got layout={layout!r}. The bshd ring is TE-only."
+    )
     q, k, v = [x.to(torch.float16) for x in (q, k, v)]
     if key_mask is None:
         (
@@ -171,14 +191,37 @@ def backward(
     dropout_p: float = 0.0,
     seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
     rng_state: Optional[torch.Tensor] = None,
+    layout: str = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Backward call to flash attention. Returns (dq, dk, dv).
+    """Compute the flash-attention gradients.
 
-    ``rng_state`` -- the flattened ``[*philox_seed, philox_offset]`` tensor
-    :func:`forward` packed for this same chunk -- is split back here (offset is
-    the last element) and replayed so the kernel reconstructs the identical
-    dropout mask it applied in forward; without it (``None``, the
-    ``dropout_p == 0`` case) any same-device int64 tensors work, hence zeros.
+    Parameters
+    ----------
+    grad_out : torch.Tensor
+        Gradient of the output.
+    q, k, v : torch.Tensor
+        Query, key and value, shaped ``(b, h, s, d)``.
+    out : torch.Tensor
+        Saved attention output.
+    logsumexp : torch.Tensor
+        Saved log-sum-exp.
+    scale : float
+        Softmax scale.
+    max_q, max_k : float
+        Query and key sequence lengths.
+    causal : bool
+        Whether the causal triangular mask was applied in the forward.
+    key_mask : torch.Tensor, optional
+        Boolean key-padding mask, ``[B, Sk]``, ``True`` = attend.
+    dropout_p : float
+        Dropout probability.
+    seed : int, optional
+        Unused.
+    rng_state : torch.Tensor, optional
+        Dropout RNG state returned by :func:`forward`.
+    layout : str
+        Kept for interface parity with the other cores; sdpa only accepts
+        ``"bhsd"``.
 
     See :func:`forward` for the ``(B, H, S, d)`` layout, the meaning of
     ``max_q`` / ``max_k`` / ``philox_*`` / ``cum_seq_*``, ``causal``, and the
@@ -190,11 +233,17 @@ def backward(
     it as fp32 and returns garbage for a 16-bit ``logsumexp`` (the ring's
     :func:`..backward.ring_backward` hands it back downcast to the model dtype).
     Gradients are returned in the input dtype.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Gradients ``(dq, dk, dv)`` in the input dtype.
     """
-    in_dtype = grad_out.dtype
-    grad_out, q, k, v, out = (
-        t.to(torch.float16) for t in (grad_out, q, k, v, out)
+    assert layout == "bhsd", (
+        f"sdpa core is bhsd-only; got layout={layout!r}. The bshd ring is TE-only."
     )
+    in_dtype = grad_out.dtype
+    grad_out, q, k, v, out = (t.to(torch.float16) for t in (grad_out, q, k, v, out))
     logsumexp = logsumexp.to(torch.float32)
 
     if key_mask is None:
@@ -224,8 +273,14 @@ def backward(
         return dq.to(in_dtype), dk.to(in_dtype), dv.to(in_dtype)
 
     bias = _build_bias(
-        q.shape[0], q.shape[1], q.shape[-2], k.shape[-2],
-        causal, key_mask, q.dtype, q.device,
+        q.shape[0],
+        q.shape[1],
+        q.shape[-2],
+        k.shape[-2],
+        causal,
+        key_mask,
+        q.dtype,
+        q.device,
     )
     dq, dk, dv, _ = torch.ops.aten._scaled_dot_product_efficient_attention_backward(
         grad_out,

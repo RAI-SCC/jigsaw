@@ -130,8 +130,13 @@ def dist_env(
     else:
         assert dist.is_gloo_available()
 
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "12355"
+    # Default to a single-machine rendezvous for local/CI runs; a real launcher
+    # that already computed the job's actual rendezvous host (e.g. run.sh
+    # deriving it from SLURM_JOB_NODELIST) exports MASTER_ADDR itself, and that
+    # must win here or a multi-node run can never actually rendezvous --
+    # "localhost" resolves to a different loopback on every node.
+    os.environ.setdefault("MASTER_ADDR", "localhost")
+    os.environ.setdefault("MASTER_PORT", "12355")
 
     dist.init_process_group(
         backend="nccl" if device.type == "cuda" else "gloo",
@@ -168,6 +173,22 @@ def device(request: Any) -> torch.device:
         local_id = mpi_rank % torch.cuda.device_count()
         device = torch.device("cuda", local_id)
         return device
+
+
+@pytest.fixture(autouse=True)
+def restore_torch_numerics() -> Generator[None, None, None]:
+    """Undo a test's changes to torch's global numerics settings.
+
+    Some tests switch on ``torch.use_deterministic_algorithms`` for a reproducible
+    reference. Left on, it makes every later cuBLAS matmul on the GPU raise (unless
+    ``CUBLAS_WORKSPACE_CONFIG`` is set), failing unrelated tests further down the run.
+    """
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    tf32 = torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
+    yield
+    torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
+    torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = tf32
 
 
 @pytest.fixture(autouse=False)

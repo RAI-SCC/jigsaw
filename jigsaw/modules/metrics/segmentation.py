@@ -1,19 +1,4 @@
-"""Distributed semantic-segmentation metrics built on a confusion matrix.
-
-The confusion matrix ``cm[t, p]`` counts pixels with true class ``t`` and
-predicted class ``p``.  It is the single quantity that needs communication:
-
-* if the class dimension of the prediction logits is sharded across
-  ``channel_group`` the arg-max is distributed (see
-  :func:`jigsaw.modules.loss.common.distributed_argmax`);
-* the ``C x C`` count matrix is summed across every ``reduce_groups`` group, i.e.
-  every group over which the batch / spatial dimensions are partitioned.  It is
-  *not* reduced over ``channel_group`` -- after the distributed arg-max every
-  channel rank holds the same prediction map for its spatial shard.
-
-Every scalar metric (mIoU, Dice, pixel accuracy, ...) is then a pure function of
-the reduced matrix and needs no further communication.
-"""
+"""Distributed semantic-segmentation metrics based on a confusion matrix."""
 
 from typing import Optional, Sequence
 
@@ -35,37 +20,36 @@ def distributed_confusion_matrix(
     reduce_groups: GroupsArg = None,
     pred_is_logits: Optional[bool] = None,
 ) -> torch.Tensor:
-    """Accumulate a distributed ``[num_classes, num_classes]`` confusion matrix.
+    """Compute the confusion matrix of a sharded prediction.
+
+    Rows of the matrix index the true class and columns the predicted class.
 
     Parameters
     ----------
     pred : torch.Tensor
-        Either prediction logits/scores with the (possibly sharded) class
-        dimension at ``dim`` -- shape ``target.shape`` with ``dim`` inserted --
-        or already-arg-maxed global class indices with the same shape as
-        ``target``.
+        Logits with the class dimension ``dim`` holding the local shard, or global
+        class indices with the shape of ``target``.
     target : torch.Tensor
-        Ground-truth class indices, shape ``[N, *spatial]``.
+        Class indices.
     num_classes : int
-        Global number of classes ``C``.
-    ignore_index : Optional[int]
-        Target value to exclude from the matrix entirely.
+        Global number of classes.
+    ignore_index : int, optional
+        Target value to exclude from the matrix.
     dim : int
-        Class dimension of ``pred`` when it holds logits.
-    channel_group : Optional[dist.ProcessGroup]
-        Group sharding the class dimension (only used for the distributed
-        arg-max when ``pred`` holds logits).
-    reduce_groups : GroupsArg
-        Every group over which the batch / spatial dimensions are partitioned.
-    pred_is_logits : Optional[bool]
-        Force the interpretation of ``pred``; inferred from its rank otherwise.
+        Class dimension of ``pred`` if it holds logits.
+    channel_group : dist.ProcessGroup, optional
+        Group across which the class dimension is partitioned.
+    reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
+        Every group across which the batch and spatial dimensions are partitioned.
+    pred_is_logits : bool, optional
+        Whether ``pred`` holds logits. Inferred from the number of dimensions of
+        ``pred`` if ``None``.
 
     Returns
     -------
     torch.Tensor
-        ``int64`` confusion matrix of shape ``[num_classes, num_classes]``,
-        identical on every rank of ``reduce_groups``.  Rows index the true
-        class, columns the predicted class.
+        ``int64`` matrix of shape ``(num_classes, num_classes)``, identical on every
+        rank of ``reduce_groups``.
     """
     groups = _normalize_groups(reduce_groups)
 
@@ -102,11 +86,7 @@ def distributed_confusion_matrix(
 
 
 def _count_ratio(numerator: torch.Tensor, denominator: torch.Tensor) -> torch.Tensor:
-    """``numerator / denominator`` for integer-count denominators; ``nan`` when it is ``0``.
-
-    The denominator is a sum of non-negative counts, so it is either ``0`` (the
-    ``nan`` case) or ``>= 1`` -- clamping to ``1`` only rewrites the ignored branch.
-    """
+    """Divide by a non-negative count, giving ``nan`` where it is zero."""
     return torch.where(
         denominator > 0,
         numerator / denominator.clamp_min(1),
@@ -115,7 +95,7 @@ def _count_ratio(numerator: torch.Tensor, denominator: torch.Tensor) -> torch.Te
 
 
 def _ratio(numerator: torch.Tensor, denominator: torch.Tensor) -> torch.Tensor:
-    """``numerator / denominator`` with ``nan`` where ``denominator == 0`` (any magnitude)."""
+    """Divide, giving ``nan`` where the denominator is zero."""
     return torch.where(
         denominator != 0,
         numerator / denominator.masked_fill(denominator == 0, 1.0),
@@ -130,26 +110,25 @@ def confusion_to_metrics(
 ) -> dict[str, torch.Tensor]:
     """Derive segmentation metrics from a confusion matrix.
 
-    Absent classes (a zero row *and* column) yield ``nan`` in their per-class
-    entry and are dropped from the ``mean_*`` aggregates (``nanmean``).
+    Classes absent from the matrix yield ``nan`` and are excluded from the ``mean_*``
+    entries.
 
     Parameters
     ----------
     confusion : torch.Tensor
-        ``[C, C]`` matrix, rows = true class, columns = predicted class.
-    exclude : Optional[Sequence[int]]
-        Class indices to drop before computing anything -- their rows and
-        columns are zeroed, so the excluded pixels count towards neither the
-        per-class metrics nor pixel accuracy.
+        Matrix of shape ``(C, C)`` with rows indexing the true class and columns the
+        predicted class.
+    exclude : Sequence[int], optional
+        Classes whose rows and columns are zeroed before the metrics are computed.
 
     Returns
     -------
     dict[str, torch.Tensor]
-        Keys: ``confusion``, ``support``, ``per_class_iou``, ``mean_iou``,
+        Metrics keyed by ``confusion``, ``support``, ``per_class_iou``, ``mean_iou``,
         ``per_class_dice``, ``mean_dice``, ``per_class_precision``,
         ``mean_precision``, ``per_class_recall``, ``mean_recall``,
-        ``pixel_accuracy``, ``mean_accuracy``, ``frequency_weighted_iou``,
-        ``cohen_kappa``.  Every value is a tensor (0-dim for the scalars).
+        ``pixel_accuracy``, ``mean_accuracy``, ``frequency_weighted_iou`` and
+        ``cohen_kappa``.
     """
     cm = confusion.to(torch.float64)
     if exclude:
@@ -198,12 +177,7 @@ def confusion_to_metrics(
 
 
 class DistributedSegmentationMetrics(torch.nn.Module):
-    """Confusion-matrix accumulator for distributed semantic segmentation.
-
-    ``update`` (also the ``forward``) is collective -- it must be called in
-    lock-step on every rank of ``reduce_groups`` -- and folds one batch into the
-    running matrix.  ``compute`` and ``reset`` are purely local.
-    """
+    """Confusion-matrix accumulator for distributed semantic segmentation."""
 
     def __init__(
         self,
@@ -221,16 +195,16 @@ class DistributedSegmentationMetrics(torch.nn.Module):
         ----------
         num_classes : int
             Global number of classes.
-        channel_group : Optional[dist.ProcessGroup]
-            Group sharding the class dimension of the prediction logits.
-        reduce_groups : GroupsArg
-            Every group over which the batch / spatial dimensions are partitioned.
-        ignore_index : Optional[int]
-            Target value excluded from the matrix.
+        channel_group : dist.ProcessGroup, optional
+            Group across which the class dimension of the predictions is partitioned.
+        reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
+            Every group across which the batch and spatial dimensions are partitioned.
+        ignore_index : int, optional
+            Target value to exclude from the matrix.
         dim : int
-            Class dimension of the prediction logits.
-        exclude : Optional[Sequence[int]]
-            Class indices dropped when :meth:`compute` derives the metrics.
+            Class dimension of the predictions.
+        exclude : Sequence[int], optional
+            Classes whose rows and columns are zeroed by :meth:`compute`.
         """
         super().__init__()
         self.num_classes = num_classes
@@ -242,7 +216,7 @@ class DistributedSegmentationMetrics(torch.nn.Module):
         self.confusion = torch.zeros(num_classes, num_classes, dtype=torch.int64)
 
     def get_parameter_count(self) -> int:
-        """Return ``0``; the metric holds no trainable parameters."""
+        """Return the number of local parameters."""
         return 0
 
     def reset(self) -> None:
@@ -251,7 +225,23 @@ class DistributedSegmentationMetrics(torch.nn.Module):
 
     @torch.no_grad()
     def update(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Fold one batch into the running matrix and return that batch's matrix."""
+        """Add a batch to the running confusion matrix.
+
+        This is a collective call on the ranks of ``reduce_groups``.
+
+        Parameters
+        ----------
+        pred : torch.Tensor
+            Logits with the class dimension holding the local shard, or global class
+            indices.
+        target : torch.Tensor
+            Class indices.
+
+        Returns
+        -------
+        torch.Tensor
+            Confusion matrix of the batch.
+        """
         cm = distributed_confusion_matrix(
             pred,
             target,
@@ -267,5 +257,11 @@ class DistributedSegmentationMetrics(torch.nn.Module):
     forward = update
 
     def compute(self) -> dict[str, torch.Tensor]:
-        """Return the segmentation metrics for the matrix accumulated so far."""
+        """Compute the metrics of the accumulated confusion matrix.
+
+        Returns
+        -------
+        dict[str, torch.Tensor]
+            Metrics as returned by :func:`confusion_to_metrics`.
+        """
         return confusion_to_metrics(self.confusion, exclude=self.exclude)

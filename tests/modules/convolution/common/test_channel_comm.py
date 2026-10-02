@@ -19,7 +19,10 @@ from jigsaw.modules.convolution.common.channel_comm import (
     _resolve_channel_hop,
     gather_full_channels,
     resolve_channel_comm,
+    resolve_conv_groups,
 )
+from jigsaw.modules.convolution.common.halo import exchange_along_axis
+from jigsaw.modules.convolution.common.spatial_split import _reduce_scatter_channels
 
 
 class TestResolveChannelComm:
@@ -29,9 +32,7 @@ class TestResolveChannelComm:
 
     def test_auto_resolves_to_all_to_all_on_cuda(self) -> None:
         """``"auto"`` -> ``"all_to_all"`` on CUDA; only the device *type* matters."""
-        assert (
-            resolve_channel_comm("auto", torch.device("cuda", 0)) == "all_to_all"
-        )
+        assert resolve_channel_comm("auto", torch.device("cuda", 0)) == "all_to_all"
 
     @pytest.mark.parametrize("name", list(CHANNEL_COMMS))
     def test_explicit_names_pass_through(self, name: str) -> None:
@@ -90,9 +91,7 @@ class TestResolveChannelHop:
         """NCCL has a real all-to-all, so the hop lookup returns it."""
         if dist.get_backend() != "nccl":
             pytest.skip("only meaningful on the nccl backend")
-        assert (
-            _resolve_channel_hop("all_to_all", dist.group.WORLD) is comm_1d_alltoall
-        )
+        assert _resolve_channel_hop("all_to_all", dist.group.WORLD) is comm_1d_alltoall
 
 
 class TestGatherFullChannels:
@@ -124,3 +123,45 @@ class TestGatherFullChannels:
         gather_full_channels(x_grad, col, channel_dim=1).pow(2).sum().backward()
         assert x_grad.grad is not None
         assert torch.equal(x_grad.grad, 2 * x_grad.detach())
+
+
+class TestResolveConvGroups:
+    def test_dense_convolution_is_not_channel_local(self) -> None:
+        assert resolve_conv_groups(1, 8, 8, 4) == (False, 1)
+
+    def test_groups_that_are_a_multiple_of_the_channel_group_are_channel_local(
+        self,
+    ) -> None:
+        assert resolve_conv_groups(8, 16, 16, 4) == (True, 2)
+
+    def test_rejects_non_positive_groups(self) -> None:
+        with pytest.raises(ValueError, match="groups must be >= 1"):
+            resolve_conv_groups(0, 8, 8, 2)
+
+    @pytest.mark.parametrize("in_ch, out_ch", [(6, 8), (8, 6)])
+    def test_rejects_channels_not_divisible_by_groups(
+        self, in_ch: int, out_ch: int
+    ) -> None:
+        with pytest.raises(ValueError, match="divisible by groups"):
+            resolve_conv_groups(4, in_ch, out_ch, 2)
+
+    def test_rejects_groups_that_do_not_fit_the_channel_group(self) -> None:
+        with pytest.raises(NotImplementedError, match="multiple"):
+            resolve_conv_groups(3, 6, 6, 2)
+
+
+class TestSingletonGroupPrimitives:
+    def test_reduce_scatter_of_a_single_rank_is_the_identity(self) -> None:
+        g_x = torch.randn(2, 4, 5)
+        out, handle = _reduce_scatter_channels(g_x, _singleton_group(), n=1)
+        assert handle is None and torch.equal(out, g_x)
+
+    def test_exchange_with_nothing_to_send_returns_empty_slices(
+        self, device: torch.device
+    ) -> None:
+        template = torch.randn(2, 3, 4, device=device)
+        part = template.narrow(-1, 0, 0)
+        (recv,) = exchange_along_axis(
+            _singleton_group(), template, [part], [0], [0], axis=-1
+        )
+        assert recv.shape == (2, 3, 0)

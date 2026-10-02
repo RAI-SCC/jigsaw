@@ -1,4 +1,4 @@
-"""Expose distributed linear layers to public interface."""
+"""Distributed normalization layers."""
 
 from .normalization import DistributedLayerNorm as DistributedLayerNorm
 from .normalization import DistributedNoParamLayerNorm as DistributedNoParamLayerNorm

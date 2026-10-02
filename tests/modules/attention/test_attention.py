@@ -107,6 +107,63 @@ class TestDistributedAttention:
             loss.backward()
             optimizer.step()
 
+    @pytest.mark.dist(4)
+    def test_ring_with_channel_parallel_smoke(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """Ring attention composes with a channel-sharded qkv on a 2x2 mesh.
+
+        The ring re-projects K/V from a plain local ``qkv.weight`` matmul, which
+        cannot work once the projection is channel-parallel, so
+        ``DistributedAttention`` forces the ring to circulate K/V instead
+        (``send_in_forward = save_for_backward = KV``). This exercises that path
+        forward and backward -- ``local_seq_len != heads`` here, which is also
+        what surfaced the ``(b, h, s)`` vs ``(b, s, h)`` LSE-layout bug in the
+        backward. Correctness (vs a serial reference) is left to the functional
+        ``test_ring_attention`` suite; this only guards the wiring.
+        """
+        from jigsaw.modules.attention import config as attn_config
+
+        model_group = process_mesh_dict_2x2["model"]
+
+        # A `config=None` build auto-selects the KV-circulating policy.
+        defaulted = _build_distributed(process_mesh_dict_2x2, device, ring=True)
+        assert defaulted.config.send_in_forward is attn_config.SendForward.KV
+        assert defaulted.config.save_for_backward is attn_config.SaveBackward.KV
+
+        # P2P ring (the 2-rank spatial group is not divisible by the default
+        # HYBRID `gpus_per_node`); KV in/out so `_compute_kv` is never reached.
+        cfg = attn_config.RingAttentionConfig(
+            device=device,
+            send_op=attn_config.SendOp.P2P,
+            send_in_forward=attn_config.SendForward.KV,
+            save_for_backward=attn_config.SaveBackward.KV,
+        )
+        model = _build_distributed(
+            process_mesh_dict_2x2, device, ring=True, config=cfg
+        )
+
+        local_seq_len = 14
+        local_channels = _IN_DIM // process_mesh_dict_2x2["col"].size()
+        x = torch.randn(2, local_seq_len, local_channels, device=device, requires_grad=True)
+        out = model(x)
+        assert out.shape == x.shape
+        out.sum().backward()
+
+        assert all_ranks_ok(bool(torch.isfinite(out).all()), device, model_group)
+        assert all_ranks_ok(bool(torch.isfinite(x.grad).all()), device, model_group)
+        _assert_all_params_replicated(model, process_mesh_dict_2x2, device)
+
+        # An explicit config that would drive `_compute_kv` is rejected, not
+        # silently corrected.
+        bad = attn_config.RingAttentionConfig(
+            device=device,
+            send_op=attn_config.SendOp.P2P,
+            send_in_forward=attn_config.SendForward.X,
+        )
+        with pytest.raises(ValueError, match="channel/tensor parallelism"):
+            _build_distributed(process_mesh_dict_2x2, device, ring=True, config=bad)
+
         _assert_all_params_replicated(model, process_mesh_dict_2x2, device)
 
     @pytest.mark.dist(4)

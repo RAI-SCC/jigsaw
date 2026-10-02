@@ -1,4 +1,4 @@
-"""Distributed matrix multiplication implementation with Point-to-point operations."""
+"""Distributed matmul kernels using point-to-point communication."""
 
 from typing import cast
 
@@ -19,31 +19,36 @@ def fused_xw_xtw_twoway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Fused calculation to calculate grad_input and grad_weight in backward pass of a linear layer.
+    """Compute the input and weight gradients on two processes with point-to-point communication.
+
+    The gradients are ``grad_output @ weight`` and ``grad_output.mT @ input``.
 
     Parameters
     ----------
-    grad_output: torch.Tensor
-        Output with respect to the gradient.
-    weight: torch.Tensor
-        Model weights.
-    input: torch.Tensor
-        Model input.
-    local_rank: int
-        Local model rank.
-    device: torch.device
-        Device upon which computations occur.
-    model_group: dist.ProcessGroup
-        Process group of the domain- and tensor-parallel group of this linear layer.
+    grad_output : torch.Tensor
+        Gradient of the output.
+    weight : torch.Tensor
+        Local weight matrix.
+    input : torch.Tensor
+        Local input matrix.
+    local_rank : int
+        Rank within the model group.
+    device : torch.device
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor]
-    Gradient with respect to the input and gradient of the weights.
+        Gradients of the input and the weight.
     """
     mod = local_rank % 2
     w0, w1 = torch.split(weight, weight.shape[-2] // 2, dim=-2)
+    # ``grad_output`` is sent verbatim through ``isend`` below, which rejects
+    # non-contiguous tensors; autograd routinely hands us a strided gradient
+    # (e.g. through a preceding transpose / broadcast, as ``sum()``'s does).
+    grad_output = grad_output.contiguous()
     buffer_x = get_preallocated_buffer(
         grad_output.shape, grad_output.dtype, local_rank, device
     )
@@ -82,8 +87,7 @@ def xw_transpose_twoway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (XWT) multiplication distributed across two processes.
+    """Compute ``x @ w.mT`` on two processes with point-to-point communication.
 
     Parameters
     ----------
@@ -91,16 +95,16 @@ def xw_transpose_twoway(
         Local input matrix.
     wij : torch.Tensor
         Local weight matrix.
-    device : torch.device
-        Device to perform computation on.
     local_rank : int
-        Local local_rank.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Rank within the model group.
+    device : torch.device
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 2
@@ -148,8 +152,7 @@ def xw_twoway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (XW) multiplication distributed across two processes.
+    """Compute ``x @ w`` on two processes with point-to-point communication.
 
     Parameters
     ----------
@@ -157,16 +160,16 @@ def xw_twoway(
         Local input matrix.
     wij : torch.Tensor
         Local weight matrix.
-    device : torch.device
-        Device to perform computation on.
     local_rank : int
-        Global local_rank.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Rank within the model group.
+    device : torch.device
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 2
@@ -203,8 +206,7 @@ def x_transpose_w_twoway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (x_transposeW) multiplication distributed across two processes.
+    """Compute ``x.mT @ w`` on two processes with point-to-point communication.
 
     Parameters
     ----------
@@ -212,16 +214,16 @@ def x_transpose_w_twoway(
         Local input matrix.
     wij : torch.Tensor
         Local weight matrix.
-    device : torch.device
-        The device on which to perform the operations.
     local_rank : int
-        Local model rank.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Rank within the model group.
+    device : torch.device
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 2
@@ -260,8 +262,7 @@ def xw_transpose_fourway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (XWT) multiplication distributed across four processes.
+    """Compute ``x @ w.mT`` on four processes with point-to-point communication.
 
     Parameters
     ----------
@@ -270,15 +271,15 @@ def xw_transpose_fourway(
     wij : torch.Tensor
         Local weight matrix.
     local_rank : int
-        Local model rank.
+        Rank within the model group.
     device : torch.device
-        Device to perform computation on.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 4
@@ -382,8 +383,7 @@ def xw_fourway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (XW) multiplication distributed across four processes.
+    """Compute ``x @ w`` on four processes with point-to-point communication.
 
     Parameters
     ----------
@@ -392,11 +392,11 @@ def xw_fourway(
     wij : torch.Tensor
         Local weight matrix.
     local_rank : int
-        Local model rank.
+        Rank within the model group.
     device : torch.device
-        Device to perform computation on.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
@@ -468,28 +468,29 @@ def fused_xw_xtw_fourway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Fused calculation to calculate grad_input and grad_weight in backward pass of a linear layer.
+    """Compute the input and weight gradients on four processes with point-to-point communication.
+
+    The gradients are ``grad_output @ weight`` and ``grad_output.mT @ input``.
 
     Parameters
     ----------
-    grad_output: torch.Tensor
-        Output with respect to the gradient.
-    weight: torch.Tensor
-        Model weights.
-    input: torch.Tensor
-        Model input.
-    local_rank: int
-        Local model rank.
-    device: torch.device
-        Device upon which computations occur.
-    model_group: dist.ProcessGroup
-        Process group of the domain- and tensor-parallel group of this linear layer.
+    grad_output : torch.Tensor
+        Gradient of the output.
+    weight : torch.Tensor
+        Local weight matrix.
+    input : torch.Tensor
+        Local input matrix.
+    local_rank : int
+        Rank within the model group.
+    device : torch.device
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor]
-    Gradient with respect to the input and gradient of the weights.
+        Gradients of the input and the weight.
     """
     mod = local_rank % 4
 
@@ -682,8 +683,7 @@ def x_transpose_w_fourway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (x_transposeW) multiplication distributed across four processes.
+    """Compute ``x.mT @ w`` on four processes with point-to-point communication.
 
     Parameters
     ----------
@@ -692,15 +692,15 @@ def x_transpose_w_fourway(
     wij : torch.Tensor
         Local weight matrix.
     local_rank : int
-        Local model rank.
+        Rank within the model group.
     device : torch.device
-        Device to perform computation on.
+        Device of the computation.
     model_group : dist.ProcessGroup
-        Process group for an individual model-parallel instance.
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 4
@@ -802,25 +802,24 @@ def xw_transpose_eightway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (XWT) multiplication distributed across four processes.
+    """Compute ``x @ w.mT`` on eight processes with point-to-point communication.
 
-    Parameters.
+    Parameters
     ----------
     xij : torch.Tensor
         Local input matrix.
     wij : torch.Tensor
         Local weight matrix.
     local_rank : int
-        Local model rank.
+        Rank within the model group.
     device : torch.device
-        Device to perform computation on.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 8
@@ -1097,25 +1096,24 @@ def xw_eightway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (XW) multiplication distributed across eight processes.
+    """Compute ``x @ w`` on eight processes with point-to-point communication.
 
-    Parameters.
+    Parameters
     ----------
     xij : torch.Tensor
         Local input matrix.
     wij : torch.Tensor
         Local weight matrix.
     local_rank : int
-        Local model rank.
+        Rank within the model group.
     device : torch.device
-        Device to perform computation on.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 8
@@ -1383,6 +1381,7 @@ def xw_eightway(
             recv_x.wait()
             recv_w_1.wait()
             recv_w_3.wait()
+            send_w_1.wait()
     cij1 = torch.matmul(buffer_x, w1)
     cij = cij0 + cij1
     return cij
@@ -1395,8 +1394,7 @@ def x_transpose_w_eightway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """
-    Batched matrix-matrix (x_transposeW) multiplication distributed across eight processes.
+    """Compute ``x.mT @ w`` on eight processes with point-to-point communication.
 
     Parameters
     ----------
@@ -1405,15 +1403,15 @@ def x_transpose_w_eightway(
     wij : torch.Tensor
         Local weight matrix.
     local_rank : int
-        Local model rank.
+        Rank within the model group.
     device : torch.device
-        Device to perform computation on.
-    model_group : dist.ProcessGroup, optional
-        Process group for an individual model-parallel instance.
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
-    cij : torch.Tensor
+    torch.Tensor
         Local result.
     """
     mod = local_rank % 8
@@ -1780,6 +1778,8 @@ def x_transpose_w_eightway(
             recv_w_6.wait()
             send_w_6.wait()
             cij3 = torch.matmul(buffer_x_7, buffer_w_6)
+            send_x_2.wait()
+            send_w_2.wait()
         case 5:
             recv_x_1.wait()
             recv_w_1.wait()
@@ -1826,6 +1826,7 @@ def x_transpose_w_eightway(
             recv_x_5.wait()
             recv_w_5.wait()
             cij3 = torch.matmul(buffer_x_5, buffer_w_5)
+            send_w_5.wait()
     cij = cij0 + cij1 + cij2 + cij3
 
     return cij
@@ -1839,34 +1840,29 @@ def fused_xw_xtw_eightway(
     device: torch.device,
     model_group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Fused calculation of grad_input and grad_weight in the backward pass of a linear layer.
+    """Compute the input and weight gradients on eight processes with point-to-point communication.
 
-    Computes ``grad_input = grad_output @ weight`` (as in :func:`xw_eightway`) and
-    ``grad_weight = grad_output.mT @ input`` (as in :func:`x_transpose_w_eightway`)
-    across eight processes. Both operations consume ``grad_output``; posting the
-    point-to-point exchanges of both operations up front lets the communication of
-    one overlap with the computation of the other.
+    The gradients are ``grad_output @ weight`` and ``grad_output.mT @ input``.
 
     Parameters
     ----------
-    grad_output: torch.Tensor
-        Output with respect to the gradient.
-    weight: torch.Tensor
-        Model weights.
-    input: torch.Tensor
-        Model input.
-    local_rank: int
-        Local model rank.
-    device: torch.device
-        Device upon which computations occur.
-    model_group: dist.ProcessGroup
-        Process group of the domain- and tensor-parallel group of this linear layer.
+    grad_output : torch.Tensor
+        Gradient of the output.
+    weight : torch.Tensor
+        Local weight matrix.
+    input : torch.Tensor
+        Local input matrix.
+    local_rank : int
+        Rank within the model group.
+    device : torch.device
+        Device of the computation.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance.
 
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor]
-    Gradient with respect to the input and gradient of the weights.
+        Gradients of the input and the weight.
     """
     mod = local_rank % 8
 
@@ -2083,9 +2079,15 @@ def fused_xw_xtw_eightway(
             t_recv_x_4 = dist.irecv(t_buffer_x_4, group_src=4, group=model_group)
             t_recv_x_6 = dist.irecv(t_buffer_x_6, group_src=6, group=model_group)
 
-            t_buffer_w_2 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_4 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_6 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_2 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_4 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_6 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_send_w_2 = dist.isend(input, group_dst=2, group=model_group)
             t_send_w_4 = dist.isend(input, group_dst=4, group=model_group)
             t_send_w_6 = dist.isend(input, group_dst=6, group=model_group)
@@ -2116,9 +2118,15 @@ def fused_xw_xtw_eightway(
             # t_x0: send to 4, 5; t_x1: send to 6, 7;
             # x: recv from 0, 2, 4, 6
             # w: send to 3, 5, 7; recv from 3, 5, 7
-            t_buffer_w_3 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_5 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_7 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_3 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_5 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_7 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
 
             t_send_w_3 = dist.isend(input, group_dst=3, group=model_group)
             t_send_w_5 = dist.isend(input, group_dst=5, group=model_group)
@@ -2145,9 +2153,15 @@ def fused_xw_xtw_eightway(
             t_recv_x_6 = dist.irecv(t_buffer_x_6, group_src=6, group=model_group)
             # x: recv from 0, 4, 6
             # w: send to 0, 4, 6; recv from 0, 4, 6
-            t_buffer_w_0 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_4 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_6 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_0 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_4 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_6 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_recv_w_0 = dist.irecv(t_buffer_w_0, group_src=0, group=model_group)
             t_send_w_0 = dist.isend(input, group_dst=0, group=model_group)
             t_send_w_4 = dist.isend(input, group_dst=4, group=model_group)
@@ -2179,9 +2193,15 @@ def fused_xw_xtw_eightway(
             # t_x0: send to 4, 5; t_x1: send to 6, 7
             # x: recv from 0, 2, 4, 6
             # w: send to 1, 5, 7; recv from 1, 5, 7
-            t_buffer_w_1 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_5 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_7 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_1 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_5 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_7 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_recv_w_1 = dist.irecv(t_buffer_w_1, group_src=1, group=model_group)
             t_send_w_1 = dist.isend(input, group_dst=1, group=model_group)
             t_send_w_5 = dist.isend(input, group_dst=5, group=model_group)
@@ -2213,9 +2233,15 @@ def fused_xw_xtw_eightway(
             # t_x0: send to 0, 1; t_x1: send to 2, 3
             # x: recv from 1, 3, 5, 7
             # w: send to 0, 2, 6; recv from 0, 2, 6
-            t_buffer_w_0 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_2 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_6 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_0 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_2 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_6 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_recv_w_0 = dist.irecv(t_buffer_w_0, group_src=0, group=model_group)
             t_recv_w_2 = dist.irecv(t_buffer_w_2, group_src=2, group=model_group)
             t_send_w_0 = dist.isend(input, group_dst=0, group=model_group)
@@ -2241,9 +2267,15 @@ def fused_xw_xtw_eightway(
             # t_x0: send to 4; t_x1: send to 6, 7
             # x: recv from 1, 3, 7
             # w: send to 1, 3, 7; recv from 1, 3, 7
-            t_buffer_w_1 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_3 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_7 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_1 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_3 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_7 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_recv_w_1 = dist.irecv(t_buffer_w_1, group_src=1, group=model_group)
             t_recv_w_3 = dist.irecv(t_buffer_w_3, group_src=3, group=model_group)
             t_send_w_1 = dist.isend(input, group_dst=1, group=model_group)
@@ -2274,9 +2306,15 @@ def fused_xw_xtw_eightway(
             # t_x0: send to 0, 1; t_x1: send to 2, 3
             # x: recv from 1, 3, 5, 7
             # w: send to 0, 2, 4; recv from 0, 2, 4
-            t_buffer_w_0 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_2 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_4 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_0 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_2 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_4 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_recv_w_0 = dist.irecv(t_buffer_w_0, group_src=0, group=model_group)
             t_recv_w_2 = dist.irecv(t_buffer_w_2, group_src=2, group=model_group)
             t_recv_w_4 = dist.irecv(t_buffer_w_4, group_src=4, group=model_group)
@@ -2302,16 +2340,21 @@ def fused_xw_xtw_eightway(
             # t_x0: send to 4, 5; t_x1: send to 6
             # x: recv from 1, 3, 5
             # w: send to 1, 3, 5; recv from 1, 3, 5
-            t_buffer_w_1 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_3 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
-            t_buffer_w_5 = get_preallocated_buffer(input.shape, t_wdtype, local_rank, device)
+            t_buffer_w_1 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_3 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
+            t_buffer_w_5 = get_preallocated_buffer(
+                input.shape, t_wdtype, local_rank, device
+            )
             t_recv_w_1 = dist.irecv(t_buffer_w_1, group_src=1, group=model_group)
             t_recv_w_3 = dist.irecv(t_buffer_w_3, group_src=3, group=model_group)
             t_recv_w_5 = dist.irecv(t_buffer_w_5, group_src=5, group=model_group)
             t_send_w_1 = dist.isend(input, group_dst=1, group=model_group)
             t_send_w_3 = dist.isend(input, group_dst=3, group=model_group)
             t_send_w_5 = dist.isend(input, group_dst=5, group=model_group)
-
 
     if dist.get_backend() == "gloo":
         dist.barrier(group=model_group)
@@ -2511,6 +2554,8 @@ def fused_xw_xtw_eightway(
             t_recv_w_6.wait()
             t_send_w_6.wait()
             t_cij3 = torch.matmul(t_buffer_x_7, t_buffer_w_6)
+            t_send_x_2.wait()
+            t_send_w_2.wait()
         case 5:
             t_recv_x_1.wait()
             t_recv_w_1.wait()
@@ -2557,6 +2602,8 @@ def fused_xw_xtw_eightway(
             t_recv_x_5.wait()
             t_recv_w_5.wait()
             t_cij3 = torch.matmul(t_buffer_x_5, t_buffer_w_5)
+            send_w_1.wait()
+            t_send_w_5.wait()
     grad_weight = t_cij0 + t_cij1 + t_cij2 + t_cij3
 
     return grad_input, grad_weight

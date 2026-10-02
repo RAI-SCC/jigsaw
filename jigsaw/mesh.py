@@ -1,17 +1,8 @@
-"""Build the ``process_mesh_dict`` that every jigsaw module expects.
+"""Process mesh construction.
 
-A jigsaw module is configured with a mapping ``{axis name -> ProcessGroup}``.
-The final two entries are the domain- / tensor-parallel axes (``row`` and
-``col`` by default); any leading entries are data-parallel *replica* axes. On
-top of the per-axis groups the mapping carries a ``model`` group that spans one
-full parameter replica -- the flattened product of the model-parallel axes --
-which the parameter-free matmul, the weight-merging converters and seed setup
-all read.
-
-``torch.distributed.device_mesh.init_device_mesh`` builds the per-axis groups
-but not that flattened ``model`` group, and it silently succeeds when the mesh
-covers only some of the world. :func:`make_process_mesh` fills the first gap and
-turns the second into a loud, identical error on every rank.
+A process mesh maps axis names to process groups. The trailing axes are the
+model-parallel axes (``row`` and ``col`` by default), leading axes are
+data-parallel replicas, and a ``model`` group spans the model-parallel axes.
 """
 
 from __future__ import annotations
@@ -32,7 +23,7 @@ def _resolve_device_type(device_type: str | None) -> str:
 
 
 def _resolve_sizes(axes: Mapping[str, int]) -> dict[str, int]:
-    """Copy ``axes`` and fill a single ``-1`` from the world size."""
+    """Copy ``axes`` and infer a single ``-1`` size from the world size."""
     sizes = dict(axes)
     if not sizes:
         raise ValueError("axes must name at least one mesh dimension")
@@ -60,7 +51,7 @@ def _resolve_sizes(axes: Mapping[str, int]) -> dict[str, int]:
 def _resolve_model_axes(
     names: list[str], model_parallel_axes: Sequence[str] | None
 ) -> list[str]:
-    """Validate that the model-parallel axes are a trailing, contiguous run."""
+    """Validate that the model-parallel axes are the trailing axes."""
     if model_parallel_axes is None:
         return list(names)
 
@@ -90,32 +81,24 @@ def make_process_mesh(
     Parameters
     ----------
     axes : Mapping[str, int]
-        Ordered mapping of axis name to size, slowest-varying first. Exactly one
-        size may be ``-1``, inferred so the product matches the world size. The
-        trailing axes are the model-parallel (domain- / tensor-parallel) axes;
-        for a fully model-parallel run that is every axis, e.g.
-        ``{"row": 2, "col": 2}`` or ``{"sh": 2, "sw": 2, "col": 2}``. Leading
-        axes are data-parallel replicas, e.g. ``{"dp": -1, "row": 2, "col": 2}``.
+        Ordered mapping of axis name to size, slowest-varying first. At most one
+        size may be ``-1``, which is inferred from the world size.
     device_type : str, optional
-        Device type passed to ``init_device_mesh``. Defaults to ``"cuda"`` when a
-        CUDA device is visible, else ``"cpu"``.
+        Device type of the mesh. Defaults to ``"cuda"`` if available, else
+        ``"cpu"``.
     model_parallel_axes : Sequence[str], optional
-        Which trailing axes form one parameter replica and are flattened into
-        the ``model_key`` group. Must be a contiguous run at the end of ``axes``.
-        Defaults to every axis.
-    model_key : str, default "model"
-        Key for the flattened model-parallel group.
+        Trailing axes that form one model replica. Defaults to all axes.
+    model_key : str
+        Key of the group spanning the model-parallel axes.
 
     Returns
     -------
     dict[str, torch.distributed.ProcessGroup]
-        One group per entry of ``axes`` plus the ``model_key`` group. Pass it
-        straight to a jigsaw module, or to :func:`jigsaw.convert`.
+        One group per axis plus the ``model_key`` group.
 
     Notes
     -----
-    Requires an initialised default process group. Groups are laid out row-major
-    over global ranks, matching ``init_device_mesh``.
+    Requires an initialized default process group.
     """
     if not dist.is_initialized():
         raise RuntimeError(

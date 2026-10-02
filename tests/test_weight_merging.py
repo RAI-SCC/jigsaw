@@ -5,6 +5,7 @@ import torch
 
 from jigsaw.modules import convolution, linear
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
+from tests.parity import all_ranks_ok, assert_close
 
 pytestmark = [pytest.mark.dist_required]
 
@@ -77,9 +78,28 @@ class TestWeightMerging:
         gathered_bias_after = gather_1d_results(
             local_bias_after, to_pm_dict, dim=0, pm_key="col"
         )
-        assert torch.allclose(gathered_weights_before, gathered_weights_after)
-        assert linear_layer.parallelism == to_pm_dict["model"].size()
-        assert torch.allclose(gathered_bias_before, gathered_bias_after)
+        grp = to_pm_dict["model"]
+        assert_close(
+            "weight after reshard",
+            gathered_weights_after,
+            gathered_weights_before,
+            1e-8,
+            1e-5,
+            device,
+            grp,
+        )
+        assert all_ranks_ok(
+            linear_layer.parallelism == to_pm_dict["model"].size(), device, grp
+        )
+        assert_close(
+            "bias after reshard",
+            gathered_bias_after,
+            gathered_bias_before,
+            1e-8,
+            1e-5,
+            device,
+            grp,
+        )
 
     @pytest.mark.dist(4)
     @pytest.mark.parametrize(
@@ -196,17 +216,42 @@ class TestWeightMerging:
         layer1_bias_gathered = mlp.linear1.bias
         layer2_bias_gathered = mlp.linear2.bias
 
-        assert torch.allclose(layer1_weights_global, layer1_weights_gathered), (
-            "Layer 1 gathered weights are not the same as the original"
+        grp = process_mesh_dict_4x1x1["model"]
+        assert_close(
+            "layer 1 weight after reshard",
+            layer1_weights_gathered,
+            layer1_weights_global,
+            1e-8,
+            1e-5,
+            device,
+            grp,
         )
-        assert torch.allclose(layer2_weights_global, layer2_weights_gathered), (
-            "Layer 2 gathered weights are not the same as the original"
+        assert_close(
+            "layer 2 weight after reshard",
+            layer2_weights_gathered,
+            layer2_weights_global,
+            1e-8,
+            1e-5,
+            device,
+            grp,
         )
-        assert torch.allclose(layer1_bias_global, layer1_bias_gathered), (
-            "Layer 1 gathered bias is not the same as the original"
+        assert_close(
+            "layer 1 bias after reshard",
+            layer1_bias_gathered,
+            layer1_bias_global,
+            1e-8,
+            1e-5,
+            device,
+            grp,
         )
-        assert torch.allclose(layer2_bias_global, layer2_bias_gathered), (
-            "Layer 2 gathered bias is not the same as the original"
+        assert_close(
+            "layer 2 bias after reshard",
+            layer2_bias_gathered,
+            layer2_bias_global,
+            1e-8,
+            1e-5,
+            device,
+            grp,
         )
 
     @pytest.mark.dist(4)
@@ -277,8 +322,25 @@ class TestWeightMerging:
         gathered_bias_after = gather_1d_results(
             local_bias_after, to_pm_dict, dim=0, pm_key="col"
         )
-        assert torch.allclose(gathered_weights_before, gathered_weights_after)
-        assert torch.allclose(gathered_bias_before, gathered_bias_after)
+        grp = to_pm_dict["model"]
+        assert_close(
+            "weight after reshard",
+            gathered_weights_after,
+            gathered_weights_before,
+            1e-8,
+            1e-5,
+            device,
+            grp,
+        )
+        assert_close(
+            "bias after reshard",
+            gathered_bias_after,
+            gathered_bias_before,
+            1e-8,
+            1e-5,
+            device,
+            grp,
+        )
 
     @pytest.mark.dist(4)
     @pytest.mark.parametrize(
@@ -353,5 +415,22 @@ class TestWeightMerging:
             local_bias_after, to_pm_dict, dim=0, pm_key="col"
         )
 
-        assert torch.allclose(gathered_weights_before, gathered_weights_after)
-        assert torch.allclose(gathered_bias_before, gathered_bias_after)
+        grp = to_pm_dict["model"]
+        assert_close(
+            "weight after reshard",
+            gathered_weights_after,
+            gathered_weights_before,
+            1e-8,
+            1e-5,
+            device,
+            grp,
+        )
+        assert_close(
+            "bias after reshard",
+            gathered_bias_after,
+            gathered_bias_before,
+            1e-8,
+            1e-5,
+            device,
+            grp,
+        )

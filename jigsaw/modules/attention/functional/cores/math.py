@@ -1,4 +1,4 @@
-"""Unfused ``softmax(QK^T)V`` reference core for the ring inner step.
+"""Unfused reference attention core for the ring's inner attention.
 
 Runs for any device / shape / dtype and is what the SDPA selectors fall back to
 on CPU. The backward takes the ring's globally normalised ``out`` / ``logsumexp``
@@ -8,13 +8,13 @@ Dropout is applied post-softmax (inverted dropout: kept elements scaled by
 ``1 / (1 - dropout_p)``), matching ``torch.nn.functional.scaled_dot_product_attention``'s
 convention. ``logsumexp`` is computed from the *pre*-dropout scores -- dropout
 doesn't change the normalising constant, and the ring's online-softmax merge
-(:func:`..forward._online_softmax_merge`) needs the undropped value to combine
+(:func:`..forward._online_softmax_merge_`) needs the undropped value to combine
 chunks correctly.
 
 Since this core has no opaque kernel-internal RNG state to thread back (unlike
 :mod:`.sdpa` / :mod:`.te`), it reconstructs its dropout mask from ``seed``: an
 int the ring independently recomputes identically in the forward and backward
-loops (see :func:`..functional.combine_dropout_seed`), rather than a saved
+loops (see :func:`..functional._combine_dropout_seed`), rather than a saved
 tensor. A dedicated ``torch.Generator`` seeded from it keeps the draw
 reproducible without disturbing the ambient default RNG stream.
 """
@@ -44,7 +44,9 @@ def _build_exclude_mask(
     """
     exclude = None
     if causal:
-        exclude = torch.triu(torch.ones(sq, sk, dtype=torch.bool, device=device), diagonal=1)
+        exclude = torch.triu(
+            torch.ones(sq, sk, dtype=torch.bool, device=device), diagonal=1
+        )
     if key_mask is not None:
         pad_exclude = (~key_mask)[:, None, None, :]  # (B, 1, 1, sk)
         exclude = pad_exclude if exclude is None else (exclude | pad_exclude)
@@ -52,12 +54,7 @@ def _build_exclude_mask(
 
 
 def _dropout_mask(shape: torch.Size, device: torch.device, seed: int) -> torch.Tensor:
-    """Boolean keep-mask for ``shape``, reproducible given ``seed``.
-
-    Drawn in float32 via a dedicated ``torch.Generator`` (not the ambient
-    default RNG), so forward and backward can each build the identical mask
-    from nothing but ``seed`` -- no mask/state tensor needs saving.
-    """
+    """Return a boolean dropout keep-mask that is reproducible from ``seed``."""
     generator = torch.Generator(device=device).manual_seed(seed)
     return torch.rand(shape, generator=generator, device=device, dtype=torch.float32)
 
@@ -71,8 +68,10 @@ def forward(
     causal: bool = False,
     key_mask: Optional[torch.Tensor] = None,
     seed: Optional[int] = None,
+    *,
+    layout: str = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    """Vanilla attention forward pass. Returns ``(out, logsumexp, rng_state)``.
+    """Compute attention.
 
     ``key_mask`` (``[B, Sk]``, bool, ``True`` = attend) masks out padding key
     positions; it composes with ``causal`` (a position is excluded if either
@@ -85,10 +84,42 @@ def forward(
 
     ``rng_state`` is always ``None`` -- this core replays dropout from ``seed``
     instead (see module docstring).
+
+    Parameters
+    ----------
+    q, k, v : torch.Tensor
+        Query, key and value, shaped ``(b, h, s, d)``.
+    scale : float, optional
+        Softmax scale. Defaults to ``d ** -0.5``.
+    dropout_p : float
+        Dropout probability.
+    causal : bool
+        Whether to apply the causal triangular mask.
+    key_mask : torch.Tensor, optional
+        Boolean key-padding mask, ``[B, Sk]``, ``True`` = attend.
+    seed : int, optional
+        Seed of the dropout mask.
+    layout : str
+        Kept for interface parity with the other cores; math only accepts
+        ``"bhsd"``.
+
+    Returns
+    -------
+    out : torch.Tensor
+        Attention output.
+    logsumexp : torch.Tensor
+        Log-sum-exp of the scores.
+    rng_state : None
+        Always ``None``.
     """
+    assert layout == "bhsd", (
+        f"math core is bhsd-only; got layout={layout!r}. The bshd ring is TE-only."
+    )
     scale = scale or (q.size(-1) ** -0.5)
     scores = (q @ k.mT) * scale
-    exclude = _build_exclude_mask(scores.shape[-2], scores.shape[-1], causal, key_mask, scores.device)
+    exclude = _build_exclude_mask(
+        scores.shape[-2], scores.shape[-1], causal, key_mask, scores.device
+    )
     dead_row = None
     if exclude is not None:
         scores = scores.masked_fill(exclude, float("-inf"))
@@ -121,7 +152,7 @@ def backward(
     rng_state: Optional[torch.Tensor] = None,  # noqa: ARG001 - unused, interface parity
     **kwargs: Any,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Vanilla attention backward pass using saved (global) LSE. Returns (dq, dk, dv).
+    """Compute the attention gradients from the saved output and log-sum-exp.
 
     ``logsumexp`` is the *global* (whole-ring) value; a query row that never
     attended anywhere (globally dead: every key, across every ring step, was
@@ -132,12 +163,51 @@ def backward(
     dummy (``0``) for a dead row's ``lse`` makes ``exp(attn - 0) = exp(-inf) =
     0`` -- the same zero row the true (but nan-producing) subtraction would
     give -- without the ``nan``, and without perturbing any live row.
+
+    Parameters
+    ----------
+    grad_out : torch.Tensor
+        Gradient of the output.
+    q, k, v : torch.Tensor
+        Query, key and value, shaped ``(b, h, s, d)``.
+    out : torch.Tensor
+        Saved attention output.
+    logsumexp : torch.Tensor
+        Saved log-sum-exp.
+    scale : float
+        Softmax scale.
+    causal : bool
+        Whether the causal triangular mask was applied in the forward.
+    key_mask : torch.Tensor, optional
+        Boolean key-padding mask, ``[B, Sk]``, ``True`` = attend.
+    dropout_p : float
+        Dropout probability.
+    seed : int, optional
+        Seed of the dropout mask.
+    rng_state : torch.Tensor, optional
+        Unused.
+    *args : Any
+        Unused.
+    **kwargs : Any
+        Unused.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Gradients ``(dq, dk, dv)``.
     """
     attn = (q @ k.mT) * scale  # (B, H, Sq, Sk)
-    exclude = _build_exclude_mask(attn.shape[-2], attn.shape[-1], causal, key_mask, attn.device)
+    exclude = _build_exclude_mask(
+        attn.shape[-2], attn.shape[-1], causal, key_mask, attn.device
+    )
     if exclude is not None:
         attn = attn.masked_fill(exclude, float("-inf"))
-    lse = logsumexp.unsqueeze(-1)
+    # The ring's accumulator keeps `logsumexp` in at least fp32 (see
+    # `_online_softmax_merge_`) regardless of q/k/v's working dtype; cast it
+    # down first so the subtraction doesn't promote `p` (and everything built
+    # from it below) to fp32, which the final matmuls against bf16/fp16
+    # grad_out/k/q would then reject as a dtype mismatch.
+    lse = logsumexp.unsqueeze(-1).to(attn.dtype)
     dead = torch.isneginf(lse)
     safe_lse = torch.where(dead, torch.zeros_like(lse), lse)
     p = torch.exp(attn - safe_lse)  # global norm via saved lse
