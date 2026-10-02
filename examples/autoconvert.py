@@ -27,6 +27,13 @@ image width (or the token sequence), its "col" axis splits the channels.
 We check the conversion the way you should check yours: run the original model on the
 full input and compare against the gathered output of the converted one.
 
+``TinyTransformer`` below repeats the exercise for a pre-norm transformer block --
+``nn.LayerNorm`` and ``jigsaw.attention.Attention`` convert the same way the conv and
+linear layers of ``PatchMLP`` do. With the heads split over "col" (channel size > 1),
+the attention's default ring configuration gives an exact forward pass but a wrong
+backward one -- pass a ``config`` with ``send_op=P2P`` and ``save_scope=LOCAL`` (see
+``vit.py`` for the full explanation); the check below would catch getting this wrong.
+
 Run with one process per GPU (or 4 CPU processes):
 
     torchrun --nproc-per-node 4 examples/autoconvert.py
@@ -41,6 +48,12 @@ from _common import setup, shard
 import jigsaw
 from jigsaw import log
 from jigsaw.convert import convert_to_jigsaw
+from jigsaw.modules.attention.config import (
+    RingAttentionConfig,
+    SaveScope,
+    SendForward,
+    SendOp,
+)
 from jigsaw.utils import setup_precision
 from jigsaw.utils_aggregate import gather_1d_results
 
@@ -68,8 +81,72 @@ class PatchMLP(nn.Module):
         return self.recover(z)
 
 
+class TransformerBlock(nn.Module):
+    """Pre-norm block: ``x + attn(norm(x))``, then ``x + mlp(norm(x))``. Plain PyTorch.
+
+    ``nn.LayerNorm`` and ``jigsaw.attention.Attention`` are layers the converter knows,
+    the same way ``nn.Linear`` and ``nn.Conv2d`` are.
+    """
+
+    def __init__(self, dim: int, heads: int, device: torch.device) -> None:
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim, device=device)
+        self.attn = jigsaw.attention.Attention(
+            in_dim=dim, embed_dim=dim, out_dim=dim, heads=heads, device=device
+        )
+        self.norm2 = nn.LayerNorm(dim, device=device)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, 4 * dim, device=device),
+            nn.GELU(),
+            nn.Linear(4 * dim, dim, device=device),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(self.norm1(x))
+        return x + self.mlp(self.norm2(x))
+
+
+class TinyTransformer(nn.Module):
+    """Patchify an image into tokens, run transformer blocks, then unpatchify.
+
+    Plain PyTorch, laid out exactly like ``PatchMLP``: the patch embedding and
+    recovery split the image over the mesh, and the tokens in between carry the same
+    sharding the converted attention and layer norms expect -- sequence over "row",
+    embedding over "col".
+    """
+
+    def __init__(
+        self,
+        device: torch.device,
+        channels: int = 4,
+        dim: int = 64,
+        heads: int = 4,
+        patch: int = 4,
+        depth: int = 2,
+    ) -> None:
+        super().__init__()
+        self.embed = nn.Conv2d(
+            channels, dim, kernel_size=patch, stride=patch, device=device
+        )
+        self.blocks = nn.ModuleList(
+            [TransformerBlock(dim, heads, device) for _ in range(depth)]
+        )
+        self.recover = nn.ConvTranspose2d(
+            dim, channels, kernel_size=patch, stride=patch, device=device
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        z = self.embed(x)  # (B, E, Hp, Wp)
+        hp, wp = z.shape[-2:]
+        z = z.flatten(2).transpose(1, 2).contiguous()  # tokens (B, N, E)
+        for block in self.blocks:
+            z = block(z)
+        z = z.transpose(1, 2).unflatten(2, (hp, wp))
+        return self.recover(z)
+
+
 def main() -> None:
-    """Convert :class:`PatchMLP`, then check forward, backward and the way back."""
+    """Convert :class:`PatchMLP` and :class:`TinyTransformer`, and check each."""
     device, rank, world_size = setup()
     # On Ampere and newer GPUs cuDNN runs fp32 convolutions in TF32 by default (~1e-3
     # relative error), and the sharded and the full convolution do not round alike.
@@ -119,6 +196,69 @@ def main() -> None:
     log.info("fc1 merged back into %s", plain)
     torch.testing.assert_close(plain.weight, reference.fc1.weight)
     torch.testing.assert_close(plain.bias, reference.fc1.bias)
+
+    # --- TinyTransformer: the same exercise, now for layer norm and attention -------
+    # With "col" > 1 the heads are split, so the attention's qkv projection needs its
+    # K/V circulated (rather than rebuilt from a circulated `x`) for the ring to give
+    # the right *gradients* -- the forward pass is exact either way. The defaults don't
+    # do this; ask for it explicitly (see vit.py's Block for the long version).
+    ring_config = RingAttentionConfig(
+        device=device,
+        send_in_forward=SendForward.KV,
+        send_op=SendOp.P2P,
+        save_scope=SaveScope.LOCAL,
+    )
+    torch.manual_seed(1)
+    dim, heads = 64, 4
+    reference2 = TinyTransformer(device, dim=dim, heads=heads)
+    model2 = convert_to_jigsaw(
+        copy.deepcopy(reference2), mesh, device, config=ring_config
+    )
+    log.info(
+        "converted block layers: %s",
+        [type(m).__name__ for m in model2.blocks[0].children()],
+    )
+
+    x2 = torch.randn(2, 4, 32, 64, device=device)
+    x2_local = shard(shard(x2, 1, col), -1, row)
+
+    # --- forward: the gathered output equals the original model's output ---
+    with torch.no_grad():
+        expected2 = reference2(x2)
+        out2 = model2(x2_local)
+        out2 = gather_1d_results(out2, mesh, dim=1, pm_key="col")  # channels
+        out2 = gather_1d_results(out2, mesh, dim=-1, pm_key="row")  # width
+    err = (out2 - expected2).abs().max()
+    log.info("forward   max |converted - original| = %.2e", err)
+    torch.testing.assert_close(out2, expected2, atol=1e-5, rtol=1e-4)
+
+    # --- backward: a layer-norm and an attention weight shard against the original ---
+    reference2(x2).square().mean().backward()
+    loss2 = jigsaw.loss.DistributedMSELoss(reduce_groups=(row, col))
+    loss2(model2(x2_local), torch.zeros_like(x2_local)).backward()
+
+    # `norm1.weight` is (E,), split over "col"; replicated (not split) over "row".
+    local_dim = dim // col.size()
+    ref_norm_grad = reference2.blocks[0].norm1.weight.grad
+    ref_norm_shard = ref_norm_grad[
+        col.rank() * local_dim : (col.rank() + 1) * local_dim
+    ]
+    err = (
+        model2.blocks[0].norm1.weight.grad - ref_norm_shard
+    ).abs().max() / ref_norm_shard.abs().max()
+    log.info("backward  max relative error of the norm1.weight.grad shard = %.2e", err)
+    assert err < 1e-4, err
+
+    # `attn.head_concat.weight` is (E, E): columns (the heads) split over "col".
+    ref_hc_grad = reference2.blocks[0].attn.head_concat.weight.grad
+    ref_hc_shard = ref_hc_grad[:, col.rank() * local_dim : (col.rank() + 1) * local_dim]
+    model_hc_grad = model2.blocks[0].attn.head_concat.weight.grad
+    err = (model_hc_grad - ref_hc_shard).abs().max() / ref_hc_shard.abs().max()
+    log.info(
+        "backward  max relative error of the attn.head_concat.weight.grad shard = %.2e",
+        err,
+    )
+    assert err < 1e-4, err
 
 
 if __name__ == "__main__":
