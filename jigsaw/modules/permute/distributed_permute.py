@@ -1,16 +1,13 @@
-"""Distributed permutation kernels.
+"""Distributed permutation kernels."""
 
-The kernels exchange unequal blocks between the ranks: with ``dist.all_to_all``
-where the backend supports it, and point-to-point on gloo, which does not.
-"""
-
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 import torch.distributed as dist
 
 from jigsaw.comm import all_to_all_async
 from jigsaw.modules.buffers import get_preallocated_buffer
+from jigsaw.modules.convolution.common.channel_comm import gather_full_channels
 
 
 def _exchange(
@@ -283,3 +280,113 @@ def x_transpose_eightway(
     _wait(_exchange(x_recv_list, x_send_list, model_group))
     cij = torch.concat([cij0, cij1], dim=-2).mT.contiguous()
     return cij
+
+
+# Fast path for `distributed_permute`: a pure swap of the trailing two axes on a mesh
+# shape one of the kernels above already handles with direct peer exchange, instead of
+# the general path's all-gather.
+_SWAP_KERNELS: dict[tuple[int, int], Callable[..., torch.Tensor]] = {
+    (1, 2): x_transpose_twoway,
+    (2, 2): x_transpose_fourway,
+    (4, 2): x_transpose_eightway,
+}
+
+
+def distributed_permute(
+    x: torch.Tensor,
+    dims: tuple[int, ...],
+    row_dim: int,
+    col_dim: int,
+    local_rank: int,
+    device: torch.device,
+    mesh: dict[str, dist.ProcessGroup],
+) -> torch.Tensor:
+    """Permute ``x`` by ``dims``, resharding ``row_dim``/``col_dim`` if ``dims`` swaps them.
+
+    ``mesh["row"]`` shards ``row_dim`` and ``mesh["col"]`` shards ``col_dim`` of both the
+    input and the output: these two axis *positions* are fixed, not tracked by identity.
+    Every other axis is only ever repositioned by ``dims``, never read or resharded by its
+    own identity -- but when ``dims`` swaps ``row_dim``/``col_dim``, the data that moves
+    between ranks is whatever is attached to it along every other axis too, so those other
+    axes must be uniform across ``mesh["row"]`` x ``mesh["col"]`` itself (they may still be
+    sharded by some other, orthogonal mesh axis -- e.g. data-parallel -- that's held fixed
+    for this call, just not by ``row_dim``/``col_dim``'s own mesh).
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Local input.
+    dims : tuple[int, ...]
+        Target axis order, as in ``torch.permute``. Must feed ``row_dim`` and ``col_dim``
+        from ``{row_dim, col_dim}`` -- either unchanged or swapped with each other.
+    row_dim : int
+        Axis of ``x`` sharded by ``mesh["row"]``.
+    col_dim : int
+        Axis of ``x`` sharded by ``mesh["col"]``.
+    local_rank : int
+        Rank within the model group. Only used by the fast-path kernels.
+    device : torch.device
+        Device of the computation.
+    mesh : dict[str, dist.ProcessGroup]
+        Needs ``"row"`` and ``"col"``; the fast path also needs ``"model"``.
+
+    Returns
+    -------
+    torch.Tensor
+        Local output, permuted and resharded.
+    """
+    n = x.ndim
+    if sorted(dims) != list(range(n)):
+        raise ValueError(f"dims {dims} is not a permutation of range({n})")
+    if row_dim == col_dim or not 0 <= row_dim < n or not 0 <= col_dim < n:
+        raise ValueError(
+            f"row_dim {row_dim} and col_dim {col_dim} must be distinct axes of a "
+            f"{n}-d tensor"
+        )
+    if {dims[row_dim], dims[col_dim]} != {row_dim, col_dim}:
+        raise ValueError(
+            f"dims {dims} moves an axis other than row_dim={row_dim}/col_dim={col_dim} "
+            "into one of those two positions (or moves one of them out); "
+            "distributed_permute only knows how to reshard those two axes -- the others "
+            "may be sharded by a mesh it has no knowledge of"
+        )
+
+    if dims[row_dim] == row_dim:
+        # row_dim and col_dim keep their roles; every axis is just repositioned.
+        return x.permute(*dims).contiguous()
+
+    row_group, col_group = mesh["row"], mesh["col"]
+    n_rows, n_cols = row_group.size(), col_group.size()
+
+    if row_dim == n - 2 and col_dim == n - 1 and (n_rows, n_cols) in _SWAP_KERNELS:
+        # Reorder the batch axes first (free); the kernel below leaves them untouched
+        # and swaps the trailing two, so the result already matches `dims`.
+        x = x.permute(*dims[:-2], row_dim, col_dim).contiguous()
+        return _SWAP_KERNELS[(n_rows, n_cols)](x, local_rank, device, mesh["model"])
+
+    # General path: reconstruct each tracked axis in full over the group that currently
+    # shards it, then narrow it into the other axis's role.
+    x = gather_full_channels(x.contiguous(), col_group, col_dim)
+    x = gather_full_channels(x.contiguous(), row_group, row_dim)
+
+    row_rank, col_rank = row_group.rank(), col_group.rank()
+
+    size_col = x.shape[col_dim]
+    if size_col % n_rows:
+        raise ValueError(
+            f"axis {col_dim} (size {size_col}) doesn't divide evenly over "
+            f"{n_rows} row ranks"
+        )
+    chunk_col = size_col // n_rows
+    x = x.narrow(col_dim, row_rank * chunk_col, chunk_col).contiguous()
+
+    size_row = x.shape[row_dim]
+    if size_row % n_cols:
+        raise ValueError(
+            f"axis {row_dim} (size {size_row}) doesn't divide evenly over "
+            f"{n_cols} col ranks"
+        )
+    chunk_row = size_row // n_cols
+    x = x.narrow(row_dim, col_rank * chunk_row, chunk_row).contiguous()
+
+    return x.permute(*dims).contiguous()

@@ -183,9 +183,7 @@ class DistributedAttention(torch.nn.Module):
 
         The weights are replicated over ``spatial_group``, which splits the
         sequence, and sharded over ``channel_group``, which splits the heads.
-        Their gradients are summed over ``spatial_group``. The query and key
-        norms act on a single head, so they are replicated over both groups and
-        their gradients are summed over both.
+        Their gradients are summed over ``spatial_group``. 
 
         Parameters
         ----------
@@ -213,14 +211,7 @@ class DistributedAttention(torch.nn.Module):
         qk_norm : bool
             Whether to normalize queries and keys.
         ring : bool
-            Whether to use ring attention over ``spatial_group``. By default
-            the ring recomputes the keys and values of remote chunks from the
-            remote input with the local QKV weight, which needs an unsharded
-            channel dimension and no ``qk_norm``: ``channel_group`` must have
-            size 1 and ``qk_norm`` must be off, unless ``config`` makes the ring
-            send and save the keys and values themselves
-            (``send_in_forward=SendForward.KV`` and
-            ``save_for_backward=SaveBackward.KV``).
+            Whether to use ring attention over ``spatial_group``. 
         attn_backend : AttnBackend | str
             Attention core, ``"te"``, ``"sdpa"`` or ``"math"``.
         dtype : torch.dtype
@@ -278,7 +269,7 @@ class DistributedAttention(torch.nn.Module):
                 "split, pass a config with send_in_forward=SendForward.KV and "
                 "save_for_backward=SaveBackward.KV."
             )
-            # Likewise, a remote chunk's keys rebuilt from its input would miss
+            # A remote chunk's keys rebuilt from its input would miss
             # the key norm.
             assert not qk_norm or sends_and_saves_kv, (
                 "Ring attention with qk_norm needs the normalized keys of the "
