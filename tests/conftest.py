@@ -130,10 +130,13 @@ def dist_env(
     else:
         assert dist.is_gloo_available()
 
-    # Single-node by default; a multi-node run (e.g. 8 ranks over two 4-GPU
-    # nodes under srun) points every rank at rank 0's host instead.
-    os.environ["MASTER_ADDR"] = os.environ.get("JIGSAW_TEST_MASTER_ADDR", "localhost")
-    os.environ["MASTER_PORT"] = os.environ.get("JIGSAW_TEST_MASTER_PORT", "12355")
+    # Default to a single-machine rendezvous for local/CI runs; a real launcher
+    # that already computed the job's actual rendezvous host (e.g. run.sh
+    # deriving it from SLURM_JOB_NODELIST) exports MASTER_ADDR itself, and that
+    # must win here or a multi-node run can never actually rendezvous --
+    # "localhost" resolves to a different loopback on every node.
+    os.environ.setdefault("MASTER_ADDR", "localhost")
+    os.environ.setdefault("MASTER_PORT", "12355")
 
     dist.init_process_group(
         backend="nccl" if device.type == "cuda" else "gloo",

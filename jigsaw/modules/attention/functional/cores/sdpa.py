@@ -18,6 +18,8 @@ def forward(
     scale: float,
     dropout_p: float,
     seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
+    *,
+    layout: str = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Compute flash attention.
 
@@ -41,6 +43,9 @@ def forward(
     rng_state : torch.Tensor | None
         Dropout RNG state of the kernel, ``None`` without dropout.
     """
+    assert layout == "bhsd", (
+        f"sdpa core is bhsd-only; got layout={layout!r}. The bshd ring is TE-only."
+    )
     q, k, v = [x.to(torch.float16) for x in (q, k, v)]
     (
         out,
@@ -89,6 +94,7 @@ def backward(
     dropout_p: float = 0.0,
     seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
     rng_state: Optional[torch.Tensor] = None,
+    layout: str = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute the flash-attention gradients.
 
@@ -118,6 +124,9 @@ def backward(
     tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         Gradients ``(dq, dk, dv)`` in the input dtype.
     """
+    assert layout == "bhsd", (
+        f"sdpa core is bhsd-only; got layout={layout!r}. The bshd ring is TE-only."
+    )
     if rng_state is not None:
         philox_seed, philox_offset = rng_state[:-1], rng_state[-1]
     else:

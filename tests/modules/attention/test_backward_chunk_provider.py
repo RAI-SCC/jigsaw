@@ -154,6 +154,7 @@ class TestForwardInterNodeRelay:
         provider.kv, provider.kv_j = torch.ones(2), torch.ones(2)
         provider._inter_ranks = [1, 2]
         provider.group = None
+        provider._inter_group = None
         provider._inter_recv_buf = None
         provider.sent = []
 
@@ -175,10 +176,15 @@ class TestForwardInterNodeRelay:
 
     @pytest.mark.parametrize("send_x", [True, False])
     def test_later_rounds_send_the_chunk_that_arrived(self, send_x):
+        """``_recv`` rebinds ``x_j``/``kv_j`` from the inter-node receive before
+        the next ``_launch_inter_forward`` call, so simulate that directly."""
         provider = self._provider(send_x)
         arrived = torch.full((2,), 7.0)
-        provider._inter_recv_buf = arrived
+        if send_x:
+            provider.x_j = arrived
+        else:
+            provider.kv_j = arrived
         provider._launch_inter_forward(1)
         ((data, tag),) = provider.sent
-        assert tag == 1 and torch.equal(data, arrived)
-        assert data is not arrived  # cloned: the arrived chunk is still in use
+        assert tag == 1
+        assert data is arrived  # sent in place, no clone (see the method's docstring)

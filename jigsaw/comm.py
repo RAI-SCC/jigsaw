@@ -1,10 +1,12 @@
 """Communication primitives."""
 
+from collections import defaultdict
 from functools import lru_cache
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import torch
 import torch.distributed as dist
+from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
 
 def all_to_all_async(
@@ -239,6 +241,15 @@ def comm_1d_alltoall(
     else:
         send_to, recv_from = send_recv_ranks
 
+    # ``dist.all_to_all`` requires every tensor it touches to be contiguous.
+    # Callers can hand this a view with a non-standard memory layout (e.g. a
+    # permute+reshape that happened to avoid a copy) without ever noticing --
+    # the shape checks out, only the strides are wrong. ``.contiguous()`` is a
+    # no-op when the tensor already satisfies that, so this costs nothing on
+    # the common path.
+    data = data.contiguous()
+    buffer = buffer.contiguous()
+
     send_list = [empty] * group.size()
     recv_list = [empty] * group.size()
     send_list[send_to] = data
@@ -370,3 +381,36 @@ def comm_broadcast(
     """
     handle = dist.broadcast(data, src=src, group=group, async_op=async_op)
     return data, handle
+
+
+def broadcast_params_(
+    params: Iterable[torch.nn.Parameter],
+    group: dist.ProcessGroup,
+    src: int = 0,
+) -> None:
+    """Broadcast every tensor in ``params`` from ``src``, in one call per dtype.
+
+    Model construction commonly needs to replicate a handful of freshly
+    initialized tensors (weights, biases) from rank 0 across a group -- e.g.
+    once per transformer block, times however many tensors that block owns.
+    Issuing that as ``for p in params: dist.broadcast(p.data, ...)`` makes
+    every tensor its own blocking round trip: with many blocks, each
+    contributing several tensors, that is dozens of sequential
+    cross-rank synchronizations even though each payload is tiny, and setup
+    time ends up scaling with model depth instead of being dominated by the
+    (fast) actual compute. Flattening same-dtype tensors into one contiguous
+    buffer before broadcasting collapses that to a single round trip per
+    dtype present in ``params``, regardless of how many tensors there are.
+    """
+    buckets: dict[torch.dtype, list[torch.nn.Parameter]] = defaultdict(list)
+    for p in params:
+        buckets[p.data.dtype].append(p)
+
+    for bucket in buckets.values():
+        if len(bucket) == 1:
+            dist.broadcast(bucket[0].data, group_src=src, group=group)
+            continue
+        flat = _flatten_dense_tensors([p.data for p in bucket])
+        dist.broadcast(flat, group_src=src, group=group)
+        for p, synced in zip(bucket, _unflatten_dense_tensors(flat, [p.data for p in bucket])):
+            p.data.copy_(synced)

@@ -5,13 +5,17 @@
 was never exercised under ``vmap`` -- these tests pin it, at increasing levels
 of integration:
 
-1. :class:`TestTransformerEngineAttentionVmap` --
-   :func:`~jigsaw.modules.attention.attention.te_attention` alone. Under vmap it
-   routes through the ``TransformerEngineAttention`` ``autograd.Function``
-   (``te``'s fused kernels register no batching rule), whose ``vmap``
-   staticmethod folds the members axis into the batch, runs one un-vmapped
-   call, and unfolds; a plain call goes straight to ``te``. Forward + grad vs
-   a Python loop. **Passes.**
+1. :class:`TestTransformerEngineAttentionVmap` -- the
+   :class:`~jigsaw.modules.attention.attention.TransformerEngineAttention`
+   ``autograd.Function`` alone. It is the only piece that *has* to route through
+   a custom Function under vmap (``te``'s fused kernels register no batching
+   rule); its ``vmap`` staticmethod folds the members axis into the batch,
+   runs one un-vmapped call, and unfolds. Forward + grad vs a Python loop.
+   **Passes** -- including after the wrapper moved off
+   ``te.DotProductAttention`` onto the fused kernels directly: the fold makes
+   the folded ``q/k/v`` produce a matching folded LSE / ``rng_state``, so the
+   re-entrant ``apply`` inside the rule sends gradients through the wrapper's
+   own ``fused_attn_bwd`` backward.
 2. :class:`TestDistributedAttentionPlain` -- a plain (no vmap, no ensemble)
    ``DistributedAttention`` forward+backward on a channel-parallel mesh, sdpa
    and te. **Passes.** Regression guards for two fixes: ``forward`` now casts
@@ -40,6 +44,7 @@ import torch.distributed as dist
 from torch.func import functional_call, grad, stack_module_state, vmap
 
 from jigsaw.modules.attention import attention
+from jigsaw.modules.attention.functional.cores import te as te_cores
 from tests.parity import assert_close
 
 # TE fused attention needs fp16/bf16 and (on CUDA) the attn core runs bf16
@@ -57,20 +62,7 @@ class TestTransformerEngineAttentionVmap:
     """The wrapper's ``vmap`` staticmethod folds members into batch and unfolds."""
 
     E, B, H, S, D = 3, 2, 4, 16, 32
-
-    def _attn(self):
-        import transformer_engine.pytorch as te
-
-        a = te.DotProductAttention(
-            num_attention_heads=self.H,
-            kv_channels=self.D,
-            num_gqa_groups=self.H,
-            qkv_format="bshd",
-            attn_mask_type="no_mask",
-            attention_dropout=0.0,
-        )
-        a.eval()
-        return a
+    SCALE = D**-0.5
 
     def _qkv(self, device, requires_grad=False):
         torch.manual_seed(0)
@@ -88,14 +80,21 @@ class TestTransformerEngineAttentionVmap:
             for _ in range(3)
         ]
 
-    def test_forward_matches_loop(self, device: torch.device) -> None:
-        from jigsaw.modules.attention.attention import te_attention
+    @staticmethod
+    def _f(q, k, v, scale, core):
+        from jigsaw.modules.attention.attention import TransformerEngineAttention
 
-        attn = self._attn()
+        # apply() returns (out, logsumexp, rng_state); only the output is used
+        # outside the ring.
+        return TransformerEngineAttention.apply(q, k, v, scale, 0.0, core)[0]
+
+    def test_forward_matches_loop(self, device: torch.device) -> None:
         qe, ke, ve = self._qkv(device)
 
+        core = te_cores.select_core(device)
+
         def f(q, k, v):
-            return te_attention(q, k, v, attn)
+            return self._f(q, k, v, self.SCALE, core)
 
         got = vmap(f)(qe, ke, ve)
         assert got.shape == (self.E, self.B, self.S, self.H * self.D)
@@ -108,13 +107,12 @@ class TestTransformerEngineAttentionVmap:
         torch.testing.assert_close(got, ref, **_FWD_TOL)
 
     def test_grad_matches_loop(self, device: torch.device) -> None:
-        from jigsaw.modules.attention.attention import te_attention
-
-        attn = self._attn()
         qe, ke, ve = self._qkv(device, requires_grad=True)
 
+        core = te_cores.select_core(device)
+
         def f(q, k, v):
-            return te_attention(q, k, v, attn)
+            return self._f(q, k, v, self.SCALE, core)
 
         vmap(f)(qe, ke, ve).float().pow(2).sum().backward()
         got = (qe.grad, ke.grad, ve.grad)

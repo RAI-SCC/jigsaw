@@ -20,7 +20,8 @@ from jigsaw.modules.attention.config import (
     SendOp,
 )
 
-from .functional import _compute_kv, get_hybrid_topology
+from ._comm_overlap import PrefetchBuffer, consume, issue_on_comm_stream
+from .functional import _compute_kv, bhnd, get_hybrid_topology
 
 
 # --------------------------------------------------------------------------- #
@@ -65,11 +66,14 @@ class _ForwardChunkProvider(ABC):
         self.group = group
         self.local_rank = local_rank
         self.world_size = world_size
-        self.b, self.h, self.n_local, self.d = q.shape
+        self.layout = ring_config.core_layout
+        self.b, self.h, self.n_local, self.d = bhnd(q.shape, self.layout)
         self.send_x = ring_config.send_in_forward == SendForward.X
 
         # Local KV, kept private so an in-flight send can never alias k / v.
-        self.kv = torch.concat([k.unsqueeze(0), v.unsqueeze(0)]).clone().contiguous()
+        # ``torch.concat`` already allocates fresh contiguous storage, so it is
+        # the copy that de-aliases -- no extra ``.clone()`` needed.
+        self.kv = torch.concat([k.unsqueeze(0), v.unsqueeze(0)]).contiguous()
 
         # Running "chunk currently in hand" state.
         self.x_j = x
@@ -90,7 +94,7 @@ class _ForwardChunkProvider(ABC):
     def _kv_from_x(self) -> None:
         """Recompute the key and value from the current input chunk."""
         self.kv_j, self.kj, self.vj = _compute_kv(
-            self.x_j, self.w_qkv, self.b, self.n_local, self.h, self.d
+            self.x_j, self.w_qkv, self.b, self.n_local, self.h, self.d, self.layout
         )
 
     def _recv(self, recv_buf: torch.Tensor) -> None:
@@ -142,6 +146,10 @@ class _RingForwardChunkProvider(_ForwardChunkProvider):
     def __init__(self, *args: object) -> None:
         """Start the first ring send."""
         super().__init__(*args)  # type: ignore[arg-type]
+        self._start_first_send()
+
+    def _start_first_send(self) -> None:
+        """Issue the first ring send (local chunk). Overridden by the overlap variant."""
         self._recv_buf, self._handle = self.config.forward_send_fn(
             self.x_j, self.kv_j, direction=-1, group=self.group, tag=0
         )
@@ -178,6 +186,61 @@ class _RingForwardChunkProvider(_ForwardChunkProvider):
     def global_chunk_idx(self, step: int) -> int:
         """Return the global index of the chunk held at ``step``."""
         return (self.local_rank + step) % self.world_size
+
+
+class _RingForwardChunkProviderOverlap(_RingForwardChunkProvider):
+    """:class:`_RingForwardChunkProvider` with the K/V send on a dedicated stream.
+
+    Two persistent receive buffers ping-pong: the send of chunk ``step + 1`` is
+    issued on ``ring_config.comm_stream`` from inside ``get(step)`` -- *before*
+    :func:`~.forward.ring_forward` runs the step-``step`` attention core on the
+    default stream -- so the transfer overlaps that core instead of the
+    host-blocking ``Work.wait()`` the base class does. Selected by
+    :func:`build_forward_chunk_provider` only when
+    :attr:`RingAttentionConfig.overlap_active`.
+    """
+
+    def _start_first_send(self) -> None:
+        """Allocate the ping-pong buffers and kick the local chunk on the comm stream."""
+        self._cs = self.config.comm_stream
+        src = self.x_j if self.send_x else self.kv_j
+        # Two buffers of the circulated tensor's shape. `_pending` names the one
+        # the next `get` will read; the other is free to receive into.
+        self._bufs = [torch.empty_like(src), torch.empty_like(src)]
+        self._pending = 0
+        self._work: object = None
+        self._event: torch.cuda.Event | None = None
+        self._kick(src, into=0, tag=0)
+
+    def _kick(self, src: torch.Tensor, into: int, tag: int) -> None:
+        """Issue a ``direction=-1`` ring send of ``src`` into ``self._bufs[into]``."""
+        buf = self._bufs[into]
+        _, self._work, self._event = issue_on_comm_stream(
+            self._cs,
+            lambda: self.config.send_op_fn(
+                src, buf, direction=-1, group=self.group, async_op=True, tag=tag
+            ),
+            keep_alive=(src, buf),
+        )
+        self._pending = into
+
+    def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Adopt chunk ``step`` off the comm stream and prefetch ``step + 1``."""
+        if step > 0:
+            assert self._event is not None
+            recv_buf = self._bufs[self._pending]
+            consume(self._event, recv_buf)
+            self._recv(recv_buf)
+            if step + 1 < self.world_size:
+                # `_recv` rebound x_j / kv_j onto `recv_buf`; relay it onward into
+                # the *other* buffer. Source and destination differ, and the next
+                # `_kick` waits on the compute stream (which has just read this
+                # buffer in the core) before overwriting it.
+                src = self.x_j if self.send_x else self.kv_j
+                self._kick(src, into=1 - self._pending, tag=step)
+            if self.send_x:
+                self._kv_from_x()
+        return self.kj, self.vj
 
 
 # --------------------------------------------------------------------------- #
@@ -248,30 +311,34 @@ class _HybridForwardChunkProvider(_ForwardChunkProvider):
         self.topo = get_hybrid_topology(self.group, self.config.gpus_per_node)
         self.gpn = self.topo.gpus_per_node
         self.n_nodes = self.topo.n_nodes
-        # Inter-node hop: send to the previous node, receive from the next.
-        self._inter_ranks = [self.topo.inter_peer(-1), self.topo.inter_peer(1)]
+        # Inter-node hop: send to the previous node, receive from the next --
+        # addressed inside `internode_group`, so this leaves the intra-node
+        # sub-group (and its NCCL communicator) free to progress alongside.
+        self._inter_group = self.topo.internode_group
+        self._inter_ranks = [self.topo.internode_peer(-1), self.topo.internode_peer(1)]
         self._inter_recv_buf: Optional[torch.Tensor] = None
         self._inter_handle: Optional[dist.Work] = None
 
     def _launch_inter_forward(self, node_step: int) -> None:
-        """Start the inter-node send.
+        """Start this round's inter-node send of the chunk currently in hand.
 
-        The first round sends the local chunk. Later rounds relay the chunk that
-        just arrived, so that with more than two nodes the chunk of node
-        ``node_idx + node_step`` reaches this rank rather than that of its
-        neighbour again.
+        The source is ``x_j`` / ``kv_j`` -- this rank's own original chunk at
+        round 0, and after that whatever the previous round's inter-node recv
+        just delivered (``_recv`` rebinds it before this runs; see the two
+        callers). Relaying the *held* chunk instead of always resending ``x`` /
+        ``kv`` is what makes the inter-node ring actually a ring at
+        ``n_nodes > 2`` -- always resending the original would only ever
+        deliver the immediate neighbour's chunk, never anything further round.
+        The source is read-only for the rest of this call (``_recv`` rebinds
+        the attribute onto a fresh buffer next round; ``_compute_kv`` and the
+        attention core allocate), so it is sent in place, no clone.
         """
-        buf = torch.empty_like(self.x_j if self.send_x else self.kv_j)
-        if node_step == 0:
-            data = self.x.clone() if self.send_x else self.kv.clone()
-        else:
-            assert self._inter_recv_buf is not None
-            data = self._inter_recv_buf.clone()
+        src = self.x_j if self.send_x else self.kv_j
         self._inter_recv_buf, self._inter_handle = self.config.p2p_fn(
-            data=data,
-            buffer=buf,
+            data=src,
+            buffer=torch.empty_like(src),
             send_recv_ranks=self._inter_ranks,
-            group=self.group,
+            group=self._inter_group,
             async_op=True,
             tag=node_step,
         )
@@ -286,8 +353,13 @@ class _HybridP2PForwardChunkProvider(_HybridForwardChunkProvider):
     def __init__(self, *args: object) -> None:
         """Resolve the intra-node peers."""
         super().__init__(*args)  # type: ignore[arg-type]
-        # Intra-node ring: send to the previous local rank, receive from the next.
-        self._intra_ranks = [self.topo.intra_peer(-1), self.topo.intra_peer(1)]
+        # Intra-node ring: send to the previous local rank, receive from the
+        # next -- addressed inside `intranode_group`. For the all-to-all-flavoured
+        # send ops (`send_op_fn` is `comm_1d_alltoall` for both hybrids) that is
+        # the difference between a masked all-to-all over the whole ring and one
+        # over the `gpus_per_node` ranks that actually exchange anything.
+        self._intra_group = self.topo.intranode_group
+        self._intra_ranks = [self.topo.intranode_peer(-1), self.topo.intranode_peer(1)]
         self._intra_recv_buf: Optional[torch.Tensor] = None
         self._intra_handle: Optional[dist.Work] = None
 
@@ -298,7 +370,7 @@ class _HybridP2PForwardChunkProvider(_HybridForwardChunkProvider):
             src,
             torch.empty_like(src),
             send_recv_ranks=self._intra_ranks,
-            group=self.group,
+            group=self._intra_group,
             tag=inner,
         )
 
@@ -357,6 +429,85 @@ class _HybridP2PForwardChunkProvider(_HybridForwardChunkProvider):
         return cur_node * self.gpn + (self.topo.local_idx + inner) % self.gpn
 
 
+class _HybridP2PForwardChunkProviderOverlap(_HybridP2PForwardChunkProvider):
+    """:class:`_HybridP2PForwardChunkProvider` with both hops on the comm stream.
+
+    The intra-node hop (``send_op_fn`` over ``intranode_group``) and the
+    inter-node hop (``p2p_fn`` over ``internode_group``) are each structurally
+    the same single send/recv swap the plain ring does -- just addressed by
+    explicit ``send_recv_ranks`` instead of a ``direction`` -- so each gets its
+    own :class:`~._comm_overlap.PrefetchBuffer`, mirroring
+    :class:`_RingForwardChunkProviderOverlap` but twice over. Both are kicked
+    from inside ``get(step)`` (before the step's attention core runs) and
+    adopted at the top of the call that needs them -- ``get(step + 1)`` for the
+    intra-node hop, ``get`` of the next round's ``inner == 0`` for the
+    inter-node hop -- instead of the base class's ``Work.wait()`` in
+    ``advance`` / at the top of ``get``. Selected by
+    :func:`build_forward_chunk_provider` only when
+    :attr:`RingAttentionConfig.overlap_active`.
+    """
+
+    def __init__(self, *args: object) -> None:
+        """Allocate the intra- and inter-node prefetch buffers."""
+        super().__init__(*args)  # type: ignore[arg-type]
+        cs = self.config.comm_stream
+        assert cs is not None
+        like = self.x_j if self.send_x else self.kv_j
+        self._intra_buf = PrefetchBuffer(cs, like)
+        self._inter_buf = PrefetchBuffer(cs, like)
+
+    def _launch_inter_forward(self, node_step: int) -> None:
+        """Prefetch this round's inter-node hop on the comm stream."""
+        src = self.x_j if self.send_x else self.kv_j
+
+        def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
+            return self.config.p2p_fn(
+                data=src,
+                buffer=buf,
+                send_recv_ranks=self._inter_ranks,
+                group=self._inter_group,
+                async_op=True,
+                tag=node_step,
+            )
+
+        self._inter_buf.kick(produce, extra_keep_alive=(src,))
+
+    def _launch_intra_forward(self, inner: int) -> None:
+        """Prefetch this step's intra-node hop on the comm stream."""
+        src = self.x_j if self.send_x else self.kv_j
+
+        def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
+            return self.config.send_op_fn(
+                src, buf, send_recv_ranks=self._intra_ranks, group=self._intra_group,
+                async_op=True, tag=inner,
+            )
+
+        self._intra_buf.kick(produce, extra_keep_alive=(src,))
+
+    def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Adopt chunk ``step`` off the comm stream, then prefetch what comes next."""
+        node_step, inner = divmod(step, self.gpn)
+        if inner == 0:
+            if node_step > 0:
+                self._recv(self._inter_buf.wait())
+            if node_step < self.n_nodes - 1:
+                self._launch_inter_forward(node_step)
+        if inner + 1 < self.gpn:
+            self._launch_intra_forward(inner)
+
+        if self.send_x:
+            self._kv_from_x()
+        else:
+            self.kj, self.vj = self.kv_j[0], self.kv_j[1]
+        return self.kj, self.vj
+
+    def advance(self, step: int, world_size: int) -> None:
+        """Adopt the intra-node hop prefetched in ``get`` so the next inner step is ready."""
+        _, inner = divmod(step, self.gpn)
+        if inner + 1 < self.gpn:
+            self._recv(self._intra_buf.wait())
+
+
 # --------------------------------------------------------------------------- #
 # hybrid: intra-node broadcast + inter-node P2P
 # --------------------------------------------------------------------------- #
@@ -399,6 +550,9 @@ class _HybridBroadcastForwardChunkProvider(_HybridForwardChunkProvider):
                 self._launch_inter_forward(node_step)
 
         assert self._own_buf is not None and self._own_kv is not None
+        # `inner` is a node-local index, which *is* the rank of that source
+        # inside `intranode_group` -- `group_src`, not the global `src`, which
+        # a ring that is a mesh sub-group would get wrong.
         is_src = self.topo.local_idx == inner
         recv_buf = self._own_buf if is_src else torch.empty_like(self._own_buf)
         dist.broadcast(recv_buf, group_src=inner, group=self._intranode_group)
@@ -422,6 +576,99 @@ class _HybridBroadcastForwardChunkProvider(_HybridForwardChunkProvider):
         node_step, inner = divmod(step, self.gpn)
         cur_node = (self.topo.node_idx + node_step) % self.n_nodes
         return cur_node * self.gpn + inner
+
+
+class _HybridBroadcastForwardChunkProviderOverlap(_HybridBroadcastForwardChunkProvider):
+    """:class:`_HybridBroadcastForwardChunkProvider` with both hops on the comm stream.
+
+    The inter-node hop is prefetched exactly like
+    :class:`_HybridP2PForwardChunkProviderOverlap`'s. The ``gpn`` intra-node
+    broadcasts of a round have no dependency on one another -- each just needs
+    the round's ``_own_buf`` / ``_own_kv`` (resolved once at ``inner == 0``) --
+    so ``get(inner)`` adopts the broadcast kicked by the *previous* call and
+    immediately kicks ``inner + 1``'s, the same one-ahead pattern applied
+    within a round instead of across ring steps. A round's first broadcast
+    (``inner == 0``) has nothing earlier to hide behind and is kicked and
+    adopted in the same call, same as every other provider's first hop.
+    """
+
+    def __init__(self, *args: object) -> None:
+        """Allocate the intra- and inter-node prefetch buffers."""
+        super().__init__(*args)  # type: ignore[arg-type]
+        cs = self.config.comm_stream
+        assert cs is not None
+        like = self.x_j if self.send_x else self.kv_j
+        self._bc_buf = PrefetchBuffer(cs, like)
+        self._inter_buf = PrefetchBuffer(cs, like)
+
+    def _launch_inter_forward(self, node_step: int) -> None:
+        """Prefetch this round's inter-node hop on the comm stream."""
+        src = self.x_j if self.send_x else self.kv_j
+
+        def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
+            return self.config.p2p_fn(
+                data=src,
+                buffer=buf,
+                send_recv_ranks=self._inter_ranks,
+                group=self._inter_group,
+                async_op=True,
+                tag=node_step,
+            )
+
+        self._inter_buf.kick(produce, extra_keep_alive=(src,))
+
+    def _kick_broadcast(self, inner: int) -> None:
+        """Prefetch this round's intra-node broadcast for local index ``inner``."""
+        is_src = self.topo.local_idx == inner
+        own = self._own_buf
+        assert own is not None
+
+        def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
+            if is_src:
+                # Broadcast reads the source's own tensor in place; the
+                # persistent buffer has to hold that content before the
+                # collective fires.
+                buf.copy_(own)
+            work = dist.broadcast(
+                buf, group_src=inner, group=self._intranode_group, async_op=True
+            )
+            return buf, work
+
+        self._bc_buf.kick(produce, extra_keep_alive=(own,) if is_src else ())
+
+    def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Broadcast the chunk for inner step ``inner`` and return its ``(kj, vj)``."""
+        node_step, inner = divmod(step, self.gpn)
+        if inner == 0:
+            if node_step > 0:
+                self._recv(self._inter_buf.wait())
+                if self.send_x:
+                    self._kv_from_x()
+            self._own_kv = self.kv_j
+            self._own_buf = self.x_j if self.send_x else self.kv_j
+            if node_step < self.n_nodes - 1:
+                self._launch_inter_forward(node_step)
+            self._kick_broadcast(0)
+
+        recv_buf = self._bc_buf.wait()
+        if inner + 1 < self.gpn:
+            self._kick_broadcast(inner + 1)
+
+        is_src = self.topo.local_idx == inner
+        if self.send_x:
+            self.x_j = recv_buf
+            if is_src:
+                assert self._own_kv is not None
+                self.kv_j, self.kj, self.vj = (
+                    self._own_kv,
+                    self._own_kv[0],
+                    self._own_kv[1],
+                )
+            else:
+                self._kv_from_x()
+        else:
+            self.kv_j, self.kj, self.vj = recv_buf, recv_buf[0], recv_buf[1]
+        return self.kj, self.vj
 
 
 # --------------------------------------------------------------------------- #
@@ -467,10 +714,16 @@ def build_forward_chunk_provider(
         case SendOp.BROADCAST:
             return _BroadcastForwardChunkProvider(*args)
         case SendOp.P2P | SendOp.ALLTOALL:
+            if ring_config.overlap_active:
+                return _RingForwardChunkProviderOverlap(*args)
             return _RingForwardChunkProvider(*args)
         case SendOp.HYBRID_P2P | SendOp.HYBRID_ALLTOALL:
+            if ring_config.overlap_active:
+                return _HybridP2PForwardChunkProviderOverlap(*args)
             return _HybridP2PForwardChunkProvider(*args)
         case SendOp.HYBRID_BROADCAST:
+            if ring_config.overlap_active:
+                return _HybridBroadcastForwardChunkProviderOverlap(*args)
             return _HybridBroadcastForwardChunkProvider(*args)
         case _:
             raise NotImplementedError(f"Unknown send_op: {ring_config.send_op}")

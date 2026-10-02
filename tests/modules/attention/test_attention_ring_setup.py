@@ -22,9 +22,9 @@ DIM, HEADS, BATCH, N_LOCAL = 16, 4, 2, 6
 
 class TestUnknownBackend:
     def test_select_attn_core_rejects_an_unhandled_backend(self):
-        stub = SimpleNamespace(attn_backend="bogus", heads=HEADS, dropout_p=0.0)
+        stub = SimpleNamespace(attn_backend="bogus")
         with pytest.raises(ValueError, match="unhandled attn_backend"):
-            attention.DistributedAttention._select_attn_core(stub, DIM, HEADS)
+            attention.DistributedAttention._select_attn_core(stub)
 
     @pytest.mark.parametrize(
         "backend, name",
@@ -37,7 +37,7 @@ class TestUnknownBackend:
         stub = SimpleNamespace(
             attn_backend=backend, _attn_core_math="math", _attn_core="sdpa"
         )
-        chosen = attention.DistributedAttention._select_attn_core(stub, DIM, HEADS)
+        chosen = attention.DistributedAttention._select_attn_core(stub)
         assert chosen == getattr(stub, name)
 
 

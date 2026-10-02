@@ -73,6 +73,27 @@ sbatch experiments/train.sbatch
 See [`scripts/README.md`](scripts/README.md) for the full launch contract and
 every `JIGSAW_*` knob.
 
+### Sequence parallelism: ring vs. Ulysses
+
+`DistributedAttention` offers two mutually exclusive ways to parallelise
+attention over `spatial_group`, on top of `attn_backend`:
+
+- `ring=True` — K/V circulate around `spatial_group` in a P2P ring, with a
+  per-step online-softmax merge. Works for any head count.
+- `ulysses=True` — a single all-to-all trades the local sequence shard for a
+  head shard, runs one dense attention over the full sequence, then an
+  all-to-all brings it back. Needs `heads // channel_group.size()` divisible
+  by `spatial_group.size()`. Set `ulysses_gpus_per_node > 0` to run the
+  *hierarchical* scheme instead — Ulysses over an intra-node sub-group nested
+  in a P2P ring over the inter-node one — which keeps the all-to-all on the
+  fast intra-node fabric.
+
+Both schemes can overlap their K/V communication with the attention core on a
+dedicated CUDA stream: `overlap_comm` on `RingAttentionConfig` for the plain
+ring, `ulysses_inter_overlap` for the hierarchical scheme's inter-node ring.
+CUDA only; inert elsewhere. See `RingAttentionConfig.__init__` and
+`DistributedAttention.__init__` for the full parameter reference.
+
 ## Usage
 _jigsaw_ follows the interface of PyTorch: build the model from _jigsaw_ layers, then train it as usual. Each layer takes the *global* (unsharded) dimensions and the process groups of a [process mesh](#process-mesh), and allocates only its local shard.
 

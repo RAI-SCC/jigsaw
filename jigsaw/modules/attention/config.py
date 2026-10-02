@@ -62,10 +62,18 @@ class SendOp(Enum):
 class AttnBackend(str, Enum):
     """Attention core implementation.
 
-    - ``TE``: TransformerEngine fused kernels. Requires CUDA and
-      ``transformer_engine``.
-    - ``SDPA``: PyTorch scaled-dot-product attention.
-    - ``MATH``: unfused reference implementation.
+    Applies to both the plain :class:`~..attention.DistributedAttention` core and
+    the ring's per-chunk inner attention.
+
+    - ``TE``: whichever kernel TransformerEngine would run on this GPU -- the
+      cuDNN fused kernels on Hopper and newer, the ``flash_attn`` package on
+      Ampere. CUDA only; see :mod:`.functional.cores.te`.
+    - ``SDPA``: PyTorch scaled-dot-product attention -- the flash kernel on CUDA
+      (with a math fallback), the math kernel on CPU. Default.
+    - ``MATH``: the unfused ``softmax(QK^T)V`` reference. Any device/shape/dtype.
+
+    ``ring`` is a separate switch (see ``DistributedAttention``); it composes with
+    every backend here.
     """
 
     TE = "te"
@@ -105,7 +113,11 @@ def _select_offloader(
 
 
 def _te_core_or_raise() -> None:
-    """Raise if the TE core is unavailable."""
+    """Guard: the TE cores need ``transformer_engine`` or ``flash_attn``, plus CUDA.
+
+    Either arm of :mod:`.functional.cores.te` satisfies this; which one actually
+    runs is :func:`.functional.cores.te.select_core`'s call.
+    """
     from .functional.cores.te import TE_CORE_AVAILABLE
 
     if not TE_CORE_AVAILABLE:
@@ -117,7 +129,13 @@ def _te_core_or_raise() -> None:
 def _select_attn_core_forward_fn(
     device: torch.device, attn_backend: AttnBackend = AttnBackend.SDPA
 ) -> AttnCoreFn:
-    """Select the forward core of the ring's inner attention."""
+    """Pick the ring inner-attention forward core for ``device`` / ``attn_backend``.
+
+    ``SDPA`` keeps the historical device-based pick (flash on CUDA, math on CPU).
+    ``TE`` picks by GPU architecture -- cuDNN on Hopper and newer, ``flash_attn``
+    on Ampere; see :func:`.functional.cores.te.select_core`.
+    Cores live in :mod:`.functional.cores`; each exposes ``forward`` / ``backward``.
+    """
     from .functional.cores import math as math_core
     from .functional.cores import sdpa as sdpa_core
 
@@ -126,7 +144,7 @@ def _select_attn_core_forward_fn(
             _te_core_or_raise()
             from .functional.cores import te as te_core
 
-            return te_core.forward
+            return te_core.select_core(device).forward
         case AttnBackend.MATH:
             return math_core.forward
         case AttnBackend.SDPA:
@@ -151,7 +169,7 @@ def _select_attn_core_backward_fn(
             _te_core_or_raise()
             from .functional.cores import te as te_core
 
-            return te_core.backward
+            return te_core.select_core(device).backward
         case AttnBackend.MATH:
             return math_core.backward
         case AttnBackend.SDPA:
@@ -298,6 +316,7 @@ class RingAttentionConfig:
         offload: Offload = Offload.DISABLED,
         gpus_per_node: int = 4,
         attn_backend: AttnBackend = AttnBackend.SDPA,
+        overlap_comm: bool = False,
     ):
         """Initialize the configuration.
 
@@ -320,7 +339,21 @@ class RingAttentionConfig:
         gpus_per_node : int
             Number of ranks assigned to each node for hybrid communication.
         attn_backend : AttnBackend
-            Attention core of the per-chunk inner attention.
+            Inner per-chunk attention core. ``SDPA`` (default) keeps the
+            device-based pick (flash on CUDA, math on CPU); ``TE`` uses the
+            TransformerEngine fused core; ``MATH`` the unfused reference.
+        overlap_comm : bool
+            Put the ring's K/V circulation -- and the backward dK/dV relay,
+            where the accumulation shape allows it -- on a dedicated CUDA
+            stream with double buffering, so each transfer overlaps the
+            attention core on the default stream (the ``cp_stream`` trick
+            Transformer Engine uses). CUDA only; elsewhere it is inert and the
+            synchronous path runs unchanged. K/V circulation is overlapped for
+            every ``send_op`` except ``BROADCAST`` (a fresh collective each
+            step, nothing to prefetch ahead of); the dK/dV relay is overlapped
+            too when ``save_scope=LOCAL`` and ``send_backward=SEND_DKV``,
+            except under ``HYBRID_BROADCAST`` whose dK/dV accumulation doesn't
+            fit the direct-swap relay. See :attr:`overlap_active`.
         """
         if gpus_per_node <= 0:
             raise ValueError("gpus_per_node must be positive")
@@ -333,6 +366,23 @@ class RingAttentionConfig:
         self.gpus_per_node = gpus_per_node
         self.device = device
         self.attn_backend = AttnBackend(attn_backend)
+
+        # Dedicated CUDA stream for the ring's K/V circulation and backward dK/dV
+        # relay. Created once here (the config outlives a single forward/backward)
+        # and shared by both passes. CUDA-only: on CPU / meta devices there is no
+        # stream and ``overlap_active`` stays False, so every provider falls back
+        # to its synchronous path.
+        self.overlap_comm = bool(overlap_comm)
+        self._comm_stream: Optional[torch.cuda.Stream] = (
+            torch.cuda.Stream(device)
+            if self.overlap_comm and torch.device(device).type == "cuda"
+            else None
+        )
+
+        # Layout the ring circulates q/k/v/out in, and hands to the inner core.
+        # The TE cores (cuDNN / FA2) are natively bshd -- carrying the ring in
+        # bshd for them means zero transposes per chunk; SDPA / math are bhsd.
+        self.core_layout = "bshd" if self.attn_backend == AttnBackend.TE else "bhsd"
 
         # Resolve every policy to its concrete callable, once.
         self.offloader = _select_offloader(offload, device)
@@ -352,6 +402,21 @@ class RingAttentionConfig:
             save_for_backward, save_scope, self.offloader
         )
 
+    @property
+    def comm_stream(self) -> Optional[torch.cuda.Stream]:
+        """Dedicated CUDA stream for ring comm, or ``None`` when overlap is off."""
+        return self._comm_stream
+
+    @property
+    def overlap_active(self) -> bool:
+        """Whether the comm-stream overlap path is actually engaged.
+
+        ``True`` only when ``overlap_comm`` was requested *and* a CUDA stream
+        could be built for it; provider builders gate on this so a non-CUDA
+        device silently keeps the synchronous path.
+        """
+        return self._comm_stream is not None
+
     def wait_offloads(self) -> None:
         """Wait for pending activation offloads."""
         if self.offloader is not None:
@@ -367,5 +432,6 @@ class RingAttentionConfig:
             f"save_scope={self.save_scope.name}, "
             f"send_backward={self.send_backward.name}, "
             f"offload={self.offload.name}, "
-            f"attn_backend={self.attn_backend.name})"
+            f"attn_backend={self.attn_backend.name}, "
+            f"overlap_comm={self.overlap_comm})"
         )

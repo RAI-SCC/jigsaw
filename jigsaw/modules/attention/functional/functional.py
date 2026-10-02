@@ -35,8 +35,32 @@ def combine_dropout_seed(base_seed: int, local_rank: int, global_chunk_idx: int)
     ) % _SEED_MODULUS
 
 
+#: Ring q/k/v/out layouts. ``"bhsd"`` is the ring's historical convention (SDPA /
+#: math cores); ``"bshd"`` is what the TE cores speak natively, so the TE ring
+#: carries it end to end and skips every per-chunk transpose. Set on
+#: :class:`~..config.RingAttentionConfig.core_layout`.
+_SEQ_DIM = {"bhsd": 2, "bshd": 1}
+
+
+def seq_dim(layout: str) -> int:
+    """Axis holding the sequence in a ring q/k/v/out tensor of ``layout``."""
+    return _SEQ_DIM[layout]
+
+
+def bhnd(shape: torch.Size, layout: str) -> tuple[int, int, int, int]:
+    """``(b, h, n, d)`` from a ring q/k/v/out ``shape`` in ``layout``."""
+    b, x, y, d = shape
+    return (b, y, x, d) if layout == "bshd" else (b, x, y, d)
+
+
 def _compute_kv(
-    xj: torch.Tensor, w_qkv: torch.Tensor, b: int, n_local: int, h: int, d: int
+    xj: torch.Tensor,
+    w_qkv: torch.Tensor,
+    b: int,
+    n_local: int,
+    h: int,
+    d: int,
+    layout: str = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute key and value tensors from an input chunk.
 
@@ -54,15 +78,19 @@ def _compute_kv(
         Number of attention heads.
     d : int
         Embedding dimension per head.
+    layout : str
+        ``"bhsd"`` (default) or ``"bshd"`` -- the layout of the returned
+        ``kj`` / ``vj`` (and the stacked ``kv``, minus its leading pair axis).
 
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         The fused key-value tensor and its key and value views.
     """
-    kv = (
-        (xj @ w_qkv[d * h :, :].mT).reshape(b, n_local, 2, h, d).permute(2, 0, 3, 1, 4)
-    ).contiguous()
+    kv2 = (xj @ w_qkv[d * h :, :].mT).reshape(b, n_local, 2, h, d)
+    # (b, n, 2, h, d) -> (2, b, h, n, d)  [bhsd]  /  (2, b, n, h, d)  [bshd]
+    perm = (2, 0, 1, 3, 4) if layout == "bshd" else (2, 0, 3, 1, 4)
+    kv = kv2.permute(*perm).contiguous()
     return kv, kv[0], kv[1]
 
 
@@ -73,8 +101,28 @@ def _compute_kv(
 class HybridTopology:
     """Layout of a 1-D ring split into nodes of equal size.
 
-    Ring position ``p`` owns sequence chunk ``p`` and lives at node
-    ``p // gpus_per_node`` and local index ``p % gpus_per_node``.
+    The ring's ranks (``group.size()`` of them) are cut into ``n_nodes``
+    contiguous nodes of ``gpus_per_node`` ranks each. Ring position ``p``
+    (``0 <= p < group.size()``) owns global sequence chunk ``p`` and lives at
+    ``(p // gpus_per_node, p % gpus_per_node)``. Every peer lookup a hybrid ring
+    needs -- the next rank along the intra-node ring, the next along the
+    inter-node ring, or the rank at an arbitrary ``(node, local)`` -- is a table
+    lookup here, so callers never open-code ``// gpus_per_node`` /
+    ``% gpus_per_node`` arithmetic.
+
+    ``intranode_group`` / ``internode_group`` are the sub-groups containing this
+    rank, and are what every one-level hop -- the intra-node ring/broadcast and
+    the inter-node ring alike -- actually communicates over, so the two levels
+    sit on separate NCCL communicators and can progress independently. Each is
+    built in the obvious order (:func:`get_hybrid_topology`), so this rank's
+    position is ``local_idx`` in ``intranode_group`` and ``node_idx`` in
+    ``internode_group``; :meth:`intranode_peer` / :meth:`internode_peer` return
+    peers in that space.
+
+    :meth:`intra_peer` / :meth:`inter_peer` / :meth:`rank_at` stay in ring-position
+    space over the *full* group -- still needed by hops that move along both axes
+    at once (the backward dK/dV relay, which hands a partial straight to its
+    owner across nodes *and* local indices) and by global-chunk-id arithmetic.
     """
 
     n_nodes: int
@@ -101,6 +149,23 @@ class HybridTopology:
     def inter_peer(self, offset: int) -> int:
         """Return the ring position ``offset`` steps along the inter-node ring."""
         return self.rank_at(self.node_idx + offset, self.local_idx)
+
+    def intranode_peer(self, offset: int) -> int:
+        """Rank *within* ``intranode_group``, ``offset`` steps along the node's ring.
+
+        ``intranode_group`` lists this node's ranks in node-local-index order, so
+        its rank ``i`` is node-local index ``i`` and this rank sits at
+        ``local_idx``.
+        """
+        return (self.local_idx + offset) % self.gpus_per_node
+
+    def internode_peer(self, offset: int) -> int:
+        """Rank *within* ``internode_group``, ``offset`` steps along the node ring.
+
+        ``internode_group`` lists its members in node order, so its rank ``i`` is
+        node ``i`` and this rank sits at ``node_idx``.
+        """
+        return (self.node_idx + offset) % self.n_nodes
 
 
 _HYBRID_TOPOLOGY_CACHE: dict[tuple[dist.ProcessGroup, int], HybridTopology] = {}
@@ -154,6 +219,11 @@ def get_hybrid_topology(group: dist.ProcessGroup, gpus_per_node: int) -> HybridT
     # each sub-group derives the identical rank list, and
     # `use_local_synchronization=True` keeps the barrier local to those members,
     # so the rings at other mesh coordinates stay independent.
+    #
+    # Member order is load-bearing: `intranode_group` is listed in node-local
+    # index order and `internode_group` in node order, which is what lets
+    # `HybridTopology.intranode_peer` / `.internode_peer` return a sub-group rank
+    # as plain modular arithmetic on `local_idx` / `node_idx`.
     intranode_group = dist.new_group(
         ranks=[ring_global_ranks[p] for p in grid[node_idx]],
         use_local_synchronization=True,
@@ -288,6 +358,11 @@ class RingAttentionFunction(torch.autograd.Function):
             q,
             out,
             x,
+            # `(b, h, s)`, exactly as `ring_forward` produced it and as every
+            # inner core's backward expects it. (Was saved `.mT`'d to `(b, s, h)`
+            # here; `ring_backward` passes it straight through, so the cores got
+            # the transposed tensor -- a silent stride error for SDPA/TE, a hard
+            # shape error for the math core, whenever heads != seq_local.)
             lse,
             w_qkv,
             *chunks_to_save,  # *[t for pair in chunks_to_save for t in pair]

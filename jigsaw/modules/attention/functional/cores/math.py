@@ -1,7 +1,22 @@
 """Unfused reference attention core for the ring's inner attention.
 
-Dropout is applied after the softmax and replayed from ``seed``. The
-log-sum-exp is computed before dropout.
+Runs for any device / shape / dtype and is what the SDPA selectors fall back to
+on CPU. The backward takes the ring's globally normalised ``out`` / ``logsumexp``
+and recomputes ``dQ/dK/dV`` from them directly.
+
+Dropout is applied post-softmax (inverted dropout: kept elements scaled by
+``1 / (1 - dropout_p)``), matching ``torch.nn.functional.scaled_dot_product_attention``'s
+convention. ``logsumexp`` is computed from the *pre*-dropout scores -- dropout
+doesn't change the normalising constant, and the ring's online-softmax merge
+(:func:`..forward._online_softmax_merge_`) needs the undropped value to combine
+chunks correctly.
+
+Since this core has no opaque kernel-internal RNG state to thread back (unlike
+:mod:`.sdpa` / :mod:`.te`), it reconstructs its dropout mask from ``seed``: an
+int the ring independently recomputes identically in the forward and backward
+loops (see :func:`..functional.combine_dropout_seed`), rather than a saved
+tensor. A dedicated ``torch.Generator`` seeded from it keeps the draw
+reproducible without disturbing the ambient default RNG stream.
 """
 
 from __future__ import annotations
@@ -24,6 +39,8 @@ def forward(
     scale: Optional[float] = 0.0,
     dropout_p: float = 0.0,
     seed: Optional[int] = None,
+    *,
+    layout: str = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Compute attention.
 
@@ -47,6 +64,9 @@ def forward(
     rng_state : None
         Always ``None``.
     """
+    assert layout == "bhsd", (
+        f"math core is bhsd-only; got layout={layout!r}. The bshd ring is TE-only."
+    )
     scale = scale or (q.size(-1) ** -0.5)
     scores = (q @ k.mT) * scale
     logsumexp = scores.logsumexp(dim=-1)  # (B, H, Sq)
