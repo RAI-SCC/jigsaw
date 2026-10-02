@@ -287,7 +287,11 @@ class TestUlyssesAttention:
             2, 12, local_channels, device=device, dtype=dtype, requires_grad=True
         )
         out = model(x)
-        assert out.shape == (2, 12, _OUT_DIM)
+        # ``head_concat`` is channel-parallel too: like ``qkv``, its output stays
+        # sharded along ``out_dim`` within ``channel_group`` (see
+        # ``test_attention.py::test_converter_parity``, which gathers it back
+        # explicitly) rather than being gathered inside the module.
+        assert out.shape == (2, 12, local_channels)
         out.sum().backward()
 
         assert all_ranks_ok(bool(torch.isfinite(out).all()), device, model_group)
