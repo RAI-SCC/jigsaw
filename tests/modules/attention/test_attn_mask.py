@@ -37,6 +37,8 @@ just the output). So:
   docstring in ``attention.py``.
 """
 
+from typing import Optional
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -61,6 +63,54 @@ def _block_mask(n0: int, n1: int) -> torch.Tensor:
     mask[:n0, :n0] = True
     mask[n0:, n0:] = True
     return mask
+
+
+def _arbitrary_bool_mask(n: int, device: torch.device) -> torch.Tensor:
+    """A random, non-block boolean mask -- no two rows need share a visible set.
+
+    Unlike ``_block_mask``, this can't be decomposed into separate per-region
+    attention calls, so it exercises the actual masked-softmax path rather than
+    one that happens to equal two unmasked ones.
+    """
+    mask = torch.rand(n, n, device=device) > 0.4
+    idx = torch.arange(n, device=device)
+    mask[idx, idx] = True  # every row sees at least itself, no all-(-inf) rows
+    return mask
+
+
+def _arbitrary_float_mask(
+    n: int, device: torch.device, dtype: torch.dtype
+) -> torch.Tensor:
+    """A random finite additive bias -- not just 0/``-inf`` standing in for a bool
+    mask, but a genuinely continuous per-position weighting.
+    """
+    return (torch.randn(n, n, device=device) * 2.0).to(dtype)
+
+
+def _reference_core(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    attn_mask: Optional[torch.Tensor] = None,
+    **kwargs: torch.Tensor,
+) -> torch.Tensor:
+    """Naive softmax attention, computed in double precision.
+
+    A backend-independent ground truth for an arbitrary mask: there is no
+    decomposition trick (like ``_block_mask``'s) to check one against, so this
+    checks the actual masked-softmax definition instead. Drop-in replacement for
+    ``model.attn_core`` (same call signature), so a test can swap it in and run
+    the real ``forward`` around it.
+    """
+    scale = q.shape[-1] ** -0.5
+    scores = (q.double() @ k.double().transpose(-2, -1)) * scale
+    if attn_mask is not None:
+        if attn_mask.dtype == torch.bool:
+            scores = scores.masked_fill(~attn_mask, float("-inf"))
+        else:
+            scores = scores + attn_mask.double()
+    weights = scores.softmax(dim=-1)
+    return (weights @ v.double()).to(v.dtype)
 
 
 @pytest.fixture
@@ -175,6 +225,49 @@ class TestAttentionMask:
         tol = 5e-3 if device.type == "cuda" else 1e-4
         torch.testing.assert_close(x_masked.grad, grad_ref, rtol=tol, atol=tol)
 
+    @pytest.mark.parametrize("mask_kind", ["bool", "float"])
+    def test_arbitrary_mask_matches_reference(
+        self, device: torch.device, mask_kind: str
+    ) -> None:
+        """An arbitrary (non-block) mask matches a naive softmax reference.
+
+        ``mask_kind="bool"`` is a random visibility pattern, not two blocks;
+        ``"float"`` is a random finite bias, not just 0/``-inf``. Neither
+        decomposes into separate calls the way ``_block_mask`` does, so this
+        swaps ``_reference_core`` in for ``model.attn_core`` and runs the real
+        ``forward`` (projections, dtype cast, output projection) around it.
+        """
+        model = self._model(device)
+        n = self.n0 + self.n1
+        torch.manual_seed(1)
+        x_global = torch.randn(2, n, DIM, device=device)
+        mask_dtype = torch.bfloat16 if device.type == "cuda" else x_global.dtype
+        mask = (
+            _arbitrary_bool_mask(n, device)
+            if mask_kind == "bool"
+            else _arbitrary_float_mask(n, device, mask_dtype)
+        )
+
+        x = x_global.clone().requires_grad_(True)
+        out = model(x, attn_mask=mask)
+        grad_out = torch.randn_like(out)
+        out.backward(grad_out)
+
+        real_core = model.attn_core
+        model.attn_core = _reference_core
+        try:
+            x_ref = x_global.clone().requires_grad_(True)
+            out_ref = model(x_ref, attn_mask=mask)
+            out_ref.backward(grad_out)
+        finally:
+            model.attn_core = real_core
+
+        assert x.grad is not None and x_ref.grad is not None
+        # On CUDA the real core runs in bf16 vs. the reference's fp64: looser tol.
+        tol = 5e-3 if device.type == "cuda" else 1e-4
+        torch.testing.assert_close(out, out_ref.detach(), rtol=tol, atol=tol)
+        torch.testing.assert_close(x.grad, x_ref.grad, rtol=tol, atol=tol)
+
 
 # --------------------------------------------------------------------------- #
 # DistributedAttention, plain (non-ring, non-Ulysses) core
@@ -260,6 +353,42 @@ class TestDistributedAttentionMask:
         torch.manual_seed(1)
         x = torch.randn(2, self.n0 + self.n1, DIM, device=device)
         torch.testing.assert_close(model(x), model(x, attn_mask=None))
+
+    @pytest.mark.parametrize("backend", ["sdpa", "math"])
+    @pytest.mark.parametrize("mask_kind", ["bool", "float"])
+    def test_arbitrary_mask_matches_reference(
+        self, device: torch.device, solo_group, backend: str, mask_kind: str
+    ) -> None:
+        """See ``TestAttentionMask.test_arbitrary_mask_matches_reference``."""
+        model = self._model(backend, device, solo_group)
+        n = self.n0 + self.n1
+        torch.manual_seed(1)
+        x_global = torch.randn(2, n, DIM, device=device)
+        mask_dtype = torch.bfloat16 if device.type == "cuda" else x_global.dtype
+        mask = (
+            _arbitrary_bool_mask(n, device)
+            if mask_kind == "bool"
+            else _arbitrary_float_mask(n, device, mask_dtype)
+        )
+
+        x = x_global.clone().requires_grad_(True)
+        out = model(x, attn_mask=mask)
+        grad_out = torch.randn_like(out)
+        out.backward(grad_out)
+
+        real_core = model.attn_core
+        model.attn_core = _reference_core
+        try:
+            x_ref = x_global.clone().requires_grad_(True)
+            out_ref = model(x_ref, attn_mask=mask)
+            out_ref.backward(grad_out)
+        finally:
+            model.attn_core = real_core
+
+        assert x.grad is not None and x_ref.grad is not None
+        tol = 5e-3 if device.type == "cuda" else 1e-4
+        torch.testing.assert_close(out, out_ref.detach(), rtol=tol, atol=tol)
+        torch.testing.assert_close(x.grad, x_ref.grad, rtol=tol, atol=tol)
 
 
 @pytest.mark.gpu_required
