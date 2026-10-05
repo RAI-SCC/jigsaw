@@ -5,6 +5,7 @@ from typing import Any, Callable
 import torch
 
 from jigsaw.modules import (
+    activation,
     attention,
     convolution,
     linear,
@@ -23,7 +24,7 @@ mapped_modules: dict[type[torch.nn.Module], Any] = {
     roll.Roll: roll.DistributedRoll,
     torch.nn.LayerNorm: normalization.DistributedLayerNorm,
     torch.nn.GroupNorm: normalization.DistributedGroupNorm,
-    torch.nn.Softmax: normalization.DistributedSoftMax,
+    torch.nn.Softmax: activation.DistributedSoftMax,
     linear.MatMulXWT: linear.DistributedMatMulXWT,
     linear.MatMulXW: linear.DistributedMatMulXW,
     linear.MatMulXTW: linear.DistributedMatMulXTW,

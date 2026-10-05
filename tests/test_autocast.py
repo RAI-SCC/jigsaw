@@ -31,8 +31,9 @@ import pytest
 import torch
 import torch.distributed as dist
 
+import jigsaw.modules.activation.activation as activation
 import jigsaw.modules.convolution as convolution
-import jigsaw.modules.normalization.normalization as norm
+import jigsaw.modules.normalization as norm
 from jigsaw.modules.attention import DistributedAttention
 from jigsaw.modules.linear import DistributedXWT
 from tests.parity import assert_close
@@ -324,8 +325,13 @@ class TestAutocastFp32List:
     ) -> None:
         pm = process_mesh_dict_2x2
         local_dim = 12
-        model = norm.DistributedNoParamLayerNorm(
-            pm["model"].rank(), device, channel_group=pm["col"]
+        model = norm.DistributedLayerNorm(
+            local_dim=local_dim,
+            local_rank=pm["model"].rank(),
+            device=device,
+            row_group=pm["row"],
+            col_group=pm["col"],
+            elementwise_affine=False,
         )
         torch.manual_seed(pm["model"].rank())
         x_low = torch.randn(4, 6, local_dim, device=device, dtype=autocast_dtype)
@@ -340,7 +346,7 @@ class TestAutocastFp32List:
     ) -> None:
         pm = process_mesh_dict_2x2
         local_dim = 12
-        model = norm.DistributedSoftMax(pm["col"], dim=-1)
+        model = activation.DistributedSoftMax(pm["col"], dim=-1)
         torch.manual_seed(pm["model"].rank())
         x_low = torch.randn(4, 6, local_dim, device=device, dtype=autocast_dtype)
         self._check_fp32_list(model, x_low, device, autocast_dtype, pm["model"])

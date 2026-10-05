@@ -4,6 +4,7 @@ import pytest
 import torch
 
 import jigsaw.convert as convert
+from jigsaw.modules.activation import DistributedSoftMax
 from jigsaw.modules.attention import Attention, DistributedAttention
 from jigsaw.modules.attention.attention import attn_core_dtype
 from jigsaw.modules.linear import (
@@ -17,8 +18,7 @@ from jigsaw.modules.linear import (
 )
 from jigsaw.modules.normalization import (
     DistributedGroupNorm,
-    DistributedNoParamLayerNorm,
-    DistributedSoftMax,
+    DistributedLayerNorm,
 )
 from jigsaw.modules.roll import Roll
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
@@ -1108,15 +1108,10 @@ class TestConvertToTorch:
         assert isinstance(back, torch.nn.Softmax)
         assert back.dim == -1
 
-    def test_convert_layer_norm_no_affine_routes_to_no_param(
+    def test_convert_layer_norm_no_affine(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        """``elementwise_affine=False`` must route to ``DistributedNoParamLayerNorm``.
-
-        Before this, ``DistributedLayerNorm.convert_to_jigsaw`` raised
-        ``NotImplementedError`` for this case instead of routing to the
-        parameter-free converter that already existed for it.
-        """
+        """``elementwise_affine=False`` converts to a parameter-free ``DistributedLayerNorm``."""
         torch.manual_seed(1)
         process_mesh_dict = process_mesh_dict_2x2
         normalized_dim = 8
@@ -1124,7 +1119,8 @@ class TestConvertToTorch:
         ln = torch.nn.LayerNorm(normalized_dim, elementwise_affine=False, device=device)
 
         jigsaw_ln = convert.convert_to_jigsaw(ln, process_mesh_dict, device)
-        assert isinstance(jigsaw_ln, DistributedNoParamLayerNorm)
+        assert isinstance(jigsaw_ln, DistributedLayerNorm)
+        assert jigsaw_ln.elementwise_affine is False
 
         x_global = torch.randn(2, x_seq, normalized_dim, device=device).requires_grad_(
             True
