@@ -24,13 +24,6 @@ def _loop(module, x):
     return torch.stack([module(x[i]) for i in range(x.shape[0])])
 
 
-@pytest.mark.parametrize("dim", [-1, 1])
-def test_softmax_vmap_matches_loop(batched, dim):
-    module = norm.DistributedSoftMax(dist.group.WORLD, dim=dim)
-    assert module.get_parameter_count() == 0
-    assert torch.allclose(torch.vmap(module)(batched), _loop(module, batched))
-
-
 def test_noparam_layernorm_vmap_matches_loop(batched, device):
     module = norm.DistributedNoParamLayerNorm(dist.get_rank(), device, dist.group.WORLD)
     assert module.get_parameter_count() == 0

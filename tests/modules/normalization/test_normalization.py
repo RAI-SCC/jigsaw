@@ -1,6 +1,5 @@
 import pytest
 import torch
-import torch.distributed as dist
 
 import jigsaw.modules.normalization.normalization as norm
 from jigsaw.utils_aggregate import (
@@ -145,41 +144,4 @@ class TestDistributedLayerNorm:
             1e-5,
             device,
             model_group,
-        )
-
-
-class TestDistributedSoftMax:
-    @pytest.mark.parametrize("dim", [-1, 1, 0, -2])
-    def test_distributed_softmax(self, device: torch.device, dim: int) -> None:
-        """Forward and backward match ``torch.softmax`` along any sharded dimension."""
-        group = dist.group.WORLD
-        size, rank = group.size(), group.rank()
-
-        # The same seed on every rank gives every rank the same full tensors.
-        g = torch.Generator().manual_seed(0)
-        shape = [2 * size, 2 * size, 2 * size]
-        x_full = torch.randn(shape, generator=g).to(device).requires_grad_(True)
-        grad_full = torch.randn(shape, generator=g).to(device)
-        x = x_full.detach().chunk(size, dim=dim)[rank].clone().requires_grad_(True)
-
-        softmax = norm.DistributedSoftMax(group, dim=dim)
-        out = softmax(x)
-        out.backward(grad_full.chunk(size, dim=dim)[rank])
-
-        ref = torch.softmax(x_full, dim=dim)
-        ref.backward(grad_full)
-
-        assert isinstance(x.grad, torch.Tensor)
-        assert isinstance(x_full.grad, torch.Tensor)
-        assert_close(
-            "forward", out, ref.chunk(size, dim=dim)[rank], 1e-5, 1e-5, device, group
-        )
-        assert_close(
-            "input grad",
-            x.grad,
-            x_full.grad.chunk(size, dim=dim)[rank],
-            1e-5,
-            1e-5,
-            device,
-            group,
         )

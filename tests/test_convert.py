@@ -4,6 +4,7 @@ import pytest
 import torch
 
 import jigsaw.convert as convert
+from jigsaw.modules.activation import DistributedSoftMax
 from jigsaw.modules.attention import Attention, DistributedAttention
 from jigsaw.modules.attention.attention import attn_core_dtype
 from jigsaw.modules.linear import (
@@ -18,7 +19,6 @@ from jigsaw.modules.linear import (
 from jigsaw.modules.normalization import (
     DistributedGroupNorm,
     DistributedNoParamLayerNorm,
-    DistributedSoftMax,
 )
 from jigsaw.modules.roll import Roll
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
