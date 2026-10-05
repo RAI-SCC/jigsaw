@@ -208,19 +208,18 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
         (x,) = promote_to_fp32_under_autocast(x)
         # Compute mean and variance locally
 
-        n_l = x.shape[-1]  # normalized dimension size (local)
-        n_g = n_l * channel_group.size()  # normalized dimension size (global)
-
         local_mean = x.mean(dim=-1, keepdim=True)
-        local_var = x.var(dim=-1, keepdim=True)
+        local_var = x.var(dim=-1, keepdim=True, unbiased=False)
 
         mean = local_mean.clone()
         dist.all_reduce(mean, op=dist.ReduceOp.AVG, group=channel_group)
 
-        var = ((n_l - 1) / (n_g - 1)) * local_var + (n_l / (n_g - 1)) * (
-            mean - local_mean
-        ) ** 2
-        dist.all_reduce(var, op=dist.ReduceOp.SUM, group=channel_group)
+        # Combine each shard's *biased* variance (matching plain LayerNorm, which
+        # divides by n rather than n-1) via the shifted-mean identity, then average
+        # across equally-sized shards -- same combination as DistributedLNFunction,
+        # minus the affine transform.
+        var = local_var + (local_mean - mean) ** 2
+        dist.all_reduce(var, op=dist.ReduceOp.AVG, group=channel_group)
 
         # Normalize
         x_norm = (x - mean) / torch.sqrt(var + eps)
@@ -306,7 +305,7 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
 
         # LayerNorm backward formula
         grad_x = (1.0 / std) * (
-            grad_output - grad_x_norm_mean - x_norm * x_grad_x_term / (n - 1)
+            grad_output - grad_x_norm_mean - x_norm * x_grad_x_term / n
         )
 
         return grad_x, None, None

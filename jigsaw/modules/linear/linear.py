@@ -34,12 +34,12 @@ class DistributedXWT(torch.nn.Module):
         self,
         in_dim: int,
         out_dim: int,
-        bias: bool,
         local_rank: int,
         device: torch.device,
         model_group: dist.ProcessGroup,
         column_group: dist.ProcessGroup,
         row_group: dist.ProcessGroup,
+        bias: bool = True,
         bayesian: bool = False,
         config: Optional[LinearConfig] = None,
         dtype: torch.dtype = torch.float32,
@@ -52,8 +52,6 @@ class DistributedXWT(torch.nn.Module):
             Input dimension of the global (unsharded) weight.
         out_dim : int
             Output dimension of the global (unsharded) weight.
-        bias : bool
-            Whether to add a bias.
         local_rank : int
             Rank within the model group.
         device : torch.device
@@ -65,6 +63,8 @@ class DistributedXWT(torch.nn.Module):
             Process group splitting the last dimension of ``x`` and ``w``.
         row_group : dist.ProcessGroup
             Process group splitting the first dimension of ``w``.
+        bias : bool
+            Whether to add a bias.
         bayesian : bool
             Whether the model is Bayesian.
         config : LinearConfig, optional

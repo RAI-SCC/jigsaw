@@ -850,12 +850,12 @@ class TestLinearTrainingParity:
         dist_lin = linear.DistributedXWT(
             in_dim,
             out_dim,
-            False,
-            model_rank,
-            device,
-            pmd["model"],
-            pmd["col"],
-            pmd["row"],
+            local_rank=model_rank,
+            device=device,
+            model_group=pmd["model"],
+            column_group=pmd["col"],
+            row_group=pmd["row"],
+            bias=False,
             bayesian=False,
         ).to(device)
         w = gather_results(dist_lin.weight.data, process_mesh_dict=pmd)

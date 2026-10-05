@@ -505,12 +505,12 @@ class DistributedAttention(torch.nn.Module):
             self.qkv = linear.DistributedXWT(
                 in_dim,
                 embed_dim * 3,
-                bias=False,
                 local_rank=self.channel_group.rank(),
                 device=self.device,
                 model_group=self.channel_group,
-                row_group=self.spatial_group,
                 column_group=self.channel_group,
+                row_group=self.spatial_group,
+                bias=False,
                 bayesian=bayesian,
                 dtype=self.dtype,
             )
@@ -527,12 +527,12 @@ class DistributedAttention(torch.nn.Module):
             self.head_concat = linear.DistributedXWT(
                 embed_dim,
                 out_dim,
-                bias=out_bias,
                 local_rank=self.channel_group.rank(),
                 device=self.device,
                 model_group=self.channel_group,
-                row_group=self.spatial_group,
                 column_group=self.channel_group,
+                row_group=self.spatial_group,
+                bias=out_bias,
                 bayesian=bayesian,
                 dtype=self.dtype,
             )

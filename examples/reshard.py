@@ -45,12 +45,12 @@ def main(steps: int = 100) -> None:
         return jigsaw.linear.DistributedXWT(
             in_dim,
             out_dim,
-            bias=True,
             local_rank=train_mesh["model"].rank(),
             device=device,
             model_group=train_mesh["model"],
-            row_group=row,
             column_group=col,
+            row_group=row,
+            bias=True,
         )
 
     # tokens are split over "row" (sequence) and "col" (features): (B, S / row, DIM / col)

@@ -101,12 +101,12 @@ class TestAutocastLinear:
         model = DistributedXWT(
             in_dim,
             out_dim,
-            bias=bias,
             local_rank=pm["model"].rank(),
             device=device,
             model_group=pm["model"],
-            row_group=pm["row"],
             column_group=pm["col"],
+            row_group=pm["row"],
+            bias=bias,
         ).to(base_dtype)
         group = pm["model"]
 
