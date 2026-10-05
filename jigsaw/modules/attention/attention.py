@@ -673,21 +673,10 @@ class DistributedAttention(torch.nn.Module):
             Query, key and value.
         attn_mask : torch.Tensor, optional
             Additive (float) or keep-true (bool) mask broadcastable to
-            ``(..., heads, seq_q, seq_kv)``, e.g. the per-window mask a shifted
-            Swin block needs to stop tokens that wrapped around the sequence
-            border (a pole, for a global grid) from attending to each other.
-            Torch's flash kernel rejects a non-null ``attn_mask`` outright, so
-            a masked call never lands there -- but it does *not* fall all the
-            way to the unfused math kernel either: the memory-efficient
-            (xFormers-derived) and cuDNN backends below both run an arbitrary
-            mask fused, confirmed on an allocation at Swin-window scale
-            (``N=2400``, a 40x60 window) to be ~3-4x faster and ~25x lighter on
-            peak memory than ``_attn_core_math`` there, bit-for-bit consistent
-            with it otherwise (only the window scale where that gap actually
-            bites needs an arbitrary rather than a block-diagonal mask; at
-            tiny windows either kernel is cheap enough not to matter). CPU has
-            neither kernel and silently keeps the pre-existing math-only
-            behaviour.
+            ``(..., heads, seq_q, seq_kv)``, e.g. a per-window Swin shift
+            mask. Flash rejects a non-null mask, so a masked call instead
+            runs on the memory-efficient or cuDNN ``sdpa`` backend, fused
+            rather than falling back to unfused math.
         **kwargs : torch.Tensor
             Unused.
 
@@ -768,18 +757,11 @@ class DistributedAttention(torch.nn.Module):
         v : torch.Tensor
             Values tensor, ``bshd``.
         attn_mask : torch.Tensor, optional
-            Not supported here. ``fused_attn_fwd``/``fused_attn_bwd`` (what
+            Not supported: ``fused_attn_fwd``/``fused_attn_bwd`` (what
             :mod:`.functional.cores.te` calls) only implement
-            ``attn_mask_type`` in ``{no_mask, causal, padding, ...}``; an
-            arbitrary per-position mask like a Swin shift mask has no fused
-            kernel at all on this path -- TE's own ``DotProductAttention``
-            falls back to its *unfused* backend for it. That is not a reason
-            to silently take that detour here, since ``attn_backend="sdpa"``
-            already has a better one: :meth:`_attn_core` allows the
-            memory-efficient/cuDNN ``sdpa`` backends, which run an arbitrary
-            mask fused (confirmed faster and lighter than unfused math at
-            Swin-window scale -- see its docstring). Raises so that better
-            path gets used explicitly instead.
+            ``attn_mask_type`` in ``{no_mask, causal, padding, ...}``, no
+            arbitrary mask. Raises rather than silently taking TE's unfused
+            detour; use ``attn_backend="sdpa"`` for masked attention instead.
         **kwargs : torch.Tensor
             Unused.
 
@@ -821,12 +803,10 @@ class DistributedAttention(torch.nn.Module):
         x : torch.Tensor
             Local input chunk.
         attn_mask : torch.Tensor, optional
-            Not supported: K/V circulate chunk-by-chunk around the ring, so a
-            mask would need to be split and re-indexed per step along with
-            them, which :class:`.functional.ring.RingAttentionFunction` does
-            not implement. Raises rather than silently ignoring it. Masked
-            (e.g. windowed) attention needs no ring in the first place --
-            build it with ``ring=False``.
+            Not supported: K/V circulate chunk-by-chunk around the ring and
+            :class:`.functional.ring.RingAttentionFunction` has no per-step
+            masking. Raises rather than silently ignoring it; use
+            ``ring=False`` for masked attention.
         **kwargs : torch.Tensor
             Unused.
 
@@ -959,9 +939,7 @@ class DistributedAttention(torch.nn.Module):
         intra-node sub-group -> ``[b, seq // n_nodes, local_heads // A, d]``,
         then a P2P ring over the inter-node sub-group, then an all-to-all back.
 
-        ``attn_mask`` is not supported: the sequence is reassembled onto a
-        head shard by the all-to-all, and the inner dense core
-        (:meth:`_dense_bshd_core`/:meth:`_inter_node_ring_core`) takes no mask
+        ``attn_mask`` is not supported: the inner dense core takes no mask
         parameter. Raises rather than silently ignoring it.
         """
         if attn_mask is not None:
@@ -1016,14 +994,11 @@ class DistributedAttention(torch.nn.Module):
             leading ``...`` batch dims and the trailing ``(three h d)``.
         attn_mask : torch.Tensor, optional
             Additive (float) or keep-true (bool) mask broadcastable to
-            ``q``'s ``(..., heads, seq, seq)`` (``sdpa``/``math``) shape --
-            e.g. a per-window Swin shift mask that stops tokens wrapped
-            around the sequence border (a pole, on a global grid) from
-            attending to each other. Only the plain (non-ring, non-Ulysses)
-            core supports it, and only with ``attn_backend`` in
-            ``{"sdpa", "math"}``; ``"te"``, ``ring=True`` and ``ulysses=True``
-            all raise ``ValueError`` rather than silently ignoring it or
-            taking an unexpectedly slow detour -- see each core's docstring.
+            ``q``'s ``(..., heads, seq, seq)`` shape, e.g. a per-window Swin
+            shift mask. Only the plain (non-ring, non-Ulysses) core supports
+            it, and only with ``attn_backend`` in ``{"sdpa", "math"}``;
+            ``"te"``, ``ring=True`` and ``ulysses=True`` raise ``ValueError``
+            instead -- see each core's docstring.
 
         Returns
         -------
@@ -1164,12 +1139,9 @@ class Attention(torch.nn.Module):
             Query, key and value.
         attn_mask : torch.Tensor, optional
             Additive (float) or keep-true (bool) mask broadcastable to
-            ``(..., heads, seq_q, seq_kv)``. Torch's flash kernel rejects a
-            non-null ``attn_mask`` outright, so a masked call never lands
-            there -- but it does *not* fall all the way to the unfused math
-            kernel either: see :meth:`DistributedAttention._attn_core` for
-            why the memory-efficient and cuDNN backends below matter at
-            Swin-window scale.
+            ``(..., heads, seq_q, seq_kv)``. See
+            :meth:`DistributedAttention._attn_core` for why a masked call
+            still lands on a fused backend rather than unfused math.
         **kwargs : torch.Tensor
             Unused.
 
@@ -1208,10 +1180,9 @@ class Attention(torch.nn.Module):
             Input tensor.
         attn_mask : torch.Tensor, optional
             Additive (float) or keep-true (bool) mask broadcastable to
-            ``q``'s ``(batch, heads, seq, seq)`` shape -- e.g. a per-window
-            Swin shift mask (batch here would be ``batch * windows``, flattened
-            by the caller) that stops tokens wrapped around the sequence
-            border (a pole, on a global grid) from attending to each other.
+            ``q``'s ``(batch, heads, seq, seq)`` shape, e.g. a per-window
+            Swin shift mask (batch here would be ``batch * windows``,
+            flattened by the caller).
 
         Returns
         -------
