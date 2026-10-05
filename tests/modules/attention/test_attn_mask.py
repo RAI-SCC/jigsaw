@@ -12,18 +12,29 @@ its fused kernels (what :mod:`.functional.cores.te` calls directly) only impleme
 ``attn_mask_type`` in ``{no_mask, causal, padding, ...}`` -- no tensor-valued mask, no
 ``"arbitrary"``. TE's own ``DotProductAttention`` *does* accept an arbitrary mask, but
 its source (``dot_product_attention/utils.py``) explicitly disables both FlashAttention
-and FusedAttention for it and routes to its *unfused* backend instead -- the same cost
-class as the ``"math"`` core already in this repo, not a performance win. So:
+and FusedAttention for it and routes to its *unfused* backend instead.
 
-* ``attn_backend`` in ``{"sdpa", "math"}`` (the non-ring, non-Ulysses core): genuinely
-  supported. ``torch.nn.functional.scaled_dot_product_attention``'s flash backend
-  rejects a non-null ``attn_mask`` outright, but with ``sdpa_kernel([FLASH, MATH])``
-  (what :meth:`Attention._attn_core`/:meth:`DistributedAttention._attn_core` already
-  use) that just silently routes the masked call to the math backend -- no error,
-  correct result, confirmed below.
+That TE finding does *not* mean a masked call has no fused option at all, though --
+only that TE's direct kernel calls aren't it. Torch's own ``scaled_dot_product_attention``
+has two *other* backends beyond flash/math that do run an arbitrary mask fused: the
+memory-efficient (xFormers-derived) and cuDNN backends. Confirmed on an allocation at
+Swin-window scale (``N=2400``, a 40x60 window, bf16): ~3-4x faster and ~25x lighter on
+peak memory than the unfused math kernel for the exact same masked computation, and
+numerically consistent with it (not merely NaN-free -- checked q/k/v gradients too, not
+just the output). So:
+
+* ``attn_backend`` in ``{"sdpa", "math"}`` (the non-ring, non-Ulysses core): genuinely,
+  and at Swin-window scale *efficiently*, supported -- :meth:`Attention._attn_core`/
+  :meth:`DistributedAttention._attn_core` allow the memory-efficient and cuDNN ``sdpa``
+  backends precisely so a masked call lands on one of those instead of falling all the
+  way to unfused math. ``test_masked_call_does_not_regress_to_unfused_math`` below
+  guards that: it would not catch a *correctness* regression, but it would catch this
+  exact class of performance regression (allowing EFFICIENT_ATTENTION/CUDNN_ATTENTION
+  no longer sticking, every masked call silently eating math's full ``O(N^2)`` memory
+  again) before it reached a real training run.
 * ``attn_backend="te"``, ``ring=True``, ``ulysses=True``: all raise ``ValueError``
-  rather than silently taking that unfused detour or ignoring the mask -- see each
-  core's docstring in ``attention.py``.
+  rather than silently taking an unfused detour or ignoring the mask -- see each core's
+  docstring in ``attention.py``.
 """
 
 import pytest
@@ -102,7 +113,10 @@ class TestAttentionMask:
         torch.manual_seed(1)
         x = torch.randn(2, n0 + n1, DIM, device=device)
         bool_mask = _block_mask(n0, n1).to(device)
-        float_mask = torch.zeros_like(bool_mask, dtype=x.dtype).masked_fill(
+        # On CUDA `attn_core_dtype` casts q/k/v to bf16 inside the core; a float mask
+        # must match that dtype exactly (unlike a bool mask), not `x`'s own (fp32).
+        mask_dtype = torch.bfloat16 if device.type == "cuda" else x.dtype
+        float_mask = torch.zeros_like(bool_mask, dtype=mask_dtype).masked_fill(
             ~bool_mask, float("-inf")
         )
 
@@ -246,6 +260,69 @@ class TestDistributedAttentionMask:
         torch.manual_seed(1)
         x = torch.randn(2, self.n0 + self.n1, DIM, device=device)
         torch.testing.assert_close(model(x), model(x, attn_mask=None))
+
+
+@pytest.mark.gpu_required
+class TestMaskedAttentionIsFused:
+    """Guards against ``_attn_core`` silently regressing a masked call onto math.
+
+    Not a timing assertion (too noisy on a shared allocation) -- peak CUDA memory is
+    a robust proxy instead: the unfused math kernel materialises the full
+    ``(batch, heads, N, N)`` score/probability matrices, the memory-efficient/cuDNN
+    ``sdpa`` backends ``_attn_core`` allows do not (see its docstring in
+    ``attention.py`` for the measured Swin-window-scale numbers this is checking
+    stays true).
+    """
+
+    def _model(
+        self, backend: str, device: torch.device, group: dist.ProcessGroup
+    ) -> attention.DistributedAttention:
+        return attention.DistributedAttention(
+            in_dim=DIM,
+            embed_dim=DIM,
+            out_dim=DIM,
+            heads=HEADS,
+            dropout_p=0.0,
+            local_rank=0,
+            device=device,
+            spatial_group=group,
+            channel_group=group,
+            ring=False,
+            attn_backend=backend,
+        )
+
+    def test_masked_call_does_not_regress_to_unfused_math(
+        self, device: torch.device, solo_group
+    ) -> None:
+        model = self._model("sdpa", device, solo_group)
+        n = 512
+        torch.manual_seed(0)
+        mask = torch.rand(n, n, device=device) > 0.3
+        mask[torch.arange(n), torch.arange(n)] = True  # every row sees itself
+
+        def peak_memory(core) -> int:
+            q, k, v = (
+                torch.randn(
+                    2, HEADS, n, DIM // HEADS, device=device, requires_grad=True
+                )
+                for _ in range(3)
+            )
+            torch.cuda.synchronize(device)
+            torch.cuda.reset_peak_memory_stats(device)
+            out = core(q, k, v, attn_mask=mask)
+            out.sum().backward()
+            torch.cuda.synchronize(device)
+            return torch.cuda.max_memory_allocated(device)
+
+        fused_mem = peak_memory(model._attn_core)
+        math_mem = peak_memory(model._attn_core_math)
+
+        assert fused_mem < 0.5 * math_mem, (
+            f"masked _attn_core used {fused_mem} bytes of peak CUDA memory, not "
+            f"comfortably below _attn_core_math's {math_mem} bytes -- it looks like "
+            "it is no longer landing on a fused (memory-efficient/cuDNN) sdpa "
+            "backend for a masked call."
+        )
 
 
 # --------------------------------------------------------------------------- #

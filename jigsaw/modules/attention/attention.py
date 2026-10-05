@@ -676,10 +676,18 @@ class DistributedAttention(torch.nn.Module):
             ``(..., heads, seq_q, seq_kv)``, e.g. the per-window mask a shifted
             Swin block needs to stop tokens that wrapped around the sequence
             border (a pole, for a global grid) from attending to each other.
-            Passing anything but ``None`` here forces the restricted
-            ``sdpa_kernel`` context below off the flash backend -- torch's
-            flash kernel rejects a non-null ``attn_mask`` outright -- onto its
-            math fallback, same cost class as :meth:`_attn_core_math`.
+            Torch's flash kernel rejects a non-null ``attn_mask`` outright, so
+            a masked call never lands there -- but it does *not* fall all the
+            way to the unfused math kernel either: the memory-efficient
+            (xFormers-derived) and cuDNN backends below both run an arbitrary
+            mask fused, confirmed on an allocation at Swin-window scale
+            (``N=2400``, a 40x60 window) to be ~3-4x faster and ~25x lighter on
+            peak memory than ``_attn_core_math`` there, bit-for-bit consistent
+            with it otherwise (only the window scale where that gap actually
+            bites needs an arbitrary rather than a block-diagonal mask; at
+            tiny windows either kernel is cheap enough not to matter). CPU has
+            neither kernel and silently keeps the pre-existing math-only
+            behaviour.
         **kwargs : torch.Tensor
             Unused.
 
@@ -691,6 +699,8 @@ class DistributedAttention(torch.nn.Module):
         with torch.nn.attention.sdpa_kernel(
             [
                 torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+                torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
+                torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
                 torch.nn.attention.SDPBackend.MATH,
             ]
         ):
@@ -758,14 +768,18 @@ class DistributedAttention(torch.nn.Module):
         v : torch.Tensor
             Values tensor, ``bshd``.
         attn_mask : torch.Tensor, optional
-            Not supported here -- see the module docstring. ``fused_attn_fwd``/
-            ``fused_attn_bwd`` (what :mod:`.functional.cores.te` calls) only
-            implement ``attn_mask_type`` in ``{no_mask, causal, padding, ...}``;
-            an arbitrary per-position mask like a Swin shift mask has no fused
-            kernel at all -- TE's own ``DotProductAttention`` falls back to its
-            *unfused* backend for it, which buys nothing over
-            ``attn_backend="sdpa"``/``"math"`` here. Raises rather than
-            silently taking that detour.
+            Not supported here. ``fused_attn_fwd``/``fused_attn_bwd`` (what
+            :mod:`.functional.cores.te` calls) only implement
+            ``attn_mask_type`` in ``{no_mask, causal, padding, ...}``; an
+            arbitrary per-position mask like a Swin shift mask has no fused
+            kernel at all on this path -- TE's own ``DotProductAttention``
+            falls back to its *unfused* backend for it. That is not a reason
+            to silently take that detour here, since ``attn_backend="sdpa"``
+            already has a better one: :meth:`_attn_core` allows the
+            memory-efficient/cuDNN ``sdpa`` backends, which run an arbitrary
+            mask fused (confirmed faster and lighter than unfused math at
+            Swin-window scale -- see its docstring). Raises so that better
+            path gets used explicitly instead.
         **kwargs : torch.Tensor
             Unused.
 
@@ -1150,10 +1164,12 @@ class Attention(torch.nn.Module):
             Query, key and value.
         attn_mask : torch.Tensor, optional
             Additive (float) or keep-true (bool) mask broadcastable to
-            ``(..., heads, seq_q, seq_kv)``. Forces the restricted
-            ``sdpa_kernel`` context below off the flash backend (which
-            rejects a non-null ``attn_mask`` outright) onto its math
-            fallback.
+            ``(..., heads, seq_q, seq_kv)``. Torch's flash kernel rejects a
+            non-null ``attn_mask`` outright, so a masked call never lands
+            there -- but it does *not* fall all the way to the unfused math
+            kernel either: see :meth:`DistributedAttention._attn_core` for
+            why the memory-efficient and cuDNN backends below matter at
+            Swin-window scale.
         **kwargs : torch.Tensor
             Unused.
 
@@ -1165,6 +1181,8 @@ class Attention(torch.nn.Module):
         with torch.nn.attention.sdpa_kernel(
             [
                 torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+                torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
+                torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
                 torch.nn.attention.SDPBackend.MATH,
             ]
         ):
