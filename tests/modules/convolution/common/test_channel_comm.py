@@ -23,6 +23,7 @@ from jigsaw.modules.convolution.common.channel_comm import (
 )
 from jigsaw.modules.convolution.common.halo import exchange_along_axis
 from jigsaw.modules.convolution.common.spatial_split import _reduce_scatter_channels
+from tests.parity import assert_close
 
 
 class TestResolveChannelComm:
@@ -117,7 +118,19 @@ class TestGatherFullChannels:
 
         buf = [torch.empty_like(x) for _ in range(g_size)]
         dist.all_gather(buf, x.contiguous(), group=col)
-        assert torch.equal(full, torch.cat(buf, dim=1))
+        # Each rank holds a different slice, and another gather_full_channels
+        # all-gather (plus its backward) follows, so a one-sided mismatch has to
+        # fail every rank rather than strand them in that collective. Exact
+        # comparison: atol/rtol of 0 keeps the original torch.equal semantics.
+        assert_close(
+            "gathered channels",
+            full,
+            torch.cat(buf, dim=1),
+            0.0,
+            0.0,
+            device,
+            process_mesh_dict_1x4["model"],
+        )
 
         x_grad = x.clone().requires_grad_(True)
         gather_full_channels(x_grad, col, channel_dim=1).pow(2).sum().backward()
