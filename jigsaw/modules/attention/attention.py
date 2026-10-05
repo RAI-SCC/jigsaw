@@ -662,6 +662,7 @@ class DistributedAttention(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
         """Compute attention.
@@ -670,6 +671,15 @@ class DistributedAttention(torch.nn.Module):
         ----------
         q, k, v : torch.Tensor
             Query, key and value.
+        attn_mask : torch.Tensor, optional
+            Additive (float) or keep-true (bool) mask broadcastable to
+            ``(..., heads, seq_q, seq_kv)``, e.g. the per-window mask a shifted
+            Swin block needs to stop tokens that wrapped around the sequence
+            border (a pole, for a global grid) from attending to each other.
+            Passing anything but ``None`` here forces the restricted
+            ``sdpa_kernel`` context below off the flash backend -- torch's
+            flash kernel rejects a non-null ``attn_mask`` outright -- onto its
+            math fallback, same cost class as :meth:`_attn_core_math`.
         **kwargs : torch.Tensor
             Unused.
 
@@ -688,6 +698,7 @@ class DistributedAttention(torch.nn.Module):
                 q,
                 k,
                 v,
+                attn_mask=attn_mask,
                 is_causal=False,
                 dropout_p=self.dropout_p if self.training else 0.0,
             )
@@ -698,14 +709,26 @@ class DistributedAttention(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute attention with the unfused math backend."""
+        """Compute attention with the unfused math backend.
+
+        Parameters
+        ----------
+        q, k, v : torch.Tensor
+            Query, key and value.
+        attn_mask : torch.Tensor, optional
+            Same convention as :meth:`_attn_core`'s.
+        **kwargs : torch.Tensor
+            Unused.
+        """
         with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.MATH]):
             out = torch.nn.functional.scaled_dot_product_attention(
                 q,
                 k,
                 v,
+                attn_mask=attn_mask,
                 is_causal=False,
                 dropout_p=self.dropout_p if self.training else 0.0,
             )
@@ -716,6 +739,7 @@ class DistributedAttention(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
         """Attention computation on the TransformerEngine kernels.
@@ -733,6 +757,15 @@ class DistributedAttention(torch.nn.Module):
             Keys tensor, ``bshd``.
         v : torch.Tensor
             Values tensor, ``bshd``.
+        attn_mask : torch.Tensor, optional
+            Not supported here -- see the module docstring. ``fused_attn_fwd``/
+            ``fused_attn_bwd`` (what :mod:`.functional.cores.te` calls) only
+            implement ``attn_mask_type`` in ``{no_mask, causal, padding, ...}``;
+            an arbitrary per-position mask like a Swin shift mask has no fused
+            kernel at all -- TE's own ``DotProductAttention`` falls back to its
+            *unfused* backend for it, which buys nothing over
+            ``attn_backend="sdpa"``/``"math"`` here. Raises rather than
+            silently taking that detour.
         **kwargs : torch.Tensor
             Unused.
 
@@ -741,6 +774,14 @@ class DistributedAttention(torch.nn.Module):
         torch.Tensor
             Output of attention computation, ``[batch, seq, heads * head_dim]``.
         """
+        if attn_mask is not None:
+            raise ValueError(
+                "attn_backend='te' does not support attn_mask: the TE kernels "
+                "this core calls (fused_attn_fwd/bwd) have no fused path for an "
+                "arbitrary mask -- only no_mask/causal/padding attn_mask_types. "
+                "Use attn_backend='sdpa' or 'math' for masked (e.g. shifted-"
+                "window) attention."
+            )
         # There is no dropout nn.Module here to apply its own training-mode
         # gate, so gate it the way the sdpa/math cores do.
         out, _lse, _rng_state = TransformerEngineAttention.apply(
@@ -754,6 +795,7 @@ class DistributedAttention(torch.nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         x: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
         """Compute ring attention.
@@ -764,6 +806,13 @@ class DistributedAttention(torch.nn.Module):
             Query, key and value.
         x : torch.Tensor
             Local input chunk.
+        attn_mask : torch.Tensor, optional
+            Not supported: K/V circulate chunk-by-chunk around the ring, so a
+            mask would need to be split and re-indexed per step along with
+            them, which :class:`.functional.ring.RingAttentionFunction` does
+            not implement. Raises rather than silently ignoring it. Masked
+            (e.g. windowed) attention needs no ring in the first place --
+            build it with ``ring=False``.
         **kwargs : torch.Tensor
             Unused.
 
@@ -772,6 +821,12 @@ class DistributedAttention(torch.nn.Module):
         torch.Tensor
             Attention output.
         """
+        if attn_mask is not None:
+            raise ValueError(
+                "ring attention does not support attn_mask: K/V circulate "
+                "chunk-by-chunk around the ring and RingAttentionFunction has "
+                "no per-step masking. Use ring=False for masked attention."
+            )
         out = RingAttentionFunction.apply(
             q,
             k,
@@ -875,6 +930,7 @@ class DistributedAttention(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
         """Ulysses (all-to-all, head-parallel) sequence-parallel attention.
@@ -888,7 +944,19 @@ class DistributedAttention(torch.nn.Module):
         Hierarchical (``> 0``, the ``a2a+p2p`` analogue): an all-to-all over the
         intra-node sub-group -> ``[b, seq // n_nodes, local_heads // A, d]``,
         then a P2P ring over the inter-node sub-group, then an all-to-all back.
+
+        ``attn_mask`` is not supported: the sequence is reassembled onto a
+        head shard by the all-to-all, and the inner dense core
+        (:meth:`_dense_bshd_core`/:meth:`_inter_node_ring_core`) takes no mask
+        parameter. Raises rather than silently ignoring it.
         """
+        if attn_mask is not None:
+            raise ValueError(
+                "ulysses attention does not support attn_mask: the inner "
+                "dense core built by _dense_bshd_core/_inter_node_ring_core "
+                "takes no mask parameter. Use ulysses=False for masked "
+                "attention."
+            )
         from .functional.ulysses import (
             hierarchical_ulysses_attention,
             ulysses_attention,
@@ -915,7 +983,9 @@ class DistributedAttention(torch.nn.Module):
             qkv_stack=qkv_stack,
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """Forward pass for distributed multi-head attention.
 
         Projects ``x`` to Q/K/V, dispatches to the plain, ring, or Ulysses
@@ -926,7 +996,20 @@ class DistributedAttention(torch.nn.Module):
         ----------
         x : torch.Tensor
             ``(n_batch, vars, n_lat, n_lon)``, already sharded per
-            ``spatial_group`` / ``channel_group``.
+            ``spatial_group`` / ``channel_group``. A leading extra axis
+            between the batch and the sequence (e.g. Swin's window axis) is
+            fine too -- ``qkv``'s rearrange keeps whatever sits between the
+            leading ``...`` batch dims and the trailing ``(three h d)``.
+        attn_mask : torch.Tensor, optional
+            Additive (float) or keep-true (bool) mask broadcastable to
+            ``q``'s ``(..., heads, seq, seq)`` (``sdpa``/``math``) shape --
+            e.g. a per-window Swin shift mask that stops tokens wrapped
+            around the sequence border (a pole, on a global grid) from
+            attending to each other. Only the plain (non-ring, non-Ulysses)
+            core supports it, and only with ``attn_backend`` in
+            ``{"sdpa", "math"}``; ``"te"``, ``ring=True`` and ``ulysses=True``
+            all raise ``ValueError`` rather than silently ignoring it or
+            taking an unexpectedly slow detour -- see each core's docstring.
 
         Returns
         -------
@@ -966,7 +1049,7 @@ class DistributedAttention(torch.nn.Module):
             q, k, v = qkv.unbind(0)
             qkv_stack = qkv
 
-        out = self.attn_core(q, k, v, x=x, qkv_stack=qkv_stack)
+        out = self.attn_core(q, k, v, x=x, qkv_stack=qkv_stack, attn_mask=attn_mask)
         # Fold ``out`` to ``... n s (h d)`` in ``x.dtype`` before ``head_concat``
         # (which holds model-dtype weights). The non-ring TE core already returns
         # ``... n s (h d)``; the ring TE core and the Ulysses core return bshd
@@ -1052,7 +1135,12 @@ class Attention(torch.nn.Module):
             )
 
     def _attn_core(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, **kwargs: torch.Tensor
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+        **kwargs: torch.Tensor,
     ) -> torch.Tensor:
         """Compute attention.
 
@@ -1060,6 +1148,12 @@ class Attention(torch.nn.Module):
         ----------
         q, k, v : torch.Tensor
             Query, key and value.
+        attn_mask : torch.Tensor, optional
+            Additive (float) or keep-true (bool) mask broadcastable to
+            ``(..., heads, seq_q, seq_kv)``. Forces the restricted
+            ``sdpa_kernel`` context below off the flash backend (which
+            rejects a non-null ``attn_mask`` outright) onto its math
+            fallback.
         **kwargs : torch.Tensor
             Unused.
 
@@ -1078,19 +1172,28 @@ class Attention(torch.nn.Module):
                 q,
                 k,
                 v,
+                attn_mask=attn_mask,
                 is_causal=False,
                 dropout_p=self.dropout_p if self.training else 0.0,
             )
 
         return out
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """Compute multi-head attention.
 
         Parameters
         ----------
         x : torch.Tensor
             Input tensor.
+        attn_mask : torch.Tensor, optional
+            Additive (float) or keep-true (bool) mask broadcastable to
+            ``q``'s ``(batch, heads, seq, seq)`` shape -- e.g. a per-window
+            Swin shift mask (batch here would be ``batch * windows``, flattened
+            by the caller) that stops tokens wrapped around the sequence
+            border (a pole, on a global grid) from attending to each other.
 
         Returns
         -------
@@ -1108,7 +1211,7 @@ class Attention(torch.nn.Module):
             v = v.to(core_dtype)
         else:
             q, k, v = qkv.permute(2, 0, 3, 1, 4).to(core_dtype)
-        out = self.attn_core(q=q, k=k, v=v, x=x)
+        out = self.attn_core(q=q, k=k, v=v, x=x, attn_mask=attn_mask)
 
         # out has shape [B, h, N, d]
         out = rearrange(out, "... h s d -> ... s (h d)").to(x.dtype)
