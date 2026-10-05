@@ -75,6 +75,7 @@ class ConvNdConfig:
         group_size = channel_group.size()
         self.channel_local = groups % group_size == 0
         self.groups_local = groups // group_size if self.channel_local else 1
+        self.native_conv_fn = _CONV_FN[self.n_spatial - 1]
         self.conv_fn = self._conv_fn_selection(bayesian)
         self.conv_input_fn = self._conv_input_fn_selection(bayesian)
         self.conv_weight_fn = self._conv_weight_fn_selection(bayesian)
@@ -92,10 +93,9 @@ class ConvNdConfig:
 
     def _conv_fn_selection(self, bayesian: bool) -> Callable:
         """Select the forward primitive."""
-        conv = _CONV_FN[self.n_spatial - 1]
         if bayesian:
-            return torch.vmap(conv)
-        return conv
+            return torch.vmap(self.native_conv_fn)
+        return self.native_conv_fn
 
     def _conv_input_fn_selection(self, bayesian: bool) -> Callable:
         """Select the grad-input primitive."""
