@@ -8,7 +8,7 @@ Write an `apptainer.def`:
 
 ```
 Bootstrap: docker
-From: nvcr.io/nvidia/pytorch:26.02-py3
+From: nvcr.io/nvidia/pytorch:26.04-py3
 
 %post
     pip install --no-build-isolation zarr timm xarray h5netcdf

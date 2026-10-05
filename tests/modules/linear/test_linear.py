@@ -29,12 +29,12 @@ class TestForward:
         linlayer = linear.DistributedXWT(
             in_dim,
             out_dim,
-            False,
-            local_rank,
-            device,
-            process_mesh_dict_2x2["model"],
-            process_mesh_dict_2x2["col"],
-            process_mesh_dict_2x2["row"],
+            local_rank=local_rank,
+            device=device,
+            model_group=process_mesh_dict_2x2["model"],
+            column_group=process_mesh_dict_2x2["col"],
+            row_group=process_mesh_dict_2x2["row"],
+            bias=False,
             bayesian=False,
         ).to(device)
 
@@ -86,12 +86,12 @@ class TestForward:
         linlayer = linear.DistributedXWT(
             in_dim,
             out_dim,
-            bias=False,
             local_rank=local_rank,
             device=device,
             model_group=process_mesh_dict_2x1x2["model"],
             column_group=process_mesh_dict_2x1x2["col"],
             row_group=process_mesh_dict_2x1x2["row"],
+            bias=False,
             bayesian=False,
         ).to(device)
 
@@ -134,13 +134,13 @@ class TestForward:
         linlayer = linear.DistributedXWT(
             in_dim,
             out_dim,
-            True,
-            local_rank,
-            device,
-            process_mesh_dict_2x2["model"],
-            process_mesh_dict_2x2["col"],
-            process_mesh_dict_2x2["row"],
-            False,
+            local_rank=local_rank,
+            device=device,
+            model_group=process_mesh_dict_2x2["model"],
+            column_group=process_mesh_dict_2x2["col"],
+            row_group=process_mesh_dict_2x2["row"],
+            bias=True,
+            bayesian=False,
         ).to(device)
 
         assert isinstance(linlayer.bias, torch.Tensor)
@@ -187,13 +187,13 @@ class TestForward:
         linlayer = linear.DistributedXWT(
             in_dim,
             out_dim,
-            True,
-            local_rank,
-            device,
-            process_mesh_dict_2x2["model"],
-            process_mesh_dict_2x2["col"],
-            process_mesh_dict_2x2["row"],
-            False,
+            local_rank=local_rank,
+            device=device,
+            model_group=process_mesh_dict_2x2["model"],
+            column_group=process_mesh_dict_2x2["col"],
+            row_group=process_mesh_dict_2x2["row"],
+            bias=True,
+            bayesian=False,
         ).to(device)
         x_in = torch.randn(
             1, seq_global // 2, in_dim // 2, dtype=linlayer.weight.dtype, device=device
@@ -247,13 +247,13 @@ class TestBackward:
         linlayer = linear.DistributedXWT(
             in_dim,
             out_dim,
-            False,
-            local_rank,
-            device,
-            process_mesh_dict_2x2["model"],
-            process_mesh_dict_2x2["col"],
-            process_mesh_dict_2x2["row"],
-            False,
+            local_rank=local_rank,
+            device=device,
+            model_group=process_mesh_dict_2x2["model"],
+            column_group=process_mesh_dict_2x2["col"],
+            row_group=process_mesh_dict_2x2["row"],
+            bias=False,
+            bayesian=False,
         ).to(device)
         w_gathered = gather_results(
             linlayer.weight.data, process_mesh_dict=process_mesh_dict_2x2
@@ -359,13 +359,13 @@ class TestBackward:
         linlayer = linear.DistributedXWT(
             in_dim,
             out_dim,
-            False,
-            local_rank,
-            device,
-            process_mesh_dict_2x2["model"],
-            process_mesh_dict_2x2["col"],
-            process_mesh_dict_2x2["row"],
-            False,
+            local_rank=local_rank,
+            device=device,
+            model_group=process_mesh_dict_2x2["model"],
+            column_group=process_mesh_dict_2x2["col"],
+            row_group=process_mesh_dict_2x2["row"],
+            bias=False,
+            bayesian=False,
         ).to(device)
         w_gathered = gather_results(
             linlayer.weight.data, process_mesh_dict=process_mesh_dict_2x2
@@ -456,13 +456,13 @@ class TestBackward:
         linlayer = linear.DistributedXWT(
             in_dim,
             out_dim,
-            True,
-            local_rank,
-            device,
-            process_mesh_dict_2x2["model"],
-            process_mesh_dict_2x2["col"],
-            process_mesh_dict_2x2["row"],
-            False,
+            local_rank=local_rank,
+            device=device,
+            model_group=process_mesh_dict_2x2["model"],
+            column_group=process_mesh_dict_2x2["col"],
+            row_group=process_mesh_dict_2x2["row"],
+            bias=True,
+            bayesian=False,
         ).to(device)
 
         assert isinstance(linlayer.weight, torch.Tensor)
@@ -605,13 +605,13 @@ class TestBackward:
         linlayer = linear.DistributedXWT(
             in_dim,
             out_dim,
-            True,
-            local_rank,
-            device,
-            process_mesh_dict_2x1x2["model"],
-            process_mesh_dict_2x1x2["col"],
-            process_mesh_dict_2x1x2["row"],
-            False,
+            local_rank=local_rank,
+            device=device,
+            model_group=process_mesh_dict_2x1x2["model"],
+            column_group=process_mesh_dict_2x1x2["col"],
+            row_group=process_mesh_dict_2x1x2["row"],
+            bias=True,
+            bayesian=False,
         ).to(device)
 
         w_gathered = gather_results(
@@ -760,13 +760,13 @@ class TestBackward:
         linlayer = linear.DistributedXWT(
             in_dim,
             out_dim,
-            True,
-            local_rank,
-            device,
-            process_mesh_dict_2x2["col"],
-            process_mesh_dict_2x2["col"],
-            process_mesh_dict_2x2["row"],
-            False,
+            local_rank=local_rank,
+            device=device,
+            model_group=process_mesh_dict_2x2["col"],
+            column_group=process_mesh_dict_2x2["col"],
+            row_group=process_mesh_dict_2x2["row"],
+            bias=True,
+            bayesian=False,
         ).to(device)
 
         # broadcasting
@@ -973,13 +973,13 @@ class TestBackward:
         linlayer = linear.DistributedXWT(
             in_dim,
             out_dim,
-            False,
-            local_rank,
-            device,
-            process_mesh_dict_4x2["model"],
-            process_mesh_dict_4x2["col"],
-            process_mesh_dict_4x2["row"],
-            False,
+            local_rank=local_rank,
+            device=device,
+            model_group=process_mesh_dict_4x2["model"],
+            column_group=process_mesh_dict_4x2["col"],
+            row_group=process_mesh_dict_4x2["row"],
+            bias=False,
+            bayesian=False,
         )
         w_gathered = gather_results(
             linlayer.weight.data, process_mesh_dict=process_mesh_dict_4x2
@@ -1066,13 +1066,13 @@ class TestParameterCount:
         layer = linear.DistributedXWT(
             in_dim,
             out_dim,
-            bias,
-            dist.get_rank(group=mesh["model"]),
-            device,
-            mesh["model"],
-            mesh["col"],
-            mesh["row"],
-            False,
+            local_rank=dist.get_rank(group=mesh["model"]),
+            device=device,
+            model_group=mesh["model"],
+            column_group=mesh["col"],
+            row_group=mesh["row"],
+            bias=bias,
+            bayesian=False,
         ).to(device)
 
         local = layer.get_parameter_count()

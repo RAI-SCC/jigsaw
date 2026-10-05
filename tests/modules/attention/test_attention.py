@@ -18,6 +18,13 @@ def _build_distributed(
     mesh: dict, device: torch.device, **overrides: object
 ) -> attention.DistributedAttention:
     """Construct a ``DistributedAttention`` on ``mesh`` with the shared test shape."""
+    # The channel ranks must draw different initial weights for the
+    # "differs across the channel group" assertions below to mean anything;
+    # relying on each process's ambient RNG state is fragile, since an
+    # earlier test in the same session may have left every rank on the same
+    # seed (e.g. a `torch.manual_seed(<n>)` shared on purpose for a serial
+    # reference elsewhere in the suite).
+    torch.manual_seed(mesh["col"].rank())
     kwargs: dict = dict(
         in_dim=_IN_DIM,
         embed_dim=_EMBED_DIM,

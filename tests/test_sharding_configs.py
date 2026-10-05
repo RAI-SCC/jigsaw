@@ -22,9 +22,9 @@ import pytest
 import torch
 
 import jigsaw.convert as convert
+from jigsaw.modules import normalization as norm
 from jigsaw.modules import roll
 from jigsaw.modules.linear.linear import _SUPPORTED_XWT_LAYOUTS
-from jigsaw.modules.normalization import normalization as norm
 from jigsaw.utils_aggregate import gather_1d_results
 from tests.parity import all_ranks_ok, assert_close
 
@@ -430,6 +430,35 @@ class TestNormalizationReshard:
         ref.weight.data, ref.bias.data = w_global, b_global
         y = gather_1d_results(ln(x), to_mesh, dim=-1, pm_key="col")
         assert_close("ln forward", y, ref(x_global), 1e-4, 1e-5, device, grp)
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("mesh_name", MESHES_4)
+    def test_layer_norm_convert_roundtrip(
+        self, request: pytest.FixtureRequest, device: torch.device, mesh_name: str
+    ) -> None:
+        """torch.nn.LayerNorm -> DistributedLayerNorm -> torch.nn.LayerNorm."""
+        mesh = request.getfixturevalue(mesh_name)
+        global_dim = 24
+
+        torch.manual_seed(1234)  # every rank must build the same reference
+        ref = torch.nn.LayerNorm(global_dim, device=device)
+        jm = convert.convert_to_jigsaw(copy.deepcopy(ref), mesh, device)
+        assert isinstance(jm, norm.DistributedLayerNorm)
+
+        grp = mesh["model"]
+        w, b = jm.merge_weights(mesh)
+        assert_close("merged weight", w, ref.weight.data, 1e-6, 1e-6, device, grp)
+        assert_close("merged bias", b, ref.bias.data, 1e-6, 1e-6, device, grp)
+
+        back = jm.convert_to_torch(mesh)
+        assert_close(
+            "weight", back.weight.data, ref.weight.data, 1e-6, 1e-6, device, grp
+        )
+        assert_close("bias", back.bias.data, ref.bias.data, 1e-6, 1e-6, device, grp)
+
+        torch.manual_seed(0)
+        x = torch.randn(4, 6, global_dim, device=device)
+        assert_close("forward", back(x), ref(x), 1e-5, 1e-5, device, grp)
 
     @pytest.mark.dist(4)
     @pytest.mark.parametrize("from_name,to_name", _MESH_PAIRS_4)

@@ -1,6 +1,6 @@
 """Autograd functions of the distributed normalization layers."""
 
-from typing import Any, Optional, Protocol, cast
+from typing import Any, Optional, Protocol
 
 import torch
 import torch.distributed as dist
@@ -81,7 +81,7 @@ class DistributedLNFunction(torch.autograd.Function):
     @staticmethod
     def vmap(
         info: Any,  # type: ignore[no-untyped-def]
-        in_dims: Optional[tuple[int, ...]],
+        in_dims: tuple[Optional[int], ...],
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: Optional[torch.Tensor],
@@ -208,19 +208,18 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
         (x,) = promote_to_fp32_under_autocast(x)
         # Compute mean and variance locally
 
-        n_l = x.shape[-1]  # normalized dimension size (local)
-        n_g = n_l * channel_group.size()  # normalized dimension size (global)
-
         local_mean = x.mean(dim=-1, keepdim=True)
-        local_var = x.var(dim=-1, keepdim=True)
+        local_var = x.var(dim=-1, keepdim=True, unbiased=False)
 
         mean = local_mean.clone()
         dist.all_reduce(mean, op=dist.ReduceOp.AVG, group=channel_group)
 
-        var = ((n_l - 1) / (n_g - 1)) * local_var + (n_l / (n_g - 1)) * (
-            mean - local_mean
-        ) ** 2
-        dist.all_reduce(var, op=dist.ReduceOp.SUM, group=channel_group)
+        # Combine each shard's *biased* variance (matching plain LayerNorm, which
+        # divides by n rather than n-1) via the shifted-mean identity, then average
+        # across equally-sized shards -- same combination as DistributedLNFunction,
+        # minus the affine transform.
+        var = local_var + (local_mean - mean) ** 2
+        dist.all_reduce(var, op=dist.ReduceOp.AVG, group=channel_group)
 
         # Normalize
         x_norm = (x - mean) / torch.sqrt(var + eps)
@@ -247,7 +246,7 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
     @staticmethod
     def vmap(
         info: Any,
-        in_dims: Optional[tuple[int, ...]],
+        in_dims: tuple[Optional[int], ...],
         x: torch.Tensor,
         channel_group: dist.ProcessGroup,
         eps: float,
@@ -306,87 +305,7 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
 
         # LayerNorm backward formula
         grad_x = (1.0 / std) * (
-            grad_output - grad_x_norm_mean - x_norm * x_grad_x_term / (n - 1)
+            grad_output - grad_x_norm_mean - x_norm * x_grad_x_term / n
         )
 
         return grad_x, None, None
-
-
-class SoftMaxCtx(Protocol):
-    """Attributes stored on the autograd context."""
-
-    dim: int
-    group: dist.ProcessGroup
-
-
-class _DistributedSoftmax(torch.autograd.Function):
-    """Autograd function of the distributed softmax."""
-
-    @staticmethod
-    def forward(x: torch.Tensor, dim: int, group: dist.ProcessGroup) -> torch.Tensor:
-        """Compute the softmax over a dimension sharded across ``group``."""
-        (x,) = promote_to_fp32_under_autocast(x)
-        # local exponentials
-        local_max = x.amax(dim=dim, keepdim=True)
-        dist.all_reduce(local_max, op=dist.ReduceOp.MAX, group=group)
-
-        y = torch.exp(x - local_max)
-
-        local_sum = y.sum(dim=dim, keepdim=True)
-        # global sum
-        global_sum = local_sum.clone()
-
-        dist.all_reduce(global_sum, op=dist.ReduceOp.SUM, group=group)
-
-        # final softmax
-        out = y / global_sum
-        return out
-
-    @staticmethod
-    def setup_context(
-        ctx: torch.autograd.function.FunctionCtx, inputs: tuple, output: torch.Tensor
-    ) -> None:
-        """Save the softmax and metadata for the backward pass."""
-        _, dim, group = inputs
-        out = output
-        ctx.save_for_backward(out)
-        c = cast(SoftMaxCtx, ctx)
-
-        c.dim = dim
-        c.group = group
-
-    @staticmethod
-    def backward(
-        ctx: SoftMaxCtx, grad_out: torch.Tensor
-    ) -> tuple[torch.Tensor, None, None]:
-        """Compute the gradient of the input."""
-        (out,) = ctx.saved_tensors  # type: ignore[attr-defined]
-        # Match the forward compute dtype (fp32 under autocast).
-        grad_out = grad_out.to(out.dtype)
-        dim = ctx.dim
-        group = ctx.group
-
-        # local grad numerator
-        local_grad = grad_out * out
-        local_sum = local_grad.sum(dim=dim, keepdim=True)
-        # global sum for gradient
-        global_grad_sum = local_sum.clone()
-        dist.all_reduce(global_grad_sum, op=dist.ReduceOp.SUM, group=group)
-
-        grad_x = out * (grad_out - global_grad_sum)
-
-        return grad_x, None, None
-
-    @staticmethod
-    def vmap(
-        info: Any,
-        in_dims: tuple[int | None, ...],
-        x: torch.Tensor,
-        dim: int,
-        group: dist.ProcessGroup,
-    ) -> tuple[torch.Tensor, int]:
-        """Batching rule for ``torch.vmap``."""
-        # The batch dimension is in front, so a non-negative ``dim`` moves by one.
-        out = _DistributedSoftmax.apply(x, dim + 1 if dim >= 0 else dim, group)
-
-        return out, 0

@@ -3,6 +3,7 @@
 from . import init as init
 from . import log as log
 from .mesh import make_process_mesh as make_process_mesh
+from .modules import activation as activation
 from .modules import attention as attention
 from .modules import convolution as convolution
 from .modules import linear as linear

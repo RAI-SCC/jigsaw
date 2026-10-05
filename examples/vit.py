@@ -63,12 +63,12 @@ class Block(nn.Module):
             return jigsaw.linear.DistributedXWT(
                 in_dim,
                 out_dim,
-                bias=True,
                 local_rank=model_group.rank(),
                 device=device,
                 model_group=model_group,  # the weight is split over row *and* col
                 row_group=row,
                 column_group=col,
+                bias=True,
             )
 
         self.norm1, self.norm2 = norm(), norm()

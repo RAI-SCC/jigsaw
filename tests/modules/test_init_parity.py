@@ -56,12 +56,12 @@ class TestLinearInitParity:
         layer = linear.DistributedXWT(
             in_dim,
             out_dim,
-            True,
-            local_rank,
-            device,
-            mesh["model"],
-            mesh["col"],
-            mesh["row"],
+            local_rank=local_rank,
+            device=device,
+            model_group=mesh["model"],
+            column_group=mesh["col"],
+            row_group=mesh["row"],
+            bias=True,
         ).to(device)
 
         weight, bias = layer.merge_weights(mesh)
