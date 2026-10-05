@@ -349,13 +349,42 @@ class TestDistributedAttentionPaths:
         group = mesh["model"]
         y_ref_local = _channel_shard(y_ref.detach()[:, sl], mesh)
         assert_close("output", y.detach(), y_ref_local, tol, tol, device, group)
-        for norm_name in ("q_norm", "k_norm"):
-            for p_name in ("weight", "bias"):
-                got = getattr(getattr(model, norm_name), p_name).grad
-                ref = getattr(getattr(serial, norm_name), p_name).grad
-                assert_close(
-                    f"{norm_name}.{p_name} grad", got, ref, tol, tol, device, group
-                )
+        # ``k_norm.bias`` is a structurally dead parameter: it shifts every key
+        # by the same vector, which adds the per-query constant ``q_i . b`` to
+        # every logit of row ``i`` and so cancels in the softmax. Its gradient
+        # is identically zero -- 7e-16 in float64, and the output does not move
+        # when the bias is shifted by 10.0 -- so in bf16 both sides here hold
+        # nothing but rounding noise, which reaches ~5e-2, the tolerance
+        # itself. Comparing the two to each other is therefore a parity check
+        # with no power *and* one unlucky seed from flaking, and it never
+        # tested the replication this method is about (an unsynced gradient
+        # would be ~0 too). Assert the invariance it can actually show,
+        # measured against a live gradient of the same norm.
+        k_bias_grad = model.k_norm.bias.grad
+        assert_close(
+            "k_norm.bias grad (vanishes: softmax is shift-invariant in K)",
+            k_bias_grad,
+            torch.zeros_like(k_bias_grad),
+            tol * float(serial.k_norm.weight.grad.abs().max()),
+            tol,
+            device,
+            group,
+        )
+        for norm_name, p_name in (
+            ("q_norm", "weight"),
+            ("q_norm", "bias"),
+            ("k_norm", "weight"),
+        ):
+            got = getattr(getattr(model, norm_name), p_name).grad
+            ref = getattr(getattr(serial, norm_name), p_name).grad
+            # Summed over every token, so the bf16 rounding grows with the size
+            # of the entries -- the same scaling the qkv gradient needs below.
+            # ``tol`` as a flat absolute bound tripped on a ~4.8-magnitude
+            # q_norm.bias gradient whose error was only ~1% of it.
+            atol = tol * max(1.0, float(ref.abs().max()))
+            assert_close(
+                f"{norm_name}.{p_name} grad", got, ref, atol, tol, device, group
+            )
         if mesh["col"].size() == 1:
             # Summed over all tokens, so the bf16 rounding grows with the entries.
             ref = serial.qkv.weight.grad
