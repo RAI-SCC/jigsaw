@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-import jigsaw.modules.normalization.normalization as norm
+import jigsaw.modules.normalization as norm
 from jigsaw.utils_aggregate import (
     gather_1d_results,
     gather_results,
