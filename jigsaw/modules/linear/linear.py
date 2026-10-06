@@ -7,8 +7,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
-import jigsaw.hooks as hooks
-from jigsaw import init
+from jigsaw import init, parallel
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
 
 from .config import LinearConfig
@@ -128,9 +127,7 @@ class DistributedXWT(torch.nn.Module):
         )
 
         if self.bias is not None:
-            self.bias.register_post_accumulate_grad_hook(
-                hooks.make_grad_sync_hook(self.row_group, async_op=True)
-            )
+            parallel.mark_replicated(self.bias, self.row_group)
             dist.broadcast(self.bias.data, group_src=0, group=self.row_group)
 
         self.XWT = XWT.apply
@@ -179,10 +176,11 @@ class DistributedXWT(torch.nn.Module):
                 f"implement only {sorted(_SUPPORTED_XWT_LAYOUTS)} (row, col). "
                 f"merge_weights / reshard_parameters still work on this mesh."
             )
+        weight, bias = parallel.sync_grad(self.weight, self.bias)
         cij = self.XWT(
             x,
-            self.weight,
-            self.bias,
+            weight,
+            bias,
             self.local_rank,
             self.device,
             self.config,
@@ -448,7 +446,7 @@ class DistributedXWT(torch.nn.Module):
 
         # Rebind the module to the target mesh so a forward/backward pass on it
         # is valid: process groups, ranks, the kernel-selection config and the
-        # bias grad-sync hook all key off the new group sizes.
+        # bias replica mark all key off the new group sizes.
         self.row_group = to_process_mesh[pm_row_key]
         self.column_group = to_process_mesh[pm_col_key]
         self.model_group = to_process_mesh[pm_model_key]
@@ -464,11 +462,9 @@ class DistributedXWT(torch.nn.Module):
         )
 
         if self.bias is not None:
-            # ``self.bias`` is a fresh Parameter, so the __init__ hook is gone;
-            # re-register it on the new row group and re-broadcast rank 0's slice.
-            self.bias.register_post_accumulate_grad_hook(
-                hooks.make_grad_sync_hook(self.row_group, async_op=True)
-            )
+            # ``self.bias`` is a fresh Parameter, so the __init__ mark is gone;
+            # re-mark it on the new row group and re-broadcast rank 0's slice.
+            parallel.mark_replicated(self.bias, self.row_group)
             dist.broadcast(self.bias.data, group_src=0, group=self.row_group)
 
 

@@ -8,7 +8,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
-from jigsaw import hooks, init
+from jigsaw import init, parallel
 from jigsaw.utils_aggregate import gather_1d_results
 
 from ..common.arg_norm import _as_spatial_groups, _ntuple
@@ -185,14 +185,8 @@ class _DistributedConvNd(torch.nn.Module):
             else config
         )
 
-        if self._spatial_sync_groups:
-            self.weight.register_post_accumulate_grad_hook(
-                hooks.make_grad_sync_hook(self._spatial_sync_groups)
-            )
-            if self.bias is not None:
-                self.bias.register_post_accumulate_grad_hook(
-                    hooks.make_grad_sync_hook(self._spatial_sync_groups)
-                )
+        for p in self.parameters():
+            parallel.mark_replicated(p, self._spatial_sync_groups)
         # Broadcast the reference parameters from global rank 0 to every spatial
         # rank. Sequential broadcasts over the per-axis groups (innermost axis
         # first) propagate rank 0's values across the whole spatial grid.
@@ -491,17 +485,11 @@ class _DistributedConvNd(torch.nn.Module):
             self.groups,
         )
 
-        # The re-sliced parameters are fresh Parameters, so the __init__ hooks
-        # are gone. Re-register the spatial-group grad sync and re-broadcast
+        # The re-sliced parameters are fresh Parameters, so the __init__ marks
+        # are gone. Re-mark them over the spatial groups and re-broadcast
         # rank 0's slice across every spatial rank (innermost axis first).
-        if self._spatial_sync_groups:
-            self.weight.register_post_accumulate_grad_hook(
-                hooks.make_grad_sync_hook(self._spatial_sync_groups)
-            )
-            if self.bias is not None:
-                self.bias.register_post_accumulate_grad_hook(
-                    hooks.make_grad_sync_hook(self._spatial_sync_groups)
-                )
+        for p in self.parameters():
+            parallel.mark_replicated(p, self._spatial_sync_groups)
         for p in self.parameters():
             for g in reversed(self._spatial_sync_groups):
                 dist.broadcast(p.data, group_src=0, group=g)
@@ -515,7 +503,9 @@ class _DistributedConvNd(torch.nn.Module):
             self.kernel_size == self.stride and zero_pad and self.dilation == unit
         )
 
-    def _forward_local(self, x: torch.Tensor) -> torch.Tensor:
+    def _forward_local(
+        self, x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor]
+    ) -> torch.Tensor:
         """Convolve the local shard with the native convolution.
 
         Used if no channel communication is needed. Raises if the spatial split
@@ -532,13 +522,13 @@ class _DistributedConvNd(torch.nn.Module):
         # the wrong axis. Use the native primitive then; the outer vmap batches it.
         # The ConvNd batching rule passes the sample axis through, so it still
         # gets the vmapped primitive.
-        sampled = self.weight.dim() > self._n_spatial + 2
+        sampled = weight.dim() > self._n_spatial + 2
         conv = self.config.conv_fn if sampled else self.config.native_conv_fn
-        if self.bias is not None:
+        if bias is not None:
             y = conv(
                 x,
-                self.weight,
-                self.bias,
+                weight,
+                bias,
                 stride=self.stride,
                 padding=self.padding,
                 dilation=self.dilation,
@@ -547,7 +537,7 @@ class _DistributedConvNd(torch.nn.Module):
         else:
             y = conv(
                 x,
-                self.weight,
+                weight,
                 stride=self.stride,
                 padding=self.padding,
                 dilation=self.dilation,
@@ -577,15 +567,20 @@ class _DistributedConvNd(torch.nn.Module):
         # whole conv-groups, as the identity gather). ``_spatial_sync_groups`` is
         # non-empty iff some spatial axis is really split -- checking only the
         # innermost ``spatial_groups[-1]`` would miss a non-innermost-only split.
+        # Sync before the branch: a patchify conv (kernel == stride, no
+        # padding) takes ``_forward_local`` even when spatially split, and its
+        # replicated weight and bias still need their gradients summed.
+        weight, bias = parallel.sync_grad(self.weight, self.bias)
+        weight = cast(torch.Tensor, weight)
         if self._channel_local and not (
             self._spatial_sync_groups and self._needs_halo()
         ):
-            return self._forward_local(x)
+            return self._forward_local(x, weight, bias)
 
         out = self._conv_apply(
             x,
-            self.weight,
-            self.bias,
+            weight,
+            bias,
             self.stride,
             self.padding,
             self.dilation,

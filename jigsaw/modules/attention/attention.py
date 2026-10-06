@@ -7,7 +7,7 @@ import torch
 import torch.distributed as dist
 from einops import rearrange
 
-from jigsaw import comm, hooks
+from jigsaw import comm, parallel
 from jigsaw.modules import linear
 
 from . import config as attention_config
@@ -548,12 +548,9 @@ class DistributedAttention(torch.nn.Module):
             norm_sync_groups = [
                 g for g in (self.spatial_group, self.channel_group) if g.size() > 1
             ]
-            if norm_sync_groups:
-                for norm in (self.q_norm, self.k_norm):
-                    for p in norm.parameters():
-                        p.register_post_accumulate_grad_hook(
-                            hooks.make_grad_sync_hook(norm_sync_groups)
-                        )
+            for norm in (self.q_norm, self.k_norm):
+                for p in norm.parameters():
+                    parallel.mark_replicated(p, norm_sync_groups)
 
         # Sync up spatial parameters: one coalesced broadcast per dtype rather
         # than one blocking round trip per tensor (comm.broadcast_params_).
@@ -562,17 +559,14 @@ class DistributedAttention(torch.nn.Module):
         # keeps broadcasting correctly for callers that don't also do this.
         comm.broadcast_params_(self.parameters(), self.spatial_group, src=0)
         for p in self.parameters():
-            # A *duplicate* grad-sync hook is not harmless the way the duplicate
-            # broadcast above is: two SUM all-reduces over the same group scale
-            # that gradient by ``spatial_group.size()``. DistributedXWT already
-            # hooks its own ``bias`` over ``row_group``, which is exactly
-            # ``spatial_group`` here, so skip anything a submodule has already
-            # claimed.
-            if getattr(p, "_post_accumulate_grad_hooks", None):
+            # A *duplicate* mark is not harmless the way the duplicate broadcast
+            # above is: two SUM all-reduces over the same group scale that
+            # gradient by ``spatial_group.size()``. DistributedXWT already marks
+            # its own ``bias`` over ``row_group``, which is exactly
+            # ``spatial_group`` here, so skip anything already claimed.
+            if parallel.replica_groups(p):
                 continue
-            p.register_post_accumulate_grad_hook(
-                hooks.make_grad_sync_hook(self.spatial_group, async_op=True)
-            )
+            parallel.mark_replicated(p, self.spatial_group)
 
     def _resolve_ring_config(
         self,
@@ -1005,6 +999,23 @@ class DistributedAttention(torch.nn.Module):
         torch.Tensor
             ``(n_batch, seq_length, output_dim)``.
         """
+        # The replicated parameters -- including those of the plain
+        # ``nn.Linear`` / ``nn.LayerNorm`` submodules, whose forward jigsaw does
+        # not own -- are summed over their groups in-graph (see
+        # :mod:`jigsaw.parallel`). ``functional_call`` swaps the synced tensors
+        # in for the whole forward, so every use (``self.qkv(x)``, the ring
+        # core's ``self.qkv.weight``) sees them. They carry no mark, so the
+        # re-entered ``forward`` finds nothing left to sync and falls through,
+        # and a DistributedXWT submodule does not sync its bias a second time.
+        synced = parallel.synced_parameters(self)
+        if synced:
+            return cast(
+                torch.Tensor,
+                torch.func.functional_call(
+                    self, synced, (x,), {"attn_mask": attn_mask}
+                ),
+            )
+
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.qkv(x)
 

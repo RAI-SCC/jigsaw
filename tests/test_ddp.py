@@ -1,0 +1,233 @@
+"""jigsaw modules wrapped in ``DistributedDataParallel`` over the ``dp`` axis.
+
+Every replicated parameter must end a backward pass with the gradient
+``AVG_dp(SUM_replica(local))`` and be bitwise identical across its replica
+groups; every sharded parameter with ``AVG_dp(local)``. ``local`` is the
+gradient the same rank gets with the in-graph sync switched off, so the
+expected value is built from per-rank quantities by explicit collectives,
+independently of the code under test.
+
+The linear and conv cells use small integer data, so every sum is exact and the
+comparison is ``torch.equal``. Attention goes through a softmax and is compared
+to a tight tolerance; replica identity is still bitwise.
+"""
+
+import contextlib
+
+import pytest
+import torch
+import torch.distributed as dist
+from torch.distributed.algorithms.ddp_comm_hooks import default_hooks
+from torch.nn.parallel import DistributedDataParallel
+
+from jigsaw import parallel
+from jigsaw.mesh import make_process_mesh
+from jigsaw.modules import convolution, linear
+from jigsaw.modules.attention import attention
+
+# (dp, row, col) -> world size
+MESHES = [(2, 2, 2), (2, 2, 1), (4, 1, 1), (1, 2, 2)]
+KINDS = ["xwt", "conv_halo", "conv_patchify", "attention"]
+VARIANTS = [
+    "no_ddp",
+    "ddp",
+    "bucket_view",
+    "find_unused",
+    "static_graph",
+    "fp16_hook",
+    "no_sync",
+]
+EXACT_KINDS = {"xwt", "conv_halo", "conv_patchify"}
+
+_MESH_CACHE: dict = {}
+
+
+def _mesh(shape: tuple[int, int, int], device: torch.device) -> dict:
+    if shape not in _MESH_CACHE:
+        dp, row, col = shape
+        _MESH_CACHE[shape] = make_process_mesh(
+            {"dp": dp, "row": row, "col": col},
+            device_type=device.type,
+            model_parallel_axes=("row", "col"),
+        )
+    return _MESH_CACHE[shape]
+
+
+def _int_tensor(shape, seed: int, device, dtype=torch.float32) -> torch.Tensor:
+    g = torch.Generator().manual_seed(seed)
+    return torch.randint(-2, 3, shape, generator=g).to(device=device, dtype=dtype)
+
+
+def _build(kind: str, mesh: dict, device: torch.device):
+    """Return ``(model, make_input)`` for one module kind on ``mesh``."""
+    row, col = mesh["row"], mesh["col"]
+    if kind == "xwt":
+        summa = (row.size(), col.size()) in {(1, 1), (1, 2), (2, 2)}
+        model = linear.DistributedXWT(
+            8,
+            8,
+            local_rank=(mesh["model"] if summa else col).rank(),
+            device=device,
+            model_group=mesh["model"] if summa else col,
+            column_group=col,
+            row_group=row,
+            bias=True,
+        )
+        if not summa:
+            # ``row`` is a pure replication axis here, as in attention.
+            parallel.mark_replicated(model.weight, row)
+        shape = (2, 4 // row.size() if summa else 4, 8 // col.size())
+    elif kind == "conv_halo":
+        model = convolution.DistributedConv2D(
+            4, 4, 3, device=device, spatial_group=row, channel_group=col, padding=(1, 1)
+        )
+        shape = (2, 4 // col.size(), 4, 8 // row.size())
+    elif kind == "conv_patchify":
+        model = convolution.DistributedConv2D(
+            4, 4, 2, device=device, spatial_group=row, channel_group=col, stride=2
+        )
+        shape = (2, 4 // col.size(), 4, 8 // row.size())
+    elif kind == "attention":
+        model = attention.DistributedAttention(
+            8,
+            8,
+            8,
+            heads=2,
+            dropout_p=0.0,
+            local_rank=col.rank(),
+            device=device,
+            spatial_group=row,
+            channel_group=col,
+            qk_norm=True,
+        )
+        shape = (2, 8 // row.size(), 8 // col.size())
+    else:
+        raise ValueError(kind)
+
+    for i, p in enumerate(model.parameters()):
+        p.data = _int_tensor(p.shape, 1000 + i, device, p.dtype)
+
+    def make_input(step: int) -> torch.Tensor:
+        seed = 10 * dist.get_rank() + step
+        if kind in EXACT_KINDS:
+            return _int_tensor(shape, seed, device)
+        g = torch.Generator().manual_seed(seed)
+        return torch.randn(shape, generator=g).to(device)
+
+    return model, make_input
+
+
+def _wrap(model: torch.nn.Module, variant: str, dp: dist.ProcessGroup):
+    if variant == "no_ddp":
+        return model
+    kwargs = {
+        "bucket_view": {"gradient_as_bucket_view": True},
+        "find_unused": {"find_unused_parameters": True},
+        "static_graph": {"static_graph": True},
+    }.get(variant, {})
+    ddp = DistributedDataParallel(model, process_group=dp, **kwargs)
+    if variant == "fp16_hook":
+        ddp.register_comm_hook(dp, default_hooks.fp16_compress_hook)
+    return ddp
+
+
+def _step(model, make_input, n_micro: int, no_sync: bool = False) -> None:
+    for step in range(n_micro):
+        ctx = (
+            model.no_sync()
+            if no_sync and step < n_micro - 1
+            else contextlib.nullcontext()
+        )
+        with ctx:
+            y = model(make_input(step))
+            gout = _int_tensor(y.shape, 500 + 10 * dist.get_rank() + step, y.device)
+            y.backward(gout)
+
+
+def _local_grads(model, make_input, n_micro: int, monkeypatch) -> list:
+    with monkeypatch.context() as m:
+        m.setattr(parallel, "sync_grad", lambda *t: t)
+        _step(model, make_input, n_micro)
+    grads = [p.grad.clone() for p in model.parameters()]
+    model.zero_grad(set_to_none=True)
+    return grads
+
+
+def _expected(model, local: list, dp: dist.ProcessGroup, ddp: bool) -> list:
+    out = []
+    for p, g in zip(model.parameters(), local):
+        e = g.clone()
+        for grp in parallel.replica_groups(p):
+            dist.all_reduce(e, group=grp)
+        if ddp and dp.size() > 1:
+            e /= dp.size()
+            dist.all_reduce(e, group=dp)
+        out.append(e)
+    return out
+
+
+def _assert_identical_over(t: torch.Tensor, group: dist.ProcessGroup, what: str):
+    gathered = [torch.empty_like(t) for _ in range(group.size())]
+    dist.all_gather(gathered, t.contiguous(), group=group)
+    ok = all(torch.equal(g, gathered[0]) for g in gathered)
+    assert ok, f"{what} differs across {dist.get_process_group_ranks(group)}"
+
+
+def _cases():
+    for shape in MESHES:
+        world = shape[0] * shape[1] * shape[2]
+        for kind in KINDS:
+            for variant in VARIANTS:
+                yield pytest.param(
+                    shape,
+                    kind,
+                    variant,
+                    id=f"{'x'.join(map(str, shape))}-{kind}-{variant}",
+                    marks=pytest.mark.dist(world),
+                )
+
+
+@pytest.mark.parametrize("shape, kind, variant", list(_cases()))
+def test_ddp_composition(shape, kind, variant, device, monkeypatch) -> None:
+    mesh = _mesh(shape, device)
+    dp = mesh["dp"]
+    model, make_input = _build(kind, mesh, device)
+    n_micro = 2 if variant == "no_sync" else 1
+
+    local = _local_grads(model, make_input, n_micro, monkeypatch)
+    expected = _expected(model, local, dp, ddp=variant != "no_ddp")
+
+    wrapped = _wrap(model, variant, dp)
+    _step(wrapped, make_input, n_micro, no_sync=variant == "no_sync")
+
+    for (name, p), e in zip(model.named_parameters(), expected):
+        assert p.grad is not None, name
+        if kind in EXACT_KINDS:
+            assert torch.equal(p.grad, e), f"{name}: {p.grad} != {e}"
+        else:
+            # the fp16 comm hook rounds non-integer gradients to fp16
+            rtol, atol = (
+                (1e-2, max(2e-3 * e.abs().max().item(), 1e-6))
+                if variant == "fp16_hook"
+                else (1e-5, 1e-6)
+            )
+            torch.testing.assert_close(
+                p.grad, e, rtol=rtol, atol=atol, msg=lambda m: f"{name}: {m}"
+            )
+        for grp in parallel.replica_groups(p):
+            _assert_identical_over(p.grad, grp, f"{name}.grad")
+        if variant != "no_ddp":
+            _assert_identical_over(p.grad, dp, f"{name}.grad")
+
+
+@pytest.mark.dist(4)
+def test_sync_switched_off_is_detected(device, monkeypatch) -> None:
+    """The matrix above fails if the in-graph reduction does not happen."""
+    mesh = _mesh((2, 2, 1), device)
+    model, make_input = _build("conv_halo", mesh, device)
+    local = _local_grads(model, make_input, 1, monkeypatch)
+    expected = _expected(model, local, mesh["dp"], ddp=True)
+    wrapped = _wrap(model, "ddp", mesh["dp"])
+    monkeypatch.setattr(parallel, "sync_grad", lambda *t: t)
+    _step(wrapped, make_input, 1)
+    assert not all(torch.equal(p.grad, e) for p, e in zip(model.parameters(), expected))

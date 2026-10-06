@@ -2,6 +2,7 @@
 
 from . import init as init
 from . import log as log
+from . import parallel as parallel
 from .mesh import make_process_mesh as make_process_mesh
 from .modules import activation as activation
 from .modules import attention as attention
