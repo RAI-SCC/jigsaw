@@ -362,6 +362,18 @@ def get_dkv_buffer(
     tuple[torch.Tensor, torch.Tensor]
         Zero-initialized dk and dv buffers. They span the full sequence if the
         strategy gathers the gradients and the local sequence otherwise.
+
+        These intentionally do *not* share storage (e.g. as two views into one
+        stacked buffer): `ring_backward` runs outside `torch.no_grad()` (its
+        autograd-function caller saves q/k/v and replays the cores to get
+        dq/dk/dv, so these buffers accumulate genuinely grad-tracked partials),
+        and accumulation mutates them in place (`+=`/`.add_()`). The first
+        in-place write onto a `requires_grad=False` buffer from a
+        grad-requiring operand quietly promotes that *tensor* to require grad;
+        if dk_buf and dv_buf were sibling views of one base, promoting one
+        view poisons the other's write (now "a view of a leaf Variable that
+        requires grad"). Keeping them independent leaves each one free to make
+        that same-tensor transition on its own.
     """
     shape = list(q.shape)
     if _use_global_dkv_buffer(ring_config):
@@ -745,8 +757,13 @@ def postprocess_dkv(
         Local dk and dv.
     """
     if _use_global_dkv_buffer(ring_config):
-        dist.all_reduce(dk_buf, op=dist.ReduceOp.SUM, group=group)
-        dist.all_reduce(dv_buf, op=dist.ReduceOp.SUM, group=group)
+        # Stack into one buffer so the all-reduce is a single collective
+        # instead of two. This is built fresh here, *after* the accumulation
+        # loop is done mutating dk_buf/dv_buf in place -- see `get_dkv_buffer`
+        # for why they can't share storage any earlier than this.
+        dkv_buf = torch.stack((dk_buf, dv_buf), dim=0)
+        dist.all_reduce(dkv_buf, op=dist.ReduceOp.SUM, group=group)
+        dk_buf, dv_buf = dkv_buf[0], dkv_buf[1]
         sd = _seq_dim(ring_config.core_layout)
         lo = local_rank * seq_local
         return (
