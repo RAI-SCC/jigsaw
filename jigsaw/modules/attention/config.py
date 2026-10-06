@@ -1,4 +1,4 @@
-"""Config for attention."""
+"""Configuration of ring attention."""
 
 from enum import Enum
 from typing import Any, Callable, Optional, cast
@@ -14,421 +14,424 @@ from jigsaw.offload import NVLinkActivationOffloader
 # enums
 # --------------------------------------------------------------------------- #
 class SendForward(Enum):
-    """Enum for sending X or KV."""
+    """Tensor communicated in the forward pass."""
 
     X = 0
     KV = 1
 
 
 class SaveBackward(Enum):
-    """Enum for saving X or KV."""
+    """Tensor saved for the backward pass."""
 
     X = 0
     KV = 1
 
 
 class SaveScope(Enum):
-    """Enum for saving X or KV locally or globally."""
+    """Scope of the tensor saved for the backward pass."""
 
     LOCAL = 0
     GLOBAL = 1
 
 
 class Offload(Enum):
-    """Enum for offloading to CPU."""
+    """Activation offloading policy."""
 
     DISABLED = 0
     CPU = 1
 
 
 class SendBackward(Enum):
-    """Enum for backward communication."""
+    """Strategy for accumulating dK and dV in the backward pass."""
 
     SEND_DKV = 0
     GATHER_DKV = 1
 
 
-class SendForwardOp(Enum):
-    """Enum for forward communication operation."""
+class SendOp(Enum):
+    """Communication operation of the ring."""
 
-    SENDRECV = 0
-    BROADCAST = 1
-
-
-# --------------------------------------------------------------------------- #
-# attention cores
-# --------------------------------------------------------------------------- #
-def _attn_core_flash(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale: float, dropout_p: float
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Flash attention forward pass. Returns (out, logsumexp)."""
-    q, k, v = [x.to(torch.float16) for x in (q, k, v)]
-    out, logsumexp, *_ = torch.ops.aten._scaled_dot_product_flash_attention(
-        q,
-        k,
-        v,
-        dropout_p=dropout_p,
-        is_causal=False,
-        scale=scale,
-        return_debug_mask=False,
-    )
-
-    return out, logsumexp
+    ALLTOALL = 0
+    P2P = 1
+    BROADCAST = 2
+    HYBRID_P2P = 3
+    HYBRID_BROADCAST = 4
+    HYBRID_ALLTOALL = 5
 
 
-def _attn_core_math(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    scale: Optional[float] = 0.0,
-    dropout_p: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Vanilla attention forward pass. Returns (out, logsumexp)."""
-    scale = scale or (q.size(-1) ** -0.5)
-    scores = (q @ k.mT) * scale
-    logsumexp = scores.logsumexp(dim=-1)  # (B, H, Sq)
-    out = torch.softmax(scores, dim=-1) @ v
-    return out, logsumexp
+class AttnBackend(str, Enum):
+    """Attention core implementation.
 
+    Applies to both the plain :class:`~..attention.DistributedAttention` core and
+    the ring's per-chunk inner attention.
 
-def _attn_core_flash_backward(
-    grad_out: torch.Tensor,
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    out: torch.Tensor,
-    logsumexp: torch.Tensor,
-    scale: float,
-    max_q: float,
-    max_k: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Backward call to flash attention. Returns (dq, dk, dv)."""
-    dq, dk, dv = torch.ops.aten._scaled_dot_product_flash_attention_backward(
-        grad_out,
-        q,
-        k,
-        v,
-        out,
-        logsumexp,
-        dropout_p=0.0,
-        is_causal=False,
-        scale=scale,
-        cum_seq_q=None,
-        cum_seq_k=None,
-        max_q=max_q,
-        max_k=max_k,
-        philox_seed=torch.zeros(1, dtype=torch.long, device=q.device),
-        philox_offset=torch.zeros(1, dtype=torch.long, device=q.device),
-    )
-    return dq, dk, dv
+    - ``TE``: whichever kernel TransformerEngine would run on this GPU -- the
+      cuDNN fused kernels on Hopper and newer, the ``flash_attn`` package on
+      Ampere. CUDA only; see :mod:`.functional.cores.te`.
+    - ``SDPA``: PyTorch scaled-dot-product attention -- the flash kernel on CUDA
+      (with a math fallback), the math kernel on CPU. Default.
+    - ``MATH``: the unfused ``softmax(QK^T)V`` reference. Any device/shape/dtype.
 
-
-def _attn_core_math_backward(
-    grad_out: torch.Tensor,
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    out: torch.Tensor,
-    logsumexp: torch.Tensor,
-    scale: float,
-    *args: Any,
-    **kwargs: Any,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Vanilla attention backward pass using saved (global) LSE. Returns (dq, dk, dv)."""
-    attn = (q @ k.mT) * scale  # (B, H, Sq, Sk)
-    p = torch.exp(attn - logsumexp.unsqueeze(-1))  # global norm via saved lse
-
-    dv = p.mT @ grad_out
-
-    dp = grad_out @ v.mT
-    d = (grad_out * out).sum(dim=-1, keepdim=True)  # GLOBAL row-sum, from saved out
-    d_attn = p * (dp - d) * scale
-
-    dq = d_attn @ k
-    dk = d_attn.mT @ q
-    return dq, dk, dv
-
-
-# --------------------------------------------------------------------------- #
-# forward comm fn selection (unchanged behaviour)
-# --------------------------------------------------------------------------- #
-def _select_forward_comm_fns(
-    send_forward_op: SendForwardOp, send_in_forward: SendForward, ring_comm_fn: Callable
-) -> tuple[Callable, Callable]:
+    ``ring`` is a separate switch (see ``DistributedAttention``); it composes with
+    every backend here.
     """
-    Define send and receive functions in the forward pass.
 
-    Parameters
-    ----------
-    send_forward_op: SendForwardOp
-        Enumeration that defines what type of collective call
-        is made in the forward pass.
-    send_in_forward: SendForward
-        Enumeration to define if X or KV are communicated in the forward.
-    ring_comm_fn: Callable
-        Function handle to the "ring" communication.
+    TE = "te"
+    SDPA = "sdpa"
+    MATH = "math"
 
-    Returns
-    -------
-    send_func, recv_func: tuple[Callable, Callable]
-        Two function handles for sending and receiving the ring information.
+
+# --------------------------------------------------------------------------- #
+# policy -> callable resolution
+#
+# Every `RingAttentionConfig` attribute that holds a strategy-specific callable
+# is produced by one `_select_*` function here, so the forward/backward code
+# only ever calls `config.<thing>()` and never branches on a raw enum. The
+# attention cores themselves live in `functional/cores/{sdpa,math,te}.py`.
+# --------------------------------------------------------------------------- #
+CommFn = Callable[..., Any]
+AttnCoreFn = Callable[..., Any]
+ForwardSendFn = Callable[..., tuple[torch.Tensor, Optional[dist.Work]]]
+ForwardRecvFn = Callable[
+    [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+]
+SaveForBackwardFn = Callable[[torch.Tensor, torch.Tensor], Optional[torch.Tensor]]
+
+
+def _select_offloader(
+    offload: Offload, device: torch.device
+) -> Optional[NVLinkActivationOffloader]:
+    """Return the activation offloader for a policy, or ``None``."""
+    match offload:
+        case Offload.DISABLED:
+            return None
+        case Offload.CPU:
+            return NVLinkActivationOffloader(device)
+        case other:
+            raise ValueError(f"unhandled offload option {other}")
+
+
+def _te_core_or_raise() -> None:
+    """Guard: the TE cores need ``transformer_engine`` or ``flash_attn``, plus CUDA.
+
+    Either arm of :mod:`.functional.cores.te` satisfies this; which one actually
+    runs is :func:`.functional.cores.te.select_core`'s call.
     """
-    send_func: Callable[..., tuple[torch.Tensor, dist.Work]]
+    from .functional.cores.te import TE_CORE_AVAILABLE
 
-    match send_forward_op:
-        case SendForwardOp.SENDRECV:
-            match send_in_forward:
-                case SendForward.X:
+    if not TE_CORE_AVAILABLE:
+        raise RuntimeError(
+            "attn_backend=te needs transformer_engine (run inside the container)."
+        )
 
-                    def send_func(  # type: ignore[assignment]
-                        x: torch.Tensor,
-                        kv: torch.Tensor,
-                        local_rank: int,
-                        group: dist.ProcessGroup,
-                        step: int,
-                        empty: torch.Tensor,
-                        *args: Any,
-                        **kwargs: Any,
-                    ) -> tuple[torch.Tensor, dist.Work]:
-                        recv_buf = torch.empty_like(x)
-                        recv_buf, handle = ring_comm_fn(
-                            x,
-                            recv_buf,
-                            1,
-                            group=group,
-                            async_op=True,
-                            tag=step,
-                            empty=empty,
-                        )
-                        return recv_buf, handle
 
-                case SendForward.KV:
+def _select_attn_core_forward_fn(
+    device: torch.device, attn_backend: AttnBackend = AttnBackend.SDPA
+) -> AttnCoreFn:
+    """Pick the ring inner-attention forward core for ``device`` / ``attn_backend``.
 
-                    def send_func(  # type: ignore[assignment]
-                        x: torch.Tensor,
-                        kv: torch.Tensor,
-                        local_rank: int,
-                        group: dist.ProcessGroup,
-                        step: int,
-                        empty: torch.Tensor,
-                        *args: Any,
-                        **kwargs: Any,
-                    ) -> tuple[torch.Tensor, dist.Work]:
-                        recv_buf = torch.empty_like(kv)
-                        recv_buf, handle = ring_comm_fn(
-                            kv,
-                            recv_buf,
-                            1,
-                            group=group,
-                            async_op=True,
-                            empty=empty,
-                            tag=step,
-                        )
-                        return recv_buf, handle
+    ``SDPA`` keeps the historical device-based pick (flash on CUDA, math on CPU).
+    ``TE`` picks by GPU architecture -- cuDNN on Hopper and newer, ``flash_attn``
+    on Ampere; see :func:`.functional.cores.te.select_core`.
+    Cores live in :mod:`.functional.cores`; each exposes ``forward`` / ``backward``.
+    """
+    from .functional.cores import math as math_core
+    from .functional.cores import sdpa as sdpa_core
 
-                case _:
-                    raise NotImplementedError(
-                        f"send_in_forward option {send_in_forward} not implemented."
-                    )
+    match AttnBackend(attn_backend):
+        case AttnBackend.TE:
+            _te_core_or_raise()
+            from .functional.cores import te as te_core
 
-        case SendForwardOp.BROADCAST:
-            match send_in_forward:
-                case SendForward.X:
+            return cast(AttnCoreFn, te_core.select_core(device).forward)
+        case AttnBackend.MATH:
+            return math_core.forward
+        case AttnBackend.SDPA:
+            match device.type:
+                case "cuda":
+                    return sdpa_core.forward
+                case "cpu":
+                    return math_core.forward
+                case other:
+                    raise ValueError(f"no attention forward core for device '{other}'")
 
-                    def send_func(  # type: ignore[assignment]
-                        x: torch.Tensor,
-                        kv: torch.Tensor,
-                        local_rank: int,
-                        group: dist.ProcessGroup,
-                        step: int,
-                        *args: Any,
-                        **kwargs: Any,
-                    ) -> tuple[torch.Tensor, dist.Work]:
-                        recv_buf = x if step == local_rank else torch.empty_like(x)
-                        handle = dist.broadcast(
-                            recv_buf, src=step, group=group, async_op=True
-                        )
-                        return recv_buf, handle
 
-                case SendForward.KV:
+def _select_attn_core_backward_fn(
+    device: torch.device, attn_backend: AttnBackend = AttnBackend.SDPA
+) -> AttnCoreFn:
+    """Select the backward core of the ring's inner attention."""
+    from .functional.cores import math as math_core
+    from .functional.cores import sdpa as sdpa_core
 
-                    def send_func(  # type: ignore[assignment]
-                        x: torch.Tensor,
-                        kv: torch.Tensor,
-                        local_rank: int,
-                        group: dist.ProcessGroup,
-                        step: int,
-                        *args: Any,
-                        **kwargs: Any,
-                    ) -> tuple[torch.Tensor, dist.Work]:
-                        recv_buf = kv if step == local_rank else torch.empty_like(kv)
-                        handle = dist.broadcast(
-                            recv_buf, src=step, group=group, async_op=True
-                        )
-                        return recv_buf, handle
+    match AttnBackend(attn_backend):
+        case AttnBackend.TE:
+            _te_core_or_raise()
+            from .functional.cores import te as te_core
 
-                case _:
-                    raise NotImplementedError(
-                        f"send_in_forward option {send_in_forward} not implemented."
-                    )
-        case _:
-            raise NotImplementedError(
-                f"send_forward_op option {send_forward_op} not implemented."
-            )
+            return cast(AttnCoreFn, te_core.select_core(device).backward)
+        case AttnBackend.MATH:
+            return math_core.backward
+        case AttnBackend.SDPA:
+            match device.type:
+                case "cuda":
+                    return sdpa_core.backward
+                case "cpu":
+                    return math_core.backward
+                case other:
+                    raise ValueError(f"no attention backward core for device '{other}'")
 
-    match send_in_forward:
-        case SendForward.X:
 
-            def recv_func(
-                recv_buf: torch.Tensor,
-                xj: torch.Tensor,
-                kv_j: torch.Tensor,
-                kj: torch.Tensor,
-                vj: torch.Tensor,
-            ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-                return recv_buf, kv_j, kj, vj
+def _select_p2p_fn(send_op: SendOp) -> CommFn:
+    """Select the communication function for inter-node hops and the dK/dV relay."""
+    if dist.get_backend() == "gloo":
+        return comm.comm_1d_p2p
+    alltoall = {SendOp.ALLTOALL, SendOp.BROADCAST, SendOp.HYBRID_ALLTOALL}
+    return comm.comm_1d_alltoall if send_op in alltoall else comm.comm_1d_p2p
 
-        case SendForward.KV:
 
-            def recv_func(
-                recv_buf: torch.Tensor,
-                xj: torch.Tensor,
-                kv_j: torch.Tensor,
-                kj: torch.Tensor,
-                vj: torch.Tensor,
-            ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-                kv_j = recv_buf
-                return xj, kv_j, kv_j[0], kv_j[1]
+def _select_send_op_fn(send_op: SendOp) -> CommFn:
+    """Select the communication function for the ring's per-step send."""
+    if dist.get_backend() == "gloo":
+        return comm.comm_1d_p2p
+    if send_op == SendOp.BROADCAST:
+        return comm.comm_broadcast
+    alltoall = {SendOp.ALLTOALL, SendOp.HYBRID_P2P, SendOp.HYBRID_ALLTOALL}
+    return comm.comm_1d_alltoall if send_op in alltoall else comm.comm_1d_p2p
 
-        case _:
-            raise NotImplementedError(
-                f"send_in_forward option {send_in_forward} not implemented."
-            )
 
-    return send_func, recv_func
+def _select_forward_send_fn(
+    send_op: SendOp, send_in_forward: SendForward, send_op_fn: CommFn
+) -> ForwardSendFn:
+    """Select the send function of the forward ring.
+
+    The returned callable has signature ``send(x, kv, **kw) -> (recv_buf, handle)``.
+    """
+    send_kv = send_in_forward == SendForward.KV
+
+    def ring_send(
+        x: torch.Tensor,
+        kv: torch.Tensor,
+        direction: int,
+        group: dist.ProcessGroup,
+        tag: int,
+        group_size: Optional[int] = None,
+        **_: Any,
+    ) -> tuple[torch.Tensor, Optional[dist.Work]]:
+        buf = kv if send_kv else x
+        recv_buf, handle = send_op_fn(
+            buf,
+            torch.empty_like(buf),
+            direction,
+            group=group,
+            async_op=True,
+            tag=tag,
+            group_size=group_size,
+        )
+        return recv_buf, handle
+
+    def broadcast_send(
+        x: torch.Tensor,
+        kv: torch.Tensor,
+        local_rank: int,
+        group: dist.ProcessGroup,
+        src_rank: int,
+        **_: Any,
+    ) -> tuple[torch.Tensor, Optional[dist.Work]]:
+        buf = kv if send_kv else x
+        recv = buf if src_rank == local_rank else torch.empty_like(buf)
+        return recv, dist.broadcast(
+            recv, group_src=src_rank, group=group, async_op=True
+        )
+
+    return broadcast_send if send_op == SendOp.BROADCAST else ring_send
+
+
+def _select_forward_recv_fn(send_in_forward: SendForward) -> ForwardRecvFn:
+    """Select the receive function of the forward ring.
+
+    The returned callable has signature
+    ``recv(recv_buf, xj, kv_j, kj, vj) -> (xj, kv_j, kj, vj)``.
+    """
+    send_kv = send_in_forward == SendForward.KV
+
+    def recv(
+        recv_buf: torch.Tensor,
+        xj: torch.Tensor,
+        kv_j: torch.Tensor,
+        kj: torch.Tensor,
+        vj: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if send_kv:
+            return xj, recv_buf, recv_buf[0], recv_buf[1]
+        return recv_buf, kv_j, kj, vj
+
+    return recv
 
 
 def _select_save_for_backward_fn(
     save_for_backward: SaveBackward,
     save_scope: SaveScope,
     offloader: Optional[NVLinkActivationOffloader],
-) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
-    """Build the function for saving tensors for backward based on the config."""
-    match save_for_backward:
-        case SaveBackward.X:
-            if isinstance(offloader, NVLinkActivationOffloader):
-                return lambda x, kv: offloader.offload(x)
-            # keep on GPU -- must clone if Xj will be overwritten by recv next iter
-            if save_scope == SaveScope.GLOBAL:
-                return lambda x, kv: x.clone()
-            return lambda x, kv: x
+) -> SaveForBackwardFn:
+    """Select the function that captures the tensor kept for backward.
 
-        case SaveBackward.KV:
-            # KV is already contiguous, shape [2, B, H, N, d]
-            if isinstance(offloader, NVLinkActivationOffloader):
+    The returned callable has signature ``save(x, kv) -> tensor``. It offloads
+    the tensor if an offloader is set, clones it for ``GLOBAL`` scope, and
+    otherwise returns it unchanged.
+    """
+    want_x = save_for_backward == SaveBackward.X
+    if not (want_x or save_for_backward == SaveBackward.KV):
+        return lambda x, kv: None
 
-                def offload_kv(x: torch.Tensor, kv: torch.Tensor) -> torch.Tensor:
-                    kv_cpu = cast(torch.Tensor, offloader.offload(kv))
-                    del kv
-                    return kv_cpu
+    def save(x: torch.Tensor, kv: torch.Tensor) -> Optional[torch.Tensor]:
+        chunk = x if want_x else kv
+        if isinstance(offloader, NVLinkActivationOffloader):
+            return offloader.offload(chunk)
+        if save_scope == SaveScope.GLOBAL:
+            return chunk.clone()
+        return chunk
 
-                return offload_kv
-
-            if save_scope == SaveScope.GLOBAL:
-                return lambda x, kv: kv.clone()
-            return lambda x, kv: kv
-
-        case _:
-            return lambda xj, kv_j: None  # default no-op
+    return save
 
 
 # --------------------------------------------------------------------------- #
 # config
 # --------------------------------------------------------------------------- #
 class RingAttentionConfig:
-    """Config class for ring attention.
+    """Configuration of ring attention.
 
-    Bundles every policy decision (what to send, what to save, how to
-    accumulate dK/dV, whether to offload) together with the concrete
-    callables that implement each policy, so the forward/backward loops
-    only ever call `self.config.<thing>` and never branch on raw enums
-    themselves.
+    Holds the communication, saving and offloading policies together with the
+    functions that implement them.
     """
 
     def __init__(
         self,
         device: torch.device = torch.device("cuda"),
-        send_in_forward: SendForward = SendForward.KV,
-        send_forward_op: SendForwardOp = SendForwardOp.SENDRECV,
+        send_in_forward: SendForward = SendForward.X,
+        send_op: SendOp = SendOp.HYBRID_P2P,
         save_for_backward: SaveBackward = SaveBackward.KV,
-        save_scope: SaveScope = SaveScope.LOCAL,
+        save_scope: SaveScope = SaveScope.GLOBAL,
         send_backward: SendBackward = SendBackward.SEND_DKV,
         offload: Offload = Offload.DISABLED,
+        gpus_per_node: int = 4,
+        attn_backend: AttnBackend = AttnBackend.SDPA,
+        overlap_comm: bool = False,
     ):
+        """Initialize the configuration.
+
+        Parameters
+        ----------
+        device : torch.device
+            Device on which tensors and communication are placed.
+        send_in_forward : SendForward
+            Tensor representation communicated during the forward pass.
+        send_op : SendOp
+            Communication operation used by the ring.
+        save_for_backward : SaveBackward
+            Tensor representation saved for the backward pass.
+        save_scope : SaveScope
+            Scope in which intermediate tensors are saved.
+        send_backward : SendBackward
+            Strategy used to communicate backward gradients.
+        offload : Offload
+            Activation offloading policy.
+        gpus_per_node : int
+            Number of ranks assigned to each node for hybrid communication.
+        attn_backend : AttnBackend
+            Inner per-chunk attention core. ``SDPA`` (default) keeps the
+            device-based pick (flash on CUDA, math on CPU); ``TE`` uses the
+            TransformerEngine fused core; ``MATH`` the unfused reference.
+        overlap_comm : bool
+            Put the ring's K/V circulation -- and the backward dK/dV relay,
+            where the accumulation shape allows it -- on a dedicated CUDA
+            stream with double buffering, so each transfer overlaps the
+            attention core on the default stream (the ``cp_stream`` trick
+            Transformer Engine uses). CUDA only; elsewhere it is inert and the
+            synchronous path runs unchanged. K/V circulation is overlapped for
+            every ``send_op`` except ``BROADCAST`` (a fresh collective each
+            step, nothing to prefetch ahead of); the dK/dV relay is overlapped
+            too when ``save_scope=LOCAL`` and ``send_backward=SEND_DKV``,
+            except under ``HYBRID_BROADCAST`` whose dK/dV accumulation doesn't
+            fit the direct-swap relay. See :attr:`overlap_active`.
+        """
+        if gpus_per_node <= 0:
+            raise ValueError("gpus_per_node must be positive")
         self.send_in_forward = send_in_forward
         self.save_for_backward = save_for_backward
-        self.send_forward_op = send_forward_op
+        self.send_op = send_op
         self.save_scope = save_scope
         self.send_backward = send_backward
         self.offload = offload
+        self.gpus_per_node = gpus_per_node
         self.device = device
+        self.attn_backend = AttnBackend(attn_backend)
 
-        self.offloader = self._init_offloader(offload, device)
-        self.ring_comm_fn = self._select_ring_comm_fn(device)
-        self.attn_core_forward_fn = self._select_attn_core_forward_fn(device)
-        self.attn_core_backward_fn = self._select_attn_core_backward_fn(device)
-        self.forward_send_fn, self.forward_recv_fn = _select_forward_comm_fns(
-            send_forward_op, send_in_forward, self.ring_comm_fn
+        # Dedicated CUDA stream for the ring's K/V circulation and backward dK/dV
+        # relay. Created once here (the config outlives a single forward/backward)
+        # and shared by both passes. CUDA-only: on CPU / meta devices there is no
+        # stream and ``overlap_active`` stays False, so every provider falls back
+        # to its synchronous path.
+        self.overlap_comm = bool(overlap_comm)
+        self._comm_stream: Optional[torch.cuda.Stream] = (
+            torch.cuda.Stream(device)
+            if self.overlap_comm and torch.device(device).type == "cuda"
+            else None
         )
+
+        # Layout the ring circulates q/k/v/out in, and hands to the inner core.
+        # The TE cores (cuDNN / FA2) are natively bshd -- carrying the ring in
+        # bshd for them means zero transposes per chunk; SDPA / math are bhsd.
+        self.core_layout = "bshd" if self.attn_backend == AttnBackend.TE else "bhsd"
+
+        # Resolve every policy to its concrete callable, once.
+        self.offloader = _select_offloader(offload, device)
+        self.p2p_fn = _select_p2p_fn(send_op)
+        self.send_op_fn = _select_send_op_fn(send_op)
+        self.attn_core_forward_fn = _select_attn_core_forward_fn(
+            device, self.attn_backend
+        )
+        self.attn_core_backward_fn = _select_attn_core_backward_fn(
+            device, self.attn_backend
+        )
+        self.forward_send_fn = _select_forward_send_fn(
+            send_op, send_in_forward, self.send_op_fn
+        )
+        self.forward_recv_fn = _select_forward_recv_fn(send_in_forward)
         self.save_for_backward_fn = _select_save_for_backward_fn(
             save_for_backward, save_scope, self.offloader
         )
 
-    # -- selection helpers ------------------------------------------------- #
-    def _init_offloader(
-        self, offload: Offload, device: torch.device
-    ) -> Optional[NVLinkActivationOffloader]:
-        if offload == Offload.DISABLED:
-            return None
-        elif offload == Offload.CPU:
-            return NVLinkActivationOffloader(device)
-        raise ValueError(f"Unhandled offload option {offload}")
+    @property
+    def comm_stream(self) -> Optional[torch.cuda.Stream]:
+        """Dedicated CUDA stream for ring comm, or ``None`` when overlap is off."""
+        return self._comm_stream
 
-    def _select_ring_comm_fn(self, device: torch.device) -> Callable:
-        if device.type == "cuda":
-            return comm.comm_1d_alltoall
-        elif device.type == "cpu":
-            return comm.comm_1d_p2p
-        raise ValueError(f"No valid ring comm functions for device {device.type}")
+    @property
+    def overlap_active(self) -> bool:
+        """Whether the comm-stream overlap path is actually engaged.
 
-    def _select_attn_core_forward_fn(self, device: torch.device) -> Callable:
-        if device.type == "cuda":
-            return _attn_core_flash
-        elif device.type == "cpu":
-            return _attn_core_math
-        raise ValueError(f"No valid attention core forward for device {device.type}")
+        ``True`` only when ``overlap_comm`` was requested *and* a CUDA stream
+        could be built for it; provider builders gate on this so a non-CUDA
+        device silently keeps the synchronous path.
+        """
+        return self._comm_stream is not None
 
-    def _select_attn_core_backward_fn(self, device: torch.device) -> Callable:
-        if device.type == "cuda":
-            return _attn_core_flash_backward
-        elif device.type == "cpu":
-            return _attn_core_math_backward
-        raise ValueError(f"No valid attention core backward for device {device.type}")
-
-    # -- small shared behaviours used by both forward implementations ------ #
     def wait_offloads(self) -> None:
-        """Block until any in-flight activation offloads have completed."""
+        """Wait for pending activation offloads."""
         if self.offloader is not None:
             self.offloader.wait_offloads()
 
     def __repr__(self) -> str:
-        """Return string representation of config class."""
+        """Return a string representation of the configuration."""
         return (
             f"RingAttentionConfig("
             f"send_in_forward={self.send_in_forward.name}, "
-            f"send_forward_op={self.send_forward_op.name}, "
+            f"send_op={self.send_op.name}, "
             f"save_for_backward={self.save_for_backward.name}, "
             f"save_scope={self.save_scope.name}, "
             f"send_backward={self.send_backward.name}, "
-            f"offload={self.offload.name})"
+            f"offload={self.offload.name}, "
+            f"attn_backend={self.attn_backend.name}, "
+            f"overlap_comm={self.overlap_comm})"
         )

@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install linters
+        run: |
+          pip install ruff==0.15.12 mypy
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install --no-deps -e .
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy --config-file pyproject.toml --ignore-missing-imports
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
+        # Tests are marked @pytest.mark.dist(N) and only run when the mpirun
+        # rank count is exactly N, so each count needs its own job. 10/12/24
+        # ranks are too heavy for a hosted runner: run those on the cluster.
+        ranks: [1, 2, 4, 6, 8]
+        include:
+          - python-version: "3.11"
+            ranks: 4
+          - python-version: "3.13"
+            ranks: 4
+    name: test (py${{ matrix.python-version }}, ${{ matrix.ranks }} ranks)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install MPI
+        run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin
+      - name: Install package (CPU torch)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
+      - name: Tests
+        env:
+          OMPI_MCA_rmaps_base_oversubscribe: "1"
+          OMPI_MCA_hwloc_base_binding_policy: none
+        run: mpirun -n ${{ matrix.ranks }} pytest tests --device cpu
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check dist/*
+      - name: Check wheel contents
+        run: |
+          unzip -l dist/*.whl | grep -E "jigsaw/modules/linear/|py.typed"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

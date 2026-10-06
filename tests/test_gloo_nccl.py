@@ -1,42 +1,48 @@
-"""Test cpu-gpu backend being initialized"""
+"""Test the hybrid ``cpu:gloo,cuda:nccl`` backend being initialized.
+
+Marked ``no_dist_env`` so the shared session group is *not* set up: this file
+brings up its own hybrid-backend group. That means it only works when run on
+its own (``pytest tests/test_gloo_nccl.py`` under ``srun -n8``); inside the full
+suite another test initialises the default group first and the fixture skips.
+"""
+
 import math
-import os
-import subprocess
 
 import pytest
 import torch
 import torch.distributed as dist
 
-pytestmark = [pytest.mark.gpu_required, pytest.mark.dist_required, pytest.mark.hybrid_dist_env]
+from jigsaw.utils import resolve_launch_env
+
+pytestmark = [
+    pytest.mark.gpu_required,
+    pytest.mark.dist_required,
+    pytest.mark.hybrid_dist_env,
+    pytest.mark.dist(8),
+]
+
 
 @pytest.fixture(scope="module")
 def dist_gloo_env():
-    """Initialize the distributed process group once for the entire test session."""
-    rank = int(os.getenv("SLURM_PROCID"))
-    world_size = int(os.getenv("SLURM_NTASKS"))
-    local_id = int(os.getenv("SLURM_LOCALID", rank))
+    """Bring up a ``cpu:gloo,cuda:nccl`` process group for this module."""
+    if dist.is_initialized():
+        pytest.skip("a default process group already exists; run this file on its own")
 
-    device_id = local_id if torch.cuda.device_count() != 1 else 0
+    try:
+        env = resolve_launch_env(strict=True)  # writes MASTER_ADDR / MASTER_PORT
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
+    if env.master_addr in ("", "localhost") and env.world_size > 1:
+        pytest.skip("could not resolve MASTER_ADDR (no scontrol / nodelist)")
+
+    device_id = env.local_rank if torch.cuda.device_count() != 1 else 0
     device = torch.device("cuda", device_id)
     torch.cuda.set_device(device)
 
-    os.environ["MASTER_PORT"] = "12342"
-
-    master_addr = (
-        subprocess.check_output(
-            ["scontrol", "show", "hostnames", os.environ["SLURM_JOB_NODELIST"]]
-        )
-        .decode()
-        .split("\n")[0]
-        .strip()
-    )
-
-    os.environ["MASTER_ADDR"] = master_addr
-
     dist.init_process_group(
         backend="cpu:gloo,cuda:nccl",
-        rank=rank,
-        world_size=world_size,
+        rank=env.rank,
+        world_size=env.world_size,
         device_id=device,
         init_method="env://",
     )
@@ -67,7 +73,6 @@ def make_process_mesh(
             mesh_dim_names=tuple(["model"]),
         )
     else:  #
-        print(f"mesh shape! {mesh_shape[:-2]}")
         model_mesh = dist.device_mesh.init_device_mesh(
             device_type=device_type,
             mesh_shape=tuple(
@@ -84,20 +89,38 @@ def make_process_mesh(
     return mesh
 
 
-@pytest.mark.no_dist_env
-def test_backend_init(dist_gloo_env):
-    _ = make_process_mesh("nccl", [4, 2])
-    return
+class TestGlooNcclBackend:
+    @pytest.mark.no_dist_env
+    def test_backend_init(self, dist_gloo_env):
+        """Verify distributed backend initialization.
 
+        Parameters
+        ----------
+        dist_gloo_env : Any
+            Distributed environment configuration for the Gloo backend.
 
-@pytest.mark.no_dist_env
-def test_cpu_allreduce(dist_gloo_env, device):
-    _ = make_process_mesh("nccl", [4, 2])
-    x = torch.randn(40, 4, device=device)
-    x_cpu = x.to("cpu")
+        """
+        _ = make_process_mesh("nccl", [4, 2])
+        return
 
-    # all-reduce
-    dist.all_reduce(x)
-    dist.all_reduce(x_cpu)
-    x_cpu = x_cpu.to(device)
-    assert torch.allclose(x, x_cpu)
+    @pytest.mark.no_dist_env
+    def test_cpu_allreduce(self, dist_gloo_env, device):
+        """Verify CPU all-reduce communication.
+
+        Parameters
+        ----------
+        dist_gloo_env : Any
+            Distributed environment configuration for the Gloo backend.
+        device : Any
+            Device on which tensors and communication are placed.
+
+        """
+        _ = make_process_mesh("nccl", [4, 2])
+        x = torch.randn(40, 4, device=device)
+        x_cpu = x.to("cpu")
+
+        # all-reduce
+        dist.all_reduce(x)
+        dist.all_reduce(x_cpu)
+        x_cpu = x_cpu.to(device)
+        assert torch.allclose(x, x_cpu)

@@ -1,17 +1,16 @@
-"""Config definition for linear layers."""
+"""Kernel selection for the distributed linear layers."""
 
 from typing import Callable, Optional, Union
 
 import torch
 from torch.nn.parameter import Parameter
-import torch.distributed as dist
 
 from . import distributed_matmul as dist_mm
 from . import distributed_matmul_p2p as dist_mm_p2p
 
 
 class LinearConfig:
-    """Selection strategy for distributed linear operation."""
+    """Selection of the kernels of the distributed linear operation."""
 
     def __init__(
         self,
@@ -21,6 +20,21 @@ class LinearConfig:
         linear_layer: bool = True,
         device: torch.device = torch.device("cuda"),
     ):
+        """Initialize the configuration.
+
+        Parameters
+        ----------
+        parallelism : int
+            Number of model-parallel processes.
+        bias : torch.Tensor | None
+            Bias, if any.
+        bayesian : bool
+            Whether the model is Bayesian.
+        linear_layer : bool
+            Whether the operation belongs to a linear layer.
+        device : torch.device
+            Device of the module.
+        """
         self.mm_kernels = self._mm_kernel_selection(parallelism, device)
         self.grad_bias = self._grad_bias_selection(parallelism, bias, bayesian)
         self.add_bias = self._add_bias_selection(bias, bayesian)
@@ -31,16 +45,7 @@ class LinearConfig:
     def _reshape_weights_selection(
         self, bayesian: bool, linear_layer: bool
     ) -> Callable:
-        """
-        Selector function to decide if .
-
-        Parameters
-        ----------
-        bayesian: bool
-            Flag to see if the weight reshape is necessary.
-        linear_layer: bool
-            Flag to see if the module has weights.
-        """
+        """Select the weight-reshape function."""
         # If the model is Bayesian and the module is a linear layer,
         # weight reshape will be necessary.
         if linear_layer and bayesian:
@@ -51,23 +56,16 @@ class LinearConfig:
             return self._no_reshape_weights
 
     def _reshape_weights(self, w: torch.Tensor) -> torch.Tensor:
-        """
-        Reshape weights for vmap by unsqueezing in the batch dimension.
-
-        Parameters
-        ----------
-        w: torch.tensor
-            model weights.
-        """
+        """Add a batch dimension to the weights for vmap."""
         w = w.unsqueeze(1)
         return w
 
     def _no_reshape_weights(self, w: torch.Tensor) -> torch.Tensor:
-        """Return weights as-is. Dummy identity function."""
+        """Return the weights unchanged."""
         return w
 
     def _sum_grad_weights_selection(self, linear_layer: bool) -> Callable:
-        """Determine if summation over batch dimension is necessary."""
+        """Select the function reducing the weight gradient over the batch dimension."""
         if linear_layer:
             return self._grad_sum
         else:
@@ -76,13 +74,13 @@ class LinearConfig:
     def _no_grad_sum(
         self, grad_weight: torch.Tensor, batch_dim: torch.Tensor
     ) -> torch.Tensor:
-        """Identity function to return gradient weights."""
+        """Return the weight gradient unchanged."""
         return grad_weight
 
     def _grad_sum(
         self, grad_weight: torch.Tensor, batch_dim: torch.Tensor
     ) -> torch.Tensor:
-        """Summation over gradient weights over the batch dimension."""
+        """Sum the weight gradient over the batch dimension."""
         if len(grad_weight.shape) > 2:
             return grad_weight.sum(dim=int(batch_dim))
         else:
@@ -92,20 +90,7 @@ class LinearConfig:
     def _add_bias_selection(
         self, bias: Union[torch.Tensor, None], bayesian: bool
     ) -> Callable:
-        """
-        Selector function to add bias to weights.
-
-        If the bias is None, return identity.
-        If the model is bayesian, perform associated bias reshape.
-        Else, if bias exists, add bias.
-
-        Parameters
-        ----------
-        bias: torch.Tensor
-            Value of the bias term. Not the boolean flag.
-        bayesian: bool
-            Flag to indicate if the model is bayesian.
-        """
+        """Select the function adding the bias."""
         if bias is None:
             return self._return_identity
         elif bayesian:
@@ -114,18 +99,18 @@ class LinearConfig:
             return self._add_bias
 
     def _add_bias_bayesian(self, x: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        """Perform reshape for bias and add to x."""
+        """Add the reshaped bias to ``x``."""
         b = b.unsqueeze(1).unsqueeze(1)
         return x.add(b)
 
     def _add_bias(self, x: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        """Add bias to x."""
+        """Add the bias to ``x``."""
         return x.add(b)
 
     def _return_identity(
         self, x: torch.Tensor, b: Optional[Parameter] = None
     ) -> torch.Tensor:
-        """Return x as identity since bias does not exist."""
+        """Return ``x`` unchanged."""
         return x
 
     # Reduce bias terms over spatial groups
@@ -135,14 +120,7 @@ class LinearConfig:
         bias: Union[torch.Tensor, None],
         bayesian: bool,
     ) -> Callable:
-        """
-        Selector function for calculating gradient of bias.
-
-        Returns None when bias term is None.
-        If parallelism is 2, all model instances hold different and independent bias parameters.
-        Otherwise, reduction over the spatial groups is necessary, since spatial groups will "share" output channels.
-        If we have a synchronized layer in the case of SWIN, the bias synchronization will also need to occur across spatial groups.
-        """
+        """Select the function computing the bias gradient."""
         # return identity if bias is None
         if bias is None:
             return self._no_bias
@@ -150,19 +128,8 @@ class LinearConfig:
         else:
             return self._bias_sum
 
-    def _bias_sum(
-        self, grad_output: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Calculate grad wrt bias.
-
-        grad_b is equal to the gradient output summed over space and batch dim.
-
-        Parameters
-        ----------
-        grad_output: torch.Tensor
-            gradient wrt loss
-        """
+    def _bias_sum(self, grad_output: torch.Tensor) -> torch.Tensor:
+        """Sum ``grad_output`` over the space and batch dimensions."""
         if len(grad_output.shape) > 2:
             grad_b = grad_output.sum(dim=(-3, -2))
         else:
@@ -173,21 +140,18 @@ class LinearConfig:
         self,
         grad_output: Optional[torch.Tensor],
     ) -> Optional[torch.Tensor]:
-        """Return identity when bias does not exist."""
+        """Return ``None`` since there is no bias."""
         return None
 
     def _mm_kernel_selection(
         self, parallelism: int, device: torch.device
     ) -> list[Callable]:
-        """
-        Select distriuted matrix multiplication kernels.
-
-        Depends on number of model-parallel processes.
-
+        """Select the ``xwt``, ``xw`` and ``xtw`` matmul kernels.
 
         Returns
         -------
-        List[Callable, Callable, Callable]: pointers to xwt, xw, and xtw kernels.
+        list[Callable]
+            The three kernels.
         """
         xw_t_kernel = self._select_xw_transpose_kernel(parallelism, device)
         xw_kernel = self._select_xw_kernel(parallelism, device)
@@ -199,11 +163,11 @@ class LinearConfig:
     def _select_xw_transpose_kernel(
         self, parallelism: int, device: torch.device = torch.device("cuda")
     ) -> Callable:
-        """Return xw_t kernel based on parallelism and device."""
+        """Select the ``xwt`` kernel."""
         if device.type == "cuda":
             match parallelism:
                 case 1:
-                    return lambda x, w: x @ w.mT
+                    return lambda x, w, *args, **kwargs: x @ w.mT
                 case 2:
                     return dist_mm.xw_transpose_twoway
                 case 4:
@@ -215,7 +179,7 @@ class LinearConfig:
         elif device.type == "cpu":
             match parallelism:
                 case 1:
-                    return lambda x, w: x @ w.mT
+                    return lambda x, w, *args, **kwargs: x @ w.mT
                 case 2:
                     return dist_mm_p2p.xw_transpose_twoway
                 case 4:
@@ -230,11 +194,11 @@ class LinearConfig:
     def _select_xw_kernel(
         self, parallelism: int, device: torch.device = torch.device("cuda")
     ) -> Callable:
-        """Return xw kernel based on parallelism."""
+        """Select the ``xw`` kernel."""
         if device.type == "cuda":
             match parallelism:
                 case 1:
-                    return lambda x, w: x @ w
+                    return lambda x, w, *args, **kwargs: x @ w
                 case 2:
                     return dist_mm.xw_twoway
                 case 4:
@@ -246,7 +210,7 @@ class LinearConfig:
         elif device.type == "cpu":
             match parallelism:
                 case 1:
-                    return lambda x, w: x @ w
+                    return lambda x, w, *args, **kwargs: x @ w
                 case 2:
                     return dist_mm_p2p.xw_twoway
                 case 4:
@@ -261,11 +225,11 @@ class LinearConfig:
     def _select_x_transpose_w_kernel(
         self, parallelism: int, device: torch.device = torch.device("cuda")
     ) -> Callable:
-        """Return x_tw kernel based on parallelism."""
+        """Select the ``xtw`` kernel."""
         if device.type == "cuda":
             match parallelism:
                 case 1:
-                    return lambda x, w: x.mT @ w
+                    return lambda x, w, *args, **kwargs: x.mT @ w
                 case 2:
                     return dist_mm.x_transpose_w_twoway
                 case 4:
@@ -277,7 +241,7 @@ class LinearConfig:
         elif device.type == "cpu":
             match parallelism:
                 case 1:
-                    return lambda x, w: x.mT @ w
+                    return lambda x, w, *args, **kwargs: x.mT @ w
                 case 2:
                     return dist_mm_p2p.x_transpose_w_twoway
                 case 4:
@@ -292,6 +256,20 @@ class LinearConfig:
     def _select_xw_xtw_fused_kernel(
         self, parallelism: int, device: torch.device = torch.device("cuda")
     ) -> Callable:
+        """Select the fused ``xw`` and ``xtw`` kernel.
+
+        Parameters
+        ----------
+        parallelism : int
+            Number of model-parallel processes.
+        device : torch.device
+            Device of the module.
+
+        Returns
+        -------
+        Callable
+            Fused kernel.
+        """
         if device.type == "cuda":
             match parallelism:
                 case 1:
@@ -300,6 +278,8 @@ class LinearConfig:
                     return dist_mm.fused_xw_xtw_twoway
                 case 4:
                     return dist_mm.fused_xw_xtw_fourway
+                case 8:
+                    return dist_mm.fused_xw_xtw_eightway
                 case _:
                     raise ValueError(f"Unsupported parallelism: {parallelism}")
         elif device.type == "cpu":

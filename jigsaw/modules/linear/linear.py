@@ -1,87 +1,111 @@
-"""Modules for distributed linear layers and operations."""
+"""Distributed linear layers and matmul modules."""
 
+import math
 from typing import Any, Optional, cast
 
-import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
 import jigsaw.hooks as hooks
+from jigsaw import init
 from jigsaw.utils_aggregate import gather_1d_results, gather_results
 
 from .config import LinearConfig
 from .functional import XTW, XW, XWT
 
+# Effective ``(model_group.size() // column_group.size(), column_group.size())``
+# layouts the XWT kernels implement. The kernel is picked by ``parallelism`` (=
+# ``model_group.size()`` = row * col) alone and each one bakes in a fixed 2-D
+# arrangement of the model ranks, so an arbitrary ``row x col`` factorisation of
+# the same rank count is *not* interchangeable: parallelism 4 is a 2x2 SUMMA,
+# parallelism 8 a 4x2 one, parallelism 2 an in-split (1x2). When ``model_group
+# == column_group`` the row factor is 1 and ``row_group`` is a pure replication
+# group (not part of the matmul), so any ``row_group`` size is fine.
+# ``merge_weights`` / ``reshard_parameters`` still work for any factorisation --
+# only ``forward`` is constrained.
+_SUPPORTED_XWT_LAYOUTS = frozenset({(1, 1), (1, 2), (2, 2), (4, 2)})
+
 
 class DistributedXWT(torch.nn.Module):
-    """Batched matrix-matrix (XWT) multiplication distributed across n processes."""
+    """Distributed linear layer computing ``x @ w.mT``."""
 
     def __init__(
         self,
         in_dim: int,
         out_dim: int,
-        bias: bool,
         local_rank: int,
         device: torch.device,
         model_group: dist.ProcessGroup,
         column_group: dist.ProcessGroup,
         row_group: dist.ProcessGroup,
+        bias: bool = True,
         bayesian: bool = False,
         config: Optional[LinearConfig] = None,
+        dtype: torch.dtype = torch.float32,
     ) -> None:
-        """
-        Initialize the XWT Linear layer sharded over n processes.
+        """Initialize the layer.
 
         Parameters
         ----------
         in_dim : int
-            input dimension of local weight matrix.
+            Input dimension of the global (unsharded) weight.
         out_dim : int
-            output dimension of local weight matrix.
-        bias : bool, optional
-            If True, adds a learnable bias to the output (default is True).
+            Output dimension of the global (unsharded) weight.
         local_rank : int
-            Local model rank.
+            Rank within the model group.
         device : torch.device
-            Device to perform computation on.
-        parallelism: int
-            Number of processes the model is distributed over
-        model_group: dist.ProcessGroup
-            Process group containing all ranks within model-parallel instances.
-            Is the Union of row and column group.
-        column_group: dist.ProcessGroup
-            Process group splitting the last dimension of X and W.
-            In a standard case, this would be the channel-wise process group.
-        row_group: dist.ProcessGroup
-            Process group splitting the first dimension of W.
-            In a standard case, this would be the spatial-wise process group.
-        bayesian: bool
-            Boolean flag for whether the model is bayesian.
-        config: Optional[LinearConfig]
-            Configuration and selection strategy of linear layer.
-            If None, this will be initialized here.
+            Device of the module.
+        model_group : dist.ProcessGroup
+            Process group of one model-parallel instance, the union of the row
+            and column groups.
+        column_group : dist.ProcessGroup
+            Process group splitting the last dimension of ``x`` and ``w``.
+        row_group : dist.ProcessGroup
+            Process group splitting the first dimension of ``w``.
+        bias : bool
+            Whether to add a bias.
+        bayesian : bool
+            Whether the model is Bayesian.
+        config : LinearConfig, optional
+            Kernel selection. Defaults to a configuration built from the
+            arguments.
+        dtype : torch.dtype
+            Data type of the parameters and computations.
         """
         super().__init__()
 
-        stdev = 1.0 / np.sqrt(in_dim * row_group.size())
+        self.dtype = dtype
+        self.device = device
+
         assert in_dim % column_group.size() == 0
         assert out_dim % (model_group.size() // column_group.size()) == 0
+
+        # Global (unsharded) weight/bias shape, torch.nn.Linear layout ``(out,
+        # in)``. ``reset_parameters`` keys the init distribution off these, so a
+        # freshly built layer is drawn from the same distribution as the
+        # equivalent ``torch.nn.Linear`` -- the row-/column-group shard sizes
+        # only decide which slice of that distribution this rank samples.
+        self.global_weight_shape = (out_dim, in_dim)
+        self.global_bias_shape = (out_dim,) if bias else None
 
         bias_dim = out_dim // column_group.size()
         in_dim = in_dim // (column_group.size())
         out_dim = out_dim // (model_group.size() // column_group.size())
 
         self.weight = torch.nn.Parameter(
-            torch.zeros(out_dim, in_dim).uniform_(-stdev, stdev).to(device)
+            torch.zeros(out_dim, in_dim, dtype=self.dtype, device=self.device)
         )
         self.parallelism = model_group.size()
 
         self.bias = (
-            torch.nn.Parameter(torch.zeros(bias_dim).uniform_(-stdev, stdev).to(device))
+            torch.nn.Parameter(
+                torch.zeros(bias_dim, dtype=self.dtype, device=self.device)
+            )
             if bias
             else None
         )
+        self.reset_parameters()
 
         self.out_dim = out_dim
         self.in_dim = in_dim
@@ -111,24 +135,50 @@ class DistributedXWT(torch.nn.Module):
 
         self.XWT = XWT.apply
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def reset_parameters(self) -> None:
+        """Initialize the parameters like ``torch.nn.Linear``.
+
+        The fans are computed from the global weight shape.
         """
-        Forward pass of linear layer (XWT) distributed across two processes.
+        init.kaiming_uniform_(
+            self.weight, a=math.sqrt(5), global_shape=self.global_weight_shape
+        )
+        if self.bias is not None:
+            fan_in, _ = init._calculate_fan_in_and_fan_out(self.global_weight_shape)
+            bound = 1.0 / math.sqrt(fan_in) if fan_in > 0 else 0.0
+            init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the layer.
 
         Parameters
         ----------
         x : torch.Tensor
-            Local input tensor of shape (B, x_in, in_dim) or (S, B, x_in, in_dim).
-        model_group : dist.ProcessGroup, optional
-            Process group for an individual model-parallel instance.
+            Local input.
 
         Returns
         -------
-        Cij: torch.Tensor
-            Local output tensor of shape (B, out_dim, in_dim).
-            B, out_dim are global values.
-            in_dim is local value.
+        torch.Tensor
+            Local output.
         """
+        # The kernel is selected by ``parallelism = model_group.size()`` alone
+        # (see ``LinearConfig``), so the constrained layout is the *effective*
+        # one -- ``model_group`` split by ``column_group`` -- not
+        # ``row_group.size()``. For a SUMMA caller ``model_group`` is the union
+        # of row and column, so this equals ``(row_group.size(), col)`` and
+        # nothing changes. For a caller that passes ``model_group ==
+        # column_group`` (e.g. attention's qkv/head_concat: TP over channel,
+        # weights replicated over the spatial ``row_group``) the row factor is
+        # 1, so any spatial size runs the same parallelism-``col`` kernel.
+        row = self.model_group.size() // self.column_group.size()
+        layout = (row, self.column_group.size())
+        if layout not in _SUPPORTED_XWT_LAYOUTS:
+            raise NotImplementedError(
+                f"DistributedXWT.forward has no kernel for an effective "
+                f"row x col = {layout[0]}x{layout[1]} mesh; the XWT kernels "
+                f"implement only {sorted(_SUPPORTED_XWT_LAYOUTS)} (row, col). "
+                f"merge_weights / reshard_parameters still work on this mesh."
+            )
         cij = self.XWT(
             x,
             self.weight,
@@ -143,7 +193,7 @@ class DistributedXWT(torch.nn.Module):
         return cij
 
     def get_parameter_count(self) -> int:
-        """Return parameter count for linear layer."""
+        """Return the number of local parameters."""
         num_param = (
             0
             if self.bias is None
@@ -162,35 +212,38 @@ class DistributedXWT(torch.nn.Module):
         model_kw: str = "model",
         **kwargs: Any,
     ) -> "DistributedXWT":
-        """
-        Convert torch.nn.Linear to jigsaw based on given process mesh.
+        """Convert a ``torch.nn.Linear`` to a :class:`DistributedXWT`.
 
         Parameters
         ----------
-        model: torch.nn.Linear
-            Instance of linear class that should be converted to jigsaw linear.
-        process_mesh_dict: dict
-            Process mesh dict that comtains row, column, and model process groups
-        device: torch.device
-            Device upon which computation happens.
-        row_kw: str
-            Key for accessing row process groups
-        col_kw: str
-            Key for accessing col process groups
-        model_kw: str
-            Key for accessing model process groups.
-            Model process group should contain the Union of the row and column groups.
-        kwargs: Any
-            Additional inputs.
+        model : torch.nn.Linear
+            Layer to convert.
+        process_mesh_dict : dict
+            Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
+        device : torch.device
+            Device of the converted module.
+        row_kw : str
+            Key of the row process group.
+        col_kw : str
+            Key of the column process group.
+        model_kw : str
+            Key of the model process group.
+        **kwargs : Any
+            Unused. Accepts the options of the other converters, which
+            :func:`jigsaw.convert.convert_to_jigsaw` passes to every layer.
 
         Returns
         -------
-        model: jigsaw.linear.DistributedXWT
-            Instance of jigsaw distributed linear layer.
-            Jigsaw layer contains weights and biases given from torch.nn.Linear layer.
+        DistributedXWT
+            Distributed layer with the weights and bias of ``model``.
         """
-        assert model.in_features % process_mesh_dict[row_kw].size() == 0, (
-            "in_features is not divisible by process mesh rows"
+        # The columns shard the input dimension of the weight and the bias, the
+        # rows the output dimension of the weight.
+        assert model.in_features % process_mesh_dict[col_kw].size() == 0, (
+            "in_features is not divisible by process mesh columns"
+        )
+        assert model.out_features % process_mesh_dict[row_kw].size() == 0, (
+            "out_features is not divisible by process mesh rows"
         )
         assert model.out_features % process_mesh_dict[col_kw].size() == 0, (
             "out_features is not divisible by process mesh columns"
@@ -226,9 +279,11 @@ class DistributedXWT(torch.nn.Module):
             instance.bias, torch.Tensor
         ):
             bias_size = model.out_features // process_mesh_dict[col_kw].size()
-            instance.bias.data = model.bias.data[
-                col_rank * bias_size : (col_rank + 1) * bias_size
-            ].clone()
+            instance.bias.data = (
+                model.bias.data[col_rank * bias_size : (col_rank + 1) * bias_size]
+                .clone()
+                .to(device)
+            )
         return instance
 
     def convert_to_torch(
@@ -238,20 +293,23 @@ class DistributedXWT(torch.nn.Module):
         col_kw: str = "col",
         model_kw: str = "model",
     ) -> torch.nn.Linear:
-        """
-        Convert jigsaw linear layer to torch.
+        """Convert the layer to a ``torch.nn.Linear``.
 
         Parameters
         ----------
-        process_mesh_dict: dict
-            Process mesh dict that comtains row, column, and model process groups.
-        row_kw: str
-            Key for accessing row process groups.
-        col_kw: str
-            Key for accessing col process groups.
-        model_kw: str
-            Key for accessing model process groups.
-            Model process group should contain the Union of the row and column groups.
+        process_mesh_dict : dict
+            Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
+        row_kw : str
+            Key of the row process group.
+        col_kw : str
+            Key of the column process group.
+        model_kw : str
+            Key of the model process group.
+
+        Returns
+        -------
+        torch.nn.Linear
+            Layer with the merged weights.
         """
         weights, bias = self.merge_weights(process_mesh_dict, row_kw, col_kw, model_kw)
         linear = torch.nn.Linear(
@@ -261,7 +319,7 @@ class DistributedXWT(torch.nn.Module):
             device=self.device,
             dtype=self.dtype,
         )
-        linear.weights.data = weights
+        linear.weight.data = weights
         if isinstance(linear.bias, Parameter) and isinstance(bias, torch.Tensor):
             linear.bias.data = bias
 
@@ -274,27 +332,25 @@ class DistributedXWT(torch.nn.Module):
         col_kw: str = "col",
         model_kw: str = "model",
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Gathers and returns global weights (and bias) in a manner compatible to torch.nn.Linear.
+        """Merge the sharded weight and bias into global tensors.
 
         Parameters
         ----------
-        from_process_mesh: dict
-            Process mesh dict that comtains row, column, and model process groups
-        row_kw: str
-            Key for accessing row process groups
-        col_kw: str
-            Key for accessing col process groups
-        model_kw: str
-            Key for accessing model process groups.
-            Model process group should contain the Union of the row and column groups.
+        from_process_mesh : dict
+            Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
+        row_kw : str
+            Key of the row process group.
+        col_kw : str
+            Key of the column process group.
+        model_kw : str
+            Key of the model process group.
 
         Returns
         -------
-        global_weights: torch.Tensor
+        global_weights : torch.Tensor
             Merged weights.
-        global_bias: Union[torch.Tensor, None]
-            Merged bias, if it exists.
+        global_bias : torch.Tensor | None
+            Merged bias, if any.
         """
         global_weights = gather_results(
             self.weight, from_process_mesh, row_kw, col_kw, model_kw
@@ -314,18 +370,21 @@ class DistributedXWT(torch.nn.Module):
         to_process_mesh: dict,
         pm_row_key: str = "row",
         pm_col_key: str = "col",
+        pm_model_key: str = "model",
     ) -> None:
-        """from_process_mesh has process mesh with 'row' and 'col' flags."""
-        # re-define self selector
-        self.parallelism = to_process_mesh["row"].size() * to_process_mesh["col"].size()
-        self.config = LinearConfig(
-            self.parallelism,
-            self.bias,
-            self.bayesian,
-            linear_layer=True,
-            device=self.device,
-        )
+        """Reshard the weight and bias from one process mesh onto another.
 
+        The module is rebound to the new mesh.
+
+        Parameters
+        ----------
+        from_process_mesh : dict
+            Process groups of the current mesh.
+        to_process_mesh : dict
+            Process groups of the new mesh.
+        pm_row_key, pm_col_key, pm_model_key : str
+            Keys of the row, column and model process groups in both meshes.
+        """
         # Find the local and global shapes
         from_weight_shape_local = self.weight.shape
         weight_shape_global = (
@@ -357,7 +416,9 @@ class DistributedXWT(torch.nn.Module):
             )
 
         # Gather
-        global_weights, global_bias = self.merge_weights(from_process_mesh)
+        global_weights, global_bias = self.merge_weights(
+            from_process_mesh, pm_row_key, pm_col_key, pm_model_key
+        )
 
         row_rank, row_shard_size = (
             to_process_mesh[pm_row_key].rank(),
@@ -376,9 +437,7 @@ class DistributedXWT(torch.nn.Module):
         )
         del global_weights
 
-        if isinstance(global_bias, torch.Tensor) and isinstance(
-            global_bias, torch.Tensor
-        ):
+        if self.bias is not None and isinstance(global_bias, torch.Tensor):
             col_shard_size = to_bias_shape_local
             self.bias = torch.nn.Parameter(
                 global_bias[
@@ -387,9 +446,40 @@ class DistributedXWT(torch.nn.Module):
             )
             del global_bias
 
+        # Rebind the module to the target mesh so a forward/backward pass on it
+        # is valid: process groups, ranks, the kernel-selection config and the
+        # bias grad-sync hook all key off the new group sizes.
+        self.row_group = to_process_mesh[pm_row_key]
+        self.column_group = to_process_mesh[pm_col_key]
+        self.model_group = to_process_mesh[pm_model_key]
+        self.local_rank = self.model_group.rank()
+        self.parallelism = self.model_group.size()
+        self.out_dim, self.in_dim = tuple(self.weight.shape)
+        self.config = LinearConfig(
+            self.parallelism,
+            self.bias,
+            self.bayesian,
+            linear_layer=True,
+            device=self.device,
+        )
 
-class DistributedMatMulXWT(torch.nn.Module):
-    """Batched distributed matrix-matrix (XWT) multiplication."""
+        if self.bias is not None:
+            # ``self.bias`` is a fresh Parameter, so the __init__ hook is gone;
+            # re-register it on the new row group and re-broadcast rank 0's slice.
+            self.bias.register_post_accumulate_grad_hook(
+                hooks.make_grad_sync_hook(self.row_group, async_op=True)
+            )
+            dist.broadcast(self.bias.data, group_src=0, group=self.row_group)
+
+
+class _DistributedMatMul(torch.nn.Module):
+    """Base class of the parameter-free distributed matmul modules.
+
+    Subclasses set :attr:`_autograd_fn`.
+    """
+
+    #: autograd ``Function`` whose ``.apply`` this module drives; set by subclasses.
+    _autograd_fn: type[torch.autograd.Function]
 
     def __init__(
         self,
@@ -400,476 +490,165 @@ class DistributedMatMulXWT(torch.nn.Module):
         bayesian: bool = False,
         config: Optional[LinearConfig] = None,
     ) -> None:
-        """
-        Initialize the Distributed XWT multiplication operation.
+        """Initialize the module.
 
         Parameters
         ----------
         local_rank : int
-            Local model rank.
+            Rank within the model group.
         device : torch.device
-            Device to perform computation on.
-        parallelism: int
-            Number of processes the model is distributed over.
-        model_group: dist.ProcessGroup
-            Process group containing all ranks within model-parallel instances.
-        bayesian: bool
-            Boolean flag for whether the model is Bayesian.
-        config: Optional[LinearConfig]
-            Configuration and selection strategy of linear layer.
-            If None, this will be initialized here.
+            Device of the module.
+        parallelism : int
+            Number of model-parallel processes.
+        model_group : dist.ProcessGroup
+            Process group of one model-parallel instance.
+        bayesian : bool
+            Whether the model is Bayesian.
+        config : LinearConfig, optional
+            Kernel selection. Defaults to a configuration built from the
+            arguments.
         """
         super().__init__()
         self.local_rank = local_rank
         self.device = device
+        self.parallelism = parallelism
         self.model_group = model_group
         self.bayesian = bayesian
         self.config = (
-            LinearConfig(
-                parallelism, None, self.bayesian, linear_layer=False, device=self.device
+            config
+            if config is not None
+            else LinearConfig(
+                parallelism, None, bayesian, linear_layer=False, device=device
             )
-            if config is None
-            else config
         )
-
-        self.XWT = XWT.apply
+        self.matmul = self._autograd_fn.apply
 
     def get_parameter_count(self) -> int:
-        """Return parameter count for disdtributed MatMulXWT operation."""
+        """Return the number of parameters, which is always 0."""
         return 0
 
-    def forward(
-        self, x: torch.Tensor, w: torch.Tensor, b: torch.Tensor = None
-    ) -> torch.Tensor:
-        """
-        Forward pass of linear layer (XWT) distributed across two processes.
+    def forward(self, x: torch.Tensor, w: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+        """Apply the distributed matmul.
 
         Parameters
         ----------
         x : torch.Tensor
-            Local input tensor of shape (B, x_in, in_dim).
+            Local input.
         w : torch.Tensor
-            Local weights of shape (out_dim, in_dim) or (S, out_dim, in_dim).
-        b : torch Tensor
-            Local bias vector of shape (out_dim) or (S, out_dim).
+            Local weight.
+        **kwargs : Any
+            Unused. The operation has no bias.
 
         Returns
         -------
-        Cij: torch.Tensor
-            Local output tensor of shape (B, x_in, out_dim) or (S, B, x_in, out_dim).
+        torch.Tensor
+            Local output.
         """
-        cij = self.XWT(
+        cij = self.matmul(
             x,
             w,
-            b,
+            None,
             self.local_rank,
             self.device,
             self.config,
             self.model_group,
             self.bayesian,
         )
-        cij = cast(torch.Tensor, cij)
-
-        return cij
+        return cast(torch.Tensor, cij)
 
     @classmethod
     def convert_to_jigsaw(
         cls,
-        xwt: "MatMulXWT",
+        module: torch.nn.Module,
         process_mesh_dict: dict,
         device: torch.device,
         row_kw: str = "row",
         col_kw: str = "col",
         model_kw: str = "model",
         **kwargs: Any,
-    ) -> "DistributedMatMulXWT":
-        """
-        Convert torch.nn.Linear to jigsaw based on given process mesh.
+    ) -> "_DistributedMatMul":
+        """Build a distributed matmul module from a process mesh.
 
         Parameters
         ----------
-        xwt: MatMulXWT
-            Instance of xwt that should be converted to jigsaw distributed matmul.
-        process_mesh_dict: dict
-            Process mesh dict that comtains row, column, and model process groups
-        device: torch.device
-            Device upon which computation happens.
-        row_kw: str
-            Key for accessing row process groups
-        col_kw: str
-            Key for accessing col process groups
-        model_kw: str
-            Key for accessing model process groups.
-            Model process group should contain the Union of the row and column groups.
-        kwargs: Any
-            Additional inputs.
-
-        Returns
-        -------
-        model: jigsaw.linear.DistributedMatMulXWT
-            Instance of jigsaw distributed linear layer.
-            Jigsaw layer contains weights and biases given from torch.nn.Linear layer.
-        """
-        instance = cls(
-            local_rank=process_mesh_dict["model"].rank(),
-            device=device,
-            parallelism=process_mesh_dict["model"].size(),
-            model_group=process_mesh_dict["model"],
-        )
-        return instance
-
-
-class DistributedMatMulXW(torch.nn.Module):
-    """Batched matrix-matrix (XWT) multiplication distributed across two processes."""
-
-    def __init__(
-        self,
-        local_rank: int,
-        device: torch.device,
-        parallelism: int,
-        model_group: dist.ProcessGroup,
-        bayesian: bool = False,
-    ):
-        """
-        Initialize the distributed XW module.
-
-        Parameters
-        ----------
-        local_rank : int
-            Local model rank.
+        module : torch.nn.Module
+            Matmul module to convert. Unused, since the operation has no
+            parameters.
+        process_mesh_dict : dict
+            Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
         device : torch.device
-            Device to perform computation on.
-        parallelism: int
-            Number of processes the model is distributed over.
-        model_group: dist.ProcessGroup
-            Process group containing all ranks within model-parallel instances.
-        spatial_group: dist.ProcessGroup
-            Process group containing ranks that share channels.
-        bayesian: bool
-            Boolean flag for whether the model is Bayesian.
-        """
-        super().__init__()
-        self.local_rank = local_rank
-        self.device = device
-        self.parallelism = parallelism
-        self.model_group = model_group
-        self.bayesian = bayesian
-
-        self.config = LinearConfig(
-            parallelism, None, self.bayesian, linear_layer=False, device=self.device
-        )
-
-        self.XW = XW.apply
-
-    def get_parameter_count(self) -> int:
-        """Return parameter count for matrix multiplication."""
-        return 0
-
-    def forward(
-        self, x: torch.Tensor, w: torch.Tensor, b: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        """
-        Forward pass of linear layer (XW) distributed across two processes.
-
-        Parameters
-        ----------
-        x: torch.Tensor
-            Local input tensor of shape (B, x_in, in_dim).
-        w: torch.Tensor
-            Local weight tensor of shape (local_in_dim, local_out_dim)
-        b: torch.Tensor | None
-            Local bias tensor of shape (local_out_dim)
+            Device of the converted module.
+        row_kw : str
+            Key of the row process group.
+        col_kw : str
+            Key of the column process group.
+        model_kw : str
+            Key of the model process group.
+        **kwargs : Any
+            Unused.
 
         Returns
         -------
-        Cij: torch.Tensor
-            Local output tensor of shape (B, out_dim, in_dim).
+        _DistributedMatMul
+            Distributed matmul module.
         """
-        cij = self.XW(
-            x,
-            w,
-            b,
-            self.local_rank,
-            self.device,
-            self.config,
-            self.model_group,
-            self.bayesian,
-        )
-        cij = cast(torch.Tensor, cij)
-
-        return cij
-
-    @classmethod
-    def convert_to_jigsaw(
-        cls,
-        xw: "MatMulXW",
-        process_mesh_dict: dict,
-        device: torch.device,
-        row_kw: str = "row",
-        col_kw: str = "col",
-        model_kw: str = "model",
-        **kwargs: Any,
-    ) -> "DistributedMatMulXW":
-        """
-        Convert torch.nn.Linear to jigsaw based on given process mesh.
-
-        Parameters
-        ----------
-        xw: MatMulXW
-            Instance of MatMulXW class that should be converted to jigsaw distributed mat-mul (XW).
-        process_mesh_dict: dict
-            Process mesh dict that comtains row, column, and model process groups
-        device: torch.device
-            Device upon which computation happens.
-        row_kw: str
-            Key for accessing row process groups
-        col_kw: str
-            Key for accessing col process groups
-        model_kw: str
-            Key for accessing model process groups.
-            Model process group should contain the Union of the row and column groups.
-        kwargs: Any
-            Additional inputs.
-
-        Returns
-        -------
-        model: jigsaw.linear.DistributedMatMulXW
-            Instance of jigsaw distributed linear layer.
-            Jigsaw layer contains weights and biases given from torch.nn.Linear layer.
-        """
-        instance = cls(
-            local_rank=process_mesh_dict["model"].rank(),
+        return cls(
+            local_rank=process_mesh_dict[model_kw].rank(),
             device=device,
-            parallelism=process_mesh_dict["model"].size(),
-            model_group=process_mesh_dict["model"],
-        )
-        return instance
-
-
-class DistributedMatMulXTW(torch.nn.Module):
-    """Batched matrix-matrix (XWT) multiplication distributed across two processes."""
-
-    def __init__(
-        self,
-        local_rank: int,
-        device: torch.device,
-        parallelism: int,
-        model_group: dist.ProcessGroup,
-        bayesian: bool = False,
-    ):
-        """
-        Initialize the distributed XW module.
-
-        Parameters
-        ----------
-        local_rank : int
-            Local model rank.
-        device : torch.device
-            Device to perform computation on.
-        parallelism: int
-            Number of processes the model is distributed over.
-        model_group: dist.ProcessGroup
-            Process group containing all ranks within model-parallel instances.
-        spatial_group: dist.ProcessGroup
-            Process group containing ranks that share channels.
-        bayesian: bool
-            Boolean flag for whether the model is Bayesian.
-        """
-        super().__init__()
-        self.local_rank = local_rank
-        self.device = device
-        self.parallelism = parallelism
-        self.model_group = model_group
-        self.bayesian = bayesian
-
-        self.config = LinearConfig(
-            parallelism, None, self.bayesian, linear_layer=False, device=self.device
+            parallelism=process_mesh_dict[model_kw].size(),
+            model_group=process_mesh_dict[model_kw],
         )
 
-        self.XTW = XTW.apply
+
+class DistributedMatMulXWT(_DistributedMatMul):
+    """Distributed batched matmul ``x @ w.mT``."""
+
+    _autograd_fn = XWT
+
+
+class DistributedMatMulXW(_DistributedMatMul):
+    """Distributed batched matmul ``x @ w``."""
+
+    _autograd_fn = XW
+
+
+class DistributedMatMulXTW(_DistributedMatMul):
+    """Distributed batched matmul ``x.mT @ w``."""
+
+    _autograd_fn = XTW
+
+
+class _MatMul(torch.nn.Module):
+    """Base class of the non-distributed matmul modules.
+
+    :meth:`_DistributedMatMul.convert_to_jigsaw` replaces them with the
+    distributed versions.
+    """
 
     def get_parameter_count(self) -> int:
-        """Return parameter count for matrix multiplication."""
+        """Return the number of parameters, which is always 0."""
         return 0
 
-    def forward(
-        self, x: torch.Tensor, w: torch.Tensor, b: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        """
-        Forward pass of linear layer (XW) distributed across two processes.
 
-        Parameters
-        ----------
-        x: torch.Tensor
-            Local input tensor of shape (B, x_in, in_dim).
-        w: torch.Tensor
-            Local weight tensor of shape (local_in_dim, local_out_dim)
-        b: torch.Tensor | None
-            Local bias tensor of shape (local_out_dim)
-
-        Returns
-        -------
-        Cij: torch.Tensor
-            Local output tensor of shape (B, out_dim, in_dim).
-        """
-        cij = self.XTW(
-            x,
-            w,
-            b,
-            self.local_rank,
-            self.device,
-            self.config,
-            self.model_group,
-            self.bayesian,
-        )
-        cij = cast(torch.Tensor, cij)
-
-        return cij
-
-    @classmethod
-    def convert_to_jigsaw(
-        cls,
-        xtw: "MatMulXTW",
-        process_mesh_dict: dict,
-        device: torch.device,
-        row_kw: str = "row",
-        col_kw: str = "col",
-        model_kw: str = "model",
-        **kwargs: Any,
-    ) -> "DistributedMatMulXTW":
-        """
-        Convert torch.nn.Linear to jigsaw based on given process mesh.
-
-        Parameters
-        ----------
-        xtw: MatMulXTW
-            Instance of matrix multiplication class that should be converted to jigsaw distributed layer.
-        process_mesh_dict: dict
-            Process mesh dict that comtains row, column, and model process groups
-        device: torch.device
-            Device upon which computation happens.
-        row_kw: str
-            Key for accessing row process groups
-        col_kw: str
-            Key for accessing col process groups
-        model_kw: str
-            Key for accessing model process groups.
-            Model process group should contain the Union of the row and column groups.
-        kwargs: Any
-            Additional inputs.
-
-        Returns
-        -------
-        model: jigsaw.linear.DistributedMatMulXW
-            Instance of jigsaw distributed linear layer.
-            Jigsaw layer contains weights and biases given from torch.nn.Linear layer.
-        """
-        instance = cls(
-            local_rank=process_mesh_dict["model"].rank(),
-            device=device,
-            parallelism=process_mesh_dict["model"].size(),
-            model_group=process_mesh_dict["model"],
-        )
-        return instance
-
-
-class MatMulXWT(torch.nn.Module):
-    """Batched matrix-matrix (XWT) multiplication distributed across two processes."""
-
-    def __init__(
-        self,
-    ) -> None:
-        """Initialize the distributed XW module."""
-        super().__init__()
-
-    def get_parameter_count(self) -> int:
-        """Return parameter count for matrix multiplication."""
-        return 0
+class MatMulXWT(_MatMul):
+    """Batched matmul ``x @ w.mT``."""
 
     def forward(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of linear layer (XWT) distributed across two processes.
-
-        Parameters
-        ----------
-        x: torch.Tensor
-            Local input tensor of shape (B, x_in, in_dim).
-        w: torch.Tensor
-            Local weight tensor of shape (local_in_dim, local_out_dim)
-
-        Returns
-        -------
-        Cij: torch.Tensor
-            Local output tensor of shape (B, out_dim, in_dim).
-        """
-        cij = x @ w.mT
-
-        return cij
+        """Return ``x @ w.mT``."""
+        return x @ w.mT
 
 
-class MatMulXW(torch.nn.Module):
-    """Batched matrix-matrix (XW) multiplication distributed across two processes."""
-
-    def __init__(
-        self,
-    ) -> None:
-        """Initialize the distributed XW module."""
-        super().__init__()
-
-    def get_parameter_count(self) -> int:
-        """Return parameter count for matrix multiplication."""
-        return 0
+class MatMulXW(_MatMul):
+    """Batched matmul ``x @ w``."""
 
     def forward(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of linear layer (XW) distributed across two processes.
-
-        Parameters
-        ----------
-        x: torch.Tensor
-            Local input tensor of shape (B, x_in, in_dim).
-        w: torch.Tensor
-            Local weight tensor of shape (local_in_dim, local_out_dim)
-
-        Returns
-        -------
-        Cij: torch.Tensor
-            Local output tensor of shape (B, out_dim, in_dim).
-        """
-        cij = x @ w
-
-        return cij
+        """Return ``x @ w``."""
+        return x @ w
 
 
-class MatMulXTW(torch.nn.Module):
-    """Batched matrix-matrix (XW) multiplication distributed across two processes."""
-
-    def __init__(
-        self,
-    ) -> None:
-        """Initialize the distributed XW module."""
-        super().__init__()
-
-    def get_parameter_count(self) -> int:
-        """Return parameter count for matrix multiplication."""
-        return 0
+class MatMulXTW(_MatMul):
+    """Batched matmul ``x.mT @ w``."""
 
     def forward(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of linear layer (XTW) distributed across two processes.
-
-        Parameters
-        ----------
-        x: torch.Tensor
-            Local input tensor of shape (B, x_in, in_dim).
-        w: torch.Tensor
-            Local weight tensor of shape (local_in_dim, local_out_dim)
-
-        Returns
-        -------
-        Cij: torch.Tensor
-            Local output tensor of shape (B, out_dim, in_dim).
-        """
-        cij = x.mT @ w
-
-        return cij
+        """Return ``x.mT @ w``."""
+        return x.mT @ w
