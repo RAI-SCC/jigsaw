@@ -553,14 +553,25 @@ class _DistributedConvTransposeNd(torch.nn.Module):
                 "_forward_local reached with a halo-needing spatial split; "
                 "forward() should have routed this through _conv_apply."
             )
-        conv_transpose = self.config.conv_transpose_fn
+        # The vmapped primitive expects a leading sample axis on the input and
+        # the weight. Inside the VI sample vmap that axis is already stripped
+        # (the weight is per-sample, dim n_spatial + 2), so vmapping again maps
+        # the wrong axis. Use the native primitive then; the outer vmap batches it.
+        # The ConvNd batching rule passes the sample axis through, so it still
+        # gets the vmapped primitive.
+        sampled = self.weight.dim() > self._n_spatial + 2
+        conv_transpose = (
+            self.config.conv_transpose_fn
+            if sampled
+            else self.config.native_conv_transpose_fn
+        )
         if self.bias is not None:
             y = conv_transpose(
                 x,
                 self.weight,
                 self.bias,
                 stride=self.stride,
-                padding=self.padding,
+                padding=cast(tuple[int, ...], self.padding),
                 dilation=self.dilation,
                 groups=self._groups_local,
             )
@@ -569,7 +580,7 @@ class _DistributedConvTransposeNd(torch.nn.Module):
                 x,
                 self.weight,
                 stride=self.stride,
-                padding=self.padding,
+                padding=cast(tuple[int, ...], self.padding),
                 dilation=self.dilation,
                 groups=self._groups_local,
             )
