@@ -19,9 +19,10 @@ extra). What direct kernel calls buy there is the explicit
 
 Also the only TE path that can ever carry FP8 (not yet implemented here).
 
-Scope: non-FP8, no bias, no mask, no GQA. ``layout`` is the caller's tensor
-convention -- ``"bhsd"`` (ring) or ``"bshd"`` (non-ring, cuDNN's native
-layout, no transposes); LSE is ``(b, h, s)`` either way.
+Scope: non-FP8, no bias, no key-padding mask, no GQA (``causal`` is
+supported). ``layout`` is the caller's tensor convention -- ``"bhsd"`` (ring)
+or ``"bshd"`` (non-ring, cuDNN's native layout, no transposes); LSE is
+``(b, h, s)`` either way.
 
 Dropout replay mirrors :mod:`..sdpa`: cuDNN generates its own opaque RNG
 state (``aux_ctx_tensors[1]``) rather than taking a caller seed, so it's
@@ -195,11 +196,13 @@ def _fused_attn_backend(
     seqlen_kv: int,
     head_dim: int,
     dropout_p: float,
+    mask_type: str = "no_mask",
 ) -> "tex.NVTE_Fused_Attn_Backend":
     """Ask cuDNN which fused-attention sub-backend serves this problem shape.
 
     Cached on its arguments: the ring calls it once per chunk per ring step, and
-    the answer only depends on the (shape, dtype, dropout) problem description.
+    the answer only depends on the (shape, dtype, dropout, mask) problem
+    description.
     """
     backend = tex.get_fused_attn_backend(
         is_training,
@@ -207,7 +210,7 @@ def _fused_attn_backend(
         TE_DType[dtype],
         QKVLayout[_LAYOUT],
         AttnBiasType["no_bias"],
-        AttnMaskType["no_mask"],
+        AttnMaskType[mask_type],
         SoftmaxType["vanilla"],
         dropout_p,
         n_heads,
@@ -237,6 +240,8 @@ def forward(
     v: torch.Tensor,
     scale: float,
     dropout_p: float,
+    causal: bool = False,
+    key_mask: Optional[torch.Tensor] = None,
     seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
     *,
     layout: Layout = "bhsd",
@@ -250,10 +255,27 @@ def forward(
     ``rng_state`` is cuDNN's own opaque dropout RNG state (``None`` when
     ``dropout_p == 0``), threaded back for :func:`backward` to replay (see
     module docstring).
+
+    ``causal`` is only ever set for the ring's diagonal block (q/k chunks
+    starting at the same global offset, so ``s_q == s_kv``), where TE's
+    top-left-aligned ``"causal"`` mask is the correct causal boundary; every
+    other block is either fully visible (``causal=False``) or skipped entirely
+    by the caller.
+
+    ``key_mask`` (key-padding masking) is not supported by this core and is
+    rejected by the caller (``DistributedAttention._ring_attn_core``) before
+    this is ever reached with a non-``None`` value.
     """
+    if key_mask is not None:
+        raise NotImplementedError(
+            "key-padding masks are not supported by the TE cuDNN core."
+        )
+    mask_type = "causal" if causal else "no_mask"
     b, h, s_q, s_kv, d = _shape(q, k, layout)
     q_b, k_b, v_b = (_to_bshd(t, layout) for t in (q, k, v))
-    backend = _fused_attn_backend(True, q_b.dtype, h, s_q, s_kv, d, dropout_p)
+    backend = _fused_attn_backend(
+        True, q_b.dtype, h, s_q, s_kv, d, dropout_p, mask_type
+    )
     cu_q = _full_cu_seqlens(b, s_q, q.device)
     cu_kv = _full_cu_seqlens(b, s_kv, q.device)
 
@@ -274,7 +296,7 @@ def forward(
             "dropout": dropout_p,
             "qkv_layout": _LAYOUT,
             "attn_bias_type": "no_bias",
-            "attn_mask_type": "no_mask",
+            "attn_mask_type": mask_type,
             "window_size": (-1, -1),
         },
         optional={
@@ -317,6 +339,7 @@ def backward(
     logsumexp: torch.Tensor,
     scale: float,
     *_: object,
+    causal: bool = False,
     dropout_p: float = 0.0,
     seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
     rng_state: Optional[torch.Tensor] = None,
@@ -332,14 +355,18 @@ def backward(
     threaded back from this same chunk's :func:`forward` call -- reproduces the
     identical dropout mask; ``None`` (the ``dropout_p == 0`` case) falls back
     to a placeholder, matching cuDNN's own "unused" convention for no-dropout.
+    See :func:`forward` for ``causal``.
 
     ``layout`` describes ``q``/``k``/``v``/``out``/``grad_out`` and the returned
     gradients, exactly as in :func:`forward`; ``logsumexp`` is ``(b,h,s)``
     regardless.
     """
+    mask_type = "causal" if causal else "no_mask"
     b, h, s_q, s_kv, d = _shape(q, k, layout)
     q_b, k_b, v_b, o_b, do_b = (_to_bshd(t, layout) for t in (q, k, v, out, grad_out))
-    backend = _fused_attn_backend(True, q_b.dtype, h, s_q, s_kv, d, dropout_p)
+    backend = _fused_attn_backend(
+        True, q_b.dtype, h, s_q, s_kv, d, dropout_p, mask_type
+    )
     cu_q = _full_cu_seqlens(b, s_q, q.device)
     cu_kv = _full_cu_seqlens(b, s_kv, q.device)
     # cuDNN's bwd wants the LSE shaped as its fwd emitted it, (b, h, s_q, 1),
@@ -374,7 +401,7 @@ def backward(
             "dropout": dropout_p,
             "qkv_layout": _LAYOUT,
             "attn_bias_type": "no_bias",
-            "attn_mask_type": "no_mask",
+            "attn_mask_type": mask_type,
             "window_size": (-1, -1),
         },
         optional={

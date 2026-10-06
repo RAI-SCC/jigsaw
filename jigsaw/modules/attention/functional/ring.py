@@ -258,6 +258,7 @@ class RingCtx(Protocol):
     group: dist.ProcessGroup
     ring_group_size: int
     config: RingAttentionConfig
+    key_padding_mask: Optional[torch.Tensor]
     dropout_p: float
     base_seed: Optional[int]
     n_chunks: int
@@ -284,6 +285,7 @@ class RingAttentionFunction(torch.autograd.Function):
         group: dist.ProcessGroup,
         local_rank: int,
         config: RingAttentionConfig,
+        key_padding_mask: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, tuple, Optional[int], tuple]:
         """Run the ring-attention forward pass.
 
@@ -305,6 +307,9 @@ class RingAttentionFunction(torch.autograd.Function):
             Rank within the process group.
         config : RingAttentionConfig
             Ring-attention configuration.
+        key_padding_mask : Optional[torch.Tensor]
+            This rank's local shard (``[B, S_local]``, bool, ``True`` = attend)
+            of a global key-padding mask.
 
         Returns
         -------
@@ -327,6 +332,7 @@ class RingAttentionFunction(torch.autograd.Function):
             local_rank,
             ring_group_size,
             config,
+            key_padding_mask,
         )
         return out, lse, chunks_to_save, base_seed, rng_states
 
@@ -347,7 +353,19 @@ class RingAttentionFunction(torch.autograd.Function):
         output : Any
             Values returned by :meth:`forward`.
         """
-        q, k, v, x, w_qkv, scale, dropout_p, group, local_rank, config = inputs
+        (
+            q,
+            k,
+            v,
+            x,
+            w_qkv,
+            scale,
+            dropout_p,
+            group,
+            local_rank,
+            config,
+            key_padding_mask,
+        ) = inputs
         out, lse, chunks_to_save, base_seed, rng_states = output
         ctx.mark_non_differentiable(lse)
         ctx.mark_non_differentiable(*chunks_to_save)
@@ -377,6 +395,11 @@ class RingAttentionFunction(torch.autograd.Function):
             group
         )  # This is recomputed in forward and in setup context
         c.config = config
+        # A plain (always non-differentiable: bool tensors can't require grad)
+        # ctx attribute rather than `save_for_backward`, matching `group` /
+        # `local_rank` / `config` above -- no `None`-handling needed for the
+        # common no-mask case.
+        c.key_padding_mask = key_padding_mask
         c.dropout_p = dropout_p
         c.base_seed = base_seed
 
@@ -392,6 +415,7 @@ class RingAttentionFunction(torch.autograd.Function):
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        None,
         None,
         None,
         None,
@@ -443,9 +467,10 @@ class RingAttentionFunction(torch.autograd.Function):
             ctx.ring_group_size,
             cast(tuple[torch.Tensor, ...], chunks_to_save),
             ring_config=ctx.config,
+            key_padding_mask=ctx.key_padding_mask,
             dropout_p=ctx.dropout_p,
             base_seed=ctx.base_seed,
             rng_states=cast(tuple[Optional[torch.Tensor], ...], rng_states),
         )
 
-        return dq, dk, dv, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None

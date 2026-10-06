@@ -147,7 +147,12 @@ def fused_online_softmax_merge_(
     block_m = max(1, 2048 // block_d)  # ~2K elements/program
     grid = (triton.cdiv(n_rows, block_m),)
     try:
-        _merge_kernel[grid](
+        # Two unavoidable mypy waivers on this launch: ``num_warps`` is a
+        # triton *launcher* meta-parameter rather than one of the kernel's own
+        # arguments, and ``tl.constexpr`` parameters are declared as that type
+        # but handed plain Python values, which triton specializes on at
+        # compile time. Both are how every triton kernel is called.
+        _merge_kernel[grid](  # type: ignore[call-arg]
             o1f,
             o2f,
             l1,
@@ -157,7 +162,7 @@ def fused_online_softmax_merge_(
             n,
             h,
             d,
-            IS_BSHD=is_bshd,
+            IS_BSHD=is_bshd,  # type: ignore[arg-type]
             BLOCK_M=block_m,
             BLOCK_D=block_d,
             num_warps=4,

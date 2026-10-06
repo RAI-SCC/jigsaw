@@ -131,12 +131,22 @@ class TestOffloaderSelection:
     def test_disabled_has_no_offloader(self):
         assert cfg._select_offloader(Offload.DISABLED, CPU) is None
 
-    def test_cpu_offload_builds_an_offloader(self, monkeypatch):
+    def test_cpu_offload_builds_an_offloader_on_cuda(self, monkeypatch):
+        cuda = torch.device("cuda")
         built = []
         monkeypatch.setattr(
             cfg, "NVLinkActivationOffloader", lambda dev: built.append(dev) or "off"
         )
-        assert cfg._select_offloader(Offload.CPU, CPU) == "off" and built == [CPU]
+        assert cfg._select_offloader(Offload.CPU, cuda) == "off" and built == [cuda]
+
+    def test_cpu_offload_is_a_noop_without_cuda(self, monkeypatch):
+        built = []
+        monkeypatch.setattr(
+            cfg, "NVLinkActivationOffloader", lambda dev: built.append(dev) or "off"
+        )
+        with pytest.warns(UserWarning, match="Offload.CPU has no effect"):
+            assert cfg._select_offloader(Offload.CPU, CPU) is None
+        assert built == []
 
     def test_unknown_policy_is_rejected(self):
         with pytest.raises(ValueError, match="unhandled offload option"):

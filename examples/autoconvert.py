@@ -230,12 +230,22 @@ def main() -> None:
         out2 = gather_1d_results(out2, mesh, dim=-1, pm_key="row")  # width
     err = (out2 - expected2).abs().max()
     log.info("forward   max |converted - original| = %.2e", err)
-    torch.testing.assert_close(out2, expected2, atol=1e-5, rtol=1e-4)
+    # Unlike PatchMLP above, this model has an attention layer: its core always runs in
+    # at least bf16 on CUDA (see attn_core_dtype in jigsaw.modules.attention.attention),
+    # regardless of the fp32 parameters checked everywhere else in this file -- so the
+    # comparison here needs bf16-sized slack on GPU even with tf32 disabled; CPU attention
+    # stays true fp32 and keeps the tight tolerance.
+    atol = 1e-3 if device.type == "cuda" else 1e-5
+    torch.testing.assert_close(out2, expected2, atol=atol, rtol=1e-4)
 
     # --- backward: a layer-norm and an attention weight shard against the original ---
     reference2(x2).square().mean().backward()
     loss2 = jigsaw.loss.DistributedMSELoss(reduce_groups=(row, col))
     loss2(model2(x2_local), torch.zeros_like(x2_local)).backward()
+
+    # Both gradient checks below flow back through the same bf16-on-CUDA attention
+    # core as the forward check above, so they need the same GPU-only slack.
+    grad_tol = 5e-3 if device.type == "cuda" else 1e-4
 
     # `norm1.weight` is (E,), split over "col"; replicated (not split) over "row".
     local_dim = dim // col.size()
@@ -247,7 +257,7 @@ def main() -> None:
         model2.blocks[0].norm1.weight.grad - ref_norm_shard
     ).abs().max() / ref_norm_shard.abs().max()
     log.info("backward  max relative error of the norm1.weight.grad shard = %.2e", err)
-    assert err < 1e-4, err
+    assert err < grad_tol, err
 
     # `attn.head_concat.weight` is (E, E): columns (the heads) split over "col".
     ref_hc_grad = reference2.blocks[0].attn.head_concat.weight.grad
@@ -258,7 +268,7 @@ def main() -> None:
         "backward  max relative error of the attn.head_concat.weight.grad shard = %.2e",
         err,
     )
-    assert err < 1e-4, err
+    assert err < grad_tol, err
 
 
 if __name__ == "__main__":

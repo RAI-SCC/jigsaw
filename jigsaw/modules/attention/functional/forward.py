@@ -101,13 +101,23 @@ def _attend_step(
     out: torch.Tensor,
     lse: torch.Tensor,
     seed: Optional[int],
+    causal: bool = False,
+    key_mask: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Attend to one chunk and merge it into the running output.
+
+    kj/vj may be views into a KV buffer; flash attention requires contiguous
+    inputs, so they're materialized here. ``causal`` masks the diagonal block
+    (see :func:`_causal_step_kind`); it is never set together with a skip.
+    ``key_mask`` is this step's ``[B, n_local]`` slice of the global
+    key-padding mask (see :func:`ring_forward`).
 
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
-        Merged output and log-sum-exp, and the ``rng_state`` of the core.
+        Merged output and log-sum-exp, and the ``rng_state`` of the core
+        (``None`` unless the core is one that threads back opaque kernel RNG
+        state instead of using ``seed`` -- see :mod:`.cores`).
     """
     kjc, vjc = kj.contiguous(), vj.contiguous()
     out_j, l_j, rng_state_j = ring_config.attn_core_forward_fn(
@@ -116,6 +126,8 @@ def _attend_step(
         vjc,
         scale,
         dropout_p,
+        causal=causal,
+        key_mask=key_mask,
         seed=seed,
         layout=ring_config.core_layout,
     )
@@ -126,9 +138,47 @@ def _attend_step(
     return out, lse, rng_state_j
 
 
+def _causal_step_kind(kv_global_idx: int, q_global_idx: int) -> Optional[bool]:
+    """Classify a ring step's K/V chunk relative to this rank's own Q chunk.
+
+    Both chunks are ``n_local``-sized, contiguous, evenly-split shards of the
+    global sequence, so global chunk id alone (not position within the chunk)
+    decides visibility:
+
+    * ``kv_global_idx > q_global_idx``: every key is strictly in the future of
+      every query in this chunk -- fully masked, so the caller skips the step
+      entirely (returns ``None``).
+    * ``kv_global_idx == q_global_idx``: the "diagonal" block -- q and k start
+      at the same global offset, so the plain top-left triangular mask is the
+      causal boundary (returns ``True``).
+    * ``kv_global_idx < q_global_idx``: every key is at or before every query
+      in this chunk -- fully visible, no mask needed (returns ``False``).
+    """
+    if kv_global_idx > q_global_idx:
+        return None
+    return kv_global_idx == q_global_idx
+
+
 # --------------------------------------------------------------------------- #
 # forward driver
 # --------------------------------------------------------------------------- #
+def _gather_key_padding_mask(
+    key_padding_mask: torch.Tensor, group: dist.ProcessGroup, ring_group_size: int
+) -> torch.Tensor:
+    """All-gather local ``[B, n_local]`` key-padding shards into ``[B, S_global]``.
+
+    A one-time, small collective (bandwidth negligible next to the K/V ring
+    traffic) done once per forward call, so every rank can slice out the
+    ``[B, n_local]`` key-validity slab for whatever global chunk it currently
+    holds (via ``provider.global_chunk_idx(step)``) without threading a new
+    tensor through every :class:`~.forward_chunk_provider._ForwardChunkProvider`
+    subclass's communication path.
+    """
+    shards = [torch.empty_like(key_padding_mask) for _ in range(ring_group_size)]
+    dist.all_gather(shards, key_padding_mask.contiguous(), group=group)
+    return torch.cat(shards, dim=1)
+
+
 def ring_forward(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -141,6 +191,7 @@ def ring_forward(
     local_rank: int,
     ring_group_size: int,
     ring_config: RingAttentionConfig,
+    key_padding_mask: Optional[torch.Tensor] = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -170,6 +221,9 @@ def ring_forward(
         Number of ranks in ``group``.
     ring_config : RingAttentionConfig
         Ring-attention configuration.
+    key_padding_mask : Optional[torch.Tensor]
+        This rank's local shard (``[B, n_local]``, bool, ``True`` = attend) of
+        a global key-padding mask.
 
     Returns
     -------
@@ -206,15 +260,33 @@ def ring_forward(
         (b, heads, n_local), float("-inf"), device=q.device, dtype=acc_dtype
     )
 
+    global_key_mask = None
+    if key_padding_mask is not None:
+        global_key_mask = _gather_key_padding_mask(
+            key_padding_mask, group, ring_group_size
+        )
+
     base_seed = _draw_base_seed(q.device) if dropout_p > 0.0 else None
     rng_states: list[Optional[torch.Tensor]] = [None] * ring_group_size
 
     for step in range(ring_group_size):
         kj, vj = provider.get(step)
         provider.save_for_backward(step)
-        global_chunk_idx = provider.global_chunk_idx(step)
+        chunk_idx = provider.global_chunk_idx(step)
+        step_causal = False
+        if ring_config.causal:
+            kind = _causal_step_kind(chunk_idx, local_rank)
+            if kind is None:
+                provider.advance(step, ring_group_size)
+                continue
+            step_causal = kind
+        step_key_mask = (
+            global_key_mask[:, chunk_idx * n_local : (chunk_idx + 1) * n_local]
+            if global_key_mask is not None
+            else None
+        )
         seed = (
-            _combine_dropout_seed(base_seed, local_rank, global_chunk_idx)
+            _combine_dropout_seed(base_seed, local_rank, chunk_idx)
             if base_seed is not None
             else None
         )
@@ -233,8 +305,10 @@ def ring_forward(
             out,
             lse,
             seed,
+            causal=step_causal,
+            key_mask=step_key_mask,
         )
-        rng_states[global_chunk_idx] = rng_state_j
+        rng_states[chunk_idx] = rng_state_j
         provider.advance(step, ring_group_size)
 
     ring_config.wait_offloads()

@@ -17,9 +17,10 @@ calls the underlying ``_flash_attn_forward``/``_flash_attn_backward`` ops with
 dropout ``rng_state`` -- the same posture :mod:`..sdpa` takes with torch's
 equivalent undocumented ops.
 
-Scope: non-FP8, no bias, no mask, no GQA, fp16/bf16. ``layout`` is the caller's
-tensor convention -- ``"bhsd"`` (ring) or ``"bshd"`` (non-ring, FA2's native
-layout); LSE is ``(b, h, s)`` either way, FA2's native shape.
+Scope: non-FP8, no bias, no key-padding mask, no GQA, fp16/bf16 (``causal`` is
+supported natively). ``layout`` is the caller's tensor convention --
+``"bhsd"`` (ring) or ``"bshd"`` (non-ring, FA2's native layout); LSE is
+``(b, h, s)`` either way, FA2's native shape.
 
 Dropout replay follows :mod:`..sdpa`/:mod:`.cudnn`: the kernel draws its own
 mask from an internal philox state, threaded back verbatim as ``rng_state``
@@ -82,6 +83,8 @@ def forward(
     v: torch.Tensor,
     scale: float,
     dropout_p: float,
+    causal: bool = False,
+    key_mask: Optional[torch.Tensor] = None,
     seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see ..math)
     *,
     layout: Layout = "bhsd",
@@ -91,7 +94,17 @@ def forward(
     ``out`` comes back in the same ``layout`` ``q``/``k``/``v`` were given in.
     ``rng_state`` is the kernel's own opaque philox state (``None`` when
     ``dropout_p == 0``), threaded back for :func:`backward` to replay.
+
+    ``causal`` is only ever set for the ring's diagonal block (see
+    :func:`..cudnn.forward`); FA2 takes it natively. ``key_mask`` (key-padding
+    masking) is not supported by this core and is rejected by the caller
+    (``DistributedAttention._ring_attn_core``) before this is ever reached
+    with a non-``None`` value.
     """
+    if key_mask is not None:
+        raise NotImplementedError(
+            "key-padding masks are not supported by the TE flash core."
+        )
     head_dim = q.shape[-1]
     q_b, k_b, v_b = (_pad_head_dim(_to_bshd(t, layout), head_dim) for t in (q, k, v))
 
@@ -101,7 +114,7 @@ def forward(
         v_b,
         dropout_p,
         scale,
-        causal=False,
+        causal=causal,
         window_size_left=-1,
         window_size_right=-1,
         softcap=0.0,
@@ -125,6 +138,7 @@ def backward(
     logsumexp: torch.Tensor,
     scale: float,
     *_: object,
+    causal: bool = False,
     dropout_p: float = 0.0,
     seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see ..math)
     rng_state: Optional[torch.Tensor] = None,
@@ -168,7 +182,7 @@ def backward(
         dv,
         dropout_p,
         scale,
-        False,  # causal
+        causal,
         -1,  # window_size_left
         -1,  # window_size_right
         0.0,  # softcap

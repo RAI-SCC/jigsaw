@@ -109,7 +109,13 @@ class _ForwardChunkProvider(ABC):
         """Return the key and value of chunk ``step``."""
 
     def global_chunk_idx(self, step: int) -> int:
-        """Return the global index of the chunk held at ``step``."""
+        """Global chunk id of the ``(kj, vj)`` chunk held at ring ``step``.
+
+        Used both by :meth:`save_for_backward` (GLOBAL scope) and by the
+        causal ring loop (:func:`..forward.ring_forward`) to decide whether
+        that chunk is fully in the past, fully in the future, or the diagonal
+        block relative to this rank's own (``local_rank``-th) query chunk.
+        """
         raise NotImplementedError
 
     def save_for_backward(self, step: int) -> None:

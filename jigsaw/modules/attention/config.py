@@ -1,5 +1,6 @@
 """Configuration of ring attention."""
 
+import warnings
 from enum import Enum
 from typing import Any, Callable, Optional, cast
 
@@ -102,11 +103,24 @@ SaveForBackwardFn = Callable[[torch.Tensor, torch.Tensor], Optional[torch.Tensor
 def _select_offloader(
     offload: Offload, device: torch.device
 ) -> Optional[NVLinkActivationOffloader]:
-    """Return the activation offloader for a policy, or ``None``."""
+    """Build the activation offloader for the configured policy.
+
+    ``Offload.CPU`` stages GPU activations to pinned host memory over CUDA side
+    streams; with no CUDA device there is nothing to stage and no stream to
+    build, so it degrades to a no-op (``None``) with a warning rather than
+    failing in :class:`~jigsaw.offload.NVLinkActivationOffloader`'s constructor.
+    """
     match offload:
         case Offload.DISABLED:
             return None
         case Offload.CPU:
+            if device.type != "cuda":
+                warnings.warn(
+                    "Offload.CPU has no effect without a CUDA device; "
+                    "activation offloading disabled.",
+                    stacklevel=2,
+                )
+                return None
             return NVLinkActivationOffloader(device)
         case other:
             raise ValueError(f"unhandled offload option {other}")
@@ -316,6 +330,7 @@ class RingAttentionConfig:
         offload: Offload = Offload.DISABLED,
         gpus_per_node: int = 4,
         attn_backend: AttnBackend = AttnBackend.SDPA,
+        causal: bool = False,
         overlap_comm: bool = False,
     ):
         """Initialize the configuration.
@@ -342,6 +357,14 @@ class RingAttentionConfig:
             Inner per-chunk attention core. ``SDPA`` (default) keeps the
             device-based pick (flash on CUDA, math on CPU); ``TE`` uses the
             TransformerEngine fused core; ``MATH`` the unfused reference.
+        causal : bool
+            Whether the ring performs causal (autoregressive) attention. Each
+            rank's query chunk then only attends to K/V chunks at or before
+            its own global position: chunks strictly in the future are
+            skipped outright, the one chunk at the same global position (the
+            "diagonal" block) is masked causally, and every chunk strictly in
+            the past is attended in full -- see :func:`.forward.ring_forward`
+            and :func:`.backward.ring_backward`.
         overlap_comm : bool
             Put the ring's K/V circulation -- and the backward dK/dV relay,
             where the accumulation shape allows it -- on a dedicated CUDA
@@ -366,6 +389,7 @@ class RingAttentionConfig:
         self.gpus_per_node = gpus_per_node
         self.device = device
         self.attn_backend = AttnBackend(attn_backend)
+        self.causal = causal
 
         # Dedicated CUDA stream for the ring's K/V circulation and backward dK/dV
         # relay. Created once here (the config outlives a single forward/backward)
@@ -433,5 +457,6 @@ class RingAttentionConfig:
             f"send_backward={self.send_backward.name}, "
             f"offload={self.offload.name}, "
             f"attn_backend={self.attn_backend.name}, "
+            f"causal={self.causal}, "
             f"overlap_comm={self.overlap_comm})"
         )
