@@ -151,8 +151,8 @@ descend into automatically, so each opts in by hand. Behaviour:
   `DistributedConv*Transpose`: the forward runs in the autocast dtype and the output carries
   it (bias included); gradients are reconciled to the **fp32 (parameter) dtype** in backward,
   i.e. you keep fp32 master gradients for free.
-- **`DistributedLayerNorm` / `DistributedNoParamLayerNorm` / `DistributedSoftMax`** follow
-  stock-AMP "fp32 list" semantics: computed and emitted in fp32 even when fed bf16/fp16.
+- **`DistributedLayerNorm` (with or without `elementwise_affine`) / `DistributedSoftMax`**
+  follow stock-AMP "fp32 list" semantics: computed and emitted in fp32 even when fed bf16/fp16.
 - **Attention core (SDPA / TransformerEngine)**: under autocast it uses the autocast dtype
   (so `autocast(float16)` stays fp16); with no autocast it uses bf16 on CUDA — keeping the
   flash kernel eligible, which rejects fp32 — and the input dtype on CPU (SDPA math backend).

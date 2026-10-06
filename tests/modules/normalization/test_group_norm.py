@@ -9,7 +9,7 @@ only checks the reshard assertions, so the forward pass and the ``affine=False``
 import pytest
 import torch
 
-from jigsaw.modules.normalization import normalization as norm
+from jigsaw.modules import normalization as norm
 from tests.parity import all_ranks_ok, assert_close
 
 GROUPS, CHANNELS = 4, 8
