@@ -2,11 +2,11 @@
 
 Small, runnable scripts that each show one way of using _jigsaw_. Every script is a
 few dozen lines of code with the explanation in its docstring, and every one needs
-exactly **4 ranks**.
+exactly **4 ranks** (`domain_parallel.py --ddp`: a multiple of 4).
 
 | Script | Shows |
 |---|---|
-| [`domain_parallel.py`](domain_parallel.py) | Domain parallelism only: a CNN on an image split over a 2x2 grid, weights replicated. |
+| [`domain_parallel.py`](domain_parallel.py) | Domain parallelism only: a CNN on an image split over a 2x2 grid, weights replicated. With `--ddp` (8 ranks), data parallelism on top via `DistributedDataParallel`. |
 | [`vit.py`](vit.py) | A Vision Transformer with domain *and* tensor parallelism: ring attention, distributed MLP, layer norm and patch embedding. |
 | [`swin.py`](swin.py) | A Swin Transformer with domain parallelism: local window attention, shifted windows via `DistributedRoll`, patch merging without communication. |
 | [`dataloader.py`](dataloader.py) | A dataloader for a domain-parallel model: each rank reads only its tile, and the sampler is keyed by the data-parallel index. |

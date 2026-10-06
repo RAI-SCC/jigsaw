@@ -25,7 +25,9 @@ Two details that are easy to get wrong with a split image:
     each rank builds it from the position of its tile.
   * The weights are replicated, and ``jigsaw`` only synchronises the ones inside its own
     layers. ``replicate`` below does the same for the plain PyTorch layers: broadcast
-    the weights from rank 0 and all-reduce their gradients over the tiles.
+    the weights from rank 0 and mark them replicated over the tiles; ``Swin.forward``
+    then routes them through ``jigsaw.parallel.synced_parameters``, which sums their
+    gradients over the tiles inside the backward pass.
 
 Tokens are channels-last, ``(B, H / sh, W / sw, C)``; the convolutions that embed and
 recover the patches are channels-first, as in PyTorch. This is a denoiser, so it ends
@@ -43,7 +45,7 @@ import torch.nn.functional as F
 from _common import setup, shard
 
 import jigsaw
-from jigsaw import hooks, log
+from jigsaw import log, parallel
 
 IN_CHANNELS, PATCH, WINDOW = 1, 2, 4
 DIMS, HEADS, DEPTHS = (32, 64), (2, 4), (2, 2)  # per stage
@@ -56,12 +58,13 @@ def replicate(module: nn.Module, mesh: Mesh, device: torch.device) -> nn.Module:
     """Give every rank the same copy of ``module`` on ``device``, and keep them identical.
 
     Every rank sees only its tile, so its gradient is only a part of the total. Summing
-    the parts over the tiles gives every rank the gradient of the whole image.
+    the parts over the tiles gives every rank the gradient of the whole image; the
+    mark tells ``jigsaw.parallel`` to do that sum (see ``Swin.forward``).
     """
     module.to(device)  # NCCL only broadcasts GPU tensors
     for p in module.parameters():
         dist.broadcast(p.data, group_src=0, group=mesh["model"])
-        p.register_post_accumulate_grad_hook(hooks.make_grad_sync_hook(mesh["model"]))
+        parallel.mark_replicated(p, mesh["model"])
     return module
 
 
@@ -254,6 +257,12 @@ class Swin(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Run the model with the replicated weights swapped for copies whose gradient
+        # is summed over the tiles in the backward pass. The copies carry no mark, so
+        # the re-entered forward finds nothing left to sync and runs the layers.
+        synced = parallel.synced_parameters(self)
+        if synced:
+            return torch.func.functional_call(self, synced, (x,))
         z = self.embed(x).permute(0, 2, 3, 1)  # channels-last: (B, H', W', C)
         z = self.norm(self.stages(z))
         z = z.permute(0, 3, 1, 2).contiguous()  # back to channels-first

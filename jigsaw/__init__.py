@@ -1,5 +1,6 @@
 """Distributed model-parallel training modules."""
 
+from . import debug as debug
 from . import init as init
 from . import log as log
 from . import parallel as parallel

@@ -9,7 +9,7 @@ What jigsaw does for you:
   * ``DistributedConv2D`` swaps a halo with its neighbours, so a 3x3 convolution
     gives the same result on a tile border as on the undivided image.
   * The weights are broadcast from rank 0 at construction and their gradients are
-    all-reduced over the spatial groups in a backward hook, so a plain
+    summed over the spatial groups inside the backward pass, so a plain
     ``torch.optim`` optimizer keeps the replicas identical.
   * ``DistributedMSELoss`` reduces over the tiles: every rank sees the loss of the
     whole image.
@@ -17,7 +17,15 @@ What jigsaw does for you:
 Run with one process per GPU (or 4 CPU processes):
 
     torchrun --nproc-per-node 4 examples/domain_parallel.py
+
+Add data parallelism on top with ``--ddp``: every group of 4 ranks then holds one
+copy of the model and trains on its own images, and ``DistributedDataParallel``
+averages the gradients over the copies:
+
+    torchrun --nproc-per-node 8 examples/domain_parallel.py --ddp
 """
+
+import sys
 
 import torch
 import torch.distributed as dist
@@ -74,10 +82,12 @@ def make_batch(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return this rank's tile of a noisy input and its clean target.
 
-    Every rank draws the *same* global batch (same seed) and keeps only its tile.
-    In a real pipeline the Dataset reads just that tile from disk instead.
+    Every rank of a model copy draws the *same* batch (same seed) and keeps only its
+    tile; with data parallelism every copy draws a different one. In a real pipeline
+    the Dataset reads just that tile from disk instead.
     """
-    g = torch.Generator().manual_seed(step)
+    dp = mesh.get("dp")
+    g = torch.Generator().manual_seed(step * dp.size() + dp.rank() if dp else step)
     clean = torch.nn.functional.avg_pool2d(  # smooth random fields
         torch.randn(4, 1, 64, 64, generator=g), kernel_size=5, stride=1, padding=2
     )
@@ -89,16 +99,28 @@ def make_batch(
     return tile(noisy), tile(clean)
 
 
-def main(steps: int = 100) -> list[float]:
+def main(steps: int = 100, data_parallel: bool = False) -> list[float]:
     """Train the denoiser for ``steps`` steps and return the loss of every step."""
     device, rank, world_size = setup()
 
     # One axis per split dimension: "sh" splits the height, "sw" the width. The channel
     # axis "col" has size 1, i.e. no tensor parallelism. The mesh also gets a "model"
-    # group spanning all four ranks.
-    mesh = jigsaw.make_process_mesh({"sh": 2, "sw": 2, "col": 1})
+    # group spanning the four ranks of one model copy.
+    if data_parallel:
+        # A leading "dp" axis holds the copies: world size / 4 of them.
+        mesh = jigsaw.make_process_mesh(
+            {"dp": -1, "sh": 2, "sw": 2, "col": 1},
+            model_parallel_axes=("sh", "sw", "col"),
+        )
+    else:
+        mesh = jigsaw.make_process_mesh({"sh": 2, "sw": 2, "col": 1})
 
     model = build_model(mesh, device)
+    if data_parallel:
+        # DistributedDataParallel over "dp" only. The default group would also span
+        # the tiles of a copy, which jigsaw rejects: with sharded weights it would
+        # average different shards together.
+        model = jigsaw.parallel.wrap_ddp(model, mesh)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     # Every rank averages over the *global* image, so all ranks log the same number.
@@ -124,4 +146,4 @@ def main(steps: int = 100) -> list[float]:
 
 
 if __name__ == "__main__":
-    main()
+    main(data_parallel="--ddp" in sys.argv)

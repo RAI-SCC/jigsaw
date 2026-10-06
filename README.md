@@ -188,6 +188,40 @@ There are two options
 1) Training the model in a fully domain--tensor parallel manner. This means that a process mesh of size (4, 2) will have the parameters sharded across 8 processes.
 2) Training the model with domain-parallelism across the ``rows`` axis, and with domain--tensor parallelism across the ``col`` axis. See the individual modules for detailed usage.
 
+### Data parallelism (DDP)
+
+Wrap the model in `DistributedDataParallel` over the `dp` axis only, with `jigsaw.parallel.wrap_ddp`:
+
+```python
+mesh = jigsaw.make_process_mesh(
+    {"dp": -1, "row": 2, "col": 2}, model_parallel_axes=("row", "col")
+)
+model = build_model(mesh)  # jigsaw layers on mesh["row"] / mesh["col"]
+model = jigsaw.parallel.wrap_ddp(model, mesh)  # DDP(model, process_group=mesh["dp"])
+```
+
+`wrap_ddp` first makes the replicated parameters identical inside each model copy, then
+lets DDP broadcast over `dp`. Two mistakes would otherwise train without an error and give
+a wrong model, so jigsaw raises on them, on every rank, in `wrap_ddp` or in the first
+forward pass of a `DistributedDataParallel` you build yourself:
+
+- **DDP over the default group** (`DistributedDataParallel(model)`): on a model-parallel
+  mesh it averages sharded parameters with other shards.
+- **Replicas that differ** before wrapping: DDP only broadcasts over its own group.
+
+Parameters that are replicated over model-parallel ranks (biases over `row`, convolution
+weights over the spatial axes, ...) have their gradients summed over those ranks inside the
+backward pass (`jigsaw.parallel`). That sum is done before DDP's reducer reads the gradient,
+so it composes with DDP, `no_sync()` and gradient accumulation. To replicate the parameters of
+your own plain PyTorch layers, mark them with `jigsaw.parallel.mark_replicated(p, group)` and
+run them through `jigsaw.parallel.synced_parameters` (see `examples/swin.py`). Don't register
+`jigsaw.hooks.make_grad_sync_hook` on them for this: it races DDP and breaks gradient
+accumulation.
+
+To find the step at which replicas drift apart, call
+`jigsaw.debug.assert_replica_consistency(model, mesh)` after `optimizer.step()`. It is a
+collective and raises on every rank, naming the parameters that differ.
+
 ### Distributed logging
 
 `jigsaw.log` is a rank-aware wrapper over the stdlib `logging` module. `init_cuda()`
