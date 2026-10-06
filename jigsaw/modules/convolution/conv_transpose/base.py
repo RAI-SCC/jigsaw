@@ -561,7 +561,9 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         # gets the vmapped primitive.
         sampled = self.weight.dim() > self._n_spatial + 2
         conv_transpose = (
-            self.config.conv_transpose_fn if sampled else self.config.native_conv_transpose_fn
+            self.config.conv_transpose_fn
+            if sampled
+            else self.config.native_conv_transpose_fn
         )
         if self.bias is not None:
             y = conv_transpose(
@@ -569,7 +571,7 @@ class _DistributedConvTransposeNd(torch.nn.Module):
                 self.weight,
                 self.bias,
                 stride=self.stride,
-                padding=self.padding,
+                padding=cast(tuple[int, ...], self.padding),
                 dilation=self.dilation,
                 groups=self._groups_local,
             )
@@ -578,7 +580,7 @@ class _DistributedConvTransposeNd(torch.nn.Module):
                 x,
                 self.weight,
                 stride=self.stride,
-                padding=self.padding,
+                padding=cast(tuple[int, ...], self.padding),
                 dilation=self.dilation,
                 groups=self._groups_local,
             )
