@@ -712,18 +712,17 @@ class DistributedAttention(torch.nn.Module):
 
         Parameters
         ----------
-        q: torch.Tensor
-            Query tensor.
-        k: torch.Tensor
-            Keys tensor.
-        v: torch.Tensor
-            Values tensor.
-        attn_mask: Optional[torch.Tensor]
-            Optional attention mask (bool or additive float), forwarded to
-            ``scaled_dot_product_attention``. Composed with ``self.causal``
-            when both are given -- see :func:`_resolve_mask_and_causal`.
-        kwargs:
-            Additional optional parameters.
+        q, k, v : torch.Tensor
+            Query, key and value.
+        attn_mask : torch.Tensor, optional
+            Additive (float) or keep-true (bool) mask broadcastable to
+            ``(..., heads, seq_q, seq_kv)``, e.g. a per-window Swin shift
+            mask. Composed with ``self.causal`` when both are given -- see
+            :func:`_resolve_mask_and_causal`. Flash rejects a non-null mask,
+            so a masked call instead runs on the memory-efficient or cuDNN
+            ``sdpa`` backend, fused rather than falling back to unfused math.
+        **kwargs : Any
+            Unused.
 
         Returns
         -------
@@ -734,6 +733,8 @@ class DistributedAttention(torch.nn.Module):
         with torch.nn.attention.sdpa_kernel(
             [
                 torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+                torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
+                torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
                 torch.nn.attention.SDPBackend.MATH,
             ]
         ):
@@ -758,6 +759,16 @@ class DistributedAttention(torch.nn.Module):
         """Unfused ``softmax(QK^T)V`` reference core (``attn_backend='math'``).
 
         Forces the MATH SDPA backend, so it runs for any shape / dtype / device.
+
+        Parameters
+        ----------
+        q, k, v : torch.Tensor
+            Query, key and value.
+        attn_mask : torch.Tensor, optional
+            Same convention as :meth:`_attn_core`'s -- composed with
+            ``self.causal`` via :func:`_resolve_mask_and_causal`.
+        **kwargs : Any
+            Unused.
         """
         mask, is_causal = _resolve_mask_and_causal(attn_mask, self.causal)
         with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.MATH]):
@@ -794,10 +805,15 @@ class DistributedAttention(torch.nn.Module):
             Keys tensor, ``bshd``.
         v : torch.Tensor
             Values tensor, ``bshd``.
-        attn_mask : Optional[torch.Tensor]
-            Not supported -- the TE core's mask handling only covers
-            ``self.causal``, not an arbitrary per-call mask.
-        **kwargs : torch.Tensor
+        attn_mask : torch.Tensor, optional
+            Not supported: ``fused_attn_fwd``/``fused_attn_bwd`` (what
+            :mod:`.functional.cores.te` calls) only implement
+            ``attn_mask_type`` in ``{no_mask, causal, padding, ...}``, no
+            arbitrary mask -- only ``self.causal`` is threaded through.
+            Raises rather than silently taking TE's unfused detour; use
+            ``attn_backend="sdpa"`` or ``"math"`` for masked attention
+            instead.
+        **kwargs : Any
             Unused.
 
         Returns
@@ -806,9 +822,12 @@ class DistributedAttention(torch.nn.Module):
             Output of attention computation, ``[batch, seq, heads * head_dim]``.
         """
         if attn_mask is not None:
-            raise NotImplementedError(
-                "attn_mask is not supported with attn_backend='te'; "
-                "use 'sdpa' or 'math' instead."
+            raise ValueError(
+                "attn_backend='te' does not support attn_mask: the TE kernels "
+                "this core calls (fused_attn_fwd/bwd) have no fused path for an "
+                "arbitrary mask -- only no_mask/causal/padding attn_mask_types. "
+                "Use attn_backend='sdpa' or 'math' for masked (e.g. shifted-"
+                "window) attention."
             )
         # There is no dropout nn.Module here to apply its own training-mode
         # gate, so gate it the way the sdpa/math cores do.
@@ -829,6 +848,7 @@ class DistributedAttention(torch.nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         x: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
         key_padding_mask: Optional[torch.Tensor] = None,
         **kwargs: Any,
     ) -> torch.Tensor:
@@ -836,25 +856,36 @@ class DistributedAttention(torch.nn.Module):
 
         Parameters
         ----------
-        q: torch.Tensor
-            Query tensor.
-        k: torch.Tensor
-            Keys tensor.
-        v: torch.Tensor
-            Values tensor.
-        x: torch.Tensor
-            Input data.
-        key_padding_mask: Optional[torch.Tensor]
+        q, k, v : torch.Tensor
+            Query, key and value.
+        x : torch.Tensor
+            Local input chunk.
+        attn_mask : torch.Tensor, optional
+            Not supported: K/V circulate chunk-by-chunk around the ring and
+            :class:`.functional.ring.RingAttentionFunction` has no per-step
+            masking for an arbitrary mask. Raises rather than silently
+            ignoring it; use ``ring=False`` for masked attention, or
+            ``key_padding_mask`` for a per-sample key-padding mask, which the
+            ring does support.
+        key_padding_mask : torch.Tensor, optional
             Local shard (``[B, S_local]``, bool, ``True`` = attend) of a
             global key-padding mask. Unsupported with ``attn_backend='te'``.
-        kwargs:
-            Additional optional parameters.
+        **kwargs : Any
+            Unused.
 
         Returns
         -------
         torch.Tensor
             Attention output.
         """
+        if attn_mask is not None:
+            raise ValueError(
+                "ring attention does not support attn_mask: attn_mask is not "
+                "supported with ring=True; pass key_padding_mask instead for "
+                "a key-padding mask -- K/V circulate chunk-by-chunk around "
+                "the ring and RingAttentionFunction has no per-step masking "
+                "for an arbitrary mask. Use ring=False for masked attention."
+            )
         if key_padding_mask is not None and self.te:
             raise NotImplementedError(
                 "key_padding_mask is not supported with attn_backend='te'; "
@@ -964,6 +995,7 @@ class DistributedAttention(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
         """Ulysses (all-to-all, head-parallel) sequence-parallel attention.
@@ -977,7 +1009,17 @@ class DistributedAttention(torch.nn.Module):
         Hierarchical (``> 0``, the ``a2a+p2p`` analogue): an all-to-all over the
         intra-node sub-group -> ``[b, seq // n_nodes, local_heads // A, d]``,
         then a P2P ring over the inter-node sub-group, then an all-to-all back.
+
+        ``attn_mask`` is not supported: the inner dense core takes no mask
+        parameter. Raises rather than silently ignoring it.
         """
+        if attn_mask is not None:
+            raise ValueError(
+                "ulysses attention does not support attn_mask: the inner "
+                "dense core built by _dense_bshd_core/_inter_node_ring_core "
+                "takes no mask parameter. Use ulysses=False for masked "
+                "attention."
+            )
         from .functional.ulysses import (
             hierarchical_ulysses_attention,
             ulysses_attention,
@@ -1020,13 +1062,20 @@ class DistributedAttention(torch.nn.Module):
         ----------
         x : torch.Tensor
             ``(n_batch, vars, n_lat, n_lon)``, already sharded per
-            ``spatial_group`` / ``channel_group``.
-        attn_mask : Optional[torch.Tensor]
-            Non-ring only (``ring=False``): optional attention mask (bool or
-            additive float) forwarded to the SDPA/MATH core. Unsupported with
-            ``ring=True`` (use ``key_padding_mask`` instead) or
-            ``attn_backend='te'``.
-        key_padding_mask : Optional[torch.Tensor]
+            ``spatial_group`` / ``channel_group``. A leading extra axis
+            between the batch and the sequence (e.g. Swin's window axis) is
+            fine too -- ``qkv``'s rearrange keeps whatever sits between the
+            leading ``...`` batch dims and the trailing ``(three h d)``.
+        attn_mask : torch.Tensor, optional
+            Non-ring, non-Ulysses only: additive (float) or keep-true (bool)
+            mask broadcastable to ``q``'s ``(..., heads, seq, seq)`` shape,
+            e.g. a per-window Swin shift mask, forwarded to the SDPA/MATH
+            core and composed with ``self.causal`` when both are given --
+            see :func:`_resolve_mask_and_causal`. Unsupported with
+            ``ring=True`` (use ``key_padding_mask`` instead), ``ulysses=True``
+            or ``attn_backend='te'`` -- those raise ``ValueError`` instead,
+            see each core's docstring.
+        key_padding_mask : torch.Tensor, optional
             Ring only (``ring=True``): this rank's local shard (``[B,
             S_local]``, bool, ``True`` = attend) of a global key-padding mask.
             Unsupported with ``ring=False`` (use ``attn_mask`` instead) or
@@ -1037,11 +1086,9 @@ class DistributedAttention(torch.nn.Module):
         torch.Tensor
             ``(n_batch, seq_length, output_dim)``.
         """
-        if attn_mask is not None and self.ring:
-            raise ValueError(
-                "attn_mask is not supported with ring=True; pass "
-                "key_padding_mask instead."
-            )
+        # ``attn_mask`` with ``ring=True`` is not guarded here: it falls through
+        # to ``_ring_attn_core``, which raises -- so the same check also covers
+        # ``_ring_attn_core`` called directly (not just through ``forward``).
         if key_padding_mask is not None and not self.ring:
             raise ValueError(
                 "key_padding_mask is only supported with ring=True; pass "
@@ -1190,18 +1237,16 @@ class Attention(torch.nn.Module):
 
         Parameters
         ----------
-        q: torch.Tensor
-            Query tensor.
-        k: torch.Tensor
-            Keys tensor.
-        v: torch.Tensor
-            Values tensor.
-        attn_mask: Optional[torch.Tensor]
-            Optional attention mask (bool or additive float), forwarded to
-            ``scaled_dot_product_attention``. Composed with ``self.causal``
-            when both are given -- see :func:`_resolve_mask_and_causal`.
-        kwargs:
-            Additional optional parameters.
+        q, k, v : torch.Tensor
+            Query, key and value.
+        attn_mask : torch.Tensor, optional
+            Additive (float) or keep-true (bool) mask broadcastable to
+            ``(..., heads, seq_q, seq_kv)``. Composed with ``self.causal``
+            when both are given -- see :func:`_resolve_mask_and_causal`. See
+            :meth:`DistributedAttention._attn_core` for why a masked call
+            still lands on a fused backend rather than unfused math.
+        **kwargs : Any
+            Unused.
 
         Returns
         -------
@@ -1212,6 +1257,8 @@ class Attention(torch.nn.Module):
         with torch.nn.attention.sdpa_kernel(
             [
                 torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+                torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
+                torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
                 torch.nn.attention.SDPBackend.MATH,
             ]
         ):
@@ -1229,17 +1276,20 @@ class Attention(torch.nn.Module):
     def forward(
         self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """Forward pass of multi-headed attention.
+        """Compute multi-head attention.
 
         Automatically uses the torch SDPA backend.
 
         Parameters
         ----------
-        x: torch.Tensor
-            Tensor upon which to calculate attention.
-        attn_mask: Optional[torch.Tensor]
-            Optional attention mask (bool or additive float), forwarded to
-            the SDPA core. Composed with ``self.causal`` when both are given.
+        x : torch.Tensor
+            Input tensor.
+        attn_mask : torch.Tensor, optional
+            Additive (float) or keep-true (bool) mask broadcastable to
+            ``q``'s ``(batch, heads, seq, seq)`` shape, e.g. a per-window
+            Swin shift mask (batch here would be ``batch * windows``,
+            flattened by the caller). Composed with ``self.causal`` when both
+            are given.
 
         Returns
         -------

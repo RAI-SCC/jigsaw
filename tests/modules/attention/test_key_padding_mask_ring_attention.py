@@ -230,9 +230,7 @@ class TestRingAttentionKeyPaddingMask:
         v_ref = gather_1d_results(v_local, process_mesh_dict, dim=2).requires_grad_(
             True
         )
-        global_key_mask = gather_1d_results(
-            key_padding_mask, process_mesh_dict, dim=1
-        )
+        global_key_mask = gather_1d_results(key_padding_mask, process_mesh_dict, dim=1)
 
         allow = global_key_mask[:, None, None, :].expand(b, h, n_global, n_global)
         if causal:

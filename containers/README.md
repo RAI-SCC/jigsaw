@@ -4,12 +4,12 @@ jigsaw runs on top of NVIDIA's PyTorch container. The `.sif` file lives external
 
 ## Base image
 
-Base image is `nvcr.io/nvidia/pytorch:26.02-py3`
-(`sha256:bbc2b67e2533edd63ff1496bb1ed00a00338cdc1478af6c1a0bf9f4b369977e7`), which ships
+Base image is `nvcr.io/nvidia/pytorch:26.04-py3`
+(`sha256:be06a21bd95a46bce1a5cfc0576051a40209f328440edaa2ba5cd35abf85ca1a`), which ships
 - Python 3.12
-- torch 2.11.0a0
-- transformer-engine 2.12.0
-- CUDA 13
+- torch 2.12.0a0
+- transformer-engine 2.14.0
+- CUDA 13.2
 - NCCL 2.29, and
 - HPC-X OpenMPI under `/opt/hpcx/ompi`.
 
@@ -18,7 +18,7 @@ Base image is `nvcr.io/nvidia/pytorch:26.02-py3`
 Pull the container with:
 
 ```bash
-apptainer pull pytorch26.02.sif docker://nvcr.io/nvidia/pytorch:26.02-py3
+apptainer pull pytorch26.04.sif docker://nvcr.io/nvidia/pytorch:26.04-py3
 ```
 
 When bumping the tag, re-pull, update the digest above, and confirm
@@ -32,7 +32,7 @@ container with `--system-site-packages`, on a filesystem the compute nodes can
 reach:
 
 ```bash
-SIF=/path/to/pytorch26.02.sif
+SIF=/path/to/pytorch26.04.sif
 ENV=$HOME/envs/jigsaw-te
 
 apptainer exec --nv "$SIF" python -m venv --system-site-packages "$ENV"
@@ -57,7 +57,7 @@ The `--no-deps` flag on the jigsaw install stops pip from pulling a second `torc
 For a one-off command, call `apptainer exec` directly:
 
 ```bash
-SIF=/path/to/pytorch26.02.sif
+SIF=/path/to/pytorch26.04.sif
 ENV=$HOME/envs/jigsaw-te
 
 apptainer exec --nv --bind /scratch "$SIF" \

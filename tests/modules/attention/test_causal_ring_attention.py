@@ -45,9 +45,7 @@ class TestMathCoreCausal:
         # cross-check the returned logsumexp against an explicit masked softmax
         mask = torch.triu(torch.ones(s, s, dtype=torch.bool), diagonal=1)
         scores = (q @ k.mT * scale).masked_fill(mask, float("-inf"))
-        torch.testing.assert_close(
-            lse, scores.logsumexp(dim=-1), atol=1e-5, rtol=1e-5
-        )
+        torch.testing.assert_close(lse, scores.logsumexp(dim=-1), atol=1e-5, rtol=1e-5)
 
     def test_forward_causal_false_is_unaffected(self):
         """``causal=False`` (the default) is untouched by the new mask path."""
@@ -64,9 +62,7 @@ class TestMathCoreCausal:
         torch.manual_seed(2)
         b, h, s, d = 2, 2, 6, 4
         scale = d**-0.5
-        q, k, v = (
-            torch.randn(b, h, s, d, requires_grad=True) for _ in range(3)
-        )
+        q, k, v = (torch.randn(b, h, s, d, requires_grad=True) for _ in range(3))
         out, lse, _ = math_core.forward(q, k, v, scale=scale, causal=True)
         grad_out = torch.randn_like(out)
         out.backward(grad_out)
@@ -149,7 +145,7 @@ class TestRingAttentionCausal:
         )
         scale = q_local.shape[-1] ** -0.5
 
-        ring_forward = forward.build_ring_forward(ring_config)
+        ring_forward = forward.ring_forward
         out, lse, chunks_to_save, _, _ = ring_forward(
             q_local,
             k_local,

@@ -330,7 +330,13 @@ class TestAttentionMask:
             )
 
         assert_close(
-            "attn_mask output", out, ref, 1e-5, 1e-5, device, process_mesh_dict_2x2["model"]
+            "attn_mask output",
+            out,
+            ref,
+            1e-5,
+            1e-5,
+            device,
+            process_mesh_dict_2x2["model"],
         )
 
     @pytest.mark.dist(4)
@@ -341,7 +347,9 @@ class TestAttentionMask:
         model = _build_distributed(process_mesh_dict_4x1, device, ring=True)
         local_channels = _IN_DIM // process_mesh_dict_4x1["col"].size()
         x = torch.randn(1, 8, local_channels, device=device)
-        with pytest.raises(ValueError, match="attn_mask is not supported with ring=True"):
+        with pytest.raises(
+            ValueError, match="attn_mask is not supported with ring=True"
+        ):
             model(x, attn_mask=torch.zeros(1, 1, 8, 8, device=device))
 
     @pytest.mark.dist(4)
@@ -365,7 +373,7 @@ class TestAttentionMask:
         (which only exists for an actual TE-backed instance)."""
         model = _build_distributed(process_mesh_dict_2x2, device)
         dummy = torch.zeros(1, 1, 1, 1, device=device)
-        with pytest.raises(NotImplementedError, match="attn_backend='te'"):
+        with pytest.raises(ValueError, match="attn_backend='te'"):
             model._transformer_attn_core(dummy, dummy, dummy, attn_mask=dummy)
 
     @pytest.mark.dist(4)
@@ -387,5 +395,7 @@ class TestAttentionMask:
                 dummy,
                 dummy,
                 x,
-                key_padding_mask=torch.ones(1, local_seq, dtype=torch.bool, device=device),
+                key_padding_mask=torch.ones(
+                    1, local_seq, dtype=torch.bool, device=device
+                ),
             )

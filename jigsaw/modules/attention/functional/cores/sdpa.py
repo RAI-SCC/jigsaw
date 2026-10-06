@@ -10,55 +10,7 @@ from typing import Optional
 
 import torch
 
-
-def _build_bias(
-    b: int,
-    h: int,
-    sq: int,
-    sk: int,
-    causal: bool,
-    key_mask: Optional[torch.Tensor],
-    dtype: torch.dtype,
-    device: torch.device,
-) -> Optional[torch.Tensor]:
-    """Additive attention bias for ``_scaled_dot_product_efficient_attention``.
-
-    Excluded positions get ``torch.finfo(dtype).min`` rather than literal
-    ``-inf``: a fully-excluded row (e.g. a padding query under causal+padding,
-    or a batch entry with no valid keys) would otherwise make the kernel's
-    internal softmax subtract ``-inf - -inf = nan`` (the same failure mode
-    :func:`..cores.math._build_exclude_mask`'s caller works around explicitly);
-    a large-but-finite bias is the standard fix framework attention kernels use
-    for additive masks and needs no cooperation from the (opaque, CUDA-only)
-    kernel. Returns ``None`` when neither ``causal`` nor ``key_mask`` applies.
-
-    The mem-efficient kernel neither broadcasts the bias's batch/head dims nor
-    tolerates an unaligned last-dim stride, so the result is expanded to the
-    full ``(b, h, sq, sk)`` and, when ``sk`` is not a multiple of 8, padded up
-    and sliced back (mirrors aten's own ``sdp::preprocess_mask``).
-    """
-    if not causal and key_mask is None:
-        return None
-    neg = torch.finfo(dtype).min
-    bias = torch.zeros(
-        key_mask.shape[0] if key_mask is not None else 1,
-        1,
-        sq,
-        sk,
-        dtype=dtype,
-        device=device,
-    )
-    if causal:
-        causal_exclude = torch.triu(
-            torch.ones(sq, sk, dtype=torch.bool, device=device), diagonal=1
-        )
-        bias = bias.masked_fill(causal_exclude, neg)
-    if key_mask is not None:
-        pad_exclude = (~key_mask)[:, None, None, :]
-        bias = bias.masked_fill(pad_exclude, neg)
-    if sk % 8:
-        bias = torch.nn.functional.pad(bias, (0, 8 - sk % 8))[..., :sk]
-    return bias.expand(b, h, sq, sk)
+from . import math as math_core
 
 
 def forward(
@@ -69,7 +21,7 @@ def forward(
     dropout_p: float,
     causal: bool = False,
     key_mask: Optional[torch.Tensor] = None,
-    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
+    seed: Optional[int] = None,
     *,
     layout: str = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
@@ -88,7 +40,9 @@ def forward(
     key_mask : torch.Tensor, optional
         Boolean key-padding mask, ``[B, Sk]``, ``True`` = attend.
     seed : int, optional
-        Unused.
+        Unused by the flash path; forwarded to :mod:`.math` when ``key_mask``
+        is given (unused there too -- dropout isn't exercised on that path --
+        kept for interface parity).
     layout : str
         Kept for interface parity with the other cores; sdpa only accepts
         ``"bhsd"``.
@@ -110,15 +64,22 @@ def forward(
     triangular mask is the correct causal boundary; every other block is
     either fully visible (``causal=False``) or skipped by the caller entirely.
 
-    ``key_mask`` (``[B, Sk]``, bool, ``True`` = attend): the flash op above
-    only takes ``is_causal``, no arbitrary mask, so when a ``key_mask`` is
-    given this switches to ``_scaled_dot_product_efficient_attention``
-    instead, which accepts an additive ``attn_bias`` and also returns
-    ``logsumexp``; ``causal`` is folded into that bias too (see
-    :func:`_build_bias`) rather than passed as the op's own ``is_causal``, so
-    the two masks compose. CUDA-only, like the flash op; unverified against a
-    GPU in this repo (no CUDA device available in the environment this was
-    written in) -- verify before relying on it in production.
+    ``key_mask`` (``[B, Sk]``, bool, ``True`` = attend): delegates to
+    :mod:`.math` instead of the flash op. An earlier version of this core used
+    ``_scaled_dot_product_efficient_attention``/its backward (an additive
+    ``attn_bias``, returning its own ``logsumexp``) for the masked path, but
+    that op's backward does not tolerate being fed the ring's *merged*
+    (multi-chunk) ``out``/``logsumexp`` -- which is exactly what
+    :func:`..backward.ring_backward` does for every chunk -- even though its
+    forward is fine in isolation: confirmed on GPU with a 2-chunk, single-
+    process replica of the ring's merge-then-recompute pattern (``dv`` came
+    back exact, ``dq``/``dk`` did not, matching the ring tests' failure
+    signature exactly). :mod:`.math` implements the same merge-tolerant
+    recompute from first principles (explicit ``p = exp(attn - lse)``) and is
+    correctness-first by design, at the cost of materializing the full
+    ``(b, h, sq, sk)`` score matrix instead of using a fused kernel -- an
+    acceptable trade for the less-common masked path; the plain flash path
+    above is untouched and stays fused.
 
     Returns
     -------
@@ -132,48 +93,42 @@ def forward(
     assert layout == "bhsd", (
         f"sdpa core is bhsd-only; got layout={layout!r}. The bshd ring is TE-only."
     )
+    if key_mask is not None:
+        return math_core.forward(
+            q, k, v, scale, dropout_p, causal=causal, key_mask=key_mask, seed=seed
+        )
     q, k, v = [x.to(torch.float16) for x in (q, k, v)]
-    if key_mask is None:
-        (
-            out,
-            logsumexp,
-            _cum_seq_q,
-            _cum_seq_k,
-            _max_q,
-            _max_k,
-            philox_seed,
-            philox_offset,
-            _debug_attn_mask,
-        ) = torch.ops.aten._scaled_dot_product_flash_attention(
-            q,
-            k,
-            v,
-            dropout_p=dropout_p,
-            is_causal=causal,
-            scale=scale,
-            return_debug_mask=False,
-        )
-        # ``philox_seed`` / ``philox_offset`` are the flash kernel's opaque
-        # dropout RNG state. Their shapes are build-dependent and need not match
-        # (this torch build returns ``(2,)`` and ``()``), so flatten and
-        # concatenate into a single 1-D tensor -- the ring stores ``rng_state``
-        # via ``ctx.save_for_backward``, which takes tensors, not tuples -- and
-        # split it back in :func:`backward`. ``philox_offset`` is always last.
-        rng_state = (
-            torch.cat([philox_seed.reshape(-1), philox_offset.reshape(-1)])
-            if dropout_p > 0.0
-            else None
-        )
-        return out, logsumexp, rng_state
-
-    b, h, sq = q.shape[0], q.shape[1], q.shape[-2]
-    bias = _build_bias(b, h, sq, k.shape[-2], causal, key_mask, q.dtype, q.device)
-    out, logsumexp, *_ = torch.ops.aten._scaled_dot_product_efficient_attention(
-        q, k, v, bias, True, dropout_p, False, scale=scale
+    (
+        out,
+        logsumexp,
+        _cum_seq_q,
+        _cum_seq_k,
+        _max_q,
+        _max_k,
+        philox_seed,
+        philox_offset,
+        _debug_attn_mask,
+    ) = torch.ops.aten._scaled_dot_product_flash_attention(
+        q,
+        k,
+        v,
+        dropout_p=dropout_p,
+        is_causal=causal,
+        scale=scale,
+        return_debug_mask=False,
     )
-    # the mem-efficient kernel pads the LSE seq dim up to a multiple of 32;
-    # the ring's online-softmax merge wants it back at (b, h, sq).
-    return out, logsumexp[..., :sq].contiguous(), None
+    # ``philox_seed`` / ``philox_offset`` are the flash kernel's opaque
+    # dropout RNG state. Their shapes are build-dependent and need not match
+    # (this torch build returns ``(2,)`` and ``()``), so flatten and
+    # concatenate into a single 1-D tensor -- the ring stores ``rng_state``
+    # via ``ctx.save_for_backward``, which takes tensors, not tuples -- and
+    # split it back in :func:`backward`. ``philox_offset`` is always last.
+    rng_state = (
+        torch.cat([philox_seed.reshape(-1), philox_offset.reshape(-1)])
+        if dropout_p > 0.0
+        else None
+    )
+    return out, logsumexp, rng_state
 
 
 def backward(
@@ -189,7 +144,7 @@ def backward(
     causal: bool = False,
     key_mask: Optional[torch.Tensor] = None,
     dropout_p: float = 0.0,
-    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
+    seed: Optional[int] = None,
     rng_state: Optional[torch.Tensor] = None,
     layout: str = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -225,8 +180,7 @@ def backward(
 
     See :func:`forward` for the ``(B, H, S, d)`` layout, the meaning of
     ``max_q`` / ``max_k`` / ``philox_*`` / ``cum_seq_*``, ``causal``, and the
-    ``key_mask`` mask-aware fork onto ``_scaled_dot_product_efficient_attention``
-    (mirrored here via its ``_backward`` counterpart).
+    ``key_mask`` mask-aware fork onto :mod:`.math`.
 
     ``q``/``k``/``v``/``out``/``grad_out`` are cast to fp16 to match
     :func:`forward`, and ``logsumexp`` to fp32: the flash backward kernel reads
@@ -242,65 +196,45 @@ def backward(
     assert layout == "bhsd", (
         f"sdpa core is bhsd-only; got layout={layout!r}. The bshd ring is TE-only."
     )
-    in_dtype = grad_out.dtype
-    grad_out, q, k, v, out = (t.to(torch.float16) for t in (grad_out, q, k, v, out))
-    logsumexp = logsumexp.to(torch.float32)
-
-    if key_mask is None:
-        if rng_state is not None:
-            philox_seed, philox_offset = rng_state[:-1], rng_state[-1]
-        else:
-            philox_seed = torch.zeros(1, dtype=torch.long, device=q.device)
-            philox_offset = torch.zeros(1, dtype=torch.long, device=q.device)
-
-        dq, dk, dv = torch.ops.aten._scaled_dot_product_flash_attention_backward(
+    if key_mask is not None:
+        return math_core.backward(
             grad_out,
             q,
             k,
             v,
             out,
             logsumexp,
+            scale,
+            causal=causal,
+            key_mask=key_mask,
             dropout_p=dropout_p,
-            is_causal=causal,
-            scale=scale,
-            cum_seq_q=None,
-            cum_seq_k=None,
-            max_q=max_q,
-            max_k=max_k,
-            philox_seed=philox_seed,
-            philox_offset=philox_offset,
+            seed=seed,
         )
-        return dq.to(in_dtype), dk.to(in_dtype), dv.to(in_dtype)
+    in_dtype = grad_out.dtype
+    grad_out, q, k, v, out = (t.to(torch.float16) for t in (grad_out, q, k, v, out))
+    logsumexp = logsumexp.to(torch.float32)
 
-    bias = _build_bias(
-        q.shape[0],
-        q.shape[1],
-        q.shape[-2],
-        k.shape[-2],
-        causal,
-        key_mask,
-        q.dtype,
-        q.device,
-    )
-    dq, dk, dv, _ = torch.ops.aten._scaled_dot_product_efficient_attention_backward(
+    if rng_state is not None:
+        philox_seed, philox_offset = rng_state[:-1], rng_state[-1]
+    else:
+        philox_seed = torch.zeros(1, dtype=torch.long, device=q.device)
+        philox_offset = torch.zeros(1, dtype=torch.long, device=q.device)
+
+    dq, dk, dv = torch.ops.aten._scaled_dot_product_flash_attention_backward(
         grad_out,
         q,
         k,
         v,
-        bias,
         out,
         logsumexp,
-        torch.zeros(1, dtype=torch.long, device=q.device),
-        torch.zeros(1, dtype=torch.long, device=q.device),
-        0.0,
-        [True, True, True, False],
-        is_causal=False,
+        dropout_p=dropout_p,
+        is_causal=causal,
         scale=scale,
+        cum_seq_q=None,
+        cum_seq_k=None,
+        max_q=max_q,
+        max_k=max_k,
+        philox_seed=philox_seed,
+        philox_offset=philox_offset,
     )
-    # the mem-efficient backward returns non-contiguous grads; the ring's dK/dV
-    # all-reduce / relay needs them contiguous.
-    return (
-        dq.to(in_dtype).contiguous(),
-        dk.to(in_dtype).contiguous(),
-        dv.to(in_dtype).contiguous(),
-    )
+    return dq.to(in_dtype), dk.to(in_dtype), dv.to(in_dtype)
