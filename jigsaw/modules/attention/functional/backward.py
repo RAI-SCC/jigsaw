@@ -190,7 +190,7 @@ def ring_backward(
     # wrong. Each core casts it to what its kernel wants (the ``math`` core
     # keeps whatever precision the forward produced).
     dq = torch.zeros_like(q, dtype=core_dtype)
-    dkv_buf, dk_buf, dv_buf = get_dkv_buffer(ring_config, q, ring_group_size)
+    dk_buf, dv_buf = get_dkv_buffer(ring_config, q, ring_group_size)
 
     # Cases where every rank processes the *same* global chunk `step` at ring
     # step `step`: the partial dK/dV for chunk `step` just needs a SUM
@@ -329,7 +329,7 @@ def ring_backward(
         return dq, dk_buf, dv_buf
 
     dk_local, dv_local = postprocess_dkv(
-        ring_config, dkv_buf, dk_buf, dv_buf, local_rank, seq_local, group
+        ring_config, dk_buf, dv_buf, local_rank, seq_local, group
     )
 
     return dq, dk_local, dv_local
@@ -345,12 +345,8 @@ def _use_global_dkv_buffer(ring_config: RingAttentionConfig) -> bool:
 
 def get_dkv_buffer(
     ring_config: RingAttentionConfig, q: torch.Tensor, ring_group_size: int
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Allocate the dK and dV buffers of the accumulation strategy.
-
-    dK and dV share a single zero-initialized buffer stacked on a new leading
-    axis, so the GATHER_DKV path in :func:`postprocess_dkv` can all-reduce
-    both in one collective instead of two.
 
     Parameters
     ----------
@@ -363,18 +359,31 @@ def get_dkv_buffer(
 
     Returns
     -------
-    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-        The combined ``dkv`` buffer, and the ``dk``/``dv`` views into it. They
-        span the full sequence if the strategy gathers the gradients and the
-        local sequence otherwise.
+    tuple[torch.Tensor, torch.Tensor]
+        Zero-initialized dk and dv buffers. They span the full sequence if the
+        strategy gathers the gradients and the local sequence otherwise.
+
+        These intentionally do *not* share storage (e.g. as two views into one
+        stacked buffer): `ring_backward` runs outside `torch.no_grad()` (its
+        autograd-function caller saves q/k/v and replays the cores to get
+        dq/dk/dv, so these buffers accumulate genuinely grad-tracked partials),
+        and accumulation mutates them in place (`+=`/`.add_()`). The first
+        in-place write onto a `requires_grad=False` buffer from a
+        grad-requiring operand quietly promotes that *tensor* to require grad;
+        if dk_buf and dv_buf were sibling views of one base, promoting one
+        view poisons the other's write (now "a view of a leaf Variable that
+        requires grad"). Keeping them independent leaves each one free to make
+        that same-tensor transition on its own.
     """
     shape = list(q.shape)
     if _use_global_dkv_buffer(ring_config):
         # Global buffer spans every rank's chunk along the sequence axis.
         sd = _seq_dim(ring_config.core_layout)
         shape[sd] = ring_group_size * shape[sd]
-    dkv_buf = torch.zeros((2, *shape), device=q.device, dtype=q.dtype)
-    return dkv_buf, dkv_buf[0], dkv_buf[1]
+    return (
+        torch.zeros(shape, device=q.device, dtype=q.dtype),
+        torch.zeros(shape, device=q.device, dtype=q.dtype),
+    )
 
 
 def accumulate_dkv(
@@ -719,7 +728,6 @@ def _accumulate_dkv_hybrid_broadcast(
 
 def postprocess_dkv(
     ring_config: RingAttentionConfig,
-    dkv_buf: torch.Tensor,
     dk_buf: torch.Tensor,
     dv_buf: torch.Tensor,
     local_rank: int,
@@ -732,10 +740,6 @@ def postprocess_dkv(
     ----------
     ring_config : RingAttentionConfig
         Ring-attention configuration.
-    dkv_buf : torch.Tensor
-        Combined buffer backing ``dk_buf``/``dv_buf`` (see
-        :func:`get_dkv_buffer`), all-reduced in one collective here instead of
-        reducing ``dk_buf``/``dv_buf`` separately.
     dk_buf : torch.Tensor
         Buffer accumulating dk.
     dv_buf : torch.Tensor
@@ -753,7 +757,13 @@ def postprocess_dkv(
         Local dk and dv.
     """
     if _use_global_dkv_buffer(ring_config):
+        # Stack into one buffer so the all-reduce is a single collective
+        # instead of two. This is built fresh here, *after* the accumulation
+        # loop is done mutating dk_buf/dv_buf in place -- see `get_dkv_buffer`
+        # for why they can't share storage any earlier than this.
+        dkv_buf = torch.stack((dk_buf, dv_buf), dim=0)
         dist.all_reduce(dkv_buf, op=dist.ReduceOp.SUM, group=group)
+        dk_buf, dv_buf = dkv_buf[0], dkv_buf[1]
         sd = _seq_dim(ring_config.core_layout)
         lo = local_rank * seq_local
         return (
