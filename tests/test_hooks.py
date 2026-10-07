@@ -8,6 +8,7 @@ world size, including one.
 import pytest
 import torch
 import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
 
 from jigsaw import hooks
 from jigsaw.utils_aggregate import average_weights, average_weights_module
@@ -142,3 +143,95 @@ class TestAveraging:
         average_weights_module(model, dist.group.WORLD, bias_only=True)
         assert torch.allclose(model.bias.cpu(), torch.full((2,), 0.5))
         assert torch.all(model.weight == float(rank))
+
+
+class TestMpDpCommHook:
+    """The DDP communication hook that reduces model- then data-parallel.
+
+    A deferred-wait post-accumulate-grad hook lets DDP reduce a gradient the
+    model-parallel all-reduce has not finished writing, which shows up as
+    replicas drifting apart over successive steps. These tests pin the ordering.
+    """
+
+    N = 32
+    LAYERS = 3
+    STEPS = 3
+
+    @staticmethod
+    def _device_ids(device: torch.device) -> "list[int] | None":
+        """Return the ``device_ids`` DDP needs for this device."""
+        if device.type == "cpu":
+            return None
+        return [torch.cuda.current_device()]
+
+    @classmethod
+    def _model(cls, device: torch.device) -> torch.nn.Module:
+        """Build a model that is identical on every rank."""
+        torch.manual_seed(0)
+        return torch.nn.Sequential(
+            *[torch.nn.Linear(cls.N, cls.N, bias=False) for _ in range(cls.LAYERS)]
+        ).to(device)
+
+    @pytest.mark.dist(4)
+    def test_matches_blocking_reference_and_keeps_replicas_identical(self, device):
+        # Split WORLD 2x2: model-parallel {0,1},{2,3}, data-parallel {0,2},{1,3}.
+        rank, world = dist.get_rank(), dist.get_world_size()
+        half = world // 2
+        mp_group = [
+            dist.new_group(list(range(half))),
+            dist.new_group(list(range(half, world))),
+        ][rank // half]
+        dp_group = [dist.new_group([r, r + half]) for r in range(half)][rank % half]
+        x = torch.ones(4, self.N, device=device)
+
+        def run(comm_hook: bool) -> list[torch.Tensor]:
+            """Train a few steps, reducing either via the hook or blocking."""
+            model = self._model(device)
+            net: torch.nn.Module = model
+            if comm_hook:
+                net = DistributedDataParallel(
+                    model,
+                    device_ids=self._device_ids(device),
+                    process_group=dp_group,
+                )
+                net.register_comm_hook(
+                    None,
+                    hooks.make_mp_dp_comm_hook(lambda p: mp_group, dp_group=dp_group),
+                )
+            opt = torch.optim.SGD(model.parameters(), lr=1e-2)
+            for _ in range(self.STEPS):
+                opt.zero_grad(set_to_none=True)
+                loss = (net(x) * float(rank + 1)).sum() / (self.N * self.LAYERS)
+                loss.backward()
+                if not comm_hook:
+                    # blocking two-stage reference: model-parallel, then data-parallel
+                    for param in model.parameters():
+                        dist.all_reduce(param.grad, group=mp_group)
+                        param.grad.div_(dp_group.size())
+                        dist.all_reduce(param.grad, group=dp_group)
+                opt.step()
+            return [param.detach().clone() for param in model.parameters()]
+
+        got, want = run(comm_hook=True), run(comm_hook=False)
+        for have, expected in zip(got, want):
+            assert torch.equal(have, expected)
+
+        # The weights are replicated over both groups, so every rank must agree.
+        for tensor in got:
+            gathered = [torch.empty_like(tensor) for _ in range(world)]
+            dist.all_gather(gathered, tensor)
+            for other in gathered:
+                assert torch.equal(other, gathered[0])
+
+    def test_without_model_parallel_group_averages_over_data_parallel(self, device):
+        # ``mp_group_for`` returning None must leave plain DDP averaging.
+        world, rank = dist.get_world_size(), dist.get_rank()
+        model = torch.nn.Linear(4, 4, bias=False).to(device)
+        net = DistributedDataParallel(model, device_ids=self._device_ids(device))
+        net.register_comm_hook(None, hooks.make_mp_dp_comm_hook(lambda p: None))
+        x = torch.ones(1, 4, device=device)
+        (net(x) * float(rank + 1)).sum().backward()
+        expected = (world + 1) / 2
+        assert torch.allclose(
+            model.weight.grad.cpu(), torch.full((4, 4), float(expected))
+        )
