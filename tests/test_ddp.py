@@ -37,6 +37,12 @@ VARIANTS = [
     "fp16_hook",
     "no_sync",
     "device_mesh",
+    "joint",
+    "joint_bucket_view",
+    "joint_static_graph",
+    "joint_fp16",
+    "joint_no_sync",
+    "joint_accum",
 ]
 EXACT_KINDS = {"xwt", "conv_halo", "conv_patchify"}
 
@@ -129,15 +135,29 @@ def _wrap(model: torch.nn.Module, variant: str, dp: dist.ProcessGroup, mesh=None
     if variant == "device_mesh":
         # A 1-D slice of the n-d DeviceMesh instead of ``process_group=``.
         return DistributedDataParallel(model, device_mesh=mesh.device_mesh["dp"])
+    joint = variant.startswith("joint")
+    base = variant.removeprefix("joint_") if joint else variant
     kwargs = {
         "bucket_view": {"gradient_as_bucket_view": True},
         "find_unused": {"find_unused_parameters": True},
         "static_graph": {"static_graph": True},
-    }.get(variant, {})
+    }.get(base, {})
     ddp = DistributedDataParallel(model, process_group=dp, **kwargs)
     if variant == "fp16_hook":
         ddp.register_comm_hook(dp, default_hooks.fp16_compress_hook)
+    if joint:
+        wrapper = default_hooks.fp16_compress_wrapper if base == "fp16" else None
+        parallel.register_joint_comm_hook(ddp, wrapper)
     return ddp
+
+
+def _n_micro(variant: str) -> int:
+    """Microbatches per step: 2 for the accumulation variants."""
+    return 2 if variant in ("no_sync", "joint_no_sync", "joint_accum") else 1
+
+
+def _uses_no_sync(variant: str) -> bool:
+    return variant in ("no_sync", "joint_no_sync")
 
 
 def _step(model, make_input, n_micro: int, no_sync: bool = False) -> None:
@@ -201,13 +221,13 @@ def test_ddp_composition(shape, kind, variant, device, monkeypatch) -> None:
     mesh = _mesh(shape, device)
     dp = mesh["dp"]
     model, make_input = _build(kind, mesh, device)
-    n_micro = 2 if variant == "no_sync" else 1
+    n_micro = _n_micro(variant)
 
     local = _local_grads(model, make_input, n_micro, monkeypatch)
     expected = _expected(model, local, dp, ddp=variant != "no_ddp")
 
     wrapped = _wrap(model, variant, dp, mesh)
-    _step(wrapped, make_input, n_micro, no_sync=variant == "no_sync")
+    _step(wrapped, make_input, n_micro, no_sync=_uses_no_sync(variant))
 
     for (name, p), e in zip(model.named_parameters(), expected):
         assert p.grad is not None, name
@@ -217,7 +237,7 @@ def test_ddp_composition(shape, kind, variant, device, monkeypatch) -> None:
             # the fp16 comm hook rounds non-integer gradients to fp16
             rtol, atol = (
                 (1e-2, max(2e-3 * e.abs().max().item(), 1e-6))
-                if variant == "fp16_hook"
+                if variant in ("fp16_hook", "joint_fp16")
                 else (1e-5, 1e-6)
             )
             torch.testing.assert_close(
@@ -240,3 +260,35 @@ def test_sync_switched_off_is_detected(device, monkeypatch) -> None:
     monkeypatch.setattr(parallel, "sync_grad", lambda *t: t)
     _step(wrapped, make_input, 1)
     assert not all(torch.equal(p.grad, e) for p, e in zip(model.parameters(), expected))
+
+
+@pytest.mark.dist(8)
+def test_joint_hook_groups(device) -> None:
+    """Each parameter is averaged over exactly the ranks that hold a copy of it."""
+    mesh = _mesh((2, 2, 2), device)
+    model, _ = _build("xwt", mesh, device)  # weight sharded; bias replicated over row
+    ddp = DistributedDataParallel(model, process_group=mesh["dp"])
+    state = parallel.register_joint_comm_hook(ddp)
+    dp_ranks = set(dist.get_process_group_ranks(mesh["dp"]))
+    assert any(parallel.replica_groups(p) for p in model.parameters())
+    for name, p in model.named_parameters():
+        got = set(dist.get_process_group_ranks(state.group_of(p)))
+        assert dist.get_rank() in got, name
+        if parallel.replica_groups(p):
+            row = set(dist.get_process_group_ranks(mesh["row"]))
+            # dp x row: both axes, and nothing along col
+            assert len(got) == mesh["dp"].size() * mesh["row"].size(), (name, got)
+            assert dp_ranks <= got and row <= got, (name, got)
+        else:
+            assert got == dp_ranks, (name, got)
+
+
+@pytest.mark.dist(4)
+def test_joint_state_without_hook_raises(device) -> None:
+    """Scaling without the hook would leave the gradients unsummed: refuse."""
+    mesh = _mesh((2, 2, 1), device)
+    model, make_input = _build("conv_halo", mesh, device)
+    ddp = DistributedDataParallel(model, process_group=mesh["dp"])
+    parallel.JointCommHookState(ddp)
+    with pytest.raises(RuntimeError, match="not registered"):
+        ddp(make_input(0))

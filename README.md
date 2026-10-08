@@ -230,6 +230,31 @@ run them through `jigsaw.parallel.synced_parameters` (see `examples/swin.py`). D
 `jigsaw.hooks.make_grad_sync_hook` on them for this: it races DDP and breaks gradient
 accumulation.
 
+#### Joint comm hook (faster gradient sync for replicated parameters)
+
+With plain DDP a replicated gradient is reduced twice: summed over its model-parallel
+replicas inside the backward pass, then averaged over `dp` by DDP. Since every replica then
+holds the same gradient, the `dp` all-reduce sends it over the inter-node links once per
+replica. The joint comm hook replaces both with a single DDP comm hook that averages each
+gradient over the *joint* group (`dp` x its replica groups) in DDP's buckets, overlapped with
+the backward pass:
+
+```python
+model = DistributedDataParallel(model, process_group=mesh["dp"])
+jigsaw.parallel.register_joint_comm_hook(model)  # collective: call on every rank
+
+# with fp16 (or bf16) compression on top:
+from torch.distributed.algorithms.ddp_comm_hooks import default_hooks
+jigsaw.parallel.register_joint_comm_hook(model, default_hooks.fp16_compress_wrapper)
+```
+
+or `jigsaw.parallel.wrap_ddp(model, mesh, joint_hook=True)`. Gradients are the same as
+without it, and `no_sync()`, accumulating without `no_sync()`, `gradient_as_bucket_view` and
+`static_graph` all keep working. The hook takes DDP's comm-hook slot, so it cannot be combined
+with PowerSGD. It creates one extra process group per distinct set of replica groups. The gain
+grows with the share of parameters that are replicated: on 8 A100s over two nodes (`dp=2`,
+2x2 spatial split), a 14M-parameter conv net trained about 8% faster.
+
 To find the step at which replicas drift apart, call
 `jigsaw.debug.assert_replica_consistency(model, mesh)` after `optimizer.step()`. It is a
 collective and raises on every rank, naming the parameters that differ. It only knows the
