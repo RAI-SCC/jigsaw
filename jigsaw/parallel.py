@@ -22,14 +22,16 @@ Usage: mark a parameter once with :func:`mark_replicated` where it is created,
 and route it through :func:`sync_grad` (or :func:`synced_parameters` for
 submodules whose forward jigsaw does not own) in the forward.
 
-Data parallelism composes with this through ``DistributedDataParallel`` over the
-mesh's data-parallel axis; :func:`wrap_ddp` builds it. A DDP whose process group
-reaches across the model-parallel axes (the default group, say) averages
-different shards together without any error, so :func:`check_ddp` rejects it.
-It runs from :func:`wrap_ddp` and, for a ``DistributedDataParallel`` built by
-hand, from the first jigsaw forward inside it.
+Data parallelism composes with this through a plain ``DistributedDataParallel``
+over the mesh's data-parallel axis, ``DistributedDataParallel(model,
+process_group=mesh["dp"])``; :func:`wrap_ddp` is a shorthand that also
+broadcasts the replicas first. A DDP whose process group reaches across the
+model-parallel axes (the default group, say) averages different shards together
+without any error, so :func:`check_ddp` rejects it. It runs from the first jigsaw
+forward inside any ``DistributedDataParallel``, and from :func:`wrap_ddp`.
 """
 
+import os
 import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Optional
@@ -42,6 +44,10 @@ _ATTR = "_jigsaw_replica_groups"
 _CHECKED = "_jigsaw_ddp_checked"
 #: set on the hooks of :func:`jigsaw.hooks.make_grad_sync_hook`
 HOOK_TAG = "_jigsaw_grad_sync_hook"
+#: Mutation-testing switch: with ``JIGSAW_DISABLE_GRAD_SYNC=1`` in the environment
+#: :func:`sync_grad` passes everything through, so replicated parameters keep only
+#: their local gradient share. Training is then wrong; the test suite must notice.
+SYNC_DISABLED = os.environ.get("JIGSAW_DISABLE_GRAD_SYNC", "") == "1"
 
 Groups = tuple[dist.ProcessGroup, ...]
 
@@ -133,7 +139,8 @@ def sync_grad(*tensors: Optional[torch.Tensor]) -> tuple[Optional[torch.Tensor],
     Unmarked tensors, ``None`` and tensors that do not require a gradient are
     returned unchanged, as is everything when grad mode is off. The marked ones
     are grouped by ``(groups, dtype)`` and each group is reduced in one flat
-    collective per process group.
+    collective per process group. :data:`SYNC_DISABLED` turns this into a
+    pass-through, for mutation testing only.
 
     Parameters
     ----------
@@ -147,7 +154,7 @@ def sync_grad(*tensors: Optional[torch.Tensor]) -> tuple[Optional[torch.Tensor],
     """
     _check_active_ddp()
     out = list(tensors)
-    if not torch.is_grad_enabled():
+    if SYNC_DISABLED or not torch.is_grad_enabled():
         return tuple(out)
     buckets: dict[tuple[Groups, torch.dtype], list[int]] = {}
     for i, t in enumerate(tensors):
@@ -236,7 +243,10 @@ def wrap_ddp(
 ) -> DistributedDataParallel:
     """Wrap a jigsaw model in ``DistributedDataParallel`` over the data-parallel axis.
 
-    The marked parameters are first made identical across their replica groups
+    Optional: ``DistributedDataParallel(module, process_group=mesh[dp_key])`` is
+    checked just the same, in its first forward. This also broadcasts the
+    replicas, which jigsaw modules already do when they are built, but
+    parameters marked by hand may need. The marked parameters are first made identical across their replica groups
     (from group rank 0), then DDP broadcasts the whole model over ``mesh[dp_key]``
     from data-parallel rank 0 and averages the gradients over it. The result is
     checked with :func:`check_ddp`.
@@ -415,9 +425,9 @@ def check_ddp(ddp: DistributedDataParallel) -> None:
         raise RuntimeError(
             f"{len(bad)} replicated parameter(s) differ across their replica groups "
             f"before training, e.g. {bad[:5]}. DistributedDataParallel only "
-            "broadcasts over the data-parallel axis; build it with "
-            "jigsaw.parallel.wrap_ddp(model, mesh), or call "
-            "jigsaw.parallel.broadcast_replicas(model) before wrapping."
+            "broadcasts over the data-parallel axis; call "
+            "jigsaw.parallel.broadcast_replicas(model) before wrapping, or build "
+            "it with jigsaw.parallel.wrap_ddp(model, mesh)."
         )
     setattr(ddp, _CHECKED, True)
 

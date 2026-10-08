@@ -13,7 +13,7 @@ from torch.nn.parallel import DistributedDataParallel
 
 from jigsaw import debug, hooks, parallel
 from jigsaw.modules import convolution
-from tests.test_ddp import _build, _expected, _int_tensor, _local_grads, _mesh
+from tests.test_ddp import KINDS, _build, _expected, _int_tensor, _local_grads, _mesh
 
 # dp=2 over a 2x1 model: replicated conv weights over ``row``
 SHAPE = (2, 2, 1)
@@ -56,6 +56,23 @@ def test_ddp_on_whole_world_is_fine_without_model_parallelism(device) -> None:
     mesh = _mesh((4, 1, 1), device)
     model, make_input = _build("conv_halo", mesh, device)
     DistributedDataParallel(model)(make_input(0)).sum().backward()
+
+
+@pytest.mark.dist(8)
+@pytest.mark.parametrize("kind", KINDS)
+def test_modules_start_with_identical_replicas(kind, device) -> None:
+    """jigsaw modules broadcast their replicas in ``__init__``, over every group
+    they are marked with, so a plain DDP over ``dp`` needs nothing else."""
+    mesh = _mesh((2, 2, 2), device)
+    torch.manual_seed(1234 + dist.get_rank())  # a different init on every rank
+    model, make_input = _build(kind, mesh, device, fill=False)
+    assert any(parallel.replica_groups(p) for p in model.parameters())
+    params = [(p, parallel.replica_groups(p)) for p in model.parameters()]
+    div = parallel.replica_divergence(params)
+    parallel.all_reduce_max(div, mesh.values())
+    names = [n for n, _ in model.named_parameters()]
+    assert not div.any(), [n for n, d in zip(names, div.tolist()) if d > 0]
+    DistributedDataParallel(model, process_group=mesh["dp"])(make_input(0))
 
 
 @pytest.mark.dist(4)
@@ -148,3 +165,58 @@ def test_reshard_remarks_onto_new_groups(device, monkeypatch) -> None:
     y.backward(_int_tensor(y.shape, 500 + 10 * dist.get_rank(), device))
     for (name, p), e in zip(conv.named_parameters(), expected):
         assert torch.equal(p.grad, e), name
+
+
+class _ConvWithPlainHead(torch.nn.Module):
+    """A jigsaw conv followed by a plain ``nn.Linear`` on the spatially split output.
+
+    The head is replicated over every model-parallel rank; ``mark`` decides
+    whether it is marked as such.
+    """
+
+    def __init__(self, mesh: dict, device: torch.device, mark: bool) -> None:
+        super().__init__()
+        self.conv = convolution.DistributedConv2D(
+            4,
+            4,
+            3,
+            device=device,
+            spatial_group=mesh["row"],
+            channel_group=mesh["col"],
+            padding=(1, 1),
+        )
+        self.head = torch.nn.Linear(4, 4, device=device)
+        for i, p in enumerate(self.parameters()):
+            p.data = _int_tensor(p.shape, 1000 + i, device, p.dtype)
+        if mark:
+            for p in self.head.parameters():
+                parallel.mark_replicated(p, mesh["model"])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        synced = parallel.synced_parameters(self.head)
+        return torch.func.functional_call(self.head, synced, (self.conv(x),))
+
+
+@pytest.mark.dist(8)
+@pytest.mark.parametrize("mark", [False, True])
+def test_unmarked_replica_is_reported(mark, device) -> None:
+    """An unmarked plain layer drifts over the model axes; only ``unmarked`` sees it.
+
+    The conv weight is sharded over ``col`` and must not be reported.
+    """
+    mesh = _mesh((2, 2, 2), device)
+    model = _ConvWithPlainHead(mesh, device, mark)
+    ddp = DistributedDataParallel(model, process_group=mesh["dp"])
+    opt = torch.optim.SGD(ddp.parameters(), lr=0.1)
+    x = _int_tensor((2, 2, 4, 4), 10 * dist.get_rank(), device)
+    ddp(x).pow(2).mean().backward()
+    opt.step()
+
+    debug.assert_replica_consistency(model, mesh)  # blind to the missing mark
+    if mark:
+        debug.assert_replica_consistency(model, mesh, unmarked=True)
+    else:
+        with pytest.raises(AssertionError, match="carry no replica mark") as err:
+            debug.assert_replica_consistency(model, mesh, unmarked=True)
+        assert "head.weight" in str(err.value)
+        assert "conv.weight" not in str(err.value)

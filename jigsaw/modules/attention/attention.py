@@ -7,7 +7,7 @@ import torch
 import torch.distributed as dist
 from einops import rearrange
 
-from jigsaw import comm, parallel
+from jigsaw import parallel
 from jigsaw.modules import linear
 
 from . import config as attention_config
@@ -552,21 +552,20 @@ class DistributedAttention(torch.nn.Module):
                 for p in norm.parameters():
                     parallel.mark_replicated(p, norm_sync_groups)
 
-        # Sync up spatial parameters: one coalesced broadcast per dtype rather
-        # than one blocking round trip per tensor (comm.broadcast_params_).
-        # head_concat's bias gets broadcast twice (DistributedXWT.__init__
-        # already does its own) -- harmless and left alone so DistributedXWT
-        # keeps broadcasting correctly for callers that don't also do this.
-        comm.broadcast_params_(self.parameters(), self.spatial_group, src=0)
         for p in self.parameters():
-            # A *duplicate* mark is not harmless the way the duplicate broadcast
-            # above is: two SUM all-reduces over the same group scale that
-            # gradient by ``spatial_group.size()``. DistributedXWT already marks
-            # its own ``bias`` over ``row_group``, which is exactly
-            # ``spatial_group`` here, so skip anything already claimed.
+            # A duplicate mark would sum that gradient twice, scaling it by
+            # ``spatial_group.size()``. DistributedXWT already marks its own
+            # ``bias`` over ``row_group``, which is exactly ``spatial_group``
+            # here, so skip anything already claimed.
             if parallel.replica_groups(p):
                 continue
             parallel.mark_replicated(p, self.spatial_group)
+        # Make every replica identical from the start, over each group it is
+        # marked with (the qk norms over the channel group too), so a plain
+        # DistributedDataParallel needs no extra broadcast: one coalesced
+        # broadcast per group and dtype. head_concat's bias gets broadcast twice
+        # (DistributedXWT.__init__ already does its own) -- harmless.
+        parallel.broadcast_replicas(self)
 
     def _resolve_ring_config(
         self,

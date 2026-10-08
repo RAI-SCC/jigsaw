@@ -30,6 +30,7 @@ import sys
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel
 from _common import setup, shard
 
 import jigsaw
@@ -117,10 +118,10 @@ def main(steps: int = 100, data_parallel: bool = False) -> list[float]:
 
     model = build_model(mesh, device)
     if data_parallel:
-        # DistributedDataParallel over "dp" only. The default group would also span
-        # the tiles of a copy, which jigsaw rejects: with sharded weights it would
-        # average different shards together.
-        model = jigsaw.parallel.wrap_ddp(model, mesh)
+        # Plain DistributedDataParallel over "dp" only. The default group would also
+        # span the tiles of a copy, which jigsaw rejects in the first forward: with
+        # sharded weights it would average different shards together.
+        model = DistributedDataParallel(model, process_group=mesh["dp"])
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     # Every rank averages over the *global* image, so all ranks log the same number.

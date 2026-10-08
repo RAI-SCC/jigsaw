@@ -36,6 +36,7 @@ VARIANTS = [
     "static_graph",
     "fp16_hook",
     "no_sync",
+    "device_mesh",
 ]
 EXACT_KINDS = {"xwt", "conv_halo", "conv_patchify"}
 
@@ -58,8 +59,12 @@ def _int_tensor(shape, seed: int, device, dtype=torch.float32) -> torch.Tensor:
     return torch.randint(-2, 3, shape, generator=g).to(device=device, dtype=dtype)
 
 
-def _build(kind: str, mesh: dict, device: torch.device):
-    """Return ``(model, make_input)`` for one module kind on ``mesh``."""
+def _build(kind: str, mesh: dict, device: torch.device, fill: bool = True):
+    """Return ``(model, make_input)`` for one module kind on ``mesh``.
+
+    With ``fill`` every parameter is overwritten with the same small integers on
+    every rank; without it the parameters keep their initialization.
+    """
     row, col = mesh["row"], mesh["col"]
     if kind == "xwt":
         summa = (row.size(), col.size()) in {(1, 1), (1, 2), (2, 2)}
@@ -76,6 +81,7 @@ def _build(kind: str, mesh: dict, device: torch.device):
         if not summa:
             # ``row`` is a pure replication axis here, as in attention.
             parallel.mark_replicated(model.weight, row)
+            dist.broadcast(model.weight.data, group_src=0, group=row)
         shape = (2, 4 // row.size() if summa else 4, 8 // col.size())
     elif kind == "conv_halo":
         model = convolution.DistributedConv2D(
@@ -104,7 +110,7 @@ def _build(kind: str, mesh: dict, device: torch.device):
     else:
         raise ValueError(kind)
 
-    for i, p in enumerate(model.parameters()):
+    for i, p in enumerate(model.parameters() if fill else ()):
         p.data = _int_tensor(p.shape, 1000 + i, device, p.dtype)
 
     def make_input(step: int) -> torch.Tensor:
@@ -117,9 +123,12 @@ def _build(kind: str, mesh: dict, device: torch.device):
     return model, make_input
 
 
-def _wrap(model: torch.nn.Module, variant: str, dp: dist.ProcessGroup):
+def _wrap(model: torch.nn.Module, variant: str, dp: dist.ProcessGroup, mesh=None):
     if variant == "no_ddp":
         return model
+    if variant == "device_mesh":
+        # A 1-D slice of the n-d DeviceMesh instead of ``process_group=``.
+        return DistributedDataParallel(model, device_mesh=mesh.device_mesh["dp"])
     kwargs = {
         "bucket_view": {"gradient_as_bucket_view": True},
         "find_unused": {"find_unused_parameters": True},
@@ -197,7 +206,7 @@ def test_ddp_composition(shape, kind, variant, device, monkeypatch) -> None:
     local = _local_grads(model, make_input, n_micro, monkeypatch)
     expected = _expected(model, local, dp, ddp=variant != "no_ddp")
 
-    wrapped = _wrap(model, variant, dp)
+    wrapped = _wrap(model, variant, dp, mesh)
     _step(wrapped, make_input, n_micro, no_sync=variant == "no_sync")
 
     for (name, p), e in zip(model.named_parameters(), expected):

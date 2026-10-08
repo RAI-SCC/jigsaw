@@ -29,8 +29,12 @@ def _cases():
             )
 
 
-@pytest.mark.parametrize("shape, kind", list(_cases()))
-def test_replicas_stay_identical(shape, kind, device) -> None:
+def train(shape, kind, device, steps: int = STEPS) -> list:
+    """Train through ``wrap_ddp`` and check the replicas after every step.
+
+    The global check runs first, so a divergence raises on every rank at the same
+    step instead of on some ranks only. Returns the initial parameters.
+    """
     mesh = _mesh(shape, device)
     model, make_input = _build(kind, mesh, device)
     with torch.no_grad():
@@ -40,17 +44,21 @@ def test_replicas_stay_identical(shape, kind, device) -> None:
     opt = torch.optim.AdamW(ddp.parameters(), lr=1e-2)
     before = [p.detach().clone() for p in model.parameters()]
 
-    for step in range(STEPS):
+    for step in range(steps):
         opt.zero_grad(set_to_none=True)
         loss = ddp(make_input(step)).float().pow(2).mean()
         loss.backward()
         opt.step()
+        debug.assert_replica_consistency(model, mesh)
         for name, p in model.named_parameters():
             for grp in parallel.replica_groups(p):
                 _assert_identical_over(p.detach(), grp, f"step {step}: {name}")
             _assert_identical_over(p.detach(), mesh["dp"], f"step {step}: {name}")
-        debug.assert_replica_consistency(model, mesh)
+    return [(name, p, b) for (name, p), b in zip(model.named_parameters(), before)]
 
-    for (name, p), b in zip(model.named_parameters(), before):
+
+@pytest.mark.parametrize("shape, kind", list(_cases()))
+def test_replicas_stay_identical(shape, kind, device) -> None:
+    for name, p, b in train(shape, kind, device):
         assert torch.isfinite(p).all(), name
         assert not torch.equal(p, b), f"{name} never moved"

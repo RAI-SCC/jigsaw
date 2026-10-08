@@ -190,24 +190,36 @@ There are two options
 
 ### Data parallelism (DDP)
 
-Wrap the model in `DistributedDataParallel` over the `dp` axis only, with `jigsaw.parallel.wrap_ddp`:
+Use plain `DistributedDataParallel` over the `dp` axis:
 
 ```python
+from torch.nn.parallel import DistributedDataParallel
+
 mesh = jigsaw.make_process_mesh(
     {"dp": -1, "row": 2, "col": 2}, model_parallel_axes=("row", "col")
 )
 model = build_model(mesh)  # jigsaw layers on mesh["row"] / mesh["col"]
-model = jigsaw.parallel.wrap_ddp(model, mesh)  # DDP(model, process_group=mesh["dp"])
+model = DistributedDataParallel(model, process_group=mesh["dp"])
 ```
 
-`wrap_ddp` first makes the replicated parameters identical inside each model copy, then
-lets DDP broadcast over `dp`. Two mistakes would otherwise train without an error and give
-a wrong model, so jigsaw raises on them, on every rank, in `wrap_ddp` or in the first
-forward pass of a `DistributedDataParallel` you build yourself:
+Everything after that is ordinary DDP: `no_sync()`, `gradient_as_bucket_view`,
+`find_unused_parameters`, `static_graph` and your own comm hook (fp16 compression, say) all
+work. `make_process_mesh` also returns the n-d `DeviceMesh` it builds, so
+`DistributedDataParallel(model, device_mesh=mesh.device_mesh["dp"])` works too; it goes
+through DDP's DTensor code path, so `process_group=` is the default we recommend.
+
+Naming the `dp` axis is the one thing you have to do. Two mistakes would otherwise train
+without an error and give a wrong model, so jigsaw raises on them, on every rank, in the
+first forward pass:
 
 - **DDP over the default group** (`DistributedDataParallel(model)`): on a model-parallel
   mesh it averages sharded parameters with other shards.
-- **Replicas that differ** before wrapping: DDP only broadcasts over its own group.
+- **Replicas that differ** at the start: DDP only broadcasts over its own group. jigsaw
+  modules make their replicas identical when they are built; for parameters you mark
+  yourself (below), call `jigsaw.parallel.broadcast_replicas(model)` before wrapping.
+
+`jigsaw.parallel.wrap_ddp(model, mesh)` does both steps, `broadcast_replicas` and
+`DistributedDataParallel(model, process_group=mesh["dp"])`, and runs the check right away.
 
 Parameters that are replicated over model-parallel ranks (biases over `row`, convolution
 weights over the spatial axes, ...) have their gradients summed over those ranks inside the
@@ -220,7 +232,10 @@ accumulation.
 
 To find the step at which replicas drift apart, call
 `jigsaw.debug.assert_replica_consistency(model, mesh)` after `optimizer.step()`. It is a
-collective and raises on every rank, naming the parameters that differ.
+collective and raises on every rank, naming the parameters that differ. It only knows the
+groups a mark names, so a plain layer you forgot to mark is invisible to it; pass
+`unmarked=True` to also compare every unmarked parameter of a non-jigsaw module over every
+mesh axis.
 
 ### Distributed logging
 
