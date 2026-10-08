@@ -28,6 +28,19 @@ def _param(device: torch.device, dtype: torch.dtype = torch.float32):
     return torch.nn.Parameter(torch.zeros(3, device=device, dtype=dtype))
 
 
+_MESH_CACHE: dict = {}
+
+
+def _mesh_2x2(device: torch.device) -> dict:
+    # Every mesh opens new communicators and nothing frees them, so the
+    # 4-rank GPU suite runs out of memory if each test builds its own.
+    if device.type not in _MESH_CACHE:
+        _MESH_CACHE[device.type] = make_process_mesh(
+            {"a": 2, "b": 2}, device_type=device.type
+        )
+    return _MESH_CACHE[device.type]
+
+
 def _loss(t: torch.Tensor) -> torch.Tensor:
     # d loss / d t == (rank + 1) * [1, 2, 3]
     return (t * BASE.to(t.device, t.dtype) * _scale()).sum()
@@ -56,6 +69,36 @@ class TestMark:
         with pytest.raises(RuntimeError, match="already marked"):
             parallel.mark_replicated(p, dist.group.WORLD)
 
+    @pytest.mark.dist(4)
+    def test_extend_appends_new_groups(self, device):
+        mesh = _mesh_2x2(device)
+        p = _param(device)
+        parallel.mark_replicated(p, mesh["a"])
+        parallel.mark_replicated(p, mesh["b"], extend=True)
+        assert parallel.replica_groups(p) == (mesh["a"], mesh["b"])
+        (q,) = parallel.sync_grad(p)
+        _loss(q).backward()
+        assert torch.equal(p.grad.cpu(), BASE * _world_sum())
+
+    def test_extend_drops_groups_with_the_same_ranks(self, device):
+        if dist.get_world_size() == 1:
+            pytest.skip("a size-1 group is never marked")
+        p = _param(device)
+        parallel.mark_replicated(p, dist.group.WORLD)
+        same = dist.new_group(list(range(dist.get_world_size())))
+        parallel.mark_replicated(p, [same, dist.group.WORLD], extend=True)
+        assert parallel.replica_groups(p) == (dist.group.WORLD,)
+        (q,) = parallel.sync_grad(p)
+        _loss(q).backward()
+        assert torch.equal(p.grad.cpu(), BASE * _world_sum())
+
+    def test_extend_marks_an_unmarked_parameter(self, device):
+        if dist.get_world_size() == 1:
+            pytest.skip("a size-1 group is never marked")
+        p = _param(device)
+        parallel.mark_replicated(p, dist.group.WORLD, extend=True)
+        assert parallel.replica_groups(p) == (dist.group.WORLD,)
+
     def test_size_one_groups_are_dropped(self, device):
         p = _param(device)
         parallel.mark_replicated(p, [None, dist.new_group([dist.get_rank()])])
@@ -76,7 +119,7 @@ class TestSyncGrad:
 
     @pytest.mark.dist(4)
     def test_group_sequence_sums_over_product(self, device):
-        mesh = make_process_mesh({"a": 2, "b": 2}, device_type=device.type)
+        mesh = _mesh_2x2(device)
         p = _param(device)
         parallel.mark_replicated(p, [mesh["a"], mesh["b"]])
         (q,) = parallel.sync_grad(p)
@@ -85,7 +128,7 @@ class TestSyncGrad:
 
     @pytest.mark.dist(4)
     def test_sums_only_over_the_marked_group(self, device):
-        mesh = make_process_mesh({"a": 2, "b": 2}, device_type=device.type)
+        mesh = _mesh_2x2(device)
         p = _param(device)
         parallel.mark_replicated(p, mesh["b"])
         (q,) = parallel.sync_grad(p)

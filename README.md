@@ -228,7 +228,9 @@ so it composes with DDP, `no_sync()` and gradient accumulation. To replicate the
 your own plain PyTorch layers, mark them with `jigsaw.parallel.mark_replicated(p, group)` and
 run them through `jigsaw.parallel.synced_parameters` (see `examples/swin.py`). Don't register
 `jigsaw.hooks.make_grad_sync_hook` on them for this: it races DDP and breaks gradient
-accumulation.
+accumulation. To add a replica axis of your own (an ensemble axis, say) to parameters that
+jigsaw modules already mark, pass `extend=True`; a group over the same ranks as one already in
+the mark is not added again.
 
 #### Joint comm hook (faster gradient sync for replicated parameters)
 

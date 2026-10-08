@@ -72,6 +72,7 @@ def _as_groups(
 def mark_replicated(
     param: torch.Tensor,
     groups: "dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]]",
+    extend: bool = False,
 ) -> None:
     """Mark a parameter as replicated over ``groups``.
 
@@ -85,21 +86,33 @@ def mark_replicated(
         Parameter to mark.
     groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None]
         Process group(s) the parameter is replicated over.
+    extend : bool
+        Append ``groups`` to an existing mark instead of raising, e.g. to add
+        an ensemble axis to a parameter a jigsaw module already marks over its
+        spatial group. A group spanning the same ranks as one already in the
+        mark is dropped, so the gradient is still summed over it only once.
 
     Raises
     ------
     RuntimeError
-        If ``param`` is already marked. A second SUM over the same group would
-        scale its gradient by the group size.
+        If ``param`` is already marked and ``extend`` is false. A second SUM
+        over the same group would scale its gradient by the group size.
     """
-    if replica_groups(param):
+    old = replica_groups(param)
+    if old and not extend:
         raise RuntimeError(
             "parameter is already marked replicated; a second mark would sum "
-            "its gradient twice"
+            "its gradient twice. Pass extend=True to add groups to the mark."
         )
-    groups = _as_groups(groups)
-    if groups:
-        setattr(param, _ATTR, groups)
+    seen = {tuple(dist.get_process_group_ranks(g)) for g in old}
+    new = list(old)
+    for g in _as_groups(groups):
+        ranks = tuple(dist.get_process_group_ranks(g))
+        if ranks not in seen:
+            seen.add(ranks)
+            new.append(g)
+    if new:
+        setattr(param, _ATTR, tuple(new))
 
 
 def replica_groups(param: Optional[torch.Tensor]) -> Groups:
