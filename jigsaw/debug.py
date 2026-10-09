@@ -6,6 +6,8 @@ import torch
 import torch.distributed as dist
 
 from . import parallel
+from ._core.comm import all_reduce_max
+from .parallel._replicas import replica_divergence
 
 __all__ = ["assert_replica_consistency", "count_parameters"]
 
@@ -67,10 +69,10 @@ def assert_replica_consistency(
         elif dp is not None:
             groups.append(dp)
         entries.append((name, p, groups, missing_mark))
-    div = parallel.replica_divergence([(p, g) for _, p, g, _ in entries])
+    div = replica_divergence([(p, g) for _, p, g, _ in entries])
     if not entries:
         div = torch.zeros(1, dtype=torch.float64, device=_device(mesh))
-    parallel.all_reduce_max(div, mesh.values())
+    all_reduce_max(div, mesh.values())
     bad = [
         (f"{name} ({d:.3g})", missing_mark)
         for (name, _, _, missing_mark), d in zip(entries, div.tolist())

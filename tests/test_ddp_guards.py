@@ -12,7 +12,10 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
 from jigsaw import debug, parallel
+from jigsaw._core.comm import all_reduce_max
 from jigsaw.modules import convolution, normalization
+from jigsaw.parallel import _ddp
+from jigsaw.parallel._replicas import replica_divergence
 from tests.test_ddp import KINDS, _build, _expected, _int_tensor, _local_grads, _mesh
 
 # dp=2 over a 2x1 model: replicated conv weights over ``row``
@@ -47,7 +50,7 @@ def test_ddp_on_dp_group_passes(device) -> None:
     model, make_input = _build("conv_halo", mesh, device)
     ddp = DistributedDataParallel(model, process_group=mesh["dp"])
     ddp(make_input(0)).sum().backward()
-    assert getattr(ddp, parallel._CHECKED)
+    assert getattr(ddp, _ddp._CHECKED)
 
 
 @pytest.mark.dist(4)
@@ -68,8 +71,8 @@ def test_modules_start_with_identical_replicas(kind, device) -> None:
     model, make_input = _build(kind, mesh, device, fill=False)
     assert any(parallel.replica_groups(p) for p in model.parameters())
     params = [(p, parallel.replica_groups(p)) for p in model.parameters()]
-    div = parallel.replica_divergence(params)
-    parallel.all_reduce_max(div, mesh.values())
+    div = replica_divergence(params)
+    all_reduce_max(div, mesh.values())
     names = [n for n, _ in model.named_parameters()]
     assert not div.any(), [n for n, d in zip(names, div.tolist()) if d > 0]
     DistributedDataParallel(model, process_group=mesh["dp"])(make_input(0))

@@ -416,3 +416,9 @@ def broadcast_params_(
             bucket, _unflatten_dense_tensors(flat, [p.data for p in bucket])
         ):
             p.data.copy_(synced)
+
+
+def all_reduce_max(t: torch.Tensor, groups: Iterable[dist.ProcessGroup]) -> None:
+    """All-reduce ``t`` with MAX over each group in turn, in place."""
+    for g in groups:
+        dist.all_reduce(t, op=dist.ReduceOp.MAX, group=g)

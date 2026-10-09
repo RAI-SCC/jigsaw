@@ -1,6 +1,6 @@
 """The DDP tests notice when the replica sync is missing or misscaled.
 
-``JIGSAW_DISABLE_GRAD_SYNC=1`` (:data:`jigsaw.parallel.SYNC_DISABLED`) turns
+``JIGSAW_DISABLE_GRAD_SYNC=1`` (``jigsaw.parallel._sync._SYNC_DISABLED``) turns
 :func:`jigsaw.parallel.sync_grad` into a pass-through: replicated parameters keep
 their local gradient share. Here the switch is flipped in-process and the
 gradient check (``test_ddp``), the multi-step identity check
@@ -24,6 +24,7 @@ from tests.test_ddp import (
     KINDS,
     MESHES,
     _build,
+    _disable_sync,
     _expected,
     _local_grads,
     _mesh,
@@ -36,7 +37,7 @@ from tests.test_examples import _load, _tile
 
 @pytest.fixture
 def sync_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(parallel, "SYNC_DISABLED", True)
+    _disable_sync(monkeypatch)
 
 
 def _cases(shapes):
@@ -61,7 +62,7 @@ def test_gradient_check_fails(shape, kind, device, monkeypatch) -> None:
     model, make_input = _build(kind, mesh, device)
     local = _local_grads(model, make_input, 1, monkeypatch)
     expected = _expected(model, local, mesh["dp"], ddp=True)
-    monkeypatch.setattr(parallel, "SYNC_DISABLED", True)
+    _disable_sync(monkeypatch)
     _step(_wrap(model, "ddp", mesh["dp"]), make_input, 1)
     ok = all(
         torch.allclose(p.grad, e, rtol=1e-5, atol=1e-6)
