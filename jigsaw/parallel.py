@@ -39,6 +39,7 @@ from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
+import torch.distributed._functional_collectives as fcol
 from torch.nn.parallel import DistributedDataParallel
 
 # parameter attribute holding its replica groups
@@ -186,8 +187,9 @@ def sync_grad(*tensors: Optional[torch.Tensor]) -> tuple[Optional[torch.Tensor],
     Unmarked tensors, ``None`` and tensors not requiring grad pass through
     unchanged, as does everything when grad mode is off. Marked tensors are
     bucketed by ``(groups, dtype)``, one flat collective per bucket and group.
-    Inside the forward of a DDP with :func:`register_joint_comm_hook`, the
-    parameters DDP reduces are only scaled; the hook does the sum.
+    Inside the forward of a DDP with :func:`register_joint_comm_hook` (anywhere,
+    under DDP's Python reducer), the parameters DDP reduces are only scaled;
+    the hook does the sum.
 
     Parameters
     ----------
@@ -205,19 +207,19 @@ def sync_grad(*tensors: Optional[torch.Tensor]) -> tuple[Optional[torch.Tensor],
         return tuple(out)
     # Joint-hook state of the DDP whose forward is running, if any.
     joint = _active_joint_state()
-    # (groups, dtype, scale only) -> indices
-    buckets: dict[tuple[Groups, torch.dtype, bool], list[int]] = {}
+    # (groups, dtype, joint state if only scaled) -> indices
+    buckets: "dict[tuple[Groups, torch.dtype, Optional[JointCommHookState]], list[int]]"
+    buckets = {}
     for i, t in enumerate(tensors):
         groups = replica_groups(t)
         if groups and t is not None and t.requires_grad:
             # Parameters the joint hook reduces only need scaling here.
-            scaled = joint is not None and joint.reduces(t)
-            buckets.setdefault((groups, t.dtype, scaled), []).append(i)
-    for (groups, _, scaled), idx in buckets.items():
+            state = _joint_state_of(t, joint)
+            buckets.setdefault((groups, t.dtype, state), []).append(i)
+    for (groups, _, state), idx in buckets.items():
         ts = (tensors[i] for i in idx)
-        if scaled:
-            assert joint is not None
-            synced = _ScaleGrad.apply(joint.factor(groups), *ts)
+        if state is not None:
+            synced = _ScaleGrad.apply(state.factor(groups), *ts)
         else:
             synced = _SyncGrad.apply(groups, *ts)
         # Scatter the synced views back to their input positions.
@@ -357,6 +359,10 @@ def wrap_ddp(
 
 # DDP attribute holding its JointCommHookState
 _JOINT = "_jigsaw_joint_hook_state"
+# Under DDP's Python reducer, parameter attributes holding the JointCommHookState
+# that reduces it and the group it is averaged over
+_JOINT_PARAM = "_jigsaw_joint_state"
+_JOINT_PARAM_GROUP = "_jigsaw_joint_hook_group"
 # (id(WORLD), partition as sorted rank tuples) -> this rank's group in it
 _JOINT_GROUPS: dict[tuple[int, tuple[tuple[int, ...], ...]], dist.ProcessGroup] = {}
 
@@ -373,7 +379,9 @@ class JointCommHookState:
     and may create process groups; joint groups are cached). It also switches
     :func:`sync_grad` to scaling inside ``ddp``'s forward, so the hook must then
     be registered, or :func:`sync_grad` raises. :func:`register_joint_comm_hook`
-    does both.
+    does both. Under DDP's Python reducer (compiled autograd), which reduces
+    after every backward, :func:`sync_grad` scales the reduced parameters
+    wherever they are used.
 
     Parameters
     ----------
@@ -383,16 +391,11 @@ class JointCommHookState:
     Raises
     ------
     RuntimeError
-        If ``ddp`` uses the Python reducer (compiled autograd), whose forward
-        :func:`sync_grad` cannot detect, or if the ranks disagree on the model's
-        replica groups.
+        If the ranks disagree on the model's replica groups.
     """
 
     def __init__(self, ddp: DistributedDataParallel) -> None:
-        if getattr(ddp, "_use_python_reducer", False):
-            raise RuntimeError(
-                "the joint comm hook does not support DDP's Python reducer"
-            )
+        self.python_reducer: bool = getattr(ddp, "_use_python_reducer", False)
         self.ddp = ddp
         self.dp: dist.ProcessGroup = ddp.process_group
         # The parameters that end up in DDP's buckets.
@@ -440,6 +443,10 @@ class JointCommHookState:
             id(p): self._group.get(replica_groups(p), self.dp) for p in reduced
         }
         setattr(ddp, _JOINT, self)
+        if self.python_reducer:
+            for p in reduced:
+                setattr(p, _JOINT_PARAM, self)
+                setattr(p, _JOINT_PARAM_GROUP, self._of[id(p)])
 
     def reduces(self, param: torch.Tensor) -> bool:
         """Return whether DDP's buckets, hence the hook, reduce ``param``."""
@@ -505,18 +512,25 @@ def joint_comm_hook(
     Gradient accumulation with ``no_sync`` stays correct, and the hook works
     under ``fp16_compress_wrapper`` / ``bf16_compress_wrapper``.
 
+    DDP's Python reducer (compiled autograd) instead calls the hook once per
+    parameter with ``(grad, param)``, reduces ``grad`` in place and ignores the
+    return value.
+
     Parameters
     ----------
     state : JointCommHookState
         Built for the DDP this hook is registered on.
-    bucket : dist.GradBucket
-        Bucket of flattened gradients.
+    bucket : dist.GradBucket | tuple[torch.Tensor, torch.Tensor]
+        Bucket of flattened gradients, or ``(grad, param)``.
 
     Returns
     -------
     torch.futures.Future[torch.Tensor]
-        Resolves to the reduced bucket buffer.
+        Resolves to the reduced bucket buffer; ``None`` for ``(grad, param)``.
     """
+    if isinstance(bucket, tuple):
+        _reduce_param_grad(*bucket)
+        return None  # type: ignore[return-value]
     buf = bucket.buffer()
     # Parameters lie back to back in the buffer; merge neighbours with the same
     # joint group into (group, start, end) runs.
@@ -552,6 +566,20 @@ def joint_comm_hook(
     return last.then(join)
 
 
+def _reduce_param_grad(grad: torch.Tensor, param: torch.Tensor) -> None:
+    """Average ``grad`` over ``param``'s joint group in place (Python reducer)."""
+    group = getattr(param, _JOINT_PARAM_GROUP)
+    if replica_groups(param):
+        # Inductor's DDP fusion merges every ``div -> all_reduce -> copy_`` of
+        # the backward into one all-reduce over the last one's group. The joint
+        # groups differ per parameter, so pre-scale with ``mul`` to stay out of it.
+        grad_in = grad * (1.0 / group.size())
+    else:
+        # Over DDP's own group, as DDP does it, so these still fuse.
+        grad_in = grad / group.size()
+    grad.copy_(fcol.all_reduce(grad_in, "sum", group))
+
+
 def register_joint_comm_hook(
     ddp: DistributedDataParallel,
     wrapper: Optional[Callable[[Callable], Callable]] = None,
@@ -570,12 +598,23 @@ def register_joint_comm_hook(
     wrapper : Callable, optional
         Wraps the hook before registering, e.g.
         ``torch.distributed.algorithms.ddp_comm_hooks.default_hooks.fp16_compress_wrapper``.
+        Not with DDP's Python reducer, which has no buckets to compress.
 
     Returns
     -------
     JointCommHookState
         The hook's state.
+
+    Raises
+    ------
+    ValueError
+        If ``wrapper`` is given and ``ddp`` uses the Python reducer.
     """
+    if wrapper is not None and getattr(ddp, "_use_python_reducer", False):
+        raise ValueError(
+            "comm hook wrappers need DDP's gradient buckets, which DDP's Python "
+            "reducer (compiled autograd) does not have"
+        )
     state = JointCommHookState(ddp)
     hook = joint_comm_hook if wrapper is None else wrapper(joint_comm_hook)
     ddp.register_comm_hook(state, hook)
@@ -755,11 +794,31 @@ def _active_joint_state() -> Optional[JointCommHookState]:
     state = getattr(ddp, _JOINT, None) if ddp is not None else None
     if not isinstance(state, JointCommHookState):
         return None
+    _require_hook(state)
+    return state
+
+
+def _joint_state_of(
+    param: torch.Tensor, active: Optional[JointCommHookState]
+) -> Optional[JointCommHookState]:
+    """Return the joint-hook state whose hook reduces ``param``, if any."""
+    if active is not None:
+        return active if active.reduces(param) else None
+    # DDP's Python reducer runs the forward outside ``_inside_ddp_forward``, so
+    # there is no active DDP; it reduces each of its parameters in a
+    # post-accumulate hook after any backward instead, which the mark follows.
+    state = getattr(param, _JOINT_PARAM, None)
+    if state is not None:
+        _require_hook(state)
+    return state
+
+
+def _require_hook(state: JointCommHookState) -> None:
+    """Raise unless ``joint_comm_hook`` is registered with ``state``."""
     # A state without its hook would make sync_grad only scale, and nothing sum.
-    if not any(s is state for _, s in getattr(ddp, "_comm_hooks", ())):
+    if not any(s is state for _, s in getattr(state.ddp, "_comm_hooks", ())):
         raise RuntimeError(
             "a JointCommHookState was built for this DDP but joint_comm_hook is not "
             "registered on it; without the hook the replicated gradients are never "
             "summed. Use jigsaw.parallel.register_joint_comm_hook(ddp)."
         )
-    return state
