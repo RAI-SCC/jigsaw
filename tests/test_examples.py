@@ -21,6 +21,7 @@ The launcher side (``torchrun --nproc-per-node 4 examples/x.py``) is covered by
 """
 
 import importlib.util
+import math
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -78,11 +79,34 @@ def _load(name: str) -> ModuleType:
     return module
 
 
+_MESHES: dict = {}
+_real_make_process_mesh = jigsaw.make_process_mesh
+
+
+def _mesh(axes: dict, model_parallel_axes, device: torch.device):
+    """A cached mesh: every new one costs NCCL communicators that are never freed."""
+    known = math.prod(s for s in axes.values() if s != -1)
+    axes = {
+        k: dist.get_world_size() // known if s == -1 else s for k, s in axes.items()
+    }
+    key = (tuple(axes.items()), tuple(model_parallel_axes or ()), device.type)
+    if key not in _MESHES:
+        _MESHES[key] = _real_make_process_mesh(
+            axes, device_type=device.type, model_parallel_axes=model_parallel_axes
+        )
+    return _MESHES[key]
+
+
 @pytest.fixture
 def example(
     monkeypatch: pytest.MonkeyPatch, device: torch.device
 ) -> Callable[[str], ModuleType]:
-    """Load a tutorial whose ``setup()`` reuses the test session's process group."""
+    """Load a tutorial on the test session's process group, with cached meshes."""
+
+    def make_process_mesh(axes, device_type=None, model_parallel_axes=None):
+        return _mesh(axes, model_parallel_axes, device)
+
+    monkeypatch.setattr(jigsaw, "make_process_mesh", make_process_mesh)
 
     def load(name: str) -> ModuleType:
         module = _load(name)

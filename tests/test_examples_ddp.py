@@ -33,30 +33,20 @@ import jigsaw
 from jigsaw import debug, parallel
 from jigsaw.utils import set_all_seeds
 from tests.parity import assert_close, no_tf32
-from tests.test_examples import REL, REL_FP16_ATTENTION, _agree, _load, _tile
+from tests.test_examples import (
+    REL,
+    REL_FP16_ATTENTION,
+    _agree,
+    _load,
+    _mesh,
+    _tile,
+)
 
 pytestmark = [pytest.mark.dist_required, pytest.mark.dist(8)]
 
 STEPS = 5
 BATCH = 4  # global, split over the two copies
 LR = 0.05
-
-_MESHES: dict = {}
-_real_make_process_mesh = jigsaw.make_process_mesh
-
-
-def _mesh(axes: dict, model_parallel_axes, device: torch.device):
-    """A cached mesh: every new one costs NCCL communicators that are never freed."""
-    known = math.prod(s for s in axes.values() if s != -1)
-    axes = {
-        k: dist.get_world_size() // known if s == -1 else s for k, s in axes.items()
-    }
-    key = (tuple(axes.items()), tuple(model_parallel_axes or ()), device.type)
-    if key not in _MESHES:
-        _MESHES[key] = _real_make_process_mesh(
-            axes, device_type=device.type, model_parallel_axes=model_parallel_axes
-        )
-    return _MESHES[key]
 
 
 @pytest.fixture
