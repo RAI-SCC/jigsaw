@@ -190,85 +190,30 @@ There are two options
 
 ### Data parallelism (DDP)
 
-The full guide, including when to use the joint comm hook instead of the default in-graph
-sync, is in [docs/ddp.md](docs/ddp.md).
-
-Use plain `DistributedDataParallel` over the `dp` axis:
+Add a `dp` axis to the mesh and wrap the model in DDP over it. Each `row` x `col` group holds
+one model copy; DDP averages gradients across the copies.
 
 ```python
-from torch.nn.parallel import DistributedDataParallel
-
+# 8 ranks: 2 copies (dp) of a model split 2x2 over row x col
 mesh = jigsaw.make_process_mesh(
     {"dp": -1, "row": 2, "col": 2}, model_parallel_axes=("row", "col")
 )
 model = build_model(mesh)  # jigsaw layers on mesh["row"] / mesh["col"]
-model = DistributedDataParallel(model, process_group=mesh["dp"])
+model = jigsaw.parallel.wrap_ddp(model, mesh)  # DDP over mesh["dp"], checks the replicas match
+# faster sync of replicated grads: wrap_ddp(model, mesh, joint_hook=True)
+
+for x, y in loader:  # sampler keyed by mesh["dp"].rank(); each rank loads its shard
+    loss = loss_fn(model(x), y)
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
 ```
 
-Everything after that is ordinary DDP: `no_sync()`, `gradient_as_bucket_view`,
-`find_unused_parameters`, `static_graph` and your own comm hook (fp16 compression, say) all
-work. `make_process_mesh` also returns the n-d `DeviceMesh` it builds, so
-`DistributedDataParallel(model, device_mesh=mesh.device_mesh["dp"])` works too; it goes
-through DDP's DTensor code path, so `process_group=` is the default we recommend.
-
-Naming the `dp` axis is the one thing you have to do. Two mistakes would otherwise train
-without an error and give a wrong model, so jigsaw raises on them, on every rank, in the
-first forward pass:
-
-- **DDP over the default group** (`DistributedDataParallel(model)`): on a model-parallel
-  mesh it averages sharded parameters with other shards.
-- **Replicas that differ** at the start: DDP only broadcasts over its own group. jigsaw
-  modules make their replicas identical when they are built; for parameters you mark
-  yourself (below), call `jigsaw.parallel.broadcast_replicas(model)` before wrapping.
-
-`jigsaw.parallel.wrap_ddp(model, mesh)` does both steps, `broadcast_replicas` and
-`DistributedDataParallel(model, process_group=mesh["dp"])`, and runs the check right away.
-
-Parameters that are replicated over model-parallel ranks (biases over `row`, convolution
-weights over the spatial axes, ...) have their gradients summed over those ranks inside the
-backward pass (`jigsaw.parallel`). That sum is done before DDP's reducer reads the gradient,
-so it composes with DDP, `no_sync()` and gradient accumulation. To replicate the parameters of
-your own plain PyTorch layers, mark them with `jigsaw.parallel.mark_replicated(p, group)` and
-run them through `jigsaw.parallel.synced_parameters` (see `examples/swin.py`). Don't register
-`jigsaw.hooks.make_grad_sync_hook` on them for this: it races DDP and breaks gradient
-accumulation. To add a replica axis of your own (an ensemble axis, say) to parameters that
-jigsaw modules already mark, pass `extend=True`; a group over the same ranks as one already in
-the mark is not added again.
-
-#### Joint comm hook (faster gradient sync for replicated parameters)
-
-With plain DDP a replicated gradient is reduced twice: summed over its model-parallel
-replicas inside the backward pass, then averaged over `dp` by DDP. Since every replica then
-holds the same gradient, the `dp` all-reduce sends it over the inter-node links once per
-replica. The joint comm hook replaces both with a single DDP comm hook that averages each
-gradient over the *joint* group (`dp` x its replica groups) in DDP's buckets, overlapped with
-the backward pass:
-
-```python
-model = DistributedDataParallel(model, process_group=mesh["dp"])
-jigsaw.parallel.register_joint_comm_hook(model)  # collective: call on every rank
-
-# with fp16 (or bf16) compression on top:
-from torch.distributed.algorithms.ddp_comm_hooks import default_hooks
-jigsaw.parallel.register_joint_comm_hook(model, default_hooks.fp16_compress_wrapper)
-```
-
-or `jigsaw.parallel.wrap_ddp(model, mesh, joint_hook=True)`. Gradients are the same as
-without it, and `no_sync()`, accumulating without `no_sync()`, `gradient_as_bucket_view` and
-`static_graph` all keep working. The hook takes DDP's comm-hook slot, so it cannot be combined
-with PowerSGD. It creates one extra process group per distinct set of replica groups. The gain
-grows with the share of parameters that are replicated: on 8 A100s over two nodes (`dp=2`,
-2x2 spatial split), a 14M-parameter conv net trained about 8% faster.
-
-`examples/vit.py --ddp`, `examples/swin.py --ddp` and `examples/ddp.py` show all of this in
-running code; [`docs/ddp.md`](docs/ddp.md) has the details.
-
-To find the step at which replicas drift apart, call
-`jigsaw.debug.assert_replica_consistency(model, mesh)` after `optimizer.step()`. It is a
-collective and raises on every rank, naming the parameters that differ. It only knows the
-groups a mark names, so a plain layer you forgot to mark is invisible to it; pass
-`unmarked=True` to also compare every unmarked parameter of a non-jigsaw module over every
-mesh axis.
+After wrapping, it's plain DDP: `no_sync()`, gradient accumulation and comm hooks all work.
+Using `DistributedDataParallel(model, process_group=mesh["dp"])` is also correct. 
+[docs/ddp.md](docs/ddp.md) has the details including joint comm hook (faster), plain PyTorch layers inside a jigsaw model, 
+and debugging replica drift.
+Running examples: `examples/ddp.py`, `examples/vit.py --ddp` and `examples/swin.py --ddp`.
 
 ### Distributed logging
 

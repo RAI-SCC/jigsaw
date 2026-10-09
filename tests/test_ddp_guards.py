@@ -11,7 +11,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
-from jigsaw import debug, hooks, parallel
+from jigsaw import debug, parallel
 from jigsaw.modules import convolution, normalization
 from tests.test_ddp import KINDS, _build, _expected, _int_tensor, _local_grads, _mesh
 
@@ -102,17 +102,6 @@ def test_wrap_ddp_rejects_process_group(device) -> None:
     model, _ = _build("conv_halo", mesh, device)
     with pytest.raises(TypeError):
         parallel.wrap_ddp(model, mesh, process_group=mesh["dp"])
-
-
-@pytest.mark.dist(4)
-def test_hook_synced_parameter_warns(device) -> None:
-    mesh = _mesh(SHAPE, device)
-    model, _ = _build("conv_halo", mesh, device)
-    model.bias.register_post_accumulate_grad_hook(
-        hooks.make_grad_sync_hook(mesh["row"])
-    )
-    with pytest.warns(UserWarning, match="make_grad_sync_hook"):
-        parallel.wrap_ddp(model, mesh)
 
 
 @pytest.mark.dist(8)
