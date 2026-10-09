@@ -12,7 +12,7 @@ from typing import Optional, cast
 import torch
 import torch.distributed as dist
 
-from jigsaw.comm import get_empty
+from jigsaw._core.comm import get_empty
 from jigsaw.modules.attention.config import (
     RingAttentionConfig,
     SaveScope,

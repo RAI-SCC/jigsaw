@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
-from jigsaw.autocast import cast_to_autocast_dtype
+from jigsaw._core.autocast import cast_to_autocast_dtype
 
 from .config import LinearConfig
 

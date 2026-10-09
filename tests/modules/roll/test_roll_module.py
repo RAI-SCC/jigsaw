@@ -7,7 +7,7 @@ no communication, so these run in the single-process session and on every rank.
 import pytest
 import torch
 
-from jigsaw import comm
+from jigsaw._core import comm
 from jigsaw.modules import roll
 from jigsaw.modules.roll import distributed_roll as dist_roll
 from jigsaw.modules.roll.config import RollConfig

@@ -5,7 +5,7 @@ from typing import Any, Optional, Protocol, cast
 import torch
 import torch.distributed as dist
 
-from jigsaw.autocast import promote_to_fp32_under_autocast
+from jigsaw._core.autocast import promote_to_fp32_under_autocast
 
 
 class SoftMaxCtx(Protocol):
