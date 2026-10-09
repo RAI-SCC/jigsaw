@@ -190,6 +190,9 @@ There are two options
 
 ### Data parallelism (DDP)
 
+The full guide, including when to use the joint comm hook instead of the default in-graph
+sync, is in [docs/ddp.md](docs/ddp.md).
+
 Use plain `DistributedDataParallel` over the `dp` axis:
 
 ```python

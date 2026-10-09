@@ -1,42 +1,35 @@
 """In-graph gradient synchronization of replicated parameters.
 
-A parameter that is replicated over a process group (e.g. a conv weight over the
-spatial grid, or a linear bias over the row group) sees only its local share of
-the gradient on each rank; the shares have to be summed over the group. This
-module does that *inside the autograd graph*: :func:`sync_grad` routes the
-parameters through an identity :class:`torch.autograd.Function` whose backward
-all-reduces the incoming gradients. The reduction therefore happens upstream of
-the parameter's ``AccumulateGrad`` node, which gives three properties a
-``register_post_accumulate_grad_hook`` cannot:
+A parameter replicated over a process group (e.g. a conv weight over the spatial
+grid) receives only its local share of the gradient on each rank; the shares
+must be summed over the group. :func:`sync_grad` does this *inside the autograd
+graph*, by routing the parameters through an identity
+:class:`torch.autograd.Function` whose backward all-reduces the gradients.
+Because the reduction runs upstream of the parameter's ``AccumulateGrad`` node,
+unlike a ``register_post_accumulate_grad_hook``:
 
-* It completes before anything that observes ``p.grad`` runs -- in particular
-  ``DistributedDataParallel``'s reducer hook on the same ``AccumulateGrad``
-  node. An asynchronous post-accumulate hook races that reducer, which then
-  overwrites ``p.grad`` with the un-summed local share.
-* Every backward pass reduces its own gradient, not the running ``p.grad`` sum,
-  so gradient accumulation over microbatches stays correct.
-* Several parameters sharing a group tuple and dtype are reduced in one flat
-  collective.
+* it finishes before anything reads ``p.grad``, in particular DDP's reducer
+  hook on the same node (an asynchronous post-accumulate hook races it);
+* each backward reduces its own gradient, not the running ``p.grad`` sum, so
+  gradient accumulation stays correct;
+* parameters sharing a group tuple and dtype are reduced in one collective.
 
 Usage: mark a parameter once with :func:`mark_replicated` where it is created,
 and route it through :func:`sync_grad` (or :func:`synced_parameters` for
-submodules whose forward jigsaw does not own) in the forward.
+submodules jigsaw does not own) in the forward.
 
-Data parallelism composes with this through a plain ``DistributedDataParallel``
-over the mesh's data-parallel axis, ``DistributedDataParallel(model,
-process_group=mesh["dp"])``; :func:`wrap_ddp` is a shorthand that also
-broadcasts the replicas first. A DDP whose process group reaches across the
-model-parallel axes (the default group, say) averages different shards together
-without any error, so :func:`check_ddp` rejects it. It runs from the first jigsaw
-forward inside any ``DistributedDataParallel``, and from :func:`wrap_ddp`.
+Data parallelism: wrap the model in a plain ``DistributedDataParallel`` over
+the mesh's data-parallel axis (``process_group=mesh["dp"]``), or use
+:func:`wrap_ddp`, which also broadcasts the replicas first. :func:`check_ddp`
+rejects a DDP whose group spans model-parallel ranks, which would silently
+average different shards; it runs from :func:`wrap_ddp` and from the first
+jigsaw forward inside any DDP.
 
-With plain DDP, a replicated gradient is reduced twice: summed over its replica
-groups in the graph, then averaged over ``dp`` by DDP. After the first step all
-replicas hold the same gradient, so the second all-reduce sends it over the
-(typically inter-node) ``dp`` links once per replica. :func:`register_joint_comm_hook`
-replaces both with one DDP comm hook: in the graph the gradient is only scaled,
-and DDP averages it over the *joint* group ``dp x replica groups`` in its
-buckets. That moves the replica sum off the critical path and lets NCCL reduce
+With plain DDP a replicated gradient is reduced twice: summed over its replica
+groups in the graph, then averaged over ``dp`` by DDP.
+:func:`register_joint_comm_hook` merges both into one average over the *joint*
+group ``dp x replica groups`` inside DDP's buckets, with only a scaling left in
+the graph. This takes the replica sum off the critical path and lets NCCL reduce
 within a node before crossing nodes.
 """
 
@@ -49,13 +42,15 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
+# parameter attribute holding its replica groups
 _ATTR = "_jigsaw_replica_groups"
+# DDP attribute set once check_ddp has passed
 _CHECKED = "_jigsaw_ddp_checked"
-#: set on the hooks of :func:`jigsaw.hooks.make_grad_sync_hook`
+#: Attribute set on the hooks of :func:`jigsaw.hooks.make_grad_sync_hook`.
 HOOK_TAG = "_jigsaw_grad_sync_hook"
-#: Mutation-testing switch: with ``JIGSAW_DISABLE_GRAD_SYNC=1`` in the environment
-#: :func:`sync_grad` passes everything through, so replicated parameters keep only
-#: their local gradient share. Training is then wrong; the test suite must notice.
+#: Mutation-testing switch: with ``JIGSAW_DISABLE_GRAD_SYNC=1``, :func:`sync_grad`
+#: is a pass-through and replicated parameters keep only their local gradient
+#: share. Training is then wrong; the test suite must notice.
 SYNC_DISABLED = os.environ.get("JIGSAW_DISABLE_GRAD_SYNC", "") == "1"
 
 Groups = tuple[dist.ProcessGroup, ...]
@@ -87,15 +82,14 @@ def mark_replicated(
     groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None]
         Process group(s) the parameter is replicated over.
     extend : bool
-        Append ``groups`` to an existing mark instead of raising, e.g. to add
-        an ensemble axis to a parameter a jigsaw module already marks over its
-        spatial group. A group spanning the same ranks as one already in the
-        mark is dropped, so the gradient is still summed over it only once.
+        Add ``groups`` to an existing mark instead of raising, e.g. an ensemble
+        axis on top of a jigsaw module's spatial group. Groups with the same
+        ranks as one already marked are skipped.
 
     Raises
     ------
     RuntimeError
-        If ``param`` is already marked and ``extend`` is false. A second SUM
+        If ``param`` is already marked and ``extend`` is false; a second SUM
         over the same group would scale its gradient by the group size.
     """
     old = replica_groups(param)
@@ -104,6 +98,8 @@ def mark_replicated(
             "parameter is already marked replicated; a second mark would sum "
             "its gradient twice. Pass extend=True to add groups to the mark."
         )
+    # Deduplicate by rank set, not group identity: two group objects over the
+    # same ranks would still sum the gradient twice.
     seen = {tuple(dist.get_process_group_ranks(g)) for g in old}
     new = list(old)
     for g in _as_groups(groups):
@@ -142,8 +138,10 @@ class _SyncGrad(torch.autograd.Function):
         """
         # ``cat`` copies, so the incoming gradients are never written in place.
         flat = torch.cat([g.reshape(-1) for g in grads])
+        # Summing over each group in turn sums over their product.
         for group in ctx.groups:
             dist.all_reduce(flat, op=dist.ReduceOp.SUM, group=group)
+        # Unflatten into views of the reduced buffer, one per input.
         chunks = flat.split([g.numel() for g in grads])
         return (None, *(c.view_as(g) for c, g in zip(chunks, grads)))
 
@@ -188,13 +186,11 @@ class _ScaleGrad(torch.autograd.Function):
 def sync_grad(*tensors: Optional[torch.Tensor]) -> tuple[Optional[torch.Tensor], ...]:
     """Route marked parameters through an in-graph gradient all-reduce.
 
-    Unmarked tensors, ``None`` and tensors that do not require a gradient are
-    returned unchanged, as is everything when grad mode is off. The marked ones
-    are grouped by ``(groups, dtype)`` and each group is reduced in one flat
-    collective per process group. Inside the forward of a DDP with
-    :func:`register_joint_comm_hook`, the parameters that DDP reduces are only
-    scaled instead; the hook does the sum. :data:`SYNC_DISABLED` turns this into
-    a pass-through, for mutation testing only.
+    Unmarked tensors, ``None`` and tensors not requiring grad pass through
+    unchanged, as does everything when grad mode is off. Marked tensors are
+    bucketed by ``(groups, dtype)``, one flat collective per bucket and group.
+    Inside the forward of a DDP with :func:`register_joint_comm_hook`, the
+    parameters DDP reduces are only scaled; the hook does the sum.
 
     Parameters
     ----------
@@ -210,12 +206,14 @@ def sync_grad(*tensors: Optional[torch.Tensor]) -> tuple[Optional[torch.Tensor],
     out = list(tensors)
     if SYNC_DISABLED or not torch.is_grad_enabled():
         return tuple(out)
+    # Joint-hook state of the DDP whose forward is running, if any.
     joint = _active_joint_state()
     # (groups, dtype, scale only) -> indices
     buckets: dict[tuple[Groups, torch.dtype, bool], list[int]] = {}
     for i, t in enumerate(tensors):
         groups = replica_groups(t)
         if groups and t is not None and t.requires_grad:
+            # Parameters the joint hook reduces only need scaling here.
             scaled = joint is not None and joint.reduces(t)
             buckets.setdefault((groups, t.dtype, scaled), []).append(i)
     for (groups, _, scaled), idx in buckets.items():
@@ -225,6 +223,7 @@ def sync_grad(*tensors: Optional[torch.Tensor]) -> tuple[Optional[torch.Tensor],
             synced = _ScaleGrad.apply(joint.factor(groups), *ts)
         else:
             synced = _SyncGrad.apply(groups, *ts)
+        # Scatter the synced views back to their input positions.
         for i, s in zip(idx, synced):
             out[i] = s
     return tuple(out)
@@ -234,10 +233,10 @@ def synced_parameters(module: torch.nn.Module) -> dict[str, torch.Tensor]:
     """Return the marked parameters of ``module`` routed through :func:`sync_grad`.
 
     Meant for ``torch.func.functional_call(module, synced_parameters(module),
-    ...)`` around submodules whose forward jigsaw does not own (a plain
-    ``torch.nn.Linear`` replicated over the spatial group, say). Inside that
-    call the module sees the synced tensors, which carry no mark, so a jigsaw
-    submodule that calls :func:`sync_grad` itself does not reduce twice.
+    ...)`` around submodules jigsaw does not own, e.g. a plain
+    ``torch.nn.Linear`` replicated over the spatial group. The synced tensors
+    carry no mark, so nested jigsaw modules calling :func:`sync_grad` on them
+    do not reduce twice.
 
     Parameters
     ----------
@@ -254,6 +253,7 @@ def synced_parameters(module: torch.nn.Module) -> dict[str, torch.Tensor]:
     if not marked:
         return {}
     synced = sync_grad(*marked.values())
+    # Keep only what sync_grad actually rerouted (nothing with grad mode off).
     return {
         n: s
         for (n, p), s in zip(marked.items(), synced)
@@ -265,7 +265,8 @@ def broadcast_replicas(module: torch.nn.Module, src: int = 0) -> None:
     """Make every marked parameter of ``module`` identical over its groups.
 
     Each parameter is broadcast from group rank ``src`` over each of its replica
-    groups in turn, which leaves it equal across their whole product.
+    groups in turn, which leaves it equal across their whole product. Collective
+    over those groups: call it on every rank.
 
     Parameters
     ----------
@@ -274,6 +275,8 @@ def broadcast_replicas(module: torch.nn.Module, src: int = 0) -> None:
     src : int
         Group rank to broadcast from.
     """
+    # Bucket by replica-group tuple; parameters() order is the same on every
+    # rank, so all ranks issue the broadcasts in the same order.
     buckets: dict[Groups, list[torch.Tensor]] = {}
     for p in module.parameters():
         if replica_groups(p):
@@ -287,12 +290,19 @@ def broadcast_replicas(module: torch.nn.Module, src: int = 0) -> None:
 def _broadcast_coalesced(
     tensors: list[torch.Tensor], group: dist.ProcessGroup, src: int
 ) -> None:
+    """Broadcast ``tensors`` in place from group rank ``src``, one call per dtype."""
+    # A flat buffer needs a single dtype, so split the tensors by dtype first.
     by_dtype: dict[torch.dtype, list[torch.Tensor]] = {}
     for t in tensors:
         by_dtype.setdefault(t.dtype, []).append(t)
     for ts in by_dtype.values():
+        # Pack into one contiguous buffer (a copy) so that each dtype needs a
+        # single collective instead of one per tensor.
         flat = torch.cat([t.detach().reshape(-1) for t in ts])
+        # On ``src`` the buffer is sent; everywhere else it is overwritten.
         dist.broadcast(flat, group_src=src, group=group)
+        # Unpack: copy each slice back into its tensor. ``detach`` lets this
+        # write into leaf parameters that require grad.
         for t, chunk in zip(ts, flat.split([t.numel() for t in ts])):
             t.detach().copy_(chunk.view_as(t))
 
@@ -306,13 +316,14 @@ def wrap_ddp(
 ) -> DistributedDataParallel:
     """Wrap a jigsaw model in ``DistributedDataParallel`` over the data-parallel axis.
 
-    Optional: ``DistributedDataParallel(module, process_group=mesh[dp_key])`` is
-    checked just the same, in its first forward. This also broadcasts the
-    replicas, which jigsaw modules already do when they are built, but
-    parameters marked by hand may need. The marked parameters are first made identical across their replica groups
-    (from group rank 0), then DDP broadcasts the whole model over ``mesh[dp_key]``
-    from data-parallel rank 0 and averages the gradients over it. The result is
-    checked with :func:`check_ddp`.
+    First makes the marked parameters identical across their replica groups
+    (see :func:`broadcast_replicas`; jigsaw modules do this when built, but
+    parameters marked by hand may need it). DDP then broadcasts the model over
+    ``mesh[dp_key]`` and averages gradients over it. The result is checked with
+    :func:`check_ddp`.
+
+    Optional: a hand-built ``DistributedDataParallel(module,
+    process_group=mesh[dp_key])`` is checked the same way in its first forward.
 
     Parameters
     ----------
@@ -347,25 +358,25 @@ def wrap_ddp(
     return ddp
 
 
+# DDP attribute holding its JointCommHookState
 _JOINT = "_jigsaw_joint_hook_state"
-#: partition of the world (tuple of sorted rank tuples) -> this rank's group in it
+# (id(WORLD), partition as sorted rank tuples) -> this rank's group in it
 _JOINT_GROUPS: dict[tuple[int, tuple[tuple[int, ...], ...]], dist.ProcessGroup] = {}
 
 
 class JointCommHookState:
     """State of :func:`joint_comm_hook` for one ``DistributedDataParallel``.
 
-    For every distinct replica-group tuple ``R`` of the marked parameters DDP
-    reduces, this builds the *joint* group: the ranks reachable from this one
-    through DDP's group and the groups in ``R``, i.e. every rank holding a copy
-    of the parameter. Unmarked parameters use DDP's group.
+    For each distinct replica-group tuple ``R`` among the parameters DDP
+    reduces, builds the *joint* group: all ranks connected to this one through
+    DDP's group and the groups in ``R``, i.e. every rank holding a copy of the
+    parameter. Unmarked parameters use DDP's group.
 
-    Creating it is collective over the default group (it gathers the group
-    layouts and may create process groups): call it on every rank. Joint groups
-    are cached, so a second state over the same layout creates none.
-    Constructing it switches :func:`sync_grad` to scaling inside ``ddp``'s
-    forward, so the hook must then be registered on ``ddp``; :func:`sync_grad`
-    raises otherwise. :func:`register_joint_comm_hook` does both.
+    Construction is collective over the default group (it gathers group layouts
+    and may create process groups; joint groups are cached). It also switches
+    :func:`sync_grad` to scaling inside ``ddp``'s forward, so the hook must then
+    be registered, or :func:`sync_grad` raises. :func:`register_joint_comm_hook`
+    does both.
 
     Parameters
     ----------
@@ -387,18 +398,23 @@ class JointCommHookState:
             )
         self.ddp = ddp
         self.dp: dist.ProcessGroup = ddp.process_group
+        # The parameters that end up in DDP's buckets.
         ignored: set[str] = getattr(ddp, "parameters_to_ignore", set())
         reduced = [
             p
             for n, p in ddp.module.named_parameters()
             if n not in ignored and p.requires_grad
         ]
+        # Distinct replica-group tuples, numbered in parameter order (the same
+        # on every rank) so that index k means the same tuple everywhere.
         keys: dict[Groups, int] = {}
         for p in reduced:
             r = replica_groups(p)
             if r and r not in keys:
                 keys[r] = len(keys)
 
+        # Each rank only knows the groups it is in; gather everyone's rank
+        # lists so every rank can build the full partition.
         mine = (
             dist.get_process_group_ranks(self.dp),
             [[dist.get_process_group_ranks(g) for g in r] for r in keys],
@@ -414,10 +430,13 @@ class JointCommHookState:
         self._group: dict[Groups, dist.ProcessGroup] = {}
         self._factor: dict[Groups, float] = {}
         for r, k in keys.items():
+            # Connect all dp groups and all groups of tuple k across ranks.
             joint = _joint_group(
                 [e[0] for e in everyone] + [g for e in everyone for g in e[1][k]]
             )
             self._group[r] = joint
+            # The hook divides by |joint| instead of |dp|; the in-graph scale
+            # by this factor turns that average back into AVG_dp(SUM_replica).
             self._factor[r] = joint.size() / self.dp.size()
         # parameter -> joint group (DDP's group when unmarked)
         self._of: dict[int, dist.ProcessGroup] = {
@@ -441,14 +460,16 @@ class JointCommHookState:
 def _joint_group(edges: Sequence[Sequence[int]]) -> dist.ProcessGroup:
     """Return this rank's group in the partition the rank lists ``edges`` connect.
 
-    Collective over the default group the first time a partition is seen; the
+    Collective over the default group the first time a partition is seen. The
     same ``edges`` on every rank give the same partition, so all ranks agree on
     whether to create it.
     """
+    # Union-find over all ranks: each rank list in ``edges`` joins its members.
     world = dist.get_world_size()
     parent = list(range(world))
 
     def find(a: int) -> int:
+        # Path halving keeps the trees shallow.
         while parent[a] != a:
             parent[a] = parent[parent[a]]
             a = parent[a]
@@ -457,14 +478,18 @@ def _joint_group(edges: Sequence[Sequence[int]]) -> dist.ProcessGroup:
     for ranks in edges:
         for r in ranks[1:]:
             parent[find(r)] = find(ranks[0])
+    # Connected components, in a canonical (sorted) form usable as a cache key.
     comps: dict[int, list[int]] = {}
     for r in range(world):
         comps.setdefault(find(r), []).append(r)
     partition = tuple(sorted(tuple(c) for c in comps.values()))
     if len(partition) == 1:
         return dist.group.WORLD  # type: ignore[return-value]
+    # Keyed by WORLD too, so a re-initialized process group does not hit stale
+    # entries.
     key = (id(dist.group.WORLD), partition)
     if key not in _JOINT_GROUPS:
+        # Collective: every rank creates all parts and keeps its own.
         group, _ = dist.new_subgroups_by_enumeration([list(c) for c in partition])
         assert isinstance(group, dist.ProcessGroup)  # every rank is in a part
         _JOINT_GROUPS[key] = group
@@ -476,13 +501,12 @@ def joint_comm_hook(
 ) -> torch.futures.Future[torch.Tensor]:
     """DDP comm hook: average each gradient over its parameter's joint group.
 
-    The bucket is split into runs of parameters that share a joint group, and
-    each run is averaged in one all-reduce. Combined with the in-graph scaling
-    that :func:`sync_grad` applies under this hook, a replicated parameter ends
-    with ``AVG_dp(SUM_replica(local))``, as with the in-graph sum plus plain
-    DDP. Like plain DDP it averages, so gradients accumulated with or without
-    ``no_sync`` stay correct. Works under ``fp16_compress_wrapper`` and
-    ``bf16_compress_wrapper``, which swap the bucket's buffer.
+    The bucket is split into runs of consecutive parameters sharing a joint
+    group, each averaged in one async all-reduce. With the in-graph scaling of
+    :func:`sync_grad`, a replicated parameter ends up with
+    ``AVG_dp(SUM_replica(local))``, as with the in-graph sum plus plain DDP.
+    Gradient accumulation with ``no_sync`` stays correct, and the hook works
+    under ``fp16_compress_wrapper`` / ``bf16_compress_wrapper``.
 
     Parameters
     ----------
@@ -497,6 +521,8 @@ def joint_comm_hook(
         Resolves to the reduced bucket buffer.
     """
     buf = bucket.buffer()
+    # Parameters lie back to back in the buffer; merge neighbours with the same
+    # joint group into (group, start, end) runs.
     runs: list[tuple[dist.ProcessGroup, int, int]] = []
     off = 0
     for p in bucket.parameters():
@@ -510,11 +536,13 @@ def joint_comm_hook(
         raise RuntimeError(
             f"bucket buffer has {buf.numel()} elements but its parameters {off}"
         )
+    # Average each run in place over its group: pre-divide, then SUM.
     works = []
     for g, a, b in runs:
         seg = buf[a:b]
         seg.div_(g.size())
         works.append(dist.all_reduce(seg, group=g, async_op=True))
+    # DDP expects a single future; chain the others onto the last one.
     last = works[-1].get_future()
 
     def join(_: Any) -> torch.Tensor:
@@ -564,6 +592,7 @@ def _model_groups(module: torch.nn.Module) -> list[dist.ProcessGroup]:
     group held by a jigsaw module that owns parameters, in module order (the
     same on every rank) and of size > 1.
     """
+    # Ordered set keyed by identity; insertion order is the same on every rank.
     out: dict[int, dist.ProcessGroup] = {}
 
     def add(g: Any) -> None:
@@ -571,6 +600,8 @@ def _model_groups(module: torch.nn.Module) -> list[dist.ProcessGroup]:
             out.setdefault(id(g), g)
 
     for m in module.modules():
+        # Sharded parameters carry no mark; find their groups by scanning the
+        # attributes (and list/tuple attributes) of jigsaw modules.
         if type(m).__module__.startswith("jigsaw.") and any(
             True for _ in m.parameters(recurse=False)
         ):
@@ -588,9 +619,8 @@ def replica_divergence(
 ) -> torch.Tensor:
     """Return ``max|p - p_0|`` per parameter, over each of its groups.
 
-    ``p_0`` is the copy on group rank 0 of the respective group. The result is
-    local: reduce it over the mesh before acting on it. Collective over every
-    group listed, in order.
+    ``p_0`` is the copy on group rank 0. The result is local; reduce it over the
+    mesh before acting on it. Collective over every group listed, in order.
 
     Parameters
     ----------
@@ -604,6 +634,7 @@ def replica_divergence(
     """
     device = params[0][0].device if params else torch.device("cpu")
     div = torch.zeros(len(params), dtype=torch.float64, device=device)
+    # Bucket by group tuple so each bucket needs one broadcast per group.
     buckets: dict[tuple[dist.ProcessGroup, ...], list[int]] = {}
     for i, (_, groups) in enumerate(params):
         groups = tuple(g for g in groups if g is not None and g.size() > 1)
@@ -615,6 +646,7 @@ def replica_divergence(
             mine = torch.cat([params[i][0].detach().reshape(-1).double() for i in idx])
             sizes = [params[i][0].numel() for i in idx]
             for group in groups:
+                # Fetch group rank 0's copy and compare elementwise.
                 ref = mine.clone()
                 dist.broadcast(ref, group_src=0, group=group)
                 d = (mine - ref).abs()
@@ -635,13 +667,11 @@ def all_reduce_max(t: torch.Tensor, groups: Iterable[dist.ProcessGroup]) -> None
 def check_ddp(ddp: DistributedDataParallel) -> None:
     """Check that ``ddp`` composes with the jigsaw model it wraps.
 
-    Raises if DDP's process group overlaps any group the model's parameters are
-    sharded or replicated over in more than the calling rank (the default group
-    on a model-parallel mesh, say: DDP would then average different shards), or
-    if a marked parameter differs across its replica groups (DDP only broadcasts
-    over its own group, so replicas initialized differently stay different).
-    Warns if a parameter still carries a gradient hook from
-    :func:`jigsaw.hooks.make_grad_sync_hook`.
+    Raises if DDP's process group shares a rank other than the caller with any
+    group the model is sharded or replicated over (DDP would average different
+    shards), or if a marked parameter differs across its replica groups (DDP
+    only broadcasts over its own group). Warns if a parameter still carries a
+    :func:`jigsaw.hooks.make_grad_sync_hook` hook.
 
     Collective over DDP's group and the model's groups: call it on every rank.
     The verdict is reduced over all of them, so every rank raises or none does.
@@ -661,6 +691,7 @@ def check_ddp(ddp: DistributedDataParallel) -> None:
     me = dist.get_rank()
     dp_ranks = set(dist.get_process_group_ranks(dp))
     groups = _model_groups(module)
+    # On a proper mesh, dp and every model group intersect only in this rank.
     wrong_group = any(
         dp_ranks & set(dist.get_process_group_ranks(g)) - {me} for g in groups
     )
@@ -681,6 +712,8 @@ def check_ddp(ddp: DistributedDataParallel) -> None:
     params = [(p, g) for _, p, g in named]
     first = next(module.parameters(), None)
     device = first.device if first is not None else _device_of(dp)
+    # Pack both checks into one vector, [wrong_group, divergence per marked
+    # param], and MAX-reduce it so every rank reaches the same verdict.
     flags = torch.cat(
         [
             torch.tensor([float(wrong_group)], dtype=torch.float64, device=device),
@@ -710,11 +743,13 @@ def check_ddp(ddp: DistributedDataParallel) -> None:
 
 
 def _post_accumulate_hooks(p: torch.Tensor) -> Iterable[Any]:
+    """Return the post-accumulate-grad hooks registered on ``p`` (private API)."""
     hooks = getattr(p, "_post_accumulate_grad_hooks", None)
     return hooks.values() if hooks else ()
 
 
 def _device_of(group: dist.ProcessGroup) -> torch.device:
+    """Return the device collectives over ``group`` need their tensors on."""
     if dist.get_backend(group) == "nccl":
         return torch.device("cuda", torch.cuda.current_device())
     return torch.device("cpu")
@@ -741,6 +776,7 @@ def _active_joint_state() -> Optional[JointCommHookState]:
     state = getattr(ddp, _JOINT, None) if ddp is not None else None
     if not isinstance(state, JointCommHookState):
         return None
+    # A state without its hook would make sync_grad only scale, and nothing sum.
     if not any(s is state for _, s in getattr(ddp, "_comm_hooks", ())):
         raise RuntimeError(
             "a JointCommHookState was built for this DDP but joint_comm_hook is not "
