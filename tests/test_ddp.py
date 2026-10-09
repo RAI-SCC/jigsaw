@@ -352,22 +352,13 @@ def _compiled_cases():
     for shape in [(2, 2, 1), (2, 2, 2)]:
         world = shape[0] * shape[1] * shape[2]
         for kind in KINDS:
-            marks = [pytest.mark.dist(world)]
-            if shape[2] > 1 and kind in ("xwt", "attention"):
-                marks.append(
-                    pytest.mark.xfail(
-                        strict=True,
-                        reason="compiled autograd cannot trace the p2p matmul "
-                        "backward (dist.isend/irecv, cached buffers)",
-                    )
-                )
             for variant in ["compiled", "joint_compiled", "joint_compiled_no_sync"]:
                 yield pytest.param(
                     shape,
                     kind,
                     variant,
                     id=f"{'x'.join(map(str, shape))}-{kind}-{variant}",
-                    marks=marks,
+                    marks=pytest.mark.dist(world),
                 )
 
 
