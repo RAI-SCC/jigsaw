@@ -8,8 +8,9 @@ expected value is built from per-rank quantities by explicit collectives,
 independently of the code under test.
 
 The linear and conv cells use small integer data, so every sum is exact and the
-comparison is ``torch.equal``. Attention goes through a softmax and is compared
-to a tight tolerance; replica identity is still bitwise.
+comparison is ``torch.equal``. Attention goes through a softmax and layer norm
+through a square root; both are compared to a tight tolerance, replica identity
+is still bitwise.
 """
 
 import contextlib
@@ -22,12 +23,12 @@ from torch.nn.parallel import DistributedDataParallel
 
 from jigsaw import parallel
 from jigsaw.mesh import make_process_mesh
-from jigsaw.modules import convolution, linear
+from jigsaw.modules import convolution, linear, normalization
 from jigsaw.modules.attention import attention
 
 # (dp, row, col) -> world size
 MESHES = [(2, 2, 2), (2, 2, 1), (4, 1, 1), (1, 2, 2)]
-KINDS = ["xwt", "conv_halo", "conv_patchify", "attention"]
+KINDS = ["xwt", "conv_halo", "conv_patchify", "attention", "layer_norm"]
 VARIANTS = [
     "no_ddp",
     "ddp",
@@ -111,6 +112,15 @@ def _build(kind: str, mesh: dict, device: torch.device, fill: bool = True):
             spatial_group=row,
             channel_group=col,
             qk_norm=True,
+        )
+        shape = (2, 8 // row.size(), 8 // col.size())
+    elif kind == "layer_norm":
+        model = normalization.DistributedLayerNorm(
+            8 // col.size(),
+            local_rank=mesh["model"].rank(),
+            device=device,
+            row_group=row,
+            col_group=col,
         )
         shape = (2, 8 // row.size(), 8 // col.size())
     else:

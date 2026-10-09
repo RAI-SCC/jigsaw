@@ -47,12 +47,8 @@ AVG_dp( SUM_R( local gradient ) )
 jigsaw modules mark their replicated parameters themselves with
 `jigsaw.parallel.mark_replicated(p, groups)`, and route them through
 `jigsaw.parallel.sync_grad` in their forward. That call is where the two modes differ.
-
-`DistributedLayerNorm` is the exception: it sums its weight and bias gradients over `row` in
-its own backward pass, upstream of the gradient accumulation like `sync_grad`. Its parameters
-carry no mark, so both modes treat them as unmarked: DDP averages them over `dp`, which is
-correct in both, but the joint hook does not fold their sum into its collective, and the
-replica checks only compare them over `dp`.
+`DistributedLayerNorm` marks its weight and bias over its `row_group`. On a mesh with
+several spatial axes, add the others with `mark_replicated(p, group, extend=True)`.
 
 ## Common setup
 

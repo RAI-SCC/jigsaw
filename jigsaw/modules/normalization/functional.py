@@ -16,7 +16,6 @@ class DistributedLNFunction(torch.autograd.Function):
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: Optional[torch.Tensor],
-        spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         eps: float,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -30,8 +29,6 @@ class DistributedLNFunction(torch.autograd.Function):
             Local scale.
         bias : torch.Tensor | None
             Local shift.
-        spatial_group : dist.ProcessGroup
-            Process group over which the parameter gradients are reduced.
         channel_group : dist.ProcessGroup
             Process group across which the last dimension is partitioned.
         eps : float
@@ -68,11 +65,10 @@ class DistributedLNFunction(torch.autograd.Function):
         output: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
     ) -> None:
         """Save the tensors and metadata for the backward pass."""
-        x, weight, bias, spatial_group, channel_group, eps = inputs
+        x, weight, bias, channel_group, eps = inputs
         _, x_norm, weight, var = output
 
         ctx.mark_non_differentiable(x_norm, weight, var)
-        ctx.spatial_group = spatial_group  # type: ignore[attr-defined]
         ctx.channel_group = channel_group  # type: ignore[attr-defined]
 
         # Save for backward
@@ -85,14 +81,11 @@ class DistributedLNFunction(torch.autograd.Function):
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: Optional[torch.Tensor],
-        spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         eps: float,
     ) -> tuple[torch.Tensor, int]:
         """Batching rule for ``torch.vmap``."""
-        out = DistributedLNFunction.apply(
-            x, weight, bias, spatial_group, channel_group, eps
-        )
+        out = DistributedLNFunction.apply(x, weight, bias, channel_group, eps)
 
         return out, 0
 
@@ -103,8 +96,11 @@ class DistributedLNFunction(torch.autograd.Function):
         x_norm_grad: None,
         weight_grad: None,
         var_grad: None,
-    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None]:
         """Compute the gradients of the distributed LayerNorm.
+
+        The weight and bias gradients are local; the layer sums them over its
+        replicas with :func:`jigsaw.parallel.sync_grad`.
 
         Parameters
         ----------
@@ -117,7 +113,7 @@ class DistributedLNFunction(torch.autograd.Function):
 
         Returns
         -------
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None, None, None]
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None, None]
             Gradients of the input, weight and bias, followed by ``None`` for the
             non-differentiable arguments.
         """
@@ -125,7 +121,6 @@ class DistributedLNFunction(torch.autograd.Function):
         # Match the forward compute dtype: under autocast the saved tensors are
         # fp32 while ``grad_output`` arrives in the autocast dtype.
         grad_output = grad_output.to(x_norm.dtype)
-        spatial_group = ctx.spatial_group  # type: ignore[attr-defined]
         channel_group = ctx.channel_group  # type: ignore[attr-defined]
         n = (
             x_norm.shape[-1] * channel_group.size()
@@ -138,14 +133,6 @@ class DistributedLNFunction(torch.autograd.Function):
             dim=tuple(range(grad_output.dim() - 1))
         )
         grad_bias = grad_output.sum(dim=tuple(range(grad_output.dim() - 1)))
-
-        # Synchronize parameter gradients across the process group
-        g_w_handle = dist.all_reduce(
-            grad_weight, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True
-        )
-        g_b_handle = dist.all_reduce(
-            grad_bias, op=dist.ReduceOp.SUM, group=spatial_group, async_op=True
-        )
 
         # Gradient for input (standard LayerNorm backward)
         grad_x_norm = grad_output * weight
@@ -168,10 +155,7 @@ class DistributedLNFunction(torch.autograd.Function):
             grad_x_norm - grad_x_norm_mean - x_norm * x_grad_x_term / n
         )
 
-        g_w_handle.wait()
-        g_b_handle.wait()
-
-        return grad_x, grad_weight, grad_bias, None, None, None  # type: ignore[return-value]
+        return grad_x, grad_weight, grad_bias, None, None  # type: ignore[return-value]
 
 
 class NoParamLNCtx(Protocol):
