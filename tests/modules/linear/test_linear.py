@@ -2,8 +2,8 @@ import pytest
 import torch
 import torch.distributed as dist
 
-import jigsaw.hooks as hooks
 import jigsaw.modules.linear as linear
+import jigsaw.parallel as parallel
 from jigsaw.utils_aggregate import (
     gather_1d_results,
     gather_1d_results_list,
@@ -773,9 +773,7 @@ class TestBackward:
         for p in linlayer.parameters():
             dist.broadcast(p.data, group_src=0, group=process_mesh_dict_2x2["row"])
 
-        linlayer.weight.register_post_accumulate_grad_hook(
-            hooks.make_grad_sync_hook(process_mesh_dict_2x2["row"])
-        )
+        parallel.mark_replicated(linlayer.weight, process_mesh_dict_2x2["row"])
 
         w_gathered = gather_1d_results(
             linlayer.weight.data,

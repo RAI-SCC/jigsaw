@@ -9,15 +9,15 @@ parameter values and parameter gradients in one call.
 Two design-shaping points:
 
 * Backward is driven with an explicit upstream gradient rather than a loss. jigsaw's
-  weight-gradient all-reduce (``jigsaw.hooks.make_grad_sync_hook``) is a ``ReduceOp.SUM``
+  weight-gradient all-reduce (``jigsaw.parallel.sync_grad``) is a ``ReduceOp.SUM``
   over the spatial group, so the distributed gradient only equals the serial one when
   nothing averages over a sharded dimension. Splitting a global ``randn`` upstream
   gradient makes that relation exact and removes any need for a scaling factor.
 
 * Parameters are described as either *sharded* over a mesh axis (compare by gathering)
   or *replicated* over it (compare by checking the replicas agree, then taking one). For
-  a replicated parameter the agreement check is itself the test that the grad-sync hook
-  fired: without the all-reduce the per-rank gradients hold only local contributions and
+  a replicated parameter the agreement check is itself the test that the gradient sync
+  ran: without the all-reduce the per-rank gradients hold only local contributions and
   differ.
 
 Relation to the rest of the suite
@@ -200,9 +200,8 @@ def sync_device(device: torch.device) -> None:
     """
     Wait for every stream on the device, including the ones NCCL uses internally.
 
-    jigsaw's grad-sync hooks issue ``all_reduce(..., async_op=True)`` and only wait on
-    the handles from an autograd engine callback, so reading ``.grad`` straight after
-    ``backward()`` returns can race with the collective. Call this before comparing.
+    jigsaw's collectives run on NCCL's own streams, so reading ``.grad`` straight after
+    ``backward()`` returns can race with them. Call this before comparing.
     """
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -536,7 +535,7 @@ def _check_parity(
     y_local = dist_module(x_local)
     y_local.backward(g_local)
 
-    # The grad-sync hooks all-reduce asynchronously; drain before reading .grad.
+    # Drain the gradient collectives before reading .grad.
     sync_device(device)
 
     assert x_local.grad is not None, "distributed backward produced no input gradient"

@@ -98,6 +98,16 @@ class TestFourRanks:
         assert mesh["dp"].size() == 2
         assert mesh["model"].size() == 2
 
+        # It also carries the n-d DeviceMesh the axis groups were cut from.
+        assert isinstance(mesh, dict)
+        assert mesh.device_mesh.mesh_dim_names == ("dp", "row", "col")
+        for name in ("dp", "row", "col"):
+            sliced = mesh.device_mesh[name]
+            assert sliced.get_group() is mesh[name]
+            assert dist.get_process_group_ranks(
+                sliced.get_group()
+            ) == dist.get_process_group_ranks(mesh[name])
+
     def test_spatial_axes_flatten_into_the_model_group(self, device):
         mesh = jigsaw.make_process_mesh(
             {"sh": 2, "sw": 2, "col": 1}, device_type=device.type

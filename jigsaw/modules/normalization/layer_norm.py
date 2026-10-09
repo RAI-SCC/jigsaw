@@ -5,6 +5,7 @@ from typing import Any, Optional
 import torch
 import torch.distributed as dist
 
+from jigsaw import parallel
 from jigsaw.utils_aggregate import gather_1d_results
 
 from . import functional
@@ -33,7 +34,8 @@ class DistributedLayerNorm(torch.nn.Module):
         device : torch.device
             Device of the module.
         row_group : dist.ProcessGroup
-            Process group over which the parameter gradients are reduced.
+            Process group the weight and bias are replicated over; their
+            gradients are summed over it by :func:`jigsaw.parallel.sync_grad`.
             Unused if ``elementwise_affine`` is ``False``: there are then no
             parameters to reduce gradients for.
         col_group : dist.ProcessGroup
@@ -55,11 +57,17 @@ class DistributedLayerNorm(torch.nn.Module):
             # Learnable parameters
             self.weight = torch.nn.Parameter(torch.ones(local_dim, device=device))
             self.bias = torch.nn.Parameter(torch.zeros(local_dim, device=device))
+            self._mark_replicated()
             self.layernorm = functional.DistributedLNFunction.apply
         else:
             self.register_parameter("weight", None)
             self.register_parameter("bias", None)
             self.layernorm = functional.DistributedNoParamLNFunction.apply
+
+    def _mark_replicated(self) -> None:
+        """Mark the weight and bias replicated over the row group."""
+        for p in (self.weight, self.bias):
+            parallel.mark_replicated(p, self.spatial_group)
 
     def get_parameter_count(self) -> int:
         """Return the number of local parameters."""
@@ -296,6 +304,9 @@ class DistributedLayerNorm(torch.nn.Module):
         self.spatial_group = to_process_mesh[pm_row_key]
         self.channel_group = to_col
         self.local_rank = to_process_mesh.get("model", to_col).rank()
+        if self.elementwise_affine:
+            # Fresh Parameters: the __init__ mark is gone; mark on the new rows.
+            self._mark_replicated()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply the layer.
@@ -311,12 +322,8 @@ class DistributedLayerNorm(torch.nn.Module):
             Local output.
         """
         if self.elementwise_affine:
+            weight, bias = parallel.sync_grad(self.weight, self.bias)
             return self.layernorm(  # type: ignore[no-any-return]
-                x,
-                self.weight,
-                self.bias,
-                self.spatial_group,
-                self.channel_group,
-                self.eps,
+                x, weight, bias, self.channel_group, self.eps
             )[0]
         return self.layernorm(x, self.channel_group, self.eps)[0]  # type: ignore[no-any-return]

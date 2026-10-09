@@ -131,7 +131,7 @@ model = Linear(1024, 1024, mesh, device)
 
 Run it with one process per GPU, e.g. `torchrun --nproc-per-node 4 train.py` or `srun` (see [Launching](#launching)).
 
-Complete, runnable scripts -- a CNN, a Vision Transformer, a Swin Transformer, a dataloader, converting an existing model, re-sharding a trained one -- are in [`examples/`](examples/README.md). Each runs with `torchrun --nproc-per-node 4`, on GPUs or on the CPU.
+Complete, runnable scripts -- a CNN, a Vision Transformer, a Swin Transformer, a dataloader, converting an existing model, re-sharding a trained one, a data-parallel training loop -- are in [`examples/`](examples/README.md). Each runs with `torchrun --nproc-per-node 4`, on GPUs or on the CPU; the CNN, the ViT and the Swin Transformer take `--ddp` (8 ranks or more) for data parallelism on top.
 
 ### Mixed precision (autocast)
 
@@ -187,6 +187,33 @@ mesh = jigsaw.make_process_mesh({"sh": 2, "sw": 2, "col": 2})
 There are two options
 1) Training the model in a fully domain--tensor parallel manner. This means that a process mesh of size (4, 2) will have the parameters sharded across 8 processes.
 2) Training the model with domain-parallelism across the ``rows`` axis, and with domain--tensor parallelism across the ``col`` axis. See the individual modules for detailed usage.
+
+### Data parallelism (DDP)
+
+Add a `dp` axis to the mesh and wrap the model in DDP over it. Each `row` x `col` group holds
+one model copy; DDP averages gradients across the copies.
+
+```python
+# 8 ranks: 2 copies (dp) of a model split 2x2 over row x col
+mesh = jigsaw.make_process_mesh(
+    {"dp": -1, "row": 2, "col": 2}, model_parallel_axes=("row", "col")
+)
+model = build_model(mesh)  # jigsaw layers on mesh["row"] / mesh["col"]
+model = jigsaw.parallel.wrap_ddp(model, mesh)  # DDP over mesh["dp"], checks the replicas match
+# faster sync of replicated grads: wrap_ddp(model, mesh, joint_hook=True)
+
+for x, y in loader:  # sampler keyed by mesh["dp"].rank(); each rank loads its shard
+    loss = loss_fn(model(x), y)
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+```
+
+After wrapping, it's plain DDP: `no_sync()`, gradient accumulation and comm hooks all work.
+Using `DistributedDataParallel(model, process_group=mesh["dp"])` is also correct. 
+[docs/ddp.md](docs/ddp.md) has the details including joint comm hook (faster), plain PyTorch layers inside a jigsaw model, 
+and debugging replica drift.
+Running examples: `examples/ddp.py`, `examples/vit.py --ddp` and `examples/swin.py --ddp`.
 
 ### Distributed logging
 

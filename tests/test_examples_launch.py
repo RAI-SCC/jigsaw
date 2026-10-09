@@ -114,6 +114,23 @@ def _load_common(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
 
 
 @pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        ([], (False, False)),
+        (["--ddp"], (True, False)),
+        (["--joint-hook"], (True, True)),  # the hook needs DDP: it implies --ddp
+        (["--ddp", "--joint-hook"], (True, True)),
+    ],
+)
+def test_ddp_flags(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], expected: tuple[bool, bool]
+) -> None:
+    """``--ddp`` and ``--joint-hook`` as the tutorials' ``main()`` arguments."""
+    flags = _load_common(monkeypatch).ddp_flags(["examples/vit.py", *argv])
+    assert (flags["data_parallel"], flags["joint_hook"]) == expected
+
+
+@pytest.mark.parametrize(
     ("env", "world_size", "expected"),
     [
         ({}, 4, 4),  # a plain launch: everything is on this node

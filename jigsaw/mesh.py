@@ -13,7 +13,33 @@ from collections.abc import Mapping, Sequence
 import torch
 import torch.distributed as dist
 
-__all__ = ["make_process_mesh"]
+__all__ = ["ProcessMesh", "make_process_mesh"]
+
+
+class ProcessMesh(dict):
+    """A ``dict`` of axis name to process group that also holds the ``DeviceMesh``.
+
+    Indexing works as on any ``process_mesh_dict``; :attr:`device_mesh` is the
+    named n-d mesh the axis groups were cut from, so a 1-D slice of it can go to
+    APIs that take a ``DeviceMesh``, e.g.
+    ``DistributedDataParallel(model, device_mesh=mesh.device_mesh["dp"])``.
+    The ``model`` group is not a dimension of it.
+
+    Attributes
+    ----------
+    device_mesh : torch.distributed.device_mesh.DeviceMesh
+        The n-d mesh over every axis, in the order they were given.
+    """
+
+    device_mesh: dist.device_mesh.DeviceMesh
+
+    def __init__(
+        self,
+        groups: Mapping[str, dist.ProcessGroup],
+        device_mesh: dist.device_mesh.DeviceMesh,
+    ) -> None:
+        super().__init__(groups)
+        self.device_mesh = device_mesh
 
 
 def _resolve_device_type(device_type: str | None) -> str:
@@ -75,7 +101,7 @@ def make_process_mesh(
     device_type: str | None = None,
     model_parallel_axes: Sequence[str] | None = None,
     model_key: str = "model",
-) -> dict[str, dist.ProcessGroup]:
+) -> ProcessMesh:
     """Build a jigsaw ``process_mesh_dict`` from named, ordered mesh axes.
 
     Parameters
@@ -93,8 +119,9 @@ def make_process_mesh(
 
     Returns
     -------
-    dict[str, torch.distributed.ProcessGroup]
-        One group per axis plus the ``model_key`` group.
+    ProcessMesh
+        One group per axis plus the ``model_key`` group, in a ``dict`` that
+        also carries the n-d ``DeviceMesh`` as ``.device_mesh``.
 
     Notes
     -----
@@ -131,9 +158,7 @@ def make_process_mesh(
         mesh_shape=tuple(sizes.values()),
         mesh_dim_names=tuple(names),
     )
-    mesh: dict[str, dist.ProcessGroup] = {
-        name: nd_mesh.get_group(name) for name in names
-    }
+    mesh = ProcessMesh({name: nd_mesh.get_group(name) for name in names}, nd_mesh)
 
     model_numel = math.prod(sizes[a] for a in model_axes)
     if len(model_axes) == len(names):

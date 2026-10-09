@@ -25,7 +25,9 @@ Two details that are easy to get wrong with a split image:
     each rank builds it from the position of its tile.
   * The weights are replicated, and ``jigsaw`` only synchronises the ones inside its own
     layers. ``replicate`` below does the same for the plain PyTorch layers: broadcast
-    the weights from rank 0 and all-reduce their gradients over the tiles.
+    the weights from rank 0 and mark them replicated over the tiles; ``Swin.forward``
+    then routes them through ``jigsaw.parallel.synced_parameters``, which sums their
+    gradients over the tiles inside the backward pass.
 
 Tokens are channels-last, ``(B, H / sh, W / sw, C)``; the convolutions that embed and
 recover the patches are channels-first, as in PyTorch. This is a denoiser, so it ends
@@ -34,16 +36,30 @@ with a transposed convolution rather than a classification head.
 Run with one process per GPU (or 4 CPU processes):
 
     torchrun --nproc-per-node 4 examples/swin.py
+
+Data parallelism on top (``--ddp``, a multiple of 4 ranks): a leading "dp" axis holds
+copies of the tiled model, each training on its own images.
+
+    torchrun --nproc-per-node 8 examples/swin.py --ddp
+
+Every weight is replicated, so each gradient is summed over the tiles (in the backward
+pass, by the mark ``replicate`` sets) and then averaged over "dp" by a plain
+``DistributedDataParallel`` over ``mesh["dp"]``. ``replicate`` broadcasts the weights
+over the tiles; DDP only broadcasts over "dp". If you mark parameters after building
+the model, ``jigsaw.parallel.wrap_ddp`` broadcasts them for you. With ``--joint-hook``
+the sum and the average become one all-reduce in DDP's buckets (see ``docs/ddp.md``).
 """
+
+import sys
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from _common import setup, shard
+from _common import data_seed, ddp_flags, setup, shard
 
 import jigsaw
-from jigsaw import hooks, log
+from jigsaw import log, parallel
 
 IN_CHANNELS, PATCH, WINDOW = 1, 2, 4
 DIMS, HEADS, DEPTHS = (32, 64), (2, 4), (2, 2)  # per stage
@@ -56,12 +72,13 @@ def replicate(module: nn.Module, mesh: Mesh, device: torch.device) -> nn.Module:
     """Give every rank the same copy of ``module`` on ``device``, and keep them identical.
 
     Every rank sees only its tile, so its gradient is only a part of the total. Summing
-    the parts over the tiles gives every rank the gradient of the whole image.
+    the parts over the tiles gives every rank the gradient of the whole image; the
+    mark tells ``jigsaw.parallel`` to do that sum (see ``Swin.forward``).
     """
     module.to(device)  # NCCL only broadcasts GPU tensors
     for p in module.parameters():
         dist.broadcast(p.data, group_src=0, group=mesh["model"])
-        p.register_post_accumulate_grad_hook(hooks.make_grad_sync_hook(mesh["model"]))
+        parallel.mark_replicated(p, mesh["model"])
     return module
 
 
@@ -254,6 +271,12 @@ class Swin(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Run the model with the replicated weights swapped for copies whose gradient
+        # is summed over the tiles in the backward pass. The copies carry no mark, so
+        # the re-entered forward finds nothing left to sync and runs the layers.
+        synced = parallel.synced_parameters(self)
+        if synced:
+            return torch.func.functional_call(self, synced, (x,))
         z = self.embed(x).permute(0, 2, 3, 1)  # channels-last: (B, H', W', C)
         z = self.norm(self.stages(z))
         z = z.permute(0, 3, 1, 2).contiguous()  # back to channels-first
@@ -263,8 +286,12 @@ class Swin(nn.Module):
 def make_batch(
     step: int, mesh: Mesh, device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return this rank's tile of a noisy input and its clean target."""
-    g = torch.Generator().manual_seed(step)
+    """Return this rank's tile of a noisy input and its clean target.
+
+    Every rank of a model copy draws the same images (and keeps its tile of them);
+    every data-parallel copy draws different ones.
+    """
+    g = torch.Generator().manual_seed(data_seed(step, mesh))
     clean = F.avg_pool2d(torch.randn(4, IN_CHANNELS, H, W, generator=g), 5, 1, 2)
     noisy = clean + 0.3 * torch.randn(clean.shape, generator=g)
 
@@ -274,13 +301,28 @@ def make_batch(
     return tile(noisy), tile(clean)
 
 
-def main(steps: int = 100) -> list[float]:
-    """Train the Swin denoiser for ``steps`` steps and return the loss of every step."""
+def main(
+    steps: int = 100, data_parallel: bool = False, joint_hook: bool = False
+) -> list[float]:
+    """Train the Swin denoiser for ``steps`` steps and return the loss of every step.
+
+    With ``data_parallel`` the losses are those of this rank's model copy.
+    """
     device, rank, world_size = setup()
 
-    mesh = jigsaw.make_process_mesh({"sh": 2, "sw": 2, "col": 1})
+    if data_parallel:
+        # The tiles of one copy are its "model" group; "dp" counts the copies.
+        mesh = jigsaw.make_process_mesh(
+            {"dp": -1, "sh": 2, "sw": 2, "col": 1},
+            model_parallel_axes=("sh", "sw", "col"),
+        )
+    else:
+        mesh = jigsaw.make_process_mesh({"sh": 2, "sw": 2, "col": 1})
 
     model = Swin(mesh, device)
+    if data_parallel:
+        # DDP over "dp" only, checked right away (wrong group, unequal replicas).
+        model = jigsaw.parallel.wrap_ddp(model, mesh, joint_hook=joint_hook)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=(mesh["sh"], mesh["sw"]))
     n_params = sum(p.numel() for p in model.parameters())
@@ -300,4 +342,4 @@ def main(steps: int = 100) -> list[float]:
 
 
 if __name__ == "__main__":
-    main()
+    main(**ddp_flags(sys.argv))

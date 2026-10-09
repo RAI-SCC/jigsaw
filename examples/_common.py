@@ -58,3 +58,24 @@ def shard(x: torch.Tensor, dim: int, group: dist.ProcessGroup) -> torch.Tensor:
     """Return this rank's slice of ``x`` along ``dim`` when split over ``group``."""
     size = x.shape[dim] // group.size()
     return x.narrow(dim, group.rank() * size, size).contiguous()
+
+
+def ddp_flags(argv: list[str]) -> dict[str, bool]:
+    """``main()`` keyword arguments for ``--ddp`` and ``--joint-hook``.
+
+    ``--joint-hook`` implies ``--ddp``: it is a different way of reducing the
+    gradients under ``DistributedDataParallel`` (see ``docs/ddp.md``).
+    """
+    joint = "--joint-hook" in argv
+    return {"data_parallel": joint or "--ddp" in argv, "joint_hook": joint}
+
+
+def data_seed(step: int, mesh: dict[str, dist.ProcessGroup]) -> int:
+    """Seed of the batch of ``step``: the same within a model copy, distinct across copies.
+
+    Every rank of one copy must see the same samples (each keeps only its own tile),
+    and every data-parallel copy different ones, or data parallelism only repeats the
+    same batch. Without a ``"dp"`` axis this is just ``step``.
+    """
+    dp = mesh.get("dp")
+    return step * dp.size() + dp.rank() if dp is not None else step
