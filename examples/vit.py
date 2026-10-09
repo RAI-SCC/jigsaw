@@ -246,7 +246,11 @@ def main(
         model = jigsaw.parallel.wrap_ddp(model, mesh, joint_hook=joint_hook)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=(mesh["row"], mesh["col"]))
-    log.info("local parameters per rank: %d", jigsaw.debug.count_parameters(model))
+    log.info(
+        "parameters: %d per rank, %d in the model",
+        jigsaw.debug.count_parameters(model),
+        jigsaw.debug.count_parameters(model, mesh),
+    )
 
     losses = []
     for step in range(steps):
