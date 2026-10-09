@@ -98,11 +98,21 @@ def _named_parameters(
 ) -> Iterator[tuple[str, torch.nn.Parameter, bool]]:
     """Yield ``(name, param, foreign)``; ``foreign`` if no jigsaw module owns it.
 
-    Same parameters, names and order as ``model.named_parameters()``.
+    A parameter of a plain submodule *inside* a jigsaw module (the
+    ``torch.nn.GroupNorm`` of ``DistributedGroupNorm``, say) is jigsaw's: the
+    module shards or syncs it itself. Same parameters, names and order as
+    ``model.named_parameters()``.
     """
+    # Every module at or below a jigsaw module.
+    owned = {
+        id(sub)
+        for m in model.modules()
+        if type(m).__module__.startswith("jigsaw.")
+        for sub in m.modules()
+    }
     seen: set[int] = set()
     for mod_name, m in model.named_modules():
-        foreign = not type(m).__module__.startswith("jigsaw.")
+        foreign = id(m) not in owned
         for name, p in m.named_parameters(prefix=mod_name, recurse=False):
             if id(p) not in seen:
                 seen.add(id(p))

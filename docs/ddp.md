@@ -11,6 +11,22 @@ This page explains how to train a jigsaw model with PyTorch's `DistributedDataPa
 Both give the same gradients. Start with in-graph; switch to the joint hook when gradient
 communication shows up in your step time.
 
+## Examples
+
+Runnable scripts in [`examples/`](../examples/README.md), each on a multiple of 4 ranks,
+with 4 ranks per model copy:
+
+| Command | Shows |
+| --- | --- |
+| `torchrun --nproc-per-node 8 examples/vit.py --ddp` | A ViT split over `row` x `col` (tensor and sequence parallel), plus `dp`, through `wrap_ddp` |
+| `torchrun --nproc-per-node 8 examples/swin.py --ddp` | A Swin Transformer split over the image, whose plain PyTorch layers are marked by hand (see [Replicating your own layers](#replicating-your-own-layers)) |
+| `torchrun --nproc-per-node 8 examples/domain_parallel.py --ddp` | A CNN with a hand-built `DistributedDataParallel(model, process_group=mesh["dp"])` |
+| `torchrun --nproc-per-node 8 examples/ddp.py` | The rest of the training loop: the global batch split over `dp`, gradient accumulation with `no_sync()`, the loss to log, periodic replica checks |
+
+Replace `--ddp` with `--joint-hook` for mode 2 (`ddp.py` uses it by default; `--plain`
+switches it off). `tests/test_examples_ddp.py` checks every one of these, in every mode,
+against training the same model on the whole batch without DDP.
+
 ## What has to be reduced
 
 On a mesh like `{"dp": 2, "row": 2, "col": 2}`, a parameter is either:
@@ -31,6 +47,12 @@ AVG_dp( SUM_R( local gradient ) )
 jigsaw modules mark their replicated parameters themselves with
 `jigsaw.parallel.mark_replicated(p, groups)`, and route them through
 `jigsaw.parallel.sync_grad` in their forward. That call is where the two modes differ.
+
+`DistributedLayerNorm` is the exception: it sums its weight and bias gradients over `row` in
+its own backward pass, upstream of the gradient accumulation like `sync_grad`. Its parameters
+carry no mark, so both modes treat them as unmarked: DDP averages them over `dp`, which is
+correct in both, but the joint hook does not fold their sum into its collective, and the
+replica checks only compare them over `dp`.
 
 ## Common setup
 
@@ -204,4 +226,5 @@ training.
   same wrong gradient, they still agree. To check the scale, compare the gradient against a
   serial run of the same model on the whole batch, in float64 if you can, with SGD rather
   than Adam (Adam normalizes the gradient and hides a constant factor).
-  `tests/test_ddp_serial.py` and `tests/test_ddp.py` do this for jigsaw itself.
+  `tests/test_ddp_serial.py` and `tests/test_ddp.py` do this for jigsaw itself, and
+  `tests/test_examples_ddp.py` for the models of the examples.

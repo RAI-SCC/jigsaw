@@ -20,12 +20,33 @@ on its own rank -- the ring passes the key/value chunks around "row".
 Run with one process per GPU (or 4 CPU processes):
 
     torchrun --nproc-per-node 4 examples/vit.py
+
+Data parallelism on top (``--ddp``, a multiple of 4 ranks): a leading "dp" axis holds
+copies of the 2x2 model, each training on its own images.
+
+    torchrun --nproc-per-node 8 examples/vit.py --ddp
+
+Each copy's parameters are of two kinds, and need different reductions:
+
+    MLP weights            split over "row" and "col": a different piece on every
+                           rank of the copy, so they are only averaged over "dp"
+    everything else        split over "col" at most, the same on every rank of "row":
+    (attention, norms,     each sees only its own tokens, so the partial gradients
+    biases, embedding)     are summed over "row", then averaged over "dp"
+
+``jigsaw.parallel.wrap_ddp`` wraps the model in a plain ``DistributedDataParallel`` over
+``mesh["dp"]``; the layers sum their replicated gradients over "row" themselves. A DDP
+over the default group would average sharded weights with other shards -- jigsaw
+raises if you try. With ``--joint-hook`` the sum and the average become one all-reduce
+in DDP's buckets (see ``docs/ddp.md``); the gradients are the same.
 """
+
+import sys
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from _common import setup, shard
+from _common import data_seed, ddp_flags, setup, shard
 
 import jigsaw
 from jigsaw import log
@@ -180,8 +201,12 @@ class ViT(nn.Module):
 def make_batch(
     step: int, mesh: Mesh, device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return this rank's shard of a noisy input and its clean target."""
-    g = torch.Generator().manual_seed(step)
+    """Return this rank's shard of a noisy input and its clean target.
+
+    Every rank of a model copy draws the same images (and keeps its shard of them);
+    every data-parallel copy draws different ones.
+    """
+    g = torch.Generator().manual_seed(data_seed(step, mesh))
     clean = torch.nn.functional.avg_pool2d(
         torch.randn(4, IN_CHANNELS, H, W, generator=g), 5, 1, 2
     )
@@ -193,16 +218,32 @@ def make_batch(
     return local(noisy), local(clean)
 
 
-def main(steps: int = 100) -> list[float]:
-    """Train the ViT for ``steps`` steps and return the loss of every step."""
+def main(
+    steps: int = 100, data_parallel: bool = False, joint_hook: bool = False
+) -> list[float]:
+    """Train the ViT for ``steps`` steps and return the loss of every step.
+
+    With ``data_parallel`` the losses are those of this rank's model copy.
+    """
     device, rank, world_size = setup()
 
-    mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})
+    if data_parallel:
+        # "row" and "col" split one model copy; "dp" (world size / 4) counts the copies.
+        mesh = jigsaw.make_process_mesh(
+            {"dp": -1, "row": 2, "col": 2}, model_parallel_axes=("row", "col")
+        )
+    else:
+        mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})
 
     # Every rank needs its own seed so that the shards are initialised independently.
+    # (The copies start equal anyway: DDP broadcasts copy 0's weights over "dp".)
     set_all_seeds(mesh["model"].rank())
 
     model = ViT(mesh, device)
+    if data_parallel:
+        # DDP over "dp" only. wrap_ddp also checks the setup right away: a wrong
+        # process group, or replicated weights that differ, raise on every rank.
+        model = jigsaw.parallel.wrap_ddp(model, mesh, joint_hook=joint_hook)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=(mesh["row"], mesh["col"]))
     log.info("local parameters per rank: %d", jigsaw.utils.count_parameters(model))
@@ -221,4 +262,4 @@ def main(steps: int = 100) -> list[float]:
 
 
 if __name__ == "__main__":
-    main()
+    main(**ddp_flags(sys.argv))

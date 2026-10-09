@@ -12,7 +12,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
 from jigsaw import debug, hooks, parallel
-from jigsaw.modules import convolution
+from jigsaw.modules import convolution, normalization
 from tests.test_ddp import KINDS, _build, _expected, _int_tensor, _local_grads, _mesh
 
 # dp=2 over a 2x1 model: replicated conv weights over ``row``
@@ -220,3 +220,18 @@ def test_unmarked_replica_is_reported(mark, device) -> None:
             debug.assert_replica_consistency(model, mesh, unmarked=True)
         assert "head.weight" in str(err.value)
         assert "conv.weight" not in str(err.value)
+
+
+@pytest.mark.dist(8)
+def test_plain_submodule_of_a_jigsaw_module_is_not_foreign(device) -> None:
+    """``DistributedGroupNorm`` shards the weight of its inner ``nn.GroupNorm``.
+
+    That weight differs over ``col`` by design; ``unmarked`` must not report it.
+    """
+    mesh = _mesh((2, 2, 2), device)
+    norm = normalization.DistributedGroupNorm(
+        2, 4, device=device, channel_group=mesh["col"]
+    )
+    with torch.no_grad():  # a different shard on every column
+        norm.group_norm.weight.fill_(1.0 + mesh["col"].rank())
+    debug.assert_replica_consistency(norm, mesh, unmarked=True)

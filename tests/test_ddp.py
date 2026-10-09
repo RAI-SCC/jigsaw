@@ -234,11 +234,14 @@ def test_ddp_composition(shape, kind, variant, device, monkeypatch) -> None:
         if kind in EXACT_KINDS:
             assert torch.equal(p.grad, e), f"{name}: {p.grad} != {e}"
         else:
-            # the fp16 comm hook rounds non-integer gradients to fp16
+            # The fp16 comm hook rounds non-integer gradients to fp16. In fp32,
+            # summing microbatches before or after the replica all-reduce
+            # differs by ~1e-5 of the largest entry (cancellation in the
+            # softmax backward); a wrong reduction is off by a factor.
             rtol, atol = (
                 (1e-2, max(2e-3 * e.abs().max().item(), 1e-6))
                 if variant in ("fp16_hook", "joint_fp16")
-                else (1e-5, 1e-6)
+                else (1e-5, max(1e-4 * e.abs().max().item(), 1e-6))
             )
             torch.testing.assert_close(
                 p.grad, e, rtol=rtol, atol=atol, msg=lambda m: f"{name}: {m}"

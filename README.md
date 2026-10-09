@@ -131,7 +131,7 @@ model = Linear(1024, 1024, mesh, device)
 
 Run it with one process per GPU, e.g. `torchrun --nproc-per-node 4 train.py` or `srun` (see [Launching](#launching)).
 
-Complete, runnable scripts -- a CNN, a Vision Transformer, a Swin Transformer, a dataloader, converting an existing model, re-sharding a trained one -- are in [`examples/`](examples/README.md). Each runs with `torchrun --nproc-per-node 4`, on GPUs or on the CPU.
+Complete, runnable scripts -- a CNN, a Vision Transformer, a Swin Transformer, a dataloader, converting an existing model, re-sharding a trained one, a data-parallel training loop -- are in [`examples/`](examples/README.md). Each runs with `torchrun --nproc-per-node 4`, on GPUs or on the CPU; the CNN, the ViT and the Swin Transformer take `--ddp` (8 ranks or more) for data parallelism on top.
 
 ### Mixed precision (autocast)
 
@@ -259,6 +259,9 @@ without it, and `no_sync()`, accumulating without `no_sync()`, `gradient_as_buck
 with PowerSGD. It creates one extra process group per distinct set of replica groups. The gain
 grows with the share of parameters that are replicated: on 8 A100s over two nodes (`dp=2`,
 2x2 spatial split), a 14M-parameter conv net trained about 8% faster.
+
+`examples/vit.py --ddp`, `examples/swin.py --ddp` and `examples/ddp.py` show all of this in
+running code; [`docs/ddp.md`](docs/ddp.md) has the details.
 
 To find the step at which replicas drift apart, call
 `jigsaw.debug.assert_replica_consistency(model, mesh)` after `optimizer.step()`. It is a

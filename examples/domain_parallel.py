@@ -23,6 +23,13 @@ copy of the model and trains on its own images, and ``DistributedDataParallel``
 averages the gradients over the copies:
 
     torchrun --nproc-per-node 8 examples/domain_parallel.py --ddp
+
+``--joint-hook`` reduces the gradients of the replicated weights with one DDP comm
+hook instead (one all-reduce over ``dp`` x tiles, rather than a sum over the tiles in
+the backward pass and an average over ``dp`` afterwards); the result is the same.
+See ``docs/ddp.md``:
+
+    torchrun --nproc-per-node 8 examples/domain_parallel.py --joint-hook
 """
 
 import sys
@@ -31,7 +38,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel
-from _common import setup, shard
+from _common import data_seed, ddp_flags, setup, shard
 
 import jigsaw
 from jigsaw import log
@@ -87,8 +94,7 @@ def make_batch(
     tile; with data parallelism every copy draws a different one. In a real pipeline
     the Dataset reads just that tile from disk instead.
     """
-    dp = mesh.get("dp")
-    g = torch.Generator().manual_seed(step * dp.size() + dp.rank() if dp else step)
+    g = torch.Generator().manual_seed(data_seed(step, mesh))
     clean = torch.nn.functional.avg_pool2d(  # smooth random fields
         torch.randn(4, 1, 64, 64, generator=g), kernel_size=5, stride=1, padding=2
     )
@@ -100,7 +106,9 @@ def make_batch(
     return tile(noisy), tile(clean)
 
 
-def main(steps: int = 100, data_parallel: bool = False) -> list[float]:
+def main(
+    steps: int = 100, data_parallel: bool = False, joint_hook: bool = False
+) -> list[float]:
     """Train the denoiser for ``steps`` steps and return the loss of every step."""
     device, rank, world_size = setup()
 
@@ -122,6 +130,9 @@ def main(steps: int = 100, data_parallel: bool = False) -> list[float]:
         # span the tiles of a copy, which jigsaw rejects in the first forward: with
         # sharded weights it would average different shards together.
         model = DistributedDataParallel(model, process_group=mesh["dp"])
+        if joint_hook:
+            # Collective: every rank, before the first forward.
+            jigsaw.parallel.register_joint_comm_hook(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     # Every rank averages over the *global* image, so all ranks log the same number.
@@ -142,9 +153,11 @@ def main(steps: int = 100, data_parallel: bool = False) -> list[float]:
     # two dimensions back together (the "row" axis is the height, "col" the width).
     with torch.no_grad():
         pred = gather_results(model(x), mesh, pm_key_row="sh", pm_key_col="sw")
-    log.info("local tile %s -> gathered prediction %s", tuple(x.shape), tuple(pred.shape))
+    log.info(
+        "local tile %s -> gathered prediction %s", tuple(x.shape), tuple(pred.shape)
+    )
     return losses
 
 
 if __name__ == "__main__":
-    main(data_parallel="--ddp" in sys.argv)
+    main(**ddp_flags(sys.argv))

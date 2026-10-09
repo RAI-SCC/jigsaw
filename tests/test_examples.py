@@ -16,7 +16,8 @@ Two kinds of test, both run under ``mpirun -n 4 pytest tests``:
   ======================  ======================================================
 
 The launcher side (``torchrun --nproc-per-node 4 examples/x.py``) is covered by
-``test_examples_launch.py``.
+``test_examples_launch.py``, data parallelism on top (8 ranks) by
+``test_examples_ddp.py``.
 """
 
 import importlib.util
@@ -133,7 +134,8 @@ def replica_mesh(device: torch.device) -> dict:
 class TestSmoke:
     """``main()`` of every tutorial runs, and the training ones learn."""
 
-    @pytest.mark.parametrize("name", ["domain_parallel", "vit", "swin"])
+    # ``ddp`` on 4 ranks: a single data-parallel copy (test_examples_ddp.py has two).
+    @pytest.mark.parametrize("name", ["domain_parallel", "vit", "swin", "ddp"])
     def test_training_reduces_loss(
         self, example: Callable[[str], ModuleType], device: torch.device, name: str
     ) -> None:
