@@ -56,7 +56,7 @@ from jigsaw.modules.attention.config import (
     SendForward,
     SendOp,
 )
-from jigsaw.utils import set_all_seeds
+from jigsaw.launch import set_all_seeds
 
 IN_CHANNELS, PATCH, DIM, HEADS, DEPTH = 4, 4, 64, 4, 2
 H, W = 32, 64  # global image size
@@ -246,7 +246,7 @@ def main(
         model = jigsaw.parallel.wrap_ddp(model, mesh, joint_hook=joint_hook)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=(mesh["row"], mesh["col"]))
-    log.info("local parameters per rank: %d", jigsaw.utils.count_parameters(model))
+    log.info("local parameters per rank: %d", jigsaw.debug.count_parameters(model))
 
     losses = []
     for step in range(steps):

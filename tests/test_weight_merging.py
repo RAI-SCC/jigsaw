@@ -3,8 +3,8 @@ import random
 import pytest
 import torch
 
+from jigsaw.gather import gather_1d_results, gather_results
 from jigsaw.modules import convolution, linear
-from jigsaw.utils_aggregate import gather_1d_results, gather_results
 from tests.parity import all_ranks_ok, assert_close
 
 pytestmark = [pytest.mark.dist_required]

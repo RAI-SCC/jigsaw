@@ -7,7 +7,7 @@ import torch.distributed as dist
 
 from . import parallel
 
-__all__ = ["assert_replica_consistency"]
+__all__ = ["assert_replica_consistency", "count_parameters"]
 
 
 def assert_replica_consistency(
@@ -91,6 +91,22 @@ def assert_replica_consistency(
                 "module through jigsaw.parallel.synced_parameters."
             )
         raise AssertionError(msg)
+
+
+def count_parameters(model: torch.nn.Module) -> int:
+    """Count the trainable parameters of a model.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Model to inspect.
+
+    Returns
+    -------
+    int
+        Number of parameters with ``requires_grad``.
+    """
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
 def _named_parameters(

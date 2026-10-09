@@ -40,7 +40,7 @@ from vit import H, IN_CHANNELS, W, ViT
 
 import jigsaw
 from jigsaw import log
-from jigsaw.utils import set_all_seeds
+from jigsaw.launch import set_all_seeds
 
 Mesh = dict[str, dist.ProcessGroup]
 

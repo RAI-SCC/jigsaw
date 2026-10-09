@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 
 from jigsaw import log
-from jigsaw.utils import init_cuda, resolve_launch_env
+from jigsaw.launch import init_cuda, resolve_launch_env
 
 
 def _processes_on_this_node(world_size: int) -> int:
@@ -34,7 +34,7 @@ def _gpus_on_this_node() -> int:
 def setup() -> tuple[torch.device, int, int]:
     """Initialise ``torch.distributed`` and return ``(device, rank, world_size)``.
 
-    With one GPU per process this is :func:`jigsaw.utils.init_cuda` (NCCL, launched by
+    With one GPU per process this is :func:`jigsaw.launch.init_cuda` (NCCL, launched by
     ``srun`` or ``torchrun``). Otherwise -- no GPU, or fewer GPUs than processes on the
     node, as on a laptop -- it falls back to gloo on CPU, so every tutorial also runs
     with ``torchrun --nproc-per-node 4``.

@@ -9,7 +9,7 @@ import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
 from jigsaw import init, parallel
-from jigsaw.utils_aggregate import gather_1d_results
+from jigsaw.gather import gather_1d_results
 
 from ..common.arg_norm import _as_spatial_groups, _ntuple
 from ..common.channel_comm import resolve_conv_groups

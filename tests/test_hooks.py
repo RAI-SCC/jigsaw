@@ -10,7 +10,7 @@ import torch
 import torch.distributed as dist
 
 from jigsaw import hooks
-from jigsaw.utils_aggregate import average_weights, average_weights_module
+from jigsaw.gather import average_weights, average_weights_module
 
 
 def _param(

@@ -54,8 +54,8 @@ from jigsaw.modules.attention.config import (
     SendForward,
     SendOp,
 )
-from jigsaw.utils import setup_precision
-from jigsaw.utils_aggregate import gather_1d_results
+from jigsaw.launch import setup_precision
+from jigsaw.gather import gather_1d_results
 
 
 class PatchMLP(nn.Module):

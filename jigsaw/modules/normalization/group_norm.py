@@ -5,7 +5,7 @@ from typing import Any, Optional
 import torch
 import torch.distributed as dist
 
-from jigsaw.utils_aggregate import gather_1d_results
+from jigsaw.gather import gather_1d_results
 
 
 class DistributedGroupNorm(torch.nn.Module):

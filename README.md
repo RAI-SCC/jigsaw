@@ -52,7 +52,7 @@ invocation works from a login shell, from inside an `salloc` allocation, and
 from an `sbatch` script — `run.sh` derives `MASTER_ADDR` / `MASTER_PORT` from the
 SLURM allocation, and jigsaw reads `SLURM_PROCID` / `SLURM_NTASKS` /
 `SLURM_LOCALID` (which `srun` sets) via `resolve_launch_env()` in
-[`jigsaw/utils.py`](jigsaw/utils.py). `torchrun`'s `RANK` / `WORLD_SIZE` /
+[`jigsaw/launch.py`](jigsaw/launch.py). `torchrun`'s `RANK` / `WORLD_SIZE` /
 `LOCAL_RANK` are accepted too.
 
 ```bash
@@ -100,7 +100,7 @@ _jigsaw_ follows the interface of PyTorch: build the model from _jigsaw_ layers,
 ```python
 import torch
 import jigsaw
-from jigsaw.utils import init_cuda, set_all_seeds
+from jigsaw.launch import init_cuda, set_all_seeds
 
 device, _, rank, world_size = init_cuda()  # NCCL init from the SLURM / torchrun env
 mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})  # 4 ranks, one model replica

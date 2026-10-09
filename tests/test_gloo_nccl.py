@@ -12,7 +12,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from jigsaw.utils import resolve_launch_env
+from jigsaw.launch import resolve_launch_env
 
 pytestmark = [
     pytest.mark.gpu_required,

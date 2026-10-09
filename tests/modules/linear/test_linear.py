@@ -4,7 +4,7 @@ import torch.distributed as dist
 
 import jigsaw.modules.linear as linear
 import jigsaw.parallel as parallel
-from jigsaw.utils_aggregate import (
+from jigsaw.gather import (
     gather_1d_results,
     gather_1d_results_list,
     gather_results,

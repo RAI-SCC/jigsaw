@@ -8,7 +8,7 @@ import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
 from jigsaw import init, parallel
-from jigsaw.utils_aggregate import gather_1d_results, gather_results
+from jigsaw.gather import gather_1d_results, gather_results
 
 from .config import LinearConfig
 from .functional import XTW, XW, XWT

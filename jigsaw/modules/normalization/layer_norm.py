@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 
 from jigsaw import parallel
-from jigsaw.utils_aggregate import gather_1d_results
+from jigsaw.gather import gather_1d_results
 
 from . import functional
 

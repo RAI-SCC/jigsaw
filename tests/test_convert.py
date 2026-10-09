@@ -4,6 +4,7 @@ import pytest
 import torch
 
 import jigsaw.convert as convert
+from jigsaw.gather import gather_1d_results, gather_results
 from jigsaw.modules.activation import DistributedSoftMax
 from jigsaw.modules.attention import Attention, DistributedAttention
 from jigsaw.modules.attention.attention import attn_core_dtype
@@ -21,7 +22,6 @@ from jigsaw.modules.normalization import (
     DistributedLayerNorm,
 )
 from jigsaw.modules.roll import Roll
-from jigsaw.utils_aggregate import gather_1d_results, gather_results
 from tests.parity import assert_close
 
 # Every test here builds a 2x2 / 2x1x2 mesh, so it needs exactly 4 ranks;

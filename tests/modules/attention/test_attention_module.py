@@ -20,10 +20,10 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.modules.attention as attention
+from jigsaw.gather import gather_1d_results
 from jigsaw.modules.attention import config as cfg
 from jigsaw.modules.attention.attention import attn_core_dtype
 from jigsaw.modules.attention.functional.ring import RingAttentionFunction
-from jigsaw.utils_aggregate import gather_1d_results
 from tests.parity import all_ranks_ok, assert_close, forced_sdpa_backend
 
 DIM, HEADS, BATCH = 64, 4, 2

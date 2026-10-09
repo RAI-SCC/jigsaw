@@ -27,8 +27,8 @@ from _common import setup, shard
 
 import jigsaw
 from jigsaw import log
-from jigsaw.utils import set_all_seeds
-from jigsaw.utils_aggregate import gather_results
+from jigsaw.launch import set_all_seeds
+from jigsaw.gather import gather_results
 
 DIM = 64
 
