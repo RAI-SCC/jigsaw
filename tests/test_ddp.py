@@ -297,11 +297,140 @@ def test_joint_hook_groups(device) -> None:
 
 
 @pytest.mark.dist(4)
-def test_joint_state_without_hook_raises(device) -> None:
+@pytest.mark.parametrize("reducer", ["cpp", "python"])
+def test_joint_state_without_hook_raises(device, reducer, request) -> None:
     """Scaling without the hook would leave the gradients unsummed: refuse."""
+    if reducer == "python":
+        request.getfixturevalue("python_reducer")
     mesh = _mesh((2, 2, 1), device)
     model, make_input = _build("conv_halo", mesh, device)
     ddp = DistributedDataParallel(model, process_group=mesh["dp"])
     parallel.JointCommHookState(ddp)
     with pytest.raises(RuntimeError, match="not registered"):
         ddp(make_input(0))
+
+
+@pytest.fixture
+def python_reducer(monkeypatch):
+    """Build DDPs with the Python reducer, as for compiled autograd.
+
+    Such a DDP also turns on inductor's DDP fusion and inlines DDP into dynamo,
+    process-wide; both are undone afterwards.
+    """
+    import torch._dynamo
+    import torch._inductor.config as inductor_config
+    from torch._dynamo import trace_rules
+
+    monkeypatch.setattr(torch._dynamo.config, "optimize_ddp", "python_reducer")
+    for name in ("_fuse_ddp_communication", "_fuse_ddp_bucket_size"):
+        monkeypatch.setattr(inductor_config, name, getattr(inductor_config, name))
+    inline = set(trace_rules.LEGACY_MOD_INLINELIST)
+    torch._dynamo.reset()
+    yield
+    trace_rules.LEGACY_MOD_INLINELIST.clear()
+    trace_rules.LEGACY_MOD_INLINELIST.update(inline)
+    trace_rules.get_legacy_mod_inlinelist.cache_clear()
+    torch._dynamo.reset()
+
+
+def _compiled_step(model, make_input, n_micro, no_sync, backend: str) -> None:
+    """``_step`` with the backward under compiled autograd."""
+    from torch._dynamo import compiled_autograd
+
+    with compiled_autograd._enable(torch.compile(backend=backend)):
+        _step(model, make_input, n_micro, no_sync)
+
+
+def _compiled_cases():
+    for shape in [(2, 2, 1), (2, 2, 2)]:
+        world = shape[0] * shape[1] * shape[2]
+        for kind in KINDS:
+            marks = [pytest.mark.dist(world)]
+            if shape[2] > 1 and kind in ("xwt", "attention"):
+                marks.append(
+                    pytest.mark.xfail(
+                        strict=True,
+                        reason="compiled autograd cannot trace the p2p matmul "
+                        "backward (dist.isend/irecv, cached buffers)",
+                    )
+                )
+            for variant in ["compiled", "joint_compiled", "joint_compiled_no_sync"]:
+                yield pytest.param(
+                    shape,
+                    kind,
+                    variant,
+                    id=f"{'x'.join(map(str, shape))}-{kind}-{variant}",
+                    marks=marks,
+                )
+
+
+@pytest.mark.parametrize("shape, kind, variant", list(_compiled_cases()))
+def test_ddp_compiled_autograd(
+    shape, kind, variant, device, monkeypatch, python_reducer
+) -> None:
+    """DDP's Python reducer, with and without the joint hook, as in the matrix."""
+    mesh = _mesh(shape, device)
+    dp = mesh["dp"]
+    model, make_input = _build(kind, mesh, device)
+    no_sync = variant.endswith("no_sync")
+    n_micro = 2 if no_sync else 1
+
+    local = _local_grads(model, make_input, n_micro, monkeypatch)
+    expected = _expected(model, local, dp, ddp=True)
+
+    ddp = DistributedDataParallel(model, process_group=dp)
+    assert ddp._use_python_reducer
+    if variant.startswith("joint"):
+        parallel.register_joint_comm_hook(ddp)
+    _compiled_step(ddp, make_input, n_micro, no_sync, "aot_eager")
+
+    for (name, p), e in zip(model.named_parameters(), expected):
+        assert p.grad is not None, name
+        if kind in EXACT_KINDS:
+            assert torch.equal(p.grad, e), f"{name}: {p.grad} != {e}"
+        else:
+            torch.testing.assert_close(
+                p.grad,
+                e,
+                rtol=1e-5,
+                atol=max(1e-4 * e.abs().max().item(), 1e-6),
+                msg=lambda m: f"{name}: {m}",
+            )
+        for grp in [*parallel.replica_groups(p), dp]:
+            _assert_identical_over(p.grad, grp, f"{name}.grad")
+
+
+@pytest.mark.dist(4)
+def test_joint_hook_inductor_fusion(device, monkeypatch, python_reducer) -> None:
+    """Inductor's DDP fusion must not merge all-reduces over different groups.
+
+    It fuses every ``div -> all_reduce -> copy_`` in the backward into one
+    all-reduce over the last one's group; a replicated conv (joint group dp x
+    row) next to an unmarked layer (dp) would be reduced over one group.
+    """
+    mesh = _mesh((2, 2, 1), device)
+    conv, make_input = _build("conv_halo", mesh, device)
+    plain = torch.nn.Conv2d(4, 4, 1, device=device)
+    for i, p in enumerate(plain.parameters()):
+        p.data = _int_tensor(p.shape, 2000 + i, device, p.dtype)
+    model = torch.nn.Sequential(conv, plain)
+
+    local = _local_grads(model, make_input, 1, monkeypatch)
+    expected = _expected(model, local, mesh["dp"], ddp=True)
+
+    ddp = DistributedDataParallel(model, process_group=mesh["dp"])
+    parallel.register_joint_comm_hook(ddp)
+    _compiled_step(ddp, make_input, 1, False, "inductor")
+
+    for (name, p), e in zip(model.named_parameters(), expected):
+        assert torch.equal(p.grad, e), f"{name}: {p.grad} != {e}"
+
+
+@pytest.mark.dist(4)
+def test_joint_hook_python_reducer_rejects_wrapper(device, python_reducer) -> None:
+    """Compression wrappers need DDP's buckets, which the Python reducer lacks."""
+    mesh = _mesh((2, 2, 1), device)
+    model, _ = _build("conv_halo", mesh, device)
+    ddp = DistributedDataParallel(model, process_group=mesh["dp"])
+    with pytest.raises(ValueError, match="Python reducer"):
+        parallel.register_joint_comm_hook(ddp, default_hooks.fp16_compress_wrapper)
