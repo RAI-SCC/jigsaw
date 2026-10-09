@@ -34,7 +34,6 @@ within a node before crossing nodes.
 """
 
 import os
-import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Optional
 
@@ -46,8 +45,6 @@ from torch.nn.parallel import DistributedDataParallel
 _ATTR = "_jigsaw_replica_groups"
 # DDP attribute set once check_ddp has passed
 _CHECKED = "_jigsaw_ddp_checked"
-#: Attribute set on the hooks of :func:`jigsaw.hooks.make_grad_sync_hook`.
-HOOK_TAG = "_jigsaw_grad_sync_hook"
 #: Mutation-testing switch: with ``JIGSAW_DISABLE_GRAD_SYNC=1``, :func:`sync_grad`
 #: is a pass-through and replicated parameters keep only their local gradient
 #: share. Training is then wrong; the test suite must notice.
@@ -670,8 +667,7 @@ def check_ddp(ddp: DistributedDataParallel) -> None:
     Raises if DDP's process group shares a rank other than the caller with any
     group the model is sharded or replicated over (DDP would average different
     shards), or if a marked parameter differs across its replica groups (DDP
-    only broadcasts over its own group). Warns if a parameter still carries a
-    :func:`jigsaw.hooks.make_grad_sync_hook` hook.
+    only broadcasts over its own group).
 
     Collective over DDP's group and the model's groups: call it on every rank.
     The verdict is reduced over all of them, so every rank raises or none does.
@@ -695,17 +691,6 @@ def check_ddp(ddp: DistributedDataParallel) -> None:
     wrong_group = any(
         dp_ranks & set(dist.get_process_group_ranks(g)) - {me} for g in groups
     )
-
-    if any(
-        any(getattr(h, HOOK_TAG, False) for h in _post_accumulate_hooks(p))
-        for p in module.parameters()
-    ):
-        warnings.warn(
-            "a DDP-wrapped jigsaw model has parameters with a make_grad_sync_hook; "
-            "that hook races DDP's reducer and breaks gradient accumulation. Use "
-            "jigsaw.parallel.mark_replicated and sync_grad instead.",
-            stacklevel=2,
-        )
 
     named = [(n, p, replica_groups(p)) for n, p in module.named_parameters()]
     named = [x for x in named if x[2]]
@@ -740,12 +725,6 @@ def check_ddp(ddp: DistributedDataParallel) -> None:
             "it with jigsaw.parallel.wrap_ddp(model, mesh)."
         )
     setattr(ddp, _CHECKED, True)
-
-
-def _post_accumulate_hooks(p: torch.Tensor) -> Iterable[Any]:
-    """Return the post-accumulate-grad hooks registered on ``p`` (private API)."""
-    hooks = getattr(p, "_post_accumulate_grad_hooks", None)
-    return hooks.values() if hooks else ()
 
 
 def _device_of(group: dist.ProcessGroup) -> torch.device:

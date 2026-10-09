@@ -183,9 +183,6 @@ For plain PyTorch layers inside a jigsaw model whose parameters are replicated (
 4. If you mark parameters after the model is built, call
    `jigsaw.parallel.broadcast_replicas(model)` before wrapping (or use `wrap_ddp`).
 
-Don't use `jigsaw.hooks.make_grad_sync_hook` (a post-accumulate gradient hook) for this under
-DDP: it races DDP's reducer and breaks gradient accumulation. jigsaw warns when it finds one.
-
 Both modes work with these steps. Under the joint hook, `synced_parameters` scales just like
 the jigsaw modules do.
 

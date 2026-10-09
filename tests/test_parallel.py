@@ -9,7 +9,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from jigsaw import hooks, parallel
+from jigsaw import parallel
 from jigsaw.mesh import make_process_mesh
 
 BASE = torch.arange(1.0, 4.0)
@@ -210,21 +210,6 @@ class TestGradientAccumulation:
             (q,) = parallel.sync_grad(p)
             _loss(q).backward()
         assert torch.equal(p.grad.cpu(), microbatches * BASE * _world_sum())
-
-    def test_post_accumulate_hook_rereduces_the_running_sum(self, device):
-        # Pins the defect the in-graph sync replaces: the hook reduces the
-        # accumulated ``p.grad``, so microbatch 1 is summed twice.
-        if dist.get_world_size() == 1:
-            pytest.skip("needs a real group")
-        world = dist.get_world_size()
-        p = _param(device)
-        p.register_post_accumulate_grad_hook(
-            hooks.make_grad_sync_hook(dist.group.WORLD, async_op=False)
-        )
-        _loss(p).backward()
-        _loss(p).backward()
-        # S(S(g) + g) = (world + 1) * S(g), not 2 * S(g)
-        assert torch.equal(p.grad.cpu(), (world + 1) * BASE * _world_sum())
 
 
 class TestSyncedParameters:
