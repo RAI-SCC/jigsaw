@@ -26,6 +26,6 @@ def _loop(module, x):
 
 @pytest.mark.parametrize("dim", [-1, 1])
 def test_softmax_vmap_matches_loop(batched, dim):
-    module = act.DistributedSoftMax(dist.group.WORLD, dim=dim)
+    module = act.DistributedSoftmax(dist.group.WORLD, dim=dim)
     assert module.get_parameter_count() == 0
     assert torch.allclose(torch.vmap(module)(batched), _loop(module, batched))

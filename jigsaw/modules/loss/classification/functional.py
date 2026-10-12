@@ -6,10 +6,10 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
+from ...activation.functional import _LogSoftmax
 from ..common import (
     GroupsArg,
     _active,
-    _DistributedLogSoftmax,
     _group_rank,
     _group_size,
     _normalize_groups,
@@ -285,7 +285,7 @@ def distributed_cross_entropy(
             raise NotImplementedError(
                 "probability targets support neither weight nor label_smoothing"
             )
-        log_probs = _DistributedLogSoftmax.apply(logits, dim, channel_group)
+        log_probs = _LogSoftmax.apply(logits, dim, channel_group)
         local = -(target * log_probs).sum(dim=dim)
         per_element = _RedundantAllReduce.apply(local, (channel_group,))
         denom = per_element.new_full((), float(per_element.numel()))
@@ -351,7 +351,7 @@ def distributed_binary_cross_entropy(
     return reduce_scalar_loss(local_sum, local_count, reduction, groups)
 
 
-def distributed_bce_with_logits(
+def distributed_binary_cross_entropy_with_logits(
     logits: torch.Tensor,
     target: torch.Tensor,
     *,

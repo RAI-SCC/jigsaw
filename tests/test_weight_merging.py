@@ -50,7 +50,7 @@ class TestWeightMerging:
         to_pm_dict = request.getfixturevalue(to_pm_dict)
         torch.manual_seed(from_pm_dict["model"].rank())
 
-        linear_layer = linear.DistributedXWT(
+        linear_layer = linear.DistributedLinear(
             in_dim=local_in_dim,
             out_dim=local_out_dim,
             local_rank=from_pm_dict["model"].rank(),
@@ -142,7 +142,7 @@ class TestWeightMerging:
 
                 """
                 super().__init__()
-                self.linear1 = linear.DistributedXWT(
+                self.linear1 = linear.DistributedLinear(
                     in_dim,
                     hidden_dim,
                     local_rank=from_pm_dict["model"].rank(),
@@ -153,7 +153,7 @@ class TestWeightMerging:
                     bias=True,
                 )
 
-                self.linear2 = linear.DistributedXWT(
+                self.linear2 = linear.DistributedLinear(
                     hidden_dim,
                     out_dim,
                     local_rank=from_pm_dict["model"].rank(),
@@ -293,7 +293,7 @@ class TestWeightMerging:
         to_pm_dict = request.getfixturevalue(to_pm_dict)
         torch.manual_seed(from_pm_dict["col"].rank())
 
-        conv_layer = convolution.DistributedConv2D(
+        conv_layer = convolution.DistributedConv2d(
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=kernel_size,
@@ -381,7 +381,7 @@ class TestWeightMerging:
         to_pm_dict = request.getfixturevalue(to_pm_dict)
         torch.manual_seed(from_pm_dict["col"].rank())
 
-        conv_layer = convolution.DistributedConv2DTranspose(
+        conv_layer = convolution.DistributedConvTranspose2d(
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=kernel_size,

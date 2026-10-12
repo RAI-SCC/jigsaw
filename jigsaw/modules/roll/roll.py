@@ -1,22 +1,12 @@
 """Distributed roll modules."""
 
-from collections.abc import Sequence
 from typing import Any, Optional, cast
 
 import torch
 import torch.distributed as dist
 
 from .config import RollConfig
-from .functional import RollFunction
-
-
-def _as_group_tuple(
-    spatial_group: "dist.ProcessGroup | Sequence[dist.ProcessGroup]",
-) -> tuple[dist.ProcessGroup, ...]:
-    """Return ``spatial_group`` as a tuple, wrapping a single group."""
-    if isinstance(spatial_group, Sequence):
-        return tuple(spatial_group)
-    return (spatial_group,)
+from .functional import _Roll
 
 
 class Roll(torch.nn.Module):
@@ -68,7 +58,7 @@ class DistributedRoll(torch.nn.Module):
         shifts: tuple[int, ...],
         dims: tuple[int, ...],
         distributed_dims: tuple[int, ...],
-        spatial_group: "dist.ProcessGroup | Sequence[dist.ProcessGroup]",
+        spatial_groups: tuple[dist.ProcessGroup, ...],
         device: torch.device,
         dtype: torch.dtype = torch.float32,
         config: Optional[RollConfig] = None,
@@ -84,9 +74,8 @@ class DistributedRoll(torch.nn.Module):
         distributed_dims : tuple[int, ...]
             Dimensions across which the input is partitioned. Each must appear in
             ``dims``, counted from either end: ``-2`` matches ``2`` on a 4-D input.
-        spatial_group : dist.ProcessGroup | Sequence[dist.ProcessGroup]
-            Process group of each entry of ``distributed_dims``. A single group
-            is accepted when ``distributed_dims`` has one entry.
+        spatial_groups : tuple[dist.ProcessGroup, ...]
+            Process group of each entry of ``distributed_dims``.
         device : torch.device
             Device of the module.
         dtype : torch.dtype
@@ -97,14 +86,13 @@ class DistributedRoll(torch.nn.Module):
         Raises
         ------
         ValueError
-            If ``distributed_dims`` and ``spatial_group`` differ in length, or an entry
+            If ``distributed_dims`` and ``spatial_groups`` differ in length, or an entry
             of ``distributed_dims`` is not in ``dims``. If the two count from different
             ends, that is only known, and raised, in the forward pass.
         """
         super().__init__()
-        spatial_groups = _as_group_tuple(spatial_group)
         if len(distributed_dims) != len(spatial_groups):
-            raise ValueError("distributed_dims and spatial_group must align")
+            raise ValueError("distributed_dims and spatial_groups must align")
         for d in distributed_dims:
             # A dimension counted from the other end can only be matched once the
             # number of input dimensions is known.
@@ -115,7 +103,7 @@ class DistributedRoll(torch.nn.Module):
         self.shifts = tuple(shifts)
         self.dims = tuple(dims)
         self.distributed_dims = tuple(distributed_dims)
-        self.spatial_groups = spatial_groups
+        self.spatial_groups = tuple(spatial_groups)
         self.dtype = dtype
         self.empty = torch.empty(0, device=device, dtype=dtype)
         self.config = RollConfig(device) if config is None else config
@@ -179,7 +167,7 @@ class DistributedRoll(torch.nn.Module):
             shifts=roll.shifts,
             dims=roll.dims,
             distributed_dims=distributed_dims,
-            spatial_group=spatial_groups,
+            spatial_groups=spatial_groups,
             dtype=roll.dtype,
             device=device,
         )
@@ -197,7 +185,7 @@ class DistributedRoll(torch.nn.Module):
     def reshard(
         self,
         distributed_dims: list[int],
-        spatial_group: "dist.ProcessGroup | Sequence[dist.ProcessGroup]",
+        spatial_groups: list[dist.ProcessGroup],
     ) -> None:
         """Reshard the module onto other process groups.
 
@@ -205,20 +193,18 @@ class DistributedRoll(torch.nn.Module):
         ----------
         distributed_dims : list[int]
             Dimensions across which the input is partitioned.
-        spatial_group : dist.ProcessGroup | Sequence[dist.ProcessGroup]
-            Process group of each entry of ``distributed_dims``, as in
-            :meth:`__init__`.
+        spatial_groups : list[dist.ProcessGroup]
+            Process group of each entry of ``distributed_dims``.
 
         Raises
         ------
         ValueError
-            If ``distributed_dims`` and ``spatial_group`` differ in length.
+            If ``distributed_dims`` and ``spatial_groups`` differ in length.
         """
-        spatial_groups = _as_group_tuple(spatial_group)
         if len(distributed_dims) != len(spatial_groups):
             raise ValueError("mismatched lengths")
         self.distributed_dims = tuple(distributed_dims)
-        self.spatial_groups = spatial_groups
+        self.spatial_groups = tuple(spatial_groups)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Roll the local shard and exchange the halos.
@@ -233,7 +219,7 @@ class DistributedRoll(torch.nn.Module):
         torch.Tensor
             Local output.
         """
-        out = RollFunction.apply(
+        out = _Roll.apply(
             x,
             self.shifts,
             self.dims,

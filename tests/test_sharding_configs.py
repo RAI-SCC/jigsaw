@@ -480,14 +480,10 @@ class TestNormalizationReshard:
             channel_group=from_mesh["col"],
         )
         torch.manual_seed(from_mesh["col"].rank())
-        gn.group_norm.weight.data = torch.randn_like(gn.group_norm.weight)
-        gn.group_norm.bias.data = torch.randn_like(gn.group_norm.bias)
-        w_global = gather_1d_results(
-            gn.group_norm.weight.data, from_mesh, dim=0, pm_key="col"
-        )
-        b_global = gather_1d_results(
-            gn.group_norm.bias.data, from_mesh, dim=0, pm_key="col"
-        )
+        gn.weight.data = torch.randn_like(gn.weight)
+        gn.bias.data = torch.randn_like(gn.bias)
+        w_global = gather_1d_results(gn.weight.data, from_mesh, dim=0, pm_key="col")
+        b_global = gather_1d_results(gn.bias.data, from_mesh, dim=0, pm_key="col")
 
         gn.reshard_parameters(from_mesh, to_mesh)
 
@@ -497,9 +493,7 @@ class TestNormalizationReshard:
             device,
             grp,
         )
-        w_after = gather_1d_results(
-            gn.group_norm.weight.data, to_mesh, dim=0, pm_key="col"
-        )
+        w_after = gather_1d_results(gn.weight.data, to_mesh, dim=0, pm_key="col")
         assert_close("gn weight", w_after, w_global, 1e-6, 1e-6, device, grp)
 
         torch.manual_seed(grp.rank())
@@ -546,7 +540,7 @@ class TestRollConvert:
         )
 
         # reshard the split onto the column axis; the next forward stays correct.
-        jr.reshard(distributed_dims=[2], spatial_group=[mesh["col"]])
+        jr.reshard(distributed_dims=[2], spatial_groups=[mesh["col"]])
         x2 = torch.randn(b, h, w, c, device=device)
         x2_global = gather_1d_results(x2, mesh, dim=2, pm_key="col")
         y2 = gather_1d_results(jr(x2), mesh, dim=2, pm_key="col")

@@ -25,9 +25,9 @@ from tests.parity import REPLICATED, ShardSpec, _all_gather_uneven, check_parity
 pytestmark = [pytest.mark.dist_required, pytest.mark.dist(4)]
 
 _CONV_CLS = {
-    1: convolution.DistributedConv1D,
-    2: convolution.DistributedConv2D,
-    3: convolution.DistributedConv3D,
+    1: convolution.DistributedConv1d,
+    2: convolution.DistributedConv2d,
+    3: convolution.DistributedConv3d,
 }
 _TORCH_CLS = {1: torch.nn.Conv1d, 2: torch.nn.Conv2d, 3: torch.nn.Conv3d}
 

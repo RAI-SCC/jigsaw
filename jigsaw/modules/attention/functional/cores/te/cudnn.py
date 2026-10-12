@@ -15,7 +15,7 @@ computes it regardless as its own backward's normaliser, so it's a free
 extra). What direct kernel calls buy there is the explicit
 ``fused_attn_bwd``, which ``te.DotProductAttention`` hides behind its own
 ``autograd.Function`` -- see
-:class:`~jigsaw.modules.attention.attention.TransformerEngineAttention`.
+:class:`~jigsaw.modules.attention.attention._TransformerEngineAttention`.
 
 Also the only TE path that can ever carry FP8 (not yet implemented here).
 

@@ -20,7 +20,7 @@ class TestDistributedRoll:
             shifts=(x // 2, y // 2),
             dims=(1, 2),
             distributed_dims=(2,),
-            spatial_group=(process_mesh_dict_2x2["row"],),
+            spatial_groups=(process_mesh_dict_2x2["row"],),
             device=device,
             dtype=torch.float32,
         )
@@ -49,7 +49,7 @@ class TestDistributedRoll:
             shifts=(-(x // 2), -(y // 2)),
             dims=(1, 2),
             distributed_dims=(2,),
-            spatial_group=(process_mesh_dict_2x2["row"],),
+            spatial_groups=(process_mesh_dict_2x2["row"],),
             device=device,
             dtype=torch.float32,
         )
@@ -76,7 +76,7 @@ class TestDistributedRoll:
             shifts=(x, y),
             dims=(1, 2),
             distributed_dims=(2,),
-            spatial_group=(process_mesh_dict_4x2["row"],),
+            spatial_groups=(process_mesh_dict_4x2["row"],),
             device=device,
             dtype=torch.float32,
         )
@@ -105,7 +105,7 @@ class TestDistributedRoll:
             shifts=(-x, -y),
             dims=(1, 2),
             distributed_dims=(2,),
-            spatial_group=(process_mesh_dict_4x2["row"],),
+            spatial_groups=(process_mesh_dict_4x2["row"],),
             device=device,
             dtype=torch.float32,
         )

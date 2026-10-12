@@ -109,7 +109,7 @@ mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})  # 4 ranks, one model repl
 class Linear(torch.nn.Module):
     def __init__(self, in_dim, out_dim, mesh, device):
         super().__init__()
-        self.lin = jigsaw.linear.DistributedXWT(
+        self.lin = jigsaw.linear.DistributedLinear(
             in_dim=in_dim,
             out_dim=out_dim,
             bias=True,
@@ -147,11 +147,11 @@ loss.backward()  # outside the autocast region
 _jigsaw_'s layers are custom `torch.autograd.Function`s, which `torch.autocast` does **not**
 descend into automatically, so each opts in by hand. Behaviour:
 
-- **Matmul family** — `DistributedXWT`, attention (plain + ring), `DistributedConv*` /
+- **Matmul family** — `DistributedLinear`, attention (plain + ring), `DistributedConv*` /
   `DistributedConv*Transpose`: the forward runs in the autocast dtype and the output carries
   it (bias included); gradients are reconciled to the **fp32 (parameter) dtype** in backward,
   i.e. you keep fp32 master gradients for free.
-- **`DistributedLayerNorm` (with or without `elementwise_affine`) / `DistributedSoftMax`**
+- **`DistributedLayerNorm` (with or without `elementwise_affine`) / `DistributedSoftmax`**
   follow stock-AMP "fp32 list" semantics: computed and emitted in fp32 even when fed bf16/fp16.
 - **Attention core (SDPA / TransformerEngine)**: under autocast it uses the autocast dtype
   (so `autocast(bfloat16)` stays bf16 and `autocast(float16)` fp16). With no autocast it uses

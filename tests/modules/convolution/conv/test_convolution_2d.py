@@ -74,7 +74,7 @@ def _conv2d_reference_check(
     groups: int = 1,
     channel_comm: str = "all_gather",
 ) -> None:
-    """Compare a distributed ``DistributedConv2D`` against a single-process conv2d.
+    """Compare a distributed ``DistributedConv2d`` against a single-process conv2d.
 
     Works for any ``row.size()`` (spatial) x ``col.size()`` (channel) mesh, any
     channel-parallel exchange strategy (``"all_gather"`` / ``"p2p"`` /
@@ -100,7 +100,7 @@ def _conv2d_reference_check(
         batch, in_channels // n_channel, height, width // n_spatial, device=device
     )
 
-    conv = convolution.DistributedConv2D(
+    conv = convolution.DistributedConv2d(
         in_channels,
         out_channels,
         kernel_size,
@@ -222,7 +222,7 @@ def _conv2d_optimizer_parity_check(
     groups: int = 1,
     channel_comm: str = "all_gather",
 ) -> None:
-    """Run ``iters`` train steps of a ``DistributedConv2D`` and an equal
+    """Run ``iters`` train steps of a ``DistributedConv2d`` and an equal
     single-process ``conv2d`` and assert they never drift apart.
 
     Both start from the same weights (the distributed shards, gathered) and the
@@ -249,7 +249,7 @@ def _conv2d_optimizer_parity_check(
     dilation = _pair(dilation)
 
     torch.manual_seed(model_group.rank())
-    dist_conv = convolution.DistributedConv2D(
+    dist_conv = convolution.DistributedConv2d(
         in_channels,
         out_channels,
         kernel_size,
@@ -410,7 +410,7 @@ class TestConv2d:
         torch.manual_seed(local_rank)  # each process gets a different initial seed
         in_dim, out_dim = 5, 10
         kernel_size = 4
-        conv = convolution.DistributedConv2D(
+        conv = convolution.DistributedConv2d(
             in_dim,
             out_dim,
             kernel_size,
@@ -468,7 +468,7 @@ class TestConv2d:
 
         def _build(channel_comm: str) -> torch.nn.Module:
             torch.manual_seed(1234)  # identical weight init for both variants
-            return convolution.DistributedConv2D(
+            return convolution.DistributedConv2d(
                 8,
                 12,
                 4,
@@ -519,7 +519,7 @@ class TestConv2d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """``channel_comm='auto'`` resolves from the device on the config."""
-        conv = convolution.DistributedConv2D(
+        conv = convolution.DistributedConv2d(
             8,
             12,
             4,
@@ -536,7 +536,7 @@ class TestConv2d:
     ) -> None:
         """An unrecognised ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
-            convolution.DistributedConv2D(
+            convolution.DistributedConv2d(
                 8,
                 12,
                 4,
@@ -553,7 +553,7 @@ class TestConv2d:
         """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
         if dist.get_backend() != "gloo":
             pytest.skip("only meaningful on the gloo backend")
-        conv = convolution.DistributedConv2D(
+        conv = convolution.DistributedConv2d(
             8,
             12,
             4,
@@ -574,7 +574,7 @@ class TestConv2d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """``stride`` / ``padding`` / ``dilation`` given as ``int`` become 2-tuples."""
-        conv = convolution.DistributedConv2D(
+        conv = convolution.DistributedConv2d(
             8,
             12,
             4,
@@ -611,7 +611,7 @@ class TestConv2d:
             stride: object, padding: object, dilation: object
         ) -> torch.nn.Module:
             torch.manual_seed(1234)  # identical weight init for both variants
-            return convolution.DistributedConv2D(
+            return convolution.DistributedConv2d(
                 in_channels,
                 out_channels,
                 kernel_size,
@@ -734,7 +734,7 @@ class TestConv2d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """String padding is not supported once a halo exchange is needed."""
-        conv = convolution.DistributedConv2D(
+        conv = convolution.DistributedConv2d(
             8,
             12,
             4,
@@ -874,7 +874,7 @@ class TestConv2dParallel:
     ) -> None:
         """Weight init is broadcast across a spatial group larger than two."""
         torch.manual_seed(dist.get_rank(group=process_mesh_dict_3x2["model"]))
-        conv = convolution.DistributedConv2D(
+        conv = convolution.DistributedConv2d(
             12,
             12,
             4,
@@ -1053,7 +1053,7 @@ class TestConv2dChannelGroupOne:
         assert row.size() == 1 and col.size() == 1
 
         in_ch, out_ch, k = 6, 8, 3
-        conv = convolution.DistributedConv2D(
+        conv = convolution.DistributedConv2d(
             in_ch,
             out_ch,
             k,
@@ -1316,7 +1316,7 @@ class TestConv2dGroups:
         ranks share one conv-group -- unsupported.
         """
         with pytest.raises(NotImplementedError):
-            convolution.DistributedConv2D(
+            convolution.DistributedConv2d(
                 18,
                 18,
                 4,
@@ -1538,7 +1538,7 @@ class TestConv2dTranspose:
         )
         in_dim, out_dim = 6, 10
         kernel_size = 4
-        conv2d = convolution.DistributedConv2DTranspose(
+        conv2d = convolution.DistributedConvTranspose2d(
             in_dim,
             out_dim,
             kernel_size,
@@ -1583,7 +1583,7 @@ class TestConv2dTranspose:
         kernel_size = 4
         h, w = 16, 16
 
-        conv2d = convolution.DistributedConv2DTranspose(
+        conv2d = convolution.DistributedConvTranspose2d(
             in_dim,
             out_dim,
             kernel_size,

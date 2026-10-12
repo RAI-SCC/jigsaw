@@ -25,7 +25,7 @@ class LinearCtx(Protocol):
 
 
 def _setup_linear_ctx(ctx: torch.autograd.function.FunctionCtx, inputs: Any) -> None:
-    """Save the tensors and metadata of :class:`XWT`, :class:`XW` and :class:`XTW`."""
+    """Save the tensors and metadata of :class:`_XWT`, :class:`_XW` and :class:`_XTW`."""
     x, w, b, local_rank, device, config, model_group, bayesian = inputs
     ctx.save_for_backward(x, w, b)
     c = cast(LinearCtx, ctx)
@@ -54,7 +54,7 @@ def _linear_vmap(
     return out, 0
 
 
-class XWT(torch.autograd.Function):
+class _XWT(torch.autograd.Function):
     """Distributed batched matmul ``x @ w.mT``."""
 
     @staticmethod
@@ -96,7 +96,7 @@ class XWT(torch.autograd.Function):
         """
         w = config.reshape_weights(w)
         # Opt into autocast: this Function hides the inner matmul from autocast's
-        # op-level policy. ``XWT`` casts x/w here (its kernel does not); casting
+        # op-level policy. ``_XWT`` casts x/w here (its kernel does not); casting
         # the bias too keeps ``add_bias`` from promoting the output back to fp32.
         x, w, b = cast_to_autocast_dtype(x, w, b)
         xwt = config.mm_kernels[0](x, w, local_rank, device, model_group)
@@ -183,11 +183,11 @@ class XWT(torch.autograd.Function):
     ) -> tuple[torch.Tensor, Optional[int]]:
         """Batching rule for ``torch.vmap``."""
         return _linear_vmap(
-            XWT.apply, x, w, b, local_rank, device, config, model_group, bayesian
+            _XWT.apply, x, w, b, local_rank, device, config, model_group, bayesian
         )
 
 
-class XW(torch.autograd.Function):
+class _XW(torch.autograd.Function):
     """Distributed batched matmul ``x @ w``."""
 
     @staticmethod
@@ -307,11 +307,11 @@ class XW(torch.autograd.Function):
     ) -> tuple[torch.Tensor, Optional[int]]:
         """Batching rule for ``torch.vmap``."""
         return _linear_vmap(
-            XW.apply, x, w, b, local_rank, device, config, model_group, bayesian
+            _XW.apply, x, w, b, local_rank, device, config, model_group, bayesian
         )
 
 
-class XTW(torch.autograd.Function):
+class _XTW(torch.autograd.Function):
     """Distributed batched matmul ``x.mT @ w``."""
 
     @staticmethod
@@ -431,5 +431,5 @@ class XTW(torch.autograd.Function):
     ) -> tuple[torch.Tensor, Optional[int]]:
         """Batching rule for ``torch.vmap``."""
         return _linear_vmap(
-            XTW.apply, x, w, b, local_rank, device, config, model_group, bayesian
+            _XTW.apply, x, w, b, local_rank, device, config, model_group, bayesian
         )

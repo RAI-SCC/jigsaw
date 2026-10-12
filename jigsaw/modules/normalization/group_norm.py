@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 
 from jigsaw.gather import gather_1d_results
 
@@ -43,7 +44,8 @@ class DistributedGroupNorm(torch.nn.Module):
         affine : bool
             Whether the layer has learnable affine parameters.
         bias : bool
-            Whether the affine transformation has a bias.
+            Whether the affine transformation has a bias. Ignored if ``affine``
+            is ``False``.
         dtype : torch.dtype, optional
             Data type of the parameters.
         """
@@ -62,27 +64,19 @@ class DistributedGroupNorm(torch.nn.Module):
         self.eps = eps
         self.affine = affine
         self.device = device
-        self.dtype = dtype
-        self.bias = bias
-        self.group_norm = self._build_group_norm()
-
-    def _build_group_norm(self) -> torch.nn.GroupNorm:
-        """Return a ``GroupNorm`` of the current local shape.
-
-        Older ``torch.nn.GroupNorm`` (e.g. 2.9) has no ``bias=`` argument, so a
-        disabled bias is dropped here instead, as newer torch does for ``bias=False``.
-        """
-        group_norm = torch.nn.GroupNorm(
-            self.num_local_groups,
-            self.num_local_channels,
-            eps=self.eps,
-            affine=self.affine,
-            device=self.device,
-            dtype=self.dtype,
-        )
-        if self.affine and not self.bias:
-            group_norm.register_parameter("bias", None)
-        return group_norm
+        if affine:
+            self.weight = torch.nn.Parameter(
+                torch.ones(self.num_local_channels, device=device, dtype=dtype)
+            )
+            if bias:
+                self.bias = torch.nn.Parameter(
+                    torch.zeros(self.num_local_channels, device=device, dtype=dtype)
+                )
+            else:
+                self.register_parameter("bias", None)
+        else:
+            self.register_parameter("weight", None)
+            self.register_parameter("bias", None)
 
     @classmethod
     def convert_to_jigsaw(
@@ -146,17 +140,11 @@ class DistributedGroupNorm(torch.nn.Module):
         )
         local_channels = instance.num_local_channels
         col_rank = col_group.rank()
-        if model.affine:
-            instance.group_norm.weight.data = (
-                model.weight.data[
-                    col_rank * local_channels : (col_rank + 1) * local_channels
-                ]
-                .clone()
-                .to(device)
-            )
-            if model.bias is not None:
-                instance.group_norm.bias.data = (
-                    model.bias.data[
+        for name in ("weight", "bias"):
+            src = getattr(model, name)
+            if src is not None:
+                getattr(instance, name).data = (
+                    src.data[
                         col_rank * local_channels : (col_rank + 1) * local_channels
                     ]
                     .clone()
@@ -189,18 +177,14 @@ class DistributedGroupNorm(torch.nn.Module):
         global_weight : torch.Tensor | None
             Merged weight, or ``None`` if the layer is not affine.
         global_bias : torch.Tensor | None
-            Merged bias, or ``None`` if the layer is not affine or has no bias.
+            Merged bias, or ``None`` if the layer has no bias.
         """
-        if not self.affine:
-            return None, None
-        global_weight = gather_1d_results(
-            self.group_norm.weight, from_process_mesh, dim=0, pm_key=col_kw
+        global_weight, global_bias = (
+            None
+            if p is None
+            else gather_1d_results(p, from_process_mesh, dim=0, pm_key=col_kw)
+            for p in (self.weight, self.bias)
         )
-        global_bias = None
-        if self.group_norm.bias is not None:
-            global_bias = gather_1d_results(
-                self.group_norm.bias, from_process_mesh, dim=0, pm_key=col_kw
-            )
         return global_weight, global_bias
 
     def convert_to_torch(
@@ -229,21 +213,22 @@ class DistributedGroupNorm(torch.nn.Module):
             Layer with the merged weight and bias.
         """
         weight, bias = self.merge_weights(process_mesh_dict, row_kw, col_kw, model_kw)
+        # Older ``torch.nn.GroupNorm`` (e.g. 2.9) has no ``bias=`` argument, so a
+        # missing bias is dropped after construction instead.
         group_norm = torch.nn.GroupNorm(
             self.num_groups,
             self.num_channels,
             eps=self.eps,
             affine=self.affine,
             device=self.device,
-            dtype=self.dtype,
+            dtype=weight.dtype if weight is not None else None,
         )
-        if self.affine:
-            assert weight is not None
+        if weight is not None:
             group_norm.weight.data = weight
-            if bias is not None:
-                group_norm.bias.data = bias
-            elif group_norm.bias is not None:
-                group_norm.register_parameter("bias", None)
+        if bias is not None:
+            group_norm.bias.data = bias
+        elif group_norm.bias is not None:
+            group_norm.register_parameter("bias", None)
         return group_norm
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -259,7 +244,7 @@ class DistributedGroupNorm(torch.nn.Module):
         torch.Tensor
             Local output.
         """
-        return self.group_norm(x)  # type: ignore[no-any-return]
+        return F.group_norm(x, self.num_local_groups, self.weight, self.bias, self.eps)
 
     def reshard_parameters(
         self,
@@ -293,27 +278,23 @@ class DistributedGroupNorm(torch.nn.Module):
         new_num_local_groups = self.num_groups // to_channel.size()
         col_rank = to_channel.rank()
 
-        weight_slice = bias_slice = None
-        if self.affine:
-            global_weight = gather_1d_results(
-                self.group_norm.weight, from_process_mesh, dim=0, pm_key=pm_col_key
-            )
-            weight_slice = global_weight[
-                col_rank * new_num_channels : (col_rank + 1) * new_num_channels
-            ].clone()
-            if self.group_norm.bias is not None:
-                global_bias = gather_1d_results(
-                    self.group_norm.bias, from_process_mesh, dim=0, pm_key=pm_col_key
+        for name in ("weight", "bias"):
+            p = getattr(self, name)
+            if p is not None:
+                global_p = gather_1d_results(
+                    p, from_process_mesh, dim=0, pm_key=pm_col_key
                 )
-                bias_slice = global_bias[
-                    col_rank * new_num_channels : (col_rank + 1) * new_num_channels
-                ].clone()
+                setattr(
+                    self,
+                    name,
+                    torch.nn.Parameter(
+                        global_p[
+                            col_rank * new_num_channels : (col_rank + 1)
+                            * new_num_channels
+                        ].contiguous()
+                    ),
+                )
 
         self.num_local_channels = new_num_channels
         self.num_local_groups = new_num_local_groups
         self.channel_group = to_channel
-        self.group_norm = self._build_group_norm()
-        if weight_slice is not None:
-            self.group_norm.weight.data = weight_slice
-        if bias_slice is not None and self.group_norm.bias is not None:
-            self.group_norm.bias.data = bias_slice

@@ -197,7 +197,7 @@ class SwinBlock(nn.Module):
                 shifts=(shift, shift),
                 dims=(1, 2),  # the two spatial axes of (B, H, W, C) ...
                 distributed_dims=(1, 2),  # ... both are split ...
-                spatial_group=(mesh["sh"], mesh["sw"]),  # ... over "sh" and "sw"
+                spatial_groups=(mesh["sh"], mesh["sw"]),  # ... over "sh" and "sw"
                 device=device,
             )
 
@@ -238,7 +238,7 @@ class Swin(nn.Module):
             device=device, spatial_group=(sh, sw), channel_group=mesh["col"]
         )
         # kernel == stride: the patches do not overlap, so there is no halo to exchange.
-        self.embed = jigsaw.convolution.DistributedConv2D(
+        self.embed = jigsaw.convolution.DistributedConv2d(
             IN_CHANNELS, DIMS[0], kernel_size=PATCH, stride=PATCH, **conv_kwargs
         )
 
@@ -266,7 +266,7 @@ class Swin(nn.Module):
 
         scale = PATCH * 2 ** (len(DIMS) - 1)  # pixels per token of the last stage
         self.norm = replicate(nn.LayerNorm(DIMS[-1]), mesh, device)
-        self.recover = jigsaw.convolution.DistributedConv2DTranspose(
+        self.recover = jigsaw.convolution.DistributedConvTranspose2d(
             DIMS[-1], IN_CHANNELS, kernel_size=scale, stride=scale, **conv_kwargs
         )
 

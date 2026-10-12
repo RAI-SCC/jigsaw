@@ -261,7 +261,7 @@ class DistributedBCEWithLogitsLoss(torch.nn.Module):
         torch.Tensor
             Local loss for ``"none"``, otherwise the reduced scalar loss.
         """
-        return fc.distributed_bce_with_logits(
+        return fc.distributed_binary_cross_entropy_with_logits(
             logits,
             target,
             weight=self.weight,

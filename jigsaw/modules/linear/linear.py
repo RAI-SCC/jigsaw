@@ -11,7 +11,7 @@ from jigsaw import init, parallel
 from jigsaw.gather import gather_1d_results, gather_results
 
 from .config import LinearConfig
-from .functional import XTW, XW, XWT
+from .functional import _XTW, _XW, _XWT
 
 # Effective ``(model_group.size() // col_group.size(), col_group.size())``
 # layouts the XWT kernels implement. The kernel is picked by ``parallelism`` (=
@@ -26,7 +26,7 @@ from .functional import XTW, XW, XWT
 _SUPPORTED_XWT_LAYOUTS = frozenset({(1, 1), (1, 2), (2, 2), (4, 2)})
 
 
-class DistributedXWT(torch.nn.Module):
+class DistributedLinear(torch.nn.Module):
     """Distributed linear layer computing ``x @ w.mT``."""
 
     def __init__(
@@ -132,7 +132,7 @@ class DistributedXWT(torch.nn.Module):
             parallel.mark_replicated(self.bias, self.row_group)
             dist.broadcast(self.bias.data, group_src=0, group=self.row_group)
 
-        self.XWT = XWT.apply
+        self.XWT = _XWT.apply
 
     def reset_parameters(self) -> None:
         """Initialize the parameters like ``torch.nn.Linear``.
@@ -173,7 +173,7 @@ class DistributedXWT(torch.nn.Module):
         layout = (row, self.col_group.size())
         if layout not in _SUPPORTED_XWT_LAYOUTS:
             raise NotImplementedError(
-                f"DistributedXWT.forward has no kernel for an effective "
+                f"DistributedLinear.forward has no kernel for an effective "
                 f"row x col = {layout[0]}x{layout[1]} mesh; the XWT kernels "
                 f"implement only {sorted(_SUPPORTED_XWT_LAYOUTS)} (row, col). "
                 f"merge_weights / reshard_parameters still work on this mesh."
@@ -211,8 +211,8 @@ class DistributedXWT(torch.nn.Module):
         col_kw: str = "col",
         model_kw: str = "model",
         **kwargs: Any,
-    ) -> "DistributedXWT":
-        """Convert a ``torch.nn.Linear`` to a :class:`DistributedXWT`.
+    ) -> "DistributedLinear":
+        """Convert a ``torch.nn.Linear`` to a :class:`DistributedLinear`.
 
         Parameters
         ----------
@@ -234,7 +234,7 @@ class DistributedXWT(torch.nn.Module):
 
         Returns
         -------
-        DistributedXWT
+        DistributedLinear
             Distributed layer with the weights and bias of ``model``.
         """
         # The columns shard the input dimension of the weight and the bias, the
@@ -601,19 +601,19 @@ class _DistributedMatMul(torch.nn.Module):
 class DistributedMatMulXWT(_DistributedMatMul):
     """Distributed batched matmul ``x @ w.mT``."""
 
-    _autograd_fn = XWT
+    _autograd_fn = _XWT
 
 
 class DistributedMatMulXW(_DistributedMatMul):
     """Distributed batched matmul ``x @ w``."""
 
-    _autograd_fn = XW
+    _autograd_fn = _XW
 
 
 class DistributedMatMulXTW(_DistributedMatMul):
     """Distributed batched matmul ``x.mT @ w``."""
 
-    _autograd_fn = XTW
+    _autograd_fn = _XTW
 
 
 class _MatMul(torch.nn.Module):

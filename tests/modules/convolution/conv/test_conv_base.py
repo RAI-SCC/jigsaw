@@ -18,11 +18,38 @@ from jigsaw.gather import gather_1d_results
 pytestmark = [pytest.mark.dist_required]
 
 _CONV_CLS = {
-    1: convolution.DistributedConv1D,
-    2: convolution.DistributedConv2D,
-    3: convolution.DistributedConv3D,
+    1: convolution.DistributedConv1d,
+    2: convolution.DistributedConv2d,
+    3: convolution.DistributedConv3d,
 }
 _REF_CLS = {1: torch.nn.Conv1d, 2: torch.nn.Conv2d, 3: torch.nn.Conv3d}
+
+
+class TestConvChannelSizes:
+    @pytest.mark.dist(4)
+    def test_out_channels_is_global_after_init_and_reshard(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        process_mesh_dict_1x4: dict,
+    ) -> None:
+        """``out_channels`` is the global size, like ``in_channels`` and torch;
+        ``local_out_channels`` is this rank's shard."""
+        conv = convolution.DistributedConv2d(
+            8,
+            12,
+            2,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=2,
+        ).to(device)
+        assert (conv.in_channels, conv.out_channels) == (8, 12)
+        assert conv.local_out_channels == 6 == conv.weight.shape[0]
+
+        conv.reshard_parameters(process_mesh_dict_2x2, process_mesh_dict_1x4)
+        assert (conv.in_channels, conv.out_channels) == (8, 12)
+        assert conv.local_out_channels == 3 == conv.weight.shape[0]
 
 
 class TestConvParameterCount:
@@ -56,7 +83,7 @@ class TestConvParameterCount:
     ) -> None:
         """No split spatial axis -> ``spatial_world_size == 1`` and nothing is divided."""
         mesh = process_mesh_dict_1x4
-        conv = convolution.DistributedConv2D(
+        conv = convolution.DistributedConv2d(
             8,
             16,
             2,
@@ -76,7 +103,7 @@ class TestConvParameterCount:
     ) -> None:
         """With ``bias=False`` only the weight contributes."""
         mesh = process_mesh_dict_2x2
-        conv = convolution.DistributedConv2D(
+        conv = convolution.DistributedConv2d(
             8,
             12,
             2,

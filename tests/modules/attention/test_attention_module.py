@@ -1,6 +1,6 @@
-"""Multi-rank checks of the attention layer and of ``RingAttentionFunction`` (CPU).
+"""Multi-rank checks of the attention layer and of ``_RingAttention`` (CPU).
 
-* ``RingAttentionFunction`` is driven through ``autograd`` (forward, ``setup_context``,
+* ``_RingAttention`` is driven through ``autograd`` (forward, ``setup_context``,
   ``backward``) on a 4-rank ring and compared with plain SDPA on the global sequence;
   ``test_ring_attention.py`` only calls ``ring_forward`` / ``ring_backward`` directly.
 * ``DistributedAttention`` non-ring paths that the other files do not reach --
@@ -23,7 +23,7 @@ import jigsaw.modules.attention as attention
 from jigsaw.gather import gather_1d_results
 from jigsaw.modules.attention import config as cfg
 from jigsaw.modules.attention.attention import attn_core_dtype
-from jigsaw.modules.attention.functional.ring import RingAttentionFunction
+from jigsaw.modules.attention.functional.ring import _RingAttention
 from tests.parity import all_ranks_ok, assert_close, forced_sdpa_backend
 
 DIM, HEADS, BATCH = 64, 4, 2
@@ -37,7 +37,7 @@ def _channel_shard(t: torch.Tensor, mesh: dict) -> torch.Tensor:
 
 @pytest.mark.dist_required
 class TestRingAttentionFunction:
-    """``RingAttentionFunction.apply`` on a 4-rank ring versus global SDPA."""
+    """``_RingAttention.apply`` on a 4-rank ring versus global SDPA."""
 
     h, d, n_local = 2, 8, 6
 
@@ -67,7 +67,7 @@ class TestRingAttentionFunction:
 
         q, k, v = project(x, w_qkv)
         scale = d**-0.5
-        out = RingAttentionFunction.apply(
+        out = _RingAttention.apply(
             q, k, v, x, w_qkv, scale, 0.0, ring, rank, ring_config
         )[0]
         grad_out = torch.randn(BATCH, h, world * n_local, d, device=device)

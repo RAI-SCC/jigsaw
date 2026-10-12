@@ -2,17 +2,17 @@
 
 from .config import LinearConfig
 from .linear import (
+    DistributedLinear,
     DistributedMatMulXTW,
     DistributedMatMulXW,
     DistributedMatMulXWT,
-    DistributedXWT,
     MatMulXTW,
     MatMulXW,
     MatMulXWT,
 )
 
 __all__ = [
-    "DistributedXWT",
+    "DistributedLinear",
     "DistributedMatMulXWT",
     "DistributedMatMulXW",
     "DistributedMatMulXTW",

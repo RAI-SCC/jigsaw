@@ -14,7 +14,7 @@ from jigsaw.gather import gather_1d_results
 from ..common.arg_norm import _as_spatial_groups, _ntuple
 from ..common.channel_comm import resolve_conv_groups
 from .config import ConvNdConfig
-from .functional import ConvNd
+from .functional import _ConvNd
 
 # concrete torch conv class per spatial rank, for ``convert_to_torch``.
 _TORCH_CONV_CLS = {1: torch.nn.Conv1d, 2: torch.nn.Conv2d, 3: torch.nn.Conv3d}
@@ -105,8 +105,9 @@ class _DistributedConvNd(torch.nn.Module):
         to_ntuple = _ntuple(self._n_spatial)
 
         self.in_channels = in_channels
+        self.out_channels = out_channels
         # Output channels are sharded across the channel-parallel group.
-        self.out_channels = out_channels // channel_group.size()
+        self.local_out_channels = out_channels // channel_group.size()
 
         self.kernel_size = to_ntuple(kernel_size)
         self.stride = to_ntuple(stride)
@@ -154,7 +155,7 @@ class _DistributedConvNd(torch.nn.Module):
         # layout); the channel-parallel group shards the output-channel axis 0.
         self.weight = torch.nn.parameter.Parameter(
             torch.zeros(
-                self.out_channels,
+                self.local_out_channels,
                 self.in_channels // groups,
                 *self.kernel_size,
                 device=device,
@@ -163,7 +164,7 @@ class _DistributedConvNd(torch.nn.Module):
         )
         self.bias = (
             torch.nn.parameter.Parameter(
-                torch.zeros(self.out_channels, device=device, dtype=dtype)
+                torch.zeros(self.local_out_channels, device=device, dtype=dtype)
             )
             if bias
             else None
@@ -195,7 +196,7 @@ class _DistributedConvNd(torch.nn.Module):
                 dist.broadcast(p.data, group_src=0, group=g)
 
         self._conv_apply: Callable[..., tuple[torch.Tensor, torch.Tensor]] = (
-            ConvNd.apply
+            _ConvNd.apply
         )
 
     def reset_parameters(self) -> None:
@@ -467,11 +468,12 @@ class _DistributedConvNd(torch.nn.Module):
         self._spatial_sync_groups = [
             g for g in self.spatial_groups if g is not None and g.size() > 1
         ]
-        self.out_channels = weight_shape_global[0] // self.channel_group.size()
+        self.out_channels = weight_shape_global[0]
+        self.local_out_channels = self.out_channels // self.channel_group.size()
         self._channel_local, self._groups_local = resolve_conv_groups(
             self.groups,
             self.in_channels,
-            weight_shape_global[0],
+            self.out_channels,
             self.channel_group.size(),
         )
         self.config = ConvNdConfig(
@@ -520,7 +522,7 @@ class _DistributedConvNd(torch.nn.Module):
         # the weight. Inside the VI sample vmap that axis is already stripped
         # (the weight is per-sample, dim n_spatial + 2), so vmapping again maps
         # the wrong axis. Use the native primitive then; the outer vmap batches it.
-        # The ConvNd batching rule passes the sample axis through, so it still
+        # The _ConvNd batching rule passes the sample axis through, so it still
         # gets the vmapped primitive.
         sampled = weight.dim() > self._n_spatial + 2
         conv = self.config.conv_fn if sampled else self.config.native_conv_fn

@@ -2,16 +2,14 @@
 
 from .config import ConvTransposeNdConfig
 from .conv import (
-    DistributedConv1DTranspose,
-    DistributedConv2DTranspose,
-    DistributedConv3DTranspose,
+    DistributedConvTranspose1d,
+    DistributedConvTranspose2d,
+    DistributedConvTranspose3d,
 )
-from .functional import ConvTransposeNd
 
 __all__ = [
-    "DistributedConv1DTranspose",
-    "DistributedConv2DTranspose",
-    "DistributedConv3DTranspose",
+    "DistributedConvTranspose1d",
+    "DistributedConvTranspose2d",
+    "DistributedConvTranspose3d",
     "ConvTransposeNdConfig",
-    "ConvTransposeNd",
 ]

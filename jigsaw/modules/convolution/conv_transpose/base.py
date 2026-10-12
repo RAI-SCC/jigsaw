@@ -14,7 +14,7 @@ from jigsaw.gather import gather_1d_results
 from ..common.arg_norm import _as_spatial_groups, _ntuple
 from ..common.channel_comm import resolve_conv_groups
 from .config import ConvTransposeNdConfig
-from .functional import ConvTransposeNd
+from .functional import _ConvTransposeNd
 
 # concrete torch transpose-conv class per spatial rank, for ``convert_to_torch``.
 _TORCH_CONV_TRANSPOSE_CLS = {
@@ -109,8 +109,9 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         to_ntuple = _ntuple(self._n_spatial)
 
         self.in_channels = in_channels
+        self.out_channels = out_channels
         # Output channels are sharded across the channel-parallel group.
-        self.out_channels = out_channels // channel_group.size()
+        self.local_out_channels = out_channels // channel_group.size()
 
         self.kernel_size = to_ntuple(kernel_size)
         self.stride = to_ntuple(stride)
@@ -165,13 +166,13 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             if self._channel_local
             else self.in_channels
         )
-        w_out = self.out_channels // self._groups_local
+        w_out = self.local_out_channels // self._groups_local
         self.weight = torch.nn.parameter.Parameter(
             torch.zeros(w_in, w_out, *self.kernel_size, device=device, dtype=dtype)
         )
         self.bias = (
             torch.nn.parameter.Parameter(
-                torch.zeros(self.out_channels, device=device, dtype=dtype)
+                torch.zeros(self.local_out_channels, device=device, dtype=dtype)
             )
             if bias
             else None
@@ -203,7 +204,7 @@ class _DistributedConvTransposeNd(torch.nn.Module):
                 dist.broadcast(p.data, group_src=0, group=g)
 
         self._conv_apply: Callable[..., tuple[torch.Tensor, torch.Tensor]] = (
-            ConvTransposeNd.apply
+            _ConvTransposeNd.apply
         )
 
     def reset_parameters(self) -> None:
@@ -488,12 +489,12 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         self._spatial_sync_groups = [
             g for g in self.spatial_groups if g is not None and g.size() > 1
         ]
-        out_channels_global = weight_shape_global[1] * self.groups
-        self.out_channels = out_channels_global // self.channel_group.size()
+        self.out_channels = weight_shape_global[1] * self.groups
+        self.local_out_channels = self.out_channels // self.channel_group.size()
         self._channel_local, self._groups_local = resolve_conv_groups(
             self.groups,
             self.in_channels,
-            out_channels_global,
+            self.out_channels,
             self.channel_group.size(),
         )
         if self._channel_local and self.channel_group.size() > 1:

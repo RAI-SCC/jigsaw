@@ -13,10 +13,10 @@ from jigsaw.modules import linear
 from . import config as attention_config
 from .config import AttnBackend
 from .functional.cores import te as te_core
-from .functional.ring import RingAttentionFunction, get_hybrid_topology
+from .functional.ring import _RingAttention, get_hybrid_topology
 
 #: Whether ``attn_backend="te"`` can be run at all. Both TE paths -- the ring's
-#: inner core and :class:`TransformerEngineAttention` below -- go through
+#: inner core and :class:`_TransformerEngineAttention` below -- go through
 #: :mod:`.functional.cores.te`, so one probe covers both: it is false only when
 #: *neither* arm is importable (no ``transformer_engine`` for cuDNN, no
 #: ``flash_attn`` for flash).
@@ -24,7 +24,7 @@ JIGSAW_TE_AVAILABLE = te_core.TE_CORE_AVAILABLE
 
 if JIGSAW_TE_AVAILABLE:
 
-    class TransformerEngineAttention(torch.autograd.Function):
+    class _TransformerEngineAttention(torch.autograd.Function):
         """Autograd wrapper around the TransformerEngine attention kernels.
 
         Drives :mod:`.functional.cores.te` -- the same cores the ring's inner
@@ -186,7 +186,7 @@ if JIGSAW_TE_AVAILABLE:
             k = k.flatten(0, 1)
             v = v.flatten(0, 1)
 
-            out, lse, rng_state = TransformerEngineAttention.apply(
+            out, lse, rng_state = _TransformerEngineAttention.apply(
                 q, k, v, scale, dropout_p, core
             )
 
@@ -242,8 +242,8 @@ class DistributedAttention(torch.nn.Module):
     """
 
     # type hints
-    qkv: torch.nn.Linear | linear.DistributedXWT
-    head_concat: torch.nn.Linear | linear.DistributedXWT
+    qkv: torch.nn.Linear | linear.DistributedLinear
+    head_concat: torch.nn.Linear | linear.DistributedLinear
 
     def __init__(
         self,
@@ -513,7 +513,7 @@ class DistributedAttention(torch.nn.Module):
                 in_dim, embed_dim * 3, bias=False, device=device, dtype=self.dtype
             )
         else:
-            self.qkv = linear.DistributedXWT(
+            self.qkv = linear.DistributedLinear(
                 in_dim,
                 embed_dim * 3,
                 local_rank=self.channel_group.rank(),
@@ -528,14 +528,14 @@ class DistributedAttention(torch.nn.Module):
 
         if channel_group.size() == 1:
             # No channel/tensor parallelism: the output projection is a plain
-            # local matmul, same as ``qkv`` above. ``DistributedXWT`` only has
+            # local matmul, same as ``qkv`` above. ``DistributedLinear`` only has
             # kernels for (row, col) in {(1,1),(1,2),(2,2),(4,2)}, so this also
             # unblocks a pure ring (spatial=N, channel=1).
             self.head_concat = torch.nn.Linear(
                 embed_dim, out_dim, bias=out_bias, device=device, dtype=self.dtype
             )
         else:
-            self.head_concat = linear.DistributedXWT(
+            self.head_concat = linear.DistributedLinear(
                 embed_dim,
                 out_dim,
                 local_rank=self.channel_group.rank(),
@@ -565,7 +565,7 @@ class DistributedAttention(torch.nn.Module):
 
         for p in self.parameters():
             # A duplicate mark would sum that gradient twice, scaling it by
-            # ``spatial_group.size()``. DistributedXWT already marks its own
+            # ``spatial_group.size()``. DistributedLinear already marks its own
             # ``bias`` over its ``row_group``, which is ``spatial_group`` here,
             # so skip anything already claimed.
             if parallel.replica_groups(p):
@@ -575,7 +575,7 @@ class DistributedAttention(torch.nn.Module):
         # marked with (the qk norms over the channel group too), so a plain
         # DistributedDataParallel needs no extra broadcast: one coalesced
         # broadcast per group and dtype. head_concat's bias gets broadcast twice
-        # (DistributedXWT.__init__ already does its own) -- harmless.
+        # (DistributedLinear.__init__ already does its own) -- harmless.
         parallel.broadcast_replicas(self)
 
     def _resolve_ring_config(
@@ -587,7 +587,7 @@ class DistributedAttention(torch.nn.Module):
         """Pick the ``RingAttentionConfig`` for this module.
 
         With channel/tensor parallelism the fused ``qkv`` projection is split
-        across the channel group (a distributed ``DistributedXWT`` matmul), so
+        across the channel group (a distributed ``DistributedLinear`` matmul), so
         the ring cannot rebuild K/V from a circulated ``x`` chunk with the plain
         local matmul in :func:`..functional.ring._compute_kv`. ``qk_norm`` needs
         the same thing for a different reason: the key norm is a separate
@@ -645,7 +645,7 @@ class DistributedAttention(torch.nn.Module):
 
         The ``TE`` arm resolves *which* TE kernel this GPU gets (``self.te_core``);
         it needs no other per-module state, going straight to that core via
-        :class:`TransformerEngineAttention`, parameterised per call by
+        :class:`_TransformerEngineAttention`, parameterised per call by
         ``self.scale`` / ``self.dropout_p``.
         """
         match self.attn_backend:
@@ -749,7 +749,7 @@ class DistributedAttention(torch.nn.Module):
 
         Runs ``self.te_core`` -- cuDNN on Hopper+, ``flash_attn`` on Ampere --
         shared with the ring's inner core; see
-        :class:`TransformerEngineAttention` for why the kernels are called
+        :class:`_TransformerEngineAttention` for why the kernels are called
         directly rather than through ``te.DotProductAttention``.
 
         Parameters
@@ -784,7 +784,7 @@ class DistributedAttention(torch.nn.Module):
             )
         # There is no dropout nn.Module here to apply its own training-mode
         # gate, so gate it the way the sdpa/math cores do.
-        out, _lse, _rng_state = TransformerEngineAttention.apply(
+        out, _lse, _rng_state = _TransformerEngineAttention.apply(
             q, k, v, self.scale, self.dropout_p if self.training else 0.0, self.te_core
         )
         return cast(torch.Tensor, out)
@@ -808,7 +808,7 @@ class DistributedAttention(torch.nn.Module):
             Local input chunk.
         attn_mask : torch.Tensor, optional
             Not supported: K/V circulate chunk-by-chunk around the ring and
-            :class:`.functional.ring.RingAttentionFunction` has no per-step
+            :class:`.functional.ring._RingAttention` has no per-step
             masking. Raises rather than silently ignoring it; use
             ``ring=False`` for masked attention.
         **kwargs : torch.Tensor
@@ -822,10 +822,10 @@ class DistributedAttention(torch.nn.Module):
         if attn_mask is not None:
             raise ValueError(
                 "ring attention does not support attn_mask: K/V circulate "
-                "chunk-by-chunk around the ring and RingAttentionFunction has "
+                "chunk-by-chunk around the ring and _RingAttention has "
                 "no per-step masking. Use ring=False for masked attention."
             )
-        out = RingAttentionFunction.apply(
+        out = _RingAttention.apply(
             q,
             k,
             v,
@@ -854,7 +854,7 @@ class DistributedAttention(torch.nn.Module):
             def core(
                 qc: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor
             ) -> torch.Tensor:
-                out, _lse, _rng = TransformerEngineAttention.apply(
+                out, _lse, _rng = _TransformerEngineAttention.apply(
                     qc, kc, vc, self.scale, dropout_p, self.te_core
                 )  # [b, s, h * d]
                 out = cast(torch.Tensor, out)
@@ -892,7 +892,7 @@ class DistributedAttention(torch.nn.Module):
         The inner core of the hierarchical Ulysses scheme: after the intra-node
         all-to-all, ``q``/``k``/``v`` cover one node's worth of sequence on
         ``local_heads // A`` heads, and this rings the (already-projected) K/V
-        around the ``n_nodes`` inter-node peers via :class:`RingAttentionFunction`
+        around the ``n_nodes`` inter-node peers via :class:`_RingAttention`
         with ``send_in_forward = save_for_backward = KV`` (so it never rebuilds
         K/V from ``x`` -- the dummy ``x`` / ``w_qkv`` below are unused).
         ``_uly_ring_cfg.core_layout`` is ``bshd`` for the TE core, ``bhsd``
@@ -904,7 +904,7 @@ class DistributedAttention(torch.nn.Module):
         def core(qc: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor) -> torch.Tensor:
             if layout == "bhsd":
                 qc, kc, vc = (t.transpose(1, 2).contiguous() for t in (qc, kc, vc))
-            out = RingAttentionFunction.apply(
+            out = _RingAttention.apply(
                 qc,
                 kc,
                 vc,
@@ -1016,7 +1016,7 @@ class DistributedAttention(torch.nn.Module):
         # in for the whole forward, so every use (``self.qkv(x)``, the ring
         # core's ``self.qkv.weight``) sees them. They carry no mark, so the
         # re-entered ``forward`` finds nothing left to sync and falls through,
-        # and a DistributedXWT submodule does not sync its bias a second time.
+        # and a DistributedLinear submodule does not sync its bias a second time.
         synced = parallel.synced_parameters(self)
         if synced:
             return cast(

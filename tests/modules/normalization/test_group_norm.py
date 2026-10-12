@@ -32,11 +32,10 @@ def test_unsharded_forward_matches_torch(device, affine, bias):
         GROUPS, CHANNELS, affine=affine, bias=bias, device=device
     )
     ref = _reference(affine, bias, device)
-    if affine:
-        layer.group_norm.weight.data = ref.weight.data.clone()
-        assert (layer.group_norm.bias is None) == (not bias)
-        if bias:
-            layer.group_norm.bias.data = ref.bias.data.clone()
+    # Same parameter names as torch: ``weight`` / ``bias`` (``None`` when absent).
+    assert (layer.weight is None) == (not affine)
+    assert (layer.bias is None) == (not (affine and bias))
+    layer.load_state_dict(ref.state_dict())
     x = torch.randn(2, CHANNELS, 5, 3, device=device)
     assert torch.allclose(layer(x), ref(x), atol=1e-6)
 
@@ -67,9 +66,9 @@ class TestReshardFourRanks:
         if affine:
             c = CHANNELS // 2
             lo = src["col"].rank() * c
-            layer.group_norm.weight.data = ref.weight.data[lo : lo + c].clone()
+            layer.weight.data = ref.weight.data[lo : lo + c].clone()
             if bias:
-                layer.group_norm.bias.data = ref.bias.data[lo : lo + c].clone()
+                layer.bias.data = ref.bias.data[lo : lo + c].clone()
 
         layer.reshard_parameters(src, dst)
 
@@ -81,7 +80,7 @@ class TestReshardFourRanks:
         if affine:
             assert_close(
                 "weight",
-                layer.group_norm.weight.data,
+                layer.weight.data,
                 ref.weight.data[lo : lo + c],
                 0.0,
                 0.0,
@@ -91,7 +90,7 @@ class TestReshardFourRanks:
             if bias:
                 assert_close(
                     "bias",
-                    layer.group_norm.bias.data,
+                    layer.bias.data,
                     ref.bias.data[lo : lo + c],
                     0.0,
                     0.0,
@@ -99,6 +98,6 @@ class TestReshardFourRanks:
                     group,
                 )
             else:
-                assert all_ranks_ok(layer.group_norm.bias is None, device, group)
+                assert all_ranks_ok(layer.bias is None, device, group)
         else:
-            assert all_ranks_ok(layer.group_norm.weight is None, device, group)
+            assert all_ranks_ok(layer.weight is None, device, group)

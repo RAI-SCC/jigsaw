@@ -40,7 +40,7 @@ def test_count_parameters_with_mesh_is_the_whole_model(
     """Shards are summed, the row-replicated bias and dp copies counted once."""
     mesh = _dp_mesh(device) if data_parallel else process_mesh_dict_2x2
     in_dim, out_dim = 6, 8
-    layer = linear.DistributedXWT(
+    layer = linear.DistributedLinear(
         in_dim,
         out_dim,
         local_rank=dist.get_rank(group=mesh["model"]),

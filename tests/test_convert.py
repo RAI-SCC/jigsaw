@@ -5,14 +5,14 @@ import torch
 
 import jigsaw.convert as convert
 from jigsaw.gather import gather_1d_results, gather_results
-from jigsaw.modules.activation import DistributedSoftMax
+from jigsaw.modules.activation import DistributedSoftmax
 from jigsaw.modules.attention import Attention, DistributedAttention
 from jigsaw.modules.attention.attention import attn_core_dtype
 from jigsaw.modules.linear import (
+    DistributedLinear,
     DistributedMatMulXTW,
     DistributedMatMulXW,
     DistributedMatMulXWT,
-    DistributedXWT,
     MatMulXTW,
     MatMulXW,
     MatMulXWT,
@@ -62,7 +62,7 @@ class TestConvertToTorch:
 
         jigsaw_linear = convert.convert_to_jigsaw(linear, process_mesh_dict, device)
 
-        assert isinstance(jigsaw_linear, DistributedXWT)
+        assert isinstance(jigsaw_linear, DistributedLinear)
         assert hasattr(jigsaw_linear, "reshard_parameters")
 
         x_global = torch.randn(1, x_seq, in_features, device=device).requires_grad_(
@@ -775,7 +775,7 @@ class TestConvertToTorch:
     def test_jigsaw_conv2dtranspose(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        """Test conversion of Conv2DTranspose on a 2x2 process mesh."""
+        """Test conversion of ConvTranspose2d on a 2x2 process mesh."""
         torch.manual_seed(1)
         in_channels = 32
         out_channels = 32
@@ -1024,8 +1024,8 @@ class TestConvertToTorch:
         dist_forward = jigsaw_group_norm(x_local)
         dist_forward.backward(torch.ones_like(dist_forward))
 
-        dist_w = jigsaw_group_norm.group_norm.weight.grad
-        dist_b = jigsaw_group_norm.group_norm.bias.grad
+        dist_w = jigsaw_group_norm.weight.grad
+        dist_b = jigsaw_group_norm.bias.grad
         dist_x = x_local.grad
         assert dist_w is not None
         assert dist_b is not None
@@ -1080,7 +1080,7 @@ class TestConvertToTorch:
         softmax = torch.nn.Softmax(dim=-1)
 
         jigsaw_softmax = convert.convert_to_jigsaw(softmax, process_mesh_dict, device)
-        assert isinstance(jigsaw_softmax, DistributedSoftMax)
+        assert isinstance(jigsaw_softmax, DistributedSoftmax)
 
         x_global = torch.randn(2, x_seq, dim_size, device=device).requires_grad_(True)
         ref_forward = softmax(x_global)
