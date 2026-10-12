@@ -148,8 +148,9 @@ def _named_parameters(
     """Yield ``(name, param, foreign)``; ``foreign`` if no jigsaw module owns it.
 
     A parameter of a plain submodule *inside* a jigsaw module (the
-    ``torch.nn.GroupNorm`` of ``DistributedGroupNorm``, say) is jigsaw's: the
-    module shards or syncs it itself. Same parameters, names and order as
+    ``torch.nn.Linear`` projections of an unsharded-channel
+    ``DistributedAttention``, say) is jigsaw's: the module shards or syncs it
+    itself. Same parameters, names and order as
     ``model.named_parameters()``.
     """
     # Every module at or below a jigsaw module.

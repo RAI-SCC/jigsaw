@@ -118,14 +118,6 @@ class TestLayerNormConvertRejections:
         with pytest.raises(NotImplementedError):
             convert.convert_to_jigsaw(ln, process_mesh_dict_2x2, device)
 
-    @pytest.mark.dist(4)
-    def test_no_bias_rejected(
-        self, device: torch.device, process_mesh_dict_2x2: dict
-    ) -> None:
-        ln = torch.nn.LayerNorm(4, bias=False, device=device)
-        with pytest.raises(NotImplementedError):
-            convert.convert_to_jigsaw(ln, process_mesh_dict_2x2, device)
-
 
 # --------------------------------------------------------------------------- #
 # convert_layer_norm=False: nn.LayerNorm is left untouched

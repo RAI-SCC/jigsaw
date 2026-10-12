@@ -21,7 +21,10 @@ class DistributedLayerNorm(torch.nn.Module):
         device: torch.device,
         row_group: dist.ProcessGroup,
         col_group: dist.ProcessGroup,
+        eps: float = 1e-5,
         elementwise_affine: bool = True,
+        bias: bool = True,
+        dtype: Optional[torch.dtype] = None,
     ) -> None:
         """Initialize the layer.
 
@@ -41,9 +44,16 @@ class DistributedLayerNorm(torch.nn.Module):
             parameters to reduce gradients for.
         col_group : dist.ProcessGroup
             Process group across which the normalized dimension is partitioned.
+        eps : float
+            Term added to the variance for numerical stability.
         elementwise_affine : bool
-            Whether the layer has a learnable weight and bias, as in
-            ``torch.nn.LayerNorm``.
+            Whether the layer has a learnable weight (and bias, see ``bias``),
+            as in ``torch.nn.LayerNorm``.
+        bias : bool
+            Whether the layer has a learnable bias. Ignored if
+            ``elementwise_affine`` is ``False``.
+        dtype : torch.dtype, optional
+            Data type of the parameters. Defaults to the torch default dtype.
         """
         super().__init__()
         assert normalized_dim % col_group.size() == 0, (
@@ -58,12 +68,19 @@ class DistributedLayerNorm(torch.nn.Module):
         self.elementwise_affine = elementwise_affine
         self.normalized_dim = normalized_dim
         self.local_dim = local_dim
-        self.eps = 1e-5
+        self.eps = eps
 
         if elementwise_affine:
             # Learnable parameters
-            self.weight = torch.nn.Parameter(torch.ones(local_dim, device=device))
-            self.bias = torch.nn.Parameter(torch.zeros(local_dim, device=device))
+            self.weight = torch.nn.Parameter(
+                torch.ones(local_dim, device=device, dtype=dtype)
+            )
+            if bias:
+                self.bias = torch.nn.Parameter(
+                    torch.zeros(local_dim, device=device, dtype=dtype)
+                )
+            else:
+                self.register_parameter("bias", None)
             self._mark_replicated()
             self.layernorm = functional._LayerNorm.apply
         else:
@@ -74,15 +91,13 @@ class DistributedLayerNorm(torch.nn.Module):
     def _mark_replicated(self) -> None:
         """Mark the weight and bias replicated over the row group."""
         for p in (self.weight, self.bias):
-            parallel.mark_replicated(p, self.spatial_group)
+            if p is not None:
+                parallel.mark_replicated(p, self.spatial_group)
 
     def get_parameter_count(self) -> int:
         """Return the number of local parameters."""
-        if not self.elementwise_affine:
-            return 0
-        return (self.weight.numel() + self.bias.numel()) // dist.get_world_size(
-            group=self.spatial_group
-        )
+        local = sum(p.numel() for p in (self.weight, self.bias) if p is not None)
+        return local // dist.get_world_size(group=self.spatial_group)
 
     @classmethod
     def convert_to_jigsaw(
@@ -101,9 +116,7 @@ class DistributedLayerNorm(torch.nn.Module):
         ----------
         model : torch.nn.LayerNorm
             Layer to convert. Must normalize a single trailing dimension (no
-            multi-axis ``normalized_shape``), and either have both a weight
-            and a bias (``elementwise_affine=True``, ``bias=True``) or
-            neither (``elementwise_affine=False``).
+            multi-axis ``normalized_shape``).
         process_mesh_dict : dict
             Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
         device : torch.device
@@ -127,25 +140,18 @@ class DistributedLayerNorm(torch.nn.Module):
         Returns
         -------
         DistributedLayerNorm
-            Distributed layer equivalent to ``model``, with its weight and
-            bias when it has them (``elementwise_affine=False`` otherwise).
+            Distributed layer equivalent to ``model``, with the shards of its
+            weight and bias.
 
         Raises
         ------
         NotImplementedError
-            If ``model`` normalizes more than one dimension, or has exactly
-            one of a weight or a bias (``bias=False`` with
-            ``elementwise_affine=True``) -- convert that by hand.
+            If ``model`` normalizes more than one dimension.
         """
         if len(model.normalized_shape) != 1:
             raise NotImplementedError(
                 "DistributedLayerNorm only normalizes a single trailing "
                 f"dimension; got normalized_shape={model.normalized_shape}"
-            )
-        if (model.weight is None) != (model.bias is None):
-            raise NotImplementedError(
-                "DistributedLayerNorm always has both a weight and a bias; "
-                "convert a LayerNorm without one of them by hand"
             )
         elementwise_affine = model.weight is not None
 
@@ -156,23 +162,21 @@ class DistributedLayerNorm(torch.nn.Module):
             device=device,
             row_group=process_mesh_dict[row_kw],
             col_group=col_group,
+            eps=model.eps,
             elementwise_affine=elementwise_affine,
+            bias=model.bias is not None,
+            dtype=model.weight.dtype if model.weight is not None else None,
         )
         local_dim = instance.local_dim
-        instance.eps = model.eps
-        if elementwise_affine:
-            assert model.weight is not None and model.bias is not None
-            col_rank = col_group.rank()
-            instance.weight.data = (
-                model.weight.data[col_rank * local_dim : (col_rank + 1) * local_dim]
-                .clone()
-                .to(device)
-            )
-            instance.bias.data = (
-                model.bias.data[col_rank * local_dim : (col_rank + 1) * local_dim]
-                .clone()
-                .to(device)
-            )
+        col_rank = col_group.rank()
+        for name in ("weight", "bias"):
+            src = getattr(model, name)
+            if src is not None:
+                getattr(instance, name).data = (
+                    src.data[col_rank * local_dim : (col_rank + 1) * local_dim]
+                    .clone()
+                    .to(device)
+                )
         return instance
 
     def merge_weights(
@@ -201,15 +205,13 @@ class DistributedLayerNorm(torch.nn.Module):
         global_weight : torch.Tensor | None
             Merged weight, or ``None`` if the layer is not affine.
         global_bias : torch.Tensor | None
-            Merged bias, or ``None`` if the layer is not affine.
+            Merged bias, or ``None`` if the layer has no bias.
         """
-        if not self.elementwise_affine:
-            return None, None
-        global_weight = gather_1d_results(
-            self.weight, from_process_mesh, dim=0, pm_key=col_kw
-        )
-        global_bias = gather_1d_results(
-            self.bias, from_process_mesh, dim=0, pm_key=col_kw
+        global_weight, global_bias = (
+            None
+            if p is None
+            else gather_1d_results(p, from_process_mesh, dim=0, pm_key=col_kw)
+            for p in (self.weight, self.bias)
         )
         return global_weight, global_bias
 
@@ -236,23 +238,22 @@ class DistributedLayerNorm(torch.nn.Module):
         Returns
         -------
         torch.nn.LayerNorm
-            Layer with the merged weight and bias, or with
-            ``elementwise_affine=False`` if this layer has none.
+            Layer with the same ``eps``, ``elementwise_affine`` and ``bias``,
+            and the merged weight and bias.
         """
         weight, bias = self.merge_weights(process_mesh_dict, row_kw, col_kw, model_kw)
-        if not self.elementwise_affine:
-            return torch.nn.LayerNorm(
-                self.normalized_dim,
-                eps=self.eps,
-                elementwise_affine=False,
-                device=self.device,
-            )
-        assert weight is not None and bias is not None
         layer_norm = torch.nn.LayerNorm(
-            self.normalized_dim, eps=self.eps, device=self.device, dtype=weight.dtype
+            self.normalized_dim,
+            eps=self.eps,
+            elementwise_affine=self.elementwise_affine,
+            bias=bias is not None,
+            device=self.device,
+            dtype=weight.dtype if weight is not None else None,
         )
-        layer_norm.weight.data = weight
-        layer_norm.bias.data = bias
+        if weight is not None:
+            layer_norm.weight.data = weight
+        if bias is not None:
+            layer_norm.bias.data = bias
         return layer_norm
 
     def reshard_parameters(
@@ -282,23 +283,21 @@ class DistributedLayerNorm(torch.nn.Module):
         new_local_dim = self.normalized_dim // to_col.size()
         col_rank = to_col.rank()
 
-        if self.elementwise_affine:
-            global_weight = gather_1d_results(
-                self.weight, from_process_mesh, dim=0, pm_key=pm_col_key
-            )
-            global_bias = gather_1d_results(
-                self.bias, from_process_mesh, dim=0, pm_key=pm_col_key
-            )
-            self.weight = torch.nn.Parameter(
-                global_weight[
-                    col_rank * new_local_dim : (col_rank + 1) * new_local_dim
-                ].contiguous()
-            )
-            self.bias = torch.nn.Parameter(
-                global_bias[
-                    col_rank * new_local_dim : (col_rank + 1) * new_local_dim
-                ].contiguous()
-            )
+        for name in ("weight", "bias"):
+            p = getattr(self, name)
+            if p is not None:
+                global_p = gather_1d_results(
+                    p, from_process_mesh, dim=0, pm_key=pm_col_key
+                )
+                setattr(
+                    self,
+                    name,
+                    torch.nn.Parameter(
+                        global_p[
+                            col_rank * new_local_dim : (col_rank + 1) * new_local_dim
+                        ].contiguous()
+                    ),
+                )
 
         self.local_dim = new_local_dim
         self.spatial_group = to_process_mesh[pm_row_key]

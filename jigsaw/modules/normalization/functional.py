@@ -70,6 +70,7 @@ class _LayerNorm(torch.autograd.Function):
 
         ctx.mark_non_differentiable(x_norm, weight, var)
         ctx.channel_group = channel_group  # type: ignore[attr-defined]
+        ctx.has_bias = bias is not None  # type: ignore[attr-defined]
 
         # Save for backward
         ctx.save_for_backward(x_norm, weight, torch.sqrt(var))
@@ -114,8 +115,8 @@ class _LayerNorm(torch.autograd.Function):
         Returns
         -------
         tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None, None]
-            Gradients of the input, weight and bias, followed by ``None`` for the
-            non-differentiable arguments.
+            Gradients of the input, weight and bias (``None`` without a bias),
+            followed by ``None`` for the non-differentiable arguments.
         """
         x_norm, weight, std = ctx.saved_tensors  # type: ignore[attr-defined]
         # Match the forward compute dtype: under autocast the saved tensors are
@@ -132,7 +133,11 @@ class _LayerNorm(torch.autograd.Function):
         grad_weight = (grad_output * x_norm).sum(
             dim=tuple(range(grad_output.dim() - 1))
         )
-        grad_bias = grad_output.sum(dim=tuple(range(grad_output.dim() - 1)))
+        grad_bias = (
+            grad_output.sum(dim=tuple(range(grad_output.dim() - 1)))
+            if ctx.has_bias  # type: ignore[attr-defined]
+            else None
+        )
 
         # Gradient for input (standard LayerNorm backward)
         grad_x_norm = grad_output * weight

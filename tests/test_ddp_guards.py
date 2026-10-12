@@ -216,14 +216,18 @@ def test_unmarked_replica_is_reported(mark, device) -> None:
 
 @pytest.mark.dist(8)
 def test_plain_submodule_of_a_jigsaw_module_is_not_foreign(device) -> None:
-    """``DistributedGroupNorm`` shards the weight of its inner ``nn.GroupNorm``.
+    """A plain submodule inside a jigsaw module is the jigsaw module's to shard.
 
-    That weight differs over ``col`` by design; ``unmarked`` must not report it.
+    ``DistributedGroupNorm`` shards its own weight over ``col``, and here also
+    owns a plain ``nn.Linear`` sharded the same way. Both differ over ``col`` by
+    design; ``unmarked`` must report neither.
     """
     mesh = _mesh((2, 2, 2), device)
     norm = normalization.DistributedGroupNorm(
         4, 8, device=device, channel_group=mesh["col"]
     )
+    norm.inner = torch.nn.Linear(2, 2, device=device)
     with torch.no_grad():  # a different shard on every column
-        norm.group_norm.weight.fill_(1.0 + mesh["col"].rank())
+        norm.weight.fill_(1.0 + mesh["col"].rank())
+        norm.inner.weight.fill_(1.0 + mesh["col"].rank())
     debug.assert_replica_consistency(norm, mesh, unmarked=True)

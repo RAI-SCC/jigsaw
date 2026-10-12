@@ -1024,8 +1024,8 @@ class TestConvertToTorch:
         dist_forward = jigsaw_group_norm(x_local)
         dist_forward.backward(torch.ones_like(dist_forward))
 
-        dist_w = jigsaw_group_norm.group_norm.weight.grad
-        dist_b = jigsaw_group_norm.group_norm.bias.grad
+        dist_w = jigsaw_group_norm.weight.grad
+        dist_b = jigsaw_group_norm.bias.grad
         dist_x = x_local.grad
         assert dist_w is not None
         assert dist_b is not None
