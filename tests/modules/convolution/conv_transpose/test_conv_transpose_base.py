@@ -26,6 +26,33 @@ _REF_CLS = {
 }
 
 
+class TestConvTransposeChannelSizes:
+    @pytest.mark.dist(4)
+    def test_out_channels_is_global_after_init_and_reshard(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        process_mesh_dict_1x4: dict,
+    ) -> None:
+        """``out_channels`` is the global size, like ``in_channels`` and torch;
+        ``local_out_channels`` is this rank's shard."""
+        conv = convolution.DistributedConvTranspose2d(
+            8,
+            12,
+            2,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=2,
+        ).to(device)
+        assert (conv.in_channels, conv.out_channels) == (8, 12)
+        assert conv.local_out_channels == 6 == conv.weight.shape[1]
+
+        conv.reshard_parameters(process_mesh_dict_2x2, process_mesh_dict_1x4)
+        assert (conv.in_channels, conv.out_channels) == (8, 12)
+        assert conv.local_out_channels == 3 == conv.weight.shape[1]
+
+
 class TestConvTransposeParameterCount:
     @pytest.mark.dist(4)
     @pytest.mark.parametrize("n_spatial", [1, 2, 3])

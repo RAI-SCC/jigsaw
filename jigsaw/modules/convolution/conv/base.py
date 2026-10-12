@@ -105,8 +105,9 @@ class _DistributedConvNd(torch.nn.Module):
         to_ntuple = _ntuple(self._n_spatial)
 
         self.in_channels = in_channels
+        self.out_channels = out_channels
         # Output channels are sharded across the channel-parallel group.
-        self.out_channels = out_channels // channel_group.size()
+        self.local_out_channels = out_channels // channel_group.size()
 
         self.kernel_size = to_ntuple(kernel_size)
         self.stride = to_ntuple(stride)
@@ -154,7 +155,7 @@ class _DistributedConvNd(torch.nn.Module):
         # layout); the channel-parallel group shards the output-channel axis 0.
         self.weight = torch.nn.parameter.Parameter(
             torch.zeros(
-                self.out_channels,
+                self.local_out_channels,
                 self.in_channels // groups,
                 *self.kernel_size,
                 device=device,
@@ -163,7 +164,7 @@ class _DistributedConvNd(torch.nn.Module):
         )
         self.bias = (
             torch.nn.parameter.Parameter(
-                torch.zeros(self.out_channels, device=device, dtype=dtype)
+                torch.zeros(self.local_out_channels, device=device, dtype=dtype)
             )
             if bias
             else None
@@ -467,11 +468,12 @@ class _DistributedConvNd(torch.nn.Module):
         self._spatial_sync_groups = [
             g for g in self.spatial_groups if g is not None and g.size() > 1
         ]
-        self.out_channels = weight_shape_global[0] // self.channel_group.size()
+        self.out_channels = weight_shape_global[0]
+        self.local_out_channels = self.out_channels // self.channel_group.size()
         self._channel_local, self._groups_local = resolve_conv_groups(
             self.groups,
             self.in_channels,
-            weight_shape_global[0],
+            self.out_channels,
             self.channel_group.size(),
         )
         self.config = ConvNdConfig(
