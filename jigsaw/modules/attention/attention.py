@@ -200,8 +200,9 @@ def attn_core_dtype(x: torch.Tensor) -> torch.dtype:
     """Return the dtype of the attention core.
 
     This is the autocast dtype under autocast. Otherwise it is the input dtype, except
-    that fp32 (or fp64) inputs on CUDA run the core in fp16: the flash kernels reject
-    fp32, and fp16 is 8x more precise than bf16 (but overflows above 65504).
+    that fp32 (or fp64) inputs on CUDA run the core in bf16: the flash kernels reject
+    fp32, and fp16 would need loss scaling -- without it, the small gradients of a loss
+    averaged over many outputs underflow to zero in the attention backward.
 
     Parameters
     ----------
@@ -216,7 +217,7 @@ def attn_core_dtype(x: torch.Tensor) -> torch.dtype:
     if torch.is_autocast_enabled(x.device.type):
         return torch.get_autocast_dtype(x.device.type)
     if x.is_cuda and x.dtype not in (torch.float16, torch.bfloat16):
-        return torch.float16
+        return torch.bfloat16
     return x.dtype
 
 

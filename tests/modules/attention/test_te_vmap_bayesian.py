@@ -179,11 +179,11 @@ class TestDistributedAttentionPlain:
 
     Regression guards for two fixes:
 
-    * core-dtype: the TE core runs in fp16 on CUDA (see ``attn_core_dtype``)
+    * core-dtype: the TE core runs in bf16 on CUDA (see ``attn_core_dtype``)
       while ``head_concat`` holds fp32 master weights. ``forward`` used to fold
       the core output back to ``x.dtype`` only on the ``not self._te_bshd``
-      branch, so the ``_te_bshd`` (te + non-ring) path fed fp16 into
-      ``head_concat`` and ``DistributedXWT`` raised a ``Half != float`` mismatch.
+      branch, so the ``_te_bshd`` (te + non-ring) path fed bf16 into
+      ``head_concat`` and ``DistributedXWT`` raised ``BFloat16 != float``.
     * grad-input contiguity: ``fused_xw_xtw_twoway`` sent ``grad_output``
       straight into ``all_to_all``, which rejects the strided gradient autograd
       hands back through the attention rearranges (``Tensors must be

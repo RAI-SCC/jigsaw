@@ -429,7 +429,7 @@ class TestConvertToTorch:
                     v.shape[0], v.shape[1], self.num_heads, v.shape[2] // self.num_heads
                 )
 
-                # Match the dtype of jigsaw's attention core: fp16 on CUDA, the
+                # Match the dtype of jigsaw's attention core: bf16 on CUDA, the
                 # input dtype (fp32) otherwise. A half-precision reference on CPU
                 # differs from the fp32 core by its rounding, above the tolerances.
                 core_dtype = attn_core_dtype(x)
@@ -525,9 +525,9 @@ class TestConvertToTorch:
         assert isinstance(ref_v_grad, torch.Tensor)
         assert isinstance(ref_x_grad, torch.Tensor)
         grp = process_mesh_dict_2x1x2["model"]
-        # On CUDA the attention core runs in fp16 (``attn_core_dtype``). The sharded
-        # q/k/v differ from the serial ones by fp32 reduction order, which flips the
-        # odd fp16 rounding (~1e-4 on the gradients); a wrong shard is off by O(1).
+        # On CUDA the attention core runs in bf16 (``attn_core_dtype``). The sharded
+        # q/k/v differ from the serial ones by fp32 reduction order, which can flip
+        # the odd half-precision rounding; a wrong shard is off by O(1).
         atol, rtol = (5e-3, 5e-3) if device.type == "cuda" else (1e-4, 1e-5)
         assert_close("forward", dist_forward, ref_forward, atol, rtol, device, grp)
         assert_close("qkv weight", dist_q_w, q_weight, 1e-4, 1e-5, device, grp)
@@ -626,9 +626,9 @@ class TestConvertToTorch:
         assert ref_head_cat_grad is not None
         assert ref_x_grad is not None
         grp = process_mesh_dict_2x1x2["model"]
-        # On CUDA the attention core runs in fp16 (``attn_core_dtype``). The sharded
-        # q/k/v differ from the serial ones by fp32 reduction order, which flips the
-        # odd fp16 rounding (~1e-4 on the gradients); a wrong shard is off by O(1).
+        # On CUDA the attention core runs in bf16 (``attn_core_dtype``). The sharded
+        # q/k/v differ from the serial ones by fp32 reduction order, which can flip
+        # the odd half-precision rounding; a wrong shard is off by O(1).
         atol, rtol = (5e-3, 5e-3) if device.type == "cuda" else (1e-5, 1e-5)
         assert_close("forward", dist_forward, ref_forward, atol, rtol, device, grp)
         assert_close(

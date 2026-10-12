@@ -258,7 +258,7 @@ class TestDistributedAttentionPaths:
         if variant is not None:
             tol = 2e-2
         else:
-            # On CUDA both run in fp16, the serial module on the flash kernel: ~1e-3 apart.
+            # On CUDA both run in bf16, the serial module on the flash kernel: ~1e-3 apart.
             tol = 5e-3 if device.type == "cuda" else 1e-4
         assert_close("output", out, y_ref.detach(), tol, tol, device, mesh["model"])
 
@@ -287,7 +287,7 @@ class TestDistributedAttentionPaths:
         out = gather_1d_results(
             model(_channel_shard(x_global, mesh)), mesh, dim=-1, pm_key="col"
         )
-        # On CUDA both run in fp16, the serial module on the flash kernel: ~1e-3 apart.
+        # On CUDA both run in bf16, the serial module on the flash kernel: ~1e-3 apart.
         tol = 5e-3 if device.type == "cuda" else 1e-4
         assert_close("output", out, y_ref.detach(), tol, tol, device, mesh["model"])
 
@@ -344,7 +344,7 @@ class TestDistributedAttentionPaths:
         y = model(_channel_shard(x_global[:, sl], mesh))
         y.backward(_channel_shard(grad_global[:, sl], mesh))
 
-        # On CUDA the attention core runs in fp16.
+        # On CUDA the attention core runs in bf16.
         tol = 5e-2 if device.type == "cuda" else 1e-4
         group = mesh["model"]
         y_ref_local = _channel_shard(y_ref.detach()[:, sl], mesh)
@@ -377,7 +377,7 @@ class TestDistributedAttentionPaths:
         ):
             got = getattr(getattr(model, norm_name), p_name).grad
             ref = getattr(getattr(serial, norm_name), p_name).grad
-            # Summed over every token, so the fp16 rounding grows with the size
+            # Summed over every token, so the bf16 rounding grows with the size
             # of the entries -- the same scaling the qkv gradient needs below.
             # ``tol`` as a flat absolute bound tripped on a ~4.8-magnitude
             # q_norm.bias gradient whose error was only ~1% of it.
@@ -386,7 +386,7 @@ class TestDistributedAttentionPaths:
                 f"{norm_name}.{p_name} grad", got, ref, atol, tol, device, group
             )
         if mesh["col"].size() == 1:
-            # Summed over all tokens, so the fp16 rounding grows with the entries.
+            # Summed over all tokens, so the bf16 rounding grows with the entries.
             ref = serial.qkv.weight.grad
             atol = tol * max(1.0, float(ref.abs().max()))
             assert_close(
@@ -453,9 +453,9 @@ class TestSingleProcessHelpers:
 
     @pytest.mark.gpu_required
     def test_attn_core_dtype_cuda(self, device: torch.device) -> None:
-        """fp32 runs the core in fp16 (flash rejects fp32); half dtypes are kept."""
+        """fp32 runs the core in bf16 (flash rejects fp32); half dtypes are kept."""
         for dtype, core in (
-            (torch.float32, torch.float16),
+            (torch.float32, torch.bfloat16),
             (torch.float16, torch.float16),
             (torch.bfloat16, torch.bfloat16),
         ):
@@ -463,6 +463,19 @@ class TestSingleProcessHelpers:
         x = torch.zeros(2, device=device)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             assert attn_core_dtype(x) == torch.bfloat16
+
+    @pytest.mark.gpu_required
+    def test_fp32_core_keeps_small_gradients(self, device: torch.device) -> None:
+        """An fp32 model without autocast (so without a loss scaler) keeps the tiny
+        gradients of a loss averaged over many outputs: an fp16 core would flush
+        everything below 6e-8 to zero, bf16 has fp32's range.
+        """
+        torch.manual_seed(0)
+        model = attention.Attention(32, 32, 32, 4, device)
+        out = model(torch.randn(2, 64, 32, device=device))
+        out.backward(torch.randn_like(out) * 1e-9)  # dL/dout of a mean over ~1e9
+        grad = model.qkv.weight.grad  # reaches qkv only through the core
+        assert grad is not None and (grad != 0).float().mean() > 0.9
 
     @pytest.mark.gpu_required
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

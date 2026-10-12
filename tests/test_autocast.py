@@ -17,7 +17,7 @@ hand and these tests pin the contract:
 Known quirks this file documents rather than hides:
 
 * the attention core follows :func:`jigsaw...attention.attn_core_dtype`: the
-  autocast dtype under autocast, else fp16 on CUDA for fp32 inputs (flash
+  autocast dtype under autocast, else bf16 on CUDA for fp32 inputs (flash
   rejects fp32), else the input dtype. ``DistributedAttention`` still can't run an fp64
   parameter set (it force-casts q/k/v), so attention tests use fp32 params.
 * ring attention drives its forward under autocast (bf16/fp16 saved tensors) and

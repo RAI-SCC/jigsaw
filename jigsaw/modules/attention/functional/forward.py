@@ -219,7 +219,7 @@ def ring_forward(
             else None
         )
         # A chunk recomputed from a received ``x`` comes out in ``w_qkv``'s dtype,
-        # while ``q`` is already in the core dtype (fp16 on CUDA): the cores
+        # while ``q`` is already in the core dtype (bf16 on CUDA): the cores
         # matmul ``q`` against the chunk, so a mixed-dtype pair raises. Fold the
         # chunk into ``q``'s dtype here, as ``ring_backward`` does for its cores;
         # the provider keeps (and saves) the chunk in its original precision.

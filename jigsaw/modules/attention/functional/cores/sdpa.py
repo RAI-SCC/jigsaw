@@ -12,8 +12,8 @@ import torch
 
 
 def _flash_dtype(q: torch.Tensor) -> torch.dtype:
-    """Return the dtype the flash kernel runs in: ``q``'s if half, else fp16."""
-    return q.dtype if q.dtype in (torch.float16, torch.bfloat16) else torch.float16
+    """Return the dtype the flash kernel runs in: ``q``'s if half, else bf16."""
+    return q.dtype if q.dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
 
 
 def forward(
