@@ -540,7 +540,7 @@ class TestRollConvert:
         )
 
         # reshard the split onto the column axis; the next forward stays correct.
-        jr.reshard(distributed_dims=[2], spatial_group=[mesh["col"]])
+        jr.reshard(distributed_dims=[2], spatial_groups=[mesh["col"]])
         x2 = torch.randn(b, h, w, c, device=device)
         x2_global = gather_1d_results(x2, mesh, dim=2, pm_key="col")
         y2 = gather_1d_results(jr(x2), mesh, dim=2, pm_key="col")

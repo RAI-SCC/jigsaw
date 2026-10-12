@@ -20,7 +20,7 @@ def _module(**kwargs) -> roll.DistributedRoll:
         shifts=(2, -1),
         dims=(0, 2),
         distributed_dims=(),
-        spatial_group=(),
+        spatial_groups=(),
         device=CPU,
     )
     return roll.DistributedRoll(**(args | kwargs))
@@ -85,11 +85,11 @@ class TestDistributedRollWithoutGroups:
 class TestValidation:
     def test_mismatched_group_count(self):
         with pytest.raises(ValueError, match="must align"):
-            _module(distributed_dims=(0,), spatial_group=())
+            _module(distributed_dims=(0,), spatial_groups=())
 
     def test_distributed_dim_must_be_rolled(self):
         with pytest.raises(ValueError, match="must appear in dims"):
-            _module(distributed_dims=(1,), spatial_group=(None,))
+            _module(distributed_dims=(1,), spatial_groups=(None,))
 
     def test_reshard_rejects_mismatched_lengths(self):
         with pytest.raises(ValueError, match="mismatched lengths"):
