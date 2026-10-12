@@ -15,7 +15,7 @@ unlike a ``register_post_accumulate_grad_hook``:
 * parameters sharing a group tuple and dtype are reduced in one collective.
 
 Usage: mark a parameter once with :func:`mark_replicated` where it is created,
-and route it through :func:`sync_grad` (or :func:`synced_parameters` for
+and route it through :func:`sync_grad` (or :func:`synced_call` for
 submodules jigsaw does not own) in the forward.
 
 Data parallelism: wrap the model in a plain ``DistributedDataParallel`` over
@@ -36,13 +36,14 @@ within a node before crossing nodes.
 from ._ddp import check_ddp, wrap_ddp
 from ._joint import JointCommHookState, joint_comm_hook, register_joint_comm_hook
 from ._replicas import broadcast_replicas, mark_replicated, replica_groups
-from ._sync import sync_grad, synced_parameters
+from ._sync import sync_grad, synced_call, synced_parameters
 
 __all__ = [
     "mark_replicated",
     "replica_groups",
     "sync_grad",
     "synced_parameters",
+    "synced_call",
     "broadcast_replicas",
     "wrap_ddp",
     "JointCommHookState",

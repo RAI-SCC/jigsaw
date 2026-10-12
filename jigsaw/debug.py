@@ -91,7 +91,7 @@ def assert_replica_consistency(
                 "gradient is never summed over the model-parallel axes: "
                 + ", ".join(no_mark)
                 + ". Mark them with jigsaw.parallel.mark_replicated and run their "
-                "module through jigsaw.parallel.synced_parameters."
+                "module through jigsaw.parallel.synced_call."
             )
         raise AssertionError(msg)
 

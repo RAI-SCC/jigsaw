@@ -134,10 +134,11 @@ def synced_parameters(module: torch.nn.Module) -> dict[str, torch.Tensor]:
     """Return the marked parameters of ``module`` routed through :func:`sync_grad`.
 
     Meant for ``torch.func.functional_call(module, synced_parameters(module),
-    ...)`` around submodules jigsaw does not own, e.g. a plain
-    ``torch.nn.Linear`` replicated over the spatial group. The synced tensors
-    carry no mark, so nested jigsaw modules calling :func:`sync_grad` on them
-    do not reduce twice.
+    ...)``; :func:`synced_call` does this for a submodule. Call it directly
+    from a module's own forward, re-entering the forward only if the result is
+    non-empty. The synced tensors carry no mark, so the re-entered forward, and
+    nested jigsaw modules calling :func:`sync_grad` on them, do not reduce
+    twice.
 
     Parameters
     ----------
@@ -160,3 +161,32 @@ def synced_parameters(module: torch.nn.Module) -> dict[str, torch.Tensor]:
         for (n, p), s in zip(marked.items(), synced)
         if s is not p and s is not None
     }
+
+
+def synced_call(module: torch.nn.Module, *args: Any, **kwargs: Any) -> Any:
+    """Call ``module`` with its marked parameters routed through :func:`sync_grad`.
+
+    For submodules jigsaw does not own, e.g. a plain ``torch.nn.LayerNorm``
+    replicated over the spatial group: their marked parameters are summed over
+    their replica groups in the backward pass, unmarked ones pass through. Do
+    not call it on ``self`` from a forward, which would recurse; use
+    :func:`synced_parameters` there.
+
+    Parameters
+    ----------
+    module : torch.nn.Module
+        Module to call.
+    *args : Any
+        Positional inputs of ``module``.
+    **kwargs : Any
+        Keyword inputs of ``module``.
+
+    Returns
+    -------
+    Any
+        Output of ``module``.
+    """
+    synced = synced_parameters(module)
+    if not synced:
+        return module(*args, **kwargs)
+    return torch.func.functional_call(module, synced, args, kwargs)
