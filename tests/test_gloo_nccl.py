@@ -123,4 +123,7 @@ class TestGlooNcclBackend:
         dist.all_reduce(x)
         dist.all_reduce(x_cpu)
         x_cpu = x_cpu.to(device)
-        assert torch.allclose(x, x_cpu)
+        # NCCL and gloo sum the 8 contributions in different orders, so the results
+        # differ by fp32 rounding (~1e-6 here); allclose's default atol=1e-8 fails on
+        # elements that cancel to near zero.
+        torch.testing.assert_close(x, x_cpu, atol=1e-5, rtol=1e-5)
