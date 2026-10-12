@@ -19,6 +19,17 @@ This installs `torch` and `einops`, the library's only runtime dependencies. The
 pip install -e .[dev]
 ```
 
+#### Running tests
+Tests run under MPI; a test marked `@pytest.mark.dist(N)` only runs when the
+rank count is exactly `N`, so cover each layout with its own launch:
+```
+mpirun -n 4 pytest tests --device cpu    # CPU / gloo
+mpirun -n 4 pytest tests --device cuda   # GPU / nccl, one rank per GPU
+```
+CI runs the CPU suite on 1, 4 and 8 ranks (2 and 6 ranks on a manual
+"full" dispatch). GPU tests, and the 10/12/24-rank layouts, are not run in CI —
+run them on a GPU machine before merging changes that touch the CUDA paths.
+
 ### Option B: containerized (enables TransformerEngine)
 Running inside an NGC PyTorch container is optional. It gives a matched
 CUDA/NCCL stack and a working `transformer_engine`, which unlocks the `te`
