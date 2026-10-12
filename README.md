@@ -57,11 +57,11 @@ SLURM allocation, and jigsaw reads `SLURM_PROCID` / `SLURM_NTASKS` /
 
 ```bash
 # single process — login node or interactive allocation
-JIGSAW_SITE=horeka scripts/run.sh python -c "import transformer_engine; print('ok')"
+JIGSAW_SITE=cluster_name scripts/run.sh python -c "import transformer_engine; print('ok')"
 
 # distributed — one task per GPU. Identical whether run directly from a login
 # shell or as a step inside `salloc` / `sbatch`.
-JIGSAW_SITE=horeka srun --account=hk-project-XXXX --partition=accelerated-h100 \
+JIGSAW_SITE=cluster_name srun --account=<account> --partition=<partition> \
     --nodes=2 --ntasks-per-node=4 --gres=gpu:4 --mpi=pmix \
     scripts/run.sh python -m your_script --attn-backend te
 
@@ -160,8 +160,9 @@ descend into automatically, so each opts in by hand. Behaviour:
   stays fp32 (SDPA math backend). A float `attn_mask` is cast to the core dtype for you.
 
 Only `float16` and `bfloat16` are autocast dtypes. `float64` params work for the matmul,
-conv and norm layers but not attention (it force-casts q/k/v). `float8` is not supported by
-any hand-rolled layer — it needs TransformerEngine's own `fp8_autocast` path.
+conv and norm layers but not attention (it force-casts q/k/v). FP8 is not supported:
+TransformerEngine's `fp8_autocast` has no effect on _jigsaw_'s layers, including the
+`te` attention backend, which runs non-FP8 kernels only.
 
 ### Process mesh
 Each module accepts a ```process_mesh_dict``` -- a mapping ``{axis name -> ProcessGroup}``. The last two axes represent the DTP (default kw ``row`` and ``col``); any leading axes are data-parallel replicas. On top of the per-axis groups the dict carries a ``model`` group spanning one full parameter replica, which the parameter-free matmul, the weight-merging converters and seed setup all read.

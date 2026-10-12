@@ -15,7 +15,7 @@ with every backend.
 | `run.sh` — the invariant `apptainer exec --nv` wrapper and the launch env-var contract | The image itself (`apptainer pull` / `build`) and where it lives |
 | `sites/example.env` — every knob, documented | `sites/<cluster>.env` — the values |
 | `train.sbatch.example` — batch structure | Account, partition, walltime, node counts; the real batch script |
-| `sites/horeka.env` — a working example (best-effort, not CI-guaranteed) | mpi4py built against the image's MPI; the host venv overlay |
+| `sites/*.env` — presets for the clusters jigsaw is developed on; working examples (best-effort, not CI-guaranteed) | mpi4py built against the image's MPI; the host venv overlay |
 
 See [`containers/README.md`](../containers/README.md) for the image provenance
 and the venv-overlay / mpi4py build steps.
@@ -24,13 +24,13 @@ and the venv-overlay / mpi4py build steps.
 
 ```bash
 # interactive, one process (login shell or an salloc allocation)
-JIGSAW_SITE=horeka scripts/run.sh python -c "import transformer_engine; print('ok')"
+JIGSAW_SITE=cluster_name scripts/run.sh python -c "import transformer_engine; print('ok')"
 
 # distributed, under srun (one task per GPU) - works both as a direct
 # `srun ...` from a login shell and as an `srun ...` step inside an salloc
 # allocation or an sbatch script; run.sh derives MASTER_ADDR/PORT from the
 # allocation either way
-JIGSAW_SITE=horeka srun --account=... --partition=accelerated-h100 \
+JIGSAW_SITE=cluster_name srun --account=<account> --partition=<partition> \
     --nodes=1 --ntasks-per-node=4 --gres=gpu:4 \
     scripts/run.sh python -m your_script --attn-backend te
 
@@ -41,7 +41,7 @@ cp scripts/train.sbatch.example experiments/train.sbatch  # then edit + sbatch
 Point at a preset with `JIGSAW_SITE=<name>` (→ `sites/<name>.env`) or an explicit
 file with `JIGSAW_SITE_FILE=/abs/path.env`. With neither, export the `JIGSAW_*`
 vars directly. Presets use `${VAR:-default}`, so any value exported before
-calling `run.sh` overrides the preset (e.g. `JIGSAW_SIF=/other.sif JIGSAW_SITE=horeka ...`).
+calling `run.sh` overrides the preset (e.g. `JIGSAW_SIF=/other.sif JIGSAW_SITE=cluster_name ...`).
 
 ## The launch contract
 

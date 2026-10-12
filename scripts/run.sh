@@ -3,7 +3,7 @@
 # Cluster-agnostic launcher: run a command inside the jigsaw container.
 #
 #   scripts/run.sh python -m my_training_script --foo bar
-#   JIGSAW_SITE=horeka scripts/run.sh pytest -m te_required
+#   JIGSAW_SITE=cluster_name scripts/run.sh pytest -m te_required
 #
 # Everything cluster-specific is read from the environment, normally by sourcing
 # a site preset. Resolution order:
@@ -18,7 +18,7 @@
 # Optional:
 #   JIGSAW_VENV       Host venv (created --system-site-packages from the image);
 #                     its python is used and its site-packages take precedence.
-#   JIGSAW_BINDS      Comma-separated bind mounts, e.g. /hkfs,/scratch
+#   JIGSAW_BINDS      Comma-separated bind mounts, e.g. /project,/scratch
 #   JIGSAW_PYTHON     Interpreter name when no venv is set (default: python).
 #   JIGSAW_APPTAINER  Container runtime (default: apptainer).
 #   JIGSAW_MODULES    Space-separated modules to `module load` before launching.
@@ -101,7 +101,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
 # --- Triton / Inductor runtime-build toolchain ------------------------------
 # Triton (and Inductor's C++ wrapper) compile a small shim at runtime the first
 # time a kernel is used -- jigsaw hits this in the ring attention fused merge
-# and in `xw_twoway`. Two things in the NGC image + HoreKa combination break
+# and in `xw_twoway`. Two things in the NGC image on some clusters break
 # that build; fix both unless the caller opted out with JIGSAW_FIX_TOOLCHAIN=0:
 #   * The host shell leaks CC/CXX pointing at an Intel oneAPI `icx`/`icpx` that
 #     is not in the image. Drop them so the build falls back to the image gcc.

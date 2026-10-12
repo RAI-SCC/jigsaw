@@ -81,14 +81,14 @@ Launch one task per GPU with `srun` inside an `sbatch` script:
 ```bash
 #!/usr/bin/env bash
 #SBATCH --job-name=jigsaw
-#SBATCH --account=hk-project-XXXX
-#SBATCH --partition=accelerated-h100
+#SBATCH --account=<account>
+#SBATCH --partition=<partition>
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
 #SBATCH --time=00:30:00
 
-export JIGSAW_SITE=horeka          # scripts/sites/<name>.env
+export JIGSAW_SITE=cluster_name    # scripts/sites/cluster_name.env
 
 srun --mpi=pmix scripts/run.sh python -m your_training_module \
     --config configs/run.yaml
