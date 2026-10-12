@@ -11,6 +11,11 @@ from typing import Optional
 import torch
 
 
+def _flash_dtype(q: torch.Tensor) -> torch.dtype:
+    """Return the dtype the flash kernel runs in: ``q``'s if half, else fp16."""
+    return q.dtype if q.dtype in (torch.float16, torch.bfloat16) else torch.float16
+
+
 def forward(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -49,7 +54,8 @@ def forward(
     assert layout == "bhsd", (
         f"sdpa core is bhsd-only; got layout={layout!r}. The bshd ring is TE-only."
     )
-    q, k, v = [x.to(torch.float16) for x in (q, k, v)]
+    dtype = _flash_dtype(q)
+    q, k, v = [x.to(dtype) for x in (q, k, v)]
     (
         out,
         logsumexp,
@@ -140,7 +146,8 @@ def backward(
         philox_offset = torch.zeros(1, dtype=torch.long, device=q.device)
 
     in_dtype = grad_out.dtype
-    grad_out, q, k, v, out = (t.to(torch.float16) for t in (grad_out, q, k, v, out))
+    dtype = _flash_dtype(q)
+    grad_out, q, k, v, out = (t.to(dtype) for t in (grad_out, q, k, v, out))
     logsumexp = logsumexp.to(torch.float32)
 
     dq, dk, dv = torch.ops.aten._scaled_dot_product_flash_attention_backward(

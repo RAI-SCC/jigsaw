@@ -154,8 +154,10 @@ descend into automatically, so each opts in by hand. Behaviour:
 - **`DistributedLayerNorm` (with or without `elementwise_affine`) / `DistributedSoftMax`**
   follow stock-AMP "fp32 list" semantics: computed and emitted in fp32 even when fed bf16/fp16.
 - **Attention core (SDPA / TransformerEngine)**: under autocast it uses the autocast dtype
-  (so `autocast(float16)` stays fp16); with no autocast it uses bf16 on CUDA — keeping the
-  flash kernel eligible, which rejects fp32 — and the input dtype on CPU (SDPA math backend).
+  (so `autocast(bfloat16)` stays bf16 and `autocast(float16)` fp16). With no autocast it uses
+  the input dtype, except that fp32 inputs on CUDA run the core in fp16 — the flash kernel
+  rejects fp32, and fp16 is the more precise half type. On CPU fp32 stays fp32 (SDPA math
+  backend). A float `attn_mask` is cast to the core dtype for you.
 
 Only `float16` and `bfloat16` are autocast dtypes. `float64` params work for the matmul,
 conv and norm layers but not attention (it force-casts q/k/v). `float8` is not supported by

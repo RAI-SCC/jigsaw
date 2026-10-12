@@ -199,8 +199,9 @@ if JIGSAW_TE_AVAILABLE:
 def attn_core_dtype(x: torch.Tensor) -> torch.dtype:
     """Return the dtype of the attention core.
 
-    This is the autocast dtype under autocast, bf16 on CUDA and the input dtype
-    otherwise.
+    This is the autocast dtype under autocast. Otherwise it is the input dtype, except
+    that fp32 (or fp64) inputs on CUDA run the core in fp16: the flash kernels reject
+    fp32, and fp16 is 8x more precise than bf16 (but overflows above 65504).
 
     Parameters
     ----------
@@ -214,9 +215,18 @@ def attn_core_dtype(x: torch.Tensor) -> torch.dtype:
     """
     if torch.is_autocast_enabled(x.device.type):
         return torch.get_autocast_dtype(x.device.type)
-    if x.is_cuda:
-        return torch.bfloat16
+    if x.is_cuda and x.dtype not in (torch.float16, torch.bfloat16):
+        return torch.float16
     return x.dtype
+
+
+def _mask_to(
+    attn_mask: Optional[torch.Tensor], dtype: torch.dtype
+) -> Optional[torch.Tensor]:
+    """Cast an additive (float) mask to the core dtype; SDPA rejects a mismatch."""
+    if attn_mask is not None and attn_mask.is_floating_point():
+        return attn_mask.to(dtype)
+    return attn_mask
 
 
 class DistributedAttention(torch.nn.Module):
@@ -1048,7 +1058,9 @@ class DistributedAttention(torch.nn.Module):
             q, k, v = qkv.unbind(0)
             qkv_stack = qkv
 
-        out = self.attn_core(q, k, v, x=x, qkv_stack=qkv_stack, attn_mask=attn_mask)
+        out = self.attn_core(
+            q, k, v, x=x, qkv_stack=qkv_stack, attn_mask=_mask_to(attn_mask, core_dtype)
+        )
         # Fold ``out`` to ``... n s (h d)`` in ``x.dtype`` before ``head_concat``
         # (which holds model-dtype weights). The non-ring TE core already returns
         # ``... n s (h d)``; the ring TE core and the Ulysses core return bshd
@@ -1210,7 +1222,9 @@ class Attention(torch.nn.Module):
             v = v.to(core_dtype)
         else:
             q, k, v = qkv.permute(2, 0, 3, 1, 4).to(core_dtype)
-        out = self.attn_core(q=q, k=k, v=v, x=x, attn_mask=attn_mask)
+        out = self.attn_core(
+            q=q, k=k, v=v, x=x, attn_mask=_mask_to(attn_mask, core_dtype)
+        )
 
         # out has shape [B, h, N, d]
         out = rearrange(out, "... h s d -> ... s (h d)").to(x.dtype)

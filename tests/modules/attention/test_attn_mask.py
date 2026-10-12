@@ -152,7 +152,7 @@ class TestAttentionMask:
         out_masked = model(x, attn_mask=mask)
         out_ref = torch.cat([model(x[:, :n0]), model(x[:, n0:])], dim=1)
 
-        # On CUDA the core runs in bf16 (`attn_core_dtype`): ~1e-3 roundoff.
+        # On CUDA the core runs in fp16 (`attn_core_dtype`): ~1e-3 roundoff.
         tol = 5e-3 if device.type == "cuda" else 1e-5
         torch.testing.assert_close(out_masked, out_ref, rtol=tol, atol=tol)
 
@@ -163,10 +163,9 @@ class TestAttentionMask:
         torch.manual_seed(1)
         x = torch.randn(2, n0 + n1, DIM, device=device)
         bool_mask = _block_mask(n0, n1).to(device)
-        # On CUDA `attn_core_dtype` casts q/k/v to bf16 inside the core; a float mask
-        # must match that dtype exactly (unlike a bool mask), not `x`'s own (fp32).
-        mask_dtype = torch.bfloat16 if device.type == "cuda" else x.dtype
-        float_mask = torch.zeros_like(bool_mask, dtype=mask_dtype).masked_fill(
+        # The float mask stays in `x`'s dtype (fp32): the module casts it to the core
+        # dtype itself (fp16 on CUDA, see `attn_core_dtype`).
+        float_mask = torch.zeros_like(bool_mask, dtype=x.dtype).masked_fill(
             ~bool_mask, float("-inf")
         )
 
@@ -221,7 +220,7 @@ class TestAttentionMask:
         grad_ref = torch.cat([x_a.grad, x_b.grad], dim=1)
 
         assert x_masked.grad is not None
-        # On CUDA the core runs in bf16 (`attn_core_dtype`): ~1e-3 roundoff.
+        # On CUDA the core runs in fp16 (`attn_core_dtype`): ~1e-3 roundoff.
         tol = 5e-3 if device.type == "cuda" else 1e-4
         torch.testing.assert_close(x_masked.grad, grad_ref, rtol=tol, atol=tol)
 
@@ -241,11 +240,10 @@ class TestAttentionMask:
         n = self.n0 + self.n1
         torch.manual_seed(1)
         x_global = torch.randn(2, n, DIM, device=device)
-        mask_dtype = torch.bfloat16 if device.type == "cuda" else x_global.dtype
         mask = (
             _arbitrary_bool_mask(n, device)
             if mask_kind == "bool"
-            else _arbitrary_float_mask(n, device, mask_dtype)
+            else _arbitrary_float_mask(n, device, x_global.dtype)
         )
 
         x = x_global.clone().requires_grad_(True)
@@ -263,7 +261,7 @@ class TestAttentionMask:
             model.attn_core = real_core
 
         assert x.grad is not None and x_ref.grad is not None
-        # On CUDA the real core runs in bf16 vs. the reference's fp64: looser tol.
+        # On CUDA the real core runs in fp16 vs. the reference's fp64: looser tol.
         tol = 5e-3 if device.type == "cuda" else 1e-4
         torch.testing.assert_close(out, out_ref.detach(), rtol=tol, atol=tol)
         torch.testing.assert_close(x.grad, x_ref.grad, rtol=tol, atol=tol)
@@ -310,7 +308,7 @@ class TestDistributedAttentionMask:
         out_masked = model(x, attn_mask=mask)
         out_ref = torch.cat([model(x[:, :n0]), model(x[:, n0:])], dim=1)
 
-        # On CUDA the core runs in bf16 (`attn_core_dtype`): ~1e-3 roundoff.
+        # On CUDA the core runs in fp16 (`attn_core_dtype`): ~1e-3 roundoff.
         tol = 5e-3 if device.type == "cuda" else 1e-5
         torch.testing.assert_close(out_masked, out_ref, rtol=tol, atol=tol)
 
@@ -364,11 +362,10 @@ class TestDistributedAttentionMask:
         n = self.n0 + self.n1
         torch.manual_seed(1)
         x_global = torch.randn(2, n, DIM, device=device)
-        mask_dtype = torch.bfloat16 if device.type == "cuda" else x_global.dtype
         mask = (
             _arbitrary_bool_mask(n, device)
             if mask_kind == "bool"
-            else _arbitrary_float_mask(n, device, mask_dtype)
+            else _arbitrary_float_mask(n, device, x_global.dtype)
         )
 
         x = x_global.clone().requires_grad_(True)
@@ -586,7 +583,7 @@ class TestAttnMaskWithTe:
         assert model.attn_backend is cfg.AttnBackend.TE  # the real core, not a fallback
 
         # x stays in the module's own (float32) dtype -- `attn_core_dtype` casts
-        # internally to bf16 for the core; it is not a dtype the caller must match.
+        # internally to fp16 for the core; it is not a dtype the caller must match.
         x = torch.randn(2, 8, DIM, device=device)
         with pytest.raises(ValueError, match="attn_backend='te'"):
             model(x, attn_mask=torch.ones(8, 8, dtype=torch.bool, device=device))

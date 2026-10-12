@@ -258,7 +258,7 @@ class TestDistributedAttentionPaths:
         if variant is not None:
             tol = 2e-2
         else:
-            # On CUDA both run in bf16, the serial module on the flash kernel: ~1e-3 apart.
+            # On CUDA both run in fp16, the serial module on the flash kernel: ~1e-3 apart.
             tol = 5e-3 if device.type == "cuda" else 1e-4
         assert_close("output", out, y_ref.detach(), tol, tol, device, mesh["model"])
 
@@ -287,7 +287,7 @@ class TestDistributedAttentionPaths:
         out = gather_1d_results(
             model(_channel_shard(x_global, mesh)), mesh, dim=-1, pm_key="col"
         )
-        # On CUDA both run in bf16, the serial module on the flash kernel: ~1e-3 apart.
+        # On CUDA both run in fp16, the serial module on the flash kernel: ~1e-3 apart.
         tol = 5e-3 if device.type == "cuda" else 1e-4
         assert_close("output", out, y_ref.detach(), tol, tol, device, mesh["model"])
 
@@ -344,7 +344,7 @@ class TestDistributedAttentionPaths:
         y = model(_channel_shard(x_global[:, sl], mesh))
         y.backward(_channel_shard(grad_global[:, sl], mesh))
 
-        # On CUDA the attention core runs in bf16.
+        # On CUDA the attention core runs in fp16.
         tol = 5e-2 if device.type == "cuda" else 1e-4
         group = mesh["model"]
         y_ref_local = _channel_shard(y_ref.detach()[:, sl], mesh)
@@ -353,7 +353,7 @@ class TestDistributedAttentionPaths:
         # by the same vector, which adds the per-query constant ``q_i . b`` to
         # every logit of row ``i`` and so cancels in the softmax. Its gradient
         # is identically zero -- 7e-16 in float64, and the output does not move
-        # when the bias is shifted by 10.0 -- so in bf16 both sides here hold
+        # when the bias is shifted by 10.0 -- so in half precision both sides hold
         # nothing but rounding noise, which reaches ~5e-2, the tolerance
         # itself. Comparing the two to each other is therefore a parity check
         # with no power *and* one unlucky seed from flaking, and it never
@@ -377,7 +377,7 @@ class TestDistributedAttentionPaths:
         ):
             got = getattr(getattr(model, norm_name), p_name).grad
             ref = getattr(getattr(serial, norm_name), p_name).grad
-            # Summed over every token, so the bf16 rounding grows with the size
+            # Summed over every token, so the fp16 rounding grows with the size
             # of the entries -- the same scaling the qkv gradient needs below.
             # ``tol`` as a flat absolute bound tripped on a ~4.8-magnitude
             # q_norm.bias gradient whose error was only ~1% of it.
@@ -386,7 +386,7 @@ class TestDistributedAttentionPaths:
                 f"{norm_name}.{p_name} grad", got, ref, atol, tol, device, group
             )
         if mesh["col"].size() == 1:
-            # Summed over all tokens, so the bf16 rounding grows with the entries.
+            # Summed over all tokens, so the fp16 rounding grows with the entries.
             ref = serial.qkv.weight.grad
             atol = tol * max(1.0, float(ref.abs().max()))
             assert_close(
@@ -450,3 +450,36 @@ class TestSingleProcessHelpers:
         assert attn_core_dtype(x) == torch.float64
         with torch.autocast("cpu", dtype=torch.bfloat16):
             assert attn_core_dtype(x) == torch.bfloat16
+
+    @pytest.mark.gpu_required
+    def test_attn_core_dtype_cuda(self, device: torch.device) -> None:
+        """fp32 runs the core in fp16 (flash rejects fp32); half dtypes are kept."""
+        for dtype, core in (
+            (torch.float32, torch.float16),
+            (torch.float16, torch.float16),
+            (torch.bfloat16, torch.bfloat16),
+        ):
+            assert attn_core_dtype(torch.zeros(2, device=device, dtype=dtype)) == core
+        x = torch.zeros(2, device=device)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            assert attn_core_dtype(x) == torch.bfloat16
+
+    @pytest.mark.gpu_required
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_sdpa_ring_core_keeps_half_dtype(
+        self, device: torch.device, dtype: torch.dtype
+    ) -> None:
+        """The ring's flash core runs in the dtype it is given, bf16 included."""
+        from jigsaw.modules.attention.functional.cores import sdpa
+
+        q, k, v = (torch.randn(1, 2, 16, 8, device=device, dtype=dtype) for _ in "qkv")
+        out, lse, _ = sdpa.forward(q, k, v, scale=8**-0.5, dropout_p=0.0)
+        assert out.dtype == dtype
+        dq, dk, dv = sdpa.backward(
+            torch.ones_like(out), q, k, v, out, lse, 8**-0.5, 16, 16
+        )
+        assert dq.dtype == dk.dtype == dv.dtype == dtype
+        ref = torch.nn.functional.scaled_dot_product_attention(
+            q.double(), k.double(), v.double()
+        )
+        torch.testing.assert_close(out.double(), ref, atol=2e-2, rtol=2e-2)

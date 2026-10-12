@@ -19,7 +19,7 @@ of integration:
 2. :class:`TestDistributedAttentionPlain` -- a plain (no vmap, no ensemble)
    ``DistributedAttention`` forward+backward on a channel-parallel mesh, sdpa
    and te. **Passes.** Regression guards for two fixes: ``forward`` now casts
-   the bf16 core output back to the model dtype on the ``_te_bshd`` branch too,
+   the half-precision core output back to the model dtype on the ``_te_bshd`` branch too,
    and ``fused_xw_xtw_twoway`` makes ``grad_output`` contiguous before its
    ``all_to_all``.
 3. :class:`TestDistributedAttentionEnsembleVmap` -- a full non-ring
@@ -47,10 +47,11 @@ from jigsaw.modules.attention import attention
 from jigsaw.modules.attention.functional.cores import te as te_cores
 from tests.parity import assert_close
 
-# TE fused attention needs fp16/bf16 and (on CUDA) the attn core runs bf16
-# regardless of backend -- so vmap-vs-loop parity is a bf16 comparison.
+# TE fused attention needs fp16/bf16 and (on CUDA) the attn core runs in half
+# precision regardless of backend -- so vmap-vs-loop parity is a half-precision
+# comparison (bf16 for the direct-core tests, which feed bf16 q/k/v).
 _FWD_TOL = dict(atol=2e-2, rtol=2e-2)
-_GRAD_TOL = dict(atol=3e-2, rtol=3e-2)  # grads flow through the bf16 core
+_GRAD_TOL = dict(atol=3e-2, rtol=3e-2)  # grads flow through the half-precision core
 
 
 # --------------------------------------------------------------------------- #
@@ -178,11 +179,11 @@ class TestDistributedAttentionPlain:
 
     Regression guards for two fixes:
 
-    * core-dtype: the TE core runs in bf16 on CUDA (see ``attn_core_dtype``)
+    * core-dtype: the TE core runs in fp16 on CUDA (see ``attn_core_dtype``)
       while ``head_concat`` holds fp32 master weights. ``forward`` used to fold
       the core output back to ``x.dtype`` only on the ``not self._te_bshd``
-      branch, so the ``_te_bshd`` (te + non-ring) path fed bf16 into
-      ``head_concat`` and ``DistributedXWT`` raised ``BFloat16 != float``.
+      branch, so the ``_te_bshd`` (te + non-ring) path fed fp16 into
+      ``head_concat`` and ``DistributedXWT`` raised a ``Half != float`` mismatch.
     * grad-input contiguity: ``fused_xw_xtw_twoway`` sent ``grad_output``
       straight into ``all_to_all``, which rejects the strided gradient autograd
       hands back through the attention rearranges (``Tensors must be
