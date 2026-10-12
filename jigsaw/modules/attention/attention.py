@@ -251,11 +251,11 @@ class DistributedAttention(torch.nn.Module):
         embed_dim: int,
         out_dim: int,
         heads: int,
-        dropout_p: float,
         local_rank: int,
         device: torch.device,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
+        dropout_p: float = 0.0,
         bayesian: bool = False,
         qk_norm: bool = False,
         ring: bool = False,
@@ -272,7 +272,7 @@ class DistributedAttention(torch.nn.Module):
         dtype: torch.dtype = torch.float32,
         config: Optional[attention_config.RingAttentionConfig] = None,
         out_bias: bool = True,
-    ):
+    ) -> None:
         """Initialize the module.
 
         The weights are replicated over ``spatial_group``, which splits the
@@ -289,8 +289,6 @@ class DistributedAttention(torch.nn.Module):
             Global output dimension.
         heads : int
             Global number of heads.
-        dropout_p : float
-            Dropout probability.
         local_rank : int
             Rank within the channel group. Kept for compatibility: the module
             reads the channel rank and the ring rank from the groups.
@@ -300,6 +298,8 @@ class DistributedAttention(torch.nn.Module):
             Process group along the sequence dimension.
         channel_group : dist.ProcessGroup
             Process group along the channel dimension.
+        dropout_p : float
+            Dropout probability.
         bayesian : bool
             Whether the linear layers are Bayesian.
         qk_norm : bool
@@ -519,8 +519,8 @@ class DistributedAttention(torch.nn.Module):
                 local_rank=self.channel_group.rank(),
                 device=self.device,
                 model_group=self.channel_group,
-                column_group=self.channel_group,
                 row_group=self.spatial_group,
+                col_group=self.channel_group,
                 bias=False,
                 bayesian=bayesian,
                 dtype=self.dtype,
@@ -541,8 +541,8 @@ class DistributedAttention(torch.nn.Module):
                 local_rank=self.channel_group.rank(),
                 device=self.device,
                 model_group=self.channel_group,
-                column_group=self.channel_group,
                 row_group=self.spatial_group,
+                col_group=self.channel_group,
                 bias=out_bias,
                 bayesian=bayesian,
                 dtype=self.dtype,
@@ -566,8 +566,8 @@ class DistributedAttention(torch.nn.Module):
         for p in self.parameters():
             # A duplicate mark would sum that gradient twice, scaling it by
             # ``spatial_group.size()``. DistributedXWT already marks its own
-            # ``bias`` over ``row_group``, which is exactly ``spatial_group``
-            # here, so skip anything already claimed.
+            # ``bias`` over its ``row_group``, which is ``spatial_group`` here,
+            # so skip anything already claimed.
             if parallel.replica_groups(p):
                 continue
             parallel.mark_replicated(p, self.spatial_group)

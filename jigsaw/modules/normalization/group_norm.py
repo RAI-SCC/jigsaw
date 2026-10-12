@@ -13,44 +13,52 @@ class DistributedGroupNorm(torch.nn.Module):
 
     def __init__(
         self,
-        num_local_groups: int,
+        num_groups: int,
         num_channels: int,
+        device: torch.device,
+        channel_group: Optional[dist.ProcessGroup] = None,
         eps: float = 1e-5,
         affine: bool = True,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
         bias: bool = True,
-        channel_group: Optional[dist.ProcessGroup] = None,
-    ):
+        dtype: Optional[torch.dtype] = None,
+    ) -> None:
         """Initialize the layer.
 
         Parameters
         ----------
-        num_local_groups : int
-            Number of normalization groups of the local shard.
+        num_groups : int
+            Global (unsharded) number of normalization groups. Must be
+            divisible by ``channel_group.size()``, so that no group straddles
+            two shards.
         num_channels : int
-            Number of channels of the local shard.
+            Global (unsharded) number of channels. Must be divisible by
+            ``channel_group.size()``.
+        device : torch.device
+            Device of the module.
+        channel_group : dist.ProcessGroup, optional
+            Process group across which the channels are partitioned. ``None``
+            means the channels are not partitioned.
         eps : float
             Term added to the variance for numerical stability.
         affine : bool
             Whether the layer has learnable affine parameters.
-        device : torch.device, optional
-            Device of the module.
-        dtype : torch.dtype, optional
-            Data type of the parameters.
         bias : bool
             Whether the affine transformation has a bias.
-        channel_group : dist.ProcessGroup, optional
-            Process group across which the channels are partitioned.
+        dtype : torch.dtype, optional
+            Data type of the parameters.
         """
         super().__init__()
 
-        self.num_local_groups = num_local_groups
-        self.num_channels = num_channels
-        self.channel_group = channel_group
-        self.num_global_groups = num_local_groups * (
-            channel_group.size() if channel_group is not None else 1
+        channel_size = channel_group.size() if channel_group is not None else 1
+        assert num_groups % channel_size == 0 and num_channels % channel_size == 0, (
+            f"num_groups={num_groups} and num_channels={num_channels} must both "
+            f"be divisible by the channel group size {channel_size}"
         )
+        self.num_groups = num_groups
+        self.num_channels = num_channels
+        self.num_local_groups = num_groups // channel_size
+        self.num_local_channels = num_channels // channel_size
+        self.channel_group = channel_group
         self.eps = eps
         self.affine = affine
         self.device = device
@@ -66,7 +74,7 @@ class DistributedGroupNorm(torch.nn.Module):
         """
         group_norm = torch.nn.GroupNorm(
             self.num_local_groups,
-            self.num_channels,
+            self.num_local_channels,
             eps=self.eps,
             affine=self.affine,
             device=self.device,
@@ -126,26 +134,18 @@ class DistributedGroupNorm(torch.nn.Module):
             column group size.
         """
         col_group = process_mesh_dict[col_kw]
-        assert model.num_groups % col_group.size() == 0, (
-            "num_groups is not divisible by process mesh columns"
-        )
-        assert model.num_channels % col_group.size() == 0, (
-            "num_channels is not divisible by process mesh columns"
-        )
-        local_groups = model.num_groups // col_group.size()
-        local_channels = model.num_channels // col_group.size()
-        col_rank = col_group.rank()
-
         instance = cls(
-            num_local_groups=local_groups,
-            num_channels=local_channels,
+            num_groups=model.num_groups,
+            num_channels=model.num_channels,
+            device=device,
+            channel_group=col_group,
             eps=model.eps,
             affine=model.affine,
-            device=device,
-            dtype=model.weight.dtype if model.weight is not None else None,
             bias=model.bias is not None,
-            channel_group=col_group,
+            dtype=model.weight.dtype if model.weight is not None else None,
         )
+        local_channels = instance.num_local_channels
+        col_rank = col_group.rank()
         if model.affine:
             instance.group_norm.weight.data = (
                 model.weight.data[
@@ -229,10 +229,9 @@ class DistributedGroupNorm(torch.nn.Module):
             Layer with the merged weight and bias.
         """
         weight, bias = self.merge_weights(process_mesh_dict, row_kw, col_kw, model_kw)
-        num_channels = self.num_channels * process_mesh_dict[col_kw].size()
         group_norm = torch.nn.GroupNorm(
-            self.num_global_groups,
-            num_channels,
+            self.num_groups,
+            self.num_channels,
             eps=self.eps,
             affine=self.affine,
             device=self.device,
@@ -283,16 +282,15 @@ class DistributedGroupNorm(torch.nn.Module):
             Keys of the row and column process groups in both meshes.
         """
         to_channel = to_process_mesh[pm_col_key]
-        assert self.num_global_groups % to_channel.size() == 0, (
-            "num_global_groups must be divisible by the target channel group size"
+        assert self.num_groups % to_channel.size() == 0, (
+            "num_groups must be divisible by the target channel group size"
         )
-        channels_global = self.num_channels * from_process_mesh[pm_col_key].size()
-        assert channels_global % to_channel.size() == 0, (
-            "global channel count must be divisible by the target channel group size"
+        assert self.num_channels % to_channel.size() == 0, (
+            "num_channels must be divisible by the target channel group size"
         )
 
-        new_num_channels = channels_global // to_channel.size()
-        new_num_local_groups = self.num_global_groups // to_channel.size()
+        new_num_channels = self.num_channels // to_channel.size()
+        new_num_local_groups = self.num_groups // to_channel.size()
         col_rank = to_channel.rank()
 
         weight_slice = bias_slice = None
@@ -311,7 +309,7 @@ class DistributedGroupNorm(torch.nn.Module):
                     col_rank * new_num_channels : (col_rank + 1) * new_num_channels
                 ].clone()
 
-        self.num_channels = new_num_channels
+        self.num_local_channels = new_num_channels
         self.num_local_groups = new_num_local_groups
         self.channel_group = to_channel
         self.group_norm = self._build_group_norm()

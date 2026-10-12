@@ -222,7 +222,7 @@ def test_plain_submodule_of_a_jigsaw_module_is_not_foreign(device) -> None:
     """
     mesh = _mesh((2, 2, 2), device)
     norm = normalization.DistributedGroupNorm(
-        2, 4, device=device, channel_group=mesh["col"]
+        4, 8, device=device, channel_group=mesh["col"]
     )
     with torch.no_grad():  # a different shard on every column
         norm.group_norm.weight.fill_(1.0 + mesh["col"].rank())

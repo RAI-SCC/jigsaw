@@ -13,13 +13,13 @@ from jigsaw.gather import gather_1d_results, gather_results
 from .config import LinearConfig
 from .functional import XTW, XW, XWT
 
-# Effective ``(model_group.size() // column_group.size(), column_group.size())``
+# Effective ``(model_group.size() // col_group.size(), col_group.size())``
 # layouts the XWT kernels implement. The kernel is picked by ``parallelism`` (=
 # ``model_group.size()`` = row * col) alone and each one bakes in a fixed 2-D
 # arrangement of the model ranks, so an arbitrary ``row x col`` factorisation of
 # the same rank count is *not* interchangeable: parallelism 4 is a 2x2 SUMMA,
 # parallelism 8 a 4x2 one, parallelism 2 an in-split (1x2). When ``model_group
-# == column_group`` the row factor is 1 and ``row_group`` is a pure replication
+# == col_group`` the row factor is 1 and ``row_group`` is a pure replication
 # group (not part of the matmul), so any ``row_group`` size is fine.
 # ``merge_weights`` / ``reshard_parameters`` still work for any factorisation --
 # only ``forward`` is constrained.
@@ -36,8 +36,8 @@ class DistributedXWT(torch.nn.Module):
         local_rank: int,
         device: torch.device,
         model_group: dist.ProcessGroup,
-        column_group: dist.ProcessGroup,
         row_group: dist.ProcessGroup,
+        col_group: dist.ProcessGroup,
         bias: bool = True,
         bayesian: bool = False,
         config: Optional[LinearConfig] = None,
@@ -56,12 +56,14 @@ class DistributedXWT(torch.nn.Module):
         device : torch.device
             Device of the module.
         model_group : dist.ProcessGroup
-            Process group of one model-parallel instance, the union of the row
-            and column groups.
-        column_group : dist.ProcessGroup
-            Process group splitting the last dimension of ``x`` and ``w``.
+            Process group of one model-parallel instance, usually the union of
+            the row and column groups. The first dimension of ``w`` is split
+            ``model_group.size() // col_group.size()`` ways.
         row_group : dist.ProcessGroup
-            Process group splitting the first dimension of ``w``.
+            Process group splitting the leading (row) dimensions of ``x``. The
+            bias is replicated over it.
+        col_group : dist.ProcessGroup
+            Process group splitting the last dimension of ``x`` and ``w``.
         bias : bool
             Whether to add a bias.
         bayesian : bool
@@ -77,8 +79,8 @@ class DistributedXWT(torch.nn.Module):
         self.dtype = dtype
         self.device = device
 
-        assert in_dim % column_group.size() == 0
-        assert out_dim % (model_group.size() // column_group.size()) == 0
+        assert in_dim % col_group.size() == 0
+        assert out_dim % (model_group.size() // col_group.size()) == 0
 
         # Global (unsharded) weight/bias shape, torch.nn.Linear layout ``(out,
         # in)``. ``reset_parameters`` keys the init distribution off these, so a
@@ -88,9 +90,9 @@ class DistributedXWT(torch.nn.Module):
         self.global_weight_shape = (out_dim, in_dim)
         self.global_bias_shape = (out_dim,) if bias else None
 
-        bias_dim = out_dim // column_group.size()
-        in_dim = in_dim // (column_group.size())
-        out_dim = out_dim // (model_group.size() // column_group.size())
+        bias_dim = out_dim // col_group.size()
+        in_dim = in_dim // (col_group.size())
+        out_dim = out_dim // (model_group.size() // col_group.size())
 
         self.weight = torch.nn.Parameter(
             torch.zeros(out_dim, in_dim, dtype=self.dtype, device=self.device)
@@ -111,8 +113,8 @@ class DistributedXWT(torch.nn.Module):
         self.device = device
         self.local_rank = local_rank
         self.model_group = model_group
-        self.column_group = column_group
         self.row_group = row_group
+        self.col_group = col_group
         self.bayesian = bayesian
         self.config = (
             LinearConfig(
@@ -160,15 +162,15 @@ class DistributedXWT(torch.nn.Module):
         """
         # The kernel is selected by ``parallelism = model_group.size()`` alone
         # (see ``LinearConfig``), so the constrained layout is the *effective*
-        # one -- ``model_group`` split by ``column_group`` -- not
+        # one -- ``model_group`` split by ``col_group`` -- not
         # ``row_group.size()``. For a SUMMA caller ``model_group`` is the union
         # of row and column, so this equals ``(row_group.size(), col)`` and
         # nothing changes. For a caller that passes ``model_group ==
-        # column_group`` (e.g. attention's qkv/head_concat: TP over channel,
+        # col_group`` (e.g. attention's qkv/head_concat: TP over channel,
         # weights replicated over the spatial ``row_group``) the row factor is
         # 1, so any spatial size runs the same parallelism-``col`` kernel.
-        row = self.model_group.size() // self.column_group.size()
-        layout = (row, self.column_group.size())
+        row = self.model_group.size() // self.col_group.size()
+        layout = (row, self.col_group.size())
         if layout not in _SUPPORTED_XWT_LAYOUTS:
             raise NotImplementedError(
                 f"DistributedXWT.forward has no kernel for an effective "
@@ -255,7 +257,7 @@ class DistributedXWT(torch.nn.Module):
             device=device,
             model_group=process_mesh_dict[model_kw],
             row_group=process_mesh_dict[row_kw],
-            column_group=process_mesh_dict[col_kw],
+            col_group=process_mesh_dict[col_kw],
             bayesian=False,  # TODO
         )
 
@@ -448,7 +450,7 @@ class DistributedXWT(torch.nn.Module):
         # is valid: process groups, ranks, the kernel-selection config and the
         # bias replica mark all key off the new group sizes.
         self.row_group = to_process_mesh[pm_row_key]
-        self.column_group = to_process_mesh[pm_col_key]
+        self.col_group = to_process_mesh[pm_col_key]
         self.model_group = to_process_mesh[pm_model_key]
         self.local_rank = self.model_group.rank()
         self.parallelism = self.model_group.size()

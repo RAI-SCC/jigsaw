@@ -46,7 +46,7 @@ def test_count_parameters_with_mesh_is_the_whole_model(
         local_rank=dist.get_rank(group=mesh["model"]),
         device=device,
         model_group=mesh["model"],
-        column_group=mesh["col"],
+        col_group=mesh["col"],
         row_group=mesh["row"],
         bias=bias,
         bayesian=False,

@@ -26,7 +26,7 @@ def _loop(module, x):
 
 def test_noparam_layernorm_vmap_matches_loop(batched, device):
     module = norm.DistributedLayerNorm(
-        C,
+        C * dist.get_world_size(),
         dist.get_rank(),
         device,
         dist.group.WORLD,
@@ -39,7 +39,11 @@ def test_noparam_layernorm_vmap_matches_loop(batched, device):
 
 def test_layernorm_vmap_matches_loop_and_counts_parameters(batched, device):
     module = norm.DistributedLayerNorm(
-        C, dist.get_rank(), device, dist.group.WORLD, dist.group.WORLD
+        C * dist.get_world_size(),
+        dist.get_rank(),
+        device,
+        dist.group.WORLD,
+        dist.group.WORLD,
     ).double()
     with torch.no_grad():
         module.weight.copy_(torch.linspace(0.5, 1.5, C))

@@ -116,8 +116,8 @@ class Linear(torch.nn.Module):
             local_rank=mesh["model"].rank(),
             device=device,
             model_group=mesh["model"],
-            column_group=mesh["col"],
             row_group=mesh["row"],
+            col_group=mesh["col"],
         )
 
     def forward(self, x):

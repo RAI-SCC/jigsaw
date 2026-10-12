@@ -105,7 +105,7 @@ class TestAutocastLinear:
             local_rank=pm["model"].rank(),
             device=device,
             model_group=pm["model"],
-            column_group=pm["col"],
+            col_group=pm["col"],
             row_group=pm["row"],
             bias=bias,
         ).to(base_dtype)
@@ -301,7 +301,7 @@ class TestAutocastFp32List:
         pm = process_mesh_dict_2x2
         local_dim = 12
         model = norm.DistributedLayerNorm(
-            local_dim=local_dim,
+            normalized_dim=local_dim * pm["col"].size(),
             local_rank=pm["model"].rank(),
             device=device,
             row_group=pm["row"],
@@ -326,7 +326,7 @@ class TestAutocastFp32List:
         pm = process_mesh_dict_2x2
         local_dim = 12
         model = norm.DistributedLayerNorm(
-            local_dim=local_dim,
+            normalized_dim=local_dim * pm["col"].size(),
             local_rank=pm["model"].rank(),
             device=device,
             row_group=pm["row"],

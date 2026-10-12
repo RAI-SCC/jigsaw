@@ -48,8 +48,8 @@ def main(steps: int = 100) -> None:
             local_rank=train_mesh["model"].rank(),
             device=device,
             model_group=train_mesh["model"],
-            column_group=col,
             row_group=row,
+            col_group=col,
             bias=True,
         )
 

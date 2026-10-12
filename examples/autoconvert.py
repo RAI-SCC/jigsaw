@@ -48,7 +48,7 @@ from _common import setup, shard
 import jigsaw
 from jigsaw import log
 from jigsaw.convert import convert_to_jigsaw
-from jigsaw.modules.attention.config import (
+from jigsaw.modules.attention import (
     RingAttentionConfig,
     SaveScope,
     SendForward,

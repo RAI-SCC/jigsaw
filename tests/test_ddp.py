@@ -82,7 +82,7 @@ def _build(kind: str, mesh: dict, device: torch.device, fill: bool = True):
             local_rank=(mesh["model"] if summa else col).rank(),
             device=device,
             model_group=mesh["model"] if summa else col,
-            column_group=col,
+            col_group=col,
             row_group=row,
             bias=True,
         )
@@ -117,7 +117,7 @@ def _build(kind: str, mesh: dict, device: torch.device, fill: bool = True):
         shape = (2, 8 // row.size(), 8 // col.size())
     elif kind == "layer_norm":
         model = normalization.DistributedLayerNorm(
-            8 // col.size(),
+            8,
             local_rank=mesh["model"].rank(),
             device=device,
             row_group=row,

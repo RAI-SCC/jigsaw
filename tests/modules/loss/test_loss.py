@@ -853,7 +853,7 @@ class TestLinearTrainingParity:
             local_rank=model_rank,
             device=device,
             model_group=pmd["model"],
-            column_group=pmd["col"],
+            col_group=pmd["col"],
             row_group=pmd["row"],
             bias=False,
             bayesian=False,

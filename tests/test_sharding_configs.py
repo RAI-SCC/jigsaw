@@ -399,7 +399,7 @@ class TestNormalizationReshard:
         global_dim = 24
 
         ln = norm.DistributedLayerNorm(
-            local_dim=global_dim // from_mesh["col"].size(),
+            normalized_dim=global_dim,
             local_rank=from_mesh["model"].rank(),
             device=device,
             row_group=from_mesh["row"],
@@ -474,8 +474,8 @@ class TestNormalizationReshard:
         global_channels, global_groups = 24, 4
 
         gn = norm.DistributedGroupNorm(
-            num_local_groups=global_groups // from_mesh["col"].size(),
-            num_channels=global_channels // from_mesh["col"].size(),
+            num_groups=global_groups,
+            num_channels=global_channels,
             device=device,
             channel_group=from_mesh["col"],
         )
@@ -493,7 +493,9 @@ class TestNormalizationReshard:
 
         grp = to_mesh["model"]
         assert all_ranks_ok(
-            gn.num_channels == global_channels // to_mesh["col"].size(), device, grp
+            gn.num_local_channels == global_channels // to_mesh["col"].size(),
+            device,
+            grp,
         )
         w_after = gather_1d_results(
             gn.group_norm.weight.data, to_mesh, dim=0, pm_key="col"
@@ -544,7 +546,7 @@ class TestRollConvert:
         )
 
         # reshard the split onto the column axis; the next forward stays correct.
-        jr.reshard(distributed_dims=[2], spatial_groups=[mesh["col"]])
+        jr.reshard(distributed_dims=[2], spatial_group=[mesh["col"]])
         x2 = torch.randn(b, h, w, c, device=device)
         x2_global = gather_1d_results(x2, mesh, dim=2, pm_key="col")
         y2 = gather_1d_results(jr(x2), mesh, dim=2, pm_key="col")

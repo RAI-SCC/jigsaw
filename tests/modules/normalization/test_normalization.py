@@ -39,7 +39,7 @@ class TestDistributedLayerNorm:
         process_mesh_dict = request.getfixturevalue(process_mesh_dict)
         local_dim = 12
         layer_norm = norm.DistributedLayerNorm(
-            local_dim=local_dim,
+            normalized_dim=local_dim * process_mesh_dict["col"].size(),
             local_rank=process_mesh_dict["model"].rank(),
             device=device,
             row_group=process_mesh_dict["row"],

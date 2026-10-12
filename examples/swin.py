@@ -197,7 +197,7 @@ class SwinBlock(nn.Module):
                 shifts=(shift, shift),
                 dims=(1, 2),  # the two spatial axes of (B, H, W, C) ...
                 distributed_dims=(1, 2),  # ... both are split ...
-                spatial_groups=(mesh["sh"], mesh["sw"]),  # ... over "sh" and "sw"
+                spatial_group=(mesh["sh"], mesh["sw"]),  # ... over "sh" and "sw"
                 device=device,
             )
 

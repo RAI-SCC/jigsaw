@@ -59,7 +59,7 @@ class TestLinearInitParity:
             local_rank=local_rank,
             device=device,
             model_group=mesh["model"],
-            column_group=mesh["col"],
+            col_group=mesh["col"],
             row_group=mesh["row"],
             bias=True,
         ).to(device)

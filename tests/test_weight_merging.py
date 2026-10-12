@@ -56,7 +56,7 @@ class TestWeightMerging:
             local_rank=from_pm_dict["model"].rank(),
             device=device,
             model_group=from_pm_dict["model"],
-            column_group=from_pm_dict["col"],
+            col_group=from_pm_dict["col"],
             row_group=from_pm_dict["row"],
             bias=True,
             bayesian=False,
@@ -148,7 +148,7 @@ class TestWeightMerging:
                     local_rank=from_pm_dict["model"].rank(),
                     device=device,
                     model_group=from_pm_dict["model"],
-                    column_group=from_pm_dict["col"],
+                    col_group=from_pm_dict["col"],
                     row_group=from_pm_dict["row"],
                     bias=True,
                 )
@@ -159,7 +159,7 @@ class TestWeightMerging:
                     local_rank=from_pm_dict["model"].rank(),
                     device=device,
                     model_group=from_pm_dict["model"],
-                    column_group=from_pm_dict["col"],
+                    col_group=from_pm_dict["col"],
                     row_group=from_pm_dict["row"],
                     bias=True,
                 )

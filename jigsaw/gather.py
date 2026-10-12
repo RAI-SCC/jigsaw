@@ -3,6 +3,15 @@
 import torch
 import torch.distributed as dist
 
+__all__ = [
+    "average_weights",
+    "average_weights_module",
+    "gather_results",
+    "gather_results_as_list",
+    "gather_1d_results",
+    "gather_1d_results_list",
+]
+
 
 @torch.no_grad()
 def average_weights(

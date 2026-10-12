@@ -13,6 +13,8 @@ from jigsaw.modules import (
     roll,
 )
 
+__all__ = ["convert_to_jigsaw"]
+
 mapped_modules: dict[type[torch.nn.Module], Any] = {
     torch.nn.Linear: linear.DistributedXWT,
     torch.nn.Conv1d: convolution.DistributedConv1D,

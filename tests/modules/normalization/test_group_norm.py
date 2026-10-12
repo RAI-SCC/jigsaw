@@ -56,8 +56,8 @@ class TestReshardFourRanks:
     ):
         src, dst = process_mesh_dict_2x2, process_mesh_dict_1x4
         layer = norm.DistributedGroupNorm(
-            GROUPS // 2,
-            CHANNELS // 2,
+            GROUPS,
+            CHANNELS,
             affine=affine,
             bias=bias,
             device=device,
@@ -76,7 +76,7 @@ class TestReshardFourRanks:
         c = CHANNELS // 4
         lo = dst["col"].rank() * c
         group = dst["model"]
-        assert all_ranks_ok(layer.num_channels == c, device, group)
+        assert all_ranks_ok(layer.num_local_channels == c, device, group)
         assert all_ranks_ok(layer.num_local_groups == GROUPS // 4, device, group)
         if affine:
             assert_close(
