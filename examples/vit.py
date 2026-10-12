@@ -50,13 +50,13 @@ from _common import data_seed, ddp_flags, setup, shard
 
 import jigsaw
 from jigsaw import log
-from jigsaw.modules.attention.config import (
+from jigsaw.modules.attention import (
     RingAttentionConfig,
     SaveScope,
     SendForward,
     SendOp,
 )
-from jigsaw.utils import set_all_seeds
+from jigsaw.launch import set_all_seeds
 
 IN_CHANNELS, PATCH, DIM, HEADS, DEPTH = 4, 4, 64, 4, 2
 H, W = 32, 64  # global image size
@@ -73,7 +73,7 @@ class Block(nn.Module):
 
         def norm() -> nn.Module:
             return jigsaw.normalization.DistributedLayerNorm(
-                local_dim=DIM // col.size(),  # each rank normalises its slice of E ...
+                normalized_dim=DIM,  # global size; each rank normalises its slice ...
                 local_rank=model_group.rank(),
                 device=device,
                 row_group=row,
@@ -88,7 +88,7 @@ class Block(nn.Module):
                 device=device,
                 model_group=model_group,  # the weight is split over row *and* col
                 row_group=row,
-                column_group=col,
+                col_group=col,
                 bias=True,
             )
 
@@ -98,7 +98,6 @@ class Block(nn.Module):
             embed_dim=DIM,
             out_dim=DIM,
             heads=HEADS,
-            dropout_p=0.0,
             local_rank=model_group.rank(),
             device=device,
             spatial_group=row,  # the sequence is split over "row" ...
@@ -166,7 +165,7 @@ class ViT(nn.Module):
         )
         self.blocks = nn.ModuleList([Block(mesh, device) for _ in range(DEPTH)])
         self.norm = jigsaw.normalization.DistributedLayerNorm(
-            DIM // col.size(), model_group.rank(), device, row, col
+            DIM, model_group.rank(), device, row, col
         )
         self.recover = jigsaw.convolution.DistributedConv2DTranspose(
             DIM, IN_CHANNELS, **conv_kwargs
@@ -246,7 +245,11 @@ def main(
         model = jigsaw.parallel.wrap_ddp(model, mesh, joint_hook=joint_hook)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=(mesh["row"], mesh["col"]))
-    log.info("local parameters per rank: %d", jigsaw.utils.count_parameters(model))
+    log.info(
+        "parameters: %d per rank, %d in the model",
+        jigsaw.debug.count_parameters(model),
+        jigsaw.debug.count_parameters(model, mesh),
+    )
 
     losses = []
     for step in range(steps):

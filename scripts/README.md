@@ -46,7 +46,7 @@ calling `run.sh` overrides the preset (e.g. `JIGSAW_SIF=/other.sif JIGSAW_SITE=h
 ## The launch contract
 
 `run.sh` only guarantees the wrapper. jigsaw's distributed init
-([`jigsaw/utils.py`](../jigsaw/utils.py)) still expects the process manager to
+([`jigsaw/launch.py`](../jigsaw/launch.py)) still expects the process manager to
 provide:
 
 - `SLURM_PROCID`, `SLURM_NTASKS`, `SLURM_LOCALID` — set by `srun`

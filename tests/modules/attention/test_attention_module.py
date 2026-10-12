@@ -20,10 +20,10 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.modules.attention as attention
+from jigsaw.gather import gather_1d_results
 from jigsaw.modules.attention import config as cfg
 from jigsaw.modules.attention.attention import attn_core_dtype
 from jigsaw.modules.attention.functional.ring import RingAttentionFunction
-from jigsaw.utils_aggregate import gather_1d_results
 from tests.parity import all_ranks_ok, assert_close, forced_sdpa_backend
 
 DIM, HEADS, BATCH = 64, 4, 2
@@ -353,7 +353,7 @@ class TestDistributedAttentionPaths:
         # by the same vector, which adds the per-query constant ``q_i . b`` to
         # every logit of row ``i`` and so cancels in the softmax. Its gradient
         # is identically zero -- 7e-16 in float64, and the output does not move
-        # when the bias is shifted by 10.0 -- so in bf16 both sides here hold
+        # when the bias is shifted by 10.0 -- so in half precision both sides hold
         # nothing but rounding noise, which reaches ~5e-2, the tolerance
         # itself. Comparing the two to each other is therefore a parity check
         # with no power *and* one unlucky seed from flaking, and it never
@@ -450,3 +450,49 @@ class TestSingleProcessHelpers:
         assert attn_core_dtype(x) == torch.float64
         with torch.autocast("cpu", dtype=torch.bfloat16):
             assert attn_core_dtype(x) == torch.bfloat16
+
+    @pytest.mark.gpu_required
+    def test_attn_core_dtype_cuda(self, device: torch.device) -> None:
+        """fp32 runs the core in bf16 (flash rejects fp32); half dtypes are kept."""
+        for dtype, core in (
+            (torch.float32, torch.bfloat16),
+            (torch.float16, torch.float16),
+            (torch.bfloat16, torch.bfloat16),
+        ):
+            assert attn_core_dtype(torch.zeros(2, device=device, dtype=dtype)) == core
+        x = torch.zeros(2, device=device)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            assert attn_core_dtype(x) == torch.bfloat16
+
+    @pytest.mark.gpu_required
+    def test_fp32_core_keeps_small_gradients(self, device: torch.device) -> None:
+        """An fp32 model without autocast (so without a loss scaler) keeps the tiny
+        gradients of a loss averaged over many outputs: an fp16 core would flush
+        everything below 6e-8 to zero, bf16 has fp32's range.
+        """
+        torch.manual_seed(0)
+        model = attention.Attention(32, 32, 32, 4, device)
+        out = model(torch.randn(2, 64, 32, device=device))
+        out.backward(torch.randn_like(out) * 1e-9)  # dL/dout of a mean over ~1e9
+        grad = model.qkv.weight.grad  # reaches qkv only through the core
+        assert grad is not None and (grad != 0).float().mean() > 0.9
+
+    @pytest.mark.gpu_required
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_sdpa_ring_core_keeps_half_dtype(
+        self, device: torch.device, dtype: torch.dtype
+    ) -> None:
+        """The ring's flash core runs in the dtype it is given, bf16 included."""
+        from jigsaw.modules.attention.functional.cores import sdpa
+
+        q, k, v = (torch.randn(1, 2, 16, 8, device=device, dtype=dtype) for _ in "qkv")
+        out, lse, _ = sdpa.forward(q, k, v, scale=8**-0.5, dropout_p=0.0)
+        assert out.dtype == dtype
+        dq, dk, dv = sdpa.backward(
+            torch.ones_like(out), q, k, v, out, lse, 8**-0.5, 16, 16
+        )
+        assert dq.dtype == dk.dtype == dv.dtype == dtype
+        ref = torch.nn.functional.scaled_dot_product_attention(
+            q.double(), k.double(), v.double()
+        )
+        torch.testing.assert_close(out.double(), ref, atol=2e-2, rtol=2e-2)

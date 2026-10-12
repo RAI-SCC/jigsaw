@@ -1,10 +1,10 @@
-"""Tests for the weight-averaging helpers in jigsaw.utils_aggregate."""
+"""Tests for the weight-averaging helpers in jigsaw.gather."""
 
 import pytest
 import torch
 import torch.distributed as dist
 
-from jigsaw.utils_aggregate import average_weights, average_weights_module
+from jigsaw.gather import average_weights, average_weights_module
 
 
 class TestAveraging:

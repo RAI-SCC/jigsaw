@@ -163,10 +163,9 @@ class TestAttentionMask:
         torch.manual_seed(1)
         x = torch.randn(2, n0 + n1, DIM, device=device)
         bool_mask = _block_mask(n0, n1).to(device)
-        # On CUDA `attn_core_dtype` casts q/k/v to bf16 inside the core; a float mask
-        # must match that dtype exactly (unlike a bool mask), not `x`'s own (fp32).
-        mask_dtype = torch.bfloat16 if device.type == "cuda" else x.dtype
-        float_mask = torch.zeros_like(bool_mask, dtype=mask_dtype).masked_fill(
+        # The float mask stays in `x`'s dtype (fp32): the module casts it to the core
+        # dtype itself (bf16 on CUDA, see `attn_core_dtype`).
+        float_mask = torch.zeros_like(bool_mask, dtype=x.dtype).masked_fill(
             ~bool_mask, float("-inf")
         )
 
@@ -241,11 +240,10 @@ class TestAttentionMask:
         n = self.n0 + self.n1
         torch.manual_seed(1)
         x_global = torch.randn(2, n, DIM, device=device)
-        mask_dtype = torch.bfloat16 if device.type == "cuda" else x_global.dtype
         mask = (
             _arbitrary_bool_mask(n, device)
             if mask_kind == "bool"
-            else _arbitrary_float_mask(n, device, mask_dtype)
+            else _arbitrary_float_mask(n, device, x_global.dtype)
         )
 
         x = x_global.clone().requires_grad_(True)
@@ -364,11 +362,10 @@ class TestDistributedAttentionMask:
         n = self.n0 + self.n1
         torch.manual_seed(1)
         x_global = torch.randn(2, n, DIM, device=device)
-        mask_dtype = torch.bfloat16 if device.type == "cuda" else x_global.dtype
         mask = (
             _arbitrary_bool_mask(n, device)
             if mask_kind == "bool"
-            else _arbitrary_float_mask(n, device, mask_dtype)
+            else _arbitrary_float_mask(n, device, x_global.dtype)
         )
 
         x = x_global.clone().requires_grad_(True)

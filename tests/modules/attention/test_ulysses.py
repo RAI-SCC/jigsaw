@@ -15,12 +15,12 @@ from einops import rearrange
 
 import jigsaw.modules.attention as attention
 import jigsaw.modules.attention.config as attention_config
+from jigsaw.gather import gather_1d_results, gather_1d_results_list
 from jigsaw.modules.attention.attention import attn_core_dtype
 from jigsaw.modules.attention.functional.ulysses import (
     _a2a_heads_to_seq,
     _a2a_seq_to_heads,
 )
-from jigsaw.utils_aggregate import gather_1d_results, gather_1d_results_list
 from tests.parity import all_ranks_ok, assert_close, forced_sdpa_backend
 
 pytestmark = [pytest.mark.dist_required]

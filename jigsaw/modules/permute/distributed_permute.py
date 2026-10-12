@@ -5,8 +5,8 @@ from typing import Callable, Optional
 import torch
 import torch.distributed as dist
 
-from jigsaw.comm import all_to_all_async
-from jigsaw.modules.buffers import get_preallocated_buffer
+from jigsaw._core.buffers import get_preallocated_buffer
+from jigsaw._core.comm import all_to_all_async
 from jigsaw.modules.convolution.common.channel_comm import gather_full_channels
 
 

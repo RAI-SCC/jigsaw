@@ -1,4 +1,4 @@
-"""Utilities for distributed setup and checkpointing."""
+"""Process launch and runtime setup."""
 
 import os
 import subprocess
@@ -8,6 +8,14 @@ import torch
 import torch.distributed as dist
 
 from jigsaw import log
+
+__all__ = [
+    "LaunchEnv",
+    "init_cuda",
+    "resolve_launch_env",
+    "set_all_seeds",
+    "setup_precision",
+]
 
 
 def set_all_seeds(seed: int = 0) -> None:
@@ -164,115 +172,6 @@ def init_cuda() -> tuple[torch.device, int, int, int]:
         log.error_all("process group failed to initialise on rank %d", rank)
 
     return device, slurm_localid, rank, world_size
-
-
-def count_parameters(model: torch.nn.Module) -> int:
-    """Count the trainable parameters of a model.
-
-    Parameters
-    ----------
-    model : torch.nn.Module
-        Model to inspect.
-
-    Returns
-    -------
-    int
-        Number of parameters with ``requires_grad``.
-    """
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-# save model
-
-
-def save_model(
-    model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
-    scheduler: object,
-    file_path: str,
-    rank: int,
-    epoch: int,
-    model_name: str = "model",
-) -> None:  # noqa: D103
-    """Save the model and optimizer state and the epoch to ``<file_path>/<model_name>_<rank>.pt``.
-
-    Parameters
-    ----------
-    model : torch.nn.Module
-        Model to save.
-    optimizer : torch.optim.Optimizer
-        Optimizer to save.
-    scheduler : object
-        Unused.
-    file_path : str
-        Output directory.
-    rank : int
-        Rank, used in the file name.
-    epoch : int
-        Current epoch.
-    model_name : str
-        File name prefix.
-    """
-    file_path = f"{file_path}/{model_name}_{rank}.pt"
-    state = {
-        "model_state": model.state_dict(),
-        "optimizer_state": optimizer.state_dict(),
-        "epoch": epoch,
-    }
-    torch.save(state, file_path)
-
-
-def load_model(
-    model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
-    file_path: str,
-    rank: int = 0,
-    model_parallel: bool = False,
-    parallelism: int = 4,
-) -> tuple[torch.nn.Module, torch.optim.Optimizer, int]:
-    """Load model and optimizer state from a checkpoint.
-
-    Starts from epoch 0 if the checkpoint cannot be loaded.
-
-    Parameters
-    ----------
-    model : torch.nn.Module
-        Model to load into.
-    optimizer : torch.optim.Optimizer
-        Optimizer to load into.
-    file_path : str
-        Checkpoint file, or the directory containing ``model_<rank>.pt`` if
-        ``model_parallel`` is set.
-    rank : int
-        Global rank.
-    model_parallel : bool
-        Select the checkpoint file by ``rank % parallelism``.
-    parallelism : int
-        Model-parallel size.
-
-    Returns
-    -------
-    model : torch.nn.Module
-        Loaded model.
-    optimizer : torch.optim.Optimizer
-        Loaded optimizer.
-    epoch : int
-        Epoch to resume from.
-    """
-    if model_parallel:
-        load_rank = rank % parallelism
-        file_path = f"{file_path}/model_{load_rank}.pt"
-    try:
-        state = torch.load(f"{file_path}", map_location="cpu")
-        model.load_state_dict(state["model_state"])
-        optimizer.load_state_dict(state["optimizer_state"])
-        epoch = state["epoch"] + 1
-    except Exception:
-        log.warning(
-            "could not load model from %s; initialising from scratch", file_path
-        )
-        epoch = 0
-    return model, optimizer, epoch
 
 
 def setup_precision(tf32: bool) -> None:

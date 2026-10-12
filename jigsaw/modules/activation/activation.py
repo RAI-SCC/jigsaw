@@ -11,7 +11,7 @@ from . import functional
 class DistributedSoftMax(torch.nn.Module):
     """Softmax over a sharded dimension."""
 
-    def __init__(self, group: dist.ProcessGroup, dim: int = -1):
+    def __init__(self, group: dist.ProcessGroup, dim: int = -1) -> None:
         """Initialize the layer.
 
         Parameters

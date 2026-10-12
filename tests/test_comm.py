@@ -1,4 +1,4 @@
-"""Tests for the communication primitives in jigsaw.comm.
+"""Tests for the communication primitives in jigsaw._core.comm.
 
 Gloo's ``all_to_all`` needs equal-sized tensors on every rank, which the zero-length
 placeholders used by the all-to-all halo/ring helpers violate, so those helpers are
@@ -13,7 +13,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from jigsaw import comm
+from jigsaw._core import comm
 
 
 class FakeGroup:

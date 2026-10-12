@@ -31,11 +31,11 @@ import pytest
 import torch
 
 import jigsaw.convert as convert
+from jigsaw.gather import gather_1d_results
 from jigsaw.modules import convolution, roll
 from jigsaw.modules import normalization as norm
 from jigsaw.modules.attention import Attention
 from jigsaw.modules.linear.linear import _SUPPORTED_XWT_LAYOUTS
-from jigsaw.utils_aggregate import gather_1d_results
 from tests.parity import all_ranks_ok, assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -214,9 +214,9 @@ class TestReshardContracts:
         process_mesh_dict_2x2: dict,
         process_mesh_dict_1x4: dict,
     ) -> None:
-        # local_dim=3 over col=2 -> global normalized dim 6, not divisible by col=4.
+        # Global normalized dim 6 over col=2 is fine, but not divisible by col=4.
         ln = norm.DistributedLayerNorm(
-            local_dim=3,
+            normalized_dim=6,
             local_rank=process_mesh_dict_2x2["model"].rank(),
             device=device,
             row_group=process_mesh_dict_2x2["row"],
@@ -232,10 +232,10 @@ class TestReshardContracts:
         process_mesh_dict_2x2: dict,
         process_mesh_dict_1x4: dict,
     ) -> None:
-        # 1 local group over col=2 -> 2 global groups, not divisible by col=4.
+        # 2 groups over col=2 are fine, but not divisible by col=4.
         gn = norm.DistributedGroupNorm(
-            num_local_groups=1,
-            num_channels=3,
+            num_groups=2,
+            num_channels=6,
             device=device,
             channel_group=process_mesh_dict_2x2["col"],
         )

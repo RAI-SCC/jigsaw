@@ -24,7 +24,7 @@
 #   JIGSAW_MODULES    Space-separated modules to `module load` before launching.
 #   JIGSAW_ENV_FILE   Extra --env-file passed straight to apptainer.
 #
-# The launch contract jigsaw itself relies on (see jigsaw/utils.py): the process
+# The launch contract jigsaw itself relies on (see jigsaw/launch.py): the process
 # manager must provide SLURM_PROCID / SLURM_NTASKS / SLURM_LOCALID (srun does),
 # and MASTER_ADDR / MASTER_PORT for init_method="env://". This script fills in
 # MASTER_ADDR / MASTER_PORT from the SLURM allocation when they are not already

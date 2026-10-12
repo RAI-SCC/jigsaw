@@ -12,7 +12,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from jigsaw.comm import comm_1d_alltoall, comm_1d_p2p
+from jigsaw._core.comm import comm_1d_alltoall, comm_1d_p2p
 from jigsaw.modules.convolution.common.channel_comm import (
     CHANNEL_COMMS,
     _in_channel_block,
@@ -78,7 +78,7 @@ def _singleton_group() -> dist.ProcessGroup:
 
 class TestResolveChannelHop:
     def test_p2p_returns_the_p2p_transport(self) -> None:
-        """``"p2p"`` maps to :func:`jigsaw.comm.comm_1d_p2p` on any backend."""
+        """``"p2p"`` maps to :func:`jigsaw._core.comm.comm_1d_p2p` on any backend."""
         assert _resolve_channel_hop("p2p", dist.group.WORLD) is comm_1d_p2p
 
     def test_all_to_all_on_gloo_raises(self) -> None:

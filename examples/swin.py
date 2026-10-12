@@ -197,7 +197,7 @@ class SwinBlock(nn.Module):
                 shifts=(shift, shift),
                 dims=(1, 2),  # the two spatial axes of (B, H, W, C) ...
                 distributed_dims=(1, 2),  # ... both are split ...
-                spatial_groups=(mesh["sh"], mesh["sw"]),  # ... over "sh" and "sw"
+                spatial_group=(mesh["sh"], mesh["sw"]),  # ... over "sh" and "sw"
                 device=device,
             )
 
@@ -325,8 +325,11 @@ def main(
         model = jigsaw.parallel.wrap_ddp(model, mesh, joint_hook=joint_hook)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=(mesh["sh"], mesh["sw"]))
-    n_params = sum(p.numel() for p in model.parameters())
-    log.info("parameters per rank (all replicated): %d", n_params)
+    log.info(
+        "parameters: %d per rank (all replicated), %d in the model",
+        jigsaw.debug.count_parameters(model),
+        jigsaw.debug.count_parameters(model, mesh),
+    )
 
     losses = []
     for step in range(steps):

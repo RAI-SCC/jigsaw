@@ -10,7 +10,7 @@ import pytest
 import torch
 
 import jigsaw.modules.convolution as convolution
-from jigsaw.utils_aggregate import gather_1d_results
+from jigsaw.gather import gather_1d_results
 
 pytestmark = [pytest.mark.dist_required]
 

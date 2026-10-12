@@ -17,8 +17,8 @@ hand and these tests pin the contract:
 Known quirks this file documents rather than hides:
 
 * the attention core follows :func:`jigsaw...attention.attn_core_dtype`: the
-  autocast dtype under autocast, else bf16 on CUDA (flash rejects fp32), else
-  the input dtype on CPU. ``DistributedAttention`` still can't run an fp64
+  autocast dtype under autocast, else bf16 on CUDA for fp32 inputs (flash
+  rejects fp32), else the input dtype. ``DistributedAttention`` still can't run an fp64
   parameter set (it force-casts q/k/v), so attention tests use fp32 params.
 * ring attention drives its forward under autocast (bf16/fp16 saved tensors) and
   ``ring_backward`` reconciles them to the ``w_qkv`` (master) dtype before the
@@ -105,7 +105,7 @@ class TestAutocastLinear:
             local_rank=pm["model"].rank(),
             device=device,
             model_group=pm["model"],
-            column_group=pm["col"],
+            col_group=pm["col"],
             row_group=pm["row"],
             bias=bias,
         ).to(base_dtype)
@@ -301,7 +301,7 @@ class TestAutocastFp32List:
         pm = process_mesh_dict_2x2
         local_dim = 12
         model = norm.DistributedLayerNorm(
-            local_dim=local_dim,
+            normalized_dim=local_dim * pm["col"].size(),
             local_rank=pm["model"].rank(),
             device=device,
             row_group=pm["row"],
@@ -326,7 +326,7 @@ class TestAutocastFp32List:
         pm = process_mesh_dict_2x2
         local_dim = 12
         model = norm.DistributedLayerNorm(
-            local_dim=local_dim,
+            normalized_dim=local_dim * pm["col"].size(),
             local_rank=pm["model"].rank(),
             device=device,
             row_group=pm["row"],

@@ -22,9 +22,9 @@ import torch.nn.functional as F
 
 import jigsaw.modules.linear as linear
 import jigsaw.modules.loss as jloss
+from jigsaw.gather import gather_1d_results, gather_results
 from jigsaw.modules.loss import classification as lossc
 from jigsaw.modules.loss import regression as lossr
-from jigsaw.utils_aggregate import gather_1d_results, gather_results
 from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -853,7 +853,7 @@ class TestLinearTrainingParity:
             local_rank=model_rank,
             device=device,
             model_group=pmd["model"],
-            column_group=pmd["col"],
+            col_group=pmd["col"],
             row_group=pmd["row"],
             bias=False,
             bayesian=False,

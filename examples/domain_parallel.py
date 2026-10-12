@@ -42,7 +42,7 @@ from _common import data_seed, ddp_flags, setup, shard
 
 import jigsaw
 from jigsaw import log
-from jigsaw.utils_aggregate import gather_results
+from jigsaw.gather import gather_results
 
 
 def build_model(mesh: dict[str, dist.ProcessGroup], device: torch.device) -> nn.Module:

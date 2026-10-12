@@ -3,11 +3,11 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.modules.attention.config as config
-from jigsaw.modules.attention.functional import backward, forward, ring
-from jigsaw.modules.attention.functional.cores import te as te_cores
-from jigsaw.utils_aggregate import (
+from jigsaw.gather import (
     gather_1d_results,
 )
+from jigsaw.modules.attention.functional import backward, forward, ring
+from jigsaw.modules.attention.functional.cores import te as te_cores
 from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]

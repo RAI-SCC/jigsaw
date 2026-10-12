@@ -31,7 +31,7 @@ from torch.nn.parallel import DistributedDataParallel
 
 import jigsaw
 from jigsaw import debug, parallel
-from jigsaw.utils import set_all_seeds
+from jigsaw.launch import set_all_seeds
 from tests.parity import assert_close, no_tf32
 from tests.test_examples import (
     REL,

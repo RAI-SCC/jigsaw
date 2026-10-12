@@ -4,6 +4,7 @@ import pytest
 import torch
 
 import jigsaw.convert as convert
+from jigsaw.gather import gather_1d_results, gather_results
 from jigsaw.modules.activation import DistributedSoftMax
 from jigsaw.modules.attention import Attention, DistributedAttention
 from jigsaw.modules.attention.attention import attn_core_dtype
@@ -21,7 +22,6 @@ from jigsaw.modules.normalization import (
     DistributedLayerNorm,
 )
 from jigsaw.modules.roll import Roll
-from jigsaw.utils_aggregate import gather_1d_results, gather_results
 from tests.parity import assert_close
 
 # Every test here builds a 2x2 / 2x1x2 mesh, so it needs exactly 4 ranks;
@@ -430,8 +430,8 @@ class TestConvertToTorch:
                 )
 
                 # Match the dtype of jigsaw's attention core: bf16 on CUDA, the
-                # input dtype (fp32) otherwise. A bf16 reference on CPU differs
-                # from the fp32 core by bf16 rounding, well above the tolerances.
+                # input dtype (fp32) otherwise. A half-precision reference on CPU
+                # differs from the fp32 core by its rounding, above the tolerances.
                 core_dtype = attn_core_dtype(x)
                 q = q.permute(0, 2, 1, 3).to(core_dtype)
                 k = k.permute(0, 2, 1, 3).to(core_dtype)
@@ -525,12 +525,16 @@ class TestConvertToTorch:
         assert isinstance(ref_v_grad, torch.Tensor)
         assert isinstance(ref_x_grad, torch.Tensor)
         grp = process_mesh_dict_2x1x2["model"]
-        assert_close("forward", dist_forward, ref_forward, 1e-4, 1e-5, device, grp)
+        # On CUDA the attention core runs in bf16 (``attn_core_dtype``). The sharded
+        # q/k/v differ from the serial ones by fp32 reduction order, which can flip
+        # the odd half-precision rounding; a wrong shard is off by O(1).
+        atol, rtol = (5e-3, 5e-3) if device.type == "cuda" else (1e-4, 1e-5)
+        assert_close("forward", dist_forward, ref_forward, atol, rtol, device, grp)
         assert_close("qkv weight", dist_q_w, q_weight, 1e-4, 1e-5, device, grp)
-        assert_close("q.weight grad", dist_q_grad, ref_q_grad, 1e-4, 1e-5, device, grp)
-        assert_close("k.weight grad", dist_k_grad, ref_k_grad, 1e-4, 1e-5, device, grp)
-        assert_close("v.weight grad", dist_v_grad, ref_v_grad, 1e-4, 1e-5, device, grp)
-        assert_close("input grad", dist_x_grad, ref_x_grad, 1e-4, 1e-5, device, grp)
+        assert_close("q.weight grad", dist_q_grad, ref_q_grad, atol, rtol, device, grp)
+        assert_close("k.weight grad", dist_k_grad, ref_k_grad, atol, rtol, device, grp)
+        assert_close("v.weight grad", dist_v_grad, ref_v_grad, atol, rtol, device, grp)
+        assert_close("input grad", dist_x_grad, ref_x_grad, atol, rtol, device, grp)
 
     def test_jigsaw_transformer(
         self, device: torch.device, process_mesh_dict_2x1x2: dict
@@ -622,7 +626,11 @@ class TestConvertToTorch:
         assert ref_head_cat_grad is not None
         assert ref_x_grad is not None
         grp = process_mesh_dict_2x1x2["model"]
-        assert_close("forward", dist_forward, ref_forward, 1e-5, 1e-5, device, grp)
+        # On CUDA the attention core runs in bf16 (``attn_core_dtype``). The sharded
+        # q/k/v differ from the serial ones by fp32 reduction order, which can flip
+        # the odd half-precision rounding; a wrong shard is off by O(1).
+        atol, rtol = (5e-3, 5e-3) if device.type == "cuda" else (1e-5, 1e-5)
+        assert_close("forward", dist_forward, ref_forward, atol, rtol, device, grp)
         assert_close(
             "qkv weight sum",
             dist_qkv_w.sum(),
@@ -635,12 +643,13 @@ class TestConvertToTorch:
         # Gradient reduction order differs between the sharded qkv matmul and
         # the serial reference, so this needs the same ~1e-4 slack as the
         # other gradient checks in this test rather than allclose's 1e-5 default.
+        grad_atol = max(atol, 1e-4)
         assert_close(
             "qkv weight grad sum",
             dist_qkv_grad.sum(),
             ref_qkv_grad.sum(),
-            1e-4,
-            1e-5,
+            grad_atol,
+            rtol,
             device,
             grp,
         )
@@ -660,12 +669,14 @@ class TestConvertToTorch:
             "head concat weight grad",
             dist_head_cat_grad,
             ref_head_cat_grad,
-            1e-4,
-            1e-5,
+            grad_atol,
+            rtol,
             device,
             grp,
         )
-        assert_close("input grad", dist_x_grad, ref_x_grad, 1e-4, 1e-5, device, grp)
+        assert_close(
+            "input grad", dist_x_grad, ref_x_grad, grad_atol, rtol, device, grp
+        )
 
     def test_jigsaw_conv2d(
         self, device: torch.device, process_mesh_dict_2x2: dict

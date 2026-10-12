@@ -2,7 +2,7 @@ import pytest
 import torch
 
 import jigsaw.modules.normalization as norm
-from jigsaw.utils_aggregate import (
+from jigsaw.gather import (
     gather_1d_results,
     gather_results,
 )
@@ -39,7 +39,7 @@ class TestDistributedLayerNorm:
         process_mesh_dict = request.getfixturevalue(process_mesh_dict)
         local_dim = 12
         layer_norm = norm.DistributedLayerNorm(
-            local_dim=local_dim,
+            normalized_dim=local_dim * process_mesh_dict["col"].size(),
             local_rank=process_mesh_dict["model"].rank(),
             device=device,
             row_group=process_mesh_dict["row"],

@@ -48,14 +48,14 @@ from _common import setup, shard
 import jigsaw
 from jigsaw import log
 from jigsaw.convert import convert_to_jigsaw
-from jigsaw.modules.attention.config import (
+from jigsaw.modules.attention import (
     RingAttentionConfig,
     SaveScope,
     SendForward,
     SendOp,
 )
-from jigsaw.utils import setup_precision
-from jigsaw.utils_aggregate import gather_1d_results
+from jigsaw.launch import setup_precision
+from jigsaw.gather import gather_1d_results
 
 
 class PatchMLP(nn.Module):
@@ -222,6 +222,12 @@ def main() -> None:
     x2 = torch.randn(2, 4, 32, 64, device=device)
     x2_local = shard(shard(x2, 1, col), -1, row)
 
+    # On CUDA the attention core runs in half precision even for fp32 inputs (see the
+    # README, "Mixed precision"), so the original and the converted model differ by
+    # its rounding (~1e-3 of the output) on top of the fp32 noise. A wrong shard or
+    # weight layout is still off by the size of the entries themselves.
+    rel = 5e-3 if device.type == "cuda" else 1e-4
+
     # --- forward: the gathered output equals the original model's output ---
     with torch.no_grad():
         expected2 = reference2(x2)
@@ -230,7 +236,8 @@ def main() -> None:
         out2 = gather_1d_results(out2, mesh, dim=-1, pm_key="row")  # width
     err = (out2 - expected2).abs().max()
     log.info("forward   max |converted - original| = %.2e", err)
-    torch.testing.assert_close(out2, expected2, atol=1e-5, rtol=1e-4)
+    atol = 1e-5 if device.type != "cuda" else rel * expected2.abs().max().item()
+    torch.testing.assert_close(out2, expected2, atol=atol, rtol=rel)
 
     # --- backward: a layer-norm and an attention weight shard against the original ---
     reference2(x2).square().mean().backward()
@@ -247,7 +254,7 @@ def main() -> None:
         model2.blocks[0].norm1.weight.grad - ref_norm_shard
     ).abs().max() / ref_norm_shard.abs().max()
     log.info("backward  max relative error of the norm1.weight.grad shard = %.2e", err)
-    assert err < 1e-4, err
+    assert err < rel, err
 
     # `attn.head_concat.weight` is (E, E): columns (the heads) split over "col".
     ref_hc_grad = reference2.blocks[0].attn.head_concat.weight.grad
@@ -258,7 +265,7 @@ def main() -> None:
         "backward  max relative error of the attn.head_concat.weight.grad shard = %.2e",
         err,
     )
-    assert err < 1e-4, err
+    assert err < rel, err
 
 
 if __name__ == "__main__":

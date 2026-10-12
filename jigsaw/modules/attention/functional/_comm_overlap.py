@@ -5,7 +5,7 @@ Originally built for (and still used directly by) the plain ``SendOp.P2P`` /
 ``SendOp.ALLTOALL`` chunk providers; :class:`PrefetchBuffer` below generalizes
 the same ping-pong pattern for the hybrid (intra-/inter-node) providers, which
 have more than one concurrent hop in flight. The pattern mirrors
-:mod:`jigsaw.offload` and the stream pairs in
+:mod:`jigsaw._core.offload` and the stream pairs in
 :mod:`jigsaw.modules.linear.distributed_matmul`: issue the transfer on a side
 stream, tag the buffers with ``record_stream`` so the caching allocator will not
 recycle them mid-flight, and hand back a CUDA event the consumer waits on from
@@ -20,7 +20,7 @@ import torch
 import torch.distributed as dist
 
 #: ``produce()`` issues the async comm and returns ``(recv_buf, work)`` -- the
-#: exact shape :func:`jigsaw.comm.comm_1d_p2p` / :func:`~jigsaw.comm.comm_1d_alltoall`
+#: exact shape :func:`jigsaw._core.comm.comm_1d_p2p` / :func:`~jigsaw._core.comm.comm_1d_alltoall`
 #: already return.
 ProduceFn = Callable[[], "tuple[torch.Tensor, Optional[dist.Work]]"]
 

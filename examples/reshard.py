@@ -27,8 +27,8 @@ from _common import setup, shard
 
 import jigsaw
 from jigsaw import log
-from jigsaw.utils import set_all_seeds
-from jigsaw.utils_aggregate import gather_results
+from jigsaw.launch import set_all_seeds
+from jigsaw.gather import gather_results
 
 DIM = 64
 
@@ -48,8 +48,8 @@ def main(steps: int = 100) -> None:
             local_rank=train_mesh["model"].rank(),
             device=device,
             model_group=train_mesh["model"],
-            column_group=col,
             row_group=row,
+            col_group=col,
             bias=True,
         )
 

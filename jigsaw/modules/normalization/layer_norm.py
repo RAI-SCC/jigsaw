@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 
 from jigsaw import parallel
-from jigsaw.utils_aggregate import gather_1d_results
+from jigsaw.gather import gather_1d_results
 
 from . import functional
 
@@ -16,19 +16,20 @@ class DistributedLayerNorm(torch.nn.Module):
 
     def __init__(
         self,
-        local_dim: int,
+        normalized_dim: int,
         local_rank: int,
         device: torch.device,
         row_group: dist.ProcessGroup,
         col_group: dist.ProcessGroup,
         elementwise_affine: bool = True,
-    ):
+    ) -> None:
         """Initialize the layer.
 
         Parameters
         ----------
-        local_dim : int
-            Size of the local shard of the normalized dimension.
+        normalized_dim : int
+            Global (unsharded) size of the normalized dimension. Must be
+            divisible by ``col_group.size()``.
         local_rank : int
             Rank within the model group.
         device : torch.device
@@ -45,12 +46,18 @@ class DistributedLayerNorm(torch.nn.Module):
             ``torch.nn.LayerNorm``.
         """
         super().__init__()
+        assert normalized_dim % col_group.size() == 0, (
+            f"normalized_dim={normalized_dim} is not divisible by the column "
+            f"group size {col_group.size()}"
+        )
+        local_dim = normalized_dim // col_group.size()
         self.local_rank = local_rank
         self.device = device
         self.spatial_group = row_group
         self.channel_group = col_group
         self.elementwise_affine = elementwise_affine
-        self.normalized_dim = local_dim
+        self.normalized_dim = normalized_dim
+        self.local_dim = local_dim
         self.eps = 1e-5
 
         if elementwise_affine:
@@ -142,21 +149,16 @@ class DistributedLayerNorm(torch.nn.Module):
             )
         elementwise_affine = model.weight is not None
 
-        normalized_dim = model.normalized_shape[0]
         col_group = process_mesh_dict[col_kw]
-        assert normalized_dim % col_group.size() == 0, (
-            "normalized_shape is not divisible by process mesh columns"
-        )
-        local_dim = normalized_dim // col_group.size()
-
         instance = cls(
-            local_dim=local_dim,
+            normalized_dim=model.normalized_shape[0],
             local_rank=process_mesh_dict[model_kw].rank(),
             device=device,
             row_group=process_mesh_dict[row_kw],
             col_group=col_group,
             elementwise_affine=elementwise_affine,
         )
+        local_dim = instance.local_dim
         instance.eps = model.eps
         if elementwise_affine:
             assert model.weight is not None and model.bias is not None
@@ -238,17 +240,16 @@ class DistributedLayerNorm(torch.nn.Module):
             ``elementwise_affine=False`` if this layer has none.
         """
         weight, bias = self.merge_weights(process_mesh_dict, row_kw, col_kw, model_kw)
-        normalized_dim = self.normalized_dim * process_mesh_dict[col_kw].size()
         if not self.elementwise_affine:
             return torch.nn.LayerNorm(
-                normalized_dim,
+                self.normalized_dim,
                 eps=self.eps,
                 elementwise_affine=False,
                 device=self.device,
             )
         assert weight is not None and bias is not None
         layer_norm = torch.nn.LayerNorm(
-            normalized_dim, eps=self.eps, device=self.device, dtype=weight.dtype
+            self.normalized_dim, eps=self.eps, device=self.device, dtype=weight.dtype
         )
         layer_norm.weight.data = weight
         layer_norm.bias.data = bias
@@ -274,12 +275,11 @@ class DistributedLayerNorm(torch.nn.Module):
         pm_row_key, pm_col_key : str
             Keys of the row and column process groups in both meshes.
         """
-        from_col, to_col = from_process_mesh[pm_col_key], to_process_mesh[pm_col_key]
-        normalized_global = self.normalized_dim * from_col.size()
-        assert normalized_global % to_col.size() == 0, (
+        to_col = to_process_mesh[pm_col_key]
+        assert self.normalized_dim % to_col.size() == 0, (
             "global normalized dim must be divisible by the target channel group size"
         )
-        new_local_dim = normalized_global // to_col.size()
+        new_local_dim = self.normalized_dim // to_col.size()
         col_rank = to_col.rank()
 
         if self.elementwise_affine:
@@ -300,7 +300,7 @@ class DistributedLayerNorm(torch.nn.Module):
                 ].contiguous()
             )
 
-        self.normalized_dim = new_local_dim
+        self.local_dim = new_local_dim
         self.spatial_group = to_process_mesh[pm_row_key]
         self.channel_group = to_col
         self.local_rank = to_process_mesh.get("model", to_col).rank()

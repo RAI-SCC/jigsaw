@@ -6,8 +6,8 @@ from typing import Any, Callable, Optional, cast
 import torch
 import torch.distributed as dist
 
-import jigsaw.comm as comm
-from jigsaw.offload import NVLinkActivationOffloader
+import jigsaw._core.comm as comm
+from jigsaw._core.offload import NVLinkActivationOffloader
 
 
 # --------------------------------------------------------------------------- #

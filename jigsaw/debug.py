@@ -1,13 +1,16 @@
-"""Debugging aids for distributed training."""
+"""Debugging and inspection aids for distributed training."""
 
 from collections.abc import Iterator, Mapping
+from typing import Optional
 
 import torch
 import torch.distributed as dist
 
 from . import parallel
+from ._core.comm import all_reduce_max
+from .parallel._replicas import replica_divergence
 
-__all__ = ["assert_replica_consistency"]
+__all__ = ["assert_replica_consistency", "count_parameters"]
 
 
 def assert_replica_consistency(
@@ -67,10 +70,10 @@ def assert_replica_consistency(
         elif dp is not None:
             groups.append(dp)
         entries.append((name, p, groups, missing_mark))
-    div = parallel.replica_divergence([(p, g) for _, p, g, _ in entries])
+    div = replica_divergence([(p, g) for _, p, g, _ in entries])
     if not entries:
         div = torch.zeros(1, dtype=torch.float64, device=_device(mesh))
-    parallel.all_reduce_max(div, mesh.values())
+    all_reduce_max(div, mesh.values())
     bad = [
         (f"{name} ({d:.3g})", missing_mark)
         for (name, _, _, missing_mark), d in zip(entries, div.tolist())
@@ -91,6 +94,52 @@ def assert_replica_consistency(
                 "module through jigsaw.parallel.synced_parameters."
             )
         raise AssertionError(msg)
+
+
+def count_parameters(
+    model: torch.nn.Module,
+    mesh: Optional[Mapping[str, dist.ProcessGroup]] = None,
+    model_key: str = "model",
+) -> int:
+    """Count the trainable parameters of a model.
+
+    Without ``mesh``, this is the count held by the calling rank. With ``mesh``,
+    it is the size of the whole model: the local counts are summed over
+    ``mesh[model_key]``, with a parameter marked by
+    :func:`jigsaw.parallel.mark_replicated` counted only on rank 0 of each of its
+    replica groups. Data-parallel copies are not counted.
+
+    An unmarked parameter is taken to be a shard, so an unmarked replica (see
+    :func:`assert_replica_consistency` with ``unmarked``) is counted once per
+    copy.
+
+    With ``mesh``, collective over ``mesh[model_key]``: call it on every rank.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Model to inspect (unwrapped, or wrapped in ``DistributedDataParallel``).
+    mesh : Mapping[str, dist.ProcessGroup], optional
+        Process mesh the model lives on.
+    model_key : str
+        Key of the group spanning one model copy in ``mesh``.
+
+    Returns
+    -------
+    int
+        Number of parameters with ``requires_grad``, local or of the whole model.
+    """
+    params = [p for p in model.parameters() if p.requires_grad]
+    if mesh is None:
+        return sum(p.numel() for p in params)
+    local = sum(
+        p.numel()
+        for p in params
+        if all(g.rank() == 0 for g in parallel.replica_groups(p))
+    )
+    total = torch.tensor(local, dtype=torch.int64, device=_device(mesh))
+    dist.all_reduce(total, group=mesh[model_key])
+    return int(total.item())
 
 
 def _named_parameters(

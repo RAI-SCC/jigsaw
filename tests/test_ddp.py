@@ -25,6 +25,7 @@ from jigsaw import parallel
 from jigsaw.mesh import make_process_mesh
 from jigsaw.modules import convolution, linear, normalization
 from jigsaw.modules.attention import attention
+from jigsaw.parallel import _sync
 
 # (dp, row, col) -> world size
 MESHES = [(2, 2, 2), (2, 2, 1), (4, 1, 1), (1, 2, 2)]
@@ -81,7 +82,7 @@ def _build(kind: str, mesh: dict, device: torch.device, fill: bool = True):
             local_rank=(mesh["model"] if summa else col).rank(),
             device=device,
             model_group=mesh["model"] if summa else col,
-            column_group=col,
+            col_group=col,
             row_group=row,
             bias=True,
         )
@@ -116,7 +117,7 @@ def _build(kind: str, mesh: dict, device: torch.device, fill: bool = True):
         shape = (2, 8 // row.size(), 8 // col.size())
     elif kind == "layer_norm":
         model = normalization.DistributedLayerNorm(
-            8 // col.size(),
+            8,
             local_rank=mesh["model"].rank(),
             device=device,
             row_group=row,
@@ -183,9 +184,15 @@ def _step(model, make_input, n_micro: int, no_sync: bool = False) -> None:
             y.backward(gout)
 
 
+def _disable_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``sync_grad`` a pass-through, as ``JIGSAW_DISABLE_GRAD_SYNC=1`` does."""
+    # Patch the module that reads the switch; jigsaw.parallel only re-exports.
+    monkeypatch.setattr(_sync, "_SYNC_DISABLED", True)
+
+
 def _local_grads(model, make_input, n_micro: int, monkeypatch) -> list:
     with monkeypatch.context() as m:
-        m.setattr(parallel, "sync_grad", lambda *t: t)
+        _disable_sync(m)
         _step(model, make_input, n_micro)
     grads = [p.grad.clone() for p in model.parameters()]
     model.zero_grad(set_to_none=True)
@@ -270,7 +277,7 @@ def test_sync_switched_off_is_detected(device, monkeypatch) -> None:
     local = _local_grads(model, make_input, 1, monkeypatch)
     expected = _expected(model, local, mesh["dp"], ddp=True)
     wrapped = _wrap(model, "ddp", mesh["dp"])
-    monkeypatch.setattr(parallel, "sync_grad", lambda *t: t)
+    _disable_sync(monkeypatch)
     _step(wrapped, make_input, 1)
     assert not all(torch.equal(p.grad, e) for p, e in zip(model.parameters(), expected))
 
@@ -345,22 +352,13 @@ def _compiled_cases():
     for shape in [(2, 2, 1), (2, 2, 2)]:
         world = shape[0] * shape[1] * shape[2]
         for kind in KINDS:
-            marks = [pytest.mark.dist(world)]
-            if shape[2] > 1 and kind in ("xwt", "attention"):
-                marks.append(
-                    pytest.mark.xfail(
-                        strict=True,
-                        reason="compiled autograd cannot trace the p2p matmul "
-                        "backward (dist.isend/irecv, cached buffers)",
-                    )
-                )
             for variant in ["compiled", "joint_compiled", "joint_compiled_no_sync"]:
                 yield pytest.param(
                     shape,
                     kind,
                     variant,
                     id=f"{'x'.join(map(str, shape))}-{kind}-{variant}",
-                    marks=marks,
+                    marks=pytest.mark.dist(world),
                 )
 
 

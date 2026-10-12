@@ -52,7 +52,7 @@ invocation works from a login shell, from inside an `salloc` allocation, and
 from an `sbatch` script — `run.sh` derives `MASTER_ADDR` / `MASTER_PORT` from the
 SLURM allocation, and jigsaw reads `SLURM_PROCID` / `SLURM_NTASKS` /
 `SLURM_LOCALID` (which `srun` sets) via `resolve_launch_env()` in
-[`jigsaw/utils.py`](jigsaw/utils.py). `torchrun`'s `RANK` / `WORLD_SIZE` /
+[`jigsaw/launch.py`](jigsaw/launch.py). `torchrun`'s `RANK` / `WORLD_SIZE` /
 `LOCAL_RANK` are accepted too.
 
 ```bash
@@ -100,7 +100,7 @@ _jigsaw_ follows the interface of PyTorch: build the model from _jigsaw_ layers,
 ```python
 import torch
 import jigsaw
-from jigsaw.utils import init_cuda, set_all_seeds
+from jigsaw.launch import init_cuda, set_all_seeds
 
 device, _, rank, world_size = init_cuda()  # NCCL init from the SLURM / torchrun env
 mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})  # 4 ranks, one model replica
@@ -116,8 +116,8 @@ class Linear(torch.nn.Module):
             local_rank=mesh["model"].rank(),
             device=device,
             model_group=mesh["model"],
-            column_group=mesh["col"],
             row_group=mesh["row"],
+            col_group=mesh["col"],
         )
 
     def forward(self, x):
@@ -154,8 +154,10 @@ descend into automatically, so each opts in by hand. Behaviour:
 - **`DistributedLayerNorm` (with or without `elementwise_affine`) / `DistributedSoftMax`**
   follow stock-AMP "fp32 list" semantics: computed and emitted in fp32 even when fed bf16/fp16.
 - **Attention core (SDPA / TransformerEngine)**: under autocast it uses the autocast dtype
-  (so `autocast(float16)` stays fp16); with no autocast it uses bf16 on CUDA — keeping the
-  flash kernel eligible, which rejects fp32 — and the input dtype on CPU (SDPA math backend).
+  (so `autocast(bfloat16)` stays bf16 and `autocast(float16)` fp16). With no autocast it uses
+  the input dtype, except that fp32 inputs on CUDA run the core in bf16 — the flash kernel
+  rejects fp32, and fp16 would underflow small gradients without a loss scaler. On CPU fp32
+  stays fp32 (SDPA math backend). A float `attn_mask` is cast to the core dtype for you.
 
 Only `float16` and `bfloat16` are autocast dtypes. `float64` params work for the matmul,
 conv and norm layers but not attention (it force-casts q/k/v). `float8` is not supported by
@@ -210,8 +212,8 @@ for x, y in loader:  # sampler keyed by mesh["dp"].rank(); each rank loads its s
 ```
 
 After wrapping, it's plain DDP: `no_sync()`, gradient accumulation and comm hooks all work.
-Using `DistributedDataParallel(model, process_group=mesh["dp"])` is also correct. 
-[docs/ddp.md](docs/ddp.md) has the details including joint comm hook (faster), plain PyTorch layers inside a jigsaw model, 
+Using `DistributedDataParallel(model, process_group=mesh["dp"])` is also correct.
+[docs/ddp.md](docs/ddp.md) has the details including joint comm hook (faster), plain PyTorch layers inside a jigsaw model,
 and debugging replica drift.
 Running examples: `examples/ddp.py`, `examples/vit.py --ddp` and `examples/swin.py --ddp`.
 

@@ -34,9 +34,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import jigsaw
+from jigsaw.gather import gather_1d_results, gather_results
+from jigsaw.launch import set_all_seeds
 from jigsaw.modules.roll import DistributedRoll
-from jigsaw.utils import set_all_seeds
-from jigsaw.utils_aggregate import gather_1d_results, gather_results
 from tests.parity import all_ranks_ok, no_tf32
 from tests.parity import assert_close as _assert_close
 
