@@ -12,7 +12,7 @@ gradients with the serial module through ``check_parity``.
   each row's window separately. That runs on ``4x1`` (spatial only) and on ``2x2``
   (spatial and channel).
 * The converted weights must agree over the rows and their gradients must be summed over
-  them, including the output bias, which ``DistributedXWT`` already syncs on its own.
+  them, including the output bias, which ``DistributedLinear`` already syncs on its own.
 """
 
 import pytest

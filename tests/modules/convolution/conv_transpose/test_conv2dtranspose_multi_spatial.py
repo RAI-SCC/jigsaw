@@ -59,7 +59,7 @@ def _conv2d_transpose_multi_spatial_reference_check(
     groups: int = 1,
     channel_comm: str = "all_gather",
 ) -> None:
-    """Compare a ``DistributedConv2DTranspose`` split along H *and* W to a plain op.
+    """Compare a ``DistributedConvTranspose2d`` split along H *and* W to a plain op.
 
     ``mesh`` carries ``sh`` (height), ``sw`` (width) and ``col`` (channel) groups
     plus a ``model`` group over every rank. Either spatial group may be size 1
@@ -85,7 +85,7 @@ def _conv2d_transpose_multi_spatial_reference_check(
         device=device,
     )
 
-    conv = convolution.DistributedConv2DTranspose(
+    conv = convolution.DistributedConvTranspose2d(
         in_channels,
         out_channels,
         kernel_size,
@@ -486,7 +486,7 @@ class TestConv2dTransposeMultiSpatialGroups:
     ) -> None:
         """``1 < groups`` not a multiple of ``col.size()`` fails at construction."""
         with pytest.raises(NotImplementedError):
-            convolution.DistributedConv2DTranspose(
+            convolution.DistributedConvTranspose2d(
                 18,
                 18,
                 4,

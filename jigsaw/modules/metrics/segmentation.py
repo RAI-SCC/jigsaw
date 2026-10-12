@@ -5,7 +5,8 @@ from typing import Optional, Sequence
 import torch
 import torch.distributed as dist
 
-from ..loss.common import GroupsArg, _active, _normalize_groups, distributed_argmax
+from ..activation.functional import distributed_argmax
+from ..loss.common import GroupsArg, _active, _normalize_groups
 
 
 @torch.no_grad()

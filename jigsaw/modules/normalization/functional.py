@@ -8,7 +8,7 @@ import torch.distributed as dist
 from jigsaw._core.autocast import promote_to_fp32_under_autocast
 
 
-class DistributedLNFunction(torch.autograd.Function):
+class _LayerNorm(torch.autograd.Function):
     """Autograd function of the distributed LayerNorm."""
 
     @staticmethod
@@ -85,7 +85,7 @@ class DistributedLNFunction(torch.autograd.Function):
         eps: float,
     ) -> tuple[torch.Tensor, int]:
         """Batching rule for ``torch.vmap``."""
-        out = DistributedLNFunction.apply(x, weight, bias, channel_group, eps)
+        out = _LayerNorm.apply(x, weight, bias, channel_group, eps)
 
         return out, 0
 
@@ -158,14 +158,14 @@ class DistributedLNFunction(torch.autograd.Function):
         return grad_x, grad_weight, grad_bias, None, None  # type: ignore[return-value]
 
 
-class NoParamLNCtx(Protocol):
+class LayerNormNoAffineCtx(Protocol):
     """Attributes stored on the autograd context."""
 
     x_norm: torch.Tensor
     std: torch.Tensor
 
 
-class DistributedNoParamLNFunction(torch.autograd.Function):
+class _LayerNormNoAffine(torch.autograd.Function):
     """Autograd function of the distributed LayerNorm without parameters."""
 
     @staticmethod
@@ -200,7 +200,7 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
 
         # Combine each shard's *biased* variance (matching plain LayerNorm, which
         # divides by n rather than n-1) via the shifted-mean identity, then average
-        # across equally-sized shards -- same combination as DistributedLNFunction,
+        # across equally-sized shards -- same combination as _LayerNorm,
         # minus the affine transform.
         var = local_var + (local_mean - mean) ** 2
         dist.all_reduce(var, op=dist.ReduceOp.AVG, group=channel_group)
@@ -236,19 +236,19 @@ class DistributedNoParamLNFunction(torch.autograd.Function):
         eps: float,
     ) -> tuple[torch.Tensor, int]:
         """Batching rule for ``torch.vmap``."""
-        out = DistributedNoParamLNFunction.apply(x, channel_group, eps)
+        out = _LayerNormNoAffine.apply(x, channel_group, eps)
 
         return out, 0
 
     @staticmethod
     def backward(
-        ctx: NoParamLNCtx, grad_output: torch.Tensor, var_grad: None
+        ctx: LayerNormNoAffineCtx, grad_output: torch.Tensor, var_grad: None
     ) -> tuple[torch.Tensor | None, ...]:
         """Compute the gradient of the distributed LayerNorm without parameters.
 
         Parameters
         ----------
-        ctx : NoParamLNCtx
+        ctx : LayerNormNoAffineCtx
             Autograd context.
         grad_output : torch.Tensor
             Gradient of the output.

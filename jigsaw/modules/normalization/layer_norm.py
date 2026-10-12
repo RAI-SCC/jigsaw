@@ -65,11 +65,11 @@ class DistributedLayerNorm(torch.nn.Module):
             self.weight = torch.nn.Parameter(torch.ones(local_dim, device=device))
             self.bias = torch.nn.Parameter(torch.zeros(local_dim, device=device))
             self._mark_replicated()
-            self.layernorm = functional.DistributedLNFunction.apply
+            self.layernorm = functional._LayerNorm.apply
         else:
             self.register_parameter("weight", None)
             self.register_parameter("bias", None)
-            self.layernorm = functional.DistributedNoParamLNFunction.apply
+            self.layernorm = functional._LayerNormNoAffine.apply
 
     def _mark_replicated(self) -> None:
         """Mark the weight and bias replicated over the row group."""

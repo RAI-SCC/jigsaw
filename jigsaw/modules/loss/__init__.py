@@ -5,12 +5,12 @@ from .classification import (
     DistributedBCEWithLogitsLoss,
     DistributedCrossEntropyLoss,
     DistributedNLLLoss,
-    distributed_bce_with_logits,
     distributed_binary_cross_entropy,
+    distributed_binary_cross_entropy_with_logits,
     distributed_cross_entropy,
     distributed_nll_loss,
 )
-from .common import distributed_argmax, distributed_log_softmax, redundant_all_reduce
+from .common import redundant_all_reduce
 from .regression import (
     DistributedL1Loss,
     DistributedMSELoss,
@@ -31,11 +31,9 @@ __all__ = [
     "distributed_nll_loss",
     "distributed_cross_entropy",
     "distributed_binary_cross_entropy",
-    "distributed_bce_with_logits",
+    "distributed_binary_cross_entropy_with_logits",
     "distributed_mse_loss",
     "distributed_l1_loss",
     "distributed_smooth_l1_loss",
-    "distributed_argmax",
-    "distributed_log_softmax",
     "redundant_all_reduce",
 ]

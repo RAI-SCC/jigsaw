@@ -302,9 +302,9 @@ class TestGenericContainerRecursion:
         out = convert.convert_to_jigsaw(seq, process_mesh_dict_2x2, device)
 
         assert out is seq, "generic container is converted in place and returned"
-        assert isinstance(seq[0], linear.DistributedXWT)
+        assert isinstance(seq[0], linear.DistributedLinear)
         assert seq[1] is relu, "a non-mapped leaf is left untouched"
-        assert isinstance(seq[2], convolution.DistributedConv1D)
+        assert isinstance(seq[2], convolution.DistributedConv1d)
 
     @pytest.mark.dist(4)
     def test_module_without_mapped_leaf_unchanged(
@@ -469,10 +469,10 @@ class TestConvertAxesDevicesOptions:
             model, process_mesh_dict_2x2, device, ring=False
         )
         assert [type(m).__name__ for m in out] == [
-            "DistributedConv2D",
-            "DistributedConv2DTranspose",
+            "DistributedConv2d",
+            "DistributedConvTranspose2d",
             "DistributedRoll",
-            "DistributedXWT",
+            "DistributedLinear",
             "DistributedAttention",
         ]
         assert out[4].ring is False
@@ -516,7 +516,7 @@ class TestConvertAxesDevicesOptions:
 class TestConstructorDtype:
     @pytest.mark.dist(4)
     @pytest.mark.parametrize(
-        "cls", [convolution.DistributedConv2D, convolution.DistributedConv2DTranspose]
+        "cls", [convolution.DistributedConv2d, convolution.DistributedConvTranspose2d]
     )
     def test_conv_parameters_have_the_requested_dtype(
         self, device: torch.device, process_mesh_dict_2x2: dict, cls: type

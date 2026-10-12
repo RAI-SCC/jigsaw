@@ -63,7 +63,7 @@ def _conv1d_reference_check(
     channel_comm: str = "all_gather",
     spatial_group_as_sequence: bool = False,
 ) -> None:
-    """Compare a distributed ``DistributedConv1D`` against a single-process conv1d.
+    """Compare a distributed ``DistributedConv1d`` against a single-process conv1d.
 
     Works for any ``row.size()`` (spatial) x ``col.size()`` (channel) mesh and
     for both the no-halo regime (``stride == kernel_size``, the default) and the
@@ -89,7 +89,7 @@ def _conv1d_reference_check(
         batch, in_channels // n_channel, length // n_spatial, device=device
     )
 
-    conv = convolution.DistributedConv1D(
+    conv = convolution.DistributedConv1d(
         in_channels,
         out_channels,
         kernel_size,
@@ -199,7 +199,7 @@ class TestConv1d:
             process_mesh_dict_2x2["row"].size(),
             process_mesh_dict_2x2["col"].size(),
         )
-        conv = convolution.DistributedConv1D(
+        conv = convolution.DistributedConv1d(
             5,
             10,
             4,
@@ -319,7 +319,7 @@ class TestConv1d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """String padding is not supported once a halo exchange is needed."""
-        conv = convolution.DistributedConv1D(
+        conv = convolution.DistributedConv1d(
             8,
             12,
             4,
@@ -342,7 +342,7 @@ class TestConv1d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """``channel_comm='auto'`` resolves from the device on the config."""
-        conv = convolution.DistributedConv1D(
+        conv = convolution.DistributedConv1d(
             8,
             12,
             4,
@@ -359,7 +359,7 @@ class TestConv1d:
     ) -> None:
         """An unrecognised ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
-            convolution.DistributedConv1D(
+            convolution.DistributedConv1d(
                 8,
                 12,
                 4,
@@ -376,7 +376,7 @@ class TestConv1d:
         """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
         if dist.get_backend() != "gloo":
             pytest.skip("only meaningful on the gloo backend")
-        conv = convolution.DistributedConv1D(
+        conv = convolution.DistributedConv1d(
             8,
             12,
             4,
@@ -855,7 +855,7 @@ class TestConv1dGroups:
     ) -> None:
         """An odd ``groups`` on a real channel group fails fast at construction."""
         with pytest.raises(NotImplementedError):
-            convolution.DistributedConv1D(
+            convolution.DistributedConv1d(
                 18,
                 18,
                 4,

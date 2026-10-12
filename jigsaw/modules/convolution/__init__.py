@@ -1,29 +1,25 @@
 """Distributed convolution and transpose convolution."""
 
 from .conv import (
-    ConvNd,
     ConvNdConfig,
-    DistributedConv1D,
-    DistributedConv2D,
-    DistributedConv3D,
+    DistributedConv1d,
+    DistributedConv2d,
+    DistributedConv3d,
 )
 from .conv_transpose import (
-    ConvTransposeNd,
     ConvTransposeNdConfig,
-    DistributedConv1DTranspose,
-    DistributedConv2DTranspose,
-    DistributedConv3DTranspose,
+    DistributedConvTranspose1d,
+    DistributedConvTranspose2d,
+    DistributedConvTranspose3d,
 )
 
 __all__ = [
-    "DistributedConv1D",
-    "DistributedConv2D",
-    "DistributedConv3D",
-    "DistributedConv1DTranspose",
-    "DistributedConv2DTranspose",
-    "DistributedConv3DTranspose",
+    "DistributedConv1d",
+    "DistributedConv2d",
+    "DistributedConv3d",
+    "DistributedConvTranspose1d",
+    "DistributedConvTranspose2d",
+    "DistributedConvTranspose3d",
     "ConvNdConfig",
     "ConvTransposeNdConfig",
-    "ConvNd",
-    "ConvTransposeNd",
 ]

@@ -66,7 +66,7 @@ def _conv3d_reference_check(
     groups: int = 1,
     channel_comm: str = "all_gather",
 ) -> None:
-    """Compare a distributed ``DistributedConv3D`` against a single-process conv3d.
+    """Compare a distributed ``DistributedConv3d`` against a single-process conv3d.
 
     Works for any ``row.size()`` (spatial, splits the width axis) x ``col.size()``
     (channel) mesh and for both the no-halo regime (``stride == kernel_size``,
@@ -98,7 +98,7 @@ def _conv3d_reference_check(
         device=device,
     )
 
-    conv = convolution.DistributedConv3D(
+    conv = convolution.DistributedConv3d(
         in_channels,
         out_channels,
         kernel_size,
@@ -212,7 +212,7 @@ class TestConv3d:
             process_mesh_dict_2x2["row"].size(),
             process_mesh_dict_2x2["col"].size(),
         )
-        conv = convolution.DistributedConv3D(
+        conv = convolution.DistributedConv3d(
             6,
             12,
             2,
@@ -305,7 +305,7 @@ class TestConv3d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """String padding is not supported once a halo exchange is needed."""
-        conv = convolution.DistributedConv3D(
+        conv = convolution.DistributedConv3d(
             8,
             12,
             3,
@@ -328,7 +328,7 @@ class TestConv3d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """``channel_comm='auto'`` resolves from the device on the config."""
-        conv = convolution.DistributedConv3D(
+        conv = convolution.DistributedConv3d(
             8,
             12,
             2,
@@ -345,7 +345,7 @@ class TestConv3d:
     ) -> None:
         """An unrecognised ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
-            convolution.DistributedConv3D(
+            convolution.DistributedConv3d(
                 8,
                 12,
                 2,
@@ -362,7 +362,7 @@ class TestConv3d:
         """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
         if dist.get_backend() != "gloo":
             pytest.skip("only meaningful on the gloo backend")
-        conv = convolution.DistributedConv3D(
+        conv = convolution.DistributedConv3d(
             8,
             12,
             2,
@@ -499,7 +499,7 @@ def _conv3d_multi_spatial_reference_check(
     dilation: Triple = 1,
     groups: int = 1,
 ) -> None:
-    """Compare a ``DistributedConv3D`` split along D/H/W to a plain conv3d.
+    """Compare a ``DistributedConv3d`` split along D/H/W to a plain conv3d.
 
     ``mesh`` carries ``sd`` (depth), ``sh`` (height), ``sw`` (width) and ``col``
     (channel) groups plus a ``model`` group over every rank. Any spatial group
@@ -535,7 +535,7 @@ def _conv3d_multi_spatial_reference_check(
         device=device,
     )
 
-    conv = convolution.DistributedConv3D(
+    conv = convolution.DistributedConv3d(
         in_channels,
         out_channels,
         kernel_size,
@@ -850,7 +850,7 @@ class TestConv3dGroups:
     ) -> None:
         """``1 < groups`` not a multiple of ``col.size()`` fails at construction."""
         with pytest.raises(NotImplementedError):
-            convolution.DistributedConv3D(
+            convolution.DistributedConv3d(
                 18,
                 18,
                 2,
@@ -1026,7 +1026,7 @@ class TestConv3dMultiSpatial:
     ) -> None:
         """A spatial_group sequence must have one entry per spatial axis."""
         with pytest.raises(ValueError):
-            convolution.DistributedConv3D(
+            convolution.DistributedConv3d(
                 6,
                 12,
                 2,

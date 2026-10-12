@@ -10,10 +10,9 @@ import torch
 import torch.nn.functional as F
 
 import jigsaw.modules.loss as jloss
+from jigsaw.modules.activation import distributed_argmax, distributed_log_softmax
 from jigsaw.modules.loss import classification as lossc
 from jigsaw.modules.loss.common import (
-    distributed_argmax,
-    distributed_log_softmax,
     reduce_loss,
     reduce_scalar_loss,
     redundant_all_reduce,

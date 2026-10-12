@@ -14,7 +14,7 @@ from jigsaw.gather import gather_1d_results
 from ..common.arg_norm import _as_spatial_groups, _ntuple
 from ..common.channel_comm import resolve_conv_groups
 from .config import ConvTransposeNdConfig
-from .functional import ConvTransposeNd
+from .functional import _ConvTransposeNd
 
 # concrete torch transpose-conv class per spatial rank, for ``convert_to_torch``.
 _TORCH_CONV_TRANSPOSE_CLS = {
@@ -203,7 +203,7 @@ class _DistributedConvTransposeNd(torch.nn.Module):
                 dist.broadcast(p.data, group_src=0, group=g)
 
         self._conv_apply: Callable[..., tuple[torch.Tensor, torch.Tensor]] = (
-            ConvTransposeNd.apply
+            _ConvTransposeNd.apply
         )
 
     def reset_parameters(self) -> None:

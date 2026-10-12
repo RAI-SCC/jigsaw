@@ -26,7 +26,7 @@ class TestForward:
         # global dims
         in_dim, out_dim = 4, 4
         seq_global = 20
-        linlayer = linear.DistributedXWT(
+        linlayer = linear.DistributedLinear(
             in_dim,
             out_dim,
             local_rank=local_rank,
@@ -83,7 +83,7 @@ class TestForward:
         in_dim, out_dim = 4, 4
         seq_global = 10
 
-        linlayer = linear.DistributedXWT(
+        linlayer = linear.DistributedLinear(
             in_dim,
             out_dim,
             local_rank=local_rank,
@@ -131,7 +131,7 @@ class TestForward:
 
         in_dim, out_dim = 6, 10
 
-        linlayer = linear.DistributedXWT(
+        linlayer = linear.DistributedLinear(
             in_dim,
             out_dim,
             local_rank=local_rank,
@@ -184,7 +184,7 @@ class TestForward:
         in_dim, out_dim = 6, 10
         seq_global = 20
 
-        linlayer = linear.DistributedXWT(
+        linlayer = linear.DistributedLinear(
             in_dim,
             out_dim,
             local_rank=local_rank,
@@ -244,7 +244,7 @@ class TestBackward:
 
         loss_fn = torch.nn.MSELoss(reduction="mean")
 
-        linlayer = linear.DistributedXWT(
+        linlayer = linear.DistributedLinear(
             in_dim,
             out_dim,
             local_rank=local_rank,
@@ -356,7 +356,7 @@ class TestBackward:
 
         loss_fn = torch.nn.MSELoss(reduction="sum")
 
-        linlayer = linear.DistributedXWT(
+        linlayer = linear.DistributedLinear(
             in_dim,
             out_dim,
             local_rank=local_rank,
@@ -453,7 +453,7 @@ class TestBackward:
 
         loss_fn = torch.nn.MSELoss(reduction="mean")
 
-        linlayer = linear.DistributedXWT(
+        linlayer = linear.DistributedLinear(
             in_dim,
             out_dim,
             local_rank=local_rank,
@@ -602,7 +602,7 @@ class TestBackward:
 
         loss_fn = torch.nn.MSELoss(reduction="mean")
 
-        linlayer = linear.DistributedXWT(
+        linlayer = linear.DistributedLinear(
             in_dim,
             out_dim,
             local_rank=local_rank,
@@ -757,7 +757,7 @@ class TestBackward:
 
         loss_fn = torch.nn.MSELoss(reduction="mean")
 
-        linlayer = linear.DistributedXWT(
+        linlayer = linear.DistributedLinear(
             in_dim,
             out_dim,
             local_rank=local_rank,
@@ -968,7 +968,7 @@ class TestBackward:
 
         loss_fn = torch.nn.MSELoss(reduction="sum")
 
-        linlayer = linear.DistributedXWT(
+        linlayer = linear.DistributedLinear(
             in_dim,
             out_dim,
             local_rank=local_rank,
@@ -1061,7 +1061,7 @@ class TestParameterCount:
         """The bias is replicated over the row group, so it is counted once overall."""
         mesh = process_mesh_dict_2x2
         in_dim, out_dim = 6, 8
-        layer = linear.DistributedXWT(
+        layer = linear.DistributedLinear(
             in_dim,
             out_dim,
             local_rank=dist.get_rank(group=mesh["model"]),

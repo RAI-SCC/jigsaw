@@ -3,7 +3,7 @@
 from .base import _DistributedConvNd
 
 
-class DistributedConv1D(_DistributedConvNd):
+class DistributedConv1d(_DistributedConvNd):
     """Distributed 1-D convolution.
 
     Input has shape ``(N, Cin, Lin)`` and output ``(N, Cout, Lout)``.
@@ -12,7 +12,7 @@ class DistributedConv1D(_DistributedConvNd):
     _n_spatial = 1
 
 
-class DistributedConv2D(_DistributedConvNd):
+class DistributedConv2d(_DistributedConvNd):
     """Distributed 2-D convolution.
 
     Input has shape ``(N, Cin, Hin, Win)`` and output ``(N, Cout, Hout, Wout)``.
@@ -21,7 +21,7 @@ class DistributedConv2D(_DistributedConvNd):
     _n_spatial = 2
 
 
-class DistributedConv3D(_DistributedConvNd):
+class DistributedConv3d(_DistributedConvNd):
     """Distributed 3-D convolution.
 
     Input has shape ``(N, Cin, Din, Hin, Win)`` and output

@@ -132,7 +132,7 @@ def test_assert_replica_consistency_fails_on_every_rank(axis, device) -> None:
 def test_reshard_remarks_onto_new_groups(device, monkeypatch) -> None:
     """After resharding, the gradient is summed over the new spatial group."""
     old, new = _mesh((2, 2, 2), device), _mesh((2, 4, 1), device)
-    conv = convolution.DistributedConv2D(
+    conv = convolution.DistributedConv2d(
         4,
         4,
         3,
@@ -168,7 +168,7 @@ class _ConvWithPlainHead(torch.nn.Module):
 
     def __init__(self, mesh: dict, device: torch.device, mark: bool) -> None:
         super().__init__()
-        self.conv = convolution.DistributedConv2D(
+        self.conv = convolution.DistributedConv2d(
             4,
             4,
             3,

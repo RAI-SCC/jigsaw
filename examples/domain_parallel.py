@@ -6,7 +6,7 @@ memory per rank only shrinks with the *activations*, which is what dominates for
 large images. This is the simplest way to use jigsaw.
 
 What jigsaw does for you:
-  * ``DistributedConv2D`` swaps a halo with its neighbours, so a 3x3 convolution
+  * ``DistributedConv2d`` swaps a halo with its neighbours, so a 3x3 convolution
     gives the same result on a tile border as on the undivided image.
   * The weights are broadcast from rank 0 at construction and their gradients are
     summed over the spatial groups inside the backward pass, so a plain
@@ -51,7 +51,7 @@ def build_model(mesh: dict[str, dist.ProcessGroup], device: torch.device) -> nn.
 
     def conv(cin: int, cout: int, stride: int = 1) -> nn.Module:
         """A 3x3 distributed convolution with 'same' padding."""
-        return jigsaw.convolution.DistributedConv2D(
+        return jigsaw.convolution.DistributedConv2d(
             cin,
             cout,
             kernel_size=3,
@@ -64,7 +64,7 @@ def build_model(mesh: dict[str, dist.ProcessGroup], device: torch.device) -> nn.
 
     def up(cin: int, cout: int) -> nn.Module:
         """A stride-2 transposed convolution that doubles the resolution."""
-        return jigsaw.convolution.DistributedConv2DTranspose(
+        return jigsaw.convolution.DistributedConvTranspose2d(
             cin,
             cout,
             kernel_size=2,

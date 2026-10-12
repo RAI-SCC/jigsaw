@@ -76,7 +76,7 @@ def _build(kind: str, mesh: dict, device: torch.device, fill: bool = True):
     row, col = mesh["row"], mesh["col"]
     if kind == "xwt":
         summa = (row.size(), col.size()) in {(1, 1), (1, 2), (2, 2)}
-        model = linear.DistributedXWT(
+        model = linear.DistributedLinear(
             8,
             8,
             local_rank=(mesh["model"] if summa else col).rank(),
@@ -92,12 +92,12 @@ def _build(kind: str, mesh: dict, device: torch.device, fill: bool = True):
             dist.broadcast(model.weight.data, group_src=0, group=row)
         shape = (2, 4 // row.size() if summa else 4, 8 // col.size())
     elif kind == "conv_halo":
-        model = convolution.DistributedConv2D(
+        model = convolution.DistributedConv2d(
             4, 4, 3, device=device, spatial_group=row, channel_group=col, padding=(1, 1)
         )
         shape = (2, 4 // col.size(), 4, 8 // row.size())
     elif kind == "conv_patchify":
-        model = convolution.DistributedConv2D(
+        model = convolution.DistributedConv2d(
             4, 4, 2, device=device, spatial_group=row, channel_group=col, stride=2
         )
         shape = (2, 4 // col.size(), 4, 8 // row.size())

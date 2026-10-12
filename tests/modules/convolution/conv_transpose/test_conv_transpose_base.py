@@ -15,9 +15,9 @@ from jigsaw.gather import gather_1d_results
 pytestmark = [pytest.mark.dist_required]
 
 _CONV_CLS = {
-    1: convolution.DistributedConv1DTranspose,
-    2: convolution.DistributedConv2DTranspose,
-    3: convolution.DistributedConv3DTranspose,
+    1: convolution.DistributedConvTranspose1d,
+    2: convolution.DistributedConvTranspose2d,
+    3: convolution.DistributedConvTranspose3d,
 }
 _REF_CLS = {
     1: torch.nn.ConvTranspose1d,
@@ -57,7 +57,7 @@ class TestConvTransposeParameterCount:
     ) -> None:
         """No split spatial axis -> ``spatial_world_size == 1`` and nothing is divided."""
         mesh = process_mesh_dict_1x4
-        conv = convolution.DistributedConv2DTranspose(
+        conv = convolution.DistributedConvTranspose2d(
             8,
             16,
             2,
@@ -77,7 +77,7 @@ class TestConvTransposeParameterCount:
     ) -> None:
         """With ``bias=False`` only the weight contributes."""
         mesh = process_mesh_dict_2x2
-        conv = convolution.DistributedConv2DTranspose(
+        conv = convolution.DistributedConvTranspose2d(
             8,
             12,
             2,

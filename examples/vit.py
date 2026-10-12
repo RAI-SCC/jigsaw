@@ -8,11 +8,11 @@ The mesh has two axes and every tensor is split over both:
 Nothing is ever gathered: the patch embedding, ring attention, the MLP and the
 patch recovery all consume and produce these shards.
 
-    patch embed   DistributedConv2D          kernel == stride, so no halo exchange
+    patch embed   DistributedConv2d          kernel == stride, so no halo exchange
     attention     DistributedAttention       ring attention over "row", heads over "col"
-    MLP           DistributedXWT             weights split over both axes
+    MLP           DistributedLinear             weights split over both axes
     layer norm    DistributedLayerNorm       statistics reduced over "col"
-    recovery      DistributedConv2DTranspose
+    recovery      DistributedConvTranspose2d
 
 Attention is global: every token attends to the whole image, not just to the tokens
 on its own rank -- the ring passes the key/value chunks around "row".
@@ -81,7 +81,7 @@ class Block(nn.Module):
             )
 
         def linear(in_dim: int, out_dim: int) -> nn.Module:
-            return jigsaw.linear.DistributedXWT(
+            return jigsaw.linear.DistributedLinear(
                 in_dim,
                 out_dim,
                 local_rank=model_group.rank(),
@@ -160,14 +160,14 @@ class ViT(nn.Module):
             spatial_group=row,  # a single group splits the last (width) axis
             channel_group=col,
         )
-        self.embed = jigsaw.convolution.DistributedConv2D(
+        self.embed = jigsaw.convolution.DistributedConv2d(
             IN_CHANNELS, DIM, **conv_kwargs
         )
         self.blocks = nn.ModuleList([Block(mesh, device) for _ in range(DEPTH)])
         self.norm = jigsaw.normalization.DistributedLayerNorm(
             DIM, model_group.rank(), device, row, col
         )
-        self.recover = jigsaw.convolution.DistributedConv2DTranspose(
+        self.recover = jigsaw.convolution.DistributedConvTranspose2d(
             DIM, IN_CHANNELS, **conv_kwargs
         )
 

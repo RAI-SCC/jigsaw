@@ -23,7 +23,7 @@ class ConvTransposeNdCtx(Protocol):
     saved_tensors: tuple[torch.Tensor, torch.Tensor]
 
 
-class ConvTransposeNd(torch.autograd.Function):
+class _ConvTransposeNd(torch.autograd.Function):
     """Autograd function of the distributed transpose convolution."""
 
     @staticmethod
@@ -168,7 +168,7 @@ class ConvTransposeNd(torch.autograd.Function):
         config: ConvTransposeNdConfig,
     ) -> tuple[torch.Tensor, Optional[int]]:
         """Batching rule for ``torch.vmap``."""
-        out = ConvTransposeNd.apply(
+        out = _ConvTransposeNd.apply(
             x,
             weight,
             bias,

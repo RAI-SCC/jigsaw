@@ -22,7 +22,7 @@ class RollCtx(Protocol):
     config: RollConfig
 
 
-class RollFunction(torch.autograd.Function):
+class _Roll(torch.autograd.Function):
     """Autograd function of the distributed roll."""
 
     @staticmethod
@@ -145,7 +145,7 @@ class RollFunction(torch.autograd.Function):
         def _shift(ds: tuple[int, ...]) -> tuple[int, ...]:
             return tuple(d + 1 if d >= 0 else d for d in ds)
 
-        out = RollFunction.apply(
+        out = _Roll.apply(
             x,
             shifts,
             _shift(dims),

@@ -8,7 +8,7 @@ from tests.parity import assert_close
 pytestmark = [pytest.mark.dist_required]
 
 
-class TestDistributedSoftMax:
+class TestDistributedSoftmax:
     @pytest.mark.parametrize("dim", [-1, 1, 0, -2])
     def test_distributed_softmax(self, device: torch.device, dim: int) -> None:
         """Forward and backward match ``torch.softmax`` along any sharded dimension."""
@@ -22,7 +22,7 @@ class TestDistributedSoftMax:
         grad_full = torch.randn(shape, generator=g).to(device)
         x = x_full.detach().chunk(size, dim=dim)[rank].clone().requires_grad_(True)
 
-        softmax = act.DistributedSoftMax(group, dim=dim)
+        softmax = act.DistributedSoftmax(group, dim=dim)
         out = softmax(x)
         out.backward(grad_full.chunk(size, dim=dim)[rank])
 

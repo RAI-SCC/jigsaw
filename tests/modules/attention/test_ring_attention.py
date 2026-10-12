@@ -878,7 +878,7 @@ def test_ring_hybrid_single_node(
 def test_ring_autograd_function_matches_full_attention(
     device: torch.device, process_mesh_dict_4x1: dict
 ) -> None:
-    """``RingAttentionFunction`` gives the gradients of full attention.
+    """``_RingAttention`` gives the gradients of full attention.
 
     Goes through the autograd wrapper (``setup_context`` saves the log-sum-exp for the
     backward) with ``heads != local sequence length``; a transposed saved ``lse``
@@ -911,7 +911,7 @@ def test_ring_autograd_function_matches_full_attention(
     ring_config = config.RingAttentionConfig(
         device=device, gpus_per_node=world, send_in_forward=config.SendForward.KV
     )
-    out = ring.RingAttentionFunction.apply(
+    out = ring._RingAttention.apply(
         q, k, v, x, w_qkv, d**-0.5, 0.0, group, rank, ring_config
     )[0]
     out.backward(g_full[:, :, shard].contiguous())

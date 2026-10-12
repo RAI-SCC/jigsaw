@@ -42,7 +42,7 @@ def main(steps: int = 100) -> None:
     set_all_seeds(train_mesh["model"].rank())  # independent shards, so different seeds
 
     def linear(in_dim: int, out_dim: int) -> nn.Module:
-        return jigsaw.linear.DistributedXWT(
+        return jigsaw.linear.DistributedLinear(
             in_dim,
             out_dim,
             local_rank=train_mesh["model"].rank(),

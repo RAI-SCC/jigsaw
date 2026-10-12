@@ -167,7 +167,7 @@ sharded parameters, expect little difference.
 | Extra process groups | none | one per distinct replica-group set |
 | Gradient accumulation / `no_sync()` | yes | yes |
 
-Under compiled autograd, the channel-parallel matmul (`DistributedXWT` and attention with a
+Under compiled autograd, the channel-parallel matmul (`DistributedLinear` and attention with a
 `col` axis larger than 1) does not compile yet: its backward uses `dist.isend`/`irecv`, which
 dynamo cannot trace. This holds for both modes.
 

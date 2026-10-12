@@ -8,7 +8,7 @@ import torch.distributed as dist
 from . import functional
 
 
-class DistributedSoftMax(torch.nn.Module):
+class DistributedSoftmax(torch.nn.Module):
     """Softmax over a sharded dimension."""
 
     def __init__(self, group: dist.ProcessGroup, dim: int = -1) -> None:
@@ -24,7 +24,7 @@ class DistributedSoftMax(torch.nn.Module):
         super().__init__()
         self.dim = dim
         self.group = group
-        self.softmax = functional._DistributedSoftmax.apply
+        self.softmax = functional._Softmax.apply
 
     def get_parameter_count(self) -> int:
         """Return the number of local parameters."""
@@ -40,8 +40,8 @@ class DistributedSoftMax(torch.nn.Module):
         col_kw: str = "col",
         model_kw: str = "model",
         **kwargs: Any,
-    ) -> "DistributedSoftMax":
-        """Convert a ``torch.nn.Softmax`` to a :class:`DistributedSoftMax`.
+    ) -> "DistributedSoftmax":
+        """Convert a ``torch.nn.Softmax`` to a :class:`DistributedSoftmax`.
 
         Parameters
         ----------
@@ -67,7 +67,7 @@ class DistributedSoftMax(torch.nn.Module):
 
         Returns
         -------
-        DistributedSoftMax
+        DistributedSoftmax
             Distributed layer over ``process_mesh_dict[col_kw]``.
 
         Raises
@@ -80,7 +80,7 @@ class DistributedSoftMax(torch.nn.Module):
         """
         if model.dim is None:
             raise NotImplementedError(
-                "DistributedSoftMax requires an explicit dim; convert a "
+                "DistributedSoftmax requires an explicit dim; convert a "
                 "Softmax with dim=None by hand"
             )
         return cls(group=process_mesh_dict[col_kw], dim=model.dim)

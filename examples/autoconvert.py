@@ -4,7 +4,7 @@ The model below is ordinary PyTorch: it knows nothing about process meshes.
 ``jigsaw.convert.convert_to_jigsaw`` walks it and swaps every layer it knows for its
 distributed twin, carrying the weights over -- each rank keeps only its shard of them:
 
-    nn.Linear                       -> DistributedXWT
+    nn.Linear                       -> DistributedLinear
     nn.Conv{1,2,3}d                 -> DistributedConv{1,2,3}D
     nn.ConvTranspose{1,2,3}d        -> DistributedConv{1,2,3}DTranspose
     nn.LayerNorm                    -> DistributedLayerNorm

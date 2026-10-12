@@ -35,7 +35,7 @@ import jigsaw.modules.activation.activation as activation
 import jigsaw.modules.convolution as convolution
 import jigsaw.modules.normalization as norm
 from jigsaw.modules.attention import DistributedAttention
-from jigsaw.modules.linear import DistributedXWT
+from jigsaw.modules.linear import DistributedLinear
 from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -99,7 +99,7 @@ class TestAutocastLinear:
     ) -> None:
         pm = process_mesh_dict_2x2
         in_dim, out_dim = 10, 20
-        model = DistributedXWT(
+        model = DistributedLinear(
             in_dim,
             out_dim,
             local_rank=pm["model"].rank(),
@@ -346,7 +346,7 @@ class TestAutocastFp32List:
     ) -> None:
         pm = process_mesh_dict_2x2
         local_dim = 12
-        model = activation.DistributedSoftMax(pm["col"], dim=-1)
+        model = activation.DistributedSoftmax(pm["col"], dim=-1)
         torch.manual_seed(pm["model"].rank())
         x_low = torch.randn(4, 6, local_dim, device=device, dtype=autocast_dtype)
         self._check_fp32_list(model, x_low, device, autocast_dtype, pm["model"])
@@ -407,9 +407,9 @@ class TestAutocastConv:
         nc, nsp = pm["col"].size(), pm["row"].size()
         in_ch, out_ch = 4, 4
         cls = (
-            convolution.DistributedConv2DTranspose
+            convolution.DistributedConvTranspose2d
             if transpose
-            else convolution.DistributedConv2D
+            else convolution.DistributedConv2d
         )
         model = cls(
             in_ch,

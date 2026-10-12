@@ -185,7 +185,7 @@ class TestTeCoreGuard:
 def solo_group():
     """A 1-rank process group for the current rank.
 
-    ``DistributedAttention`` always builds a ``DistributedXWT`` head and
+    ``DistributedAttention`` always builds a ``DistributedLinear`` head and
     broadcasts its parameters over ``spatial_group``; a size-1 group makes that
     a no-op, so the module constructs at any world size (and on CPU under an
     nccl default group) without cross-rank coupling.
@@ -329,7 +329,7 @@ class TestBackendWithTe:
         Ported from the standalone ``test_transformer_engine.py`` so the numeric
         check survives that file's removal on ``refactor/tests``.
         """
-        from jigsaw.modules.attention.attention import TransformerEngineAttention
+        from jigsaw.modules.attention.attention import _TransformerEngineAttention
 
         batch, seq, heads, head_dim = 2, 16, 4, 32
         scale = head_dim**-0.5
@@ -345,7 +345,7 @@ class TestBackendWithTe:
         for t in (q, k, v):
             t.requires_grad_(True)
 
-        out, lse, rng_state = TransformerEngineAttention.apply(
+        out, lse, rng_state = _TransformerEngineAttention.apply(
             q, k, v, scale, 0.0, core
         )
         assert out.shape == (batch, seq, heads * head_dim)
