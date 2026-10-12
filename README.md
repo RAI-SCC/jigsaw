@@ -210,8 +210,8 @@ for x, y in loader:  # sampler keyed by mesh["dp"].rank(); each rank loads its s
 ```
 
 After wrapping, it's plain DDP: `no_sync()`, gradient accumulation and comm hooks all work.
-Using `DistributedDataParallel(model, process_group=mesh["dp"])` is also correct. 
-[docs/ddp.md](docs/ddp.md) has the details including joint comm hook (faster), plain PyTorch layers inside a jigsaw model, 
+Using `DistributedDataParallel(model, process_group=mesh["dp"])` is also correct.
+[docs/ddp.md](docs/ddp.md) has the details including joint comm hook (faster), plain PyTorch layers inside a jigsaw model,
 and debugging replica drift.
 Running examples: `examples/ddp.py`, `examples/vit.py --ddp` and `examples/swin.py --ddp`.
 
