@@ -181,11 +181,11 @@ For plain PyTorch layers inside a jigsaw model whose parameters are replicated (
    groups are dropped.
 2. In the forward, run the layer through the synced parameters:
    ```python
-   out = torch.func.functional_call(
-       self.norm, jigsaw.parallel.synced_parameters(self.norm), (x,)
-   )
+   out = jigsaw.parallel.synced_call(self.norm, x)
    ```
-   `examples/swin.py` does this.
+   To sync the parameters of a whole module from its own forward, use
+   `jigsaw.parallel.synced_parameters(self)` with `torch.func.functional_call` and re-enter the
+   forward only if it returned anything. `examples/swin.py` does this.
 3. To add a replica axis of your own to parameters jigsaw modules already mark (an ensemble
    axis, say), pass `extend=True`. A group over the same ranks as one already in the mark is
    not added again, so nothing is summed twice. Marking an already marked parameter without
@@ -193,7 +193,7 @@ For plain PyTorch layers inside a jigsaw model whose parameters are replicated (
 4. If you mark parameters after the model is built, call
    `jigsaw.parallel.broadcast_replicas(model)` before wrapping (or use `wrap_ddp`).
 
-Both modes work with these steps. Under the joint hook, `synced_parameters` scales just like
+Both modes work with these steps. Under the joint hook, `synced_call` scales just like
 the jigsaw modules do.
 
 ## Gradient terms that are already complete on every replica

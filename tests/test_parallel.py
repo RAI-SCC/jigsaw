@@ -231,3 +231,22 @@ class TestSyncedParameters:
             lin, parallel.synced_parameters(lin), (x,)
         ).sum().backward()
         assert torch.equal(lin.weight.grad.cpu(), BASE[None] * _world_sum())
+
+
+class TestSyncedCall:
+    def test_sums_marked_and_keeps_unmarked(self, device):
+        lin = torch.nn.Linear(3, 1, device=device)
+        lin.bias.data.zero_()
+        parallel.mark_replicated(lin.weight, dist.group.WORLD)
+        x = BASE.to(device)[None] * _scale()
+        parallel.synced_call(lin, x).sum().backward()
+        assert torch.equal(lin.weight.grad.cpu(), BASE[None] * _world_sum())
+        assert torch.equal(lin.bias.grad.cpu(), torch.ones(1))
+
+    def test_passes_keyword_inputs(self, device):
+        attn = torch.nn.MultiheadAttention(3, 1, bias=False, device=device)
+        parallel.mark_replicated(attn.in_proj_weight, dist.group.WORLD)
+        x = BASE.to(device)[None, None]
+        out, weights = parallel.synced_call(attn, x, x, x, need_weights=False)
+        assert out.shape == (1, 1, 3)
+        assert weights is None

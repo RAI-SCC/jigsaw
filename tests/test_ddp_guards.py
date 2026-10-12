@@ -185,8 +185,7 @@ class _ConvWithPlainHead(torch.nn.Module):
                 parallel.mark_replicated(p, mesh["model"])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        synced = parallel.synced_parameters(self.head)
-        return torch.func.functional_call(self.head, synced, (self.conv(x),))
+        return parallel.synced_call(self.head, self.conv(x))
 
 
 @pytest.mark.dist(8)
