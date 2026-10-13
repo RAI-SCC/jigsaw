@@ -4,7 +4,7 @@ from typing import Any, Callable
 
 import torch
 
-from jigsaw.modules import (
+from jigsaw.nn import (
     activation,
     attention,
     convolution,
@@ -64,7 +64,7 @@ def convert_to_jigsaw(
         Key of the model (rows x columns) process group.
     convert_layer_norm : bool
         Whether ``torch.nn.LayerNorm`` is swapped for
-        :class:`~jigsaw.modules.normalization.DistributedLayerNorm`. Leave
+        :class:`~jigsaw.nn.normalization.DistributedLayerNorm`. Leave
         this at the default unless the normalized dimension is *not* sharded
         at the point where the layer norm sits (e.g. it is never split across
         ``col_kw``) -- a plain ``nn.LayerNorm`` is only correct there, and

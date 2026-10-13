@@ -5,7 +5,7 @@ import torch
 import torch.distributed as dist
 
 import jigsaw
-import jigsaw.modules.linear as linear
+import jigsaw.nn.linear as linear
 from jigsaw import debug
 from tests.parity import all_ranks_ok
 

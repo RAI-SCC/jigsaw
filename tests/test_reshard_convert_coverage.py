@@ -32,10 +32,10 @@ import torch
 
 import jigsaw.convert as convert
 from jigsaw.gather import gather_1d_results
-from jigsaw.modules import convolution, roll
-from jigsaw.modules import normalization as norm
-from jigsaw.modules.attention import Attention
-from jigsaw.modules.linear.linear import _SUPPORTED_XWT_LAYOUTS
+from jigsaw.nn import convolution, roll
+from jigsaw.nn import normalization as norm
+from jigsaw.nn.attention import Attention
+from jigsaw.nn.linear.linear import _SUPPORTED_XWT_LAYOUTS
 from tests.parity import all_ranks_ok, assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -283,7 +283,7 @@ class TestGenericContainerRecursion:
     def test_sequential_leaves_swapped_in_place(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        from jigsaw.modules import convolution, linear
+        from jigsaw.nn import convolution, linear
 
         seq = torch.nn.Sequential(
             torch.nn.Linear(8, 8, device=device),

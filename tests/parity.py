@@ -24,7 +24,7 @@ Relation to the rest of the suite
 ---------------------------------
 The mesh comes from the ordinary ``process_mesh_*`` fixtures in ``tests/process_mesh``
 and the rank count from an ``@pytest.mark.dist(N)`` marker, exactly like the hand-rolled
-reference checks in ``tests/modules/convolution``. ``ShardSpec`` is keyed by mesh-axis
+reference checks in ``tests/nn/convolution``. ``ShardSpec`` is keyed by mesh-axis
 *name*, so the same harness drives a 2-D ``row`` x ``col`` mesh and an N-way spatial mesh
 (``sh``/``sw``/``sd`` + ``col``) without change. ``assert_close`` / ``all_ranks_ok`` give
 every rank the same verdict so a mismatch fails the job instead of hanging it; those two

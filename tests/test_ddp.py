@@ -23,8 +23,8 @@ from torch.nn.parallel import DistributedDataParallel
 
 from jigsaw import parallel
 from jigsaw.mesh import make_process_mesh
-from jigsaw.modules import convolution, linear, normalization
-from jigsaw.modules.attention import attention
+from jigsaw.nn import convolution, linear, normalization
+from jigsaw.nn.attention import attention
 from jigsaw.parallel import _sync
 
 # (dp, row, col) -> world size

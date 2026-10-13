@@ -13,7 +13,7 @@ from torch.nn.parallel import DistributedDataParallel
 
 from jigsaw import debug, parallel
 from jigsaw._core.comm import all_reduce_max
-from jigsaw.modules import convolution, normalization
+from jigsaw.nn import convolution, normalization
 from jigsaw.parallel import _ddp
 from jigsaw.parallel._replicas import replica_divergence
 from tests.test_ddp import KINDS, _build, _expected, _int_tensor, _local_grads, _mesh
@@ -229,4 +229,5 @@ def test_plain_submodule_of_a_jigsaw_module_is_not_foreign(device) -> None:
     with torch.no_grad():  # a different shard on every column
         norm.weight.fill_(1.0 + mesh["col"].rank())
         norm.inner.weight.fill_(1.0 + mesh["col"].rank())
+        norm.inner.bias.fill_(1.0 + mesh["col"].rank())
     debug.assert_replica_consistency(norm, mesh, unmarked=True)

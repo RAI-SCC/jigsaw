@@ -109,7 +109,7 @@ jobs:
       - run: twine check dist/*
       - name: Check wheel contents
         run: |
-          unzip -l dist/*.whl | grep -E "jigsaw/modules/linear/|py.typed"
+          unzip -l dist/*.whl | grep -E "jigsaw/nn/linear/|py.typed"
       - uses: actions/upload-artifact@v4
         with:
           name: dist

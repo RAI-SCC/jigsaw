@@ -21,7 +21,7 @@ Known quirks this file documents rather than hides:
   rejects fp32), else the input dtype. ``DistributedAttention`` still can't run an fp64
   parameter set (it force-casts q/k/v), so attention tests use fp32 params.
 * ring attention drives its forward under autocast (bf16/fp16 saved tensors) and
-  ``ring_backward`` reconciles them to the ``w_qkv`` (master) dtype before the
+  ``_ring_backward`` reconciles them to the ``w_qkv`` (master) dtype before the
   cores run -- the same backward-in-master-precision rule ``XWT`` follows.
 """
 
@@ -31,11 +31,11 @@ import pytest
 import torch
 import torch.distributed as dist
 
-import jigsaw.modules.activation.activation as activation
-import jigsaw.modules.convolution as convolution
-import jigsaw.modules.normalization as norm
-from jigsaw.modules.attention import DistributedAttention
-from jigsaw.modules.linear import DistributedLinear
+import jigsaw.nn.activation.activation as activation
+import jigsaw.nn.convolution as convolution
+import jigsaw.nn.normalization as norm
+from jigsaw.nn.attention import DistributedAttention
+from jigsaw.nn.linear import DistributedLinear
 from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -194,13 +194,13 @@ class TestAutocastAttention:
         device: torch.device,
         autocast_dtype: torch.dtype,
     ) -> None:
-        # Drive the ring forward / backward directly (as tests/modules/attention
+        # Drive the ring forward / backward directly (as tests/nn/attention
         # does): the forward runs under autocast -- its saved ``out`` / ``lse`` /
-        # K-V chunks come back in the autocast dtype -- and ``ring_backward``
+        # K-V chunks come back in the autocast dtype -- and ``_ring_backward``
         # must reconcile them against the fp32 ``q`` without a dtype clash.
-        from jigsaw.modules.attention import config as attn_config
-        from jigsaw.modules.attention.functional import backward as ring_bwd
-        from jigsaw.modules.attention.functional import forward as ring_fwd
+        from jigsaw.nn.attention import config as attn_config
+        from jigsaw.nn.attention.functional import backward as ring_bwd
+        from jigsaw.nn.attention.functional import forward as ring_fwd
 
         pm = process_mesh_dict_4x1
         ring_group = pm["row"]
@@ -228,10 +228,10 @@ class TestAutocastAttention:
                 else contextlib.nullcontext()
             )
             with ctx:
-                out, lse, chunks, base_seed, rng_states = ring_fwd.ring_forward(
+                out, lse, chunks, base_seed, rng_states = ring_fwd._ring_forward(
                     q, k, v, x0, w_qkv, scale, 0.0, ring_group, local_rank, world, cfg
                 )
-            dq, dk, dv = ring_bwd.ring_backward(
+            dq, dk, dv = ring_bwd._ring_backward(
                 torch.ones_like(out),
                 q,
                 out,

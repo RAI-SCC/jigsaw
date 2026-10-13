@@ -2,7 +2,7 @@
 Code for performing domain- and tensor-parallel training optimized for large image-based data.
 
 ## Structure of repository
-- jigsaw/modules contains the implementations of the individual modules. Currently supported operations are ```nn.Linear, nn.Conv2d, nn.ConvTranspose2d, F.roll, Attention (with or without ring), and  non-parameterized matrix multiplications```.
+- jigsaw/nn contains the implementations of the individual modules. Currently supported operations are ```nn.Linear, nn.Conv2d, nn.ConvTranspose2d, F.roll, Attention (with or without ring), and  non-parameterized matrix multiplications```.
 
 ## Environment
 ### Option A: bare metal
@@ -120,7 +120,7 @@ mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})  # 4 ranks, one model repl
 class Linear(torch.nn.Module):
     def __init__(self, in_dim, out_dim, mesh, device):
         super().__init__()
-        self.lin = jigsaw.linear.DistributedLinear(
+        self.lin = jigsaw.nn.DistributedLinear(
             in_dim=in_dim,
             out_dim=out_dim,
             bias=True,

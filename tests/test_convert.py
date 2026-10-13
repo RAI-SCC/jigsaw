@@ -5,10 +5,10 @@ import torch
 
 import jigsaw.convert as convert
 from jigsaw.gather import gather_1d_results, gather_results
-from jigsaw.modules.activation import DistributedSoftmax
-from jigsaw.modules.attention import Attention, DistributedAttention
-from jigsaw.modules.attention.attention import attn_core_dtype
-from jigsaw.modules.linear import (
+from jigsaw.nn.activation import DistributedSoftmax
+from jigsaw.nn.attention import Attention, DistributedAttention
+from jigsaw.nn.attention.attention import attn_core_dtype
+from jigsaw.nn.linear import (
     DistributedLinear,
     DistributedMatMulXTW,
     DistributedMatMulXW,
@@ -17,11 +17,11 @@ from jigsaw.modules.linear import (
     MatMulXW,
     MatMulXWT,
 )
-from jigsaw.modules.normalization import (
+from jigsaw.nn.normalization import (
     DistributedGroupNorm,
     DistributedLayerNorm,
 )
-from jigsaw.modules.roll import Roll
+from jigsaw.nn.roll import Roll
 from tests.parity import assert_close
 
 # Every test here builds a 2x2 / 2x1x2 mesh, so it needs exactly 4 ranks;

@@ -127,7 +127,7 @@ def _grad_norm(tiling: tuple[int, int, int], state: dict, device) -> float:
     mine = slice(mesh["dp"].rank() * per_replica, (mesh["dp"].rank() + 1) * per_replica)
     tiles = [(-2, "sh"), (-1, "sw")]
     x, y = _tile(x[mine], mesh, tiles), _tile(y[mine], mesh, tiles)
-    loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=(mesh["sh"], mesh["sw"]))
+    loss_fn = jigsaw.nn.DistributedMSELoss(reduce_groups=(mesh["sh"], mesh["sw"]))
     loss_fn(ddp(x), y).backward()
     # Every weight is replicated, so the local norm is the global one.
     return torch.cat([p.grad.reshape(-1) for p in model.parameters()]).norm().item()

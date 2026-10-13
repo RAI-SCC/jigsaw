@@ -111,7 +111,7 @@ def main(steps: int = 100, joint_hook: bool = True) -> list[float]:
     # wrap_ddp: DDP over "dp" only, with the setup checked before the first step.
     ddp = jigsaw.parallel.wrap_ddp(ViT(mesh, device), mesh, joint_hook=joint_hook)
     optimizer = torch.optim.AdamW(ddp.parameters(), lr=1e-3)
-    loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=(mesh["row"], mesh["col"]))
+    loss_fn = jigsaw.nn.DistributedMSELoss(reduce_groups=(mesh["row"], mesh["col"]))
 
     losses = []
     for step in range(steps):

@@ -21,7 +21,7 @@ import torch.nn.functional as F
 
 import jigsaw
 from jigsaw import parallel
-from jigsaw.modules.roll import DistributedRoll
+from jigsaw.nn.roll import DistributedRoll
 from tests.parity import assert_close, no_tf32
 from tests.test_examples import _load, _tile, _TorchRoll
 
@@ -61,7 +61,7 @@ def _batch(step: int, size: tuple[int, int], device: torch.device):
 def _loss(kind: str, out: torch.Tensor, y: torch.Tensor, mesh: dict) -> torch.Tensor:
     tiles = (mesh["sh"], mesh["sw"])
     if kind == "distributed_mse":
-        return jigsaw.loss.DistributedMSELoss(reduce_groups=tiles)(out, y)
+        return jigsaw.nn.DistributedMSELoss(reduce_groups=tiles)(out, y)
     local = F.mse_loss(out, y)
     if kind == "local_mse_scaled":
         return local / (tiles[0].size() * tiles[1].size())
