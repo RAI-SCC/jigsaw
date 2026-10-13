@@ -1,5 +1,7 @@
 """Distributed attention."""
 
+from jigsaw._core.public import set_module as _set_module
+
 from ._attention import Attention, DistributedAttention
 from ._config import (
     AttnBackend,
@@ -27,3 +29,5 @@ __all__ = [
     "HybridTopology",
     "get_hybrid_topology",
 ]
+
+_set_module(globals(), __all__)

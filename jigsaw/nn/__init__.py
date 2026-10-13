@@ -5,6 +5,8 @@ functional forms from :mod:`jigsaw.nn.functional`. Configuration classes and
 enums stay in their subpackage (``jigsaw.nn.attention.RingAttentionConfig``).
 """
 
+from jigsaw._core.public import set_module as _set_module
+
 from . import (
     activation,
     attention,
@@ -93,3 +95,5 @@ __all__ = [
     "permute",
     "roll",
 ]
+
+_set_module(globals(), __all__)

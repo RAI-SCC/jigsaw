@@ -1,5 +1,7 @@
 """Functional forms of the jigsaw layers, the counterpart of :mod:`torch.nn.functional`."""
 
+from jigsaw._core.public import set_module as _set_module
+
 from .activation import distributed_argmax, distributed_log_softmax
 from .attention._functional import hierarchical_ulysses_attention, ulysses_attention
 from .loss import (
@@ -29,3 +31,5 @@ __all__ = [
     "redundant_all_reduce",
     "distributed_permute",
 ]
+
+_set_module(globals(), __all__)
