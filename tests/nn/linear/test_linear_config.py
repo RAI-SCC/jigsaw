@@ -3,9 +3,9 @@
 import pytest
 import torch
 
-import jigsaw.nn.linear.distributed_matmul as dist_mm
-import jigsaw.nn.linear.distributed_matmul_p2p as dist_mm_p2p
-from jigsaw.nn.linear.config import LinearConfig
+import jigsaw.nn.linear._distributed_matmul as dist_mm
+import jigsaw.nn.linear._distributed_matmul_p2p as dist_mm_p2p
+from jigsaw.nn.linear._config import LinearConfig
 
 CPU, CUDA = torch.device("cpu"), torch.device("cuda")
 WAYS = {2: "twoway", 4: "fourway", 8: "eightway"}

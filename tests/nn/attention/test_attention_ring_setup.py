@@ -14,7 +14,7 @@ import torch
 
 import jigsaw.nn.attention as attention
 from jigsaw.gather import gather_1d_results
-from jigsaw.nn.attention import config as cfg
+from jigsaw.nn.attention import _config as cfg
 from tests.parity import assert_close
 
 DIM, HEADS, BATCH, N_LOCAL = 16, 4, 2, 6

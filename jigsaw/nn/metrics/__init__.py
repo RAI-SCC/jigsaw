@@ -1,6 +1,6 @@
 """Distributed evaluation metrics."""
 
-from .segmentation import (
+from ._segmentation import (
     DistributedSegmentationMetrics,
     confusion_to_metrics,
     distributed_confusion_matrix,

@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from jigsaw.gather import gather_results
-from jigsaw.nn.linear.linear import (
+from jigsaw.nn.linear._linear import (
     DistributedMatMulXTW,
     DistributedMatMulXW,
     DistributedMatMulXWT,

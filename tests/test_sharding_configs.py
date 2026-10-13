@@ -25,7 +25,7 @@ import jigsaw.convert as convert
 from jigsaw.gather import gather_1d_results
 from jigsaw.nn import normalization as norm
 from jigsaw.nn import roll
-from jigsaw.nn.linear.linear import _SUPPORTED_XWT_LAYOUTS
+from jigsaw.nn.linear._linear import _SUPPORTED_XWT_LAYOUTS
 from tests.parity import all_ranks_ok, assert_close
 
 pytestmark = [pytest.mark.dist_required]

@@ -7,7 +7,7 @@ import jigsaw.convert as convert
 from jigsaw.gather import gather_1d_results, gather_results
 from jigsaw.nn.activation import DistributedSoftmax
 from jigsaw.nn.attention import Attention, DistributedAttention
-from jigsaw.nn.attention.attention import attn_core_dtype
+from jigsaw.nn.attention._attention import attn_core_dtype
 from jigsaw.nn.linear import (
     DistributedLinear,
     DistributedMatMulXTW,

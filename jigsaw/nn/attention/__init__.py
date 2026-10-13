@@ -1,7 +1,7 @@
 """Distributed attention."""
 
-from .attention import Attention, DistributedAttention
-from .config import (
+from ._attention import Attention, DistributedAttention
+from ._config import (
     AttnBackend,
     Offload,
     RingAttentionConfig,
@@ -11,6 +11,7 @@ from .config import (
     SendForward,
     SendOp,
 )
+from ._functional import HybridTopology, get_hybrid_topology
 
 __all__ = [
     "Attention",
@@ -23,4 +24,6 @@ __all__ = [
     "SaveScope",
     "SendBackward",
     "Offload",
+    "HybridTopology",
+    "get_hybrid_topology",
 ]

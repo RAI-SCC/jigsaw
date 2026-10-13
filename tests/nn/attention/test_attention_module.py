@@ -21,9 +21,9 @@ import torch.distributed as dist
 
 import jigsaw.nn.attention as attention
 from jigsaw.gather import gather_1d_results
-from jigsaw.nn.attention import config as cfg
-from jigsaw.nn.attention.attention import attn_core_dtype
-from jigsaw.nn.attention.functional.ring import _RingAttention
+from jigsaw.nn.attention import _config as cfg
+from jigsaw.nn.attention._attention import attn_core_dtype
+from jigsaw.nn.attention._functional.ring import _RingAttention
 from tests.parity import all_ranks_ok, assert_close, forced_sdpa_backend
 
 DIM, HEADS, BATCH = 64, 4, 2
@@ -212,7 +212,7 @@ class TestDistributedAttentionPaths:
         ``test_te_attn_forward_backward_matches_sdpa`` uses for TE.
         """
         if attn_backend == "te" and variant is not None:
-            from jigsaw.nn.attention.functional.cores.te import cudnn, flash
+            from jigsaw.nn.attention._functional.cores.te import cudnn, flash
 
             available = (
                 cudnn.CUDNN_CORE_AVAILABLE
@@ -437,7 +437,7 @@ class TestDistributedAttentionPaths:
 
 class TestSingleProcessHelpers:
     def test_te_backend_falls_back_to_sdpa_with_warning(self, monkeypatch) -> None:
-        from jigsaw.nn.attention import attention as attn_mod
+        from jigsaw.nn.attention import _attention as attn_mod
 
         monkeypatch.setattr(attn_mod, "JIGSAW_TE_AVAILABLE", False)
         resolve = attn_mod.DistributedAttention._resolve_backend
@@ -483,7 +483,7 @@ class TestSingleProcessHelpers:
         self, device: torch.device, dtype: torch.dtype
     ) -> None:
         """The ring's flash core runs in the dtype it is given, bf16 included."""
-        from jigsaw.nn.attention.functional.cores import sdpa
+        from jigsaw.nn.attention._functional.cores import sdpa
 
         q, k, v = (torch.randn(1, 2, 16, 8, device=device, dtype=dtype) for _ in "qkv")
         out, lse, _ = sdpa.forward(q, k, v, scale=8**-0.5, dropout_p=0.0)

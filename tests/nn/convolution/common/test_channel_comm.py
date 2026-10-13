@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`jigsaw.nn.convolution.common.channel_comm`.
+"""Unit tests for :mod:`jigsaw.nn.convolution._common.channel_comm`.
 
 The pure helpers -- ``resolve_channel_comm`` (``"auto"`` resolution + name
 validation) and ``_in_channel_block`` (the weight input-channel slicer) -- need
@@ -13,7 +13,7 @@ import torch
 import torch.distributed as dist
 
 from jigsaw._core.comm import comm_1d_alltoall, comm_1d_p2p
-from jigsaw.nn.convolution.common.channel_comm import (
+from jigsaw.nn.convolution._common.channel_comm import (
     CHANNEL_COMMS,
     _in_channel_block,
     _resolve_channel_hop,
@@ -21,8 +21,8 @@ from jigsaw.nn.convolution.common.channel_comm import (
     resolve_channel_comm,
     resolve_conv_groups,
 )
-from jigsaw.nn.convolution.common.halo import exchange_along_axis
-from jigsaw.nn.convolution.common.spatial_split import _reduce_scatter_channels
+from jigsaw.nn.convolution._common.halo import exchange_along_axis
+from jigsaw.nn.convolution._common.spatial_split import _reduce_scatter_channels
 from tests.parity import assert_close
 
 

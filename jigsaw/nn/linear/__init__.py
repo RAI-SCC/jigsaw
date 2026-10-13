@@ -1,7 +1,7 @@
 """Distributed linear layers."""
 
-from .config import LinearConfig
-from .linear import (
+from ._config import LinearConfig
+from ._linear import (
     DistributedLinear,
     DistributedMatMulXTW,
     DistributedMatMulXW,

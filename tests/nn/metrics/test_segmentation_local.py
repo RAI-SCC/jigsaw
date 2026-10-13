@@ -9,7 +9,7 @@ sequence of groups is expected, and the trivial ``nn.Module`` surface of the acc
 import torch
 import torch.distributed as dist
 
-from jigsaw.nn.metrics import segmentation as seg
+from jigsaw.nn.metrics import _segmentation as seg
 
 NUM_CLASSES = 4
 

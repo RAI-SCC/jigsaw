@@ -2,7 +2,7 @@
 
 Running jigsaw in a container is **optional**. It provides a matching
 CUDA/NCCL/cuDNN stack and a working
-[TransformerEngine](../jigsaw/nn/attention/attention.py), which unlocks the
+[TransformerEngine](../jigsaw/nn/attention/_attention.py), which unlocks the
 `te` attention backend (`attn_backend="te"` on `DistributedAttention`, or
 `--attn-backend te` in scripts that expose it). Outside a container that choice
 warns and falls back to `sdpa`. `ring` attention is a separate switch and works

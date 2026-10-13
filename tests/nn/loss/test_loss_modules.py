@@ -11,8 +11,8 @@ import torch.nn.functional as F
 
 import jigsaw.nn.loss as jloss
 from jigsaw.nn.activation import distributed_argmax, distributed_log_softmax
-from jigsaw.nn.loss import classification as lossc
-from jigsaw.nn.loss.common import (
+from jigsaw.nn.loss import _classification as lossc
+from jigsaw.nn.loss._common import (
     reduce_loss,
     reduce_scalar_loss,
     redundant_all_reduce,

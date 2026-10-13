@@ -2,7 +2,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from jigsaw.nn.activation import activation as act
+from jigsaw.nn.activation import _activation as act
 from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]

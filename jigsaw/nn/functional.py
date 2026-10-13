@@ -1,7 +1,7 @@
 """Functional forms of the jigsaw layers, the counterpart of :mod:`torch.nn.functional`."""
 
 from .activation import distributed_argmax, distributed_log_softmax
-from .attention.functional import hierarchical_ulysses_attention, ulysses_attention
+from .attention._functional import hierarchical_ulysses_attention, ulysses_attention
 from .loss import (
     distributed_binary_cross_entropy,
     distributed_binary_cross_entropy_with_logits,

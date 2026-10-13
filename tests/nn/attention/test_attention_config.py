@@ -9,8 +9,8 @@ import torch
 import torch.distributed as dist
 
 import jigsaw._core.comm as comm
-from jigsaw.nn.attention import config as cfg
-from jigsaw.nn.attention.config import (
+from jigsaw.nn.attention import _config as cfg
+from jigsaw.nn.attention._config import (
     AttnBackend,
     Offload,
     RingAttentionConfig,
@@ -19,8 +19,8 @@ from jigsaw.nn.attention.config import (
     SendForward,
     SendOp,
 )
-from jigsaw.nn.attention.functional.cores import math as math_core
-from jigsaw.nn.attention.functional.cores import sdpa as sdpa_core
+from jigsaw.nn.attention._functional.cores import math as math_core
+from jigsaw.nn.attention._functional.cores import sdpa as sdpa_core
 
 CPU = torch.device("cpu")
 
@@ -109,8 +109,8 @@ class TestCoreSelection:
             cfg._select_attn_core_backward_fn(meta, AttnBackend.SDPA)
 
     def test_te_backend_dispatches_to_te_core_when_available(self, monkeypatch):
-        from jigsaw.nn.attention.functional.cores import te as te_core
-        from jigsaw.nn.attention.functional.cores.te import cudnn
+        from jigsaw.nn.attention._functional.cores import te as te_core
+        from jigsaw.nn.attention._functional.cores.te import cudnn
 
         monkeypatch.setattr(te_core, "TE_CORE_AVAILABLE", True)
         # ``select_core`` resolves non-CUDA devices to ``cudnn`` (see its docstring).
@@ -118,7 +118,7 @@ class TestCoreSelection:
         assert cfg._select_attn_core_backward_fn(CPU, AttnBackend.TE) is cudnn.backward
 
     def test_te_backend_raises_without_transformer_engine(self, monkeypatch):
-        from jigsaw.nn.attention.functional.cores import te as te_core
+        from jigsaw.nn.attention._functional.cores import te as te_core
 
         monkeypatch.setattr(te_core, "TE_CORE_AVAILABLE", False)
         with pytest.raises(RuntimeError, match="transformer_engine"):

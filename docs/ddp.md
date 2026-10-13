@@ -213,7 +213,7 @@ term reads the unsynced ones.
 
 The replica sync sums over the shards, and DDP averages over `dp`. So the loss each rank
 backpropagates must be its replica's mean loss *as seen from its shard*: either a loss that
-reduces over the shards with an identity backward (`jigsaw.nn.loss.regression.loss.DistributedMSELoss`), or the local mean
+reduces over the shards with an identity backward (`jigsaw.nn.DistributedMSELoss`), or the local mean
 divided by the number of shards. `tests/test_ddp_serial.py` pins this down against serial
 training.
 

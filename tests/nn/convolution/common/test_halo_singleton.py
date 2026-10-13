@@ -17,8 +17,8 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from jigsaw.nn.convolution.conv.halo import halo_gather, halo_scatter_add
-from jigsaw.nn.convolution.conv_transpose.halo import (
+from jigsaw.nn.convolution._conv.halo import halo_gather, halo_scatter_add
+from jigsaw.nn.convolution._conv_transpose.halo import (
     transpose_halo_expand,
     transpose_halo_reduce,
 )

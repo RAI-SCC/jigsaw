@@ -44,7 +44,7 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.nn.attention as attention
-from jigsaw.nn.attention import config as cfg
+from jigsaw.nn.attention import _config as cfg
 
 DIM, HEADS = 32, 4
 
