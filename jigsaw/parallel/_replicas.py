@@ -22,7 +22,7 @@ def _as_groups(
 
 
 def mark_replicated(
-    param: torch.Tensor,
+    param: torch.nn.Parameter,
     groups: "dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]]",
     extend: bool = False,
 ) -> None:
@@ -34,7 +34,7 @@ def mark_replicated(
 
     Parameters
     ----------
-    param : torch.Tensor
+    param : torch.nn.Parameter
         Parameter to mark.
     groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None]
         Process group(s) the parameter is replicated over.
@@ -89,7 +89,7 @@ def broadcast_replicas(module: torch.nn.Module, src: int = 0) -> None:
     """
     # Bucket by replica-group tuple; parameters() order is the same on every
     # rank, so all ranks issue the broadcasts in the same order.
-    buckets: dict[Groups, list[torch.Tensor]] = {}
+    buckets: dict[Groups, list[torch.nn.Parameter]] = {}
     for p in module.parameters():
         if replica_groups(p):
             buckets.setdefault(replica_groups(p), []).append(p)
@@ -100,27 +100,27 @@ def broadcast_replicas(module: torch.nn.Module, src: int = 0) -> None:
 
 
 def _broadcast_coalesced(
-    tensors: list[torch.Tensor], group: dist.ProcessGroup, src: int
+    params: list[torch.nn.Parameter], group: dist.ProcessGroup, src: int
 ) -> None:
-    """Broadcast ``tensors`` in place from group rank ``src``, one call per dtype."""
-    # A flat buffer needs a single dtype, so split the tensors by dtype first.
-    by_dtype: dict[torch.dtype, list[torch.Tensor]] = {}
-    for t in tensors:
-        by_dtype.setdefault(t.dtype, []).append(t)
-    for ts in by_dtype.values():
+    """Broadcast ``params`` in place from group rank ``src``, one call per dtype."""
+    # A flat buffer needs a single dtype, so split the parameters by dtype first.
+    by_dtype: dict[torch.dtype, list[torch.nn.Parameter]] = {}
+    for p in params:
+        by_dtype.setdefault(p.dtype, []).append(p)
+    for ps in by_dtype.values():
         # Pack into one contiguous buffer (a copy) so that each dtype needs a
-        # single collective instead of one per tensor.
-        flat = torch.cat([t.detach().reshape(-1) for t in ts])
+        # single collective instead of one per parameter.
+        flat = torch.cat([p.detach().reshape(-1) for p in ps])
         # On ``src`` the buffer is sent; everywhere else it is overwritten.
         dist.broadcast(flat, group_src=src, group=group)
-        # Unpack: copy each slice back into its tensor. ``detach`` lets this
+        # Unpack: copy each slice back into its parameter. ``detach`` lets this
         # write into leaf parameters that require grad.
-        for t, chunk in zip(ts, flat.split([t.numel() for t in ts])):
-            t.detach().copy_(chunk.view_as(t))
+        for p, chunk in zip(ps, flat.split([p.numel() for p in ps])):
+            p.detach().copy_(chunk.view_as(p))
 
 
 def replica_divergence(
-    params: Sequence[tuple[torch.Tensor, Sequence[dist.ProcessGroup]]],
+    params: Sequence[tuple[torch.nn.Parameter, Sequence[dist.ProcessGroup]]],
 ) -> torch.Tensor:
     """Return ``max|p - p_0|`` per parameter, over each of its groups.
 
@@ -129,7 +129,7 @@ def replica_divergence(
 
     Parameters
     ----------
-    params : Sequence[tuple[torch.Tensor, Sequence[dist.ProcessGroup]]]
+    params : Sequence[tuple[torch.nn.Parameter, Sequence[dist.ProcessGroup]]]
         Parameters, each with the groups it should be identical over.
 
     Returns

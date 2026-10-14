@@ -1,7 +1,7 @@
 """DDP comm hook that averages replicated gradients over their joint groups."""
 
 from collections.abc import Callable, Sequence
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import torch
 import torch.distributed as dist
@@ -101,7 +101,7 @@ class JointCommHookState:
                 setattr(p, _JOINT_PARAM, self)
                 setattr(p, _JOINT_PARAM_GROUP, self._of[id(p)])
 
-    def reduces(self, param: torch.Tensor) -> bool:
+    def reduces(self, param: torch.nn.Parameter) -> bool:
         """Return whether DDP's buckets, hence the hook, reduce ``param``."""
         return id(param) in self._of
 
@@ -109,7 +109,7 @@ class JointCommHookState:
         """Return ``|joint group| / |dp|`` for replica groups ``groups``."""
         return self._factor[groups]
 
-    def group_of(self, param: torch.Tensor) -> dist.ProcessGroup:
+    def group_of(self, param: torch.nn.Parameter) -> dist.ProcessGroup:
         """Return the group the hook averages ``param``'s gradient over."""
         return self._of[id(param)]
 
@@ -173,7 +173,7 @@ def joint_comm_hook(
     ----------
     state : JointCommHookState
         Built for the DDP this hook is registered on.
-    bucket : dist.GradBucket | tuple[torch.Tensor, torch.Tensor]
+    bucket : dist.GradBucket | tuple[torch.Tensor, torch.nn.Parameter]
         Bucket of flattened gradients, or ``(grad, param)``.
 
     Returns
@@ -181,7 +181,7 @@ def joint_comm_hook(
     torch.futures.Future[torch.Tensor]
         Resolves to the reduced bucket buffer; ``None`` for ``(grad, param)``.
     """
-    if isinstance(bucket, tuple):
+    if isinstance(bucket, tuple): # if under torch.compile
         _reduce_param_grad(*bucket)
         return None  # type: ignore[return-value]
     buf = bucket.buffer()
@@ -189,7 +189,8 @@ def joint_comm_hook(
     # joint group into (group, start, end) runs.
     runs: list[tuple[dist.ProcessGroup, int, int]] = []
     off = 0
-    for p in bucket.parameters():
+    # Typed as tensors, but these are the module's own parameter objects.
+    for p in cast(list[torch.nn.Parameter], bucket.parameters()):
         g, n = state.group_of(p), p.numel()
         if runs and runs[-1][0] is g:
             runs[-1] = (g, runs[-1][1], off + n)
@@ -219,8 +220,12 @@ def joint_comm_hook(
     return last.then(join)
 
 
-def _reduce_param_grad(grad: torch.Tensor, param: torch.Tensor) -> None:
-    """Average ``grad`` over ``param``'s joint group in place (Python reducer)."""
+def _reduce_param_grad(grad: torch.Tensor, param: torch.nn.Parameter) -> None:
+    """Python reducer grad averaging.
+    
+    Average ``grad`` over ``param``'s joint group in place (Python reducer).
+    Only called when DDP uses the PythonReducer, i.e., under compiled autograd.
+    """
     group = getattr(param, _JOINT_PARAM_GROUP)
     if replica_groups(param):
         # Inductor's DDP fusion merges every ``div -> all_reduce -> copy_`` of
@@ -229,7 +234,7 @@ def _reduce_param_grad(grad: torch.Tensor, param: torch.Tensor) -> None:
         grad_in = grad * (1.0 / group.size())
     else:
         # Over DDP's own group, as DDP does it, so these still fuse.
-        grad_in = grad / group.size()
+        grad_in = grad / group.size() # allows for fused all-reduce
     grad.copy_(fcol.all_reduce(grad_in, "sum", group))
 
 
@@ -285,7 +290,7 @@ def active_joint_state() -> Optional[JointCommHookState]:
 
 
 def joint_state_of(
-    param: torch.Tensor, active: Optional[JointCommHookState]
+    param: torch.nn.Parameter, active: Optional[JointCommHookState]
 ) -> Optional[JointCommHookState]:
     """Return the joint-hook state whose hook reduces ``param``, if any."""
     if active is not None:

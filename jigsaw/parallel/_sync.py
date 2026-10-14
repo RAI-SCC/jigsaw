@@ -1,7 +1,7 @@
 """In-graph gradient synchronization of replicated parameters."""
 
 import os
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import torch
 import torch.distributed as dist
@@ -111,12 +111,17 @@ def sync_grad(*tensors: Optional[torch.Tensor]) -> tuple[Optional[torch.Tensor],
     joint = active_joint_state()
     # (groups, dtype, joint state if only scaled) -> indices
     buckets: "dict[tuple[Groups, torch.dtype, Optional[JointCommHookState]], list[int]]"
+    # Buckets will hold the parameters that need sync., that also share an autograd node.
+    # Examples include weight and bias of Conv layers and layer norms
+    # Only bias term over a distributed linear
+    # 
     buckets = {}
     for i, t in enumerate(tensors):
         groups = replica_groups(t)
         if groups and t is not None and t.requires_grad:
             # Parameters the joint hook reduces only need scaling here.
-            state = joint_state_of(t, joint)
+            # Only parameters carry a mark.
+            state = joint_state_of(cast(torch.nn.Parameter, t), joint)
             buckets.setdefault((groups, t.dtype, state), []).append(i)
     for (groups, _, state), idx in buckets.items():
         ts = (tensors[i] for i in idx)
