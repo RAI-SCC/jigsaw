@@ -81,18 +81,14 @@ class DistributedLayerNorm(torch.nn.Module):
                 )
             else:
                 self.register_parameter("bias", None)
-            self._mark_replicated()
             self.layernorm = functional._LayerNorm.apply
         else:
             self.register_parameter("weight", None)
             self.register_parameter("bias", None)
             self.layernorm = functional._LayerNormNoAffine.apply
 
-    def _mark_replicated(self) -> None:
-        """Mark the weight and bias replicated over the row group."""
-        for p in (self.weight, self.bias):
-            if p is not None:
-                parallel.mark_replicated(p, self.spatial_group)
+        for p in self.parameters():
+            parallel.mark_replicated(p, self.spatial_group)
 
     def get_parameter_count(self) -> int:
         """Return the number of local parameters."""
@@ -303,9 +299,10 @@ class DistributedLayerNorm(torch.nn.Module):
         self.spatial_group = to_process_mesh[pm_row_key]
         self.channel_group = to_col
         self.local_rank = to_process_mesh.get("model", to_col).rank()
-        if self.elementwise_affine:
-            # Fresh Parameters: the __init__ mark is gone; mark on the new rows.
-            self._mark_replicated()
+        # The re-sliced parameters are fresh Parameters, so the __init__ marks
+        # are gone. Re-mark them over the new spatial group.
+        for p in self.parameters():
+            parallel.mark_replicated(p, self.spatial_group)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply the layer.
