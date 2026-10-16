@@ -75,10 +75,18 @@ warn_unused_ignores=false
 follow_imports = "normal"
 follow_untyped_imports = true
 
-# numpy is only reached through torch. Its stubs use syntax newer than the
-# `python_version` checked against above, which stops mypy before it gets to jigsaw.
+# numpy (and scipy, when installed) are only reached through torch. Their stubs use
+# syntax newer than the `python_version` checked against above, which stops mypy
+# before it gets to jigsaw.
 [[tool.mypy.overrides]]
-module = ["numpy", "numpy.*"]
+module = ["numpy", "numpy.*", "scipy", "scipy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
+# CI installs CPU torch (no triton), so triton resolves to Any there. Skip it locally
+# too: mypy can't type `kernel[grid](..., num_warps=...)` launches or constexpr params.
+[[tool.mypy.overrides]]
+module = ["triton", "triton.*"]
 follow_imports = "skip"
 follow_imports_for_stubs = true
 
