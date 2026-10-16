@@ -48,6 +48,10 @@ def mark_replicated(
     RuntimeError
         If ``param`` is already marked and ``extend`` is false; a second SUM
         over the same group would scale its gradient by the group size.
+    ValueError
+        If a group shares a rank other than the caller with another group of
+        the mark. Only the caller's own groups are compared; the check does not
+        prove the groups form a mesh across all ranks.
     """
     old = replica_groups(param)
     if old and not extend:
@@ -58,12 +62,26 @@ def mark_replicated(
     # Deduplicate by rank set, not group identity: two group objects over the
     # same ranks would still sum the gradient twice.
     seen = {tuple(dist.get_process_group_ranks(g)) for g in old}
+    # Ranks already covered by the mark. Every group holds the caller, so a new
+    # group meeting this union only in the caller meets each marked group only
+    # there; any larger overlap would sum some gradients twice.
+    me = dist.get_rank()
+    covered = {r for ranks in seen for r in ranks}
     new = list(old)
     for g in _as_groups(groups):
         ranks = tuple(dist.get_process_group_ranks(g))
-        if ranks not in seen:
-            seen.add(ranks)
-            new.append(g)
+        if ranks in seen:
+            continue
+        overlap = (set(ranks) & covered) - {me}
+        if overlap:
+            raise ValueError(
+                f"group {list(ranks)} overlaps a replica group of this parameter "
+                f"in ranks {sorted(overlap)} besides rank {me}; replica groups "
+                "must meet only in the calling rank, e.g. orthogonal mesh axes."
+            )
+        seen.add(ranks)
+        covered.update(ranks)
+        new.append(g)
     if new:
         setattr(param, _ATTR, tuple(new))
 

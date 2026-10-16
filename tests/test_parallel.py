@@ -93,6 +93,17 @@ class TestMark:
         _loss(q).backward()
         assert torch.equal(p.grad.cpu(), BASE * _world_sum())
 
+    @pytest.mark.dist(4)
+    def test_overlapping_groups_raise(self, device):
+        mesh = _mesh_2x2(device)
+        p = _param(device)
+        parallel.mark_replicated(p, mesh["a"])
+        with pytest.raises(ValueError, match="overlaps a replica group"):
+            parallel.mark_replicated(p, dist.group.WORLD, extend=True)
+        assert parallel.replica_groups(p) == (mesh["a"],)
+        with pytest.raises(ValueError, match="overlaps a replica group"):
+            parallel.mark_replicated(_param(device), [mesh["a"], dist.group.WORLD])
+
     def test_extend_marks_an_unmarked_parameter(self, device):
         if dist.get_world_size() == 1:
             pytest.skip("a size-1 group is never marked")
