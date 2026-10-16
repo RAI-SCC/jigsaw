@@ -168,6 +168,15 @@ TUTORIALS = {
 }
 
 
+def _assert_same_init(model: nn.Module, ref: nn.Module, device: torch.device) -> None:
+    """``_seeded`` builds are deterministic: both copies start from the same weights."""
+    same = all(
+        torch.equal(p, q)
+        for p, q in zip(model.parameters(), ref.parameters(), strict=True)
+    )
+    _agree(same, device, "two seeded builds start from different weights")
+
+
 def _wrap(model: nn.Module, how: str, mesh: dict) -> nn.Module:
     if how == "ddp":  # domain_parallel.py: checked in the first forward
         return DistributedDataParallel(model, process_group=mesh["dp"])
@@ -219,9 +228,7 @@ def test_matches_data_serial_training(
     mesh = _mesh(t.axes, t.model_axes, device)
     dp = mesh["dp"]
     model, ref = t.build(module, mesh, device), t.build(module, mesh, device)
-    with torch.no_grad():
-        for p, q in zip(ref.parameters(), model.parameters(), strict=True):
-            p.copy_(q)
+    _assert_same_init(model, ref, device)
     init = [p.detach().clone() for p in model.parameters()]
     wrapped = _wrap(model, how, mesh)
     opt = torch.optim.SGD(wrapped.parameters(), lr=LR, momentum=0.9)
@@ -277,9 +284,7 @@ def test_ddp_tutorial_step_matches_full_batch(
     share = module.GLOBAL_BATCH // mesh["dp"].size()
     assert share // module.MICRO_BATCH == 2, "the test wants two microbatches"
     model, ref = t.build(module, mesh, device), t.build(module, mesh, device)
-    with torch.no_grad():
-        for p, q in zip(ref.parameters(), model.parameters(), strict=True):
-            p.copy_(q)
+    _assert_same_init(model, ref, device)
     init = [p.detach().clone() for p in model.parameters()]
     ddp = parallel.wrap_ddp(model, mesh, joint_hook=joint_hook)
     opt = torch.optim.SGD(ddp.parameters(), lr=LR, momentum=0.9)
