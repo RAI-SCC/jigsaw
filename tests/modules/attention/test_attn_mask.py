@@ -7,24 +7,17 @@ together attend to each other. That needs an arbitrary per-window mask, broadcas
 to ``q``'s ``(..., heads, seq, seq)`` shape -- not a simple per-sample valid-length
 ("padding") cutoff.
 
-Checked against the installed ``transformer_engine`` (2.14.0) before writing this:
-its fused kernels (what :mod:`.functional.cores.te` calls directly) only implement
-``attn_mask_type`` in ``{no_mask, causal, padding, ...}`` -- no tensor-valued mask, no
-``"arbitrary"``. TE's own ``DotProductAttention`` *does* accept an arbitrary mask, but
-its source (``dot_product_attention/utils.py``) explicitly disables both FlashAttention
-and FusedAttention for it and routes to its *unfused* backend instead.
+``transformer_engine``'s fused kernels (what :mod:`.functional.cores.te` calls
+directly) only implement ``attn_mask_type`` in ``{no_mask, causal, padding, ...}`` --
+no tensor-valued mask, no ``"arbitrary"``. TE's own ``DotProductAttention`` *does*
+accept an arbitrary mask, but routes it to its *unfused* backend.
 
-That TE finding does *not* mean a masked call has no fused option at all, though --
-only that TE's direct kernel calls aren't it. Torch's own ``scaled_dot_product_attention``
-has two *other* backends beyond flash/math that do run an arbitrary mask fused: the
-memory-efficient (xFormers-derived) and cuDNN backends. Confirmed on an allocation at
-Swin-window scale (``N=2400``, a 40x60 window, bf16): ~3-4x faster and ~25x lighter on
-peak memory than the unfused math kernel for the exact same masked computation, and
-numerically consistent with it (not merely NaN-free -- checked q/k/v gradients too, not
-just the output). So:
+Torch's own ``scaled_dot_product_attention`` does run an arbitrary mask fused, on its
+memory-efficient (xFormers-derived) and cuDNN backends, which avoid materialising the
+``(batch, heads, N, N)`` score matrix the unfused math kernel needs. So:
 
 * ``attn_backend`` in ``{"sdpa", "math"}`` (the non-ring, non-Ulysses core): genuinely,
-  and at Swin-window scale *efficiently*, supported -- :meth:`Attention._attn_core`/
+  and efficiently, supported -- :meth:`Attention._attn_core`/
   :meth:`DistributedAttention._attn_core` allow the memory-efficient and cuDNN ``sdpa``
   backends precisely so a masked call lands on one of those instead of falling all the
   way to unfused math. ``test_masked_call_does_not_regress_to_unfused_math`` below
@@ -152,7 +145,7 @@ class TestAttentionMask:
         out_masked = model(x, attn_mask=mask)
         out_ref = torch.cat([model(x[:, :n0]), model(x[:, n0:])], dim=1)
 
-        # On CUDA the core runs in bf16 (`attn_core_dtype`): ~1e-3 roundoff.
+        # On CUDA the core runs in bf16 (`attn_core_dtype`).
         tol = 5e-3 if device.type == "cuda" else 1e-5
         torch.testing.assert_close(out_masked, out_ref, rtol=tol, atol=tol)
 
@@ -220,7 +213,7 @@ class TestAttentionMask:
         grad_ref = torch.cat([x_a.grad, x_b.grad], dim=1)
 
         assert x_masked.grad is not None
-        # On CUDA the core runs in bf16 (`attn_core_dtype`): ~1e-3 roundoff.
+        # On CUDA the core runs in bf16 (`attn_core_dtype`).
         tol = 5e-3 if device.type == "cuda" else 1e-4
         torch.testing.assert_close(x_masked.grad, grad_ref, rtol=tol, atol=tol)
 
@@ -308,7 +301,7 @@ class TestDistributedAttentionMask:
         out_masked = model(x, attn_mask=mask)
         out_ref = torch.cat([model(x[:, :n0]), model(x[:, n0:])], dim=1)
 
-        # On CUDA the core runs in bf16 (`attn_core_dtype`): ~1e-3 roundoff.
+        # On CUDA the core runs in bf16 (`attn_core_dtype`).
         tol = 5e-3 if device.type == "cuda" else 1e-5
         torch.testing.assert_close(out_masked, out_ref, rtol=tol, atol=tol)
 
@@ -395,9 +388,7 @@ class TestMaskedAttentionIsFused:
     Not a timing assertion (too noisy on a shared allocation) -- peak CUDA memory is
     a robust proxy instead: the unfused math kernel materialises the full
     ``(batch, heads, N, N)`` score/probability matrices, the memory-efficient/cuDNN
-    ``sdpa`` backends ``_attn_core`` allows do not (see its docstring in
-    ``attention.py`` for the measured Swin-window-scale numbers this is checking
-    stays true).
+    ``sdpa`` backends ``_attn_core`` allows do not.
     """
 
     def _model(

@@ -258,7 +258,7 @@ class TestDistributedAttentionPaths:
         if variant is not None:
             tol = 2e-2
         else:
-            # On CUDA both run in bf16, the serial module on the flash kernel: ~1e-3 apart.
+            # On CUDA both run in bf16, the serial module on the flash kernel.
             tol = 5e-3 if device.type == "cuda" else 1e-4
         assert_close("output", out, y_ref.detach(), tol, tol, device, mesh["model"])
 
@@ -287,7 +287,7 @@ class TestDistributedAttentionPaths:
         out = gather_1d_results(
             model(_channel_shard(x_global, mesh)), mesh, dim=-1, pm_key="col"
         )
-        # On CUDA both run in bf16, the serial module on the flash kernel: ~1e-3 apart.
+        # On CUDA both run in bf16, the serial module on the flash kernel.
         tol = 5e-3 if device.type == "cuda" else 1e-4
         assert_close("output", out, y_ref.detach(), tol, tol, device, mesh["model"])
 
@@ -352,10 +352,8 @@ class TestDistributedAttentionPaths:
         # ``k_norm.bias`` is a structurally dead parameter: it shifts every key
         # by the same vector, which adds the per-query constant ``q_i . b`` to
         # every logit of row ``i`` and so cancels in the softmax. Its gradient
-        # is identically zero -- 7e-16 in float64, and the output does not move
-        # when the bias is shifted by 10.0 -- so in half precision both sides hold
-        # nothing but rounding noise, which reaches ~5e-2, the tolerance
-        # itself. Comparing the two to each other is therefore a parity check
+        # is identically zero, so in half precision both sides hold nothing but
+        # rounding noise, as large as the tolerance itself. Comparing the two to each other is therefore a parity check
         # with no power *and* one unlucky seed from flaking, and it never
         # tested the replication this method is about (an unsynced gradient
         # would be ~0 too). Assert the invariance it can actually show,
@@ -379,8 +377,7 @@ class TestDistributedAttentionPaths:
             ref = getattr(getattr(serial, norm_name), p_name).grad
             # Summed over every token, so the bf16 rounding grows with the size
             # of the entries -- the same scaling the qkv gradient needs below.
-            # ``tol`` as a flat absolute bound tripped on a ~4.8-magnitude
-            # q_norm.bias gradient whose error was only ~1% of it.
+            # ``tol`` as a flat absolute bound is too tight for large entries.
             atol = tol * max(1.0, float(ref.abs().max()))
             assert_close(
                 f"{norm_name}.{p_name} grad", got, ref, atol, tol, device, group

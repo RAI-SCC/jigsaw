@@ -916,7 +916,7 @@ def test_ring_autograd_function_matches_full_attention(
     )[0]
     out.backward(g_full[:, :, shard].contiguous())
 
-    # The CUDA core runs flash attention in float16 (errors ~1e-3 here); a transposed
+    # The CUDA core runs flash attention in float16; a transposed
     # ``lse`` is off by O(1), so this still catches it.
     tol = 5e-3 if device.type == "cuda" else 1e-4
     for name, got, ref in (
