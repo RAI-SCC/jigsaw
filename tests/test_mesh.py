@@ -69,16 +69,26 @@ class TestValidation:
         with pytest.raises(RuntimeError, match="initialised default process group"):
             jigsaw.make_process_mesh({"a": 1})
 
+    def test_rejects_unsupported_backend(self, monkeypatch):
+        monkeypatch.setattr(dist, "get_backend", lambda group=None: "mpi")
+        with pytest.raises(RuntimeError, match="unsupported process-group backend"):
+            jigsaw.make_process_mesh({"a": -1})
+
     def test_device_type_defaults_to_available_accelerator(self, monkeypatch):
         import torch
 
         from jigsaw import mesh
 
+        monkeypatch.setattr(dist, "get_backend", lambda: "nccl")
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
         assert mesh._resolve_device_type(None) == "cpu"
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         assert mesh._resolve_device_type(None) == "cuda"
         assert mesh._resolve_device_type("cpu") == "cpu"
+        # A Gloo default group gets a CPU mesh even with GPUs present.
+        monkeypatch.setattr(dist, "get_backend", lambda: "gloo")
+        assert mesh._resolve_device_type(None) == "cpu"
+        assert mesh._resolve_device_type("cuda") == "cuda"
 
 
 @pytest.mark.dist(4)

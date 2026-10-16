@@ -1,4 +1,4 @@
-default_install_hook_types: [pre-commit, pre-push]
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
 default_language_version:
   python: python3.12
 repos:
@@ -27,6 +27,14 @@ repos:
         args: [ --fix ]
       # Run the formatter.
       - id: ruff-format
+  # Conventional Commits on the commit message (rules in .commitlintrc.yaml).
+  # pre-commit bootstraps its own node, so no system node is needed.
+  - repo: https://github.com/alessandrojcm/commitlint-pre-commit-hook
+    rev: v9.27.0
+    hooks:
+      - id: commitlint
+        stages: [commit-msg]
+        additional_dependencies: ["@commitlint/config-conventional@21.2.2"]
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:

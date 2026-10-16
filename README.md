@@ -30,6 +30,19 @@ CI runs the CPU suite on 1, 4 and 8 ranks (2 and 6 ranks on a manual
 "full" dispatch). GPU tests, and the 10/12/24-rank layouts, are not run in CI —
 run them on a GPU machine before merging changes that touch the CUDA paths.
 
+#### Supported platforms
+- **Process-group backends:** `nccl` (NVIDIA NCCL, or AMD RCCL — ROCm builds of
+  PyTorch register it under the same name), `gloo` (CPU tensors), or a mix such
+  as `"cpu:gloo,cuda:nccl"`. `make_process_mesh` raises on any other backend
+  (`mpi`, `ucc`, `xccl`, ...).
+- **Devices:** `cuda` (NVIDIA, or AMD via ROCm/HIP) and `cpu`. Other device types
+  raise when a module picks its kernels.
+- **ROCm:** expected to work for all comm paths and the `sdpa`/`math` attention
+  backends, but not covered by the test suite. `attn_backend="te"` uses the
+  `flash_attn` core there (`JIGSAW_TE_CORE=cudnn` forces TE's fused core, untested).
+- `init_cuda()` always initialises `nccl`; on CPU call
+  `dist.init_process_group("gloo")` yourself.
+
 ### Option B: containerized (enables TransformerEngine)
 Running inside an NGC PyTorch container is optional. It gives a matched
 CUDA/NCCL stack and a working `transformer_engine`, which unlocks the `te`

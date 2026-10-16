@@ -13,6 +13,8 @@ from collections.abc import Mapping, Sequence
 import torch
 import torch.distributed as dist
 
+from ._core.comm import check_backend
+
 __all__ = ["ProcessMesh", "make_process_mesh"]
 
 
@@ -45,6 +47,10 @@ class ProcessMesh(dict):
 def _resolve_device_type(device_type: str | None) -> str:
     if device_type is not None:
         return device_type
+    # A Gloo default group communicates host tensors, so its mesh is a CPU mesh
+    # even on a machine with GPUs.
+    if dist.get_backend() == "gloo":
+        return "cpu"
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -110,8 +116,8 @@ def make_process_mesh(
         Ordered mapping of axis name to size, slowest-varying first. At most one
         size may be ``-1``, which is inferred from the world size.
     device_type : str, optional
-        Device type of the mesh. Defaults to ``"cuda"`` if available, else
-        ``"cpu"``.
+        Device type of the mesh. Defaults to ``"cpu"`` if the default process
+        group uses Gloo, else ``"cuda"`` if available, else ``"cpu"``.
     model_parallel_axes : Sequence[str], optional
         Trailing axes that form one model replica. Defaults to all axes.
     model_key : str
@@ -125,13 +131,17 @@ def make_process_mesh(
 
     Notes
     -----
-    Requires an initialized default process group.
+    Requires an initialized default process group on ``nccl`` (NCCL or RCCL),
+    ``gloo``, or a mix such as ``"cpu:gloo,cuda:nccl"``; any other backend
+    raises ``RuntimeError``.
     """
     if not dist.is_initialized():
         raise RuntimeError(
             "make_process_mesh needs an initialised default process group; call "
             "torch.distributed.init_process_group first"
         )
+    # Anything but nccl/gloo would silently take the NCCL comm paths and hang.
+    check_backend()
 
     device = _resolve_device_type(device_type)
     sizes = _resolve_sizes(axes)

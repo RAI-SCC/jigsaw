@@ -137,11 +137,23 @@ class TestTeCoreSelection:
         monkeypatch.setattr(te_cores.cudnn, "CUDNN_CORE_AVAILABLE", True)
         monkeypatch.setattr(te_cores.flash, "FLASH_CORE_AVAILABLE", True)
         monkeypatch.delenv("JIGSAW_TE_CORE", raising=False)
+        monkeypatch.setattr(torch.version, "hip", None)
         monkeypatch.setattr(
             torch.cuda, "get_device_capability", lambda device=None: capability
         )
         chosen = te_cores.select_core(torch.device("cuda"))
         assert chosen is getattr(te_cores, expected)
+
+    def test_rocm_uses_flash_or_raises(self, monkeypatch):
+        """ROCm reports gfx versions as capability, so the Hopper rule is skipped."""
+        monkeypatch.delenv("JIGSAW_TE_CORE", raising=False)
+        monkeypatch.setattr(torch.version, "hip", "6.2")
+        monkeypatch.setattr(te_cores.cudnn, "CUDNN_CORE_AVAILABLE", True)
+        monkeypatch.setattr(te_cores.flash, "FLASH_CORE_AVAILABLE", True)
+        assert te_cores.select_core(torch.device("cuda")) is te_cores.flash
+        monkeypatch.setattr(te_cores.flash, "FLASH_CORE_AVAILABLE", False)
+        with pytest.raises(RuntimeError, match="on ROCm needs flash_attn"):
+            te_cores.select_core(torch.device("cuda"))
 
     def test_falls_back_when_preferred_arm_missing(self, monkeypatch):
         """A container without ``flash_attn`` still runs ``te`` on Ampere."""

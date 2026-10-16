@@ -40,6 +40,39 @@ def all_to_all_async(
 _BACKEND_DEVICE_TYPES = {"nccl": "cuda", "gloo": "cpu"}
 
 
+def check_backend(group: Optional[dist.ProcessGroup] = None) -> set[str]:
+    """Return ``group``'s backend names, raising if jigsaw does not support one.
+
+    ``"nccl"`` covers both NVIDIA NCCL and AMD RCCL (ROCm builds of PyTorch
+    register RCCL under that name).
+
+    Parameters
+    ----------
+    group : dist.ProcessGroup, optional
+        Process group; the default group if ``None``.
+
+    Returns
+    -------
+    set[str]
+        The backend names, e.g. ``{"gloo", "nccl"}`` for ``"cpu:gloo,cuda:nccl"``.
+
+    Raises
+    ------
+    RuntimeError
+        If the group's backend is not one jigsaw supports.
+    """
+    backend = str(dist.get_backend(group))
+    # A plain "nccl" or a per-device list "cpu:gloo,cuda:nccl".
+    names = {entry.rpartition(":")[2] for entry in backend.split(",")}
+    unsupported = names - _BACKEND_DEVICE_TYPES.keys()
+    if unsupported:
+        raise RuntimeError(
+            f"unsupported process-group backend {backend!r}; jigsaw supports "
+            f"{sorted(_BACKEND_DEVICE_TYPES)}"
+        )
+    return names
+
+
 def get_device_of_process_group(
     group: Optional[dist.ProcessGroup] = None,
 ) -> torch.device:
@@ -63,16 +96,7 @@ def get_device_of_process_group(
     RuntimeError
         If the group's backend is not one jigsaw supports.
     """
-    backend = str(dist.get_backend(group))
-    # A plain "nccl" or a per-device list "cpu:gloo,cuda:nccl".
-    names = {entry.rpartition(":")[2] for entry in backend.split(",")}
-    unsupported = names - _BACKEND_DEVICE_TYPES.keys()
-    if unsupported:
-        raise RuntimeError(
-            f"unsupported process-group backend {backend!r}; jigsaw supports "
-            f"{sorted(_BACKEND_DEVICE_TYPES)}"
-        )
-    if "nccl" in names:
+    if "nccl" in check_backend(group):
         return torch.device("cuda", torch.cuda.current_device())
     return torch.device("cpu")
 

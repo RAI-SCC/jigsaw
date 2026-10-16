@@ -253,7 +253,7 @@ def joint_comm_hook(
             f"bucket buffer has {buf.numel()} elements but its parameters {off}"
         )
     # Average each run in place over its group: pre-divide, then SUM.
-    works = []
+    works: list[dist.Work] = []
     for g, a, b in runs:
         seg = buf[a:b]
         seg.div_(g.size())
