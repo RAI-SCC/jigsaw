@@ -1,6 +1,6 @@
 """DDP comm hook that averages replicated gradients over their joint groups."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from typing import Any, Optional, cast
 
 import torch
@@ -16,8 +16,8 @@ _JOINT = "_jigsaw_joint_hook_state"
 # that reduces it and the group it is averaged over
 _JOINT_PARAM = "_jigsaw_joint_state"
 _JOINT_PARAM_GROUP = "_jigsaw_joint_hook_group"
-# (id(WORLD), partition as sorted rank tuples) -> this rank's group in it
-_JOINT_GROUPS: dict[tuple[int, tuple[tuple[int, ...], ...]], dist.ProcessGroup] = {}
+# (id(WORLD), each rank's part's smallest rank as bytes) -> this rank's group
+_JOINT_GROUPS: dict[tuple[int, bytes], dist.ProcessGroup] = {}
 
 
 class JointCommHookState:
@@ -66,27 +66,58 @@ class JointCommHookState:
             if r and r not in keys:
                 keys[r] = len(keys)
 
-        # Each rank only knows the groups it is in; gather everyone's rank
-        # lists so every rank can build the full partition.
-        mine = (
-            dist.get_process_group_ranks(self.dp),
-            [[dist.get_process_group_ranks(g) for g in r] for r in keys],
-        )
-        everyone: list = [None] * dist.get_world_size()
-        dist.all_gather_object(everyone, mine)
-        if len({len(e[1]) for e in everyone}) != 1:
+        # Each rank only knows the groups it is in. Name each group by its
+        # smallest rank and gather the names, so every rank can build the full
+        # partition. Row i of ``names``: rank i's dp group, then the groups of
+        # tuple k in columns 1 + k * width onwards.
+        # n is the number of distinct replica groups.
+        # width is the largest number of replica groups that any one parameter is marked over.
+        device = _device_of(None)
+        n, width = len(keys), max(map(len, keys), default=0)
+        # A MAX all-reduce of (n, -n) gives (max n, -min n); max n == min n
+        # exactly when every rank has the same n. Also agree on the max width.
+        # Ensures every rank has exactly the same unique replica groups.
+        head = torch.tensor([n, -n, width], device=device)
+        dist.all_reduce(head, op=dist.ReduceOp.MAX)
+        n_max, neg_n_min, width = head.tolist()
+        if n_max != -neg_n_min:
             raise RuntimeError(
                 "ranks disagree on the number of distinct replica-group tuples; "
                 "the jigsaw model must be built the same way on every rank"
             )
-
         self._group: dict[Groups, dist.ProcessGroup] = {}
         self._factor: dict[Groups, float] = {}
+        names = torch.empty((0, 0), dtype=torch.int64)
+        if n:
+            # Pad with this rank's own name: it joins nothing.
+            # Necessary if some params (i.e., bias) replicate over more dimensions
+            # than other params (i.e., weight). "weight" replica group will be padded.
+            # mine: 1 slot for DDP group, and the rest for
+            # max number of possible replica ranks
+            mine = torch.full((1 + n * width,), dist.get_rank(), dtype=torch.int64)
+            # Get the min rank of the dp group the rank is in
+            mine[0] = min(dist.get_process_group_ranks(self.dp))
+            # Loop through the unique replica groups (keys) and
+            # get the index (k) and unique replica group (r)
+            for k, r in enumerate(keys):
+                # for index (j) and the replica group (g)
+                # fill "mine" with the smallest rank of the replica group
+                for j, g in enumerate(r):
+                    mine[1 + k * width + j] = min(dist.get_process_group_ranks(g))
+            # Flatten: because all-gather wants a 1-D output.
+            names = torch.empty(
+                dist.get_world_size() * mine.numel(), dtype=torch.int64, device=device
+            )
+            dist.all_gather_into_tensor(names, mine.to(device))
+            names = names.cpu().view(
+                -1, mine.numel()
+            )  # sync point. cheaper to run subsequent ops on cpu than gpu.
+        # Iter over the replica tuple and the index
         for r, k in keys.items():
             # Connect all dp groups and all groups of tuple k across ranks.
-            joint = _joint_group(
-                [e[0] for e in everyone] + [g for e in everyone for g in e[1][k]]
-            )
+            # Unpack the columns that describe tuple k
+            cols = [0, *range(1 + k * width, 1 + (k + 1) * width)]
+            joint = _joint_group(names[:, cols])
             self._group[r] = joint
             # The hook divides by |joint| instead of |dp|; the in-graph scale
             # by this factor turns that average back into AVG_dp(SUM_replica).
@@ -114,43 +145,69 @@ class JointCommHookState:
         return self._of[id(param)]
 
 
-def _joint_group(edges: Sequence[Sequence[int]]) -> dist.ProcessGroup:
-    """Return this rank's group in the partition the rank lists ``edges`` connect.
+def _joint_group(names: torch.Tensor) -> dist.ProcessGroup:
+    """Return this rank's group in the partition that ``names`` connects.
+
+    ``names[i]`` holds, for each group rank ``i`` is in, that group's smallest
+    rank; ranks sharing a group are joined. E.g. dp groups ``[0,2,4,6]``,
+    ``[1,3,5,7]`` and replica groups ``[0,1]``, ``[2,3]``, ... give rows
+    ``[0,0], [1,0], [0,2], [1,2], ...``; ``[0,1]`` links the two dp groups, so
+    all 8 ranks form one part and this returns WORLD.
 
     Collective over the default group the first time a partition is seen. The
-    same ``edges`` on every rank give the same partition, so all ranks agree on
+    same ``names`` on every rank give the same partition, so all ranks agree on
     whether to create it.
     """
-    # Union-find over all ranks: each rank list in ``edges`` joins its members.
-    world = dist.get_world_size()
-    parent = list(range(world))
-
-    def find(a: int) -> int:
-        # Path halving keeps the trees shallow.
-        while parent[a] != a:
-            parent[a] = parent[parent[a]]
-            a = parent[a]
-        return a
-
-    for ranks in edges:
-        for r in ranks[1:]:
-            parent[find(r)] = find(ranks[0])
-    # Connected components, in a canonical (sorted) form usable as a cache key.
-    comps: dict[int, list[int]] = {}
-    for r in range(world):
-        comps.setdefault(find(r), []).append(r)
-    partition = tuple(sorted(tuple(c) for c in comps.values()))
-    if len(partition) == 1:
+    # label: the smallest rank currently known to be connected to rank i
+    # Each sweep gives every member of a group the group's smallest label,
+    # then jumps every label to its own label.
+    world = names.shape[0]
+    label = torch.arange(world)
+    # example round 1:
+    # dp  least[col] = [0,1,2,3,0,1,2,3]
+    # row least[col] = [0,1,0,1,4,5,4,5]
+    # col least[col] = [0,0,2,2,4,4,6,6]
+    # new (min of all with label) = [0,0,0,1,0,1,2,3]
+    while True:
+        new = label.clone()
+        for col in names.T:  # names.T has shape (c, world)
+            # For each round, for each column, find the smallest label per-group.
+            # least: collects the values from each group into one slot
+            least = torch.full_like(label, world).scatter_reduce_(0, col, label, "amin")
+            # least[col]: hands the group's result back to members
+            new = torch.minimum(new, least[col])  # minimum is element-wise comparison
+        # Each rank replaces its label with its label's label,
+        # which skips ahead through another rank to an even smaller connected rank.
+        # This reduces the number of loops that need to occur.
+        new = new[new]
+        if torch.equal(new, label):
+            break
+        label = new
+    if not label.any():
         return dist.group.WORLD  # type: ignore[return-value]
-    # Keyed by WORLD too, so a re-initialized process group does not hit stale
-    # entries.
-    key = (id(dist.group.WORLD), partition)
+    # The labels are canonical, so they serve as the cache key. Keyed by WORLD
+    # too, so a re-initialized process group does not hit stale entries.
+    key = (id(dist.group.WORLD), label.numpy().tobytes())
+
+    # Example: label can be [0, 1, 0, 3, 1, 0, 3, 3], meaning we want [[0, 2, 5], [1, 4], [3, 6, 7]] groups
+    # order sorts the label to see how ranks are in each new process group
     if key not in _JOINT_GROUPS:
+        # Ranks sorted by part, then by rank; split into parts.
+        order = torch.argsort(label, stable=True)
+        sizes = torch.unique_consecutive(label[order], return_counts=True)[1]
+        partition = [p.tolist() for p in order.split(sizes.tolist())]
         # Collective: every rank creates all parts and keeps its own.
-        group, _ = dist.new_subgroups_by_enumeration([list(c) for c in partition])
+        group, _ = dist.new_subgroups_by_enumeration(partition)
         assert isinstance(group, dist.ProcessGroup)  # every rank is in a part
         _JOINT_GROUPS[key] = group
     return _JOINT_GROUPS[key]
+
+
+def _device_of(group: Optional[dist.ProcessGroup]) -> torch.device:
+    """Return the device collectives over ``group`` need their tensors on."""
+    if dist.get_backend(group) == "nccl":
+        return torch.device("cuda", torch.cuda.current_device())
+    return torch.device("cpu")
 
 
 def joint_comm_hook(
@@ -181,7 +238,7 @@ def joint_comm_hook(
     torch.futures.Future[torch.Tensor]
         Resolves to the reduced bucket buffer; ``None`` for ``(grad, param)``.
     """
-    if isinstance(bucket, tuple): # if under torch.compile
+    if isinstance(bucket, tuple):  # if under torch.compile
         _reduce_param_grad(*bucket)
         return None  # type: ignore[return-value]
     buf = bucket.buffer()
@@ -222,7 +279,7 @@ def joint_comm_hook(
 
 def _reduce_param_grad(grad: torch.Tensor, param: torch.nn.Parameter) -> None:
     """Python reducer grad averaging.
-    
+
     Average ``grad`` over ``param``'s joint group in place (Python reducer).
     Only called when DDP uses the PythonReducer, i.e., under compiled autograd.
     """
@@ -234,7 +291,7 @@ def _reduce_param_grad(grad: torch.Tensor, param: torch.nn.Parameter) -> None:
         grad_in = grad * (1.0 / group.size())
     else:
         # Over DDP's own group, as DDP does it, so these still fuse.
-        grad_in = grad / group.size() # allows for fused all-reduce
+        grad_in = grad / group.size()  # allows for fused all-reduce
     grad.copy_(fcol.all_reduce(grad_in, "sum", group))
 
 

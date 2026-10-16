@@ -8,7 +8,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
 from .._core.comm import all_reduce_max
-from ._joint import register_joint_comm_hook
+from ._joint import _device_of, register_joint_comm_hook
 from ._replicas import broadcast_replicas, replica_divergence, replica_groups
 
 # DDP attribute set once check_ddp has passed
@@ -159,13 +159,6 @@ def check_ddp(ddp: DistributedDataParallel) -> None:
             "it with jigsaw.parallel.wrap_ddp(model, mesh)."
         )
     setattr(ddp, _CHECKED, True)
-
-
-def _device_of(group: dist.ProcessGroup) -> torch.device:
-    """Return the device collectives over ``group`` need their tensors on."""
-    if dist.get_backend(group) == "nccl":
-        return torch.device("cuda", torch.cuda.current_device())
-    return torch.device("cpu")
 
 
 def check_active_ddp() -> None:
