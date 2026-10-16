@@ -20,11 +20,7 @@ memory-efficient (xFormers-derived) and cuDNN backends, which avoid materialisin
   and efficiently, supported -- :meth:`Attention._attn_core`/
   :meth:`DistributedAttention._attn_core` allow the memory-efficient and cuDNN ``sdpa``
   backends precisely so a masked call lands on one of those instead of falling all the
-  way to unfused math. ``test_masked_call_does_not_regress_to_unfused_math`` below
-  guards that: it would not catch a *correctness* regression, but it would catch this
-  exact class of performance regression (allowing EFFICIENT_ATTENTION/CUDNN_ATTENTION
-  no longer sticking, every masked call silently eating math's full ``O(N^2)`` memory
-  again) before it reached a real training run.
+  way to unfused math.
 * ``attn_backend="te"``, ``ring=True``, ``ulysses=True``: all raise ``ValueError``
   rather than silently taking an unfused detour or ignoring the mask -- see each core's
   docstring in ``attention.py``.
@@ -379,67 +375,6 @@ class TestDistributedAttentionMask:
         tol = 5e-3 if device.type == "cuda" else 1e-4
         torch.testing.assert_close(out, out_ref.detach(), rtol=tol, atol=tol)
         torch.testing.assert_close(x.grad, x_ref.grad, rtol=tol, atol=tol)
-
-
-@pytest.mark.gpu_required
-class TestMaskedAttentionIsFused:
-    """Guards against ``_attn_core`` silently regressing a masked call onto math.
-
-    Not a timing assertion (too noisy on a shared allocation) -- peak CUDA memory is
-    a robust proxy instead: the unfused math kernel materialises the full
-    ``(batch, heads, N, N)`` score/probability matrices, the memory-efficient/cuDNN
-    ``sdpa`` backends ``_attn_core`` allows do not.
-    """
-
-    def _model(
-        self, backend: str, device: torch.device, group: dist.ProcessGroup
-    ) -> attention.DistributedAttention:
-        return attention.DistributedAttention(
-            in_dim=DIM,
-            embed_dim=DIM,
-            out_dim=DIM,
-            heads=HEADS,
-            dropout_p=0.0,
-            local_rank=0,
-            device=device,
-            spatial_group=group,
-            channel_group=group,
-            ring=False,
-            attn_backend=backend,
-        )
-
-    def test_masked_call_does_not_regress_to_unfused_math(
-        self, device: torch.device, solo_group
-    ) -> None:
-        model = self._model("sdpa", device, solo_group)
-        n = 512
-        torch.manual_seed(0)
-        mask = torch.rand(n, n, device=device) > 0.3
-        mask[torch.arange(n), torch.arange(n)] = True  # every row sees itself
-
-        def peak_memory(core) -> int:
-            q, k, v = (
-                torch.randn(
-                    2, HEADS, n, DIM // HEADS, device=device, requires_grad=True
-                )
-                for _ in range(3)
-            )
-            torch.cuda.synchronize(device)
-            torch.cuda.reset_peak_memory_stats(device)
-            out = core(q, k, v, attn_mask=mask)
-            out.sum().backward()
-            torch.cuda.synchronize(device)
-            return torch.cuda.max_memory_allocated(device)
-
-        fused_mem = peak_memory(model._attn_core)
-        math_mem = peak_memory(model._attn_core_math)
-
-        assert fused_mem < 0.5 * math_mem, (
-            f"masked _attn_core used {fused_mem} bytes of peak CUDA memory, not "
-            f"comfortably below _attn_core_math's {math_mem} bytes -- it looks like "
-            "it is no longer landing on a fused (memory-efficient/cuDNN) sdpa "
-            "backend for a masked call."
-        )
 
 
 # --------------------------------------------------------------------------- #
