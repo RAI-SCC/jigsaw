@@ -40,23 +40,33 @@ jobs:
         # rank count is exactly N, so each count needs its own job. 10/12/24
         # ranks are too heavy for a hosted runner: run those on the cluster.
         ranks: [1, 2, 4, 6, 8]
-        include:
-          - python-version: "3.11"
-            ranks: 4
-          - python-version: "3.13"
-            ranks: 4
     name: test (py${{ matrix.python-version }}, ${{ matrix.ranks }} ranks)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
+        id: py
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install MPI
         run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin
-      - name: Install package (CPU torch)
+      # The venv (CPU torch + dev deps) is shared by every rank-count job and
+      # only rebuilt when pyproject.toml, the Python patch version or the runner
+      # image changes. ImageOS is in the key because mpi4py links the apt OpenMPI.
+      - uses: actions/cache@v4
+        id: venv
+        with:
+          path: ~/venv
+          key: venv-${{ runner.os }}-${{ env.ImageOS }}-py${{ steps.py.outputs.python-version }}-${{ hashFiles('pyproject.toml') }}
+      - name: Build venv (CPU torch)
+        if: steps.venv.outputs.cache-hit != 'true'
         run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e ".[dev]"
+          python -m venv ~/venv
+          ~/venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+          ~/venv/bin/pip install ".[dev]"
+      - name: Install package
+        run: |
+          ~/venv/bin/pip install --no-deps -e .
+          echo "$HOME/venv/bin" >> "$GITHUB_PATH"
       - name: Tests
         env:
           OMPI_MCA_rmaps_base_oversubscribe: "1"
