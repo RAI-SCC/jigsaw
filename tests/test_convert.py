@@ -983,11 +983,11 @@ class TestConvertToTorch:
     def test_convert_group_norm(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        """Test conversion of a channel-sharded GroupNorm.
+        """Test conversion of a channel- and spatially sharded GroupNorm.
 
         Channels are split so no group straddles a shard (groups=4, col=2 ->
-        2 groups per shard), which is what makes the per-shard local forward
-        equal the matching slice of the global GroupNorm.
+        2 groups per shard); the width is split over ``row`` as for a
+        converted conv, so the group statistics must be reduced over it.
         """
         torch.manual_seed(1)
         process_mesh_dict = process_mesh_dict_2x2
@@ -1013,9 +1013,19 @@ class TestConvertToTorch:
             process_mesh_dict["col"].rank(),
             process_mesh_dict["col"].size(),
         )
+        row_rank, row_size = (
+            process_mesh_dict["row"].rank(),
+            process_mesh_dict["row"].size(),
+        )
         local_channels = num_channels // col_size
+        local_w = w // row_size
         x_local = (
-            x_global[:, col_rank * local_channels : (col_rank + 1) * local_channels]
+            x_global[
+                :,
+                col_rank * local_channels : (col_rank + 1) * local_channels,
+                :,
+                row_rank * local_w : (row_rank + 1) * local_w,
+            ]
             .detach()
             .contiguous()
             .requires_grad_(True)
@@ -1034,12 +1044,14 @@ class TestConvertToTorch:
         assert ref_b_grad is not None
         assert ref_x_grad is not None
 
-        dist_forward = gather_1d_results(
-            dist_forward, process_mesh_dict, dim=1, pm_key="col"
-        )
+        def gather_channels_and_width(t: torch.Tensor) -> torch.Tensor:
+            t = gather_1d_results(t, process_mesh_dict, dim=-1, pm_key="row")
+            return gather_1d_results(t, process_mesh_dict, dim=1, pm_key="col")
+
+        dist_forward = gather_channels_and_width(dist_forward)
         dist_w_grad = gather_1d_results(dist_w, process_mesh_dict, dim=0, pm_key="col")
         dist_b_grad = gather_1d_results(dist_b, process_mesh_dict, dim=0, pm_key="col")
-        dist_x_grad = gather_1d_results(dist_x, process_mesh_dict, dim=1, pm_key="col")
+        dist_x_grad = gather_channels_and_width(dist_x)
 
         grp = process_mesh_dict["model"]
         assert_close("forward", dist_forward, ref_forward, 1e-5, 1e-5, device, grp)

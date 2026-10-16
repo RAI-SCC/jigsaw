@@ -478,6 +478,7 @@ class TestNormalizationReshard:
             num_channels=global_channels,
             device=device,
             channel_group=from_mesh["col"],
+            spatial_group=from_mesh["row"],
         )
         torch.manual_seed(from_mesh["col"].rank())
         gn.weight.data = torch.randn_like(gn.weight)
@@ -496,12 +497,18 @@ class TestNormalizationReshard:
         w_after = gather_1d_results(gn.weight.data, to_mesh, dim=0, pm_key="col")
         assert_close("gn weight", w_after, w_global, 1e-6, 1e-6, device, grp)
 
+        # Channels split over ``col``, the length over ``row``: the statistics
+        # must be reduced over the target mesh's row group.
+        def gather_channels_and_length(t: torch.Tensor) -> torch.Tensor:
+            t = gather_1d_results(t, to_mesh, dim=-1, pm_key="row")
+            return gather_1d_results(t, to_mesh, dim=1, pm_key="col")
+
         torch.manual_seed(grp.rank())
         x = torch.randn(2, global_channels // to_mesh["col"].size(), 8, device=device)
-        x_global = gather_1d_results(x, to_mesh, dim=1, pm_key="col")
+        x_global = gather_channels_and_length(x)
         ref = torch.nn.GroupNorm(global_groups, global_channels, device=device)
         ref.weight.data, ref.bias.data = w_global, b_global
-        y = gather_1d_results(gn(x), to_mesh, dim=1, pm_key="col")
+        y = gather_channels_and_length(gn(x))
         assert_close("gn forward", y, ref(x_global), 1e-4, 1e-5, device, grp)
 
 

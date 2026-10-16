@@ -1,6 +1,6 @@
 """Autograd functions of the distributed normalization layers."""
 
-from typing import Any, Optional, Protocol
+from typing import Any, Optional, Protocol, Sequence
 
 import torch
 import torch.distributed as dist
@@ -298,3 +298,163 @@ class _LayerNormNoAffine(torch.autograd.Function):
         )
 
         return grad_x, None, None
+
+
+def _all_reduce_sum(t: torch.Tensor, groups: Sequence[dist.ProcessGroup]) -> None:
+    """Sum ``t`` in place over every group in turn, i.e. over their whole grid."""
+    for g in groups:
+        dist.all_reduce(t, op=dist.ReduceOp.SUM, group=g)
+
+
+class _GroupNorm(torch.autograd.Function):
+    """Autograd function of the GroupNorm over a spatially sharded input."""
+
+    @staticmethod
+    def forward(
+        x: torch.Tensor,
+        num_groups: int,
+        weight: Optional[torch.Tensor],
+        bias: Optional[torch.Tensor],
+        spatial_groups: Sequence[dist.ProcessGroup],
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Normalize each channel group of ``x`` over all spatial shards.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input of shape ``(N, C_local, *spatial_local)``.
+        num_groups : int
+            Number of local channel groups; no group straddles a channel shard.
+        weight : torch.Tensor | None
+            Local per-channel scale.
+        bias : torch.Tensor | None
+            Local per-channel shift.
+        spatial_groups : Sequence[dist.ProcessGroup]
+            Process groups across which the spatial dimensions are partitioned.
+        eps : float
+            Term added to the variance for numerical stability.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+            Output, normalized input, inverse standard deviation of shape
+            ``(N, num_groups, 1)`` and the global number of elements per group.
+            All but the output are kept for the backward pass.
+        """
+        x, weight, bias = promote_to_fp32_under_autocast(x, weight, bias)
+        xg = x.reshape(x.shape[0], num_groups, -1)
+
+        # Global count and sum per (sample, group) in one collective per group.
+        stats = torch.stack(
+            [torch.full_like(xg[..., 0], xg.shape[-1]), xg.sum(dim=-1)], dim=-1
+        )
+        _all_reduce_sum(stats, spatial_groups)
+        n, total = stats.unbind(dim=-1)
+        mean = (total / n).unsqueeze(-1)
+
+        # Centre on the global mean before squaring, as two-pass variance.
+        centred = xg - mean
+        var = (centred * centred).sum(dim=-1, keepdim=True)
+        _all_reduce_sum(var, spatial_groups)
+        n = n.unsqueeze(-1)
+        rstd = torch.rsqrt(var / n + eps)
+
+        x_norm = (centred * rstd).reshape(x.shape)
+        affine_shape = (1, -1) + (1,) * (x.dim() - 2)
+        # Without affine parameters the output must still be a separate tensor
+        # from ``x_norm``, which is marked non-differentiable.
+        y = x_norm if weight is not None or bias is not None else x_norm.clone()
+        if weight is not None:
+            y = y * weight.reshape(affine_shape)
+        if bias is not None:
+            y = y + bias.reshape(affine_shape)
+        return y, x_norm, rstd, n
+
+    @staticmethod
+    def setup_context(
+        ctx: torch.autograd.function.FunctionCtx,
+        inputs: tuple,
+        output: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    ) -> None:
+        """Save the tensors and metadata for the backward pass."""
+        _, num_groups, weight, bias, spatial_groups, _ = inputs
+        _, x_norm, rstd, n = output
+
+        ctx.mark_non_differentiable(x_norm, rstd, n)
+        ctx.num_groups = num_groups  # type: ignore[attr-defined]
+        ctx.spatial_groups = spatial_groups  # type: ignore[attr-defined]
+        ctx.has_weight = weight is not None  # type: ignore[attr-defined]
+        ctx.has_bias = bias is not None  # type: ignore[attr-defined]
+        ctx.save_for_backward(x_norm, rstd, n, weight)
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_output: torch.Tensor,
+        x_norm_grad: None,
+        rstd_grad: None,
+        n_grad: None,
+    ) -> tuple[
+        torch.Tensor,
+        None,
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        None,
+        None,
+    ]:
+        """Compute the gradients of the spatially sharded GroupNorm.
+
+        The weight and bias gradients are local; the layer sums them over its
+        replicas with :func:`jigsaw.parallel.sync_grad`.
+
+        Parameters
+        ----------
+        ctx : torch.autograd.function.FunctionCtx
+            Autograd context.
+        grad_output : torch.Tensor
+            Gradient of the output.
+        x_norm_grad, rstd_grad, n_grad : None
+            Unused; the corresponding outputs are non-differentiable.
+
+        Returns
+        -------
+        tuple[torch.Tensor, None, torch.Tensor | None, torch.Tensor | None, None, None]
+            Gradients of the input, weight (``None`` if not affine) and bias
+            (``None`` without a bias), with ``None`` for the other arguments.
+        """
+        x_norm, rstd, n, weight = ctx.saved_tensors  # type: ignore[attr-defined]
+        # Match the forward compute dtype (fp32 under autocast).
+        grad_output = grad_output.to(x_norm.dtype)
+        num_groups = ctx.num_groups  # type: ignore[attr-defined]
+
+        # Reduce over batch and spatial dimensions, keep the channel dimension.
+        reduce_dims = (0, *range(2, grad_output.dim()))
+        grad_weight = (
+            (grad_output * x_norm).sum(dim=reduce_dims)
+            if ctx.has_weight  # type: ignore[attr-defined]
+            else None
+        )
+        grad_bias = (
+            grad_output.sum(dim=reduce_dims)
+            if ctx.has_bias  # type: ignore[attr-defined]
+            else None
+        )
+
+        grad_x_norm = grad_output
+        if weight is not None:
+            affine_shape = (1, -1) + (1,) * (grad_output.dim() - 2)
+            grad_x_norm = grad_output * weight.reshape(affine_shape)
+        shape = (x_norm.shape[0], num_groups, -1)
+        gg = grad_x_norm.reshape(shape)
+        xg = x_norm.reshape(shape)
+
+        # Both per-group reductions in one collective per group.
+        sums = torch.stack([gg.sum(dim=-1), (gg * xg).sum(dim=-1)], dim=-1)
+        _all_reduce_sum(sums, ctx.spatial_groups)  # type: ignore[attr-defined]
+        g_sum, gx_sum = (s.unsqueeze(-1) for s in sums.unbind(dim=-1))
+
+        # GroupNorm backward formula
+        grad_x = rstd * (gg - g_sum / n - xg * gx_sum / n)
+
+        return grad_x.reshape(x_norm.shape), None, grad_weight, grad_bias, None, None

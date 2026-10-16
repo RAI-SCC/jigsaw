@@ -130,7 +130,7 @@ class DistributedLinear(torch.nn.Module):
 
         if self.bias is not None:
             parallel.mark_replicated(self.bias, self.row_group)
-            dist.broadcast(self.bias.data, group_src=0, group=self.row_group)
+            parallel.broadcast_replicas(self)
 
         self.XWT = _XWT.apply
 
@@ -467,7 +467,7 @@ class DistributedLinear(torch.nn.Module):
             # ``self.bias`` is a fresh Parameter, so the __init__ mark is gone;
             # re-mark it on the new row group and re-broadcast rank 0's slice.
             parallel.mark_replicated(self.bias, self.row_group)
-            dist.broadcast(self.bias.data, group_src=0, group=self.row_group)
+            parallel.broadcast_replicas(self)
 
 
 class _DistributedMatMul(torch.nn.Module):

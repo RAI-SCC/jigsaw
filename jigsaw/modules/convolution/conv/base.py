@@ -518,12 +518,8 @@ class _DistributedConvNd(torch.nn.Module):
                 "_forward_local reached with a halo-needing spatial split; "
                 "forward() should have routed this through _conv_apply."
             )
-        # The vmapped primitive expects a leading sample axis on the input and
-        # the weight. Inside the VI sample vmap that axis is already stripped
-        # (the weight is per-sample, dim n_spatial + 2), so vmapping again maps
-        # the wrong axis. Use the native primitive then; the outer vmap batches it.
-        # The _ConvNd batching rule passes the sample axis through, so it still
-        # gets the vmapped primitive.
+        # The vmapped primitive expects a leading sample axis on the weight;
+        # without it, use the native primitive.
         sampled = weight.dim() > self._n_spatial + 2
         conv = self.config.conv_fn if sampled else self.config.native_conv_fn
         if bias is not None:

@@ -101,3 +101,79 @@ class TestReshardFourRanks:
                 assert all_ranks_ok(layer.bias is None, device, group)
         else:
             assert all_ranks_ok(layer.weight is None, device, group)
+
+
+# Mesh fixture -> (key of the channel group, keys of the spatial groups split
+# along H and W; ``None`` for an axis that is not split).
+_SPATIAL_MESHES = {
+    "process_mesh_dict_2x2": ("col", (None, "row")),
+    "spatial_mesh_2x2_hw": ("col", ("sh", "sw")),
+}
+
+
+@pytest.mark.dist(4)
+@pytest.mark.parametrize("mesh_name", list(_SPATIAL_MESHES))
+@pytest.mark.parametrize("affine, bias", [(True, True), (True, False), (False, True)])
+def test_spatially_sharded_matches_torch(request, device, mesh_name, affine, bias):
+    """Each rank holds a block of H x W: the statistics span every block."""
+    mesh = request.getfixturevalue(mesh_name)
+    col_key, spatial_keys = _SPATIAL_MESHES[mesh_name]
+    spatial_groups = [mesh[k] if k is not None else None for k in spatial_keys]
+    channel_group = mesh[col_key]
+
+    ref = _reference(affine, bias, device)
+    layer = norm.DistributedGroupNorm(
+        GROUPS,
+        CHANNELS,
+        affine=affine,
+        bias=bias,
+        device=device,
+        channel_group=channel_group,
+        spatial_group=spatial_groups,
+    )
+    c = CHANNELS // channel_group.size()
+    channels = slice(channel_group.rank() * c, (channel_group.rank() + 1) * c)
+    if affine:
+        layer.weight.data = ref.weight.data[channels].clone()
+        if bias:
+            layer.bias.data = ref.bias.data[channels].clone()
+
+    torch.manual_seed(0)
+    x = torch.randn(2, CHANNELS, 4, 6, device=device, requires_grad=True)
+    grad_out = torch.randn(2, CHANNELS, 4, 6, device=device)
+    y_ref = ref(x)
+    y_ref.backward(grad_out)
+
+    index = [slice(None), channels]
+    for dim, g in zip((2, 3), spatial_groups):
+        n = x.shape[dim] // (g.size() if g is not None else 1)
+        r = g.rank() if g is not None else 0
+        index.append(slice(r * n, (r + 1) * n))
+    index = tuple(index)
+    x_local = x.detach()[index].clone().requires_grad_(True)
+    y = layer(x_local)
+    y.backward(grad_out[index])
+
+    group = mesh["model"]
+    assert_close("forward", y, y_ref[index], 1e-5, 1e-5, device, group)
+    assert_close("input grad", x_local.grad, x.grad[index], 1e-5, 1e-5, device, group)
+    if affine:
+        assert_close(
+            "weight grad",
+            layer.weight.grad,
+            ref.weight.grad[channels],
+            1e-5,
+            1e-5,
+            device,
+            group,
+        )
+        if bias:
+            assert_close(
+                "bias grad",
+                layer.bias.grad,
+                ref.bias.grad[channels],
+                1e-5,
+                1e-5,
+                device,
+                group,
+            )

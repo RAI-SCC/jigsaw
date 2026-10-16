@@ -33,6 +33,17 @@ def _layer_norm(pm: dict, device: torch.device) -> tuple:
     return dist_mod, torch.nn.LayerNorm(8)
 
 
+def _group_norm(pm: dict, device: torch.device) -> tuple:
+    dist_mod = normalization.DistributedGroupNorm(
+        num_groups=4,
+        num_channels=8,
+        device=device,
+        channel_group=pm["col"],
+        spatial_group=pm["row"],
+    )
+    return dist_mod, torch.nn.GroupNorm(4, 8)
+
+
 def _conv(groups: int, bias: bool) -> Build:
     def build(pm: dict, device: torch.device) -> tuple:
         kw = dict(kernel_size=3, groups=groups, bias=bias)
@@ -115,6 +126,7 @@ def _assert_count_matches(build: Build, pm: dict, device: torch.device) -> None:
     "build",
     [
         pytest.param(_layer_norm, id="layer_norm"),
+        pytest.param(_group_norm, id="group_norm"),
         pytest.param(_conv(1, True), id="conv"),
         pytest.param(_conv(1, False), id="conv-nobias"),
         pytest.param(_conv(2, True), id="conv-groups2"),

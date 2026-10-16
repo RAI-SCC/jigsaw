@@ -1,16 +1,28 @@
 """Distributed GroupNorm."""
 
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
+from jigsaw import parallel
 from jigsaw.gather import gather_1d_results
+
+from . import functional
+
+
+def _sync_groups(
+    spatial_group: "dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]] | None",
+) -> list[dist.ProcessGroup]:
+    """Return the spatial groups of size > 1 the statistics are reduced over."""
+    if spatial_group is None or isinstance(spatial_group, dist.ProcessGroup):
+        spatial_group = [spatial_group]
+    return [g for g in spatial_group if g is not None and g.size() > 1]
 
 
 class DistributedGroupNorm(torch.nn.Module):
-    """GroupNorm over a channel-sharded input."""
+    """GroupNorm over a channel- and spatially sharded input."""
 
     def __init__(
         self,
@@ -22,6 +34,7 @@ class DistributedGroupNorm(torch.nn.Module):
         affine: bool = True,
         bias: bool = True,
         dtype: Optional[torch.dtype] = None,
+        spatial_group: "dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]] | None" = None,
     ) -> None:
         """Initialize the layer.
 
@@ -48,6 +61,12 @@ class DistributedGroupNorm(torch.nn.Module):
             is ``False``.
         dtype : torch.dtype, optional
             Data type of the parameters.
+        spatial_group : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
+            Process group(s) across which the spatial dimensions are partitioned,
+            e.g. the ``spatial_group`` of the preceding convolution. The group
+            statistics are reduced over them, and the weight and bias are
+            replicated over them. ``None`` means the spatial dimensions are not
+            partitioned.
         """
         super().__init__()
 
@@ -61,6 +80,7 @@ class DistributedGroupNorm(torch.nn.Module):
         self.num_local_groups = num_groups // channel_size
         self.num_local_channels = num_channels // channel_size
         self.channel_group = channel_group
+        self._spatial_sync_groups = _sync_groups(spatial_group)
         self.eps = eps
         self.affine = affine
         self.device = device
@@ -77,6 +97,9 @@ class DistributedGroupNorm(torch.nn.Module):
         else:
             self.register_parameter("weight", None)
             self.register_parameter("bias", None)
+
+        for p in self.parameters():
+            parallel.mark_replicated(p, self._spatial_sync_groups)
 
     @classmethod
     def convert_to_jigsaw(
@@ -104,9 +127,10 @@ class DistributedGroupNorm(torch.nn.Module):
         device : torch.device
             Device of the converted module.
         row_kw : str
-            Key of the row process group. Unused: the layer has no collective
-            to reduce over it, since each shard normalizes whole groups
-            independently.
+            Key of the row process group across which the spatial dimensions
+            are partitioned, as for :class:`DistributedConv2d`. The group
+            statistics are reduced over it, and the weight and bias are
+            replicated over it.
         col_kw : str
             Key of the column process group across which the channels (and
             thus groups) are partitioned.
@@ -137,6 +161,7 @@ class DistributedGroupNorm(torch.nn.Module):
             affine=model.affine,
             bias=model.bias is not None,
             dtype=model.weight.dtype if model.weight is not None else None,
+            spatial_group=process_mesh_dict[row_kw],
         )
         local_channels = instance.num_local_channels
         col_rank = col_group.rank()
@@ -244,7 +269,14 @@ class DistributedGroupNorm(torch.nn.Module):
         torch.Tensor
             Local output.
         """
-        return F.group_norm(x, self.num_local_groups, self.weight, self.bias, self.eps)
+        if not self._spatial_sync_groups:
+            return F.group_norm(
+                x, self.num_local_groups, self.weight, self.bias, self.eps
+            )
+        weight, bias = parallel.sync_grad(self.weight, self.bias)
+        return functional._GroupNorm.apply(  # type: ignore[no-any-return]
+            x, self.num_local_groups, weight, bias, self._spatial_sync_groups, self.eps
+        )[0]
 
     def reshard_parameters(
         self,
@@ -255,7 +287,9 @@ class DistributedGroupNorm(torch.nn.Module):
     ) -> None:
         """Reshard the affine parameters from one process mesh onto another.
 
-        The module is rebound to the new mesh.
+        The module is rebound to the new mesh: its channels to
+        ``to_process_mesh[pm_col_key]`` and its spatial dimensions to
+        ``to_process_mesh[pm_row_key]``.
 
         Parameters
         ----------
@@ -298,3 +332,8 @@ class DistributedGroupNorm(torch.nn.Module):
         self.num_local_channels = new_num_channels
         self.num_local_groups = new_num_local_groups
         self.channel_group = to_channel
+        self._spatial_sync_groups = _sync_groups(to_process_mesh[pm_row_key])
+        # The re-sliced parameters are fresh Parameters, so the __init__ marks
+        # are gone. Re-mark them over the new spatial group.
+        for p in self.parameters():
+            parallel.mark_replicated(p, self._spatial_sync_groups)
