@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 
 from ..common import GroupsArg
-from . import functional as fc
+from . import functional as F
 
 
 class DistributedNLLLoss(torch.nn.Module):
@@ -67,7 +67,7 @@ class DistributedNLLLoss(torch.nn.Module):
         torch.Tensor
             Local loss for ``"none"``, otherwise the reduced scalar loss.
         """
-        return fc.distributed_nll_loss(
+        return F.distributed_nll_loss(
             log_probs,
             target,
             weight=self.weight,
@@ -142,7 +142,7 @@ class DistributedCrossEntropyLoss(torch.nn.Module):
         torch.Tensor
             Local loss for ``"none"``, otherwise the reduced scalar loss.
         """
-        return fc.distributed_cross_entropy(
+        return F.distributed_cross_entropy(
             logits,
             target,
             weight=self.weight,
@@ -201,7 +201,7 @@ class DistributedBCELoss(torch.nn.Module):
         torch.Tensor
             Local loss for ``"none"``, otherwise the reduced scalar loss.
         """
-        return fc.distributed_binary_cross_entropy(
+        return F.distributed_binary_cross_entropy(
             probs,
             target,
             weight=self.weight,
@@ -261,7 +261,7 @@ class DistributedBCEWithLogitsLoss(torch.nn.Module):
         torch.Tensor
             Local loss for ``"none"``, otherwise the reduced scalar loss.
         """
-        return fc.distributed_binary_cross_entropy_with_logits(
+        return F.distributed_binary_cross_entropy_with_logits(
             logits,
             target,
             weight=self.weight,
