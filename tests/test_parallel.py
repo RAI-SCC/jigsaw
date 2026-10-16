@@ -11,6 +11,7 @@ import torch.distributed as dist
 
 from jigsaw import parallel
 from jigsaw.mesh import make_process_mesh
+from jigsaw.parallel import _joint
 
 BASE = torch.arange(1.0, 4.0)
 
@@ -250,3 +251,104 @@ class TestSyncedCall:
         out, weights = parallel.synced_call(attn, x, x, x, need_weights=False)
         assert out.shape == (1, 1, 3)
         assert weights is None
+
+
+def _names(world: int, *axes: list[list[int]]) -> torch.Tensor:
+    """The ``names`` table of :func:`_joint._joint_group`, one column per axis.
+
+    Each axis lists its groups; a rank names its group by the group's smallest
+    rank, and a rank in no group names itself (the padding of a short tuple).
+    """
+    cols = []
+    for groups in axes:
+        col = list(range(world))
+        for g in groups:
+            for r in g:
+                col[r] = min(g)
+        cols.append(col)
+    return torch.tensor(cols, dtype=torch.int64).T.contiguous()
+
+
+@pytest.fixture
+def new_subgroups(monkeypatch):
+    """Record the partitions ``_joint_group`` creates, on an empty cache.
+
+    Creates no process group: every rank gets WORLD back.
+    """
+    calls = []
+
+    def record(partition):
+        calls.append(partition)
+        return dist.group.WORLD, []
+
+    monkeypatch.setattr(_joint, "_JOINT_GROUPS", {})
+    monkeypatch.setattr(dist, "new_subgroups_by_enumeration", record)
+    return calls
+
+
+class TestJointGroup:
+    """The partition ``_joint_group`` builds from a names table, on CPU only."""
+
+    # 2 x 2 x 2 mesh, rank = 4 * dp + 2 * row + col
+    DP = [[0, 4], [1, 5], [2, 6], [3, 7]]
+    ROW = [[0, 2], [1, 3], [4, 6], [5, 7]]
+    COL = [[0, 1], [2, 3], [4, 5], [6, 7]]
+
+    def test_dp_times_row(self, new_subgroups):
+        # The bias of a linear layer: replicated over row, DDP over dp.
+        _joint._joint_group(_names(8, self.DP, self.ROW))
+        assert new_subgroups == [[[0, 2, 4, 6], [1, 3, 5, 7]]]
+
+    def test_uneven_tuples_on_dp_row_col(self, new_subgroups):
+        # weight replicated over (col,), bias over (row, col): width 2, so the
+        # weight's tuple is padded. Laid out and sliced as JointCommHookState
+        # does: dp, then tuple k in columns 1 + k * width onwards.
+        width = 2
+        names = _names(8, self.DP, self.COL, [], self.ROW, self.COL)
+
+        def joint(k):
+            cols = [0, *range(1 + k * width, 1 + (k + 1) * width)]
+            return _joint._joint_group(names[:, cols])
+
+        joint(0)  # weight: dp x col
+        assert new_subgroups == [[[0, 1, 4, 5], [2, 3, 6, 7]]]
+        # bias: dp x row x col is every rank
+        assert joint(1) is dist.group.WORLD
+        assert len(new_subgroups) == 1
+
+    def test_fully_connected_is_world_without_new_group(self, new_subgroups):
+        # The docstring's example: [0, 1] links the two dp groups.
+        names = _names(
+            8, [[0, 2, 4, 6], [1, 3, 5, 7]], [[0, 1], [2, 3], [4, 5], [6, 7]]
+        )
+        assert _joint._joint_group(names) is dist.group.WORLD
+        assert new_subgroups == []
+
+    def test_padding_joins_nothing(self, new_subgroups):
+        _joint._joint_group(_names(8, self.DP, []))
+        assert new_subgroups == [self.DP]
+
+    def test_no_links_gives_singletons(self, new_subgroups):
+        _joint._joint_group(_names(4, []))
+        assert new_subgroups == [[[0], [1], [2], [3]]]
+
+    def test_interleaved_parts(self, new_subgroups):
+        # Parts are not contiguous rank ranges; each is sorted by rank.
+        _joint._joint_group(_names(8, [[0, 2, 5], [1, 4], [3, 6, 7]]))
+        assert new_subgroups == [[[0, 2, 5], [1, 4], [3, 6, 7]]]
+
+    def test_long_chain_is_connected(self, new_subgroups):
+        # 7-3-5-1-6-2-4-0: each column links only neighbours, so the smallest
+        # label has to travel the whole chain over several sweeps.
+        a = [[7, 3], [5, 1], [6, 2], [4, 0]]
+        b = [[3, 5], [1, 6], [2, 4]]
+        assert _joint._joint_group(_names(8, a, b)) is dist.group.WORLD
+        assert new_subgroups == []
+
+    def test_cached_by_partition(self, new_subgroups):
+        _joint._joint_group(_names(8, self.DP, self.ROW))
+        # Other columns, same partition: a cache hit, no new collective.
+        _joint._joint_group(_names(8, [[0, 2, 4, 6], [1, 3, 5, 7]]))
+        assert len(new_subgroups) == 1
+        _joint._joint_group(_names(8, self.DP))
+        assert new_subgroups == [[[0, 2, 4, 6], [1, 3, 5, 7]], self.DP]
