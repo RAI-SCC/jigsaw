@@ -37,6 +37,46 @@ def all_to_all_async(
     return work
 
 
+_BACKEND_DEVICE_TYPES = {"nccl": "cuda", "gloo": "cpu"}
+
+
+def get_device_of_process_group(
+    group: Optional[dist.ProcessGroup] = None,
+) -> torch.device:
+    """Return the device collectives over ``group`` need their tensors on.
+
+    A group with several backends (e.g. ``"cpu:gloo,cuda:nccl"``) resolves to
+    CUDA if any of them is NCCL.
+
+    Parameters
+    ----------
+    group : dist.ProcessGroup, optional
+        Process group; the default group if ``None``.
+
+    Returns
+    -------
+    torch.device
+        The current CUDA device for NCCL, the CPU for Gloo.
+
+    Raises
+    ------
+    RuntimeError
+        If the group's backend is not one jigsaw supports.
+    """
+    backend = str(dist.get_backend(group))
+    # A plain "nccl" or a per-device list "cpu:gloo,cuda:nccl".
+    names = {entry.rpartition(":")[2] for entry in backend.split(",")}
+    unsupported = names - _BACKEND_DEVICE_TYPES.keys()
+    if unsupported:
+        raise RuntimeError(
+            f"unsupported process-group backend {backend!r}; jigsaw supports "
+            f"{sorted(_BACKEND_DEVICE_TYPES)}"
+        )
+    if "nccl" in names:
+        return torch.device("cuda", torch.cuda.current_device())
+    return torch.device("cpu")
+
+
 @lru_cache(maxsize=None)
 def get_empty(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     """Return a cached zero-length tensor for ``(device, dtype)``.

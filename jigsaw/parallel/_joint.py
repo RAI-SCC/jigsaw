@@ -8,6 +8,7 @@ import torch.distributed as dist
 import torch.distributed._functional_collectives as fcol
 from torch.nn.parallel import DistributedDataParallel
 
+from .._core.comm import get_device_of_process_group
 from ._replicas import Groups, replica_groups
 
 # DDP attribute holding its JointCommHookState
@@ -72,7 +73,7 @@ class JointCommHookState:
         # tuple k in columns 1 + k * width onwards.
         # n is the number of distinct replica groups.
         # width is the largest number of replica groups that any one parameter is marked over.
-        device = _device_of(None)
+        device = get_device_of_process_group(None)
         n, width = len(keys), max(map(len, keys), default=0)
         # A MAX all-reduce of (n, -n) gives (max n, -min n); max n == min n
         # exactly when every rank has the same n. Also agree on the max width.
@@ -201,13 +202,6 @@ def _joint_group(names: torch.Tensor) -> dist.ProcessGroup:
         assert isinstance(group, dist.ProcessGroup)  # every rank is in a part
         _JOINT_GROUPS[key] = group
     return _JOINT_GROUPS[key]
-
-
-def _device_of(group: Optional[dist.ProcessGroup]) -> torch.device:
-    """Return the device collectives over ``group`` need their tensors on."""
-    if dist.get_backend(group) == "nccl":
-        return torch.device("cuda", torch.cuda.current_device())
-    return torch.device("cpu")
 
 
 def joint_comm_hook(

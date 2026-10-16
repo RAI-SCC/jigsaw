@@ -7,7 +7,7 @@ import torch
 import torch.distributed as dist
 
 from . import parallel
-from ._core.comm import all_reduce_max
+from ._core.comm import all_reduce_max, get_device_of_process_group
 from .parallel._replicas import replica_divergence
 
 __all__ = ["assert_replica_consistency", "count_parameters"]
@@ -170,7 +170,4 @@ def _named_parameters(
 
 
 def _device(mesh: Mapping[str, dist.ProcessGroup]) -> torch.device:
-    group = next(iter(mesh.values()))
-    if dist.get_backend(group) == "nccl":
-        return torch.device("cuda", torch.cuda.current_device())
-    return torch.device("cpu")
+    return get_device_of_process_group(next(iter(mesh.values())))

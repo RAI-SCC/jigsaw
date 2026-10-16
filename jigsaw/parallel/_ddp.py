@@ -7,8 +7,8 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
-from .._core.comm import all_reduce_max
-from ._joint import _device_of, register_joint_comm_hook
+from .._core.comm import all_reduce_max, get_device_of_process_group
+from ._joint import register_joint_comm_hook
 from ._replicas import broadcast_replicas, replica_divergence, replica_groups
 
 # DDP attribute set once check_ddp has passed
@@ -130,7 +130,7 @@ def check_ddp(ddp: DistributedDataParallel) -> None:
     named = [x for x in named if x[2]]
     params = [(p, g) for _, p, g in named]
     first = next(module.parameters(), None)
-    device = first.device if first is not None else _device_of(dp)
+    device = first.device if first is not None else get_device_of_process_group(dp)
     # Pack both checks into one vector, [wrong_group, divergence per marked
     # param], and MAX-reduce it so every rank reaches the same verdict.
     flags = torch.cat(
