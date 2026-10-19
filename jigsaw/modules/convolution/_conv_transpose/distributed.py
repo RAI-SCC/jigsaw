@@ -78,7 +78,7 @@ def _grad_input_weight_reduced(
     input gradient is started, unless the model is vmapped.
     """
     reduce_pending = channel_group.size() > 1 and not config.channel_local
-    if reduce_pending and not config.bayesian:
+    if reduce_pending and not config.vmapped:
         g_x, _ = _grad_input_weight(
             grad_output,
             x_full,

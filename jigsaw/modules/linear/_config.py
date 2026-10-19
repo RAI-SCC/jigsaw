@@ -1,20 +1,18 @@
 """Kernel selection for the distributed linear layers."""
 
-import copy
 from typing import Callable, Optional, Union
 
 import torch
 from torch.nn.parameter import Parameter
 
+from jigsaw._core.vmap import VmapConfig
+
 from . import _distributed_matmul as dist_mm
 from . import _distributed_matmul_p2p as dist_mm_p2p
 
 
-class LinearConfig:
+class LinearConfig(VmapConfig):
     """Selection of the kernels of the distributed linear operation."""
-
-    #: Whether this is the config for a vmapped layer weight (see :meth:`for_vmap`).
-    vmapped: bool = False
 
     def __init__(
         self,
@@ -44,32 +42,20 @@ class LinearConfig:
         )
         self.reshape_weights: Callable = self._no_reshape_weights
         self.grad_sum = self._sum_grad_weights_selection(linear_layer)
-        self._vmap_config: Optional["LinearConfig"] = None
 
-    def for_vmap(self) -> "LinearConfig":
-        """Return the config for a layer weight that is vmapped.
+    def _select_vmapped(self) -> None:
+        """Swap in the members-axis kernels on the vmapped copy.
 
         The batching rule of the linear Functions passes ``x`` as
         ``(members, batch, seq, in)``, the weight as ``(members, out, in)`` and
-        the bias as ``(members, out)``. This config gives the weight and bias
-        singleton ``batch``/``seq`` axes, so the kernels broadcast each member's
-        weight over its input, and reduces the gradients over ``batch``/``seq``
-        only.
+        the bias as ``(members, out)``. The weight and bias get singleton
+        ``batch``/``seq`` axes, so the kernels broadcast each member's weight
+        over its input; the gradients are reduced over ``batch``/``seq`` only.
         """
-        if self._vmap_config is None:
-            c = copy.copy(self)
-            c.vmapped = True
-            # Rebind the selected methods to the copy, so they see ``vmapped``.
-            for name, value in vars(self).items():
-                if getattr(value, "__self__", None) is self:
-                    setattr(c, name, getattr(c, value.__func__.__name__))
-            if self.linear_layer:
-                c.reshape_weights = c._reshape_weights
-                if self.add_bias == self._add_bias:
-                    c.add_bias = c._add_bias_vmapped
-            c._vmap_config = c
-            self._vmap_config = c
-        return self._vmap_config
+        if self.linear_layer:
+            self.reshape_weights = self._reshape_weights
+            if self.add_bias == self._add_bias:
+                self.add_bias = self._add_bias_vmapped
 
     # reshape weights
     def _reshape_weights(self, w: torch.Tensor) -> torch.Tensor:

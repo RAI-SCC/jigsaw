@@ -33,7 +33,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
     # type-hints
     bias: Optional[Parameter]
     config: ConvTransposeNdConfig
-    bayesian: bool
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...]
     channel_group: dist.ProcessGroup
     device: torch.device
@@ -60,7 +59,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         groups: int = 1,
         bias: bool = True,
         # --- distributed (optional) ---
-        bayesian: bool = False,
         dtype: torch.dtype = torch.float32,
         channel_comm: str = "auto",
         config: Optional[ConvTransposeNdConfig] = None,
@@ -94,8 +92,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             ``channel_group.size()``.
         bias : bool
             Whether to add a bias.
-        bayesian : bool
-            Whether the model is Bayesian.
         dtype : torch.dtype
             Data type of the parameters.
         channel_comm : str
@@ -140,7 +136,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         self.channel_group = channel_group
         self.device = device
         self.dtype = dtype
-        self.bayesian = bayesian
 
         # Global (unsharded) weight/bias shape, torch.nn.ConvTranspose{1,2,3}d
         # layout ``(C_in, C_out / groups, *kernel)``. ``reset_parameters`` keys
@@ -181,7 +176,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
 
         self.config = (
             ConvTransposeNdConfig(
-                self.bayesian,
                 self.channel_group,
                 self.bias,
                 self.kernel_size,
@@ -283,7 +277,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             spatial_group=process_mesh_dict[row_kw],
             channel_group=process_mesh_dict[col_kw],
             device=device,
-            bayesian=False,  # TODO
             dtype=model.weight.dtype,
         )
         # Map weights — clone so the original graph is detached. The gather
@@ -503,7 +496,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
                 "convolution whose target channel group owns whole conv-groups."
             )
         self.config = ConvTransposeNdConfig(
-            self.bayesian,
             self.channel_group,
             self.bias,
             self.kernel_size,
@@ -544,18 +536,9 @@ class _DistributedConvTransposeNd(torch.nn.Module):
                 "_forward_local reached with a halo-needing spatial split; "
                 "forward() should have routed this through _conv_apply."
             )
-        # The vmapped primitive expects a leading sample axis on the input and
-        # the weight. Inside the VI sample vmap that axis is already stripped
-        # (the weight is per-sample, dim n_spatial + 2), so vmapping again maps
-        # the wrong axis. Use the native primitive then; the outer vmap batches it.
-        # The ConvNd batching rule passes the sample axis through, so it still
-        # gets the vmapped primitive.
-        sampled = weight.dim() > self._n_spatial + 2
-        conv_transpose = (
-            self.config.conv_transpose_fn
-            if sampled
-            else self.config.native_conv_transpose_fn
-        )
+        # Under torch.vmap the native primitive's own batching rule handles a
+        # vmapped weight.
+        conv_transpose = self.config.native_conv_transpose_fn
         if bias is not None:
             y = conv_transpose(
                 x,
