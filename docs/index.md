@@ -8,5 +8,9 @@
 :hidden:
 
 ddp
+attention
+mixed_precision
+logging
+platforms
 api
 ```
