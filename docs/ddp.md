@@ -189,7 +189,7 @@ For plain PyTorch layers inside a jigsaw model whose parameters are replicated (
 3. To add a replica axis of your own to parameters jigsaw modules already mark (an ensemble
    axis, say), pass `extend=True`. A group over the same ranks as one already in the mark is
    not added again, so nothing is summed twice. Marking an already marked parameter without
-   `extend=True` raises.
+   `extend=True` raises RuntimeError.
 4. If you mark parameters after the model is built, call
    `jigsaw.parallel.broadcast_replicas(model)` before wrapping (or use `wrap_ddp`).
 
