@@ -1,7 +1,7 @@
 """Unit tests for ``_ntuple`` scalar/tuple normalization of conv arguments.
 
 These do not need a distributed environment: ``_ntuple`` is the pure helper in
-:mod:`jigsaw.modules.convolution.common.arg_norm` shared by the conv and
+:mod:`jigsaw.modules.convolution._common.arg_norm` shared by the conv and
 conv-transpose modules -- it lets them accept ``stride`` / ``padding`` /
 ``dilation`` as a plain ``int`` instead of a per-axis tuple. ``_pair`` here is
 the 2-axis instance used by the 2D modules.
@@ -9,7 +9,7 @@ the 2-axis instance used by the 2D modules.
 
 import pytest
 
-from jigsaw.modules.convolution.common.arg_norm import _ntuple
+from jigsaw.modules.convolution._common.arg_norm import _ntuple
 
 _pair = _ntuple(2)
 

@@ -11,7 +11,7 @@ def set_module(namespace: Mapping[str, object], names: Iterable[str]) -> None:
     ``set_module(globals(), __all__)`` after its imports. Reprs, error
     messages, the docs and pickles then name the public path
     (``jigsaw.modules.linear.DistributedLinear``) instead of the internal file
-    (``jigsaw.modules.linear.linear``), so the internal layout can change
+    (``jigsaw.modules.linear._linear``), so the internal layout can change
     without breaking them. A name exported from several modules keeps the
     label of the last one to run.
 

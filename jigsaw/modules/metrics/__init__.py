@@ -2,7 +2,7 @@
 
 from jigsaw._core.public import set_module as _set_module
 
-from .segmentation import (
+from ._segmentation import (
     DistributedSegmentationMetrics,
     confusion_to_metrics,
     distributed_confusion_matrix,

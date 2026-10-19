@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from jigsaw._core.buffers import clear_preallocated_buffers
-from jigsaw.modules.permute.distributed_permute import (
+from jigsaw.modules.permute._distributed_permute import (
     distributed_permute,
     x_transpose_eightway,
     x_transpose_fourway,

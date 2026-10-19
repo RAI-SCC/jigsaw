@@ -18,7 +18,7 @@ import torch
 import jigsaw.modules.metrics as jmetrics
 from jigsaw.gather import gather_1d_results
 from jigsaw.modules.activation import distributed_argmax
-from jigsaw.modules.metrics import segmentation as seg
+from jigsaw.modules.metrics import _segmentation as seg
 from tests.parity import all_ranks_ok, assert_close
 
 pytestmark = [pytest.mark.dist_required]

@@ -11,9 +11,9 @@ op shards a different axis.
 import pytest
 import torch
 
-import jigsaw.modules.linear.distributed_matmul as dist_mm
-import jigsaw.modules.linear.distributed_matmul_batchedp2p as dist_mm_batchedp2p
-import jigsaw.modules.linear.distributed_matmul_p2p as dist_mm_p2p
+import jigsaw.modules.linear._distributed_matmul as dist_mm
+import jigsaw.modules.linear._distributed_matmul_batchedp2p as dist_mm_batchedp2p
+import jigsaw.modules.linear._distributed_matmul_p2p as dist_mm_p2p
 from jigsaw.gather import gather_results
 from tests.parity import assert_close
 

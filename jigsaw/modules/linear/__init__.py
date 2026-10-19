@@ -2,8 +2,8 @@
 
 from jigsaw._core.public import set_module as _set_module
 
-from .config import LinearConfig
-from .linear import (
+from ._config import LinearConfig
+from ._linear import (
     DistributedLinear,
     DistributedMatMulXTW,
     DistributedMatMulXW,

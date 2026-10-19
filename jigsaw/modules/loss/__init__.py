@@ -2,7 +2,7 @@
 
 from jigsaw._core.public import set_module as _set_module
 
-from .classification import (
+from ._classification import (
     DistributedBCELoss,
     DistributedBCEWithLogitsLoss,
     DistributedCrossEntropyLoss,
@@ -12,8 +12,8 @@ from .classification import (
     distributed_cross_entropy,
     distributed_nll_loss,
 )
-from .common import redundant_all_reduce
-from .regression import (
+from ._common import redundant_all_reduce
+from ._regression import (
     DistributedL1Loss,
     DistributedMSELoss,
     DistributedSmoothL1Loss,

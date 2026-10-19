@@ -14,10 +14,10 @@ import torch.distributed as dist
 from einops import rearrange
 
 import jigsaw.modules.attention as attention
-import jigsaw.modules.attention.config as attention_config
+import jigsaw.modules.attention._config as attention_config
 from jigsaw.gather import gather_1d_results, gather_1d_results_list
-from jigsaw.modules.attention.attention import attn_core_dtype
-from jigsaw.modules.attention.functional.ulysses import (
+from jigsaw.modules.attention._attention import attn_core_dtype
+from jigsaw.modules.attention._functional.ulysses import (
     _a2a_heads_to_seq,
     _a2a_seq_to_heads,
 )
@@ -191,7 +191,7 @@ class TestUlyssesAttention:
         ground truth every backend's Ulysses path must reproduce.
         """
         if attn_backend == "te" and variant is not None:
-            from jigsaw.modules.attention.functional.cores.te import cudnn, flash
+            from jigsaw.modules.attention._functional.cores.te import cudnn, flash
 
             available = (
                 cudnn.CUDNN_CORE_AVAILABLE

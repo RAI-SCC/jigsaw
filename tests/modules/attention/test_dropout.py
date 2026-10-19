@@ -26,11 +26,11 @@ import pytest
 import torch
 
 from jigsaw.modules.attention import Attention, DistributedAttention
-from jigsaw.modules.attention.functional.cores import math as math_core
-from jigsaw.modules.attention.functional.cores import sdpa as sdpa_core
-from jigsaw.modules.attention.functional.cores.te import cudnn as te_cudnn_core
-from jigsaw.modules.attention.functional.cores.te import flash as te_flash_core
-from jigsaw.modules.attention.functional.ring import _combine_dropout_seed
+from jigsaw.modules.attention._functional.cores import math as math_core
+from jigsaw.modules.attention._functional.cores import sdpa as sdpa_core
+from jigsaw.modules.attention._functional.cores.te import cudnn as te_cudnn_core
+from jigsaw.modules.attention._functional.cores.te import flash as te_flash_core
+from jigsaw.modules.attention._functional.ring import _combine_dropout_seed
 
 
 class TestMathCoreDropout:
@@ -324,7 +324,7 @@ class TestSdpaTeCoreDropoutReplay:
 )
 class TestTeAttnDropoutReplay:
     """``_TransformerEngineAttention`` (the non-ring, ``bshd`` wrapper around the
-    same cores as :mod:`~jigsaw.modules.attention.functional.cores.te`) must
+    same cores as :mod:`~jigsaw.modules.attention._functional.cores.te`) must
     replay its forward dropout mask in backward -- on either arm, so both are
     covered here regardless of which one this GPU's architecture selects.
 
@@ -366,7 +366,7 @@ class TestTeAttnDropoutReplay:
         return q, k, v
 
     def _apply(self, q, k, v, dropout_p, core):
-        from jigsaw.modules.attention.attention import _TransformerEngineAttention
+        from jigsaw.modules.attention._attention import _TransformerEngineAttention
 
         return _TransformerEngineAttention.apply(q, k, v, self.SCALE, dropout_p, core)[
             0

@@ -23,8 +23,8 @@ import torch.nn.functional as F
 import jigsaw.modules.linear as linear
 import jigsaw.modules.loss as jloss
 from jigsaw.gather import gather_1d_results, gather_results
-from jigsaw.modules.loss import classification as lossc
-from jigsaw.modules.loss import regression as lossr
+from jigsaw.modules.loss import _classification as lossc
+from jigsaw.modules.loss import _regression as lossr
 from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]

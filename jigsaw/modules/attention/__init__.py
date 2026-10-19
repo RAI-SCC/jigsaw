@@ -2,8 +2,8 @@
 
 from jigsaw._core.public import set_module as _set_module
 
-from .attention import Attention, DistributedAttention
-from .config import (
+from ._attention import Attention, DistributedAttention
+from ._config import (
     AttnBackend,
     Offload,
     RingAttentionConfig,

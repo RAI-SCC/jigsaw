@@ -1,14 +1,14 @@
 """``AttnBackend`` selection, coercion and the TE-unavailable fallback.
 
 The container path adds a three-way attention-core switch
-(:class:`jigsaw.modules.attention.config.AttnBackend` -- ``te`` / ``sdpa`` /
+(:class:`jigsaw.modules.attention._config.AttnBackend` -- ``te`` / ``sdpa`` /
 ``math``). These tests pin:
 
 * enum construction and string coercion,
 * the ring core selectors (``_select_attn_core_{forward,backward}_fn``) and the
   ``_te_core_or_raise`` guard, with TE availability forced via ``monkeypatch``,
 * the deliberate asymmetry for ``attn_backend="te"`` when TE is missing --
-  :class:`~jigsaw.modules.attention.attention.DistributedAttention` *warns and
+  :class:`~jigsaw.modules.attention._attention.DistributedAttention` *warns and
   falls back to sdpa*, while :class:`~...config.RingAttentionConfig` *raises*.
 
 Every test runs on a single rank against a 1-rank sub-group, so they work
@@ -21,17 +21,17 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from jigsaw.modules.attention import attention
-from jigsaw.modules.attention.config import (
+from jigsaw.modules.attention import _attention as attention
+from jigsaw.modules.attention._config import (
     AttnBackend,
     RingAttentionConfig,
     _select_attn_core_backward_fn,
     _select_attn_core_forward_fn,
     _te_core_or_raise,
 )
-from jigsaw.modules.attention.functional.cores import math as math_core
-from jigsaw.modules.attention.functional.cores import sdpa as sdpa_core
-from jigsaw.modules.attention.functional.cores import te as te_cores
+from jigsaw.modules.attention._functional.cores import math as math_core
+from jigsaw.modules.attention._functional.cores import sdpa as sdpa_core
+from jigsaw.modules.attention._functional.cores import te as te_cores
 
 CPU = torch.device("cpu")
 
@@ -41,7 +41,7 @@ def te_unavailable(monkeypatch):
     """Force every TE-availability flag off, regardless of the environment."""
     monkeypatch.setattr(attention, "JIGSAW_TE_AVAILABLE", False)
     monkeypatch.setattr(
-        "jigsaw.modules.attention.functional.cores.te.TE_CORE_AVAILABLE", False
+        "jigsaw.modules.attention._functional.cores.te.TE_CORE_AVAILABLE", False
     )
 
 
@@ -185,7 +185,7 @@ class TestTeCoreGuard:
 
     def test_noop_when_available(self, monkeypatch):
         monkeypatch.setattr(
-            "jigsaw.modules.attention.functional.cores.te.TE_CORE_AVAILABLE", True
+            "jigsaw.modules.attention._functional.cores.te.TE_CORE_AVAILABLE", True
         )
         assert _te_core_or_raise() is None
 
@@ -315,7 +315,7 @@ class TestRingAttentionConfigBackend:
 @pytest.mark.gpu_required
 class TestBackendWithTe:
     def test_distributed_attention_te_is_wired(self, device, solo_group):
-        from jigsaw.modules.attention.attention import DistributedAttention
+        from jigsaw.modules.attention._attention import DistributedAttention
 
         model = _build_attn("te", device, solo_group)
 
@@ -329,8 +329,8 @@ class TestBackendWithTe:
         assert model.te_core is te_cores.select_core(device)
 
     def test_availability_flags_are_true(self):
-        from jigsaw.modules.attention.attention import JIGSAW_TE_AVAILABLE
-        from jigsaw.modules.attention.functional.cores.te import TE_CORE_AVAILABLE
+        from jigsaw.modules.attention._attention import JIGSAW_TE_AVAILABLE
+        from jigsaw.modules.attention._functional.cores.te import TE_CORE_AVAILABLE
 
         assert JIGSAW_TE_AVAILABLE is True
         assert TE_CORE_AVAILABLE is True
@@ -341,7 +341,7 @@ class TestBackendWithTe:
         Ported from the standalone ``test_transformer_engine.py`` so the numeric
         check survives that file's removal on ``refactor/tests``.
         """
-        from jigsaw.modules.attention.attention import _TransformerEngineAttention
+        from jigsaw.modules.attention._attention import _TransformerEngineAttention
 
         batch, seq, heads, head_dim = 2, 16, 4, 32
         scale = head_dim**-0.5

@@ -9,7 +9,7 @@ communication. That exercises the ``XWT`` / ``XW`` / ``XTW`` forward, backward a
 import pytest
 import torch
 
-from jigsaw.modules.linear.linear import (
+from jigsaw.modules.linear._linear import (
     DistributedMatMulXTW,
     DistributedMatMulXW,
     DistributedMatMulXWT,
