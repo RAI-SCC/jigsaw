@@ -60,7 +60,8 @@ torchrun --nproc-per-node 8 examples/vit.py --ddp   # 2 data-parallel copies
 ## Layers
 
 Linear (`DistributedLinear`, parameter-free matmuls), convolution and transposed
-convolution (1d/2d/3d), attention (with ring or Ulysses sequence parallelism),
+convolution (1d/2d/3d), attention (head-parallel over the channel group, optionally
+combined with ring or Ulysses sequence parallelism),
 `LayerNorm`, `GroupNorm`, `Softmax`, `Roll`, losses (cross-entropy, NLL, BCE, MSE, L1,
 smooth L1) and segmentation metrics. All live in `jigsaw.modules`.
 
