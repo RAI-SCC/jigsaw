@@ -34,6 +34,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
     parser.addoption(
+        "--runslow",
+        action="store_true",
+        default=False,
+        help="Also run tests marked slow (the full run that gates a release)",
+    )
+
+    parser.addoption(
         "--print-all-ranks",
         action="store_true",
         default=False,
@@ -62,6 +69,9 @@ def pytest_configure(config):
     warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 
     config.addinivalue_line("markers", "no_dist_env: skip the dist_env autouse fixture")
+    config.addinivalue_line(
+        "markers", "slow: expensive extra coverage; only runs with --runslow"
+    )
     config.addinivalue_line("markers", "gpu_required: test requires GPU")
     config.addinivalue_line(
         "markers", "te_required: test requires transformer_engine (container path)"
@@ -209,8 +219,11 @@ def pytest_collection_modifyitems(config, items):
         or mpi_size > 1
     )
     has_te = importlib.util.find_spec("transformer_engine") is not None
+    run_slow = config.getoption("--runslow")
 
     for item in items:
+        if item.get_closest_marker("slow") and not run_slow:
+            item.add_marker(pytest.mark.skip(reason="slow: run with --runslow"))
         if item.get_closest_marker("gpu_required") and not has_gpu:
             item.add_marker(pytest.mark.skip(reason="GPU not available"))
         if item.get_closest_marker("dist_required") and not is_distributed:

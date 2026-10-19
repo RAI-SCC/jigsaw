@@ -7,7 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       full:
-        description: "Also run the 2- and 6-rank CPU tests"
+        description: "Full run: also the 2- and 6-rank CPU tests and the slow ones"
+        type: boolean
+        default: false
+  # release.yml runs the full suite before publishing.
+  workflow_call:
+    inputs:
+      full:
         type: boolean
         default: false
 
@@ -47,7 +53,8 @@ jobs:
         # rank count is exactly N, so each count needs its own job. CI covers
         # 1/4/8 ranks; the 2- and 6-rank tests run on a manual dispatch
         # (Actions -> CI -> Run workflow, "full"), 10/12/24 ranks and all GPU
-        # tests on a dev machine or the cluster.
+        # tests on a dev machine or the cluster. Tests marked slow run only in a
+        # full run (--runslow), which also gates a release.
         # One Python only: the 3.11 floor in requires-python is guarded
         # statically by mypy (python_version = "3.11") in the lint job.
         ranks: [1, 4, 8]
@@ -70,12 +77,12 @@ jobs:
         env:
           OMPI_MCA_rmaps_base_oversubscribe: "1"
           OMPI_MCA_hwloc_base_binding_policy: none
-        run: mpirun -n ${{ matrix.ranks }} pytest tests --device cpu
+        run: mpirun -n ${{ matrix.ranks }} pytest tests --device cpu ${{ inputs.full && '--runslow' || '' }}
 
-  # Remaining hosted-runner rank counts (non-power-of-two meshes etc.); only on
-  # a manual dispatch with "full" ticked, to keep PR CI cheap.
+  # Remaining hosted-runner rank counts (non-power-of-two meshes etc.); only in a
+  # full run (manual dispatch with "full" ticked, or a release), to keep PR CI cheap.
   test-full:
-    if: github.event_name == 'workflow_dispatch' && inputs.full
+    if: inputs.full
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -86,6 +93,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
+        id: py
         with:
           python-version: "3.12"
           cache: pip
@@ -114,7 +122,7 @@ jobs:
         env:
           OMPI_MCA_rmaps_base_oversubscribe: "1"
           OMPI_MCA_hwloc_base_binding_policy: none
-        run: mpirun -n ${{ matrix.ranks }} pytest tests --device cpu
+        run: mpirun -n ${{ matrix.ranks }} pytest tests --device cpu --runslow
 
   build:
     runs-on: ubuntu-latest
