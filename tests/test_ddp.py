@@ -348,17 +348,34 @@ def _compiled_step(model, make_input, n_micro, no_sync, backend: str) -> None:
         _step(model, make_input, n_micro, no_sync)
 
 
+COMPILED_VARIANTS = ["compiled", "joint_compiled", "joint_compiled_no_sync"]
+# Each case compiles from scratch (``python_reducer`` resets dynamo), so the default
+# run takes one case per kind -- every module's backward traced under compiled
+# autograd -- and all variants on conv_halo, whose replicated weight puts it in a
+# joint group. The rest of the matrix is ``slow`` (``--runslow``, before a release).
+_COMPILED_DEFAULT = {
+    *(("conv_halo", v) for v in COMPILED_VARIANTS),
+    ("xwt", "joint_compiled_no_sync"),
+    ("conv_patchify", "joint_compiled_no_sync"),
+    ("layer_norm", "joint_compiled_no_sync"),
+    ("attention", "joint_compiled"),
+}
+
+
 def _compiled_cases():
     for shape in [(2, 2, 1), (2, 2, 2)]:
         world = shape[0] * shape[1] * shape[2]
         for kind in KINDS:
-            for variant in ["compiled", "joint_compiled", "joint_compiled_no_sync"]:
+            for variant in COMPILED_VARIANTS:
+                marks = [pytest.mark.dist(world)]
+                if (kind, variant) not in _COMPILED_DEFAULT:
+                    marks.append(pytest.mark.slow)
                 yield pytest.param(
                     shape,
                     kind,
                     variant,
                     id=f"{'x'.join(map(str, shape))}-{kind}-{variant}",
-                    marks=pytest.mark.dist(world),
+                    marks=marks,
                 )
 
 
@@ -398,6 +415,7 @@ def test_ddp_compiled_autograd(
             _assert_identical_over(p.grad, grp, f"{name}.grad")
 
 
+@pytest.mark.slow  # inductor compiles C++ on CPU: ~25 s
 @pytest.mark.dist(4)
 def test_joint_hook_inductor_fusion(device, monkeypatch, python_reducer) -> None:
     """Inductor's DDP fusion must not merge all-reduces over different groups.

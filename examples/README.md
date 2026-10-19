@@ -80,4 +80,5 @@ whole batch.
 
 `_common.py` holds the helpers they share: `setup()` (process-group bring-up), `shard()`
 (this rank's slice of a tensor), `data_seed()` (different images for every data-parallel
-copy) and `ddp_flags()` (`--ddp`, `--joint-hook`).
+copy), `ddp_flags()` (`--ddp`, `--joint-hook`) and `steps_flag()` (`--steps N`, to override
+the 100 training steps of the training scripts).

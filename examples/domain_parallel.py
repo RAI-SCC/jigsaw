@@ -38,7 +38,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel
-from _common import data_seed, ddp_flags, setup, shard
+from _common import data_seed, ddp_flags, setup, shard, steps_flag
 
 import jigsaw
 from jigsaw import log
@@ -160,4 +160,4 @@ def main(
 
 
 if __name__ == "__main__":
-    main(**ddp_flags(sys.argv))
+    main(**ddp_flags(sys.argv), **steps_flag(sys.argv))

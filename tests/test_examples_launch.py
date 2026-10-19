@@ -25,6 +25,8 @@ pytestmark = pytest.mark.skipif(
 REPO = Path(__file__).resolve().parents[1]
 EXAMPLES = REPO / "examples"
 SCRIPTS = sorted(p.stem for p in EXAMPLES.glob("*.py") if not p.name.startswith("_"))
+# Enough to start, train and exit: ``test_examples.py`` checks that the loss falls.
+LAUNCH_STEPS = 4
 
 # Anything a launcher (this one, mpirun, srun) put in the environment would be
 # inherited by the job we start and be taken for *its* launch.
@@ -65,7 +67,10 @@ def test_scripts_found() -> None:
 
 @pytest.mark.parametrize("name", SCRIPTS)
 def test_runs_under_torchrun(name: str) -> None:
-    """``torchrun --nproc-per-node 4 examples/<name>.py`` finishes without an error."""
+    """``torchrun --nproc-per-node 4 examples/<name>.py`` finishes without an error.
+
+    The training scripts run ``LAUNCH_STEPS`` steps (``--steps``); the others ignore it.
+    """
     proc = _run(
         [
             "-m",
@@ -73,6 +78,8 @@ def test_runs_under_torchrun(name: str) -> None:
             "--standalone",
             "--nproc-per-node=4",
             f"examples/{name}.py",
+            "--steps",
+            str(LAUNCH_STEPS),
         ]
     )
     assert proc.returncode == 0, f"{proc.stdout[-2000:]}\n{proc.stderr[-4000:]}"

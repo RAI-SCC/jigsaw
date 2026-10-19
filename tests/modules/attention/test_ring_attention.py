@@ -1,3 +1,5 @@
+import itertools
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -223,7 +225,6 @@ class TestRingAttention:
         x = torch.randn(
             b, n_local, d, device=device, requires_grad=True, dtype=dtype
         ) / (d**0.5)
-        x.fill_(local_rank * 0.1)
         x = x.contiguous()
 
         qkv = x @ w_qkv.mT
@@ -433,7 +434,6 @@ def test_ring_forward_backward_te(
     x = torch.randn(b, n_local, d, device=device, requires_grad=True, dtype=dtype) / (
         d**0.5
     )
-    x.fill_(local_rank * 0.1)
     x = x.contiguous()
 
     qkv = x @ w_qkv.mT
@@ -512,43 +512,75 @@ def test_ring_forward_backward_te(
         assert torch.allclose(local_bhsd, ref_slice, atol=atol)
 
 
-# Shared parametrization for the ``test_ring_hybrid*`` variants. Kept as a list
-# so both the 8-rank (``2 nodes x 4 GPUs``) and the 4-rank (``2 nodes x 2 GPUs``)
-# test stack the identical grid without duplicating six ``parametrize`` blocks.
-_RING_HYBRID_PARAMETRIZE = [
-    pytest.mark.parametrize(
-        "send_in_forward", [config.SendForward.X, config.SendForward.KV]
-    ),
-    pytest.mark.parametrize(
-        "save_for_backward", [config.SaveBackward.X, config.SaveBackward.KV]
-    ),
-    pytest.mark.parametrize(
-        "send_op",
-        [
-            config.SendOp.HYBRID_P2P,
-            config.SendOp.HYBRID_ALLTOALL,
-            config.SendOp.HYBRID_BROADCAST,
-            config.SendOp.P2P,
-            config.SendOp.ALLTOALL,
-            config.SendOp.BROADCAST,
-        ],
-    ),
-    pytest.mark.parametrize(
-        "save_scope", [config.SaveScope.LOCAL, config.SaveScope.GLOBAL]
-    ),
-    pytest.mark.parametrize(
-        "send_backward",
-        [config.SendBackward.SEND_DKV, config.SendBackward.GATHER_DKV],
-    ),
-    pytest.mark.parametrize("offloader", [config.Offload.DISABLED, config.Offload.CPU]),
-]
+# Shared parametrization for the ``test_ring_hybrid*`` variants. The full product
+# of the six options is 192 cases per topology; each costs a ring of collectives,
+# so the default run takes a pairwise cover (every pair of option values appears
+# in some case) and the rest is ``slow`` (``--runslow``, before a release). The
+# cover is built for each offload mode separately: ``Offload.CPU`` skips without
+# CUDA, so a CPU run still covers every pair of the other five options.
+_RING_HYBRID_OPTIONS = {
+    "send_in_forward": [config.SendForward.X, config.SendForward.KV],
+    "save_for_backward": [config.SaveBackward.X, config.SaveBackward.KV],
+    "send_op": [
+        config.SendOp.HYBRID_P2P,
+        config.SendOp.HYBRID_ALLTOALL,
+        config.SendOp.HYBRID_BROADCAST,
+        config.SendOp.P2P,
+        config.SendOp.ALLTOALL,
+        config.SendOp.BROADCAST,
+    ],
+    "save_scope": [config.SaveScope.LOCAL, config.SaveScope.GLOBAL],
+    "send_backward": [config.SendBackward.SEND_DKV, config.SendBackward.GATHER_DKV],
+}
+_OFFLOADERS = [config.Offload.DISABLED, config.Offload.CPU]
+
+
+def _ring_hybrid_unsupported(combo: tuple) -> bool:
+    """``SendForward.KV`` with ``SaveBackward.X``: xfails in ``_check_ring_hybrid``."""
+    return combo[0] == config.SendForward.KV and combo[1] == config.SaveBackward.X
+
+
+def _pairwise_cover(combos: list[tuple]) -> set[tuple]:
+    """Greedy (deterministic) subset of ``combos`` covering every value pair.
+
+    Pairs are taken over the supported combos only; one unsupported combo is
+    added so its xfail stays visible in the default run.
+    """
+
+    def pairs(c: tuple) -> set[tuple]:
+        return {(i, c[i], j, c[j]) for i, j in itertools.combinations(range(len(c)), 2)}
+
+    supported = [c for c in combos if not _ring_hybrid_unsupported(c)]
+    uncovered = set().union(*map(pairs, supported))
+    chosen = set()
+    while uncovered:
+        best = max(supported, key=lambda c: len(pairs(c) & uncovered))
+        chosen.add(best)
+        uncovered -= pairs(best)
+    chosen.add(next(c for c in combos if _ring_hybrid_unsupported(c)))
+    return chosen
+
+
+def _ring_hybrid_cases() -> list:
+    combos = list(itertools.product(*_RING_HYBRID_OPTIONS.values()))
+    default = _pairwise_cover(combos)
+    return [
+        pytest.param(
+            *combo,
+            offloader,
+            id="-".join(str(v) for v in (*combo, offloader)),
+            marks=() if combo in default else pytest.mark.slow,
+        )
+        for offloader in _OFFLOADERS
+        for combo in combos
+    ]
 
 
 def _apply_ring_hybrid_parametrize(fn):
-    """Stack the shared ``test_ring_hybrid*`` parametrization onto ``fn``."""
-    for marker in reversed(_RING_HYBRID_PARAMETRIZE):
-        fn = marker(fn)
-    return fn
+    """Apply the shared ``test_ring_hybrid*`` parametrization to ``fn``."""
+    return pytest.mark.parametrize(
+        (*_RING_HYBRID_OPTIONS, "offloader"), _ring_hybrid_cases()
+    )(fn)
 
 
 def _check_ring_hybrid(
@@ -601,13 +633,11 @@ def _check_ring_hybrid(
     w_qkv = torch.randn(
         3 * d * h, d, device=device, requires_grad=True, dtype=dtype
     ) / (d**0.5)
-    w_qkv.fill_(0.01)
     torch.manual_seed(local_rank)  # different seed for input data generation
     x = torch.randn(b, n_local, d, device=device, requires_grad=True, dtype=dtype) / (
         d**0.5
     )
     x = x.contiguous()
-    x = x.fill_(0.1 * local_rank)
 
     qkv = x @ w_qkv.mT
     # QKV shape: [B, Nlocal, 3*d*h]

@@ -21,9 +21,11 @@ Run with one process per GPU (or 4 CPU processes):
     torchrun --nproc-per-node 4 examples/reshard.py
 """
 
+import sys
+
 import torch
 import torch.nn as nn
-from _common import setup, shard
+from _common import setup, shard, steps_flag
 
 import jigsaw
 from jigsaw import log
@@ -106,4 +108,4 @@ def main(steps: int = 100) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(**steps_flag(sys.argv))

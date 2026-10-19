@@ -229,4 +229,6 @@ def test_plain_submodule_of_a_jigsaw_module_is_not_foreign(device) -> None:
     with torch.no_grad():  # a different shard on every column
         norm.weight.fill_(1.0 + mesh["col"].rank())
         norm.inner.weight.fill_(1.0 + mesh["col"].rank())
+        # Not left to its random init: that would differ over dp, not only col.
+        norm.inner.bias.fill_(1.0 + mesh["col"].rank())
     debug.assert_replica_consistency(norm, mesh, unmarked=True)
