@@ -40,7 +40,7 @@ def _combine_dropout_seed(
 #: Ring q/k/v/out layouts. ``"bhsd"`` is the ring's historical convention (SDPA /
 #: math cores); ``"bshd"`` is what the TE cores speak natively, so the TE ring
 #: carries it end to end and skips every per-chunk transpose. Set on
-#: :class:`~.._config.RingAttentionConfig.core_layout`.
+#: :class:`~jigsaw.modules.RingAttentionConfig.core_layout`.
 _SEQ_DIM = {"bhsd": 2, "bshd": 1}
 
 

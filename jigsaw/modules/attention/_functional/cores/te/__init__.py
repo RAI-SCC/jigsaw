@@ -6,7 +6,7 @@
 ``te.DotProductAttention``'s own choice there, where cuDNN measured slower).
 :func:`select_core` is the whole rule, resolved once per module (ring:
 ``..._config._select_attn_core_forward_fn``; non-ring:
-:meth:`~jigsaw.modules.attention._attention.DistributedAttention._select_attn_core`).
+:meth:`~jigsaw.modules.DistributedAttention._select_attn_core`).
 
 ``attn_backend="sdpa"`` is separate: torch's own kernels on every architecture,
 the escape hatch when TE's pick is wrong for a given shape.

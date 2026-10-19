@@ -24,7 +24,7 @@ orthogonal to how ``qkv`` was sharded.
 
 All tensors here are ``bshd`` (the TE cores' native layout); the SDPA path
 transposes around its kernel call in
-:meth:`.._attention.DistributedAttention._ulysses_attn_core`.
+:meth:`~jigsaw.modules.DistributedAttention._ulysses_attn_core`.
 """
 
 from __future__ import annotations

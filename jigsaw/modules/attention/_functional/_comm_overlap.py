@@ -1,6 +1,6 @@
 """Helpers for running the ring's point-to-point comm on a dedicated CUDA stream.
 
-Gated by :attr:`~jigsaw.modules.attention._config.RingAttentionConfig.overlap_comm`.
+Gated by :attr:`~jigsaw.modules.RingAttentionConfig.overlap_comm`.
 Originally built for (and still used directly by) the plain ``SendOp.P2P`` /
 ``SendOp.ALLTOALL`` chunk providers; :class:`PrefetchBuffer` below generalizes
 the same ping-pong pattern for the hybrid (intra-/inter-node) providers, which

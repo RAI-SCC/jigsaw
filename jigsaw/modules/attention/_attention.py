@@ -343,7 +343,7 @@ class DistributedAttention(torch.nn.Module):
             each inter-node transfer overlaps the node-local attention core --
             the ``cp_stream`` trick Transformer Engine's ``a2a+p2p`` uses. Only
             read when ``ulysses_gpus_per_node > 0``; forwarded to the inter-node
-            ring's :class:`._config.RingAttentionConfig` as ``overlap_comm``
+            ring's :class:`~jigsaw.modules.RingAttentionConfig` as ``overlap_comm``
             (CUDA-only, inert otherwise). Requires
             ``ulysses_inter_save_scope=LOCAL`` to also overlap the *backward*
             (the re-ringing dK/dV relay the overlap targets); paired with
@@ -352,7 +352,7 @@ class DistributedAttention(torch.nn.Module):
         ulysses_inter_offload : Offload | str
             ``offload`` for the hierarchical scheme's inter-node K/V ring (only
             read when ``ulysses_gpus_per_node > 0``): forwarded as-is to the
-            inter-node ring's :class:`._config.RingAttentionConfig`, which is the
+            inter-node ring's :class:`~jigsaw.modules.RingAttentionConfig`, which is the
             same ``RingAttentionConfig`` the plain ``ring=True`` path uses --
             see :class:`.offload.NVLinkActivationOffloader`. ``CPU`` moves the
             chunk kept for backward (per ``ulysses_inter_save_scope``) to

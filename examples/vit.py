@@ -50,12 +50,8 @@ from _common import data_seed, ddp_flags, setup, shard
 
 import jigsaw
 from jigsaw import log
-from jigsaw.modules.attention import (
-    RingAttentionConfig,
-    SaveScope,
-    SendForward,
-    SendOp,
-)
+from jigsaw.modules import RingAttentionConfig
+from jigsaw.modules.attention import SaveScope, SendForward, SendOp
 from jigsaw.launch import set_all_seeds
 
 IN_CHANNELS, PATCH, DIM, HEADS, DEPTH = 4, 4, 64, 4, 2

@@ -62,7 +62,7 @@ class SendOp(Enum):
 class AttnBackend(str, Enum):
     """Attention core implementation.
 
-    Applies to both the plain :class:`~.._attention.DistributedAttention` core and
+    Applies to both the plain :class:`~jigsaw.modules.DistributedAttention` core and
     the ring's per-chunk inner attention.
 
     - ``TE``: whichever kernel TransformerEngine would run on this GPU -- the

@@ -29,7 +29,7 @@ import jigsaw
 
 loss_fn = jigsaw.modules.DistributedCrossEntropyLoss(...)
 # or
-from jigsaw.modules.loss import distributed_cross_entropy
+from jigsaw.modules.functional import distributed_cross_entropy
 ```
 
 ## The two kinds of sharding
@@ -82,7 +82,7 @@ loss.backward()  # grads flow back into logits
 Functional form, same semantics:
 
 ```python
-from jigsaw.modules.loss import distributed_cross_entropy
+from jigsaw.modules.functional import distributed_cross_entropy
 
 loss = distributed_cross_entropy(
     logits,

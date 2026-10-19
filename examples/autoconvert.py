@@ -48,12 +48,8 @@ from _common import setup, shard
 import jigsaw
 from jigsaw import log
 from jigsaw.convert import convert_to_jigsaw
-from jigsaw.modules.attention import (
-    RingAttentionConfig,
-    SaveScope,
-    SendForward,
-    SendOp,
-)
+from jigsaw.modules import RingAttentionConfig
+from jigsaw.modules.attention import SaveScope, SendForward, SendOp
 from jigsaw.launch import setup_precision
 from jigsaw.gather import gather_1d_results
 

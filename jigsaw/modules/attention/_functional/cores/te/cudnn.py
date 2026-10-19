@@ -9,7 +9,7 @@ module drives ``fused_attn_fwd``/``fused_attn_bwd`` directly, reading the LSE
 from ``aux_ctx_tensors[0]``.
 
 The non-ring core
-(:meth:`~jigsaw.modules.attention._attention.DistributedAttention._transformer_attn_core`)
+(:meth:`~jigsaw.modules.DistributedAttention._transformer_attn_core`)
 goes through here too with ``layout="bshd"`` and just discards the LSE (cuDNN
 computes it regardless as its own backward's normaliser, so it's a free
 extra). What direct kernel calls buy there is the explicit
