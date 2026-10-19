@@ -78,9 +78,11 @@ def fused_xw_xtw_twoway(
     # rejects non-contiguous tensors; autograd routinely hands us a strided
     # gradient (e.g. through a preceding transpose / rearrange).
     grad_output = grad_output.contiguous()
-    buffer_x = get_preallocated_buffer(
-        grad_output.shape, grad_output.dtype, local_rank, device
-    )
+    # Fresh, not a cached ``get_preallocated_buffer`` slot: a cached recv buffer
+    # this size stays resident for the whole run (and is zero-filled every call,
+    # although the all-to-all overwrites it), which costs more peak memory than
+    # the allocation it saves.
+    buffer_x = torch.empty_like(grad_output)
     empty = get_empty(device, grad_output.dtype)
 
     match mod:
@@ -146,11 +148,9 @@ def xw_transpose_twoway(
     # from the inputs alone. Resolve it up front so the receive buffer and the
     # placeholder can be allocated before the ``xw`` matmul runs.
     xw_dtype = resolve_matmul_dtype(device, xij, wij)
-    buffer_xw = get_preallocated_buffer(
-        cast(torch.Size, (*xij.shape[:-1], w0.shape[-2])),
-        xw_dtype,
-        local_rank,
-        device,
+    # Fresh, not a cached slot: see the note in ``fused_xw_xtw_twoway``.
+    buffer_xw = torch.empty(
+        (*xij.shape[:-1], w0.shape[-2]), dtype=xw_dtype, device=device
     )
     empty = get_empty(device, xw_dtype)
 
