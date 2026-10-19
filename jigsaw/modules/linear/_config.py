@@ -1,5 +1,6 @@
 """Kernel selection for the distributed linear layers."""
 
+import copy
 from typing import Callable, Optional, Union
 
 import torch
@@ -12,11 +13,13 @@ from . import _distributed_matmul_p2p as dist_mm_p2p
 class LinearConfig:
     """Selection of the kernels of the distributed linear operation."""
 
+    #: Whether this is the config for a vmapped layer weight (see :meth:`for_vmap`).
+    vmapped: bool = False
+
     def __init__(
         self,
         parallelism: int,
         bias: torch.Tensor | None,
-        bayesian: bool,
         linear_layer: bool = True,
         device: torch.device = torch.device("cuda"),
     ):
@@ -28,33 +31,47 @@ class LinearConfig:
             Number of model-parallel processes.
         bias : torch.Tensor | None
             Bias, if any.
-        bayesian : bool
-            Whether the model is Bayesian.
         linear_layer : bool
             Whether the operation belongs to a linear layer.
         device : torch.device
             Device of the module.
         """
+        self.linear_layer = linear_layer
         self.mm_kernels = self._mm_kernel_selection(parallelism, device)
-        self.grad_bias = self._grad_bias_selection(parallelism, bias, bayesian)
-        self.add_bias = self._add_bias_selection(bias, bayesian)
-        self.reshape_weights = self._reshape_weights_selection(bayesian, linear_layer)
+        self.grad_bias = self._grad_bias_selection(bias)
+        self.add_bias: Callable = (
+            self._return_identity if bias is None else self._add_bias
+        )
+        self.reshape_weights: Callable = self._no_reshape_weights
         self.grad_sum = self._sum_grad_weights_selection(linear_layer)
+        self._vmap_config: Optional["LinearConfig"] = None
+
+    def for_vmap(self) -> "LinearConfig":
+        """Return the config for a layer weight that is vmapped.
+
+        The batching rule of the linear Functions passes ``x`` as
+        ``(members, batch, seq, in)``, the weight as ``(members, out, in)`` and
+        the bias as ``(members, out)``. This config gives the weight and bias
+        singleton ``batch``/``seq`` axes, so the kernels broadcast each member's
+        weight over its input, and reduces the gradients over ``batch``/``seq``
+        only.
+        """
+        if self._vmap_config is None:
+            c = copy.copy(self)
+            c.vmapped = True
+            # Rebind the selected methods to the copy, so they see ``vmapped``.
+            for name, value in vars(self).items():
+                if getattr(value, "__self__", None) is self:
+                    setattr(c, name, getattr(c, value.__func__.__name__))
+            if self.linear_layer:
+                c.reshape_weights = c._reshape_weights
+                if self.add_bias == self._add_bias:
+                    c.add_bias = c._add_bias_vmapped
+            c._vmap_config = c
+            self._vmap_config = c
+        return self._vmap_config
 
     # reshape weights
-    def _reshape_weights_selection(
-        self, bayesian: bool, linear_layer: bool
-    ) -> Callable:
-        """Select the weight-reshape function."""
-        # If the model is Bayesian and the module is a linear layer,
-        # weight reshape will be necessary.
-        if linear_layer and bayesian:
-            return self._reshape_weights
-        # If it is a distributed matrix operation with no explicit
-        # weight sampling, weight reshape is not needed.
-        else:
-            return self._no_reshape_weights
-
     def _reshape_weights(self, w: torch.Tensor) -> torch.Tensor:
         """Add a batch dimension to the weights for vmap."""
         w = w.unsqueeze(1)
@@ -71,35 +88,22 @@ class LinearConfig:
         else:
             return self._no_grad_sum
 
-    def _no_grad_sum(
-        self, grad_weight: torch.Tensor, batch_dim: torch.Tensor
-    ) -> torch.Tensor:
+    def _no_grad_sum(self, grad_weight: torch.Tensor) -> torch.Tensor:
         """Return the weight gradient unchanged."""
         return grad_weight
 
-    def _grad_sum(
-        self, grad_weight: torch.Tensor, batch_dim: torch.Tensor
-    ) -> torch.Tensor:
-        """Sum the weight gradient over the batch dimension."""
-        if len(grad_weight.shape) > 2:
-            return grad_weight.sum(dim=int(batch_dim))
-        else:
-            return grad_weight
+    def _grad_sum(self, grad_weight: torch.Tensor) -> torch.Tensor:
+        """Sum the weight gradient over the batch dimensions.
+
+        The leading (members) axis of a vmapped weight is kept.
+        """
+        first = 1 if self.vmapped else 0
+        dims = tuple(range(first, grad_weight.ndim - 2))
+        return grad_weight.sum(dim=dims) if dims else grad_weight
 
     # Adding xwt + b
-    def _add_bias_selection(
-        self, bias: Union[torch.Tensor, None], bayesian: bool
-    ) -> Callable:
-        """Select the function adding the bias."""
-        if bias is None:
-            return self._return_identity
-        elif bayesian:
-            return self._add_bias_bayesian
-        else:
-            return self._add_bias
-
-    def _add_bias_bayesian(self, x: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        """Add the reshaped bias to ``x``."""
+    def _add_bias_vmapped(self, x: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        """Add the per-member bias to ``x`` of shape ``(members, batch, seq, out)``."""
         b = b.unsqueeze(1).unsqueeze(1)
         return x.add(b)
 
@@ -114,27 +118,21 @@ class LinearConfig:
         return x
 
     # Reduce bias terms over spatial groups
-    def _grad_bias_selection(
-        self,
-        parallelism: int,
-        bias: Union[torch.Tensor, None],
-        bayesian: bool,
-    ) -> Callable:
+    def _grad_bias_selection(self, bias: Union[torch.Tensor, None]) -> Callable:
         """Select the function computing the bias gradient."""
-        # return identity if bias is None
         if bias is None:
             return self._no_bias
-        # all_reduce is not required for 2-way parallel models
         else:
             return self._bias_sum
 
     def _bias_sum(self, grad_output: torch.Tensor) -> torch.Tensor:
-        """Sum ``grad_output`` over the space and batch dimensions."""
-        if len(grad_output.shape) > 2:
-            grad_b = grad_output.sum(dim=(-3, -2))
-        else:
-            grad_b = grad_output.sum(dim=(-2))
-        return grad_b
+        """Sum ``grad_output`` over the space and batch dimensions.
+
+        The leading (members) axis of a vmapped bias is kept.
+        """
+        first = 1 if self.vmapped else 0
+        dims = tuple(range(first, grad_output.ndim - 1))
+        return grad_output.sum(dim=dims) if dims else grad_output
 
     def _no_bias(
         self,

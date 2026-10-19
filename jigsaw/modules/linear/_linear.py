@@ -39,7 +39,6 @@ class DistributedLinear(torch.nn.Module):
         row_group: dist.ProcessGroup,
         col_group: dist.ProcessGroup,
         bias: bool = True,
-        bayesian: bool = False,
         config: Optional[LinearConfig] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
@@ -66,8 +65,6 @@ class DistributedLinear(torch.nn.Module):
             Process group splitting the last dimension of ``x`` and ``w``.
         bias : bool
             Whether to add a bias.
-        bayesian : bool
-            Whether the model is Bayesian.
         config : LinearConfig, optional
             Kernel selection. Defaults to a configuration built from the
             arguments.
@@ -115,12 +112,10 @@ class DistributedLinear(torch.nn.Module):
         self.model_group = model_group
         self.row_group = row_group
         self.col_group = col_group
-        self.bayesian = bayesian
         self.config = (
             LinearConfig(
                 self.parallelism,
                 self.bias,
-                self.bayesian,
                 linear_layer=True,
                 device=self.device,
             )
@@ -187,7 +182,6 @@ class DistributedLinear(torch.nn.Module):
             self.device,
             self.config,
             self.model_group,
-            self.bayesian,
         )
         cij = cast(torch.Tensor, cij)
         return cij
@@ -258,7 +252,6 @@ class DistributedLinear(torch.nn.Module):
             model_group=process_mesh_dict[model_kw],
             row_group=process_mesh_dict[row_kw],
             col_group=process_mesh_dict[col_kw],
-            bayesian=False,  # TODO
         )
 
         # Map weights — clone so the original graph is detached
@@ -458,7 +451,6 @@ class DistributedLinear(torch.nn.Module):
         self.config = LinearConfig(
             self.parallelism,
             self.bias,
-            self.bayesian,
             linear_layer=True,
             device=self.device,
         )
@@ -485,7 +477,6 @@ class _DistributedMatMul(torch.nn.Module):
         device: torch.device,
         parallelism: int,
         model_group: dist.ProcessGroup,
-        bayesian: bool = False,
         config: Optional[LinearConfig] = None,
     ) -> None:
         """Initialize the module.
@@ -500,8 +491,6 @@ class _DistributedMatMul(torch.nn.Module):
             Number of model-parallel processes.
         model_group : dist.ProcessGroup
             Process group of one model-parallel instance.
-        bayesian : bool
-            Whether the model is Bayesian.
         config : LinearConfig, optional
             Kernel selection. Defaults to a configuration built from the
             arguments.
@@ -511,13 +500,10 @@ class _DistributedMatMul(torch.nn.Module):
         self.device = device
         self.parallelism = parallelism
         self.model_group = model_group
-        self.bayesian = bayesian
         self.config = (
             config
             if config is not None
-            else LinearConfig(
-                parallelism, None, bayesian, linear_layer=False, device=device
-            )
+            else LinearConfig(parallelism, None, linear_layer=False, device=device)
         )
         self.matmul = self._autograd_fn.apply
 
@@ -550,7 +536,6 @@ class _DistributedMatMul(torch.nn.Module):
             self.device,
             self.config,
             self.model_group,
-            self.bayesian,
         )
         return cast(torch.Tensor, cij)
 

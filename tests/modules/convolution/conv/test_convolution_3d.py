@@ -110,7 +110,6 @@ def _conv3d_reference_check(
         dilation=dilation,
         groups=groups,
         bias=True,
-        bayesian=False,
         dtype=torch.float32,
         channel_comm=channel_comm,
     ).to(device)
@@ -224,7 +223,6 @@ class TestConv3d:
             dilation=1,
             groups=1,
             bias=True,
-            bayesian=False,
             dtype=torch.float32,
         ).to(device)
 
@@ -317,7 +315,6 @@ class TestConv3d:
             dilation=1,
             groups=1,
             bias=True,
-            bayesian=False,
             dtype=torch.float32,
         ).to(device)
         x = torch.randn(2, 4, 6, 6, 8, device=device)
@@ -547,7 +544,6 @@ def _conv3d_multi_spatial_reference_check(
         dilation=dilation,
         groups=groups,
         bias=True,
-        bayesian=False,
         dtype=torch.float32,
     ).to(device)
 

@@ -25,8 +25,8 @@ of integration:
 3. :class:`TestDistributedAttentionEnsembleVmap` -- a full non-ring
    ``DistributedAttention`` under ``vmap(functional_call(...))`` with stacked
    ensemble parameters, vs a per-member loop, sdpa and te. **Forward passes;
-   grad xfails** -- ``_XWT.backward``'s ``bayesian`` weight reshape double-counts
-   the members axis under ``vmap(grad(...))``.
+   grad xfails** -- under ``vmap(grad(...))`` the backward collectives run on
+   BatchedTensors, and ``c10d`` ops register no batching rule.
 4. :class:`TestRingVmap` -- ``torch.vmap`` over a ``ring=True``
    ``DistributedAttention`` raises: ``_RingAttention`` has no ``vmap``
    staticmethod. **Passes** (asserts the raise); flip to a parity test when a
@@ -139,9 +139,7 @@ _IN = _EMBED = _OUT = 64
 _HEADS = 4
 
 
-def _build_attn(
-    mesh: dict, device: torch.device, backend: str, bayesian: bool, ring: bool = False
-):
+def _build_attn(mesh: dict, device: torch.device, backend: str, ring: bool = False):
     model = attention.DistributedAttention(
         in_dim=_IN,
         embed_dim=_EMBED,
@@ -152,7 +150,6 @@ def _build_attn(
         device=device,
         spatial_group=mesh["row"],
         channel_group=mesh["col"],
-        bayesian=bayesian,
         qk_norm=False,
         ring=ring,
         attn_backend=backend,
@@ -195,7 +192,7 @@ class TestDistributedAttentionPlain:
     def test_te_forward_channel_parallel(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        model = _build_attn(process_mesh_dict_2x2, device, "te", bayesian=False)
+        model = _build_attn(process_mesh_dict_2x2, device, "te")
         x = _local_x(process_mesh_dict_2x2, device)
         y = model(x)
         assert y.shape == x.shape
@@ -203,7 +200,7 @@ class TestDistributedAttentionPlain:
         assert torch.isfinite(y).all()
 
     def _check_backward(self, mesh, device, backend):
-        model = _build_attn(mesh, device, backend, bayesian=False)
+        model = _build_attn(mesh, device, backend)
         x = _local_x(mesh, device).requires_grad_(True)
         model(x).sum().backward()
         assert x.grad is not None
@@ -223,14 +220,6 @@ class TestDistributedAttentionPlain:
         self._check_backward(process_mesh_dict_2x2, device, "te")
 
 
-def _copy_weights(dst: torch.nn.Module, src: torch.nn.Module) -> None:
-    with torch.no_grad():
-        for (_, p_dst), (_, p_src) in zip(
-            dst.named_parameters(), src.named_parameters(), strict=True
-        ):
-            p_dst.copy_(p_src)
-
-
 # --------------------------------------------------------------------------- #
 # 3. full DistributedAttention under vmap (Bayesian ensemble)
 # --------------------------------------------------------------------------- #
@@ -240,35 +229,25 @@ class TestDistributedAttentionEnsembleVmap:
     with an ensemble (leading members axis) of stacked parameters -- the shape
     ``torch_blue`` drives for Bayesian sampling.
 
-    Reference is a per-member Python loop over ``bayesian=False`` modules holding
-    the same weights (``bayesian`` only changes a call-time weight reshape, not
-    the values), so a mismatch is the vmap members-fold, not the sharding.
+    Reference is a per-member Python loop over the same modules, so a mismatch
+    is the vmap members axis, not the sharding.
 
     **Forward** works for both ``sdpa`` and ``te`` once the core-dtype and
     grad-input-contiguity fixes are in (see :class:`TestDistributedAttentionPlain`).
-    **Grad** still xfails: under ``vmap(grad(...))`` functorch already peels the
-    members axis, then ``_XWT.backward`` calls ``config.reshape_weights`` which
-    unsqueezes a *second* one, so ``torch.split`` in ``fused_xw_xtw_twoway`` gets
-    a size-1 dim. Fix: make the ``bayesian`` weight reshape vmap-aware (or move
-    it into the ``vmap`` staticmethod).
+    **Grad** still xfails: under ``vmap(grad(...))`` the Functions' backward
+    runs on BatchedTensors, and the ``c10d`` collectives it calls register no
+    batching rule.
     """
 
     E = 2
 
     def _build(self, mesh, device, backend):
-        """Ensemble of ``bayesian=True`` models + stacked state + a
-        weight-matched ``bayesian=False`` per-member reference set + inputs."""
-        b_models = [
-            _build_attn(mesh, device, backend, bayesian=True) for _ in range(self.E)
-        ]
-        params, buffers = stack_module_state(b_models)
-        ref_models = [
-            _build_attn(mesh, device, backend, bayesian=False) for _ in range(self.E)
-        ]
-        for rm, bm in zip(ref_models, b_models, strict=True):
-            _copy_weights(rm, bm)
+        """Ensemble of models (the per-member references) + stacked state + inputs."""
+        ref_models = [_build_attn(mesh, device, backend) for _ in range(self.E)]
+        params, buffers = stack_module_state(ref_models)
+        base = _build_attn(mesh, device, backend)
         x_e = _local_x(mesh, device, members=self.E)
-        return b_models[0], params, buffers, ref_models, x_e
+        return base, params, buffers, ref_models, x_e
 
     def _fwd(self, mesh, device, backend):
         base, params, buffers, ref_models, x_e = self._build(mesh, device, backend)
@@ -325,8 +304,8 @@ class TestDistributedAttentionEnsembleVmap:
         )
 
     _XWT_VMAP_GRAD = pytest.mark.xfail(
-        strict=True,
-        reason="_XWT.backward's bayesian reshape_weights double-counts the members axis under vmap(grad)",
+        strict=False,
+        reason="c10d collectives in the Functions' backward have no batching rule under vmap(grad)",
     )
 
     @pytest.mark.dist(4)
@@ -381,9 +360,7 @@ class TestRingVmap:
         self, device: torch.device, process_mesh_dict_4x1: dict
     ) -> None:
         # ``4x1``: with its default config the ring needs an unsharded channel axis.
-        model = _build_attn(
-            process_mesh_dict_4x1, device, "sdpa", bayesian=False, ring=True
-        )
+        model = _build_attn(process_mesh_dict_4x1, device, "sdpa", ring=True)
         x_e = _local_x(process_mesh_dict_4x1, device, members=2)
 
         with pytest.raises((RuntimeError, NotImplementedError)):
