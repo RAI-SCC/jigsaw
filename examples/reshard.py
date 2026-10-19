@@ -42,7 +42,7 @@ def main(steps: int = 100) -> None:
     set_all_seeds(train_mesh["model"].rank())  # independent shards, so different seeds
 
     def linear(in_dim: int, out_dim: int) -> nn.Module:
-        return jigsaw.linear.DistributedLinear(
+        return jigsaw.modules.DistributedLinear(
             in_dim,
             out_dim,
             local_rank=train_mesh["model"].rank(),
@@ -56,7 +56,7 @@ def main(steps: int = 100) -> None:
     # tokens are split over "row" (sequence) and "col" (features): (B, S / row, DIM / col)
     model = nn.Sequential(linear(DIM, 4 * DIM), nn.GELU(), linear(4 * DIM, DIM))
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
-    loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=(row, col))
+    loss_fn = jigsaw.modules.DistributedMSELoss(reduce_groups=(row, col))
 
     def local(x: torch.Tensor) -> torch.Tensor:
         """This rank's shard of a full (B, S, DIM) tensor on the training mesh."""

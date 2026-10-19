@@ -43,8 +43,8 @@ EXPECTED_ALL: dict[str, set[str]] = {
         "init",
         "launch",
         "log",
+        "modules",
         "parallel",
-        *SUBPACKAGES,
     },
     "jigsaw.parallel": {
         "JointCommHookState",

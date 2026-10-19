@@ -215,7 +215,7 @@ class TestParity:
 
         with no_tf32():
             out = model(_tile(x, mesh, tiles))
-            loss_fn = jigsaw.loss.DistributedMSELoss(
+            loss_fn = jigsaw.modules.DistributedMSELoss(
                 reduce_groups=(mesh["sh"], mesh["sw"])
             )
             loss = loss_fn(out, _tile(y, mesh, tiles))
@@ -270,7 +270,7 @@ class TestParity:
 
         with no_tf32():
             out = tiled(_tile(x, mesh, tiles))
-            loss_fn = jigsaw.loss.DistributedMSELoss(
+            loss_fn = jigsaw.modules.DistributedMSELoss(
                 reduce_groups=(mesh["sh"], mesh["sw"])
             )
             loss = loss_fn(out, _tile(y, mesh, tiles))
@@ -317,7 +317,7 @@ class TestParity:
         g = torch.Generator().manual_seed(100 + col.rank())
         with torch.no_grad():
             for m in model.modules():
-                if isinstance(m, jigsaw.normalization.DistributedLayerNorm):
+                if isinstance(m, jigsaw.modules.DistributedLayerNorm):
                     m.weight.copy_(1 + 0.2 * torch.randn(m.weight.shape, generator=g))
                     m.bias.copy_(0.2 * torch.randn(m.bias.shape, generator=g))
 
@@ -421,7 +421,7 @@ class TestParity:
 
         with no_tf32():
             out = model(x_local)
-            loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=(row, col))
+            loss_fn = jigsaw.modules.DistributedMSELoss(reduce_groups=(row, col))
             loss = loss_fn(out, _tile(y, mesh, tiles))
             loss.backward()
 

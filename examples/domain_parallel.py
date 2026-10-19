@@ -51,7 +51,7 @@ def build_model(mesh: dict[str, dist.ProcessGroup], device: torch.device) -> nn.
 
     def conv(cin: int, cout: int, stride: int = 1) -> nn.Module:
         """A 3x3 distributed convolution with 'same' padding."""
-        return jigsaw.convolution.DistributedConv2d(
+        return jigsaw.modules.DistributedConv2d(
             cin,
             cout,
             kernel_size=3,
@@ -64,7 +64,7 @@ def build_model(mesh: dict[str, dist.ProcessGroup], device: torch.device) -> nn.
 
     def up(cin: int, cout: int) -> nn.Module:
         """A stride-2 transposed convolution that doubles the resolution."""
-        return jigsaw.convolution.DistributedConvTranspose2d(
+        return jigsaw.modules.DistributedConvTranspose2d(
             cin,
             cout,
             kernel_size=2,
@@ -136,7 +136,7 @@ def main(
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     # Every rank averages over the *global* image, so all ranks log the same number.
-    loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=(mesh["sh"], mesh["sw"]))
+    loss_fn = jigsaw.modules.DistributedMSELoss(reduce_groups=(mesh["sh"], mesh["sw"]))
 
     losses = []
     for step in range(steps):

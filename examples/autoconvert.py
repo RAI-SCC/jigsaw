@@ -8,8 +8,8 @@ distributed twin, carrying the weights over -- each rank keeps only its shard of
     nn.Conv{1,2,3}d                 -> DistributedConv{1,2,3}D
     nn.ConvTranspose{1,2,3}d        -> DistributedConv{1,2,3}DTranspose
     nn.LayerNorm                    -> DistributedLayerNorm
-    jigsaw.attention.Attention      -> DistributedAttention
-    jigsaw.roll.Roll                -> DistributedRoll
+    jigsaw.modules.Attention      -> DistributedAttention
+    jigsaw.modules.Roll                -> DistributedRoll
 
 Everything else (activations, reshapes, ...) is left alone, which is fine as long as it
 is elementwise or only touches the *local* shapes. A layer the converter does not know
@@ -28,7 +28,7 @@ We check the conversion the way you should check yours: run the original model o
 full input and compare against the gathered output of the converted one.
 
 ``TinyTransformer`` below repeats the exercise for a pre-norm transformer block --
-``nn.LayerNorm`` and ``jigsaw.attention.Attention`` convert the same way the conv and
+``nn.LayerNorm`` and ``jigsaw.modules.Attention`` convert the same way the conv and
 linear layers of ``PatchMLP`` do. With the heads split over "col" (channel size > 1),
 the attention's default ring configuration gives an exact forward pass but a wrong
 backward one -- pass a ``config`` with ``send_op=P2P`` and ``save_scope=LOCAL`` (see
@@ -84,14 +84,14 @@ class PatchMLP(nn.Module):
 class TransformerBlock(nn.Module):
     """Pre-norm block: ``x + attn(norm(x))``, then ``x + mlp(norm(x))``. Plain PyTorch.
 
-    ``nn.LayerNorm`` and ``jigsaw.attention.Attention`` are layers the converter knows,
+    ``nn.LayerNorm`` and ``jigsaw.modules.Attention`` are layers the converter knows,
     the same way ``nn.Linear`` and ``nn.Conv2d`` are.
     """
 
     def __init__(self, dim: int, heads: int, device: torch.device) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(dim, device=device)
-        self.attn = jigsaw.attention.Attention(
+        self.attn = jigsaw.modules.Attention(
             in_dim=dim, embed_dim=dim, out_dim=dim, heads=heads, device=device
         )
         self.norm2 = nn.LayerNorm(dim, device=device)
@@ -177,7 +177,7 @@ def main() -> None:
 
     # --- backward: the gradient of a weight shard equals the same slice of the original
     reference(x).square().mean().backward()
-    loss = jigsaw.loss.DistributedMSELoss(reduce_groups=(row, col))
+    loss = jigsaw.modules.DistributedMSELoss(reduce_groups=(row, col))
     loss(model(x_local), torch.zeros_like(x_local)).backward()
 
     # `fc1.weight` is (4E, E): rows split over "row", columns over "col".
@@ -241,7 +241,7 @@ def main() -> None:
 
     # --- backward: a layer-norm and an attention weight shard against the original ---
     reference2(x2).square().mean().backward()
-    loss2 = jigsaw.loss.DistributedMSELoss(reduce_groups=(row, col))
+    loss2 = jigsaw.modules.DistributedMSELoss(reduce_groups=(row, col))
     loss2(model2(x2_local), torch.zeros_like(x2_local)).backward()
 
     # `norm1.weight` is (E,), split over "col"; replicated (not split) over "row".

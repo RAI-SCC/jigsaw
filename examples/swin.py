@@ -193,7 +193,7 @@ class SwinBlock(nn.Module):
         )
 
         def roll(shift: int) -> nn.Module:
-            return jigsaw.roll.DistributedRoll(
+            return jigsaw.modules.DistributedRoll(
                 shifts=(shift, shift),
                 dims=(1, 2),  # the two spatial axes of (B, H, W, C) ...
                 distributed_dims=(1, 2),  # ... both are split ...
@@ -238,7 +238,7 @@ class Swin(nn.Module):
             device=device, spatial_group=(sh, sw), channel_group=mesh["col"]
         )
         # kernel == stride: the patches do not overlap, so there is no halo to exchange.
-        self.embed = jigsaw.convolution.DistributedConv2d(
+        self.embed = jigsaw.modules.DistributedConv2d(
             IN_CHANNELS, DIMS[0], kernel_size=PATCH, stride=PATCH, **conv_kwargs
         )
 
@@ -266,7 +266,7 @@ class Swin(nn.Module):
 
         scale = PATCH * 2 ** (len(DIMS) - 1)  # pixels per token of the last stage
         self.norm = replicate(nn.LayerNorm(DIMS[-1]), mesh, device)
-        self.recover = jigsaw.convolution.DistributedConvTranspose2d(
+        self.recover = jigsaw.modules.DistributedConvTranspose2d(
             DIMS[-1], IN_CHANNELS, kernel_size=scale, stride=scale, **conv_kwargs
         )
 
@@ -324,7 +324,7 @@ def main(
         # DDP over "dp" only, checked right away (wrong group, unequal replicas).
         model = jigsaw.parallel.wrap_ddp(model, mesh, joint_hook=joint_hook)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-    loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=(mesh["sh"], mesh["sw"]))
+    loss_fn = jigsaw.modules.DistributedMSELoss(reduce_groups=(mesh["sh"], mesh["sw"]))
     log.info(
         "parameters: %d per rank (all replicated), %d in the model",
         jigsaw.debug.count_parameters(model),
