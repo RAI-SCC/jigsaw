@@ -114,7 +114,7 @@ def sync_grad(*tensors: Optional[torch.Tensor]) -> tuple[Optional[torch.Tensor],
     # Buckets will hold the parameters that need sync., that also share an autograd node.
     # Examples include weight and bias of Conv layers and layer norms
     # Only bias term over a distributed linear
-    # 
+
     buckets = {}
     for i, t in enumerate(tensors):
         groups = replica_groups(t)

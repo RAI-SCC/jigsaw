@@ -125,6 +125,7 @@ EXPECTED_ALL: dict[str, set[str]] = {
         "Attention",
         "AttnBackend",
         "DistributedAttention",
+        "JIGSAW_TE_AVAILABLE",
         "Offload",
         "RingAttentionConfig",
         "SaveBackward",

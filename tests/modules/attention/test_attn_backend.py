@@ -329,7 +329,7 @@ class TestBackendWithTe:
         assert model.te_core is te_cores.select_core(device)
 
     def test_availability_flags_are_true(self):
-        from jigsaw.modules.attention._attention import JIGSAW_TE_AVAILABLE
+        from jigsaw.modules.attention import JIGSAW_TE_AVAILABLE
         from jigsaw.modules.attention._functional.cores.te import TE_CORE_AVAILABLE
 
         assert JIGSAW_TE_AVAILABLE is True

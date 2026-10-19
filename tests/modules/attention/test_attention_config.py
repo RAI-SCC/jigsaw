@@ -16,6 +16,7 @@ from jigsaw.modules.attention._config import (
     RingAttentionConfig,
     SaveBackward,
     SaveScope,
+    SendBackward,
     SendForward,
     SendOp,
 )
@@ -245,6 +246,47 @@ class TestRingAttentionConfig:
         )()
         config.wait_offloads()
         assert waited == [1]
+
+    @pytest.mark.parametrize(
+        "arg, value, expected",
+        [
+            ("send_in_forward", "kv", SendForward.KV),
+            ("send_op", "hybrid_p2p", SendOp.HYBRID_P2P),
+            ("send_op", "Hybrid_P2P", SendOp.HYBRID_P2P),
+            ("send_op", "ALLTOALL", SendOp.ALLTOALL),
+            ("save_for_backward", "x", SaveBackward.X),
+            ("save_scope", "local", SaveScope.LOCAL),
+            ("send_backward", "gather_dkv", SendBackward.GATHER_DKV),
+            ("offload", "disabled", Offload.DISABLED),
+            ("attn_backend", "MATH", AttnBackend.MATH),
+            ("attn_backend", "math", AttnBackend.MATH),
+        ],
+    )
+    def test_enum_names_are_accepted_in_any_case(self, arg, value, expected):
+        config = RingAttentionConfig(device=CPU, **{arg: value})
+        assert getattr(config, arg) is expected
+
+    @pytest.mark.parametrize("member", [SendOp.P2P, SendOp.BROADCAST])
+    def test_enum_members_pass_through(self, member):
+        assert RingAttentionConfig(device=CPU, send_op=member).send_op is member
+
+    @pytest.mark.parametrize(
+        "arg, value",
+        [
+            ("send_op", "ring"),
+            ("send_op", 3),
+            ("save_scope", "everywhere"),
+            ("attn_backend", "flash"),
+            ("send_in_forward", None),
+        ],
+    )
+    def test_unknown_values_are_rejected(self, arg, value):
+        with pytest.raises(ValueError, match=rf"{arg}={value!r} is not a"):
+            RingAttentionConfig(device=CPU, **{arg: value})
+
+    def test_error_lists_the_valid_names(self):
+        with pytest.raises(ValueError, match="'hybrid_p2p'"):
+            RingAttentionConfig(device=CPU, send_op="hybrid")
 
     def test_repr_lists_the_policies(self):
         text = repr(RingAttentionConfig(device=CPU, attn_backend="math"))

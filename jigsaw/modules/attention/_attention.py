@@ -410,7 +410,9 @@ class DistributedAttention(torch.nn.Module):
         if ring and ulysses:
             raise ValueError("ring and ulysses are mutually exclusive")
 
-        self.attn_backend = self._resolve_backend(AttnBackend(attn_backend))
+        self.attn_backend = self._resolve_backend(
+            attention_config._coerce_enum(AttnBackend, attn_backend, "attn_backend")
+        )
         self.te = self.attn_backend == AttnBackend.TE
         # Both TE paths run bshd q/k/v (``self.te`` gates the rearrange in
         # ``forward``); the Ulysses path is bshd for every backend. They differ

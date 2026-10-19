@@ -1,7 +1,7 @@
 """Configuration of ring attention."""
 
 from enum import Enum
-from typing import Any, Callable, Optional, cast
+from typing import Any, Callable, Optional, TypeVar, cast
 
 import torch
 import torch.distributed as dist
@@ -79,6 +79,54 @@ class AttnBackend(str, Enum):
     TE = "te"
     SDPA = "sdpa"
     MATH = "math"
+
+
+_E = TypeVar("_E", bound=Enum)
+
+
+def _coerce_enum(enum_cls: type[_E], value: Any, arg: str) -> _E:
+    """Return ``value`` as a member of ``enum_cls``.
+
+    Accepts the member itself or its name as a string in any case
+    (``send_op="hybrid_p2p"``), and for string enums also the value
+    (``attn_backend="te"``). Anything else raises, instead of being stored
+    unchanged and then silently matching none of the policy branches.
+
+    Parameters
+    ----------
+    enum_cls : type[Enum]
+        The enum to convert to.
+    value : Any
+        The argument as passed by the caller.
+    arg : str
+        Argument name, for the error message.
+
+    Returns
+    -------
+    Enum
+        The matching member of ``enum_cls``.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` names no member of ``enum_cls``.
+    """
+    if isinstance(value, enum_cls):
+        return value
+    if isinstance(value, str):
+        member = enum_cls.__members__.get(value.upper())
+        if member is not None:
+            return member
+        if issubclass(enum_cls, str):
+            try:
+                return enum_cls(value)
+            except ValueError:
+                pass
+    valid = ", ".join(repr(name.lower()) for name in enum_cls.__members__)
+    raise ValueError(
+        f"{arg}={value!r} is not a {enum_cls.__name__}; expected a "
+        f"{enum_cls.__name__} member or one of {valid}."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -308,37 +356,41 @@ class RingAttentionConfig:
     def __init__(
         self,
         device: torch.device = torch.device("cuda"),
-        send_in_forward: SendForward = SendForward.X,
-        send_op: SendOp = SendOp.HYBRID_P2P,
-        save_for_backward: SaveBackward = SaveBackward.KV,
-        save_scope: SaveScope = SaveScope.GLOBAL,
-        send_backward: SendBackward = SendBackward.SEND_DKV,
-        offload: Offload = Offload.DISABLED,
+        send_in_forward: SendForward | str = SendForward.X,
+        send_op: SendOp | str = SendOp.HYBRID_P2P,
+        save_for_backward: SaveBackward | str = SaveBackward.KV,
+        save_scope: SaveScope | str = SaveScope.GLOBAL,
+        send_backward: SendBackward | str = SendBackward.SEND_DKV,
+        offload: Offload | str = Offload.DISABLED,
         gpus_per_node: int = 4,
-        attn_backend: AttnBackend = AttnBackend.SDPA,
+        attn_backend: AttnBackend | str = AttnBackend.SDPA,
         overlap_comm: bool = False,
     ):
         """Initialize the configuration.
+
+        Every enum argument also takes the member's name as a string, in any
+        case (``send_op="hybrid_p2p"``); ``attn_backend`` also takes its value
+        (``"te"``). Unknown names raise :class:`ValueError`.
 
         Parameters
         ----------
         device : torch.device
             Device on which tensors and communication are placed.
-        send_in_forward : SendForward
+        send_in_forward : SendForward or str
             Tensor representation communicated during the forward pass.
-        send_op : SendOp
+        send_op : SendOp or str
             Communication operation used by the ring.
-        save_for_backward : SaveBackward
+        save_for_backward : SaveBackward or str
             Tensor representation saved for the backward pass.
-        save_scope : SaveScope
+        save_scope : SaveScope or str
             Scope in which intermediate tensors are saved.
-        send_backward : SendBackward
+        send_backward : SendBackward or str
             Strategy used to communicate backward gradients.
-        offload : Offload
+        offload : Offload or str
             Activation offloading policy.
         gpus_per_node : int
             Number of ranks assigned to each node for hybrid communication.
-        attn_backend : AttnBackend
+        attn_backend : AttnBackend or str
             Inner per-chunk attention core. ``SDPA`` (default) keeps the
             device-based pick (flash on CUDA, math on CPU); ``TE`` uses the
             TransformerEngine fused core; ``MATH`` the unfused reference.
@@ -357,6 +409,14 @@ class RingAttentionConfig:
         """
         if gpus_per_node <= 0:
             raise ValueError("gpus_per_node must be positive")
+        send_in_forward = _coerce_enum(SendForward, send_in_forward, "send_in_forward")
+        save_for_backward = _coerce_enum(
+            SaveBackward, save_for_backward, "save_for_backward"
+        )
+        send_op = _coerce_enum(SendOp, send_op, "send_op")
+        save_scope = _coerce_enum(SaveScope, save_scope, "save_scope")
+        send_backward = _coerce_enum(SendBackward, send_backward, "send_backward")
+        offload = _coerce_enum(Offload, offload, "offload")
         self.send_in_forward = send_in_forward
         self.save_for_backward = save_for_backward
         self.send_op = send_op
@@ -365,7 +425,7 @@ class RingAttentionConfig:
         self.offload = offload
         self.gpus_per_node = gpus_per_node
         self.device = device
-        self.attn_backend = AttnBackend(attn_backend)
+        self.attn_backend = _coerce_enum(AttnBackend, attn_backend, "attn_backend")
 
         # Dedicated CUDA stream for the ring's K/V circulation and backward dK/dV
         # relay. Created once here (the config outlives a single forward/backward)
