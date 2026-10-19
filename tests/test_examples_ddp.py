@@ -2,8 +2,9 @@
 
 Run under ``mpirun -n 8 pytest tests``: two data-parallel copies of each 4-rank model.
 
-* **Smoke** -- ``main()`` of every tutorial runs in every DDP mode, the loss goes
-  down, and the copies train on different images.
+* **Smoke** (``slow``: ``--runslow``, before a release) -- ``main()`` of every
+  tutorial runs in every DDP mode, the loss goes down, and the copies train on
+  different images.
 * **Parity with data-serial training** -- the model of each tutorial, wrapped in DDP
   over ``dp`` the three ways the tutorials and ``docs/ddp.md`` show (a hand-built
   ``DistributedDataParallel``, ``wrap_ddp``, ``wrap_ddp(joint_hook=True)``), with each
@@ -71,8 +72,11 @@ def example(
 
 
 # --- smoke ---------------------------------------------------------------------------
+# Full tutorial runs (~90 s on 8 CPU ranks): ``slow``, so they run before a release
+# (``--runslow``) but not on every PR. The parity tests below stay in the default run.
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("joint_hook", [False, True], ids=["ddp", "joint"])
 @pytest.mark.parametrize("name", ["domain_parallel", "vit", "swin"])
 def test_training_reduces_loss(
@@ -97,6 +101,7 @@ def test_training_reduces_loss(
     _agree(not torch.equal(*both), device, "both copies trained on the same images")
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("joint_hook", [False, True], ids=["plain", "joint"])
 def test_ddp_tutorial_runs(
     example: Callable[[str], ModuleType], device: torch.device, joint_hook: bool
