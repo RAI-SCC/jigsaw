@@ -31,7 +31,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-import jigsaw.modules.activation.activation as activation
+import jigsaw.modules.activation._activation as activation
 import jigsaw.modules.convolution as convolution
 import jigsaw.modules.normalization as norm
 from jigsaw.modules.attention import DistributedAttention
@@ -198,9 +198,9 @@ class TestAutocastAttention:
         # does): the forward runs under autocast -- its saved ``out`` / ``lse`` /
         # K-V chunks come back in the autocast dtype -- and ``ring_backward``
         # must reconcile them against the fp32 ``q`` without a dtype clash.
-        from jigsaw.modules.attention import config as attn_config
-        from jigsaw.modules.attention.functional import backward as ring_bwd
-        from jigsaw.modules.attention.functional import forward as ring_fwd
+        from jigsaw.modules.attention import _config as attn_config
+        from jigsaw.modules.attention._functional import backward as ring_bwd
+        from jigsaw.modules.attention._functional import forward as ring_fwd
 
         pm = process_mesh_dict_4x1
         ring_group = pm["row"]

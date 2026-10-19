@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`jigsaw.modules.convolution.conv_transpose.channel_comm`.
+"""Unit tests for :mod:`jigsaw.modules.convolution._conv_transpose.channel_comm`.
 
 ``_bias_view`` is a pure reshape and needs no distributed environment. It has to
 broadcast the raw bias parameter against the transpose-conv output for a plain
@@ -12,7 +12,7 @@ aligned.
 import pytest
 import torch
 
-from jigsaw.modules.convolution.conv_transpose.channel_comm import _bias_view
+from jigsaw.modules.convolution._conv_transpose.channel_comm import _bias_view
 
 
 class TestBiasView:

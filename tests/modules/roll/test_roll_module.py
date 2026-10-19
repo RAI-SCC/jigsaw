@@ -9,8 +9,8 @@ import torch
 
 from jigsaw._core import comm
 from jigsaw.modules import roll
-from jigsaw.modules.roll import distributed_roll as dist_roll
-from jigsaw.modules.roll.config import RollConfig
+from jigsaw.modules.roll import _distributed_roll as dist_roll
+from jigsaw.modules.roll._config import RollConfig
 
 CPU = torch.device("cpu")
 

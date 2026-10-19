@@ -50,12 +50,8 @@ from _common import data_seed, ddp_flags, setup, shard
 
 import jigsaw
 from jigsaw import log
-from jigsaw.modules.attention import (
-    RingAttentionConfig,
-    SaveScope,
-    SendForward,
-    SendOp,
-)
+from jigsaw.modules import RingAttentionConfig
+from jigsaw.modules.attention import SaveScope, SendForward, SendOp
 from jigsaw.launch import set_all_seeds
 
 IN_CHANNELS, PATCH, DIM, HEADS, DEPTH = 4, 4, 64, 4, 2
@@ -72,7 +68,7 @@ class Block(nn.Module):
         row, col, model_group = mesh["row"], mesh["col"], mesh["model"]
 
         def norm() -> nn.Module:
-            return jigsaw.normalization.DistributedLayerNorm(
+            return jigsaw.modules.DistributedLayerNorm(
                 normalized_dim=DIM,  # global size; each rank normalises its slice ...
                 local_rank=model_group.rank(),
                 device=device,
@@ -81,7 +77,7 @@ class Block(nn.Module):
             )
 
         def linear(in_dim: int, out_dim: int) -> nn.Module:
-            return jigsaw.linear.DistributedLinear(
+            return jigsaw.modules.DistributedLinear(
                 in_dim,
                 out_dim,
                 local_rank=model_group.rank(),
@@ -93,7 +89,7 @@ class Block(nn.Module):
             )
 
         self.norm1, self.norm2 = norm(), norm()
-        self.attn = jigsaw.attention.DistributedAttention(
+        self.attn = jigsaw.modules.DistributedAttention(
             in_dim=DIM,
             embed_dim=DIM,
             out_dim=DIM,
@@ -160,14 +156,14 @@ class ViT(nn.Module):
             spatial_group=row,  # a single group splits the last (width) axis
             channel_group=col,
         )
-        self.embed = jigsaw.convolution.DistributedConv2d(
+        self.embed = jigsaw.modules.DistributedConv2d(
             IN_CHANNELS, DIM, **conv_kwargs
         )
         self.blocks = nn.ModuleList([Block(mesh, device) for _ in range(DEPTH)])
-        self.norm = jigsaw.normalization.DistributedLayerNorm(
+        self.norm = jigsaw.modules.DistributedLayerNorm(
             DIM, model_group.rank(), device, row, col
         )
-        self.recover = jigsaw.convolution.DistributedConvTranspose2d(
+        self.recover = jigsaw.modules.DistributedConvTranspose2d(
             DIM, IN_CHANNELS, **conv_kwargs
         )
 
@@ -244,7 +240,7 @@ def main(
         # process group, or replicated weights that differ, raise on every rank.
         model = jigsaw.parallel.wrap_ddp(model, mesh, joint_hook=joint_hook)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-    loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=(mesh["row"], mesh["col"]))
+    loss_fn = jigsaw.modules.DistributedMSELoss(reduce_groups=(mesh["row"], mesh["col"]))
     log.info(
         "parameters: %d per rank, %d in the model",
         jigsaw.debug.count_parameters(model),

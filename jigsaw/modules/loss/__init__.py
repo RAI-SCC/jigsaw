@@ -1,6 +1,8 @@
 """Distributed classification and regression losses."""
 
-from .classification import (
+from jigsaw._core.public import set_module as _set_module
+
+from ._classification import (
     DistributedBCELoss,
     DistributedBCEWithLogitsLoss,
     DistributedCrossEntropyLoss,
@@ -10,8 +12,8 @@ from .classification import (
     distributed_cross_entropy,
     distributed_nll_loss,
 )
-from .common import redundant_all_reduce
-from .regression import (
+from ._common import redundant_all_reduce
+from ._regression import (
     DistributedL1Loss,
     DistributedMSELoss,
     DistributedSmoothL1Loss,
@@ -37,3 +39,5 @@ __all__ = [
     "distributed_smooth_l1_loss",
     "redundant_all_reduce",
 ]
+
+_set_module(globals(), __all__)

@@ -6,7 +6,7 @@ was never exercised under ``vmap`` -- these tests pin it, at increasing levels
 of integration:
 
 1. :class:`TestTransformerEngineAttentionVmap` -- the
-   :class:`~jigsaw.modules.attention.attention._TransformerEngineAttention`
+   :class:`~jigsaw.modules.attention._attention._TransformerEngineAttention`
    ``autograd.Function`` alone. It is the only piece that *has* to route through
    a custom Function under vmap (``te``'s fused kernels register no batching
    rule); its ``vmap`` staticmethod folds the members axis into the batch,
@@ -43,8 +43,8 @@ import torch
 import torch.distributed as dist
 from torch.func import functional_call, grad, stack_module_state, vmap
 
-from jigsaw.modules.attention import attention
-from jigsaw.modules.attention.functional.cores import te as te_cores
+from jigsaw.modules.attention import _attention as attention
+from jigsaw.modules.attention._functional.cores import te as te_cores
 from tests.parity import assert_close
 
 # TE fused attention needs fp16/bf16 and (on CUDA) the attn core runs in half
@@ -83,7 +83,7 @@ class TestTransformerEngineAttentionVmap:
 
     @staticmethod
     def _f(q, k, v, scale, core):
-        from jigsaw.modules.attention.attention import _TransformerEngineAttention
+        from jigsaw.modules.attention._attention import _TransformerEngineAttention
 
         # apply() returns (out, logsumexp, rng_state); only the output is used
         # outside the ring.

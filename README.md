@@ -133,7 +133,7 @@ mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})  # 4 ranks, one model repl
 class Linear(torch.nn.Module):
     def __init__(self, in_dim, out_dim, mesh, device):
         super().__init__()
-        self.lin = jigsaw.linear.DistributedLinear(
+        self.lin = jigsaw.modules.DistributedLinear(
             in_dim=in_dim,
             out_dim=out_dim,
             bias=True,

@@ -1,12 +1,14 @@
 """Distributed convolution and transpose convolution."""
 
-from .conv import (
+from jigsaw._core.public import set_module as _set_module
+
+from ._conv import (
     ConvNdConfig,
     DistributedConv1d,
     DistributedConv2d,
     DistributedConv3d,
 )
-from .conv_transpose import (
+from ._conv_transpose import (
     ConvTransposeNdConfig,
     DistributedConvTranspose1d,
     DistributedConvTranspose2d,
@@ -23,3 +25,5 @@ __all__ = [
     "ConvNdConfig",
     "ConvTransposeNdConfig",
 ]
+
+_set_module(globals(), __all__)

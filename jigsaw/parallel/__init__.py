@@ -33,6 +33,8 @@ the graph. This takes the replica sum off the critical path and lets NCCL reduce
 within a node before crossing nodes.
 """
 
+from jigsaw._core.public import set_module as _set_module
+
 from ._ddp import check_ddp, wrap_ddp
 from ._joint import JointCommHookState, joint_comm_hook, register_joint_comm_hook
 from ._replicas import broadcast_replicas, mark_replicated, replica_groups
@@ -51,3 +53,5 @@ __all__ = [
     "register_joint_comm_hook",
     "check_ddp",
 ]
+
+_set_module(globals(), __all__)

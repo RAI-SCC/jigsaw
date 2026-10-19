@@ -13,14 +13,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from jigsaw.modules.attention.config import SaveScope
-from jigsaw.modules.attention.functional import forward as ring_forward
-from jigsaw.modules.attention.functional.backward_chunk_provider import (
+from jigsaw.modules.attention._config import SaveScope
+from jigsaw.modules.attention._functional import forward as ring_forward
+from jigsaw.modules.attention._functional.backward_chunk_provider import (
     _build_backward_chunk_provider,
     _GlobalChunkProvider,
     _LocalChunkProviderHybridP2P,
 )
-from jigsaw.modules.attention.functional.forward_chunk_provider import (
+from jigsaw.modules.attention._functional.forward_chunk_provider import (
     _ForwardChunkProvider,
     _HybridP2PForwardChunkProvider,
     build_forward_chunk_provider,

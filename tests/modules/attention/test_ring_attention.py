@@ -2,12 +2,12 @@ import pytest
 import torch
 import torch.distributed as dist
 
-import jigsaw.modules.attention.config as config
+import jigsaw.modules.attention._config as config
 from jigsaw.gather import (
     gather_1d_results,
 )
-from jigsaw.modules.attention.functional import backward, forward, ring
-from jigsaw.modules.attention.functional.cores import te as te_cores
+from jigsaw.modules.attention._functional import backward, forward, ring
+from jigsaw.modules.attention._functional.cores import te as te_cores
 from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -395,7 +395,7 @@ def test_ring_forward_backward_te(
 ) -> None:
     """Ring forward/backward with the TransformerEngine inner core vs full SDPA.
 
-    Exercises :mod:`jigsaw.modules.attention.functional.cores.te` inside the ring:
+    Exercises :mod:`jigsaw.modules.attention._functional.cores.te` inside the ring:
     whichever arm this GPU selects supplies the per-chunk ``(out, lse)`` for the
     online-softmax merge, and its backward recomputes ``dQ/dK/dV`` from the saved
     *global* ``out`` / ``lse``. Set ``JIGSAW_TE_CORE`` to exercise the arm this

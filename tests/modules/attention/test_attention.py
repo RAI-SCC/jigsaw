@@ -129,7 +129,7 @@ class TestDistributedAttention:
         backward. Correctness (vs a serial reference) is left to the functional
         ``test_ring_attention`` suite; this only guards the wiring.
         """
-        from jigsaw.modules.attention import config as attn_config
+        from jigsaw.modules.attention import _config as attn_config
 
         model_group = process_mesh_dict_2x2["model"]
 

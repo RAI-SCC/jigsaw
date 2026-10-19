@@ -1,6 +1,8 @@
 """Distributed evaluation metrics."""
 
-from .segmentation import (
+from jigsaw._core.public import set_module as _set_module
+
+from ._segmentation import (
     DistributedSegmentationMetrics,
     confusion_to_metrics,
     distributed_confusion_matrix,
@@ -11,3 +13,5 @@ __all__ = [
     "distributed_confusion_matrix",
     "confusion_to_metrics",
 ]
+
+_set_module(globals(), __all__)

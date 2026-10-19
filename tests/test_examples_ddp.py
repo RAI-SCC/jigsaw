@@ -233,7 +233,7 @@ def test_matches_data_serial_training(
     wrapped = _wrap(model, how, mesh)
     opt = torch.optim.SGD(wrapped.parameters(), lr=LR, momentum=0.9)
     ref_opt = torch.optim.SGD(ref.parameters(), lr=LR, momentum=0.9)
-    loss_fn = jigsaw.loss.DistributedMSELoss(
+    loss_fn = jigsaw.modules.DistributedMSELoss(
         reduce_groups=tuple(mesh[a] for a in t.model_axes)
     )
 
@@ -289,7 +289,9 @@ def test_ddp_tutorial_step_matches_full_batch(
     ddp = parallel.wrap_ddp(model, mesh, joint_hook=joint_hook)
     opt = torch.optim.SGD(ddp.parameters(), lr=LR, momentum=0.9)
     ref_opt = torch.optim.SGD(ref.parameters(), lr=LR, momentum=0.9)
-    loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=(mesh["row"], mesh["col"]))
+    loss_fn = jigsaw.modules.DistributedMSELoss(
+        reduce_groups=(mesh["row"], mesh["col"])
+    )
 
     losses, ref_losses = [], []
     with no_tf32():

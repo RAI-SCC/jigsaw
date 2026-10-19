@@ -20,7 +20,7 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.modules.attention as attention
-from jigsaw.modules.attention.config import (
+from jigsaw.modules.attention._config import (
     RingAttentionConfig,
     SaveBackward,
     SaveScope,

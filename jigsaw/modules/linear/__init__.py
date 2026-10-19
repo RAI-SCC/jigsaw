@@ -1,7 +1,9 @@
 """Distributed linear layers."""
 
-from .config import LinearConfig
-from .linear import (
+from jigsaw._core.public import set_module as _set_module
+
+from ._config import LinearConfig
+from ._linear import (
     DistributedLinear,
     DistributedMatMulXTW,
     DistributedMatMulXW,
@@ -21,3 +23,5 @@ __all__ = [
     "MatMulXTW",
     "LinearConfig",
 ]
+
+_set_module(globals(), __all__)

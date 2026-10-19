@@ -27,9 +27,9 @@ equivalent and issues **no collectives** — you can use them unconditionally.
 ```python
 import jigsaw
 
-loss_fn = jigsaw.loss.DistributedCrossEntropyLoss(...)
+loss_fn = jigsaw.modules.DistributedCrossEntropyLoss(...)
 # or
-from jigsaw.modules.loss import distributed_cross_entropy
+from jigsaw.modules.functional import distributed_cross_entropy
 ```
 
 ## The two kinds of sharding
@@ -65,7 +65,7 @@ import jigsaw
 
 mesh = ...  # {"row": ProcessGroup, "col": ProcessGroup}
 
-ce = jigsaw.loss.DistributedCrossEntropyLoss(
+ce = jigsaw.modules.DistributedCrossEntropyLoss(
     channel_group=mesh["col"],  # class dim is split here
     reduce_groups=(mesh["row"],),  # batch/spatial dims are split here
     label_smoothing=0.1,
@@ -82,7 +82,7 @@ loss.backward()  # grads flow back into logits
 Functional form, same semantics:
 
 ```python
-from jigsaw.modules.loss import distributed_cross_entropy
+from jigsaw.modules.functional import distributed_cross_entropy
 
 loss = distributed_cross_entropy(
     logits,
@@ -110,14 +110,14 @@ loss = distributed_cross_entropy(
 ### NLL
 
 `DistributedNLLLoss` / `distributed_nll_loss` take **log-probabilities**, not
-logits — feed them `jigsaw.activation.distributed_log_softmax(logits, dim=1,
+logits — feed them `jigsaw.modules.functional.distributed_log_softmax(logits, dim=1,
 group=channel_group)`. Same `channel_group` / `reduce_groups` / `weight` / `ignore_index`
 contract as cross-entropy.
 
 ### Binary cross-entropy
 
 ```python
-bce = jigsaw.loss.DistributedBCEWithLogitsLoss(
+bce = jigsaw.modules.DistributedBCEWithLogitsLoss(
     reduce_groups=(mesh["row"], mesh["col"]),  # EVERY group the tensor is split on
     pos_weight=pos_weight,  # broadcastable to the class dim
     reduction="mean",
@@ -135,10 +135,10 @@ Elementwise, no class dimension — `reduce_groups` lists every group the tensor
 is split on.
 
 ```python
-mse = jigsaw.loss.DistributedMSELoss(reduce_groups=(mesh["row"], mesh["col"]))
+mse = jigsaw.modules.DistributedMSELoss(reduce_groups=(mesh["row"], mesh["col"]))
 loss = mse(pred, target)  # pred, target: matching shards
 
-huber = jigsaw.loss.DistributedSmoothL1Loss(
+huber = jigsaw.modules.DistributedSmoothL1Loss(
     reduce_groups=(mesh["row"], mesh["col"]),
     beta=1.0,  # quadratic↔linear transition point
 )
@@ -192,9 +192,9 @@ DistributedSmoothL1Loss(reduce_groups=None, *, beta=1.0, reduction="mean")
 
 Exported for building your own distributed objectives:
 
-- **`jigsaw.activation.distributed_log_softmax(x, dim=-1, group=None)`** and
-  **`jigsaw.activation.distributed_argmax(x, dim, group=None)`** (they live in
-  `jigsaw.activation`) — `log_softmax` and arg-max along a dimension sharded
+- **`jigsaw.modules.functional.distributed_log_softmax(x, dim=-1, group=None)`** and
+  **`jigsaw.modules.functional.distributed_argmax(x, dim, group=None)`** (they live in
+  `jigsaw.modules.functional`) — `log_softmax` and arg-max along a dimension sharded
   across `group`. Use the first to turn sharded logits into the
   log-probabilities that `DistributedNLLLoss` expects; the second returns
   **global** indices, breaks ties to the lowest global index, and runs under
