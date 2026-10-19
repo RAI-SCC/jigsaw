@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(".."))
 
@@ -79,6 +81,51 @@ _MockObject.__ror__ = _mock_or
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
 }
+
+# -- Markdown -----------------------------------------------------------------
+# Anchors for headings down to ``####``, so in-page links like ``#launching``
+# resolve.
+myst_heading_anchors = 4
+
+# README.md (included by index.md) and ddp.md link to repo files that are not
+# doc pages (examples/, scripts/, jigsaw/launch.py, ...). Those links work on
+# GitHub, so the Markdown keeps them; for the docs build they are pointed at the
+# file on GitHub instead. Links into docs/ are doc pages and are left alone.
+_REPO = Path(__file__).resolve().parent.parent
+_GITHUB_BLOB = "https://github.com/RAI-SCC/jigsaw/blob/main/"
+_LOCAL_LINK = re.compile(r"\]\((?!https?://|#|mailto:)([^)\s]+)\)")
+
+
+def _repo_links_to_github(text: str, base: Path) -> str:
+    def replace(match: re.Match[str]) -> str:
+        target, _, anchor = match.group(1).partition("#")
+        path = (base / target).resolve()
+        if not path.exists() or not path.is_relative_to(_REPO):
+            return match.group(0)
+        rel = path.relative_to(_REPO)
+        if rel.parts[0] == "docs":
+            return match.group(0)
+        return f"]({_GITHUB_BLOB}{rel.as_posix()}{'#' + anchor if anchor else ''})"
+
+    return _LOCAL_LINK.sub(replace, text)
+
+
+def _on_source_read(app: object, docname: str, source: list[str]) -> None:
+    doc = Path(app.env.doc2path(docname))  # type: ignore[attr-defined]
+    source[0] = _repo_links_to_github(source[0], doc.parent)
+
+
+def _on_include_read(
+    app: object, relative_path: Path, parent_docname: str, content: list[str]
+) -> None:
+    included = Path(app.srcdir) / relative_path  # type: ignore[attr-defined]
+    content[0] = _repo_links_to_github(content[0], included.resolve().parent)
+
+
+def setup(app: object) -> None:
+    """Register the repo-link rewrite for pages and included files."""
+    app.connect("source-read", _on_source_read)  # type: ignore[attr-defined]
+    app.connect("include-read", _on_include_read)  # type: ignore[attr-defined]
 
 # -- HTML output --------------------------------------------------------------
 html_theme = "sphinx_rtd_theme"
