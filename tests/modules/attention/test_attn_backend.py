@@ -89,9 +89,7 @@ class TestSelectRingCore:
             _select_attn_core_forward_fn(torch.device("cuda"), "sdpa")
             is sdpa_core.forward
         )
-        assert (
-            _select_attn_core_backward_fn(CPU, "sdpa") is math_core.backward
-        )
+        assert _select_attn_core_backward_fn(CPU, "sdpa") is math_core.backward
 
     def test_string_and_enum_arg_agree(self):
         assert _select_attn_core_forward_fn(
@@ -134,15 +132,34 @@ class TestTeCoreSelection:
         [((8, 0), "flash"), ((8, 6), "flash"), ((9, 0), "cudnn"), ((10, 0), "cudnn")],
     )
     def test_architecture_rule(self, monkeypatch, capability, expected):
+        # Pure selection logic -- force both arms "available" so this passes
+        # without transformer_engine/flash_attn installed (e.g. CPU-only CI).
+        monkeypatch.setattr(te_cores.cudnn, "CUDNN_CORE_AVAILABLE", True)
+        monkeypatch.setattr(te_cores.flash, "FLASH_CORE_AVAILABLE", True)
         monkeypatch.delenv("JIGSAW_TE_CORE", raising=False)
+        monkeypatch.setattr(torch.version, "hip", None)
         monkeypatch.setattr(
             torch.cuda, "get_device_capability", lambda device=None: capability
         )
         chosen = te_cores.select_core(torch.device("cuda"))
         assert chosen is getattr(te_cores, expected)
 
+    def test_rocm_uses_flash_or_raises(self, monkeypatch):
+        """ROCm reports gfx versions as capability, so the Hopper rule is skipped."""
+        monkeypatch.delenv("JIGSAW_TE_CORE", raising=False)
+        monkeypatch.setattr(torch.version, "hip", "6.2")
+        monkeypatch.setattr(te_cores.cudnn, "CUDNN_CORE_AVAILABLE", True)
+        monkeypatch.setattr(te_cores.flash, "FLASH_CORE_AVAILABLE", True)
+        assert te_cores.select_core(torch.device("cuda")) is te_cores.flash
+        monkeypatch.setattr(te_cores.flash, "FLASH_CORE_AVAILABLE", False)
+        with pytest.raises(RuntimeError, match="on ROCm needs flash_attn"):
+            te_cores.select_core(torch.device("cuda"))
+
     def test_falls_back_when_preferred_arm_missing(self, monkeypatch):
         """A container without ``flash_attn`` still runs ``te`` on Ampere."""
+        # cuDNN must look available for the fallback to land there, independent
+        # of whether transformer_engine is actually installed in this environment.
+        monkeypatch.setattr(te_cores.cudnn, "CUDNN_CORE_AVAILABLE", True)
         monkeypatch.delenv("JIGSAW_TE_CORE", raising=False)
         monkeypatch.setattr(
             torch.cuda, "get_device_capability", lambda device=None: (8, 0)
@@ -180,7 +197,7 @@ class TestTeCoreGuard:
 def solo_group():
     """A 1-rank process group for the current rank.
 
-    ``DistributedAttention`` always builds a ``DistributedXWT`` head and
+    ``DistributedAttention`` always builds a ``DistributedLinear`` head and
     broadcasts its parameters over ``spatial_group``; a size-1 group makes that
     a no-op, so the module constructs at any world size (and on CPU under an
     nccl default group) without cross-rank coupling.
@@ -319,12 +336,12 @@ class TestBackendWithTe:
         assert TE_CORE_AVAILABLE is True
 
     def test_te_attn_forward_backward_matches_sdpa(self, device):
-        """``TransformerEngineAttention`` runs fwd/bwd and tracks SDPA in bf16.
+        """``te_attention`` runs fwd/bwd and tracks SDPA in bf16.
 
         Ported from the standalone ``test_transformer_engine.py`` so the numeric
         check survives that file's removal on ``refactor/tests``.
         """
-        from jigsaw.modules.attention.attention import TransformerEngineAttention
+        from jigsaw.modules.attention.attention import _TransformerEngineAttention
 
         batch, seq, heads, head_dim = 2, 16, 4, 32
         scale = head_dim**-0.5
@@ -340,7 +357,7 @@ class TestBackendWithTe:
         for t in (q, k, v):
             t.requires_grad_(True)
 
-        out, lse, rng_state = TransformerEngineAttention.apply(
+        out, lse, rng_state = _TransformerEngineAttention.apply(
             q, k, v, scale, 0.0, core
         )
         assert out.shape == (batch, seq, heads * head_dim)

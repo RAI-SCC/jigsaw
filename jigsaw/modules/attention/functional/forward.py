@@ -1,10 +1,4 @@
-"""Ring attention forward implementation.
-
-A single driver loop (:func:`ring_forward`) handles every communication strategy
-by delegating to a :class:`~.forward_chunk_provider._ForwardChunkProvider`,
-mirroring how :func:`.backward.ring_backward` delegates to a
-:class:`~.backward_chunk_provider._BackwardChunkProvider`.
-"""
+"""Ring attention forward pass."""
 
 from __future__ import annotations
 
@@ -17,16 +11,11 @@ from jigsaw.modules.attention.config import RingAttentionConfig
 
 from ._merge_kernel import fused_online_softmax_merge_
 from .forward_chunk_provider import build_forward_chunk_provider
-from .functional import bhnd, combine_dropout_seed
+from .ring import _bhnd, _combine_dropout_seed
 
 
 def _draw_base_seed(device: torch.device) -> int:
-    """Draw a fresh per-call dropout base seed from the ambient default RNG.
-
-    Consumed once per ring-attention forward; every per-chunk sub-seed
-    (:func:`..functional.combine_dropout_seed`) derives from it deterministically,
-    so only this one int needs saving for backward to replay every chunk's mask.
-    """
+    """Draw a dropout base seed from the default RNG."""
     return int(torch.randint(0, 2**31 - 1, (1,), device=device).item())
 
 
@@ -113,13 +102,12 @@ def _attend_step(
     lse: torch.Tensor,
     seed: Optional[int],
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    """Run the attention core on (q, kj, vj) and merge into the running (out, lse).
+    """Attend to one chunk and merge it into the running output.
 
-    kj/vj may be views into a KV buffer; flash attention requires contiguous
-    inputs, so they're materialized here. Returns the merged ``(out, lse)``
-    plus this step's ``rng_state`` (``None`` unless the core is one that
-    threads back opaque kernel RNG state instead of using ``seed`` -- see
-    :mod:`.cores`).
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
+        Merged output and log-sum-exp, and the ``rng_state`` of the core.
     """
     kjc, vjc = kj.contiguous(), vj.contiguous()
     out_j, l_j, rng_state_j = ring_config.attn_core_forward_fn(
@@ -160,14 +148,7 @@ def ring_forward(
     Optional[int],
     tuple[torch.Tensor | None, ...],
 ]:
-    """Forward pass for ring attention.
-
-    One loop over ``ring_group_size`` ring steps: the
-    :class:`~.forward_chunk_provider._ForwardChunkProvider` for
-    ``ring_config.send_op`` makes each chunk current (``get``), records it for
-    the backward pass (``save_for_backward``), and progresses communication
-    (``advance``); this function only runs the attention core and the online
-    softmax merge.
+    """Run the forward pass of ring attention.
 
     Parameters
     ----------
@@ -178,11 +159,11 @@ def ring_forward(
     w_qkv : torch.Tensor
         Fused query, key, and value projection weights.
     scale : float
-        Attention scaling factor.
+        Softmax scale.
     dropout_p : float
-        Attention dropout probability.
+        Dropout probability.
     group : dist.ProcessGroup
-        Distributed process group used for ring communication.
+        Process group of the ring.
     local_rank : int
         Rank within ``group``.
     ring_group_size : int
@@ -193,9 +174,8 @@ def ring_forward(
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...], int | None, tuple[torch.Tensor | None, ...]]
-        Attention output, log-sum-exp values, the chunks saved for backward,
-        the dropout base seed (``None`` if ``dropout_p == 0``), and per-global-chunk
-        RNG state (see :func:`_attend_step`).
+        Output, log-sum-exp, chunks saved for backward, dropout base seed
+        (``None`` without dropout) and per-chunk RNG states.
     """
     # Accumulate ``out`` / ``lse`` in at least fp32, mutated in place across ring
     # steps by ``_online_softmax_merge_``. ``lse`` is a softmax normaliser, never
@@ -217,12 +197,14 @@ def ring_forward(
     )
 
     acc_dtype = torch.promote_types(q.dtype, torch.float32)
-    b, heads, n_local, _ = bhnd(q.shape, ring_config.core_layout)
+    b, heads, n_local, _ = _bhnd(q.shape, ring_config.core_layout)
     out = torch.zeros(q.shape, device=q.device, dtype=acc_dtype)
     # ``lse`` is always ``(b, h, n)`` -- both the SDPA and TE cores emit and
     # consume it in that shape regardless of the q/k/v layout; the merge
     # transposes the blend weight instead (see ``_online_softmax_merge_``).
-    lse = torch.full((b, heads, n_local), float("-inf"), device=q.device, dtype=acc_dtype)
+    lse = torch.full(
+        (b, heads, n_local), float("-inf"), device=q.device, dtype=acc_dtype
+    )
 
     base_seed = _draw_base_seed(q.device) if dropout_p > 0.0 else None
     rng_states: list[Optional[torch.Tensor]] = [None] * ring_group_size
@@ -232,12 +214,25 @@ def ring_forward(
         provider.save_for_backward(step)
         global_chunk_idx = provider.global_chunk_idx(step)
         seed = (
-            combine_dropout_seed(base_seed, local_rank, global_chunk_idx)
+            _combine_dropout_seed(base_seed, local_rank, global_chunk_idx)
             if base_seed is not None
             else None
         )
+        # A chunk recomputed from a received ``x`` comes out in ``w_qkv``'s dtype,
+        # while ``q`` is already in the core dtype (bf16 on CUDA): the cores
+        # matmul ``q`` against the chunk, so a mixed-dtype pair raises. Fold the
+        # chunk into ``q``'s dtype here, as ``ring_backward`` does for its cores;
+        # the provider keeps (and saves) the chunk in its original precision.
         out, lse, rng_state_j = _attend_step(
-            ring_config, q, kj, vj, scale, dropout_p, out, lse, seed
+            ring_config,
+            q,
+            kj.to(q.dtype),
+            vj.to(q.dtype),
+            scale,
+            dropout_p,
+            out,
+            lse,
+            seed,
         )
         rng_states[global_chunk_idx] = rng_state_j
         # Drain this step's D2H offload behind its attention core

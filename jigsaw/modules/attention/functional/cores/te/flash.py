@@ -32,7 +32,8 @@ from typing import Optional
 
 import torch
 
-from ._layout import Layout, from_bshd as _from_bshd
+from ._layout import Layout
+from ._layout import from_bshd as _from_bshd
 
 try:
     import flash_attn  # noqa: F401  (loads the CUDA extension)
@@ -144,8 +145,7 @@ def backward(
     """
     head_dim = q.shape[-1]
     q_b, k_b, v_b, o_b, do_b = (
-        _pad_head_dim(_to_bshd(t, layout), head_dim)
-        for t in (q, k, v, out, grad_out)
+        _pad_head_dim(_to_bshd(t, layout), head_dim) for t in (q, k, v, out, grad_out)
     )
     # Contiguous bshd output buffers: q_b/k_b/v_b are now bare transpose *views*
     # (``_to_bshd`` no longer copies), and FA2 writes the grads with whatever

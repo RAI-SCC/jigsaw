@@ -6,7 +6,7 @@ The GPU-free checks:
   via seed replay, the exact backward a plain autograd graph gives for the
   same forward dropout mask -- the mechanism ``ring_forward`` /
   ``ring_backward`` rely on to keep forward and backward masks in sync.
-* ``combine_dropout_seed`` is a deterministic function of its inputs.
+* ``_combine_dropout_seed`` is a deterministic function of its inputs.
 * dropout is gated by ``self.training`` for the non-ring ``Attention`` /
   ``DistributedAttention`` cores (eval mode must be deterministic and
   bit-identical to a ``dropout_p=0`` module with the same weights).
@@ -17,7 +17,7 @@ skipped where the hardware or ``transformer_engine`` is missing):
 * ``TestSdpaTeCoreDropoutReplay`` -- the ring's SDPA and TE (cuDNN and flash)
   inner cores draw an opaque mask in a CUDA kernel and must replay it from the
   saved RNG state in their backward.
-* ``TestTeAttnDropoutReplay`` -- the non-ring ``TransformerEngineAttention``
+* ``TestTeAttnDropoutReplay`` -- the non-ring ``_TransformerEngineAttention``
   wrapper, which drives those same cores in ``bshd`` and replays their mask
   through the same kernel-supplied ``rng_state``.
 """
@@ -30,7 +30,7 @@ from jigsaw.modules.attention.functional.cores import math as math_core
 from jigsaw.modules.attention.functional.cores import sdpa as sdpa_core
 from jigsaw.modules.attention.functional.cores.te import cudnn as te_cudnn_core
 from jigsaw.modules.attention.functional.cores.te import flash as te_flash_core
-from jigsaw.modules.attention.functional.functional import combine_dropout_seed
+from jigsaw.modules.attention.functional.ring import _combine_dropout_seed
 
 
 class TestMathCoreDropout:
@@ -114,16 +114,16 @@ class TestMathCoreDropout:
 
 
 class TestDropoutSeedDerivation:
-    """``combine_dropout_seed`` is what keeps a ring's forward and backward masks in sync."""
+    """``_combine_dropout_seed`` is what keeps a ring's forward and backward masks in sync."""
 
     def test_deterministic(self) -> None:
-        assert combine_dropout_seed(42, 0, 3) == combine_dropout_seed(42, 0, 3)
+        assert _combine_dropout_seed(42, 0, 3) == _combine_dropout_seed(42, 0, 3)
 
     def test_varies_with_each_input(self) -> None:
-        base = combine_dropout_seed(42, 0, 3)
-        assert combine_dropout_seed(42, 1, 3) != base
-        assert combine_dropout_seed(42, 0, 4) != base
-        assert combine_dropout_seed(43, 0, 3) != base
+        base = _combine_dropout_seed(42, 0, 3)
+        assert _combine_dropout_seed(42, 1, 3) != base
+        assert _combine_dropout_seed(42, 0, 4) != base
+        assert _combine_dropout_seed(43, 0, 3) != base
 
 
 class TestEvalModeDisablesDropout:
@@ -167,11 +167,11 @@ class TestEvalModeDisablesDropout:
     @pytest.mark.dist_required
     @pytest.mark.dist(4)
     def test_distributed_attention_eval_matches_zero_dropout(
-        self, device: torch.device, process_mesh_dict_4x1: dict
+        self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """Same check as above, for the non-ring SDPA core `DistributedAttention` shares."""
         torch.manual_seed(0)
-        mesh = process_mesh_dict_4x1
+        mesh = process_mesh_dict_2x2
         kwargs = dict(
             in_dim=32,
             embed_dim=32,
@@ -191,7 +191,8 @@ class TestEvalModeDisablesDropout:
         model.eval()
         model_no_dropout.eval()
 
-        x = torch.randn(2, 8, 32, device=device)
+        # The channel dim is sharded over the column group.
+        x = torch.randn(2, 8, 32 // mesh["col"].size(), device=device)
         with torch.no_grad():
             out_dropout_eval = model(x)
             out_never_dropout = model_no_dropout(x)
@@ -205,13 +206,21 @@ class TestEvalModeDisablesDropout:
 _CORES = [
     pytest.param(sdpa_core, torch.float16, (32, 32), 3e-3, id="sdpa"),
     pytest.param(
-        te_cudnn_core, torch.bfloat16, (), 2e-2, id="te-cudnn",
+        te_cudnn_core,
+        torch.bfloat16,
+        (),
+        2e-2,
+        id="te-cudnn",
         marks=pytest.mark.te_required,
     ),
     # te.flash needs flash_attn rather than transformer_engine, but the marker
     # gates on the container that ships both.
     pytest.param(
-        te_flash_core, torch.bfloat16, (), 2e-2, id="te-flash",
+        te_flash_core,
+        torch.bfloat16,
+        (),
+        2e-2,
+        id="te-flash",
         marks=pytest.mark.te_required,
     ),
 ]
@@ -264,13 +273,29 @@ class TestSdpaTeCoreDropoutReplay:
         )
 
         dq, dk, dv = core.backward(
-            grad_out, q, k, v, out, lse, self.SCALE, *extra_bwd,
-            dropout_p=self.P, rng_state=rng,
+            grad_out,
+            q,
+            k,
+            v,
+            out,
+            lse,
+            self.SCALE,
+            *extra_bwd,
+            dropout_p=self.P,
+            rng_state=rng,
         )
         # deterministic given rng_state
         dq2, _, _ = core.backward(
-            grad_out, q, k, v, out, lse, self.SCALE, *extra_bwd,
-            dropout_p=self.P, rng_state=rng,
+            grad_out,
+            q,
+            k,
+            v,
+            out,
+            lse,
+            self.SCALE,
+            *extra_bwd,
+            dropout_p=self.P,
+            rng_state=rng,
         )
         assert torch.equal(dq, dq2)
 
@@ -286,7 +311,7 @@ class TestSdpaTeCoreDropoutReplay:
 
 
 # --------------------------------------------------------------------------- #
-# Non-ring TransformerEngineAttention: cuDNN rng_state replay through fused_attn_bwd
+# Non-ring _TransformerEngineAttention: cuDNN rng_state replay through fused_attn_bwd
 # --------------------------------------------------------------------------- #
 @pytest.mark.gpu_required
 @pytest.mark.te_required
@@ -298,7 +323,7 @@ class TestSdpaTeCoreDropoutReplay:
     ],
 )
 class TestTeAttnDropoutReplay:
-    """``TransformerEngineAttention`` (the non-ring, ``bshd`` wrapper around the
+    """``_TransformerEngineAttention`` (the non-ring, ``bshd`` wrapper around the
     same cores as :mod:`~jigsaw.modules.attention.functional.cores.te`) must
     replay its forward dropout mask in backward -- on either arm, so both are
     covered here regardless of which one this GPU's architecture selects.
@@ -325,8 +350,13 @@ class TestTeAttnDropoutReplay:
         torch.manual_seed(0)
         q, k = (
             torch.randn(
-                self.B, self.S, self.H, self.D,
-                device="cuda", dtype=torch.bfloat16, requires_grad=requires_grad,
+                self.B,
+                self.S,
+                self.H,
+                self.D,
+                device="cuda",
+                dtype=torch.bfloat16,
+                requires_grad=requires_grad,
             )
             for _ in range(2)
         )
@@ -336,11 +366,11 @@ class TestTeAttnDropoutReplay:
         return q, k, v
 
     def _apply(self, q, k, v, dropout_p, core):
-        from jigsaw.modules.attention.attention import TransformerEngineAttention
+        from jigsaw.modules.attention.attention import _TransformerEngineAttention
 
-        return TransformerEngineAttention.apply(
-            q, k, v, self.SCALE, dropout_p, core
-        )[0]
+        return _TransformerEngineAttention.apply(q, k, v, self.SCALE, dropout_p, core)[
+            0
+        ]
 
     def _bhsd(self, t):
         """``[b, s, h*d]`` (the wrapper's output layout) -> ``[b, h, s, d]``."""
@@ -383,7 +413,9 @@ class TestTeAttnDropoutReplay:
         ref_out = (p_soft * kept / (1 - self.P)) @ vg
         ref_out.backward(self._bhsd(grad_out).float())
 
-        for name, got, ref in zip("qkv", (q.grad, k.grad, v.grad), (qg.grad, kg.grad, vg.grad)):
+        for name, got, ref in zip(
+            "qkv", (q.grad, k.grad, v.grad), (qg.grad, kg.grad, vg.grad)
+        ):
             assert got is not None, f"no grad for {name}"
             torch.testing.assert_close(
                 got.float().transpose(1, 2), ref, atol=self.TOL, rtol=self.TOL
@@ -398,7 +430,9 @@ class TestTeAttnDropoutReplay:
         out.backward(grad_out)
 
         torch.manual_seed(1)
-        kept = (torch.rand(self.B, self.H, self.S, self.S, device="cuda") > self.P).float()
+        kept = (
+            torch.rand(self.B, self.H, self.S, self.S, device="cuda") > self.P
+        ).float()
         qg, kg, vg = (
             t.detach().transpose(1, 2).float().clone().requires_grad_(True)
             for t in (q, k, v)

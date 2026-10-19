@@ -1,12 +1,12 @@
 import pytest
 import torch
 
+from jigsaw.gather import gather_results
 from jigsaw.modules.linear.linear import (
     DistributedMatMulXTW,
     DistributedMatMulXW,
     DistributedMatMulXWT,
 )
-from jigsaw.utils_aggregate import gather_results
 from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]

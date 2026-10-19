@@ -78,6 +78,16 @@ def select_core(device: torch.device) -> ModuleType:
     if device.type != "cuda":
         return cudnn
 
+    # On ROCm the capability is the gfx version (MI250/MI300 report 9), so the
+    # Hopper rule does not apply, and the cuDNN arm's TE calls are unverified there.
+    if torch.version.hip is not None:
+        if _available(flash):
+            return flash
+        raise RuntimeError(
+            "attn_backend=te on ROCm needs flash_attn; use attn_backend='sdpa', "
+            f"or set {_ENV_OVERRIDE}=cudnn to try TE's fused core (untested)."
+        )
+
     preferred = (
         cudnn
         if torch.cuda.get_device_capability(device)[0] >= _CUDNN_MIN_MAJOR

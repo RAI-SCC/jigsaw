@@ -1,39 +1,31 @@
-"""Concrete distributed 1-/2-/3-D convolutions.
-
-Each class only pins ``_n_spatial``; every behaviour lives in
-:class:`jigsaw.modules.convolution.conv.base._DistributedConvNd` (mirroring how
-``torch.nn.Conv{1,2,3}d`` only normalise their tuple args on top of
-``_ConvNd``).
-"""
+"""Distributed 1-D, 2-D and 3-D convolution modules."""
 
 from .base import _DistributedConvNd
 
 
-class DistributedConv1D(_DistributedConvNd):
+class DistributedConv1d(_DistributedConvNd):
     """Distributed 1-D convolution.
 
-    input shape of forward pass: ``(N, Cin, Lin)``
-    output shape of forward pass: ``(N, Cout, Lout)``
+    Input has shape ``(N, Cin, Lin)`` and output ``(N, Cout, Lout)``.
     """
 
     _n_spatial = 1
 
 
-class DistributedConv2D(_DistributedConvNd):
+class DistributedConv2d(_DistributedConvNd):
     """Distributed 2-D convolution.
 
-    input shape of forward pass: ``(N, Cin, Hin, Win)``
-    output shape of forward pass: ``(N, Cout, Hout, Wout)``
+    Input has shape ``(N, Cin, Hin, Win)`` and output ``(N, Cout, Hout, Wout)``.
     """
 
     _n_spatial = 2
 
 
-class DistributedConv3D(_DistributedConvNd):
+class DistributedConv3d(_DistributedConvNd):
     """Distributed 3-D convolution.
 
-    input shape of forward pass: ``(N, Cin, Din, Hin, Win)``
-    output shape of forward pass: ``(N, Cout, Dout, Hout, Wout)``
+    Input has shape ``(N, Cin, Din, Hin, Win)`` and output
+    ``(N, Cout, Dout, Hout, Wout)``.
     """
 
     _n_spatial = 3

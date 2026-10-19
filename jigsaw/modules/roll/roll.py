@@ -1,16 +1,16 @@
-"""Module definitions of roll functions."""
+"""Distributed roll modules."""
 
-from typing import Optional, cast
+from typing import Any, Optional, cast
 
 import torch
 import torch.distributed as dist
 
 from .config import RollConfig
-from .functional import RollFunction
+from .functional import _Roll
 
 
 class Roll(torch.nn.Module):
-    """Wrap torch roll function in a module."""
+    """Wrapper of :func:`torch.roll` as a module."""
 
     def __init__(
         self,
@@ -18,16 +18,16 @@ class Roll(torch.nn.Module):
         dims: tuple,
         dtype: torch.dtype = torch.float32,
     ):
-        """Initialize roll function.
+        """Initialize the module.
 
         Parameters
         ----------
-        shifts: tuple, list
-            number of indices to shift by
-        dims: tuple, list
-            dims to shift by
-        dtype: torch.dtype
-            data type expected of input data
+        shifts : tuple[int, ...]
+            Shift along each dimension of ``dims``.
+        dims : tuple[int, ...]
+            Dimensions to roll.
+        dtype : torch.dtype
+            Data type of the input.
         """
         super().__init__()
         self.shifts = shifts
@@ -35,24 +35,23 @@ class Roll(torch.nn.Module):
         self.dtype = dtype
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of torch roll.
+        """Roll the input.
 
         Parameters
         ----------
-        x: torch.Tensor
-            data tensor to roll
+        x : torch.Tensor
+            Input.
 
         Returns
         -------
-        x: torch.Tensor
-            rolled data
+        torch.Tensor
+            Rolled input.
         """
         return torch.roll(x, shifts=self.shifts, dims=self.dims)
 
 
 class DistributedRoll(torch.nn.Module):
-    """Distributed roll across an arbitrary set of sharded tensor dims."""
+    """Roll of a tensor partitioned across process groups."""
 
     def __init__(
         self,
@@ -64,31 +63,41 @@ class DistributedRoll(torch.nn.Module):
         dtype: torch.dtype = torch.float32,
         config: Optional[RollConfig] = None,
     ) -> None:
-        """Initialize the object.
+        """Initialize the module.
 
         Parameters
         ----------
         shifts : tuple[int, ...]
-            Per-dimension roll offsets.
+            Shift along each dimension of ``dims``.
         dims : tuple[int, ...]
-            Dimensions along which the operation is applied.
+            Dimensions to roll.
         distributed_dims : tuple[int, ...]
-            Dimensions partitioned across distributed ranks.
+            Dimensions across which the input is partitioned. Each must appear in
+            ``dims``, counted from either end: ``-2`` matches ``2`` on a 4-D input.
         spatial_groups : tuple[dist.ProcessGroup, ...]
-            Spatial process groups used by the operation.
+            Process group of each entry of ``distributed_dims``.
         device : torch.device
-            Device on which tensors and communication are placed.
+            Device of the module.
         dtype : torch.dtype
-            Data type used for tensor values.
-        config : Optional[RollConfig]
-            Operation configuration object.
+            Data type of the input.
+        config : RollConfig, optional
+            Kernel selection. Defaults to a configuration built from ``device``.
 
+        Raises
+        ------
+        ValueError
+            If ``distributed_dims`` and ``spatial_groups`` differ in length, or an entry
+            of ``distributed_dims`` is not in ``dims``. If the two count from different
+            ends, that is only known, and raised, in the forward pass.
         """
         super().__init__()
         if len(distributed_dims) != len(spatial_groups):
             raise ValueError("distributed_dims and spatial_groups must align")
         for d in distributed_dims:
-            if d not in dims:
+            # A dimension counted from the other end can only be matched once the
+            # number of input dimensions is known.
+            same_end = all((e < 0) == (d < 0) for e in dims)
+            if d not in dims and same_end:
                 raise ValueError(f"distributed dim {d} must appear in dims {dims}")
 
         self.shifts = tuple(shifts)
@@ -97,10 +106,10 @@ class DistributedRoll(torch.nn.Module):
         self.spatial_groups = tuple(spatial_groups)
         self.dtype = dtype
         self.empty = torch.empty(0, device=device, dtype=dtype)
-        self.config = RollConfig(device) if config is None else None
+        self.config = RollConfig(device) if config is None else config
 
     def get_parameter_count(self) -> int:
-        """Return dummy parameter count of roll."""
+        """Return the number of local parameters."""
         return 0
 
     @classmethod
@@ -112,9 +121,39 @@ class DistributedRoll(torch.nn.Module):
         row_kw: str = "row",
         col_kw: str = "col",
         model_kw: str = "model",
-        dim_to_mesh_axis: dict = {-2: "row"},
+        dim_to_mesh_axis: Optional[dict] = None,
+        **kwargs: Any,
     ) -> "DistributedRoll":
-        """Build a DistributedRoll from a process mesh + mapping of tensor dim -> mesh axis."""
+        """Convert a :class:`Roll` to a :class:`DistributedRoll`.
+
+        Parameters
+        ----------
+        roll : Roll
+            Module to convert.
+        process_mesh_dict : dict
+            Process groups keyed by mesh axis.
+        device : torch.device
+            Device of the converted module.
+        row_kw : str
+            Key of the row process group.
+        col_kw : str
+            Key of the column process group.
+        model_kw : str
+            Key of the model process group.
+        dim_to_mesh_axis : dict, optional
+            Mesh axis across which each distributed dimension is partitioned.
+            Defaults to ``{-2: row_kw}``.
+        **kwargs : Any
+            Unused. Accepts the options of the other converters, which
+            :func:`jigsaw.convert.convert_to_jigsaw` passes to every layer.
+
+        Returns
+        -------
+        DistributedRoll
+            Distributed module with the shifts and dimensions of ``roll``.
+        """
+        if dim_to_mesh_axis is None:
+            dim_to_mesh_axis = {-2: row_kw}
         distributed_dims = tuple(dim_to_mesh_axis.keys())
         spatial_groups = tuple(
             (
@@ -134,7 +173,13 @@ class DistributedRoll(torch.nn.Module):
         )
 
     def convert_to_torch(self) -> dict:
-        """Return an equivalent non-distributed torch.roll-style spec."""
+        """Convert the module to the arguments of :func:`torch.roll`.
+
+        Returns
+        -------
+        dict
+            ``shifts``, ``dims`` and ``dtype`` of the module.
+        """
         return {"shifts": self.shifts, "dims": self.dims, "dtype": self.dtype}
 
     def reshard(
@@ -142,15 +187,39 @@ class DistributedRoll(torch.nn.Module):
         distributed_dims: list[int],
         spatial_groups: list[dist.ProcessGroup],
     ) -> None:
-        """Update sharding without rebuilding the module."""
+        """Reshard the module onto other process groups.
+
+        Parameters
+        ----------
+        distributed_dims : list[int]
+            Dimensions across which the input is partitioned.
+        spatial_groups : list[dist.ProcessGroup]
+            Process group of each entry of ``distributed_dims``.
+
+        Raises
+        ------
+        ValueError
+            If ``distributed_dims`` and ``spatial_groups`` differ in length.
+        """
         if len(distributed_dims) != len(spatial_groups):
             raise ValueError("mismatched lengths")
         self.distributed_dims = tuple(distributed_dims)
         self.spatial_groups = tuple(spatial_groups)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass of roll function."""
-        out = RollFunction.apply(
+        """Roll the local shard and exchange the halos.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Local input.
+
+        Returns
+        -------
+        torch.Tensor
+            Local output.
+        """
+        out = _Roll.apply(
             x,
             self.shifts,
             self.dims,

@@ -1,4 +1,4 @@
-"""Per-chunk inner-attention cores for the ring.
+"""Attention cores for the ring's per-chunk inner attention.
 
 Each core -- :mod:`.sdpa`, :mod:`.math`, and the two arms of :mod:`.te`
 (:mod:`.te.cudnn`, :mod:`.te.flash`) -- exposes the same pair of callables so
@@ -21,7 +21,7 @@ global ``out``/``logsumexp`` rather than a live autograd graph, so forward's
 mask must match exactly -- splits two ways: :mod:`.math` has no opaque kernel
 state, so it derives the mask from ``seed`` (independently recomputed by both
 ring loops from one shared base seed, see
-:func:`..functional.combine_dropout_seed`); :mod:`.sdpa` and both :mod:`.te`
+:func:`..functional._combine_dropout_seed`); :mod:`.sdpa` and both :mod:`.te`
 arms wrap kernels with their own opaque RNG state, which they return from
 ``forward`` and the ring threads back verbatim into ``backward``.
 

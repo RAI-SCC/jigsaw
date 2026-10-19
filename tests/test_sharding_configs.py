@@ -22,10 +22,10 @@ import pytest
 import torch
 
 import jigsaw.convert as convert
+from jigsaw.gather import gather_1d_results
+from jigsaw.modules import normalization as norm
 from jigsaw.modules import roll
 from jigsaw.modules.linear.linear import _SUPPORTED_XWT_LAYOUTS
-from jigsaw.modules.normalization import normalization as norm
-from jigsaw.utils_aggregate import gather_1d_results
 from tests.parity import all_ranks_ok, assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -73,9 +73,14 @@ ALL_KINDS = ["linear", *CONV_KINDS]
 
 
 def _n_spatial(kind: str) -> int:
-    return {"conv1d": 1, "conv2d": 2, "conv3d": 3, "convT1d": 1, "convT2d": 2, "convT3d": 3}[
-        kind
-    ]
+    return {
+        "conv1d": 1,
+        "conv2d": 2,
+        "conv3d": 3,
+        "convT1d": 1,
+        "convT2d": 2,
+        "convT3d": 3,
+    }[kind]
 
 
 def _local_input(jm: torch.nn.Module, kind: str, device: torch.device) -> torch.Tensor:
@@ -147,7 +152,9 @@ class TestConvertRoundTrip:
         back = jm.convert_to_torch(mesh)
 
         grp = mesh["model"]
-        assert_close("weight", back.weight.data, ref.weight.data, 1e-6, 1e-6, device, grp)
+        assert_close(
+            "weight", back.weight.data, ref.weight.data, 1e-6, 1e-6, device, grp
+        )
         if bias:
             assert_close("bias", back.bias.data, ref.bias.data, 1e-6, 1e-6, device, grp)
         else:
@@ -157,10 +164,10 @@ class TestConvertRoundTrip:
         if kind == "linear":
             x = torch.randn(2, 5, ref.weight.shape[1], device=device)
         else:
-            x = torch.randn(2, ref.in_channels, *([12] * _n_spatial(kind)), device=device)
-        assert_close(
-            "forward", back(x), ref(x), 1e-5, 1e-5, device, grp
-        )
+            x = torch.randn(
+                2, ref.in_channels, *([12] * _n_spatial(kind)), device=device
+            )
+        assert_close("forward", back(x), ref(x), 1e-5, 1e-5, device, grp)
 
 
 # --------------------------------------------------------------------------- #
@@ -278,7 +285,9 @@ class TestReshardMatchesDirect:
         grp = to_mesh["model"]
         assert all_ranks_ok(
             direct.weight.shape == reshuffled.weight.shape, device, grp
-        ), f"{kind}: weight shard shape {reshuffled.weight.shape} != {direct.weight.shape}"
+        ), (
+            f"{kind}: weight shard shape {reshuffled.weight.shape} != {direct.weight.shape}"
+        )
         assert_close(
             "weight shard",
             reshuffled.weight.data,
@@ -364,7 +373,9 @@ class TestReshardLimits:
         """A grouped transpose conv whose target channel group owns whole
         conv-groups is explicitly rejected rather than silently mis-resharded."""
         mesh = process_mesh_dict_2x2
-        ct = torch.nn.ConvTranspose2d(8, 8, 2, stride=2, groups=4, bias=False, device=device)
+        ct = torch.nn.ConvTranspose2d(
+            8, 8, 2, stride=2, groups=4, bias=False, device=device
+        )
         jm = convert.convert_to_jigsaw(copy.deepcopy(ct), mesh, device)
         with pytest.raises(NotImplementedError):
             jm.reshard_parameters(mesh, mesh)
@@ -388,7 +399,7 @@ class TestNormalizationReshard:
         global_dim = 24
 
         ln = norm.DistributedLayerNorm(
-            local_dim=global_dim // from_mesh["col"].size(),
+            normalized_dim=global_dim,
             local_rank=from_mesh["model"].rank(),
             device=device,
             row_group=from_mesh["row"],
@@ -421,6 +432,35 @@ class TestNormalizationReshard:
         assert_close("ln forward", y, ref(x_global), 1e-4, 1e-5, device, grp)
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("mesh_name", MESHES_4)
+    def test_layer_norm_convert_roundtrip(
+        self, request: pytest.FixtureRequest, device: torch.device, mesh_name: str
+    ) -> None:
+        """torch.nn.LayerNorm -> DistributedLayerNorm -> torch.nn.LayerNorm."""
+        mesh = request.getfixturevalue(mesh_name)
+        global_dim = 24
+
+        torch.manual_seed(1234)  # every rank must build the same reference
+        ref = torch.nn.LayerNorm(global_dim, device=device)
+        jm = convert.convert_to_jigsaw(copy.deepcopy(ref), mesh, device)
+        assert isinstance(jm, norm.DistributedLayerNorm)
+
+        grp = mesh["model"]
+        w, b = jm.merge_weights(mesh)
+        assert_close("merged weight", w, ref.weight.data, 1e-6, 1e-6, device, grp)
+        assert_close("merged bias", b, ref.bias.data, 1e-6, 1e-6, device, grp)
+
+        back = jm.convert_to_torch(mesh)
+        assert_close(
+            "weight", back.weight.data, ref.weight.data, 1e-6, 1e-6, device, grp
+        )
+        assert_close("bias", back.bias.data, ref.bias.data, 1e-6, 1e-6, device, grp)
+
+        torch.manual_seed(0)
+        x = torch.randn(4, 6, global_dim, device=device)
+        assert_close("forward", back(x), ref(x), 1e-5, 1e-5, device, grp)
+
+    @pytest.mark.dist(4)
     @pytest.mark.parametrize("from_name,to_name", _MESH_PAIRS_4)
     def test_group_norm_reshard(
         self,
@@ -434,38 +474,41 @@ class TestNormalizationReshard:
         global_channels, global_groups = 24, 4
 
         gn = norm.DistributedGroupNorm(
-            num_local_groups=global_groups // from_mesh["col"].size(),
-            num_channels=global_channels // from_mesh["col"].size(),
+            num_groups=global_groups,
+            num_channels=global_channels,
             device=device,
             channel_group=from_mesh["col"],
+            spatial_group=from_mesh["row"],
         )
         torch.manual_seed(from_mesh["col"].rank())
-        gn.group_norm.weight.data = torch.randn_like(gn.group_norm.weight)
-        gn.group_norm.bias.data = torch.randn_like(gn.group_norm.bias)
-        w_global = gather_1d_results(
-            gn.group_norm.weight.data, from_mesh, dim=0, pm_key="col"
-        )
-        b_global = gather_1d_results(
-            gn.group_norm.bias.data, from_mesh, dim=0, pm_key="col"
-        )
+        gn.weight.data = torch.randn_like(gn.weight)
+        gn.bias.data = torch.randn_like(gn.bias)
+        w_global = gather_1d_results(gn.weight.data, from_mesh, dim=0, pm_key="col")
+        b_global = gather_1d_results(gn.bias.data, from_mesh, dim=0, pm_key="col")
 
         gn.reshard_parameters(from_mesh, to_mesh)
 
         grp = to_mesh["model"]
         assert all_ranks_ok(
-            gn.num_channels == global_channels // to_mesh["col"].size(), device, grp
+            gn.num_local_channels == global_channels // to_mesh["col"].size(),
+            device,
+            grp,
         )
-        w_after = gather_1d_results(
-            gn.group_norm.weight.data, to_mesh, dim=0, pm_key="col"
-        )
+        w_after = gather_1d_results(gn.weight.data, to_mesh, dim=0, pm_key="col")
         assert_close("gn weight", w_after, w_global, 1e-6, 1e-6, device, grp)
+
+        # Channels split over ``col``, the length over ``row``: the statistics
+        # must be reduced over the target mesh's row group.
+        def gather_channels_and_length(t: torch.Tensor) -> torch.Tensor:
+            t = gather_1d_results(t, to_mesh, dim=-1, pm_key="row")
+            return gather_1d_results(t, to_mesh, dim=1, pm_key="col")
 
         torch.manual_seed(grp.rank())
         x = torch.randn(2, global_channels // to_mesh["col"].size(), 8, device=device)
-        x_global = gather_1d_results(x, to_mesh, dim=1, pm_key="col")
+        x_global = gather_channels_and_length(x)
         ref = torch.nn.GroupNorm(global_groups, global_channels, device=device)
         ref.weight.data, ref.bias.data = w_global, b_global
-        y = gather_1d_results(gn(x), to_mesh, dim=1, pm_key="col")
+        y = gather_channels_and_length(gn(x))
         assert_close("gn forward", y, ref(x_global), 1e-4, 1e-5, device, grp)
 
 

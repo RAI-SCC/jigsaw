@@ -1,36 +1,30 @@
-"""Config for roll modules."""
+"""Kernel selection for the distributed roll."""
 
 from typing import Callable
 
 import torch
 
-from jigsaw import comm
+from jigsaw._core import comm
 
 
 class RollConfig:
-    """Selection strategy for roll function."""
+    """Selection of the halo exchange of the distributed roll."""
 
     def __init__(
         self,
         device: torch.device = torch.device("cuda"),
     ):
-        """Initialize the object.
+        """Initialize the configuration.
 
         Parameters
         ----------
         device : torch.device
-            Device on which tensors and communication are placed.
-
+            Device of the module.
         """
         self.comm_halo_1d_fn = self._comm_halo_1d_fn_selection(device)
 
     def _comm_halo_1d_fn_selection(self, device: torch.device) -> Callable:
-        """
-        Select comm call for halo 1d function.
-
-        If cuda, comm will occur via all-to-all.
-        If cpu, comm will occur via p2p.
-        """
+        """Select the 1-D halo exchange: all-to-all on CUDA, point-to-point on CPU."""
         if device.type == "cuda":
             return comm.comm_1d_alltoall
         elif device.type == "cpu":

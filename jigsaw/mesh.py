@@ -1,17 +1,8 @@
-"""Build the ``process_mesh_dict`` that every jigsaw module expects.
+"""Process mesh construction.
 
-A jigsaw module is configured with a mapping ``{axis name -> ProcessGroup}``.
-The final two entries are the domain- / tensor-parallel axes (``row`` and
-``col`` by default); any leading entries are data-parallel *replica* axes. On
-top of the per-axis groups the mapping carries a ``model`` group that spans one
-full parameter replica -- the flattened product of the model-parallel axes --
-which the parameter-free matmul, the weight-merging converters and seed setup
-all read.
-
-``torch.distributed.device_mesh.init_device_mesh`` builds the per-axis groups
-but not that flattened ``model`` group, and it silently succeeds when the mesh
-covers only some of the world. :func:`make_process_mesh` fills the first gap and
-turns the second into a loud, identical error on every rank.
+A process mesh maps axis names to process groups. The trailing axes are the
+model-parallel axes (``row`` and ``col`` by default), leading axes are
+data-parallel replicas, and a ``model`` group spans the model-parallel axes.
 """
 
 from __future__ import annotations
@@ -22,17 +13,49 @@ from collections.abc import Mapping, Sequence
 import torch
 import torch.distributed as dist
 
-__all__ = ["make_process_mesh"]
+from ._core.comm import check_backend
+
+__all__ = ["ProcessMesh", "make_process_mesh"]
+
+
+class ProcessMesh(dict):
+    """A ``dict`` of axis name to process group that also holds the ``DeviceMesh``.
+
+    Indexing works as on any ``process_mesh_dict``; :attr:`device_mesh` is the
+    named n-d mesh the axis groups were cut from, so a 1-D slice of it can go to
+    APIs that take a ``DeviceMesh``, e.g.
+    ``DistributedDataParallel(model, device_mesh=mesh.device_mesh["dp"])``.
+    The ``model`` group is not a dimension of it.
+
+    Attributes
+    ----------
+    device_mesh : torch.distributed.device_mesh.DeviceMesh
+        The n-d mesh over every axis, in the order they were given.
+    """
+
+    device_mesh: dist.device_mesh.DeviceMesh
+
+    def __init__(
+        self,
+        groups: Mapping[str, dist.ProcessGroup],
+        device_mesh: dist.device_mesh.DeviceMesh,
+    ) -> None:
+        super().__init__(groups)
+        self.device_mesh = device_mesh
 
 
 def _resolve_device_type(device_type: str | None) -> str:
     if device_type is not None:
         return device_type
+    # A Gloo default group communicates host tensors, so its mesh is a CPU mesh
+    # even on a machine with GPUs.
+    if dist.get_backend() == "gloo":
+        return "cpu"
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def _resolve_sizes(axes: Mapping[str, int]) -> dict[str, int]:
-    """Copy ``axes`` and fill a single ``-1`` from the world size."""
+    """Copy ``axes`` and infer a single ``-1`` size from the world size."""
     sizes = dict(axes)
     if not sizes:
         raise ValueError("axes must name at least one mesh dimension")
@@ -60,7 +83,7 @@ def _resolve_sizes(axes: Mapping[str, int]) -> dict[str, int]:
 def _resolve_model_axes(
     names: list[str], model_parallel_axes: Sequence[str] | None
 ) -> list[str]:
-    """Validate that the model-parallel axes are a trailing, contiguous run."""
+    """Validate that the model-parallel axes are the trailing axes."""
     if model_parallel_axes is None:
         return list(names)
 
@@ -84,44 +107,41 @@ def make_process_mesh(
     device_type: str | None = None,
     model_parallel_axes: Sequence[str] | None = None,
     model_key: str = "model",
-) -> dict[str, dist.ProcessGroup]:
+) -> ProcessMesh:
     """Build a jigsaw ``process_mesh_dict`` from named, ordered mesh axes.
 
     Parameters
     ----------
     axes : Mapping[str, int]
-        Ordered mapping of axis name to size, slowest-varying first. Exactly one
-        size may be ``-1``, inferred so the product matches the world size. The
-        trailing axes are the model-parallel (domain- / tensor-parallel) axes;
-        for a fully model-parallel run that is every axis, e.g.
-        ``{"row": 2, "col": 2}`` or ``{"sh": 2, "sw": 2, "col": 2}``. Leading
-        axes are data-parallel replicas, e.g. ``{"dp": -1, "row": 2, "col": 2}``.
+        Ordered mapping of axis name to size, slowest-varying first. At most one
+        size may be ``-1``, which is inferred from the world size.
     device_type : str, optional
-        Device type passed to ``init_device_mesh``. Defaults to ``"cuda"`` when a
-        CUDA device is visible, else ``"cpu"``.
+        Device type of the mesh. Defaults to ``"cpu"`` if the default process
+        group uses Gloo, else ``"cuda"`` if available, else ``"cpu"``.
     model_parallel_axes : Sequence[str], optional
-        Which trailing axes form one parameter replica and are flattened into
-        the ``model_key`` group. Must be a contiguous run at the end of ``axes``.
-        Defaults to every axis.
-    model_key : str, default "model"
-        Key for the flattened model-parallel group.
+        Trailing axes that form one model replica. Defaults to all axes.
+    model_key : str
+        Key of the group spanning the model-parallel axes.
 
     Returns
     -------
-    dict[str, torch.distributed.ProcessGroup]
-        One group per entry of ``axes`` plus the ``model_key`` group. Pass it
-        straight to a jigsaw module, or to :func:`jigsaw.convert`.
+    ProcessMesh
+        One group per axis plus the ``model_key`` group, in a ``dict`` that
+        also carries the n-d ``DeviceMesh`` as ``.device_mesh``.
 
     Notes
     -----
-    Requires an initialised default process group. Groups are laid out row-major
-    over global ranks, matching ``init_device_mesh``.
+    Requires an initialized default process group on ``nccl`` (NCCL or RCCL),
+    ``gloo``, or a mix such as ``"cpu:gloo,cuda:nccl"``; any other backend
+    raises ``RuntimeError``.
     """
     if not dist.is_initialized():
         raise RuntimeError(
             "make_process_mesh needs an initialised default process group; call "
             "torch.distributed.init_process_group first"
         )
+    # Anything but nccl/gloo would silently take the NCCL comm paths and hang.
+    check_backend()
 
     device = _resolve_device_type(device_type)
     sizes = _resolve_sizes(axes)
@@ -148,9 +168,7 @@ def make_process_mesh(
         mesh_shape=tuple(sizes.values()),
         mesh_dim_names=tuple(names),
     )
-    mesh: dict[str, dist.ProcessGroup] = {
-        name: nd_mesh.get_group(name) for name in names
-    }
+    mesh = ProcessMesh({name: nd_mesh.get_group(name) for name in names}, nd_mesh)
 
     model_numel = math.prod(sizes[a] for a in model_axes)
     if len(model_axes) == len(names):

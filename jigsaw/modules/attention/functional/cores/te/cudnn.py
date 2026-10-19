@@ -15,7 +15,7 @@ computes it regardless as its own backward's normaliser, so it's a free
 extra). What direct kernel calls buy there is the explicit
 ``fused_attn_bwd``, which ``te.DotProductAttention`` hides behind its own
 ``autograd.Function`` -- see
-:class:`~jigsaw.modules.attention.attention.TransformerEngineAttention`.
+:class:`~jigsaw.modules.attention.attention._TransformerEngineAttention`.
 
 Also the only TE path that can ever carry FP8 (not yet implemented here).
 
@@ -37,7 +37,8 @@ from typing import Any, Callable, Optional
 
 import torch
 
-from ._layout import Layout, from_bshd as _from_bshd
+from ._layout import Layout
+from ._layout import from_bshd as _from_bshd
 
 try:
     import transformer_engine.pytorch  # noqa: F401  (loads the C++ extension)
@@ -109,7 +110,7 @@ _TE_ALIASES: dict[str, tuple[str, ...]] = {
 
 @functools.lru_cache(maxsize=None)
 def _te_params(fn: Callable) -> frozenset[str]:
-    """The parameter names of ``fn``."""
+    """Return the parameter names of ``fn``."""
     return frozenset(inspect.signature(fn).parameters)
 
 
@@ -167,7 +168,9 @@ def _to_bshd(t: torch.Tensor, layout: Layout) -> torch.Tensor:
     return t.contiguous() if layout == "bshd" else t.transpose(1, 2).contiguous()
 
 
-def _shape(q: torch.Tensor, k: torch.Tensor, layout: Layout) -> tuple[int, int, int, int, int]:
+def _shape(
+    q: torch.Tensor, k: torch.Tensor, layout: Layout
+) -> tuple[int, int, int, int, int]:
     """``(batch, heads, seqlen_q, seqlen_kv, head_dim)`` for either layout."""
     if layout == "bshd":
         b, s_q, h, d = q.shape
@@ -335,9 +338,7 @@ def backward(
     regardless.
     """
     b, h, s_q, s_kv, d = _shape(q, k, layout)
-    q_b, k_b, v_b, o_b, do_b = (
-        _to_bshd(t, layout) for t in (q, k, v, out, grad_out)
-    )
+    q_b, k_b, v_b, o_b, do_b = (_to_bshd(t, layout) for t in (q, k, v, out, grad_out))
     backend = _fused_attn_backend(True, q_b.dtype, h, s_q, s_kv, d, dropout_p)
     cu_q = _full_cu_seqlens(b, s_q, q.device)
     cu_kv = _full_cu_seqlens(b, s_kv, q.device)

@@ -1,18 +1,17 @@
-"""Distributed regression losses: L2 (MSE), L1 and smooth-L1 (Huber).
-
-* :mod:`~jigsaw.modules.loss.regression.functional` -- functional forms;
-* :mod:`~jigsaw.modules.loss.regression.loss` -- ``torch.nn`` module wrappers.
-"""
+"""Distributed regression losses."""
 
 from .functional import (
-    distributed_l1_loss as distributed_l1_loss,
+    distributed_l1_loss,
+    distributed_mse_loss,
+    distributed_smooth_l1_loss,
 )
-from .functional import (
-    distributed_mse_loss as distributed_mse_loss,
-)
-from .functional import (
-    distributed_smooth_l1_loss as distributed_smooth_l1_loss,
-)
-from .loss import DistributedL1Loss as DistributedL1Loss
-from .loss import DistributedMSELoss as DistributedMSELoss
-from .loss import DistributedSmoothL1Loss as DistributedSmoothL1Loss
+from .loss import DistributedL1Loss, DistributedMSELoss, DistributedSmoothL1Loss
+
+__all__ = [
+    "DistributedMSELoss",
+    "DistributedL1Loss",
+    "DistributedSmoothL1Loss",
+    "distributed_mse_loss",
+    "distributed_l1_loss",
+    "distributed_smooth_l1_loss",
+]

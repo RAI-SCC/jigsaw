@@ -3,11 +3,11 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.modules.attention.config as config
-from jigsaw.modules.attention.functional import backward, forward, functional
-from jigsaw.modules.attention.functional.cores import te as te_cores
-from jigsaw.utils_aggregate import (
+from jigsaw.gather import (
     gather_1d_results,
 )
+from jigsaw.modules.attention.functional import backward, forward, ring
+from jigsaw.modules.attention.functional.cores import te as te_cores
 from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -16,7 +16,7 @@ pytestmark = [pytest.mark.dist_required]
 class TestHybridTopology:
     @staticmethod
     def _assert_subgroup_peers_agree(
-        topo: functional.HybridTopology, ring_global_ranks: list[int]
+        topo: ring.HybridTopology, ring_global_ranks: list[int]
     ) -> None:
         """The sub-group peer accessors must name the same ranks as the ring ones.
 
@@ -57,8 +57,8 @@ class TestHybridTopology:
         world_size = dist.get_world_size(group)
         rank = dist.get_rank(group)
 
-        functional._HYBRID_TOPOLOGY_CACHE.pop((group, gpus_per_node), None)
-        topo = functional.get_hybrid_topology(group, gpus_per_node)
+        ring._HYBRID_TOPOLOGY_CACHE.pop((group, gpus_per_node), None)
+        topo = ring.get_hybrid_topology(group, gpus_per_node)
 
         assert topo.gpus_per_node == gpus_per_node
         assert topo.n_nodes == world_size // gpus_per_node
@@ -81,7 +81,7 @@ class TestHybridTopology:
         self._assert_subgroup_peers_agree(topo, dist.get_process_group_ranks(group))
 
         # Cached: same object on the second call.
-        assert functional.get_hybrid_topology(group, gpus_per_node) is topo
+        assert ring.get_hybrid_topology(group, gpus_per_node) is topo
 
     @pytest.mark.dist(8)
     @pytest.mark.parametrize("gpus_per_node", [1, 2, 4])
@@ -111,8 +111,8 @@ class TestHybridTopology:
         world_size = len(ring_global_ranks)
         assert world_size == 4  # ring size == size(row), not the global world size
 
-        functional._HYBRID_TOPOLOGY_CACHE.pop((group, gpus_per_node), None)
-        topo = functional.get_hybrid_topology(group, gpus_per_node)
+        ring._HYBRID_TOPOLOGY_CACHE.pop((group, gpus_per_node), None)
+        topo = ring.get_hybrid_topology(group, gpus_per_node)
 
         ring_pos = dist.get_rank(group)
         node_idx, local_idx = divmod(ring_pos, gpus_per_node)
@@ -137,7 +137,7 @@ class TestHybridTopology:
         self._assert_subgroup_peers_agree(topo, ring_global_ranks)
 
         # Every member of a sub-group lands on the same underlying group.
-        assert functional.get_hybrid_topology(group, gpus_per_node) is topo
+        assert ring.get_hybrid_topology(group, gpus_per_node) is topo
 
     @pytest.mark.dist(4)
     def test_get_hybrid_topology_rejects_bad_args(self, device: torch.device) -> None:
@@ -152,9 +152,9 @@ class TestHybridTopology:
         assert group is not None
 
         with pytest.raises(ValueError, match="gpus_per_node must be positive"):
-            functional.get_hybrid_topology(group, 0)
+            ring.get_hybrid_topology(group, 0)
         with pytest.raises(ValueError, match="divisible by gpus_per_node"):
-            functional.get_hybrid_topology(group, 3)
+            ring.get_hybrid_topology(group, 3)
 
 
 class TestRingAttention:
@@ -193,6 +193,8 @@ class TestRingAttention:
             and save_for_backward == config.SaveBackward.X
         ):
             pytest.xfail("not yet supported")
+        if offloader == config.Offload.CPU and device.type != "cuda":
+            pytest.skip("Offload.CPU relies on CUDA streams and needs a cuda device")
 
         process_mesh_dict = process_mesh_dict_4x1
         ring_config = config.RingAttentionConfig(
@@ -573,6 +575,8 @@ def _check_ring_hybrid(
         and save_for_backward == config.SaveBackward.X
     ):
         pytest.xfail("not yet supported")
+    if offloader == config.Offload.CPU and device.type != "cuda":
+        pytest.skip("Offload.CPU relies on CUDA streams and needs a cuda device")
 
     ring_config = config.RingAttentionConfig(
         device=device,
@@ -773,6 +777,37 @@ def test_ring_hybrid(
     )
 
 
+@pytest.mark.dist(6)
+@_apply_ring_hybrid_parametrize
+def test_ring_hybrid_three_nodes(
+    device: torch.device,
+    process_mesh_dict_2x3: dict,
+    send_in_forward: config.SendForward,
+    save_for_backward: config.SaveBackward,
+    send_op: config.SendOp,
+    save_scope: config.SaveScope,
+    send_backward: config.SendBackward,
+    offloader: config.Offload,
+) -> None:
+    """Verify forward-backward parity for the hybrid ring on 6 ranks.
+
+    Runs the ring as ``3 nodes x 2 GPUs`` (``gpus_per_node=2``). Two nodes are not
+    enough to exercise the inter-node relay (a chunk hopped on to a further node),
+    which only happens while ``node_step < n_nodes - 1``.
+    """
+    _check_ring_hybrid(
+        device,
+        process_mesh_dict_2x3,
+        send_in_forward,
+        save_for_backward,
+        send_op,
+        save_scope,
+        send_backward,
+        offloader,
+        gpus_per_node=2,
+    )
+
+
 @pytest.mark.dist(8)
 @_apply_ring_hybrid_parametrize
 def test_ring_hybrid_four_nodes(
@@ -839,6 +874,61 @@ def test_ring_hybrid_single_node(
     )
 
 
+@pytest.mark.dist(4)
+def test_ring_autograd_function_matches_full_attention(
+    device: torch.device, process_mesh_dict_4x1: dict
+) -> None:
+    """``_RingAttention`` gives the gradients of full attention.
+
+    Goes through the autograd wrapper (``setup_context`` saves the log-sum-exp for the
+    backward) with ``heads != local sequence length``; a transposed saved ``lse``
+    crashes there and is only silently wrong when the two happen to be equal.
+    """
+    mesh = process_mesh_dict_4x1
+    group = mesh["row"]
+    rank, world = group.rank(), group.size()
+    b, h, n_local, d = 2, 3, 8, 8
+    assert h != n_local
+
+    torch.manual_seed(0)  # identical full tensors on every rank
+    q_full, k_full, v_full, g_full = (
+        torch.randn(b, h, world * n_local, d, device=device) for _ in range(4)
+    )
+    shard = slice(rank * n_local, (rank + 1) * n_local)
+    q, k, v = (
+        t[:, :, shard].clone().contiguous().requires_grad_(True)
+        for t in (q_full, k_full, v_full)
+    )
+    q_ref, k_ref, v_ref = (
+        t.clone().requires_grad_(True) for t in (q_full, k_full, v_full)
+    )
+    out_ref = torch.nn.functional.scaled_dot_product_attention(q_ref, k_ref, v_ref)
+    out_ref.backward(g_full)
+
+    # ``KV`` sends the keys/values themselves, so ``x`` and ``w_qkv`` are not read.
+    x = torch.randn(b, n_local, d, device=device)
+    w_qkv = torch.randn(3 * h * d, d, device=device)
+    ring_config = config.RingAttentionConfig(
+        device=device, gpus_per_node=world, send_in_forward=config.SendForward.KV
+    )
+    out = ring._RingAttention.apply(
+        q, k, v, x, w_qkv, d**-0.5, 0.0, group, rank, ring_config
+    )[0]
+    out.backward(g_full[:, :, shard].contiguous())
+
+    # The CUDA core runs flash attention in float16; a transposed
+    # ``lse`` is off by O(1), so this still catches it.
+    tol = 5e-3 if device.type == "cuda" else 1e-4
+    for name, got, ref in (
+        ("out", out, out_ref),
+        ("dq", q.grad, q_ref.grad),
+        ("dk", k.grad, k_ref.grad),
+        ("dv", v.grad, v_ref.grad),
+    ):
+        assert got is not None and ref is not None
+        assert_close(name, got, ref[:, :, shard], tol, tol, device, mesh["model"])
+
+
 # --------------------------------------------------------------------------- #
 # comm-stream overlap (RingAttentionConfig.overlap_comm)
 # --------------------------------------------------------------------------- #
@@ -879,8 +969,7 @@ def test_ring_overlap_comm_parity(
     x = (torch.randn(b, n_local, d, device=device, dtype=dtype) / (d**0.5)).contiguous()
     qkv = x @ w_qkv.mT
     q, k, v = (
-        t.contiguous()
-        for t in qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
+        t.contiguous() for t in qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
     )
     scale = d**-0.5
     dout = torch.ones(b, h, n_local, d, device=device, dtype=dtype)
@@ -900,8 +989,21 @@ def test_ring_overlap_comm_parity(
             q, k, v, x, w_qkv, scale, 0.0, group, local_rank, world_size, cfg
         )
         dq, dk, dv = backward.ring_backward(
-            dout, q, out, x, lse, w_qkv, scale, group, local_rank, world_size,
-            chunks, ring_config=cfg, dropout_p=0.0, base_seed=seed, rng_states=rng,
+            dout,
+            q,
+            out,
+            x,
+            lse,
+            w_qkv,
+            scale,
+            group,
+            local_rank,
+            world_size,
+            chunks,
+            ring_config=cfg,
+            dropout_p=0.0,
+            base_seed=seed,
+            rng_states=rng,
         )
         torch.cuda.synchronize()
         return out, dq, dk, dv
@@ -966,8 +1068,7 @@ def test_ring_overlap_comm_parity_hybrid(
     x = (torch.randn(b, n_local, d, device=device, dtype=dtype) / (d**0.5)).contiguous()
     qkv = x @ w_qkv.mT
     q, k, v = (
-        t.contiguous()
-        for t in qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
+        t.contiguous() for t in qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
     )
     scale = d**-0.5
     dout = torch.ones(b, h, n_local, d, device=device, dtype=dtype)
@@ -988,8 +1089,21 @@ def test_ring_overlap_comm_parity_hybrid(
             q, k, v, x, w_qkv, scale, 0.0, group, local_rank, world_size, cfg
         )
         dq, dk, dv = backward.ring_backward(
-            dout, q, out, x, lse, w_qkv, scale, group, local_rank, world_size,
-            chunks, ring_config=cfg, dropout_p=0.0, base_seed=seed, rng_states=rng,
+            dout,
+            q,
+            out,
+            x,
+            lse,
+            w_qkv,
+            scale,
+            group,
+            local_rank,
+            world_size,
+            chunks,
+            ring_config=cfg,
+            dropout_p=0.0,
+            base_seed=seed,
+            rng_states=rng,
         )
         torch.cuda.synchronize()
         return out, dq, dk, dv

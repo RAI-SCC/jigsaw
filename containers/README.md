@@ -4,13 +4,13 @@ jigsaw runs on top of NVIDIA's PyTorch container. The `.sif` file lives external
 
 ## Base image
 
-Base image is `nvcr.io/nvidia/pytorch:26.02-py3`
-(`sha256:bbc2b67e2533edd63ff1496bb1ed00a00338cdc1478af6c1a0bf9f4b369977e7`), which ships
+Base image is `nvcr.io/nvidia/pytorch:26.04-py3`
+(`sha256:be06a21bd95a46bce1a5cfc0576051a40209f328440edaa2ba5cd35abf85ca1a`), which ships
 - Python 3.12
-- torch 2.11.0a0
-- transformer-engine 2.12.0
-- CUDA 13
-- NCCL 2.29, and 
+- torch 2.12.0a0
+- transformer-engine 2.14.0
+- CUDA 13.2
+- NCCL 2.29, and
 - HPC-X OpenMPI under `/opt/hpcx/ompi`.
 
 `zarr`, `timm`, `xarray`, `h5netcdf`, `mpi4py`, and jigsaw are excluded.
@@ -18,7 +18,7 @@ Base image is `nvcr.io/nvidia/pytorch:26.02-py3`
 Pull the container with:
 
 ```bash
-apptainer pull pytorch26.02.sif docker://nvcr.io/nvidia/pytorch:26.02-py3
+apptainer pull pytorch26.04.sif docker://nvcr.io/nvidia/pytorch:26.04-py3
 ```
 
 When bumping the tag, re-pull, update the digest above, and confirm
@@ -32,16 +32,16 @@ container with `--system-site-packages`, on a filesystem the compute nodes can
 reach:
 
 ```bash
-SIF=/path/to/pytorch26.02.sif
+SIF=/path/to/pytorch26.04.sif
 ENV=$HOME/envs/jigsaw-te
 
 apptainer exec --nv "$SIF" python -m venv --system-site-packages "$ENV"
 
-# jigsaw plus the pure-Python deps the image is missing, without touching
-# torch / TE / mpi4py
+# jigsaw without touching torch / TE / mpi4py; its only other runtime
+# dependency is einops. Add whatever your own data pipeline needs (zarr,
+# xarray, ...) the same way.
 apptainer exec --nv "$SIF" "$ENV/bin/pip" install --no-build-isolation --no-deps -e ..
-apptainer exec --nv "$SIF" "$ENV/bin/pip" install --no-build-isolation \
-    zarr timm xarray h5netcdf
+apptainer exec --nv "$SIF" "$ENV/bin/pip" install --no-build-isolation einops
 
 # mpi4py, built against the image's OpenMPI
 apptainer exec --nv "$SIF" bash -c \
@@ -50,15 +50,14 @@ apptainer exec --nv "$SIF" bash -c \
 
 Then set `JIGSAW_VENV=$ENV` in the site preset.
 
-The `--no-deps` flag on the jigsaw install stops pip from pulling a second `torch` / `torchvision` on top of the image's build. 
-NOTE: `requirements.txt` is only for bare-metal installs and should not be used here.
+The `--no-deps` flag on the jigsaw install stops pip from pulling a second `torch` / `torchvision` on top of the image's build.
 
 ## Running code in the container
 
 For a one-off command, call `apptainer exec` directly:
 
 ```bash
-SIF=/path/to/pytorch26.02.sif
+SIF=/path/to/pytorch26.04.sif
 ENV=$HOME/envs/jigsaw-te
 
 apptainer exec --nv --bind /scratch "$SIF" \
@@ -66,7 +65,7 @@ apptainer exec --nv --bind /scratch "$SIF" \
 ```
 
 - `--nv` exposes the GPUs
-- Add `--bind` for any filesystem outside `$HOME` and `$PWD`. 
+- Add `--bind` for any filesystem outside `$HOME` and `$PWD`.
 - Without a venv, drop the `$ENV/bin/` prefix and pass
 `--env PYTHONPATH=/path/to/jigsaw` so the checkout is importable.
 
@@ -82,14 +81,14 @@ Launch one task per GPU with `srun` inside an `sbatch` script:
 ```bash
 #!/usr/bin/env bash
 #SBATCH --job-name=jigsaw
-#SBATCH --account=hk-project-XXXX
-#SBATCH --partition=accelerated-h100
+#SBATCH --account=<account>
+#SBATCH --partition=<partition>
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
 #SBATCH --time=00:30:00
 
-export JIGSAW_SITE=horeka          # scripts/sites/<name>.env
+export JIGSAW_SITE=cluster_name    # scripts/sites/cluster_name.env
 
 srun --mpi=pmix scripts/run.sh python -m your_training_module \
     --config configs/run.yaml

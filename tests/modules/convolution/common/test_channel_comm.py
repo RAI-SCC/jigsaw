@@ -12,14 +12,18 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from jigsaw.comm import comm_1d_alltoall, comm_1d_p2p
+from jigsaw._core.comm import comm_1d_alltoall, comm_1d_p2p
 from jigsaw.modules.convolution.common.channel_comm import (
     CHANNEL_COMMS,
     _in_channel_block,
     _resolve_channel_hop,
     gather_full_channels,
     resolve_channel_comm,
+    resolve_conv_groups,
 )
+from jigsaw.modules.convolution.common.halo import exchange_along_axis
+from jigsaw.modules.convolution.common.spatial_split import _reduce_scatter_channels
+from tests.parity import assert_close
 
 
 class TestResolveChannelComm:
@@ -29,9 +33,7 @@ class TestResolveChannelComm:
 
     def test_auto_resolves_to_all_to_all_on_cuda(self) -> None:
         """``"auto"`` -> ``"all_to_all"`` on CUDA; only the device *type* matters."""
-        assert (
-            resolve_channel_comm("auto", torch.device("cuda", 0)) == "all_to_all"
-        )
+        assert resolve_channel_comm("auto", torch.device("cuda", 0)) == "all_to_all"
 
     @pytest.mark.parametrize("name", list(CHANNEL_COMMS))
     def test_explicit_names_pass_through(self, name: str) -> None:
@@ -76,7 +78,7 @@ def _singleton_group() -> dist.ProcessGroup:
 
 class TestResolveChannelHop:
     def test_p2p_returns_the_p2p_transport(self) -> None:
-        """``"p2p"`` maps to :func:`jigsaw.comm.comm_1d_p2p` on any backend."""
+        """``"p2p"`` maps to :func:`jigsaw._core.comm.comm_1d_p2p` on any backend."""
         assert _resolve_channel_hop("p2p", dist.group.WORLD) is comm_1d_p2p
 
     def test_all_to_all_on_gloo_raises(self) -> None:
@@ -90,9 +92,7 @@ class TestResolveChannelHop:
         """NCCL has a real all-to-all, so the hop lookup returns it."""
         if dist.get_backend() != "nccl":
             pytest.skip("only meaningful on the nccl backend")
-        assert (
-            _resolve_channel_hop("all_to_all", dist.group.WORLD) is comm_1d_alltoall
-        )
+        assert _resolve_channel_hop("all_to_all", dist.group.WORLD) is comm_1d_alltoall
 
 
 class TestGatherFullChannels:
@@ -118,9 +118,63 @@ class TestGatherFullChannels:
 
         buf = [torch.empty_like(x) for _ in range(g_size)]
         dist.all_gather(buf, x.contiguous(), group=col)
-        assert torch.equal(full, torch.cat(buf, dim=1))
+        # Each rank holds a different slice, and another gather_full_channels
+        # all-gather (plus its backward) follows, so a one-sided mismatch has to
+        # fail every rank rather than strand them in that collective. Exact
+        # comparison: atol/rtol of 0 keeps the original torch.equal semantics.
+        assert_close(
+            "gathered channels",
+            full,
+            torch.cat(buf, dim=1),
+            0.0,
+            0.0,
+            device,
+            process_mesh_dict_1x4["model"],
+        )
 
         x_grad = x.clone().requires_grad_(True)
         gather_full_channels(x_grad, col, channel_dim=1).pow(2).sum().backward()
         assert x_grad.grad is not None
         assert torch.equal(x_grad.grad, 2 * x_grad.detach())
+
+
+class TestResolveConvGroups:
+    def test_dense_convolution_is_not_channel_local(self) -> None:
+        assert resolve_conv_groups(1, 8, 8, 4) == (False, 1)
+
+    def test_groups_that_are_a_multiple_of_the_channel_group_are_channel_local(
+        self,
+    ) -> None:
+        assert resolve_conv_groups(8, 16, 16, 4) == (True, 2)
+
+    def test_rejects_non_positive_groups(self) -> None:
+        with pytest.raises(ValueError, match="groups must be >= 1"):
+            resolve_conv_groups(0, 8, 8, 2)
+
+    @pytest.mark.parametrize("in_ch, out_ch", [(6, 8), (8, 6)])
+    def test_rejects_channels_not_divisible_by_groups(
+        self, in_ch: int, out_ch: int
+    ) -> None:
+        with pytest.raises(ValueError, match="divisible by groups"):
+            resolve_conv_groups(4, in_ch, out_ch, 2)
+
+    def test_rejects_groups_that_do_not_fit_the_channel_group(self) -> None:
+        with pytest.raises(NotImplementedError, match="multiple"):
+            resolve_conv_groups(3, 6, 6, 2)
+
+
+class TestSingletonGroupPrimitives:
+    def test_reduce_scatter_of_a_single_rank_is_the_identity(self) -> None:
+        g_x = torch.randn(2, 4, 5)
+        out, handle = _reduce_scatter_channels(g_x, _singleton_group(), n=1)
+        assert handle is None and torch.equal(out, g_x)
+
+    def test_exchange_with_nothing_to_send_returns_empty_slices(
+        self, device: torch.device
+    ) -> None:
+        template = torch.randn(2, 3, 4, device=device)
+        part = template.narrow(-1, 0, 0)
+        (recv,) = exchange_along_axis(
+            _singleton_group(), template, [part], [0], [0], axis=-1
+        )
+        assert recv.shape == (2, 3, 0)

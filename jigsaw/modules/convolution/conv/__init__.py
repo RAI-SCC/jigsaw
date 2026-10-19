@@ -1,16 +1,11 @@
-"""Distributed 1-/2-/3-D convolutions sharing one implementation.
+"""Distributed 1-D, 2-D and 3-D convolutions."""
 
-``base`` holds the dimension-independent module (``_ConvNd``-style),
-``functional`` / ``config`` / ``distributed`` the autograd Function, kernel
-selection and distributed kernels, ``channel_comm`` / ``halo`` the
-channel-parallel and spatial-split communication, and ``conv`` the three thin
-concrete classes. Pieces identical to the transpose case live in
-:mod:`jigsaw.modules.convolution.common`.
-"""
+from .config import ConvNdConfig
+from .conv import DistributedConv1d, DistributedConv2d, DistributedConv3d
 
-from .base import _DistributedConvNd as _DistributedConvNd
-from .config import ConvNdConfig as ConvNdConfig
-from .conv import DistributedConv1D as DistributedConv1D
-from .conv import DistributedConv2D as DistributedConv2D
-from .conv import DistributedConv3D as DistributedConv3D
-from .functional import ConvNd as ConvNd
+__all__ = [
+    "DistributedConv1d",
+    "DistributedConv2d",
+    "DistributedConv3d",
+    "ConvNdConfig",
+]

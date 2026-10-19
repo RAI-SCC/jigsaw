@@ -1,3 +1,23 @@
-"""Expose distributed linear layers to public interface."""
+"""Distributed linear layers."""
 
-from .linear import DistributedXWT as DistributedXWT
+from .config import LinearConfig
+from .linear import (
+    DistributedLinear,
+    DistributedMatMulXTW,
+    DistributedMatMulXW,
+    DistributedMatMulXWT,
+    MatMulXTW,
+    MatMulXW,
+    MatMulXWT,
+)
+
+__all__ = [
+    "DistributedLinear",
+    "DistributedMatMulXWT",
+    "DistributedMatMulXW",
+    "DistributedMatMulXTW",
+    "MatMulXWT",
+    "MatMulXW",
+    "MatMulXTW",
+    "LinearConfig",
+]

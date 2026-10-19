@@ -1,16 +1,13 @@
-"""Distributed evaluation metrics.
-
-* :mod:`jigsaw.modules.metrics.segmentation` -- distributed confusion matrix and
-  the semantic-segmentation metrics (mIoU, Dice, pixel accuracy, ...) derived
-  from it.
-"""
+"""Distributed evaluation metrics."""
 
 from .segmentation import (
-    DistributedSegmentationMetrics as DistributedSegmentationMetrics,
+    DistributedSegmentationMetrics,
+    confusion_to_metrics,
+    distributed_confusion_matrix,
 )
-from .segmentation import (
-    confusion_to_metrics as confusion_to_metrics,
-)
-from .segmentation import (
-    distributed_confusion_matrix as distributed_confusion_matrix,
-)
+
+__all__ = [
+    "DistributedSegmentationMetrics",
+    "distributed_confusion_matrix",
+    "confusion_to_metrics",
+]

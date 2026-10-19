@@ -17,11 +17,11 @@ equivalent and issues **no collectives** — you can use them unconditionally.
 | Classification | `distributed_cross_entropy` | `DistributedCrossEntropyLoss` | `F.cross_entropy` |
 | | `distributed_nll_loss` | `DistributedNLLLoss` | `F.nll_loss` |
 | | `distributed_binary_cross_entropy` | `DistributedBCELoss` | `F.binary_cross_entropy` |
-| | `distributed_bce_with_logits` | `DistributedBCEWithLogitsLoss` | `F.binary_cross_entropy_with_logits` |
+| | `distributed_binary_cross_entropy_with_logits` | `DistributedBCEWithLogitsLoss` | `F.binary_cross_entropy_with_logits` |
 | Regression | `distributed_mse_loss` | `DistributedMSELoss` | `F.mse_loss` |
 | | `distributed_l1_loss` | `DistributedL1Loss` | `F.l1_loss` |
 | | `distributed_smooth_l1_loss` | `DistributedSmoothL1Loss` | `F.smooth_l1_loss` |
-| Shared primitives | `distributed_log_softmax`, `distributed_argmax`, `redundant_all_reduce` | — | — |
+| Shared primitives | `redundant_all_reduce` | — | — |
 
 ### Importing
 ```python
@@ -66,17 +66,17 @@ import jigsaw
 mesh = ...  # {"row": ProcessGroup, "col": ProcessGroup}
 
 ce = jigsaw.loss.DistributedCrossEntropyLoss(
-    channel_group=mesh["col"],       # class dim is split here
-    reduce_groups=(mesh["row"],),    # batch/spatial dims are split here
+    channel_group=mesh["col"],  # class dim is split here
+    reduce_groups=(mesh["row"],),  # batch/spatial dims are split here
     label_smoothing=0.1,
     reduction="mean",
 )
 
-logits = ...                 # [N, C_local, S_local], this rank's shard
-target = ...                 # [N, S_local]  class indices in [0, C_global)
+logits = ...  # [N, C_local, S_local], this rank's shard
+target = ...  # [N, S_local]  class indices in [0, C_global)
 
-loss = ce(logits, target)    # identical scalar on every rank
-loss.backward()              # grads flow back into logits
+loss = ce(logits, target)  # identical scalar on every rank
+loss.backward()  # grads flow back into logits
 ```
 
 Functional form, same semantics:
@@ -85,10 +85,15 @@ Functional form, same semantics:
 from jigsaw.modules.loss import distributed_cross_entropy
 
 loss = distributed_cross_entropy(
-    logits, target,
-    weight=None, ignore_index=-100, reduction="mean",
-    label_smoothing=0.1, dim=1,
-    channel_group=mesh["col"], reduce_groups=(mesh["row"],),
+    logits,
+    target,
+    weight=None,
+    ignore_index=-100,
+    reduction="mean",
+    label_smoothing=0.1,
+    dim=1,
+    channel_group=mesh["col"],
+    reduce_groups=(mesh["row"],),
 )
 ```
 
@@ -105,19 +110,19 @@ loss = distributed_cross_entropy(
 ### NLL
 
 `DistributedNLLLoss` / `distributed_nll_loss` take **log-probabilities**, not
-logits — feed them `distributed_log_softmax(logits, dim, channel_group)` (see
-below). Same `channel_group` / `reduce_groups` / `weight` / `ignore_index`
+logits — feed them `jigsaw.activation.distributed_log_softmax(logits, dim=1,
+group=channel_group)`. Same `channel_group` / `reduce_groups` / `weight` / `ignore_index`
 contract as cross-entropy.
 
 ### Binary cross-entropy
 
 ```python
 bce = jigsaw.loss.DistributedBCEWithLogitsLoss(
-    reduce_groups=(mesh["row"], mesh["col"]),   # EVERY group the tensor is split on
-    pos_weight=pos_weight,                       # broadcastable to the class dim
+    reduce_groups=(mesh["row"], mesh["col"]),  # EVERY group the tensor is split on
+    pos_weight=pos_weight,  # broadcastable to the class dim
     reduction="mean",
 )
-loss = bce(logits, target)   # target: soft/binary labels in [0, 1], same shard
+loss = bce(logits, target)  # target: soft/binary labels in [0, 1], same shard
 ```
 
 `DistributedBCELoss` is the same but expects probabilities already in `[0, 1]`;
@@ -131,11 +136,11 @@ is split on.
 
 ```python
 mse = jigsaw.loss.DistributedMSELoss(reduce_groups=(mesh["row"], mesh["col"]))
-loss = mse(pred, target)     # pred, target: matching shards
+loss = mse(pred, target)  # pred, target: matching shards
 
 huber = jigsaw.loss.DistributedSmoothL1Loss(
     reduce_groups=(mesh["row"], mesh["col"]),
-    beta=1.0,                # quadratic↔linear transition point
+    beta=1.0,  # quadratic↔linear transition point
 )
 ```
 
@@ -187,13 +192,13 @@ DistributedSmoothL1Loss(reduce_groups=None, *, beta=1.0, reduction="mean")
 
 Exported for building your own distributed objectives:
 
-- **`distributed_log_softmax(x, dim=1, channel_group=None)`** — differentiable
-  `log_softmax` along a dimension sharded across `channel_group`. Use it to turn
-  sharded logits into the log-probabilities that `DistributedNLLLoss` expects.
-- **`distributed_argmax(x, dim, group=None)`** — arg-max along a sharded
-  dimension, returning **global** indices; ties break to the lowest global
-  index, deterministically across ranks. `@torch.no_grad`. Handy for
-  accuracy-style metrics on sharded logits.
+- **`jigsaw.activation.distributed_log_softmax(x, dim=-1, group=None)`** and
+  **`jigsaw.activation.distributed_argmax(x, dim, group=None)`** (they live in
+  `jigsaw.activation`) — `log_softmax` and arg-max along a dimension sharded
+  across `group`. Use the first to turn sharded logits into the
+  log-probabilities that `DistributedNLLLoss` expects; the second returns
+  **global** indices, breaks ties to the lowest global index, and runs under
+  `@torch.no_grad`.
 - **`redundant_all_reduce(x, groups)`** — sum all-reduce whose result every rank
   recomputes identically, with an **identity gradient** (a second all-reduce
   would scale it by the group size). This is the primitive behind the `"sum"` /
@@ -208,6 +213,6 @@ stock PyTorch:
 ```python
 with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
     logits = model(x)
-loss = loss_fn(logits, target)   # outside autocast
+loss = loss_fn(logits, target)  # outside autocast
 loss.backward()
 ```

@@ -1,18 +1,25 @@
-"""Unit tests for ``jigsaw.utils.resolve_launch_env``.
+"""Unit tests for ``jigsaw.launch.resolve_launch_env``.
 
 ``resolve_launch_env`` is the pure environment-parsing half of the launch
 contract that ``scripts/run.sh`` sets up: it turns ``srun`` / ``torchrun`` /
-bare-shell environment variables into a :class:`~jigsaw.utils.LaunchEnv`. It
+bare-shell environment variables into a :class:`~jigsaw.launch.LaunchEnv`. It
 touches no CUDA and starts no process group, so these are plain unit tests --
 every launcher environment is faked with ``monkeypatch``.
+
+The last class covers the one decision ``init_cuda`` adds on top of it -- which
+CUDA device a process takes -- with CUDA and the process group faked as well.
+The trailing tests cover the seeding and precision helpers of the same module.
 """
 
 import dataclasses
 import os
+import types
 
 import pytest
+import torch
 
-from jigsaw.utils import LaunchEnv, resolve_launch_env
+from jigsaw import launch
+from jigsaw.launch import LaunchEnv, init_cuda, resolve_launch_env
 
 # Every variable ``resolve_launch_env`` reads. The autouse fixture clears all of
 # them so a test starts from a known-empty environment regardless of whether the
@@ -149,7 +156,7 @@ class TestMasterAddr:
 
         calls: list = []
         monkeypatch.setattr(
-            "jigsaw.utils.subprocess.check_output",
+            "jigsaw.launch.subprocess.check_output",
             _fake_scontrol(b"node01\n", recorder=calls),
         )
 
@@ -166,7 +173,7 @@ class TestMasterAddr:
 
         calls: list = []
         monkeypatch.setattr(
-            "jigsaw.utils.subprocess.check_output",
+            "jigsaw.launch.subprocess.check_output",
             _fake_scontrol(b"node01\nnode02\nnode03\nnode04\n", recorder=calls),
         )
 
@@ -220,3 +227,73 @@ def test_launch_env_is_frozen():
 
     with pytest.raises(dataclasses.FrozenInstanceError):
         env.rank = 99  # type: ignore[misc]
+
+
+class TestInitCudaDevice:
+    """Which CUDA device ``init_cuda`` selects for a process."""
+
+    @pytest.mark.parametrize(
+        ("visible", "local_rank", "expected"),
+        [
+            (4, 0, 0),  # every process sees the node's GPUs: one each, by local rank
+            (4, 3, 3),
+            (1, 0, 0),  # the launcher bound one GPU to each task: always cuda:0
+            (1, 3, 0),
+        ],
+    )
+    def test_device_index(self, monkeypatch, visible, local_rank, expected):
+        monkeypatch.setenv("SLURM_PROCID", str(4 + local_rank))
+        monkeypatch.setenv("SLURM_NTASKS", "8")
+        monkeypatch.setenv("SLURM_LOCALID", str(local_rank))
+        monkeypatch.setenv("MASTER_ADDR", "node0")
+
+        selected = []
+
+        def noop(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr(launch.torch.cuda, "device_count", lambda: visible)
+        monkeypatch.setattr(launch.torch.cuda, "set_device", selected.append)
+        monkeypatch.setattr(launch.dist, "init_process_group", noop)
+        monkeypatch.setattr(launch.dist, "is_initialized", lambda: False)
+        monkeypatch.setattr(
+            launch,
+            "log",
+            types.SimpleNamespace(
+                configure_logging=noop, info_all=noop, error_all=noop
+            ),
+        )
+
+        device, got_local_rank, rank, world_size = init_cuda()
+
+        assert (device.type, device.index) == ("cuda", expected)
+        assert selected == [expected]
+        # The local rank is reported as launched, whatever device it maps to.
+        assert (got_local_rank, rank, world_size) == (local_rank, 4 + local_rank, 8)
+
+
+def test_set_all_seeds_is_reproducible_and_exports_seed(monkeypatch):
+    monkeypatch.delenv("PL_GLOBAL_SEED", raising=False)
+    launch.set_all_seeds(7)
+    first = torch.randn(4)
+    launch.set_all_seeds(7)
+    assert torch.equal(first, torch.randn(4))
+    assert os.environ["PL_GLOBAL_SEED"] == "7"
+    monkeypatch.delenv("PL_GLOBAL_SEED")
+
+
+def test_setup_precision_toggles_tf32():
+    matmul, cudnn = (
+        torch.backends.cuda.matmul.allow_tf32,
+        torch.backends.cudnn.allow_tf32,
+    )
+    try:
+        launch.setup_precision(True)
+        assert torch.backends.cuda.matmul.allow_tf32 is True
+        assert torch.backends.cudnn.allow_tf32 is True
+        launch.setup_precision(False)
+        assert torch.backends.cuda.matmul.allow_tf32 is False
+        assert torch.backends.cudnn.allow_tf32 is False
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = matmul
+        torch.backends.cudnn.allow_tf32 = cudnn

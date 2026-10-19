@@ -1,5 +1,6 @@
-"""Expose distributed linear layers to public interface."""
+"""Distributed normalization layers."""
 
-from .normalization import DistributedLayerNorm as DistributedLayerNorm
-from .normalization import DistributedNoParamLayerNorm as DistributedNoParamLayerNorm
-from .normalization import DistributedSoftMax as DistributedSoftMax
+from .group_norm import DistributedGroupNorm
+from .layer_norm import DistributedLayerNorm
+
+__all__ = ["DistributedGroupNorm", "DistributedLayerNorm"]

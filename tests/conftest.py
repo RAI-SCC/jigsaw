@@ -175,6 +175,22 @@ def device(request: Any) -> torch.device:
         return device
 
 
+@pytest.fixture(autouse=True)
+def restore_torch_numerics() -> Generator[None, None, None]:
+    """Undo a test's changes to torch's global numerics settings.
+
+    Some tests switch on ``torch.use_deterministic_algorithms`` for a reproducible
+    reference. Left on, it makes every later cuBLAS matmul on the GPU raise (unless
+    ``CUBLAS_WORKSPACE_CONFIG`` is set), failing unrelated tests further down the run.
+    """
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    tf32 = torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
+    yield
+    torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
+    torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = tf32
+
+
 @pytest.fixture(autouse=False)
 def cuda_cleanup():
     """Release CUDA resources after a test."""

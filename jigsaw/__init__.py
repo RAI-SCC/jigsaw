@@ -1,12 +1,36 @@
-"""Jigsaw management package. This package provides classes for distributed model training."""
+"""Distributed model-parallel training modules."""
 
-from . import init as init
-from . import log as log
-from .mesh import make_process_mesh as make_process_mesh
-from .modules import attention as attention
-from .modules import convolution as convolution
-from .modules import linear as linear
-from .modules import loss as loss
-from .modules import metrics as metrics
-from .modules import normalization as normalization
-from .modules import roll as roll
+from . import convert, debug, gather, init, launch, log, parallel
+from .mesh import ProcessMesh, make_process_mesh
+from .modules import (
+    activation,
+    attention,
+    convolution,
+    linear,
+    loss,
+    metrics,
+    normalization,
+    permute,
+    roll,
+)
+
+__all__ = [
+    "ProcessMesh",
+    "make_process_mesh",
+    "activation",
+    "attention",
+    "convert",
+    "convolution",
+    "debug",
+    "gather",
+    "init",
+    "launch",
+    "linear",
+    "log",
+    "loss",
+    "metrics",
+    "normalization",
+    "parallel",
+    "permute",
+    "roll",
+]

@@ -22,9 +22,9 @@ import torch.nn.functional as F
 
 import jigsaw.modules.linear as linear
 import jigsaw.modules.loss as jloss
+from jigsaw.gather import gather_1d_results, gather_results
 from jigsaw.modules.loss import classification as lossc
 from jigsaw.modules.loss import regression as lossr
-from jigsaw.utils_aggregate import gather_1d_results, gather_results
 from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -112,7 +112,7 @@ class TestFunctionalNoGroups:
         )
         raw = torch.randn(3, 6, device=device)
         assert torch.allclose(
-            lossc.distributed_bce_with_logits(raw, bt),
+            lossc.distributed_binary_cross_entropy_with_logits(raw, bt),
             F.binary_cross_entropy_with_logits(raw, bt),
             **FTOL,
         )
@@ -536,7 +536,7 @@ class TestBCE:
         local_target = _shard(target, pmd, {"col": 1, "row": 2})
         local_pw = _shard(pos_weight, pmd, {"col": 0})
 
-        loss = lossc.distributed_bce_with_logits(
+        loss = lossc.distributed_binary_cross_entropy_with_logits(
             local_logits,
             local_target,
             pos_weight=local_pw,
@@ -824,12 +824,12 @@ class TestModuleWrappers:
 # end-to-end: a distributed linear model trained with a distributed loss
 # --------------------------------------------------------------------------- #
 class TestLinearTrainingParity:
-    """A ``DistributedXWT`` trained for a few SGD steps with a distributed loss
+    """A ``DistributedLinear`` trained for a few SGD steps with a distributed loss
     reproduces the *gathered* ``nn.Linear`` trained with the stock ``torch`` loss
     it mirrors -- identical per-step loss values and identical weights after
     every step.
 
-    ``DistributedXWT`` shards the weight ``(out, in)`` with ``out`` across ``row``
+    ``DistributedLinear`` shards the weight ``(out, in)`` with ``out`` across ``row``
     and ``in`` across ``col``; activations are ``(1, seq, features)`` with ``seq``
     across ``row`` and ``features`` across ``col``.  The distributed loss is
     handed ``channel_group`` / ``reduce_groups`` matching that layout and no
@@ -844,18 +844,18 @@ class TestLinearTrainingParity:
     def _make_pair(
         pmd: dict, in_dim: int, out_dim: int, device: torch.device
     ) -> tuple[torch.nn.Module, torch.nn.Module]:
-        """Build a ``DistributedXWT`` and a gathered-weight ``nn.Linear`` twin."""
+        """Build a ``DistributedLinear`` and a gathered-weight ``nn.Linear`` twin."""
         model_rank = dist.get_rank(group=pmd["model"])
         torch.manual_seed(model_rank)
-        dist_lin = linear.DistributedXWT(
+        dist_lin = linear.DistributedLinear(
             in_dim,
             out_dim,
-            False,
-            model_rank,
-            device,
-            pmd["model"],
-            pmd["col"],
-            pmd["row"],
+            local_rank=model_rank,
+            device=device,
+            model_group=pmd["model"],
+            col_group=pmd["col"],
+            row_group=pmd["row"],
+            bias=False,
             bayesian=False,
         ).to(device)
         w = gather_results(dist_lin.weight.data, process_mesh_dict=pmd)

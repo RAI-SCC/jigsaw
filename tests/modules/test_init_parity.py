@@ -31,7 +31,9 @@ import jigsaw.modules.linear as linear
 pytestmark = [pytest.mark.dist_required]
 
 
-def _assert_bound(tensor: torch.Tensor, bound: float, *, low_frac: float = 0.85) -> None:
+def _assert_bound(
+    tensor: torch.Tensor, bound: float, *, low_frac: float = 0.85
+) -> None:
     """``tensor`` should be ~U(-bound, bound): comfortably under the bound, and (with
     enough elements) comfortably above ``low_frac * bound`` too."""
     max_abs = tensor.abs().max().item()
@@ -51,15 +53,15 @@ class TestLinearInitParity:
         in_dim, out_dim = 64, 128
         local_rank = torch.distributed.get_rank(group=mesh["model"])
 
-        layer = linear.DistributedXWT(
+        layer = linear.DistributedLinear(
             in_dim,
             out_dim,
-            True,
-            local_rank,
-            device,
-            mesh["model"],
-            mesh["col"],
-            mesh["row"],
+            local_rank=local_rank,
+            device=device,
+            model_group=mesh["model"],
+            col_group=mesh["col"],
+            row_group=mesh["row"],
+            bias=True,
         ).to(device)
 
         weight, bias = layer.merge_weights(mesh)
@@ -72,9 +74,9 @@ class TestLinearInitParity:
 
 
 _CONV_CLS = {
-    1: convolution.DistributedConv1D,
-    2: convolution.DistributedConv2D,
-    3: convolution.DistributedConv3D,
+    1: convolution.DistributedConv1d,
+    2: convolution.DistributedConv2d,
+    3: convolution.DistributedConv3d,
 }
 
 
@@ -108,9 +110,9 @@ class TestConvInitParity:
 
 
 _CONV_TRANSPOSE_CLS = {
-    1: convolution.DistributedConv1DTranspose,
-    2: convolution.DistributedConv2DTranspose,
-    3: convolution.DistributedConv3DTranspose,
+    1: convolution.DistributedConvTranspose1d,
+    2: convolution.DistributedConvTranspose2d,
+    3: convolution.DistributedConvTranspose3d,
 }
 
 
@@ -154,13 +156,13 @@ class TestResetParametersIsOverridable:
     ) -> None:
         mesh = process_mesh_dict_2x2
 
-        class ZerosConv2D(convolution.DistributedConv2D):
+        class ZerosConv2d(convolution.DistributedConv2d):
             def reset_parameters(self) -> None:
                 init.zeros_(self.weight)
                 if self.bias is not None:
                     init.constant_(self.bias, 0.5)
 
-        conv = ZerosConv2D(
+        conv = ZerosConv2d(
             8,
             16,
             3,

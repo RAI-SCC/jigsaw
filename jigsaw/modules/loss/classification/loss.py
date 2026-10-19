@@ -1,26 +1,4 @@
-"""Distributed classification losses wrapped as ``torch.nn`` modules.
-
-Each module mirrors its ``torch.nn`` counterpart but is aware of a process mesh:
-
-* ``channel_group`` shards the class dimension (``dim``, ``1`` by convention).
-  It may be ``None`` / size ``1`` when the class dimension is replicated.
-* ``reduce_groups`` lists every group across which the *remaining* (batch and
-  spatial) dimensions are partitioned.  The ``"mean"`` / ``"sum"`` reduction is
-  all-reduced over those groups so the returned scalar matches the value the
-  non-distributed loss would produce on the gathered tensor.
-
-For :class:`DistributedBCELoss` / :class:`DistributedBCEWithLogitsLoss` there is
-no distinguished class dimension, so ``reduce_groups`` must list *every* group
-the input is sharded over.
-
-With ``channel_group=None`` and ``reduce_groups=()`` every module reduces to a
-plain call of the corresponding ``torch.nn.functional`` loss on the local
-tensor.
-
-As in ``torch.nn``'s own weighted losses, ``weight`` / ``pos_weight`` are
-registered as buffers, so they move with :meth:`~torch.nn.Module.to` /
-:meth:`~torch.nn.Module.cuda` and appear in the module ``state_dict``.
-"""
+"""Distributed classification losses as ``torch.nn`` modules."""
 
 from typing import Optional
 
@@ -28,11 +6,11 @@ import torch
 import torch.distributed as dist
 
 from ..common import GroupsArg
-from . import functional as fc
+from . import functional as F
 
 
 class DistributedNLLLoss(torch.nn.Module):
-    """Negative log-likelihood loss over a class dimension sharded on a mesh."""
+    """Negative log-likelihood loss of a class-sharded input."""
 
     def __init__(
         self,
@@ -48,14 +26,14 @@ class DistributedNLLLoss(torch.nn.Module):
 
         Parameters
         ----------
-        channel_group : Optional[dist.ProcessGroup]
-            Group across which the class dimension ``dim`` is partitioned.
-        reduce_groups : GroupsArg
-            Groups across which the batch/spatial dimensions are partitioned.
-        weight : Optional[torch.Tensor]
-            Per-class weight of length ``C_global`` (replicated on every rank).
+        channel_group : dist.ProcessGroup, optional
+            Group across which the class dimension is partitioned.
+        reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
+            Groups across which the batch and spatial dimensions are partitioned.
+        weight : torch.Tensor, optional
+            Per-class weight of the global class dimension.
         ignore_index : int
-            Target value whose elements are skipped.
+            Target value that contributes neither loss nor normalization.
         reduction : str
             ``"none"``, ``"sum"`` or ``"mean"``.
         dim : int
@@ -71,12 +49,25 @@ class DistributedNLLLoss(torch.nn.Module):
         self.dim = dim
 
     def get_parameter_count(self) -> int:
-        """Return ``0``; the loss holds no trainable parameters."""
+        """Return the number of local parameters."""
         return 0
 
     def forward(self, log_probs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Compute the distributed NLL loss for this rank's shard."""
-        return fc.distributed_nll_loss(
+        """Compute the loss of the local shard.
+
+        Parameters
+        ----------
+        log_probs : torch.Tensor
+            Log-probabilities with the class dimension holding the local shard.
+        target : torch.Tensor
+            Class indices.
+
+        Returns
+        -------
+        torch.Tensor
+            Local loss for ``"none"``, otherwise the reduced scalar loss.
+        """
+        return F.distributed_nll_loss(
             log_probs,
             target,
             weight=self.weight,
@@ -89,7 +80,7 @@ class DistributedNLLLoss(torch.nn.Module):
 
 
 class DistributedCrossEntropyLoss(torch.nn.Module):
-    """Cross-entropy loss over a class dimension sharded on a mesh."""
+    """Cross-entropy loss of a class-sharded input."""
 
     def __init__(
         self,
@@ -106,18 +97,19 @@ class DistributedCrossEntropyLoss(torch.nn.Module):
 
         Parameters
         ----------
-        channel_group : Optional[dist.ProcessGroup]
-            Group across which the class dimension ``dim`` is partitioned.
-        reduce_groups : GroupsArg
-            Groups across which the batch/spatial dimensions are partitioned.
-        weight : Optional[torch.Tensor]
-            Per-class weight of length ``C_global`` (replicated on every rank).
+        channel_group : dist.ProcessGroup, optional
+            Group across which the class dimension is partitioned.
+        reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
+            Groups across which the batch and spatial dimensions are partitioned.
+        weight : torch.Tensor, optional
+            Per-class weight of the global class dimension.
         ignore_index : int
-            Target value whose elements are skipped (class-index targets only).
+            Target value that contributes neither loss nor normalization. Only applies
+            to class-index targets.
         reduction : str
             ``"none"``, ``"sum"`` or ``"mean"``.
         label_smoothing : float
-            Label smoothing in ``[0, 1)``; requires ``weight is None``.
+            Label smoothing in ``[0, 1)``.
         dim : int
             Class dimension of the input.
         """
@@ -132,12 +124,25 @@ class DistributedCrossEntropyLoss(torch.nn.Module):
         self.dim = dim
 
     def get_parameter_count(self) -> int:
-        """Return ``0``; the loss holds no trainable parameters."""
+        """Return the number of local parameters."""
         return 0
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Compute the distributed cross-entropy loss for this rank's shard."""
-        return fc.distributed_cross_entropy(
+        """Compute the loss of the local shard.
+
+        Parameters
+        ----------
+        logits : torch.Tensor
+            Unnormalized scores with the class dimension holding the local shard.
+        target : torch.Tensor
+            Class indices or class probabilities.
+
+        Returns
+        -------
+        torch.Tensor
+            Local loss for ``"none"``, otherwise the reduced scalar loss.
+        """
+        return F.distributed_cross_entropy(
             logits,
             target,
             weight=self.weight,
@@ -151,7 +156,7 @@ class DistributedCrossEntropyLoss(torch.nn.Module):
 
 
 class DistributedBCELoss(torch.nn.Module):
-    """Binary cross-entropy over a tensor sharded arbitrarily on a mesh."""
+    """Binary cross-entropy loss of a sharded input."""
 
     def __init__(
         self,
@@ -164,10 +169,10 @@ class DistributedBCELoss(torch.nn.Module):
 
         Parameters
         ----------
-        reduce_groups : GroupsArg
+        reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
             Every group across which the input is partitioned.
-        weight : Optional[torch.Tensor]
-            Elementwise weight broadcastable to this rank's input shard.
+        weight : torch.Tensor, optional
+            Elementwise weight broadcastable to the input.
         reduction : str
             ``"none"``, ``"sum"`` or ``"mean"``.
         """
@@ -178,12 +183,25 @@ class DistributedBCELoss(torch.nn.Module):
         self.reduction = reduction
 
     def get_parameter_count(self) -> int:
-        """Return ``0``; the loss holds no trainable parameters."""
+        """Return the number of local parameters."""
         return 0
 
     def forward(self, probs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Compute the distributed BCE loss for this rank's shard."""
-        return fc.distributed_binary_cross_entropy(
+        """Compute the loss of the local shard.
+
+        Parameters
+        ----------
+        probs : torch.Tensor
+            Predicted probabilities in ``[0, 1]``.
+        target : torch.Tensor
+            Targets in ``[0, 1]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Local loss for ``"none"``, otherwise the reduced scalar loss.
+        """
+        return F.distributed_binary_cross_entropy(
             probs,
             target,
             weight=self.weight,
@@ -193,7 +211,7 @@ class DistributedBCELoss(torch.nn.Module):
 
 
 class DistributedBCEWithLogitsLoss(torch.nn.Module):
-    """Numerically stable BCE-with-logits over a mesh-sharded tensor."""
+    """Binary cross-entropy with logits of a sharded input."""
 
     def __init__(
         self,
@@ -207,12 +225,12 @@ class DistributedBCEWithLogitsLoss(torch.nn.Module):
 
         Parameters
         ----------
-        reduce_groups : GroupsArg
+        reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
             Every group across which the input is partitioned.
-        weight : Optional[torch.Tensor]
-            Elementwise weight broadcastable to this rank's input shard.
-        pos_weight : Optional[torch.Tensor]
-            Weight of positive examples, broadcastable to the class dimension.
+        weight : torch.Tensor, optional
+            Elementwise weight broadcastable to the input.
+        pos_weight : torch.Tensor, optional
+            Weight of the positive examples, broadcastable to the class dimension.
         reduction : str
             ``"none"``, ``"sum"`` or ``"mean"``.
         """
@@ -225,12 +243,25 @@ class DistributedBCEWithLogitsLoss(torch.nn.Module):
         self.reduction = reduction
 
     def get_parameter_count(self) -> int:
-        """Return ``0``; the loss holds no trainable parameters."""
+        """Return the number of local parameters."""
         return 0
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Compute the distributed BCE-with-logits loss for this rank's shard."""
-        return fc.distributed_bce_with_logits(
+        """Compute the loss of the local shard.
+
+        Parameters
+        ----------
+        logits : torch.Tensor
+            Unnormalized scores.
+        target : torch.Tensor
+            Targets in ``[0, 1]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Local loss for ``"none"``, otherwise the reduced scalar loss.
+        """
+        return F.distributed_binary_cross_entropy_with_logits(
             logits,
             target,
             weight=self.weight,

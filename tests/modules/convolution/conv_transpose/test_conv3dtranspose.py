@@ -4,7 +4,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 import jigsaw.modules.convolution as convolution
-from jigsaw.utils_aggregate import gather_1d_results, gather_results_as_list
+from jigsaw.gather import gather_1d_results, gather_results_as_list
 from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -65,7 +65,7 @@ def _conv3d_transpose_reference_check(
     groups: int = 1,
     channel_comm: str = "all_gather",
 ) -> None:
-    """Compare ``DistributedConv3DTranspose`` against a single-process op.
+    """Compare ``DistributedConvTranspose3d`` against a single-process op.
 
     Works for any ``row.size()`` (spatial, splits the width axis) x ``col.size()``
     (channel) mesh and for both the no-halo regime (``stride == kernel_size``) and
@@ -97,7 +97,7 @@ def _conv3d_transpose_reference_check(
         device=device,
     )
 
-    conv = convolution.DistributedConv3DTranspose(
+    conv = convolution.DistributedConvTranspose3d(
         in_channels,
         out_channels,
         kernel_size,
@@ -195,8 +195,13 @@ def _conv3d_transpose_reference_check(
         device,
         model_group,
     )
+    # The bias gradient sums grad_output over the batch and every spatial axis, which
+    # is thousands of terms. F.conv_transpose3d accumulates them in fp32 and is off
+    # by more than the tolerance (the sharded sum is the more accurate one), so the
+    # reference is that sum in float64.
+    bias_grad_ref = grad_global.double().sum(dim=(0, 2, 3, 4)).to(b_grad_global.dtype)
     assert_close(
-        "bias grad", b_grad_global, bias_global.grad, 1e-4, 1e-4, device, model_group
+        "bias grad", b_grad_global, bias_grad_ref, 1e-4, 1e-4, device, model_group
     )
 
 
@@ -216,7 +221,7 @@ class TestConv3dTranspose:
             process_mesh_dict_2x2["row"].size(),
             process_mesh_dict_2x2["col"].size(),
         )
-        conv = convolution.DistributedConv3DTranspose(
+        conv = convolution.DistributedConvTranspose3d(
             6,
             12,
             2,
@@ -273,7 +278,7 @@ class TestConv3dTranspose:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """``channel_comm='auto'`` resolves from the device on the config."""
-        conv = convolution.DistributedConv3DTranspose(
+        conv = convolution.DistributedConvTranspose3d(
             8,
             12,
             2,
@@ -290,7 +295,7 @@ class TestConv3dTranspose:
     ) -> None:
         """An unrecognised ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
-            convolution.DistributedConv3DTranspose(
+            convolution.DistributedConvTranspose3d(
                 8,
                 12,
                 2,
@@ -307,7 +312,7 @@ class TestConv3dTranspose:
         """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
         if dist.get_backend() != "gloo":
             pytest.skip("only meaningful on the gloo backend")
-        conv = convolution.DistributedConv3DTranspose(
+        conv = convolution.DistributedConvTranspose3d(
             8,
             12,
             2,
@@ -328,7 +333,7 @@ class TestConv3dTranspose:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """String padding is not supported once a halo exchange is needed."""
-        conv = convolution.DistributedConv3DTranspose(
+        conv = convolution.DistributedConvTranspose3d(
             8,
             12,
             3,
@@ -629,7 +634,7 @@ class TestConv3dTransposeGroups:
     ) -> None:
         """``1 < groups`` not a multiple of ``col.size()`` fails at construction."""
         with pytest.raises(NotImplementedError):
-            convolution.DistributedConv3DTranspose(
+            convolution.DistributedConvTranspose3d(
                 18,
                 18,
                 2,
