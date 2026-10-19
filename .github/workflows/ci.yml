@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Also run the 2- and 6-rank CPU tests"
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -32,14 +38,19 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.12"]
         # Tests are marked @pytest.mark.dist(N) and only run when the mpirun
-        # rank count is exactly N, so each count needs its own job. 10/12/24
-        # ranks are too heavy for a hosted runner: run those on the cluster.
-        ranks: [1, 2, 4, 6, 8]
+        # rank count is exactly N, so each count needs its own job. CI covers
+        # 1/4/8 ranks; the 2- and 6-rank tests run on a manual dispatch
+        # (Actions -> CI -> Run workflow, "full"), 10/12/24 ranks and all GPU
+        # tests on a dev machine or the cluster.
+        # One Python only: the 3.11 floor in requires-python is guarded
+        # statically by mypy (python_version = "3.11") in the lint job.
+        ranks: [1, 4, 8]
     name: test (py${{ matrix.python-version }}, ${{ matrix.ranks }} ranks)
     steps:
       - uses: actions/checkout@v4
@@ -47,6 +58,38 @@ jobs:
         id: py
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install MPI
+        run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin
+      - name: Install package (CPU torch)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
+      - name: Tests
+        env:
+          OMPI_MCA_rmaps_base_oversubscribe: "1"
+          OMPI_MCA_hwloc_base_binding_policy: none
+        run: mpirun -n ${{ matrix.ranks }} pytest tests --device cpu
+
+  # Remaining hosted-runner rank counts (non-power-of-two meshes etc.); only on
+  # a manual dispatch with "full" ticked, to keep PR CI cheap.
+  test-full:
+    if: github.event_name == 'workflow_dispatch' && inputs.full
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        ranks: [2, 6]
+    name: test (py3.12, ${{ matrix.ranks }} ranks)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install MPI
         run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin
       # The venv (CPU torch + dev deps) is shared by every rank-count job and

@@ -53,13 +53,13 @@ class TestLinearInitParity:
         in_dim, out_dim = 64, 128
         local_rank = torch.distributed.get_rank(group=mesh["model"])
 
-        layer = linear.DistributedXWT(
+        layer = linear.DistributedLinear(
             in_dim,
             out_dim,
             local_rank=local_rank,
             device=device,
             model_group=mesh["model"],
-            column_group=mesh["col"],
+            col_group=mesh["col"],
             row_group=mesh["row"],
             bias=True,
         ).to(device)
@@ -74,9 +74,9 @@ class TestLinearInitParity:
 
 
 _CONV_CLS = {
-    1: convolution.DistributedConv1D,
-    2: convolution.DistributedConv2D,
-    3: convolution.DistributedConv3D,
+    1: convolution.DistributedConv1d,
+    2: convolution.DistributedConv2d,
+    3: convolution.DistributedConv3d,
 }
 
 
@@ -110,9 +110,9 @@ class TestConvInitParity:
 
 
 _CONV_TRANSPOSE_CLS = {
-    1: convolution.DistributedConv1DTranspose,
-    2: convolution.DistributedConv2DTranspose,
-    3: convolution.DistributedConv3DTranspose,
+    1: convolution.DistributedConvTranspose1d,
+    2: convolution.DistributedConvTranspose2d,
+    3: convolution.DistributedConvTranspose3d,
 }
 
 
@@ -156,13 +156,13 @@ class TestResetParametersIsOverridable:
     ) -> None:
         mesh = process_mesh_dict_2x2
 
-        class ZerosConv2D(convolution.DistributedConv2D):
+        class ZerosConv2d(convolution.DistributedConv2d):
             def reset_parameters(self) -> None:
                 init.zeros_(self.weight)
                 if self.bias is not None:
                     init.constant_(self.bias, 0.5)
 
-        conv = ZerosConv2D(
+        conv = ZerosConv2d(
             8,
             16,
             3,

@@ -3,11 +3,11 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.modules.attention.config as config
-from jigsaw.modules.attention.functional import backward, forward, ring
-from jigsaw.modules.attention.functional.cores import te as te_cores
-from jigsaw.utils_aggregate import (
+from jigsaw.gather import (
     gather_1d_results,
 )
+from jigsaw.modules.attention.functional import backward, forward, ring
+from jigsaw.modules.attention.functional.cores import te as te_cores
 from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -878,7 +878,7 @@ def test_ring_hybrid_single_node(
 def test_ring_autograd_function_matches_full_attention(
     device: torch.device, process_mesh_dict_4x1: dict
 ) -> None:
-    """``RingAttentionFunction`` gives the gradients of full attention.
+    """``_RingAttention`` gives the gradients of full attention.
 
     Goes through the autograd wrapper (``setup_context`` saves the log-sum-exp for the
     backward) with ``heads != local sequence length``; a transposed saved ``lse``
@@ -911,12 +911,12 @@ def test_ring_autograd_function_matches_full_attention(
     ring_config = config.RingAttentionConfig(
         device=device, gpus_per_node=world, send_in_forward=config.SendForward.KV
     )
-    out = ring.RingAttentionFunction.apply(
+    out = ring._RingAttention.apply(
         q, k, v, x, w_qkv, d**-0.5, 0.0, group, rank, ring_config
     )[0]
     out.backward(g_full[:, :, shard].contiguous())
 
-    # The CUDA core runs flash attention in float16 (errors ~1e-3 here); a transposed
+    # The CUDA core runs flash attention in float16; a transposed
     # ``lse`` is off by O(1), so this still catches it.
     tol = 5e-3 if device.type == "cuda" else 1e-4
     for name, got, ref in (

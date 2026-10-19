@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 import jigsaw.modules.convolution as convolution
-from jigsaw.utils_aggregate import gather_1d_results
+from jigsaw.gather import gather_1d_results
 from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -27,7 +27,7 @@ def _pair(value: Pair) -> tuple[int, int]:
 def _deterministic_cudnn():
     """Pin cuDNN to a deterministic, non-benchmarked convolution algorithm.
 
-    The sharded ``DistributedConv2D`` and its single-process ``F.conv2d``
+    The sharded ``DistributedConv2d`` and its single-process ``F.conv2d``
     reference are different-shaped calls, so cuDNN's benchmarked heuristic can
     pick algorithms whose fp32 accumulation order differs by more than the
     1e-4 parity tolerance (seen on the CUDA 13 container stack for the
@@ -84,7 +84,7 @@ def _conv2d_multi_spatial_reference_check(
     dilation: Pair = 1,
     groups: int = 1,
 ) -> None:
-    """Compare a ``DistributedConv2D`` split along H *and* W to a plain conv2d.
+    """Compare a ``DistributedConv2d`` split along H *and* W to a plain conv2d.
 
     ``mesh`` carries ``sh`` (height), ``sw`` (width) and ``col`` (channel)
     groups plus a ``model`` group over every rank. Either spatial group may be
@@ -110,7 +110,7 @@ def _conv2d_multi_spatial_reference_check(
         device=device,
     )
 
-    dist_conv = convolution.DistributedConv2D(
+    dist_conv = convolution.DistributedConv2d(
         in_channels,
         out_channels,
         kernel_size,
@@ -408,7 +408,7 @@ class TestConv2dMultiSpatial:
     ) -> None:
         """A spatial_group sequence must have one entry per spatial axis."""
         with pytest.raises(ValueError):
-            convolution.DistributedConv2D(
+            convolution.DistributedConv2d(
                 6,
                 12,
                 4,

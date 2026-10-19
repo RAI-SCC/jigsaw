@@ -4,7 +4,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 import jigsaw.modules.convolution as convolution
-from jigsaw.utils_aggregate import gather_1d_results, gather_results_as_list
+from jigsaw.gather import gather_1d_results, gather_results_as_list
 from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -28,7 +28,7 @@ def _skip_if_unsupported(channel_comm: str) -> None:
 
 
 def _assert_weight_replicated_across_spatial(
-    weight: torch.Tensor, mesh: dict, atol: float = 1e-5
+    weight: torch.Tensor, mesh: dict, atol: float = 1e-5, rtol: float = 1e-5
 ) -> None:
     """Every spatial rank in a channel column must hold the same weight shard.
 
@@ -36,16 +36,26 @@ def _assert_weight_replicated_across_spatial(
     returns one tensor per ``model``-group rank, and the row/col mesh lays ranks
     out row-major, so the shard for ``(spatial_row, channel_col)`` lives at index
     ``spatial_row * n_channel + channel_col``.
+
+    Compares through ``tests.parity.assert_close`` rather than a bare ``allclose``:
+    callers run further collectives after this returns (the multi-iteration test
+    gathers again on the next loop pass), so a mismatch seen on one rank only must
+    fail every rank or the others block in that next gather.
     """
     n_spatial, n_channel = mesh["row"].size(), mesh["col"].size()
     shards = gather_results_as_list(weight, mesh)
     for channel_col in range(n_channel):
         reference = shards[channel_col]  # spatial_row == 0
         for spatial_row in range(1, n_spatial):
-            assert torch.allclose(
+            assert_close(
+                f"weight shard at spatial_row={spatial_row}, "
+                f"channel_col={channel_col} vs spatial_row=0",
                 shards[spatial_row * n_channel + channel_col],
                 reference,
-                atol=atol,
+                atol,
+                rtol,
+                weight.device,
+                mesh["model"],
             )
 
 
@@ -64,7 +74,7 @@ def _conv2d_reference_check(
     groups: int = 1,
     channel_comm: str = "all_gather",
 ) -> None:
-    """Compare a distributed ``DistributedConv2D`` against a single-process conv2d.
+    """Compare a distributed ``DistributedConv2d`` against a single-process conv2d.
 
     Works for any ``row.size()`` (spatial) x ``col.size()`` (channel) mesh, any
     channel-parallel exchange strategy (``"all_gather"`` / ``"p2p"`` /
@@ -90,7 +100,7 @@ def _conv2d_reference_check(
         batch, in_channels // n_channel, height, width // n_spatial, device=device
     )
 
-    conv = convolution.DistributedConv2D(
+    conv = convolution.DistributedConv2d(
         in_channels,
         out_channels,
         kernel_size,
@@ -212,7 +222,7 @@ def _conv2d_optimizer_parity_check(
     groups: int = 1,
     channel_comm: str = "all_gather",
 ) -> None:
-    """Run ``iters`` train steps of a ``DistributedConv2D`` and an equal
+    """Run ``iters`` train steps of a ``DistributedConv2d`` and an equal
     single-process ``conv2d`` and assert they never drift apart.
 
     Both start from the same weights (the distributed shards, gathered) and the
@@ -239,7 +249,7 @@ def _conv2d_optimizer_parity_check(
     dilation = _pair(dilation)
 
     torch.manual_seed(model_group.rank())
-    dist_conv = convolution.DistributedConv2D(
+    dist_conv = convolution.DistributedConv2d(
         in_channels,
         out_channels,
         kernel_size,
@@ -400,7 +410,7 @@ class TestConv2d:
         torch.manual_seed(local_rank)  # each process gets a different initial seed
         in_dim, out_dim = 5, 10
         kernel_size = 4
-        conv = convolution.DistributedConv2D(
+        conv = convolution.DistributedConv2d(
             in_dim,
             out_dim,
             kernel_size,
@@ -458,7 +468,7 @@ class TestConv2d:
 
         def _build(channel_comm: str) -> torch.nn.Module:
             torch.manual_seed(1234)  # identical weight init for both variants
-            return convolution.DistributedConv2D(
+            return convolution.DistributedConv2d(
                 8,
                 12,
                 4,
@@ -483,7 +493,18 @@ class TestConv2d:
 
         y_ag = conv_ag(x.clone().requires_grad_(True))
         y_stream = conv_stream(x.clone().requires_grad_(True))
-        assert torch.allclose(y_ag, y_stream, atol=1e-5, rtol=1e-5)
+        # Rank-local input, and two distributed backward passes follow: a bare
+        # assert tripping on one rank would leave the others in the halo/grad
+        # collectives inside those backwards.
+        assert_close(
+            "streaming vs all_gather forward",
+            y_ag,
+            y_stream,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
 
         y_ag.backward(torch.ones_like(y_ag))
         y_stream.backward(torch.ones_like(y_stream))
@@ -498,7 +519,7 @@ class TestConv2d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """``channel_comm='auto'`` resolves from the device on the config."""
-        conv = convolution.DistributedConv2D(
+        conv = convolution.DistributedConv2d(
             8,
             12,
             4,
@@ -515,7 +536,7 @@ class TestConv2d:
     ) -> None:
         """An unrecognised ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
-            convolution.DistributedConv2D(
+            convolution.DistributedConv2d(
                 8,
                 12,
                 4,
@@ -532,7 +553,7 @@ class TestConv2d:
         """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
         if dist.get_backend() != "gloo":
             pytest.skip("only meaningful on the gloo backend")
-        conv = convolution.DistributedConv2D(
+        conv = convolution.DistributedConv2d(
             8,
             12,
             4,
@@ -553,7 +574,7 @@ class TestConv2d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """``stride`` / ``padding`` / ``dilation`` given as ``int`` become 2-tuples."""
-        conv = convolution.DistributedConv2D(
+        conv = convolution.DistributedConv2d(
             8,
             12,
             4,
@@ -590,7 +611,7 @@ class TestConv2d:
             stride: object, padding: object, dilation: object
         ) -> torch.nn.Module:
             torch.manual_seed(1234)  # identical weight init for both variants
-            return convolution.DistributedConv2D(
+            return convolution.DistributedConv2d(
                 in_channels,
                 out_channels,
                 kernel_size,
@@ -614,7 +635,16 @@ class TestConv2d:
 
         y_int = conv_int(x.clone().requires_grad_(True))
         y_tuple = conv_tuple(x.clone().requires_grad_(True))
-        assert torch.allclose(y_int, y_tuple, atol=1e-6)
+        # Distributed backwards follow; see test_streaming_matches_all_gather.
+        assert_close(
+            "int args vs tuple args forward",
+            y_int,
+            y_tuple,
+            1e-6,
+            1e-5,
+            device,
+            model_group,
+        )
 
         y_int.backward(torch.ones_like(y_int))
         y_tuple.backward(torch.ones_like(y_tuple))
@@ -704,7 +734,7 @@ class TestConv2d:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """String padding is not supported once a halo exchange is needed."""
-        conv = convolution.DistributedConv2D(
+        conv = convolution.DistributedConv2d(
             8,
             12,
             4,
@@ -844,7 +874,7 @@ class TestConv2dParallel:
     ) -> None:
         """Weight init is broadcast across a spatial group larger than two."""
         torch.manual_seed(dist.get_rank(group=process_mesh_dict_3x2["model"]))
-        conv = convolution.DistributedConv2D(
+        conv = convolution.DistributedConv2d(
             12,
             12,
             4,
@@ -1023,7 +1053,7 @@ class TestConv2dChannelGroupOne:
         assert row.size() == 1 and col.size() == 1
 
         in_ch, out_ch, k = 6, 8, 3
-        conv = convolution.DistributedConv2D(
+        conv = convolution.DistributedConv2d(
             in_ch,
             out_ch,
             k,
@@ -1286,7 +1316,7 @@ class TestConv2dGroups:
         ranks share one conv-group -- unsupported.
         """
         with pytest.raises(NotImplementedError):
-            convolution.DistributedConv2D(
+            convolution.DistributedConv2d(
                 18,
                 18,
                 4,
@@ -1508,7 +1538,7 @@ class TestConv2dTranspose:
         )
         in_dim, out_dim = 6, 10
         kernel_size = 4
-        conv2d = convolution.DistributedConv2DTranspose(
+        conv2d = convolution.DistributedConvTranspose2d(
             in_dim,
             out_dim,
             kernel_size,
@@ -1529,10 +1559,14 @@ class TestConv2dTranspose:
         )
 
         for i in range(process_mesh_dict_2x2["model"].size() // row_comm_size):
-            assert torch.allclose(
+            assert_close(
+                f"weight replica {i} vs {i + col_comm_size}",
                 weights_gathered_as_list[i],
                 weights_gathered_as_list[i + col_comm_size],
-                atol=1e-5,
+                1e-5,
+                1e-5,
+                device,
+                process_mesh_dict_2x2["model"],
             )
 
     def test_conv2d_transpose_forwardbackward(
@@ -1549,7 +1583,7 @@ class TestConv2dTranspose:
         kernel_size = 4
         h, w = 16, 16
 
-        conv2d = convolution.DistributedConv2DTranspose(
+        conv2d = convolution.DistributedConvTranspose2d(
             in_dim,
             out_dim,
             kernel_size,
@@ -1570,10 +1604,14 @@ class TestConv2dTranspose:
         )
 
         for i in range(process_mesh_dict_2x2["model"].size() // row_comm_size):
-            assert torch.allclose(
+            assert_close(
+                f"weight replica {i} vs {i + col_comm_size}",
                 weights_gathered_as_list[i],
                 weights_gathered_as_list[i + col_comm_size],
-                atol=1e-5,
+                1e-5,
+                1e-5,
+                device,
+                process_mesh_dict_2x2["model"],
             )
 
         x = torch.randn(4, in_dim // 2, h, w // 2, device=device)

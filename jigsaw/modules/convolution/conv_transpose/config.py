@@ -66,6 +66,7 @@ class ConvTransposeNdConfig:
         group_size = channel_group.size()
         self.channel_local = groups % group_size == 0
         self.groups_local = groups // group_size if self.channel_local else 1
+        self.native_conv_transpose_fn = _CONV_TRANSPOSE_FN[self.n_spatial - 1]
         self.conv_transpose_fn = self._conv_transpose_fn_selection(bayesian)
         self.conv_transpose_grad_fn = self._conv_transpose_grad_fn_selection(bayesian)
         self.weight_reshape = self._reshape_weights_selection(bayesian)
@@ -87,10 +88,9 @@ class ConvTransposeNdConfig:
 
     def _conv_transpose_fn_selection(self, bayesian: bool) -> Callable:
         """Select the forward primitive."""
-        conv_transpose = _CONV_TRANSPOSE_FN[self.n_spatial - 1]
         if bayesian:
-            return torch.vmap(conv_transpose)
-        return conv_transpose
+            return torch.vmap(self.native_conv_transpose_fn)
+        return self.native_conv_transpose_fn
 
     def _conv_transpose_grad_fn_selection(self, bayesian: bool) -> Callable:
         """Select the backward primitive."""

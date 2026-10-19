@@ -3,7 +3,7 @@
 import torch
 
 from ..common import GroupsArg
-from . import functional as fr
+from . import functional as F
 
 
 class DistributedMSELoss(torch.nn.Module):
@@ -47,7 +47,7 @@ class DistributedMSELoss(torch.nn.Module):
         torch.Tensor
             Local loss for ``"none"``, otherwise the reduced scalar loss.
         """
-        return fr.distributed_mse_loss(
+        return F.distributed_mse_loss(
             input,
             target,
             reduction=self.reduction,
@@ -96,7 +96,7 @@ class DistributedL1Loss(torch.nn.Module):
         torch.Tensor
             Local loss for ``"none"``, otherwise the reduced scalar loss.
         """
-        return fr.distributed_l1_loss(
+        return F.distributed_l1_loss(
             input,
             target,
             reduction=self.reduction,
@@ -149,7 +149,7 @@ class DistributedSmoothL1Loss(torch.nn.Module):
         torch.Tensor
             Local loss for ``"none"``, otherwise the reduced scalar loss.
         """
-        return fr.distributed_smooth_l1_loss(
+        return F.distributed_smooth_l1_loss(
             input,
             target,
             beta=self.beta,

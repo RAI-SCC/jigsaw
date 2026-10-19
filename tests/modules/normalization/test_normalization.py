@@ -1,13 +1,12 @@
 import pytest
 import torch
-import torch.distributed as dist
 
-import jigsaw.modules.normalization.normalization as norm
-from jigsaw.utils_aggregate import (
+import jigsaw.modules.normalization as norm
+from jigsaw.gather import (
     gather_1d_results,
     gather_results,
 )
-from tests.parity import assert_close
+from tests.parity import all_ranks_ok, assert_close
 
 pytestmark = [pytest.mark.dist_required]
 
@@ -40,7 +39,7 @@ class TestDistributedLayerNorm:
         process_mesh_dict = request.getfixturevalue(process_mesh_dict)
         local_dim = 12
         layer_norm = norm.DistributedLayerNorm(
-            local_dim=local_dim,
+            normalized_dim=local_dim * process_mesh_dict["col"].size(),
             local_rank=process_mesh_dict["model"].rank(),
             device=device,
             row_group=process_mesh_dict["row"],
@@ -148,38 +147,73 @@ class TestDistributedLayerNorm:
         )
 
 
-class TestDistributedSoftMax:
-    @pytest.mark.parametrize("dim", [-1, 1, 0, -2])
-    def test_distributed_softmax(self, device: torch.device, dim: int) -> None:
-        """Forward and backward match ``torch.softmax`` along any sharded dimension."""
-        group = dist.group.WORLD
-        size, rank = group.size(), group.rank()
+class TestLayerNormTorchParity:
+    pytestmark = pytest.mark.dist(4)
 
-        # The same seed on every rank gives every rank the same full tensors.
-        g = torch.Generator().manual_seed(0)
-        shape = [2 * size, 2 * size, 2 * size]
-        x_full = torch.randn(shape, generator=g).to(device).requires_grad_(True)
-        grad_full = torch.randn(shape, generator=g).to(device)
-        x = x_full.detach().chunk(size, dim=dim)[rank].clone().requires_grad_(True)
-
-        softmax = norm.DistributedSoftMax(group, dim=dim)
-        out = softmax(x)
-        out.backward(grad_full.chunk(size, dim=dim)[rank])
-
-        ref = torch.softmax(x_full, dim=dim)
-        ref.backward(grad_full)
-
-        assert isinstance(x.grad, torch.Tensor)
-        assert isinstance(x_full.grad, torch.Tensor)
-        assert_close(
-            "forward", out, ref.chunk(size, dim=dim)[rank], 1e-5, 1e-5, device, group
+    @pytest.mark.parametrize(
+        "affine, bias", [(True, True), (True, False), (False, True)]
+    )
+    def test_eps_bias_dtype_match_torch(
+        self, device: torch.device, process_mesh_dict_2x2: dict, affine, bias
+    ) -> None:
+        """``eps``, ``bias`` and ``dtype`` survive a round trip through torch, and
+        the parameter names and forward/backward match ``torch.nn.LayerNorm``."""
+        pm = process_mesh_dict_2x2
+        dim, eps, dtype = 8, 1e-2, torch.float64
+        ref = torch.nn.LayerNorm(
+            dim,
+            eps=eps,
+            elementwise_affine=affine,
+            bias=bias,
+            device=device,
+            dtype=dtype,
         )
+        torch.manual_seed(0)  # same parameters and input on every rank
+        if affine:
+            with torch.no_grad():
+                ref.weight.uniform_(0.5, 2.0)
+                if bias:
+                    ref.bias.uniform_(-1.0, 1.0)
+        x = torch.randn(3, 5, dim, device=device, dtype=dtype)
+
+        layer = norm.DistributedLayerNorm.convert_to_jigsaw(ref, pm, device)
+        group = pm["model"]
+        assert all_ranks_ok(layer.eps == eps, device, group)
+        assert all_ranks_ok(
+            layer.state_dict().keys() == ref.state_dict().keys(), device, group
+        )
+        assert all_ranks_ok(
+            all(p.dtype == dtype for p in layer.parameters()), device, group
+        )
+
+        c = dim // pm["col"].size()
+        lo = pm["col"].rank() * c
+        x_local = x[..., lo : lo + c].clone().requires_grad_(True)
+        x_ref = x.clone().requires_grad_(True)
+        y, y_ref = layer(x_local), ref(x_ref)
+        y.sum().backward()
+        y_ref.sum().backward()
+        assert_close("forward", y, y_ref[..., lo : lo + c], 1e-10, 1e-10, device, group)
+        assert isinstance(x_local.grad, torch.Tensor)
+        assert isinstance(x_ref.grad, torch.Tensor)
         assert_close(
             "input grad",
-            x.grad,
-            x_full.grad.chunk(size, dim=dim)[rank],
-            1e-5,
-            1e-5,
+            x_local.grad,
+            x_ref.grad[..., lo : lo + c],
+            1e-10,
+            1e-10,
+            device,
+            group,
+        )
+
+        back = layer.convert_to_torch(pm)
+        assert all_ranks_ok(back.eps == eps, device, group)
+        assert all_ranks_ok(
+            back.state_dict().keys() == ref.state_dict().keys()
+            and all(
+                torch.equal(back.state_dict()[k], v)
+                for k, v in ref.state_dict().items()
+            ),
             device,
             group,
         )

@@ -9,15 +9,15 @@ parameter values and parameter gradients in one call.
 Two design-shaping points:
 
 * Backward is driven with an explicit upstream gradient rather than a loss. jigsaw's
-  weight-gradient all-reduce (``jigsaw.hooks.make_grad_sync_hook``) is a ``ReduceOp.SUM``
+  weight-gradient all-reduce (``jigsaw.parallel.sync_grad``) is a ``ReduceOp.SUM``
   over the spatial group, so the distributed gradient only equals the serial one when
   nothing averages over a sharded dimension. Splitting a global ``randn`` upstream
   gradient makes that relation exact and removes any need for a scaling factor.
 
 * Parameters are described as either *sharded* over a mesh axis (compare by gathering)
   or *replicated* over it (compare by checking the replicas agree, then taking one). For
-  a replicated parameter the agreement check is itself the test that the grad-sync hook
-  fired: without the all-reduce the per-rank gradients hold only local contributions and
+  a replicated parameter the agreement check is itself the test that the gradient sync
+  ran: without the all-reduce the per-rank gradients hold only local contributions and
   differ.
 
 Relation to the rest of the suite
@@ -66,6 +66,72 @@ def no_tf32() -> Iterator[None]:
     finally:
         torch.backends.cudnn.allow_tf32 = cudnn
         torch.backends.cuda.matmul.allow_tf32 = matmul
+
+
+class ForcedSdpaCalls:
+    """Record of what :func:`forced_sdpa_backend` intercepted while it was active.
+
+    Exists so a test can assert the forcing *actually took effect* instead of
+    trusting that it did. ``count`` is the number of ``sdpa_kernel`` contexts
+    that were redirected, and ``requested`` holds the priority lists the code
+    under test asked for, in order, so a mismatch report can say what it
+    wanted.
+    """
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.requested: list[Any] = []
+
+    def record(self, backends: Any) -> None:
+        self.count += 1
+        self.requested.append(backends)
+
+
+@contextlib.contextmanager
+def forced_sdpa_backend(
+    backend: torch.nn.attention.SDPBackend,
+) -> Iterator[ForcedSdpaCalls]:
+    """Force every ``scaled_dot_product_attention`` call onto exactly one torch
+    SDPA kernel for the duration of the block, restoring the real dispatcher
+    afterwards.
+
+    ``DistributedAttention``'s ``sdpa``/``math`` cores (``_attn_core``,
+    ``_attn_core_math``, ``_dense_bshd_core``) each open their *own*
+    ``torch.nn.attention.sdpa_kernel([...])`` context with a hardcoded
+    priority list (flash first), so a context a caller enters *around* the
+    whole call is overridden the moment that inner one is entered --
+    nesting ``sdpa_kernel`` does not restrict anything, the innermost one
+    always wins. Monkeypatching the ``sdpa_kernel`` symbol itself is the only
+    way in: every call site looks it up fresh on ``torch.nn.attention`` each
+    time, so replacing it here makes the next kernel dispatch -- whatever
+    list it asked for -- resolve to just ``backend``, which then either runs
+    or raises if that shape/dtype/mask combination is not one ``backend`` can
+    serve. There is no silent fallback to another kernel to mistake for a
+    pass: a single-entry list leaves torch nothing else enabled to pick.
+
+    Yields a :class:`ForcedSdpaCalls` whose ``count`` a caller should assert is
+    nonzero after the block. That is what distinguishes "the forced kernel ran"
+    from "the patch never got looked at", the way a refactor that bound
+    ``sdpa_kernel`` at import time inside the core would leave it.
+
+    Scope this tightly around a single forward call: the backward triggered
+    later replays the kernel autograd already recorded at that forward, so it
+    needs no context of its own, and anything computed *outside* the block
+    (e.g. a reference run on the ordinary, unforced priority list) must stay
+    that way or the comparison stops meaning anything.
+    """
+    real_sdpa_kernel = torch.nn.attention.sdpa_kernel
+    calls = ForcedSdpaCalls()
+
+    def _forced(backends: Any, **kwargs: Any) -> Any:
+        calls.record(backends)
+        return real_sdpa_kernel([backend], **kwargs)
+
+    torch.nn.attention.sdpa_kernel = _forced  # type: ignore[method-assign]
+    try:
+        yield calls
+    finally:
+        torch.nn.attention.sdpa_kernel = real_sdpa_kernel  # type: ignore[method-assign]
 
 
 #: Placement marking a tensor as replicated (not sharded) across a mesh dimension.
@@ -134,9 +200,8 @@ def sync_device(device: torch.device) -> None:
     """
     Wait for every stream on the device, including the ones NCCL uses internally.
 
-    jigsaw's grad-sync hooks issue ``all_reduce(..., async_op=True)`` and only wait on
-    the handles from an autograd engine callback, so reading ``.grad`` straight after
-    ``backward()`` returns can race with the collective. Call this before comparing.
+    jigsaw's collectives run on NCCL's own streams, so reading ``.grad`` straight after
+    ``backward()`` returns can race with them. Call this before comparing.
     """
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -470,7 +535,7 @@ def _check_parity(
     y_local = dist_module(x_local)
     y_local.backward(g_local)
 
-    # The grad-sync hooks all-reduce asynchronously; drain before reading .grad.
+    # Drain the gradient collectives before reading .grad.
     sync_device(device)
 
     assert x_local.grad is not None, "distributed backward produced no input gradient"

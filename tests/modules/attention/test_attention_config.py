@@ -8,7 +8,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-import jigsaw.comm as comm
+import jigsaw._core.comm as comm
 from jigsaw.modules.attention import config as cfg
 from jigsaw.modules.attention.config import (
     AttnBackend,

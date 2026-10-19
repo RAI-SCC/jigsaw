@@ -6,6 +6,8 @@ reference built from the module's own weights, composition with a
 channel-sharded ``qkv``, and the construction guards.
 """
 
+from typing import Optional
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -13,13 +15,13 @@ from einops import rearrange
 
 import jigsaw.modules.attention as attention
 import jigsaw.modules.attention.config as attention_config
+from jigsaw.gather import gather_1d_results, gather_1d_results_list
 from jigsaw.modules.attention.attention import attn_core_dtype
 from jigsaw.modules.attention.functional.ulysses import (
     _a2a_heads_to_seq,
     _a2a_seq_to_heads,
 )
-from jigsaw.utils_aggregate import gather_1d_results, gather_1d_results_list
-from tests.parity import all_ranks_ok, assert_close
+from tests.parity import all_ranks_ok, assert_close, forced_sdpa_backend
 
 pytestmark = [pytest.mark.dist_required]
 
@@ -117,17 +119,89 @@ def _dense_reference(
     return model.head_concat(o)
 
 
+#: (attn_backend, variant) cases the flat Ulysses parity test below checks.
+#: ``variant`` is ``None`` for the default dispatch, otherwise it pins a
+#: kernel the default priority order would not otherwise reach on every GPU:
+#:
+#: * ``("te", "cudnn" | "flash")`` -- TE's two arms (cuDNN fused attention vs.
+#:   the ``flash_attn`` package), selected via ``JIGSAW_TE_CORE`` rather than
+#:   letting ``te_cores.select_core`` pick by GPU architecture; needs the
+#:   container and a GPU, and each is skipped at runtime if that arm's
+#:   package is not importable.
+#: * ``("sdpa", "efficient")`` -- torch's own memory-efficient attention
+#:   kernel (``SDPBackend.EFFICIENT_ATTENTION``), forced via
+#:   :func:`~tests.parity.forced_sdpa_backend`; ``_dense_bshd_core``'s own
+#:   list is ``[FLASH, MATH]``, so plain ``attn_backend="sdpa"`` never
+#:   reaches it otherwise.
+#:
+#: The hierarchical test below checks the same three ``attn_backend``s
+#: without pinning a specific kernel (that grid already has its own
+#: ``inter_save_scope`` x ``inter_offload`` dimensions); the other Ulysses
+#: coverage (``test_composes_with_channel_parallel``,
+#: ``test_rejects_bad_config``) stays ``sdpa``-only, since it is wiring/guard
+#: coverage, not a numeric parity check.
+_ULYSSES_BACKEND_CASES = [
+    ("sdpa", None),
+    ("math", None),
+    pytest.param(
+        "sdpa", "efficient", id="sdpa-efficient", marks=[pytest.mark.gpu_required]
+    ),
+    pytest.param(
+        "te",
+        "cudnn",
+        id="te-cudnn",
+        marks=[pytest.mark.te_required, pytest.mark.gpu_required],
+    ),
+    pytest.param(
+        "te",
+        "flash",
+        id="te-flash",
+        marks=[pytest.mark.te_required, pytest.mark.gpu_required],
+    ),
+]
+
+#: Plain ``attn_backend`` list (no explicit TE-core split) for the
+#: hierarchical parity test, which already has its own ``inter_save_scope`` x
+#: ``inter_offload`` grid.
+_ULYSSES_BACKENDS = [
+    "sdpa",
+    "math",
+    pytest.param("te", marks=[pytest.mark.te_required, pytest.mark.gpu_required]),
+]
+
+
 class TestUlyssesAttention:
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("attn_backend,variant", _ULYSSES_BACKEND_CASES)
     def test_matches_dense_reference(
-        self, device: torch.device, process_mesh_dict_4x1: dict
+        self,
+        device: torch.device,
+        process_mesh_dict_4x1: dict,
+        attn_backend: str,
+        variant: Optional[str],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Forward and input-gradient parity vs a gathered-sequence dense run.
 
         ``spatial=4, channel=1``: ``qkv`` / ``head_concat`` are plain ``Linear``
         with spatially-replicated weights, so every rank can build the exact
-        reference from ``model.<w>`` and the all-gathered input.
+        reference from ``model.<w>`` and the all-gathered input. The reference
+        itself always runs plain, unforced SDPA (see ``_dense_reference``)
+        regardless of ``attn_backend``/``variant`` -- that is the independent
+        ground truth every backend's Ulysses path must reproduce.
         """
+        if attn_backend == "te" and variant is not None:
+            from jigsaw.modules.attention.functional.cores.te import cudnn, flash
+
+            available = (
+                cudnn.CUDNN_CORE_AVAILABLE
+                if variant == "cudnn"
+                else flash.FLASH_CORE_AVAILABLE
+            )
+            if not available:
+                pytest.skip(f"te core {variant!r} not importable in this environment")
+            monkeypatch.setenv("JIGSAW_TE_CORE", variant)
+
         mesh = process_mesh_dict_4x1
         row = mesh["row"]
         model_group = mesh["model"]
@@ -147,7 +221,7 @@ class TestUlyssesAttention:
             channel_group=mesh["col"],
             ring=False,
             ulysses=True,
-            attn_backend="sdpa",
+            attn_backend=attn_backend,
             dtype=dtype,
         )
 
@@ -158,10 +232,30 @@ class TestUlyssesAttention:
             b, s_loc, _IN_DIM, device=device, dtype=dtype, requires_grad=True
         )
 
-        out_local = model(x_local)
+        if attn_backend == "sdpa" and variant == "efficient":
+            with forced_sdpa_backend(
+                torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION
+            ) as forced:
+                out_local = model(x_local)
+            # Self-verifying: the forcing has to have actually been consulted,
+            # not silently no-op'd (e.g. if a future refactor stopped looking
+            # up ``sdpa_kernel`` fresh on ``torch.nn.attention`` per call, in
+            # which case this would quietly go back to testing plain ``sdpa``).
+            # Reduced, not a bare assert: more collectives follow (the gather
+            # and grad sync below), so one rank raising alone would hang the rest.
+            if not all_ranks_ok(forced.count > 0, device, model_group):
+                raise AssertionError(
+                    "forced_sdpa_backend intercepted no sdpa_kernel dispatch -- "
+                    "the efficient kernel was never pinned, so this ran the "
+                    "default priority list"
+                )
+        else:
+            out_local = model(x_local)
         assert out_local.shape == (b, s_loc, _OUT_DIM)
 
-        # Reference on the gathered sequence.
+        # Reference on the gathered sequence -- built *outside* any forcing
+        # context, so it stays on the default, unforced priority list even
+        # when ``out_local`` above was forced onto a specific kernel.
         x_full = gather_1d_results(x_local.detach(), mesh, dim=1, pm_key="row")
         x_full.requires_grad_(True)
         out_ref = _dense_reference(model, x_full)
@@ -183,6 +277,7 @@ class TestUlyssesAttention:
         )
 
     @pytest.mark.dist(4)
+    @pytest.mark.parametrize("attn_backend", _ULYSSES_BACKENDS)
     @pytest.mark.parametrize("inter_save_scope", ["LOCAL", "GLOBAL"])
     @pytest.mark.parametrize(
         "inter_offload",
@@ -194,6 +289,7 @@ class TestUlyssesAttention:
         process_mesh_dict_4x1: dict,
         inter_save_scope: str,
         inter_offload: attention_config.Offload,
+        attn_backend: str,
     ) -> None:
         """Hierarchical Ulysses (intra-node a2a x inter-node K/V P2P ring)
         reproduces the same gathered-sequence dense run as the flat scheme.
@@ -202,7 +298,13 @@ class TestUlyssesAttention:
         nested in a 2-node inter-node P2P ring, with both backward
         ``save_scope``s (``LOCAL`` re-rings K/V in the backward, ``GLOBAL``
         keeps it). The ring's per-step online-softmax merge adds a few ULP the
-        flat single-kernel path does not.
+        flat single-kernel path does not. Every ``attn_backend`` (math, sdpa,
+        te) feeds both the intra-node all-to-all's inner dense core
+        (``_dense_bshd_core``) and the inter-node ring's inner core
+        (``_inter_node_ring_core``) -- ``te`` picks its kernel by GPU
+        architecture here rather than forcing a specific core, unlike
+        ``test_matches_dense_reference``'s split cases, to keep this grid's
+        size in check.
 
         ``inter_offload=CPU`` additionally routes the inter-node ring's saved
         K/V chunk through :class:`.offload.NVLinkActivationOffloader` (pinned
@@ -234,7 +336,7 @@ class TestUlyssesAttention:
             ulysses_gpus_per_node=2,
             ulysses_inter_save_scope=inter_save_scope,
             ulysses_inter_offload=inter_offload,
-            attn_backend="sdpa",
+            attn_backend=attn_backend,
             dtype=dtype,
         )
 

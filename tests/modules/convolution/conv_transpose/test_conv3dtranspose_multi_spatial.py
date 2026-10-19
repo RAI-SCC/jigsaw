@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 import jigsaw.modules.convolution as convolution
-from jigsaw.utils_aggregate import gather_1d_results
+from jigsaw.gather import gather_1d_results
 from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -56,7 +56,7 @@ def _conv3d_transpose_multi_spatial_reference_check(
     groups: int = 1,
     channel_comm: str = "all_gather",
 ) -> None:
-    """Compare a ``DistributedConv3DTranspose`` split along D/H/W to a plain op.
+    """Compare a ``DistributedConvTranspose3d`` split along D/H/W to a plain op.
 
     ``mesh`` carries ``sd`` (depth), ``sh`` (height), ``sw`` (width) and ``col``
     (channel) groups plus a ``model`` group over every rank. Any spatial group
@@ -92,7 +92,7 @@ def _conv3d_transpose_multi_spatial_reference_check(
         device=device,
     )
 
-    conv = convolution.DistributedConv3DTranspose(
+    conv = convolution.DistributedConvTranspose3d(
         in_channels,
         out_channels,
         kernel_size,
@@ -445,7 +445,7 @@ class TestConv3dTransposeMultiSpatialGroups:
         """``1 < groups`` not a multiple of ``col.size()`` fails at construction."""
         mesh = spatial_mesh_2x2x1_dhw_x2c
         with pytest.raises(NotImplementedError):
-            convolution.DistributedConv3DTranspose(
+            convolution.DistributedConvTranspose3d(
                 18,
                 18,
                 2,

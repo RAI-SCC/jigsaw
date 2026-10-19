@@ -1,18 +1,25 @@
 """Distributed classification losses."""
 
 from .functional import (
-    distributed_bce_with_logits as distributed_bce_with_logits,
+    distributed_binary_cross_entropy,
+    distributed_binary_cross_entropy_with_logits,
+    distributed_cross_entropy,
+    distributed_nll_loss,
 )
-from .functional import (
-    distributed_binary_cross_entropy as distributed_binary_cross_entropy,
+from .loss import (
+    DistributedBCELoss,
+    DistributedBCEWithLogitsLoss,
+    DistributedCrossEntropyLoss,
+    DistributedNLLLoss,
 )
-from .functional import (
-    distributed_cross_entropy as distributed_cross_entropy,
-)
-from .functional import (
-    distributed_nll_loss as distributed_nll_loss,
-)
-from .loss import DistributedBCELoss as DistributedBCELoss
-from .loss import DistributedBCEWithLogitsLoss as DistributedBCEWithLogitsLoss
-from .loss import DistributedCrossEntropyLoss as DistributedCrossEntropyLoss
-from .loss import DistributedNLLLoss as DistributedNLLLoss
+
+__all__ = [
+    "DistributedNLLLoss",
+    "DistributedCrossEntropyLoss",
+    "DistributedBCELoss",
+    "DistributedBCEWithLogitsLoss",
+    "distributed_nll_loss",
+    "distributed_cross_entropy",
+    "distributed_binary_cross_entropy",
+    "distributed_binary_cross_entropy_with_logits",
+]

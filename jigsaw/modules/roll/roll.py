@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 
 from .config import RollConfig
-from .functional import RollFunction
+from .functional import _Roll
 
 
 class Roll(torch.nn.Module):
@@ -219,7 +219,7 @@ class DistributedRoll(torch.nn.Module):
         torch.Tensor
             Local output.
         """
-        out = RollFunction.apply(
+        out = _Roll.apply(
             x,
             self.shifts,
             self.dims,

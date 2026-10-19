@@ -7,16 +7,16 @@ import torch
 import torch.distributed as dist
 from einops import rearrange
 
-from jigsaw import comm, hooks
+from jigsaw import parallel
 from jigsaw.modules import linear
 
 from . import config as attention_config
 from .config import AttnBackend
 from .functional.cores import te as te_core
-from .functional.ring import RingAttentionFunction, get_hybrid_topology
+from .functional.ring import _RingAttention, get_hybrid_topology
 
 #: Whether ``attn_backend="te"`` can be run at all. Both TE paths -- the ring's
-#: inner core and :class:`TransformerEngineAttention` below -- go through
+#: inner core and :class:`_TransformerEngineAttention` below -- go through
 #: :mod:`.functional.cores.te`, so one probe covers both: it is false only when
 #: *neither* arm is importable (no ``transformer_engine`` for cuDNN, no
 #: ``flash_attn`` for flash).
@@ -24,7 +24,7 @@ JIGSAW_TE_AVAILABLE = te_core.TE_CORE_AVAILABLE
 
 if JIGSAW_TE_AVAILABLE:
 
-    class TransformerEngineAttention(torch.autograd.Function):
+    class _TransformerEngineAttention(torch.autograd.Function):
         """Autograd wrapper around the TransformerEngine attention kernels.
 
         Drives :mod:`.functional.cores.te` -- the same cores the ring's inner
@@ -186,7 +186,7 @@ if JIGSAW_TE_AVAILABLE:
             k = k.flatten(0, 1)
             v = v.flatten(0, 1)
 
-            out, lse, rng_state = TransformerEngineAttention.apply(
+            out, lse, rng_state = _TransformerEngineAttention.apply(
                 q, k, v, scale, dropout_p, core
             )
 
@@ -199,8 +199,10 @@ if JIGSAW_TE_AVAILABLE:
 def attn_core_dtype(x: torch.Tensor) -> torch.dtype:
     """Return the dtype of the attention core.
 
-    This is the autocast dtype under autocast, bf16 on CUDA and the input dtype
-    otherwise.
+    This is the autocast dtype under autocast. Otherwise it is the input dtype, except
+    that fp32 (or fp64) inputs on CUDA run the core in bf16: the flash kernels reject
+    fp32, and fp16 would need loss scaling -- without it, the small gradients of a loss
+    averaged over many outputs underflow to zero in the attention backward.
 
     Parameters
     ----------
@@ -214,9 +216,18 @@ def attn_core_dtype(x: torch.Tensor) -> torch.dtype:
     """
     if torch.is_autocast_enabled(x.device.type):
         return torch.get_autocast_dtype(x.device.type)
-    if x.is_cuda:
+    if x.is_cuda and x.dtype not in (torch.float16, torch.bfloat16):
         return torch.bfloat16
     return x.dtype
+
+
+def _mask_to(
+    attn_mask: Optional[torch.Tensor], dtype: torch.dtype
+) -> Optional[torch.Tensor]:
+    """Cast an additive (float) mask to the core dtype; SDPA rejects a mismatch."""
+    if attn_mask is not None and attn_mask.is_floating_point():
+        return attn_mask.to(dtype)
+    return attn_mask
 
 
 class DistributedAttention(torch.nn.Module):
@@ -231,8 +242,8 @@ class DistributedAttention(torch.nn.Module):
     """
 
     # type hints
-    qkv: torch.nn.Linear | linear.DistributedXWT
-    head_concat: torch.nn.Linear | linear.DistributedXWT
+    qkv: torch.nn.Linear | linear.DistributedLinear
+    head_concat: torch.nn.Linear | linear.DistributedLinear
 
     def __init__(
         self,
@@ -240,11 +251,11 @@ class DistributedAttention(torch.nn.Module):
         embed_dim: int,
         out_dim: int,
         heads: int,
-        dropout_p: float,
         local_rank: int,
         device: torch.device,
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
+        dropout_p: float = 0.0,
         bayesian: bool = False,
         qk_norm: bool = False,
         ring: bool = False,
@@ -261,7 +272,7 @@ class DistributedAttention(torch.nn.Module):
         dtype: torch.dtype = torch.float32,
         config: Optional[attention_config.RingAttentionConfig] = None,
         out_bias: bool = True,
-    ):
+    ) -> None:
         """Initialize the module.
 
         The weights are replicated over ``spatial_group``, which splits the
@@ -278,8 +289,6 @@ class DistributedAttention(torch.nn.Module):
             Global output dimension.
         heads : int
             Global number of heads.
-        dropout_p : float
-            Dropout probability.
         local_rank : int
             Rank within the channel group. Kept for compatibility: the module
             reads the channel rank and the ring rank from the groups.
@@ -289,6 +298,8 @@ class DistributedAttention(torch.nn.Module):
             Process group along the sequence dimension.
         channel_group : dist.ProcessGroup
             Process group along the channel dimension.
+        dropout_p : float
+            Dropout probability.
         bayesian : bool
             Whether the linear layers are Bayesian.
         qk_norm : bool
@@ -502,14 +513,14 @@ class DistributedAttention(torch.nn.Module):
                 in_dim, embed_dim * 3, bias=False, device=device, dtype=self.dtype
             )
         else:
-            self.qkv = linear.DistributedXWT(
+            self.qkv = linear.DistributedLinear(
                 in_dim,
                 embed_dim * 3,
                 local_rank=self.channel_group.rank(),
                 device=self.device,
                 model_group=self.channel_group,
-                column_group=self.channel_group,
                 row_group=self.spatial_group,
+                col_group=self.channel_group,
                 bias=False,
                 bayesian=bayesian,
                 dtype=self.dtype,
@@ -517,21 +528,21 @@ class DistributedAttention(torch.nn.Module):
 
         if channel_group.size() == 1:
             # No channel/tensor parallelism: the output projection is a plain
-            # local matmul, same as ``qkv`` above. ``DistributedXWT`` only has
+            # local matmul, same as ``qkv`` above. ``DistributedLinear`` only has
             # kernels for (row, col) in {(1,1),(1,2),(2,2),(4,2)}, so this also
             # unblocks a pure ring (spatial=N, channel=1).
             self.head_concat = torch.nn.Linear(
                 embed_dim, out_dim, bias=out_bias, device=device, dtype=self.dtype
             )
         else:
-            self.head_concat = linear.DistributedXWT(
+            self.head_concat = linear.DistributedLinear(
                 embed_dim,
                 out_dim,
                 local_rank=self.channel_group.rank(),
                 device=self.device,
                 model_group=self.channel_group,
-                column_group=self.channel_group,
                 row_group=self.spatial_group,
+                col_group=self.channel_group,
                 bias=out_bias,
                 bayesian=bayesian,
                 dtype=self.dtype,
@@ -548,31 +559,24 @@ class DistributedAttention(torch.nn.Module):
             norm_sync_groups = [
                 g for g in (self.spatial_group, self.channel_group) if g.size() > 1
             ]
-            if norm_sync_groups:
-                for norm in (self.q_norm, self.k_norm):
-                    for p in norm.parameters():
-                        p.register_post_accumulate_grad_hook(
-                            hooks.make_grad_sync_hook(norm_sync_groups)
-                        )
+            for norm in (self.q_norm, self.k_norm):
+                for p in norm.parameters():
+                    parallel.mark_replicated(p, norm_sync_groups)
 
-        # Sync up spatial parameters: one coalesced broadcast per dtype rather
-        # than one blocking round trip per tensor (comm.broadcast_params_).
-        # head_concat's bias gets broadcast twice (DistributedXWT.__init__
-        # already does its own) -- harmless and left alone so DistributedXWT
-        # keeps broadcasting correctly for callers that don't also do this.
-        comm.broadcast_params_(self.parameters(), self.spatial_group, src=0)
         for p in self.parameters():
-            # A *duplicate* grad-sync hook is not harmless the way the duplicate
-            # broadcast above is: two SUM all-reduces over the same group scale
-            # that gradient by ``spatial_group.size()``. DistributedXWT already
-            # hooks its own ``bias`` over ``row_group``, which is exactly
-            # ``spatial_group`` here, so skip anything a submodule has already
-            # claimed.
-            if getattr(p, "_post_accumulate_grad_hooks", None):
+            # A duplicate mark would sum that gradient twice, scaling it by
+            # ``spatial_group.size()``. DistributedLinear already marks its own
+            # ``bias`` over its ``row_group``, which is ``spatial_group`` here,
+            # so skip anything already claimed.
+            if parallel.replica_groups(p):
                 continue
-            p.register_post_accumulate_grad_hook(
-                hooks.make_grad_sync_hook(self.spatial_group, async_op=True)
-            )
+            parallel.mark_replicated(p, self.spatial_group)
+        # Make every replica identical from the start, over each group it is
+        # marked with (the qk norms over the channel group too), so a plain
+        # DistributedDataParallel needs no extra broadcast: one coalesced
+        # broadcast per group and dtype. head_concat's bias gets broadcast twice
+        # (DistributedLinear.__init__ already does its own) -- harmless.
+        parallel.broadcast_replicas(self)
 
     def _resolve_ring_config(
         self,
@@ -583,7 +587,7 @@ class DistributedAttention(torch.nn.Module):
         """Pick the ``RingAttentionConfig`` for this module.
 
         With channel/tensor parallelism the fused ``qkv`` projection is split
-        across the channel group (a distributed ``DistributedXWT`` matmul), so
+        across the channel group (a distributed ``DistributedLinear`` matmul), so
         the ring cannot rebuild K/V from a circulated ``x`` chunk with the plain
         local matmul in :func:`..functional.ring._compute_kv`. ``qk_norm`` needs
         the same thing for a different reason: the key norm is a separate
@@ -641,7 +645,7 @@ class DistributedAttention(torch.nn.Module):
 
         The ``TE`` arm resolves *which* TE kernel this GPU gets (``self.te_core``);
         it needs no other per-module state, going straight to that core via
-        :class:`TransformerEngineAttention`, parameterised per call by
+        :class:`_TransformerEngineAttention`, parameterised per call by
         ``self.scale`` / ``self.dropout_p``.
         """
         match self.attn_backend:
@@ -662,6 +666,7 @@ class DistributedAttention(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
         """Compute attention.
@@ -670,6 +675,12 @@ class DistributedAttention(torch.nn.Module):
         ----------
         q, k, v : torch.Tensor
             Query, key and value.
+        attn_mask : torch.Tensor, optional
+            Additive (float) or keep-true (bool) mask broadcastable to
+            ``(..., heads, seq_q, seq_kv)``, e.g. a per-window Swin shift
+            mask. Flash rejects a non-null mask, so a masked call instead
+            runs on the memory-efficient or cuDNN ``sdpa`` backend, fused
+            rather than falling back to unfused math.
         **kwargs : torch.Tensor
             Unused.
 
@@ -681,6 +692,8 @@ class DistributedAttention(torch.nn.Module):
         with torch.nn.attention.sdpa_kernel(
             [
                 torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+                torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
+                torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
                 torch.nn.attention.SDPBackend.MATH,
             ]
         ):
@@ -688,6 +701,7 @@ class DistributedAttention(torch.nn.Module):
                 q,
                 k,
                 v,
+                attn_mask=attn_mask,
                 is_causal=False,
                 dropout_p=self.dropout_p if self.training else 0.0,
             )
@@ -698,14 +712,26 @@ class DistributedAttention(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute attention with the unfused math backend."""
+        """Compute attention with the unfused math backend.
+
+        Parameters
+        ----------
+        q, k, v : torch.Tensor
+            Query, key and value.
+        attn_mask : torch.Tensor, optional
+            Same convention as :meth:`_attn_core`'s.
+        **kwargs : torch.Tensor
+            Unused.
+        """
         with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.MATH]):
             out = torch.nn.functional.scaled_dot_product_attention(
                 q,
                 k,
                 v,
+                attn_mask=attn_mask,
                 is_causal=False,
                 dropout_p=self.dropout_p if self.training else 0.0,
             )
@@ -716,13 +742,14 @@ class DistributedAttention(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
         """Attention computation on the TransformerEngine kernels.
 
         Runs ``self.te_core`` -- cuDNN on Hopper+, ``flash_attn`` on Ampere --
         shared with the ring's inner core; see
-        :class:`TransformerEngineAttention` for why the kernels are called
+        :class:`_TransformerEngineAttention` for why the kernels are called
         directly rather than through ``te.DotProductAttention``.
 
         Parameters
@@ -733,6 +760,12 @@ class DistributedAttention(torch.nn.Module):
             Keys tensor, ``bshd``.
         v : torch.Tensor
             Values tensor, ``bshd``.
+        attn_mask : torch.Tensor, optional
+            Not supported: ``fused_attn_fwd``/``fused_attn_bwd`` (what
+            :mod:`.functional.cores.te` calls) only implement
+            ``attn_mask_type`` in ``{no_mask, causal, padding, ...}``, no
+            arbitrary mask. Raises rather than silently taking TE's unfused
+            detour; use ``attn_backend="sdpa"`` for masked attention instead.
         **kwargs : torch.Tensor
             Unused.
 
@@ -741,9 +774,17 @@ class DistributedAttention(torch.nn.Module):
         torch.Tensor
             Output of attention computation, ``[batch, seq, heads * head_dim]``.
         """
+        if attn_mask is not None:
+            raise ValueError(
+                "attn_backend='te' does not support attn_mask: the TE kernels "
+                "this core calls (fused_attn_fwd/bwd) have no fused path for an "
+                "arbitrary mask -- only no_mask/causal/padding attn_mask_types. "
+                "Use attn_backend='sdpa' or 'math' for masked (e.g. shifted-"
+                "window) attention."
+            )
         # There is no dropout nn.Module here to apply its own training-mode
         # gate, so gate it the way the sdpa/math cores do.
-        out, _lse, _rng_state = TransformerEngineAttention.apply(
+        out, _lse, _rng_state = _TransformerEngineAttention.apply(
             q, k, v, self.scale, self.dropout_p if self.training else 0.0, self.te_core
         )
         return cast(torch.Tensor, out)
@@ -754,6 +795,7 @@ class DistributedAttention(torch.nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         x: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
         """Compute ring attention.
@@ -764,6 +806,11 @@ class DistributedAttention(torch.nn.Module):
             Query, key and value.
         x : torch.Tensor
             Local input chunk.
+        attn_mask : torch.Tensor, optional
+            Not supported: K/V circulate chunk-by-chunk around the ring and
+            :class:`.functional.ring._RingAttention` has no per-step
+            masking. Raises rather than silently ignoring it; use
+            ``ring=False`` for masked attention.
         **kwargs : torch.Tensor
             Unused.
 
@@ -772,7 +819,13 @@ class DistributedAttention(torch.nn.Module):
         torch.Tensor
             Attention output.
         """
-        out = RingAttentionFunction.apply(
+        if attn_mask is not None:
+            raise ValueError(
+                "ring attention does not support attn_mask: K/V circulate "
+                "chunk-by-chunk around the ring and _RingAttention has "
+                "no per-step masking. Use ring=False for masked attention."
+            )
+        out = _RingAttention.apply(
             q,
             k,
             v,
@@ -801,7 +854,7 @@ class DistributedAttention(torch.nn.Module):
             def core(
                 qc: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor
             ) -> torch.Tensor:
-                out, _lse, _rng = TransformerEngineAttention.apply(
+                out, _lse, _rng = _TransformerEngineAttention.apply(
                     qc, kc, vc, self.scale, dropout_p, self.te_core
                 )  # [b, s, h * d]
                 out = cast(torch.Tensor, out)
@@ -839,7 +892,7 @@ class DistributedAttention(torch.nn.Module):
         The inner core of the hierarchical Ulysses scheme: after the intra-node
         all-to-all, ``q``/``k``/``v`` cover one node's worth of sequence on
         ``local_heads // A`` heads, and this rings the (already-projected) K/V
-        around the ``n_nodes`` inter-node peers via :class:`RingAttentionFunction`
+        around the ``n_nodes`` inter-node peers via :class:`_RingAttention`
         with ``send_in_forward = save_for_backward = KV`` (so it never rebuilds
         K/V from ``x`` -- the dummy ``x`` / ``w_qkv`` below are unused).
         ``_uly_ring_cfg.core_layout`` is ``bshd`` for the TE core, ``bhsd``
@@ -851,7 +904,7 @@ class DistributedAttention(torch.nn.Module):
         def core(qc: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor) -> torch.Tensor:
             if layout == "bhsd":
                 qc, kc, vc = (t.transpose(1, 2).contiguous() for t in (qc, kc, vc))
-            out = RingAttentionFunction.apply(
+            out = _RingAttention.apply(
                 qc,
                 kc,
                 vc,
@@ -875,6 +928,7 @@ class DistributedAttention(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
         """Ulysses (all-to-all, head-parallel) sequence-parallel attention.
@@ -888,7 +942,17 @@ class DistributedAttention(torch.nn.Module):
         Hierarchical (``> 0``, the ``a2a+p2p`` analogue): an all-to-all over the
         intra-node sub-group -> ``[b, seq // n_nodes, local_heads // A, d]``,
         then a P2P ring over the inter-node sub-group, then an all-to-all back.
+
+        ``attn_mask`` is not supported: the inner dense core takes no mask
+        parameter. Raises rather than silently ignoring it.
         """
+        if attn_mask is not None:
+            raise ValueError(
+                "ulysses attention does not support attn_mask: the inner "
+                "dense core built by _dense_bshd_core/_inter_node_ring_core "
+                "takes no mask parameter. Use ulysses=False for masked "
+                "attention."
+            )
         from .functional.ulysses import (
             hierarchical_ulysses_attention,
             ulysses_attention,
@@ -915,7 +979,9 @@ class DistributedAttention(torch.nn.Module):
             qkv_stack=qkv_stack,
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """Forward pass for distributed multi-head attention.
 
         Projects ``x`` to Q/K/V, dispatches to the plain, ring, or Ulysses
@@ -926,13 +992,40 @@ class DistributedAttention(torch.nn.Module):
         ----------
         x : torch.Tensor
             ``(n_batch, vars, n_lat, n_lon)``, already sharded per
-            ``spatial_group`` / ``channel_group``.
+            ``spatial_group`` / ``channel_group``. A leading extra axis
+            between the batch and the sequence (e.g. Swin's window axis) is
+            fine too -- ``qkv``'s rearrange keeps whatever sits between the
+            leading ``...`` batch dims and the trailing ``(three h d)``.
+        attn_mask : torch.Tensor, optional
+            Additive (float) or keep-true (bool) mask broadcastable to
+            ``q``'s ``(..., heads, seq, seq)`` shape, e.g. a per-window Swin
+            shift mask. Only the plain (non-ring, non-Ulysses) core supports
+            it, and only with ``attn_backend`` in ``{"sdpa", "math"}``;
+            ``"te"``, ``ring=True`` and ``ulysses=True`` raise ``ValueError``
+            instead -- see each core's docstring.
 
         Returns
         -------
         torch.Tensor
             ``(n_batch, seq_length, output_dim)``.
         """
+        # The replicated parameters -- including those of the plain
+        # ``nn.Linear`` / ``nn.LayerNorm`` submodules, whose forward jigsaw does
+        # not own -- are summed over their groups in-graph (see
+        # :mod:`jigsaw.parallel`). ``functional_call`` swaps the synced tensors
+        # in for the whole forward, so every use (``self.qkv(x)``, the ring
+        # core's ``self.qkv.weight``) sees them. They carry no mark, so the
+        # re-entered ``forward`` finds nothing left to sync and falls through,
+        # and a DistributedLinear submodule does not sync its bias a second time.
+        synced = parallel.synced_parameters(self)
+        if synced:
+            return cast(
+                torch.Tensor,
+                torch.func.functional_call(
+                    self, synced, (x,), {"attn_mask": attn_mask}
+                ),
+            )
+
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.qkv(x)
 
@@ -966,7 +1059,9 @@ class DistributedAttention(torch.nn.Module):
             q, k, v = qkv.unbind(0)
             qkv_stack = qkv
 
-        out = self.attn_core(q, k, v, x=x, qkv_stack=qkv_stack)
+        out = self.attn_core(
+            q, k, v, x=x, qkv_stack=qkv_stack, attn_mask=_mask_to(attn_mask, core_dtype)
+        )
         # Fold ``out`` to ``... n s (h d)`` in ``x.dtype`` before ``head_concat``
         # (which holds model-dtype weights). The non-ring TE core already returns
         # ``... n s (h d)``; the ring TE core and the Ulysses core return bshd
@@ -1052,7 +1147,12 @@ class Attention(torch.nn.Module):
             )
 
     def _attn_core(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, **kwargs: torch.Tensor
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+        **kwargs: torch.Tensor,
     ) -> torch.Tensor:
         """Compute attention.
 
@@ -1060,6 +1160,11 @@ class Attention(torch.nn.Module):
         ----------
         q, k, v : torch.Tensor
             Query, key and value.
+        attn_mask : torch.Tensor, optional
+            Additive (float) or keep-true (bool) mask broadcastable to
+            ``(..., heads, seq_q, seq_kv)``. See
+            :meth:`DistributedAttention._attn_core` for why a masked call
+            still lands on a fused backend rather than unfused math.
         **kwargs : torch.Tensor
             Unused.
 
@@ -1071,6 +1176,8 @@ class Attention(torch.nn.Module):
         with torch.nn.attention.sdpa_kernel(
             [
                 torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+                torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
+                torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
                 torch.nn.attention.SDPBackend.MATH,
             ]
         ):
@@ -1078,19 +1185,27 @@ class Attention(torch.nn.Module):
                 q,
                 k,
                 v,
+                attn_mask=attn_mask,
                 is_causal=False,
                 dropout_p=self.dropout_p if self.training else 0.0,
             )
 
         return out
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """Compute multi-head attention.
 
         Parameters
         ----------
         x : torch.Tensor
             Input tensor.
+        attn_mask : torch.Tensor, optional
+            Additive (float) or keep-true (bool) mask broadcastable to
+            ``q``'s ``(batch, heads, seq, seq)`` shape, e.g. a per-window
+            Swin shift mask (batch here would be ``batch * windows``,
+            flattened by the caller).
 
         Returns
         -------
@@ -1108,7 +1223,9 @@ class Attention(torch.nn.Module):
             v = v.to(core_dtype)
         else:
             q, k, v = qkv.permute(2, 0, 3, 1, 4).to(core_dtype)
-        out = self.attn_core(q=q, k=k, v=v, x=x)
+        out = self.attn_core(
+            q=q, k=k, v=v, x=x, attn_mask=_mask_to(attn_mask, core_dtype)
+        )
 
         # out has shape [B, h, N, d]
         out = rearrange(out, "... h s d -> ... s (h d)").to(x.dtype)

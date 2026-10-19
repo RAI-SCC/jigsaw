@@ -7,7 +7,7 @@ These are plain (non-distributed) tests: the function under test only needs a
 import pytest
 import torch
 
-from jigsaw.modules.buffers import (
+from jigsaw._core.buffers import (
     _prealloc_buffers,
     clear_preallocated_buffers,
     get_preallocated_buffer,

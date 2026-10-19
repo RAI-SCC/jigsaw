@@ -6,7 +6,7 @@ was never exercised under ``vmap`` -- these tests pin it, at increasing levels
 of integration:
 
 1. :class:`TestTransformerEngineAttentionVmap` -- the
-   :class:`~jigsaw.modules.attention.attention.TransformerEngineAttention`
+   :class:`~jigsaw.modules.attention.attention._TransformerEngineAttention`
    ``autograd.Function`` alone. It is the only piece that *has* to route through
    a custom Function under vmap (``te``'s fused kernels register no batching
    rule); its ``vmap`` staticmethod folds the members axis into the batch,
@@ -19,16 +19,16 @@ of integration:
 2. :class:`TestDistributedAttentionPlain` -- a plain (no vmap, no ensemble)
    ``DistributedAttention`` forward+backward on a channel-parallel mesh, sdpa
    and te. **Passes.** Regression guards for two fixes: ``forward`` now casts
-   the bf16 core output back to the model dtype on the ``_te_bshd`` branch too,
+   the half-precision core output back to the model dtype on the ``_te_bshd`` branch too,
    and ``fused_xw_xtw_twoway`` makes ``grad_output`` contiguous before its
    ``all_to_all``.
 3. :class:`TestDistributedAttentionEnsembleVmap` -- a full non-ring
    ``DistributedAttention`` under ``vmap(functional_call(...))`` with stacked
    ensemble parameters, vs a per-member loop, sdpa and te. **Forward passes;
-   grad xfails** -- ``XWT.backward``'s ``bayesian`` weight reshape double-counts
+   grad xfails** -- ``_XWT.backward``'s ``bayesian`` weight reshape double-counts
    the members axis under ``vmap(grad(...))``.
 4. :class:`TestRingVmap` -- ``torch.vmap`` over a ``ring=True``
-   ``DistributedAttention`` raises: ``RingAttentionFunction`` has no ``vmap``
+   ``DistributedAttention`` raises: ``_RingAttention`` has no ``vmap``
    staticmethod. **Passes** (asserts the raise); flip to a parity test when a
    fold-into-batch rule lands.
 
@@ -47,14 +47,15 @@ from jigsaw.modules.attention import attention
 from jigsaw.modules.attention.functional.cores import te as te_cores
 from tests.parity import assert_close
 
-# TE fused attention needs fp16/bf16 and (on CUDA) the attn core runs bf16
-# regardless of backend -- so vmap-vs-loop parity is a bf16 comparison.
+# TE fused attention needs fp16/bf16 and (on CUDA) the attn core runs in half
+# precision regardless of backend -- so vmap-vs-loop parity is a half-precision
+# comparison (bf16 for the direct-core tests, which feed bf16 q/k/v).
 _FWD_TOL = dict(atol=2e-2, rtol=2e-2)
-_GRAD_TOL = dict(atol=3e-2, rtol=3e-2)  # grads flow through the bf16 core
+_GRAD_TOL = dict(atol=3e-2, rtol=3e-2)  # grads flow through the half-precision core
 
 
 # --------------------------------------------------------------------------- #
-# 1. te_attention (TransformerEngineAttention's batching rule) under torch.vmap
+# 1. te_attention (_TransformerEngineAttention's batching rule) under torch.vmap
 # --------------------------------------------------------------------------- #
 @pytest.mark.gpu_required
 @pytest.mark.te_required
@@ -82,11 +83,11 @@ class TestTransformerEngineAttentionVmap:
 
     @staticmethod
     def _f(q, k, v, scale, core):
-        from jigsaw.modules.attention.attention import TransformerEngineAttention
+        from jigsaw.modules.attention.attention import _TransformerEngineAttention
 
         # apply() returns (out, logsumexp, rng_state); only the output is used
         # outside the ring.
-        return TransformerEngineAttention.apply(q, k, v, scale, 0.0, core)[0]
+        return _TransformerEngineAttention.apply(q, k, v, scale, 0.0, core)[0]
 
     def test_forward_matches_loop(self, device: torch.device) -> None:
         qe, ke, ve = self._qkv(device)
@@ -182,7 +183,7 @@ class TestDistributedAttentionPlain:
       while ``head_concat`` holds fp32 master weights. ``forward`` used to fold
       the core output back to ``x.dtype`` only on the ``not self._te_bshd``
       branch, so the ``_te_bshd`` (te + non-ring) path fed bf16 into
-      ``head_concat`` and ``DistributedXWT`` raised ``BFloat16 != float``.
+      ``head_concat`` and ``DistributedLinear`` raised ``BFloat16 != float``.
     * grad-input contiguity: ``fused_xw_xtw_twoway`` sent ``grad_output``
       straight into ``all_to_all``, which rejects the strided gradient autograd
       hands back through the attention rearranges (``Tensors must be
@@ -246,7 +247,7 @@ class TestDistributedAttentionEnsembleVmap:
     **Forward** works for both ``sdpa`` and ``te`` once the core-dtype and
     grad-input-contiguity fixes are in (see :class:`TestDistributedAttentionPlain`).
     **Grad** still xfails: under ``vmap(grad(...))`` functorch already peels the
-    members axis, then ``XWT.backward`` calls ``config.reshape_weights`` which
+    members axis, then ``_XWT.backward`` calls ``config.reshape_weights`` which
     unsqueezes a *second* one, so ``torch.split`` in ``fused_xw_xtw_twoway`` gets
     a size-1 dim. Fix: make the ``bayesian`` weight reshape vmap-aware (or move
     it into the ``vmap`` staticmethod).
@@ -325,7 +326,7 @@ class TestDistributedAttentionEnsembleVmap:
 
     _XWT_VMAP_GRAD = pytest.mark.xfail(
         strict=True,
-        reason="XWT.backward's bayesian reshape_weights double-counts the members axis under vmap(grad)",
+        reason="_XWT.backward's bayesian reshape_weights double-counts the members axis under vmap(grad)",
     )
 
     @pytest.mark.dist(4)
@@ -368,7 +369,7 @@ class TestDistributedAttentionEnsembleVmap:
 @pytest.mark.gpu_required
 class TestRingVmap:
     """``torch.vmap`` over a ``ring=True`` ``DistributedAttention`` raises today:
-    ``RingAttentionFunction`` defines no ``vmap`` staticmethod and does not set
+    ``_RingAttention`` defines no ``vmap`` staticmethod and does not set
     ``generate_vmap_rule`` (unlike every other custom Function in jigsaw), so the
     ring core has no batching rule. When a fold-into-batch rule is added this
     should become a per-member parity check mirroring

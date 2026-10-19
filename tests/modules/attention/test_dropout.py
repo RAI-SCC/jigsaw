@@ -17,7 +17,7 @@ skipped where the hardware or ``transformer_engine`` is missing):
 * ``TestSdpaTeCoreDropoutReplay`` -- the ring's SDPA and TE (cuDNN and flash)
   inner cores draw an opaque mask in a CUDA kernel and must replay it from the
   saved RNG state in their backward.
-* ``TestTeAttnDropoutReplay`` -- the non-ring ``TransformerEngineAttention``
+* ``TestTeAttnDropoutReplay`` -- the non-ring ``_TransformerEngineAttention``
   wrapper, which drives those same cores in ``bshd`` and replays their mask
   through the same kernel-supplied ``rng_state``.
 """
@@ -311,7 +311,7 @@ class TestSdpaTeCoreDropoutReplay:
 
 
 # --------------------------------------------------------------------------- #
-# Non-ring TransformerEngineAttention: cuDNN rng_state replay through fused_attn_bwd
+# Non-ring _TransformerEngineAttention: cuDNN rng_state replay through fused_attn_bwd
 # --------------------------------------------------------------------------- #
 @pytest.mark.gpu_required
 @pytest.mark.te_required
@@ -323,7 +323,7 @@ class TestSdpaTeCoreDropoutReplay:
     ],
 )
 class TestTeAttnDropoutReplay:
-    """``TransformerEngineAttention`` (the non-ring, ``bshd`` wrapper around the
+    """``_TransformerEngineAttention`` (the non-ring, ``bshd`` wrapper around the
     same cores as :mod:`~jigsaw.modules.attention.functional.cores.te`) must
     replay its forward dropout mask in backward -- on either arm, so both are
     covered here regardless of which one this GPU's architecture selects.
@@ -366,9 +366,11 @@ class TestTeAttnDropoutReplay:
         return q, k, v
 
     def _apply(self, q, k, v, dropout_p, core):
-        from jigsaw.modules.attention.attention import TransformerEngineAttention
+        from jigsaw.modules.attention.attention import _TransformerEngineAttention
 
-        return TransformerEngineAttention.apply(q, k, v, self.SCALE, dropout_p, core)[0]
+        return _TransformerEngineAttention.apply(q, k, v, self.SCALE, dropout_p, core)[
+            0
+        ]
 
     def _bhsd(self, t):
         """``[b, s, h*d]`` (the wrapper's output layout) -> ``[b, h, s, d]``."""

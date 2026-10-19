@@ -1,4 +1,26 @@
 """Distributed attention."""
 
-from .attention import Attention as Attention
-from .attention import DistributedAttention as DistributedAttention
+from .attention import Attention, DistributedAttention
+from .config import (
+    AttnBackend,
+    Offload,
+    RingAttentionConfig,
+    SaveBackward,
+    SaveScope,
+    SendBackward,
+    SendForward,
+    SendOp,
+)
+
+__all__ = [
+    "Attention",
+    "DistributedAttention",
+    "RingAttentionConfig",
+    "AttnBackend",
+    "SendForward",
+    "SendOp",
+    "SaveBackward",
+    "SaveScope",
+    "SendBackward",
+    "Offload",
+]

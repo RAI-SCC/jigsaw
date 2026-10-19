@@ -12,7 +12,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from jigsaw.comm import comm_1d_alltoall, comm_1d_p2p
+from jigsaw._core.comm import comm_1d_alltoall, comm_1d_p2p
 from jigsaw.modules.convolution.common.channel_comm import (
     CHANNEL_COMMS,
     _in_channel_block,
@@ -23,6 +23,7 @@ from jigsaw.modules.convolution.common.channel_comm import (
 )
 from jigsaw.modules.convolution.common.halo import exchange_along_axis
 from jigsaw.modules.convolution.common.spatial_split import _reduce_scatter_channels
+from tests.parity import assert_close
 
 
 class TestResolveChannelComm:
@@ -77,7 +78,7 @@ def _singleton_group() -> dist.ProcessGroup:
 
 class TestResolveChannelHop:
     def test_p2p_returns_the_p2p_transport(self) -> None:
-        """``"p2p"`` maps to :func:`jigsaw.comm.comm_1d_p2p` on any backend."""
+        """``"p2p"`` maps to :func:`jigsaw._core.comm.comm_1d_p2p` on any backend."""
         assert _resolve_channel_hop("p2p", dist.group.WORLD) is comm_1d_p2p
 
     def test_all_to_all_on_gloo_raises(self) -> None:
@@ -117,7 +118,19 @@ class TestGatherFullChannels:
 
         buf = [torch.empty_like(x) for _ in range(g_size)]
         dist.all_gather(buf, x.contiguous(), group=col)
-        assert torch.equal(full, torch.cat(buf, dim=1))
+        # Each rank holds a different slice, and another gather_full_channels
+        # all-gather (plus its backward) follows, so a one-sided mismatch has to
+        # fail every rank rather than strand them in that collective. Exact
+        # comparison: atol/rtol of 0 keeps the original torch.equal semantics.
+        assert_close(
+            "gathered channels",
+            full,
+            torch.cat(buf, dim=1),
+            0.0,
+            0.0,
+            device,
+            process_mesh_dict_1x4["model"],
+        )
 
         x_grad = x.clone().requires_grad_(True)
         gather_full_channels(x_grad, col, channel_dim=1).pow(2).sum().backward()

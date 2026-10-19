@@ -269,7 +269,7 @@ class RingCtx(Protocol):
 # --------------------------------------------------------------------------- #
 # autograd.Function glue
 # --------------------------------------------------------------------------- #
-class RingAttentionFunction(torch.autograd.Function):
+class _RingAttention(torch.autograd.Function):
     """Ring attention autograd function."""
 
     @staticmethod

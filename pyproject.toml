@@ -92,7 +92,7 @@ follow_imports_for_stubs = true
 
 # Ruff
 [tool.ruff]
-target-version = "py312"
+target-version = "py311"
 exclude = ["docs", "examples", "scaling_scripts", "stash"]
 
 [tool.ruff.lint]

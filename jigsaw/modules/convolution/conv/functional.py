@@ -5,7 +5,7 @@ from typing import Any, Optional, Protocol, cast
 import torch
 import torch.distributed as dist
 
-from jigsaw.autocast import cast_to_autocast_dtype
+from jigsaw._core.autocast import cast_to_autocast_dtype
 
 from .config import ConvNdConfig
 
@@ -24,7 +24,7 @@ class ConvNdCtx(Protocol):
     saved_tensors: tuple[torch.Tensor, torch.Tensor]
 
 
-class ConvNd(torch.autograd.Function):
+class _ConvNd(torch.autograd.Function):
     """Autograd function of the distributed convolution."""
 
     @staticmethod
@@ -176,7 +176,7 @@ class ConvNd(torch.autograd.Function):
         config: ConvNdConfig,
     ) -> tuple[torch.Tensor, Optional[int]]:
         """Batching rule for ``torch.vmap``."""
-        out = ConvNd.apply(
+        out = _ConvNd.apply(
             x,
             weight,
             bias,

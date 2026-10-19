@@ -1,6 +1,6 @@
 """Ring wiring of ``DistributedAttention``.
 
-``test_attention_module.py`` runs ``RingAttentionFunction`` through autograd and the
+``test_attention_module.py`` runs ``_RingAttention`` through autograd and the
 non-ring modules, and ``test_attention_convert.py`` converts a serial module with
 ``ring=True`` and compares it end to end. What is left is the glue around the ring: the
 construction checks, the ``_ring_attn_core`` wrapper on a stand-in ``self``, and the error
@@ -13,8 +13,8 @@ import pytest
 import torch
 
 import jigsaw.modules.attention as attention
+from jigsaw.gather import gather_1d_results
 from jigsaw.modules.attention import config as cfg
-from jigsaw.utils_aggregate import gather_1d_results
 from tests.parity import assert_close
 
 DIM, HEADS, BATCH, N_LOCAL = 16, 4, 2, 6

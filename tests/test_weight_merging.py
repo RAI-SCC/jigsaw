@@ -3,8 +3,8 @@ import random
 import pytest
 import torch
 
+from jigsaw.gather import gather_1d_results, gather_results
 from jigsaw.modules import convolution, linear
-from jigsaw.utils_aggregate import gather_1d_results, gather_results
 from tests.parity import all_ranks_ok, assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -50,13 +50,13 @@ class TestWeightMerging:
         to_pm_dict = request.getfixturevalue(to_pm_dict)
         torch.manual_seed(from_pm_dict["model"].rank())
 
-        linear_layer = linear.DistributedXWT(
+        linear_layer = linear.DistributedLinear(
             in_dim=local_in_dim,
             out_dim=local_out_dim,
             local_rank=from_pm_dict["model"].rank(),
             device=device,
             model_group=from_pm_dict["model"],
-            column_group=from_pm_dict["col"],
+            col_group=from_pm_dict["col"],
             row_group=from_pm_dict["row"],
             bias=True,
             bayesian=False,
@@ -142,24 +142,24 @@ class TestWeightMerging:
 
                 """
                 super().__init__()
-                self.linear1 = linear.DistributedXWT(
+                self.linear1 = linear.DistributedLinear(
                     in_dim,
                     hidden_dim,
                     local_rank=from_pm_dict["model"].rank(),
                     device=device,
                     model_group=from_pm_dict["model"],
-                    column_group=from_pm_dict["col"],
+                    col_group=from_pm_dict["col"],
                     row_group=from_pm_dict["row"],
                     bias=True,
                 )
 
-                self.linear2 = linear.DistributedXWT(
+                self.linear2 = linear.DistributedLinear(
                     hidden_dim,
                     out_dim,
                     local_rank=from_pm_dict["model"].rank(),
                     device=device,
                     model_group=from_pm_dict["model"],
-                    column_group=from_pm_dict["col"],
+                    col_group=from_pm_dict["col"],
                     row_group=from_pm_dict["row"],
                     bias=True,
                 )
@@ -293,7 +293,7 @@ class TestWeightMerging:
         to_pm_dict = request.getfixturevalue(to_pm_dict)
         torch.manual_seed(from_pm_dict["col"].rank())
 
-        conv_layer = convolution.DistributedConv2D(
+        conv_layer = convolution.DistributedConv2d(
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=kernel_size,
@@ -381,7 +381,7 @@ class TestWeightMerging:
         to_pm_dict = request.getfixturevalue(to_pm_dict)
         torch.manual_seed(from_pm_dict["col"].rank())
 
-        conv_layer = convolution.DistributedConv2DTranspose(
+        conv_layer = convolution.DistributedConvTranspose2d(
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=kernel_size,

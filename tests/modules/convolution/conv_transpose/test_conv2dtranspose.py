@@ -4,7 +4,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 import jigsaw.modules.convolution as convolution
-from jigsaw.utils_aggregate import gather_1d_results, gather_results_as_list
+from jigsaw.gather import gather_1d_results, gather_results_as_list
 from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -64,7 +64,7 @@ def _conv2d_transpose_reference_check(
     groups: int = 1,
     channel_comm: str = "all_gather",
 ) -> None:
-    """Compare ``DistributedConv2DTranspose`` against a single-process conv_transpose2d.
+    """Compare ``DistributedConvTranspose2d`` against a single-process conv_transpose2d.
 
     Works for any ``row.size()`` (spatial) x ``col.size()`` (channel) mesh and for
     both the no-halo regime (``stride == kernel_size``, the default) and the halo
@@ -91,7 +91,7 @@ def _conv2d_transpose_reference_check(
         batch, in_channels // n_channel, height, width // n_spatial, device=device
     )
 
-    conv = convolution.DistributedConv2DTranspose(
+    conv = convolution.DistributedConvTranspose2d(
         in_channels,
         out_channels,
         kernel_size,
@@ -208,7 +208,7 @@ class TestConv2dTranspose:
             process_mesh_dict_2x2["row"].size(),
             process_mesh_dict_2x2["col"].size(),
         )
-        conv = convolution.DistributedConv2DTranspose(
+        conv = convolution.DistributedConvTranspose2d(
             6,
             12,
             4,
@@ -264,7 +264,7 @@ class TestConv2dTranspose:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """``channel_comm='auto'`` resolves from the device on the config."""
-        conv = convolution.DistributedConv2DTranspose(
+        conv = convolution.DistributedConvTranspose2d(
             8,
             12,
             4,
@@ -281,7 +281,7 @@ class TestConv2dTranspose:
     ) -> None:
         """An unrecognised ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
-            convolution.DistributedConv2DTranspose(
+            convolution.DistributedConvTranspose2d(
                 8,
                 12,
                 4,
@@ -298,7 +298,7 @@ class TestConv2dTranspose:
         """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
         if dist.get_backend() != "gloo":
             pytest.skip("only meaningful on the gloo backend")
-        conv = convolution.DistributedConv2DTranspose(
+        conv = convolution.DistributedConvTranspose2d(
             8,
             12,
             4,
@@ -319,7 +319,7 @@ class TestConv2dTranspose:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         """String padding is not supported once a halo exchange is needed."""
-        conv = convolution.DistributedConv2DTranspose(
+        conv = convolution.DistributedConvTranspose2d(
             8,
             12,
             4,
@@ -597,7 +597,7 @@ class TestConv2dTransposeGroups:
     ) -> None:
         """``1 < groups`` not a multiple of ``col.size()`` fails at construction."""
         with pytest.raises(NotImplementedError):
-            convolution.DistributedConv2DTranspose(
+            convolution.DistributedConvTranspose2d(
                 18,
                 18,
                 4,

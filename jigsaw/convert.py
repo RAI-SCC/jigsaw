@@ -5,6 +5,7 @@ from typing import Any, Callable
 import torch
 
 from jigsaw.modules import (
+    activation,
     attention,
     convolution,
     linear,
@@ -12,18 +13,20 @@ from jigsaw.modules import (
     roll,
 )
 
+__all__ = ["convert_to_jigsaw"]
+
 mapped_modules: dict[type[torch.nn.Module], Any] = {
-    torch.nn.Linear: linear.DistributedXWT,
-    torch.nn.Conv1d: convolution.DistributedConv1D,
-    torch.nn.Conv2d: convolution.DistributedConv2D,
-    torch.nn.Conv3d: convolution.DistributedConv3D,
-    torch.nn.ConvTranspose1d: convolution.DistributedConv1DTranspose,
-    torch.nn.ConvTranspose2d: convolution.DistributedConv2DTranspose,
-    torch.nn.ConvTranspose3d: convolution.DistributedConv3DTranspose,
+    torch.nn.Linear: linear.DistributedLinear,
+    torch.nn.Conv1d: convolution.DistributedConv1d,
+    torch.nn.Conv2d: convolution.DistributedConv2d,
+    torch.nn.Conv3d: convolution.DistributedConv3d,
+    torch.nn.ConvTranspose1d: convolution.DistributedConvTranspose1d,
+    torch.nn.ConvTranspose2d: convolution.DistributedConvTranspose2d,
+    torch.nn.ConvTranspose3d: convolution.DistributedConvTranspose3d,
     roll.Roll: roll.DistributedRoll,
     torch.nn.LayerNorm: normalization.DistributedLayerNorm,
     torch.nn.GroupNorm: normalization.DistributedGroupNorm,
-    torch.nn.Softmax: normalization.DistributedSoftMax,
+    torch.nn.Softmax: activation.DistributedSoftmax,
     linear.MatMulXWT: linear.DistributedMatMulXWT,
     linear.MatMulXW: linear.DistributedMatMulXW,
     linear.MatMulXTW: linear.DistributedMatMulXTW,

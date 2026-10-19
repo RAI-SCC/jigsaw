@@ -31,11 +31,11 @@ import pytest
 import torch
 
 import jigsaw.convert as convert
+from jigsaw.gather import gather_1d_results
 from jigsaw.modules import convolution, roll
+from jigsaw.modules import normalization as norm
 from jigsaw.modules.attention import Attention
 from jigsaw.modules.linear.linear import _SUPPORTED_XWT_LAYOUTS
-from jigsaw.modules.normalization import normalization as norm
-from jigsaw.utils_aggregate import gather_1d_results
 from tests.parity import all_ranks_ok, assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -115,14 +115,6 @@ class TestLayerNormConvertRejections:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         ln = torch.nn.LayerNorm([4, 4], device=device)
-        with pytest.raises(NotImplementedError):
-            convert.convert_to_jigsaw(ln, process_mesh_dict_2x2, device)
-
-    @pytest.mark.dist(4)
-    def test_no_bias_rejected(
-        self, device: torch.device, process_mesh_dict_2x2: dict
-    ) -> None:
-        ln = torch.nn.LayerNorm(4, bias=False, device=device)
         with pytest.raises(NotImplementedError):
             convert.convert_to_jigsaw(ln, process_mesh_dict_2x2, device)
 
@@ -214,9 +206,9 @@ class TestReshardContracts:
         process_mesh_dict_2x2: dict,
         process_mesh_dict_1x4: dict,
     ) -> None:
-        # local_dim=3 over col=2 -> global normalized dim 6, not divisible by col=4.
+        # Global normalized dim 6 over col=2 is fine, but not divisible by col=4.
         ln = norm.DistributedLayerNorm(
-            local_dim=3,
+            normalized_dim=6,
             local_rank=process_mesh_dict_2x2["model"].rank(),
             device=device,
             row_group=process_mesh_dict_2x2["row"],
@@ -232,10 +224,10 @@ class TestReshardContracts:
         process_mesh_dict_2x2: dict,
         process_mesh_dict_1x4: dict,
     ) -> None:
-        # 1 local group over col=2 -> 2 global groups, not divisible by col=4.
+        # 2 groups over col=2 are fine, but not divisible by col=4.
         gn = norm.DistributedGroupNorm(
-            num_local_groups=1,
-            num_channels=3,
+            num_groups=2,
+            num_channels=6,
             device=device,
             channel_group=process_mesh_dict_2x2["col"],
         )
@@ -302,9 +294,9 @@ class TestGenericContainerRecursion:
         out = convert.convert_to_jigsaw(seq, process_mesh_dict_2x2, device)
 
         assert out is seq, "generic container is converted in place and returned"
-        assert isinstance(seq[0], linear.DistributedXWT)
+        assert isinstance(seq[0], linear.DistributedLinear)
         assert seq[1] is relu, "a non-mapped leaf is left untouched"
-        assert isinstance(seq[2], convolution.DistributedConv1D)
+        assert isinstance(seq[2], convolution.DistributedConv1d)
 
     @pytest.mark.dist(4)
     def test_module_without_mapped_leaf_unchanged(
@@ -469,10 +461,10 @@ class TestConvertAxesDevicesOptions:
             model, process_mesh_dict_2x2, device, ring=False
         )
         assert [type(m).__name__ for m in out] == [
-            "DistributedConv2D",
-            "DistributedConv2DTranspose",
+            "DistributedConv2d",
+            "DistributedConvTranspose2d",
             "DistributedRoll",
-            "DistributedXWT",
+            "DistributedLinear",
             "DistributedAttention",
         ]
         assert out[4].ring is False
@@ -516,7 +508,7 @@ class TestConvertAxesDevicesOptions:
 class TestConstructorDtype:
     @pytest.mark.dist(4)
     @pytest.mark.parametrize(
-        "cls", [convolution.DistributedConv2D, convolution.DistributedConv2DTranspose]
+        "cls", [convolution.DistributedConv2d, convolution.DistributedConvTranspose2d]
     )
     def test_conv_parameters_have_the_requested_dtype(
         self, device: torch.device, process_mesh_dict_2x2: dict, cls: type

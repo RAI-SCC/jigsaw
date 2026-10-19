@@ -9,7 +9,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from jigsaw.modules.normalization import normalization as norm
+from jigsaw.modules import normalization as norm
 
 E, B, S, C = 3, 2, 4, 6
 
@@ -24,22 +24,26 @@ def _loop(module, x):
     return torch.stack([module(x[i]) for i in range(x.shape[0])])
 
 
-@pytest.mark.parametrize("dim", [-1, 1])
-def test_softmax_vmap_matches_loop(batched, dim):
-    module = norm.DistributedSoftMax(dist.group.WORLD, dim=dim)
-    assert module.get_parameter_count() == 0
-    assert torch.allclose(torch.vmap(module)(batched), _loop(module, batched))
-
-
 def test_noparam_layernorm_vmap_matches_loop(batched, device):
-    module = norm.DistributedNoParamLayerNorm(dist.get_rank(), device, dist.group.WORLD)
+    module = norm.DistributedLayerNorm(
+        C * dist.get_world_size(),
+        dist.get_rank(),
+        device,
+        dist.group.WORLD,
+        dist.group.WORLD,
+        elementwise_affine=False,
+    )
     assert module.get_parameter_count() == 0
     assert torch.allclose(torch.vmap(module)(batched), _loop(module, batched))
 
 
 def test_layernorm_vmap_matches_loop_and_counts_parameters(batched, device):
     module = norm.DistributedLayerNorm(
-        C, dist.get_rank(), device, dist.group.WORLD, dist.group.WORLD
+        C * dist.get_world_size(),
+        dist.get_rank(),
+        device,
+        dist.group.WORLD,
+        dist.group.WORLD,
     ).double()
     with torch.no_grad():
         module.weight.copy_(torch.linspace(0.5, 1.5, C))

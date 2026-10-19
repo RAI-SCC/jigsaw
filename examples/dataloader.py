@@ -41,7 +41,7 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 import jigsaw
 from jigsaw import log
-from jigsaw.utils_aggregate import gather_results
+from jigsaw.gather import gather_results
 
 N, C, H, W = 16, 2, 16, 16  # samples, channels, global image size
 

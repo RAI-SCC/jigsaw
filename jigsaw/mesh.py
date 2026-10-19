@@ -13,12 +13,44 @@ from collections.abc import Mapping, Sequence
 import torch
 import torch.distributed as dist
 
-__all__ = ["make_process_mesh"]
+from ._core.comm import check_backend
+
+__all__ = ["ProcessMesh", "make_process_mesh"]
+
+
+class ProcessMesh(dict):
+    """A ``dict`` of axis name to process group that also holds the ``DeviceMesh``.
+
+    Indexing works as on any ``process_mesh_dict``; :attr:`device_mesh` is the
+    named n-d mesh the axis groups were cut from, so a 1-D slice of it can go to
+    APIs that take a ``DeviceMesh``, e.g.
+    ``DistributedDataParallel(model, device_mesh=mesh.device_mesh["dp"])``.
+    The ``model`` group is not a dimension of it.
+
+    Attributes
+    ----------
+    device_mesh : torch.distributed.device_mesh.DeviceMesh
+        The n-d mesh over every axis, in the order they were given.
+    """
+
+    device_mesh: dist.device_mesh.DeviceMesh
+
+    def __init__(
+        self,
+        groups: Mapping[str, dist.ProcessGroup],
+        device_mesh: dist.device_mesh.DeviceMesh,
+    ) -> None:
+        super().__init__(groups)
+        self.device_mesh = device_mesh
 
 
 def _resolve_device_type(device_type: str | None) -> str:
     if device_type is not None:
         return device_type
+    # A Gloo default group communicates host tensors, so its mesh is a CPU mesh
+    # even on a machine with GPUs.
+    if dist.get_backend() == "gloo":
+        return "cpu"
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -75,7 +107,7 @@ def make_process_mesh(
     device_type: str | None = None,
     model_parallel_axes: Sequence[str] | None = None,
     model_key: str = "model",
-) -> dict[str, dist.ProcessGroup]:
+) -> ProcessMesh:
     """Build a jigsaw ``process_mesh_dict`` from named, ordered mesh axes.
 
     Parameters
@@ -84,8 +116,8 @@ def make_process_mesh(
         Ordered mapping of axis name to size, slowest-varying first. At most one
         size may be ``-1``, which is inferred from the world size.
     device_type : str, optional
-        Device type of the mesh. Defaults to ``"cuda"`` if available, else
-        ``"cpu"``.
+        Device type of the mesh. Defaults to ``"cpu"`` if the default process
+        group uses Gloo, else ``"cuda"`` if available, else ``"cpu"``.
     model_parallel_axes : Sequence[str], optional
         Trailing axes that form one model replica. Defaults to all axes.
     model_key : str
@@ -93,18 +125,23 @@ def make_process_mesh(
 
     Returns
     -------
-    dict[str, torch.distributed.ProcessGroup]
-        One group per axis plus the ``model_key`` group.
+    ProcessMesh
+        One group per axis plus the ``model_key`` group, in a ``dict`` that
+        also carries the n-d ``DeviceMesh`` as ``.device_mesh``.
 
     Notes
     -----
-    Requires an initialized default process group.
+    Requires an initialized default process group on ``nccl`` (NCCL or RCCL),
+    ``gloo``, or a mix such as ``"cpu:gloo,cuda:nccl"``; any other backend
+    raises ``RuntimeError``.
     """
     if not dist.is_initialized():
         raise RuntimeError(
             "make_process_mesh needs an initialised default process group; call "
             "torch.distributed.init_process_group first"
         )
+    # Anything but nccl/gloo would silently take the NCCL comm paths and hang.
+    check_backend()
 
     device = _resolve_device_type(device_type)
     sizes = _resolve_sizes(axes)
@@ -131,9 +168,7 @@ def make_process_mesh(
         mesh_shape=tuple(sizes.values()),
         mesh_dim_names=tuple(names),
     )
-    mesh: dict[str, dist.ProcessGroup] = {
-        name: nd_mesh.get_group(name) for name in names
-    }
+    mesh = ProcessMesh({name: nd_mesh.get_group(name) for name in names}, nd_mesh)
 
     model_numel = math.prod(sizes[a] for a in model_axes)
     if len(model_axes) == len(names):

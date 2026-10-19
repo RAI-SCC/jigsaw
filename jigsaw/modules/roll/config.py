@@ -4,7 +4,7 @@ from typing import Callable
 
 import torch
 
-from jigsaw import comm
+from jigsaw._core import comm
 
 
 class RollConfig:

@@ -1,26 +1,30 @@
-"""Multi-rank checks of the attention layer and of ``RingAttentionFunction`` (CPU).
+"""Multi-rank checks of the attention layer and of ``_RingAttention`` (CPU).
 
-* ``RingAttentionFunction`` is driven through ``autograd`` (forward, ``setup_context``,
+* ``_RingAttention`` is driven through ``autograd`` (forward, ``setup_context``,
   ``backward``) on a 4-rank ring and compared with plain SDPA on the global sequence;
   ``test_ring_attention.py`` only calls ``ring_forward`` / ``ring_backward`` directly.
-* ``DistributedAttention`` non-ring paths that the other files do not reach (the math
-  backend, ``qk_norm``), plus the single-process helpers.
+* ``DistributedAttention`` non-ring paths that the other files do not reach --
+  ``test_backend_matches_serial`` across all three ``attn_backend``s (math,
+  sdpa -- default and forced-efficient-attention -- te -- both the cuDNN and
+  the ``flash_attn`` cores), ``qk_norm`` -- plus the single-process helpers.
 
 ``DistributedAttention(ring=True)`` end to end is covered by ``test_attention_convert.py``.
 By default the ring recomputes K/V as ``x @ w_qkv.mT`` on the local shard, which is only
 right when the channel axis is not split, so it then requires a channel group of size 1.
 """
 
+from typing import Optional
+
 import pytest
 import torch
 import torch.distributed as dist
 
 import jigsaw.modules.attention as attention
+from jigsaw.gather import gather_1d_results
 from jigsaw.modules.attention import config as cfg
 from jigsaw.modules.attention.attention import attn_core_dtype
-from jigsaw.modules.attention.functional.ring import RingAttentionFunction
-from jigsaw.utils_aggregate import gather_1d_results
-from tests.parity import assert_close
+from jigsaw.modules.attention.functional.ring import _RingAttention
+from tests.parity import all_ranks_ok, assert_close, forced_sdpa_backend
 
 DIM, HEADS, BATCH = 64, 4, 2
 
@@ -33,7 +37,7 @@ def _channel_shard(t: torch.Tensor, mesh: dict) -> torch.Tensor:
 
 @pytest.mark.dist_required
 class TestRingAttentionFunction:
-    """``RingAttentionFunction.apply`` on a 4-rank ring versus global SDPA."""
+    """``_RingAttention.apply`` on a 4-rank ring versus global SDPA."""
 
     h, d, n_local = 2, 8, 6
 
@@ -63,7 +67,7 @@ class TestRingAttentionFunction:
 
         q, k, v = project(x, w_qkv)
         scale = d**-0.5
-        out = RingAttentionFunction.apply(
+        out = _RingAttention.apply(
             q, k, v, x, w_qkv, scale, 0.0, ring, rank, ring_config
         )[0]
         grad_out = torch.randn(BATCH, h, world * n_local, d, device=device)
@@ -136,27 +140,126 @@ class TestRingAttentionFunction:
         self._run(process_mesh_dict_4x1, device, gpus_per_node=2)
 
 
+#: Bound-method attribute each ``attn_backend`` wires ``model.attn_core`` to,
+#: per ``DistributedAttention._select_attn_core``.
+_ATTN_CORE_ATTR = {
+    "math": "_attn_core_math",
+    "sdpa": "_attn_core",
+    "te": "_transformer_attn_core",
+}
+
+#: (attn_backend, variant) cases for the backend-parity test below. ``variant``
+#: is ``None`` for the default dispatch, otherwise it pins a specific kernel
+#: that the default priority order would not otherwise reach on every GPU:
+#:
+#: * ``("te", "cudnn" | "flash")`` -- TE's two arms (cuDNN fused attention vs.
+#:   the ``flash_attn`` package), selected via ``JIGSAW_TE_CORE`` rather than
+#:   letting ``te_cores.select_core`` pick by GPU architecture. Each is
+#:   skipped at runtime if that arm's package is not importable
+#:   (``te_required`` only guarantees ``transformer_engine`` itself, not
+#:   ``flash_attn``).
+#: * ``("sdpa", "efficient")`` -- torch's own memory-efficient attention
+#:   kernel (``SDPBackend.EFFICIENT_ATTENTION``), forced via
+#:   :func:`~tests.parity.forced_sdpa_backend`. ``_attn_core``'s own
+#:   ``sdpa_kernel`` priority list is ``[FLASH, CUDNN, EFFICIENT, MATH]``, so
+#:   plain ``attn_backend="sdpa"`` with no forcing exercises flash (or cuDNN)
+#:   on every GPU this suite runs on -- efficient-attention has no other
+#:   coverage without this.
+_BACKEND_CASES = [
+    ("math", None),
+    ("sdpa", None),
+    pytest.param(
+        "sdpa", "efficient", id="sdpa-efficient", marks=[pytest.mark.gpu_required]
+    ),
+    pytest.param(
+        "te",
+        "cudnn",
+        id="te-cudnn",
+        marks=[pytest.mark.te_required, pytest.mark.gpu_required],
+    ),
+    pytest.param(
+        "te",
+        "flash",
+        id="te-flash",
+        marks=[pytest.mark.te_required, pytest.mark.gpu_required],
+    ),
+]
+
+
 @pytest.mark.dist_required
 class TestDistributedAttentionPaths:
     @pytest.mark.dist(4)
-    def test_math_backend_matches_serial(
-        self, device: torch.device, process_mesh_dict_2x1x2: dict
+    @pytest.mark.parametrize("attn_backend,variant", _BACKEND_CASES)
+    def test_backend_matches_serial(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x1x2: dict,
+        attn_backend: str,
+        variant: Optional[str],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Channel-only split with the unfused math core."""
+        """Channel-only split (no ring), every backend/kernel variant, matches a serial reference.
+
+        The one non-ring, non-Ulysses parity check that exercises ``te`` and
+        forced-``efficient`` ``sdpa``: the other backend coverage of this path
+        (``test_attn_backend.py``) only checks that ``te`` is *wired* on a
+        1-rank group, never that a sharded, multi-rank run agrees with
+        anything. The serial reference always runs the *default*,
+        unforced ``sdpa`` priority (flash, typically) regardless of
+        ``variant`` -- that is the independent ground truth every other
+        kernel is checked against. ``te``/``efficient`` run their own kernel
+        rather than that default one, so they get the same looser tolerance
+        ``test_te_attn_forward_backward_matches_sdpa`` uses for TE.
+        """
+        if attn_backend == "te" and variant is not None:
+            from jigsaw.modules.attention.functional.cores.te import cudnn, flash
+
+            available = (
+                cudnn.CUDNN_CORE_AVAILABLE
+                if variant == "cudnn"
+                else flash.FLASH_CORE_AVAILABLE
+            )
+            if not available:
+                pytest.skip(f"te core {variant!r} not importable in this environment")
+            monkeypatch.setenv("JIGSAW_TE_CORE", variant)
+
         mesh = process_mesh_dict_2x1x2
         torch.manual_seed(1)
         serial = attention.Attention(DIM, DIM, DIM, HEADS, device)
         x_global = torch.randn(1, 10, DIM, device=device)
-        y_ref = serial(x_global)
+        y_ref = serial(x_global)  # unforced default sdpa priority -- the ground truth
         model = attention.Attention.convert_to_jigsaw(
-            serial, mesh, device, ring=False, attn_backend="math"
+            serial, mesh, device, ring=False, attn_backend=attn_backend
         )
-        assert model.attn_core == model._attn_core_math
-        out = gather_1d_results(
-            model(_channel_shard(x_global, mesh)), mesh, dim=-1, pm_key="col"
-        )
-        # On CUDA both run in bf16, the serial module on the flash kernel: ~1e-3 apart.
-        tol = 5e-3 if device.type == "cuda" else 1e-4
+        assert model.attn_core == getattr(model, _ATTN_CORE_ATTR[attn_backend])
+
+        x_local = _channel_shard(x_global, mesh)
+        if attn_backend == "sdpa" and variant == "efficient":
+            with forced_sdpa_backend(
+                torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION
+            ) as forced:
+                out = gather_1d_results(model(x_local), mesh, dim=-1, pm_key="col")
+            # Self-verifying: the forcing has to have actually been consulted,
+            # not silently no-op'd (e.g. if a future refactor stopped looking
+            # up ``sdpa_kernel`` fresh on ``torch.nn.attention`` per call, in
+            # which case this would quietly go back to testing plain ``sdpa``).
+            # Reduced, not a bare assert: this sits between collectives (the
+            # gather above, assert_close below), so one rank raising alone
+            # would hang the rest.
+            if not all_ranks_ok(forced.count > 0, device, mesh["model"]):
+                raise AssertionError(
+                    "forced_sdpa_backend intercepted no sdpa_kernel dispatch -- "
+                    "the efficient kernel was never pinned, so this ran the "
+                    "default priority list"
+                )
+        else:
+            out = gather_1d_results(model(x_local), mesh, dim=-1, pm_key="col")
+
+        if variant is not None:
+            tol = 2e-2
+        else:
+            # On CUDA both run in bf16, the serial module on the flash kernel.
+            tol = 5e-3 if device.type == "cuda" else 1e-4
         assert_close("output", out, y_ref.detach(), tol, tol, device, mesh["model"])
 
     @pytest.mark.dist(4)
@@ -184,7 +287,7 @@ class TestDistributedAttentionPaths:
         out = gather_1d_results(
             model(_channel_shard(x_global, mesh)), mesh, dim=-1, pm_key="col"
         )
-        # On CUDA both run in bf16, the serial module on the flash kernel: ~1e-3 apart.
+        # On CUDA both run in bf16, the serial module on the flash kernel.
         tol = 5e-3 if device.type == "cuda" else 1e-4
         assert_close("output", out, y_ref.detach(), tol, tol, device, mesh["model"])
 
@@ -246,13 +349,39 @@ class TestDistributedAttentionPaths:
         group = mesh["model"]
         y_ref_local = _channel_shard(y_ref.detach()[:, sl], mesh)
         assert_close("output", y.detach(), y_ref_local, tol, tol, device, group)
-        for norm_name in ("q_norm", "k_norm"):
-            for p_name in ("weight", "bias"):
-                got = getattr(getattr(model, norm_name), p_name).grad
-                ref = getattr(getattr(serial, norm_name), p_name).grad
-                assert_close(
-                    f"{norm_name}.{p_name} grad", got, ref, tol, tol, device, group
-                )
+        # ``k_norm.bias`` is a structurally dead parameter: it shifts every key
+        # by the same vector, which adds the per-query constant ``q_i . b`` to
+        # every logit of row ``i`` and so cancels in the softmax. Its gradient
+        # is identically zero, so in half precision both sides hold nothing but
+        # rounding noise, as large as the tolerance itself. Comparing the two to each other is therefore a parity check
+        # with no power *and* one unlucky seed from flaking, and it never
+        # tested the replication this method is about (an unsynced gradient
+        # would be ~0 too). Assert the invariance it can actually show,
+        # measured against a live gradient of the same norm.
+        k_bias_grad = model.k_norm.bias.grad
+        assert_close(
+            "k_norm.bias grad (vanishes: softmax is shift-invariant in K)",
+            k_bias_grad,
+            torch.zeros_like(k_bias_grad),
+            tol * float(serial.k_norm.weight.grad.abs().max()),
+            tol,
+            device,
+            group,
+        )
+        for norm_name, p_name in (
+            ("q_norm", "weight"),
+            ("q_norm", "bias"),
+            ("k_norm", "weight"),
+        ):
+            got = getattr(getattr(model, norm_name), p_name).grad
+            ref = getattr(getattr(serial, norm_name), p_name).grad
+            # Summed over every token, so the bf16 rounding grows with the size
+            # of the entries -- the same scaling the qkv gradient needs below.
+            # ``tol`` as a flat absolute bound is too tight for large entries.
+            atol = tol * max(1.0, float(ref.abs().max()))
+            assert_close(
+                f"{norm_name}.{p_name} grad", got, ref, atol, tol, device, group
+            )
         if mesh["col"].size() == 1:
             # Summed over all tokens, so the bf16 rounding grows with the entries.
             ref = serial.qkv.weight.grad
@@ -318,3 +447,49 @@ class TestSingleProcessHelpers:
         assert attn_core_dtype(x) == torch.float64
         with torch.autocast("cpu", dtype=torch.bfloat16):
             assert attn_core_dtype(x) == torch.bfloat16
+
+    @pytest.mark.gpu_required
+    def test_attn_core_dtype_cuda(self, device: torch.device) -> None:
+        """fp32 runs the core in bf16 (flash rejects fp32); half dtypes are kept."""
+        for dtype, core in (
+            (torch.float32, torch.bfloat16),
+            (torch.float16, torch.float16),
+            (torch.bfloat16, torch.bfloat16),
+        ):
+            assert attn_core_dtype(torch.zeros(2, device=device, dtype=dtype)) == core
+        x = torch.zeros(2, device=device)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            assert attn_core_dtype(x) == torch.bfloat16
+
+    @pytest.mark.gpu_required
+    def test_fp32_core_keeps_small_gradients(self, device: torch.device) -> None:
+        """An fp32 model without autocast (so without a loss scaler) keeps the tiny
+        gradients of a loss averaged over many outputs: an fp16 core would flush
+        everything below 6e-8 to zero, bf16 has fp32's range.
+        """
+        torch.manual_seed(0)
+        model = attention.Attention(32, 32, 32, 4, device)
+        out = model(torch.randn(2, 64, 32, device=device))
+        out.backward(torch.randn_like(out) * 1e-9)  # dL/dout of a mean over ~1e9
+        grad = model.qkv.weight.grad  # reaches qkv only through the core
+        assert grad is not None and (grad != 0).float().mean() > 0.9
+
+    @pytest.mark.gpu_required
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_sdpa_ring_core_keeps_half_dtype(
+        self, device: torch.device, dtype: torch.dtype
+    ) -> None:
+        """The ring's flash core runs in the dtype it is given, bf16 included."""
+        from jigsaw.modules.attention.functional.cores import sdpa
+
+        q, k, v = (torch.randn(1, 2, 16, 8, device=device, dtype=dtype) for _ in "qkv")
+        out, lse, _ = sdpa.forward(q, k, v, scale=8**-0.5, dropout_p=0.0)
+        assert out.dtype == dtype
+        dq, dk, dv = sdpa.backward(
+            torch.ones_like(out), q, k, v, out, lse, 8**-0.5, 16, 16
+        )
+        assert dq.dtype == dk.dtype == dv.dtype == dtype
+        ref = torch.nn.functional.scaled_dot_product_attention(
+            q.double(), k.double(), v.double()
+        )
+        torch.testing.assert_close(out.double(), ref, atol=2e-2, rtol=2e-2)

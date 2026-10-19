@@ -8,11 +8,11 @@ The mesh has two axes and every tensor is split over both:
 Nothing is ever gathered: the patch embedding, ring attention, the MLP and the
 patch recovery all consume and produce these shards.
 
-    patch embed   DistributedConv2D          kernel == stride, so no halo exchange
+    patch embed   DistributedConv2d          kernel == stride, so no halo exchange
     attention     DistributedAttention       ring attention over "row", heads over "col"
-    MLP           DistributedXWT             weights split over both axes
+    MLP           DistributedLinear             weights split over both axes
     layer norm    DistributedLayerNorm       statistics reduced over "col"
-    recovery      DistributedConv2DTranspose
+    recovery      DistributedConvTranspose2d
 
 Attention is global: every token attends to the whole image, not just to the tokens
 on its own rank -- the ring passes the key/value chunks around "row".
@@ -20,22 +20,43 @@ on its own rank -- the ring passes the key/value chunks around "row".
 Run with one process per GPU (or 4 CPU processes):
 
     torchrun --nproc-per-node 4 examples/vit.py
+
+Data parallelism on top (``--ddp``, a multiple of 4 ranks): a leading "dp" axis holds
+copies of the 2x2 model, each training on its own images.
+
+    torchrun --nproc-per-node 8 examples/vit.py --ddp
+
+Each copy's parameters are of two kinds, and need different reductions:
+
+    MLP weights            split over "row" and "col": a different piece on every
+                           rank of the copy, so they are only averaged over "dp"
+    everything else        split over "col" at most, the same on every rank of "row":
+    (attention, norms,     each sees only its own tokens, so the partial gradients
+    biases, embedding)     are summed over "row", then averaged over "dp"
+
+``jigsaw.parallel.wrap_ddp`` wraps the model in a plain ``DistributedDataParallel`` over
+``mesh["dp"]``; the layers sum their replicated gradients over "row" themselves. A DDP
+over the default group would average sharded weights with other shards -- jigsaw
+raises if you try. With ``--joint-hook`` the sum and the average become one all-reduce
+in DDP's buckets (see ``docs/ddp.md``); the gradients are the same.
 """
+
+import sys
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from _common import setup, shard
+from _common import data_seed, ddp_flags, setup, shard
 
 import jigsaw
 from jigsaw import log
-from jigsaw.modules.attention.config import (
+from jigsaw.modules.attention import (
     RingAttentionConfig,
     SaveScope,
     SendForward,
     SendOp,
 )
-from jigsaw.utils import set_all_seeds
+from jigsaw.launch import set_all_seeds
 
 IN_CHANNELS, PATCH, DIM, HEADS, DEPTH = 4, 4, 64, 4, 2
 H, W = 32, 64  # global image size
@@ -52,7 +73,7 @@ class Block(nn.Module):
 
         def norm() -> nn.Module:
             return jigsaw.normalization.DistributedLayerNorm(
-                local_dim=DIM // col.size(),  # each rank normalises its slice of E ...
+                normalized_dim=DIM,  # global size; each rank normalises its slice ...
                 local_rank=model_group.rank(),
                 device=device,
                 row_group=row,
@@ -60,14 +81,14 @@ class Block(nn.Module):
             )
 
         def linear(in_dim: int, out_dim: int) -> nn.Module:
-            return jigsaw.linear.DistributedXWT(
+            return jigsaw.linear.DistributedLinear(
                 in_dim,
                 out_dim,
                 local_rank=model_group.rank(),
                 device=device,
                 model_group=model_group,  # the weight is split over row *and* col
                 row_group=row,
-                column_group=col,
+                col_group=col,
                 bias=True,
             )
 
@@ -77,7 +98,6 @@ class Block(nn.Module):
             embed_dim=DIM,
             out_dim=DIM,
             heads=HEADS,
-            dropout_p=0.0,
             local_rank=model_group.rank(),
             device=device,
             spatial_group=row,  # the sequence is split over "row" ...
@@ -140,14 +160,14 @@ class ViT(nn.Module):
             spatial_group=row,  # a single group splits the last (width) axis
             channel_group=col,
         )
-        self.embed = jigsaw.convolution.DistributedConv2D(
+        self.embed = jigsaw.convolution.DistributedConv2d(
             IN_CHANNELS, DIM, **conv_kwargs
         )
         self.blocks = nn.ModuleList([Block(mesh, device) for _ in range(DEPTH)])
         self.norm = jigsaw.normalization.DistributedLayerNorm(
-            DIM // col.size(), model_group.rank(), device, row, col
+            DIM, model_group.rank(), device, row, col
         )
-        self.recover = jigsaw.convolution.DistributedConv2DTranspose(
+        self.recover = jigsaw.convolution.DistributedConvTranspose2d(
             DIM, IN_CHANNELS, **conv_kwargs
         )
 
@@ -180,8 +200,12 @@ class ViT(nn.Module):
 def make_batch(
     step: int, mesh: Mesh, device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return this rank's shard of a noisy input and its clean target."""
-    g = torch.Generator().manual_seed(step)
+    """Return this rank's shard of a noisy input and its clean target.
+
+    Every rank of a model copy draws the same images (and keeps its shard of them);
+    every data-parallel copy draws different ones.
+    """
+    g = torch.Generator().manual_seed(data_seed(step, mesh))
     clean = torch.nn.functional.avg_pool2d(
         torch.randn(4, IN_CHANNELS, H, W, generator=g), 5, 1, 2
     )
@@ -193,19 +217,39 @@ def make_batch(
     return local(noisy), local(clean)
 
 
-def main(steps: int = 100) -> list[float]:
-    """Train the ViT for ``steps`` steps and return the loss of every step."""
+def main(
+    steps: int = 100, data_parallel: bool = False, joint_hook: bool = False
+) -> list[float]:
+    """Train the ViT for ``steps`` steps and return the loss of every step.
+
+    With ``data_parallel`` the losses are those of this rank's model copy.
+    """
     device, rank, world_size = setup()
 
-    mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})
+    if data_parallel:
+        # "row" and "col" split one model copy; "dp" (world size / 4) counts the copies.
+        mesh = jigsaw.make_process_mesh(
+            {"dp": -1, "row": 2, "col": 2}, model_parallel_axes=("row", "col")
+        )
+    else:
+        mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})
 
     # Every rank needs its own seed so that the shards are initialised independently.
+    # (The copies start equal anyway: DDP broadcasts copy 0's weights over "dp".)
     set_all_seeds(mesh["model"].rank())
 
     model = ViT(mesh, device)
+    if data_parallel:
+        # DDP over "dp" only. wrap_ddp also checks the setup right away: a wrong
+        # process group, or replicated weights that differ, raise on every rank.
+        model = jigsaw.parallel.wrap_ddp(model, mesh, joint_hook=joint_hook)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     loss_fn = jigsaw.loss.DistributedMSELoss(reduce_groups=(mesh["row"], mesh["col"]))
-    log.info("local parameters per rank: %d", jigsaw.utils.count_parameters(model))
+    log.info(
+        "parameters: %d per rank, %d in the model",
+        jigsaw.debug.count_parameters(model),
+        jigsaw.debug.count_parameters(model, mesh),
+    )
 
     losses = []
     for step in range(steps):
@@ -221,4 +265,4 @@ def main(steps: int = 100) -> list[float]:
 
 
 if __name__ == "__main__":
-    main()
+    main(**ddp_flags(sys.argv))

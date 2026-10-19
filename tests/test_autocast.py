@@ -17,8 +17,8 @@ hand and these tests pin the contract:
 Known quirks this file documents rather than hides:
 
 * the attention core follows :func:`jigsaw...attention.attn_core_dtype`: the
-  autocast dtype under autocast, else bf16 on CUDA (flash rejects fp32), else
-  the input dtype on CPU. ``DistributedAttention`` still can't run an fp64
+  autocast dtype under autocast, else bf16 on CUDA for fp32 inputs (flash
+  rejects fp32), else the input dtype. ``DistributedAttention`` still can't run an fp64
   parameter set (it force-casts q/k/v), so attention tests use fp32 params.
 * ring attention drives its forward under autocast (bf16/fp16 saved tensors) and
   ``ring_backward`` reconciles them to the ``w_qkv`` (master) dtype before the
@@ -31,10 +31,11 @@ import pytest
 import torch
 import torch.distributed as dist
 
+import jigsaw.modules.activation.activation as activation
 import jigsaw.modules.convolution as convolution
-import jigsaw.modules.normalization.normalization as norm
+import jigsaw.modules.normalization as norm
 from jigsaw.modules.attention import DistributedAttention
-from jigsaw.modules.linear import DistributedXWT
+from jigsaw.modules.linear import DistributedLinear
 from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -98,13 +99,13 @@ class TestAutocastLinear:
     ) -> None:
         pm = process_mesh_dict_2x2
         in_dim, out_dim = 10, 20
-        model = DistributedXWT(
+        model = DistributedLinear(
             in_dim,
             out_dim,
             local_rank=pm["model"].rank(),
             device=device,
             model_group=pm["model"],
-            column_group=pm["col"],
+            col_group=pm["col"],
             row_group=pm["row"],
             bias=bias,
         ).to(base_dtype)
@@ -300,7 +301,7 @@ class TestAutocastFp32List:
         pm = process_mesh_dict_2x2
         local_dim = 12
         model = norm.DistributedLayerNorm(
-            local_dim=local_dim,
+            normalized_dim=local_dim * pm["col"].size(),
             local_rank=pm["model"].rank(),
             device=device,
             row_group=pm["row"],
@@ -324,8 +325,13 @@ class TestAutocastFp32List:
     ) -> None:
         pm = process_mesh_dict_2x2
         local_dim = 12
-        model = norm.DistributedNoParamLayerNorm(
-            pm["model"].rank(), device, channel_group=pm["col"]
+        model = norm.DistributedLayerNorm(
+            normalized_dim=local_dim * pm["col"].size(),
+            local_rank=pm["model"].rank(),
+            device=device,
+            row_group=pm["row"],
+            col_group=pm["col"],
+            elementwise_affine=False,
         )
         torch.manual_seed(pm["model"].rank())
         x_low = torch.randn(4, 6, local_dim, device=device, dtype=autocast_dtype)
@@ -340,7 +346,7 @@ class TestAutocastFp32List:
     ) -> None:
         pm = process_mesh_dict_2x2
         local_dim = 12
-        model = norm.DistributedSoftMax(pm["col"], dim=-1)
+        model = activation.DistributedSoftmax(pm["col"], dim=-1)
         torch.manual_seed(pm["model"].rank())
         x_low = torch.randn(4, 6, local_dim, device=device, dtype=autocast_dtype)
         self._check_fp32_list(model, x_low, device, autocast_dtype, pm["model"])
@@ -401,9 +407,9 @@ class TestAutocastConv:
         nc, nsp = pm["col"].size(), pm["row"].size()
         in_ch, out_ch = 4, 4
         cls = (
-            convolution.DistributedConv2DTranspose
+            convolution.DistributedConvTranspose2d
             if transpose
-            else convolution.DistributedConv2D
+            else convolution.DistributedConv2d
         )
         model = cls(
             in_ch,

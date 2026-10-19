@@ -5,7 +5,7 @@ from typing import Callable, Optional
 import torch
 import torch.distributed as dist
 
-from jigsaw.comm import comm_1d_alltoall, comm_1d_p2p
+from jigsaw._core.comm import comm_1d_alltoall, comm_1d_p2p
 
 # Valid ``channel_comm`` names, in preference order.
 CHANNEL_COMMS: tuple[str, ...] = ("all_gather", "p2p", "all_to_all")

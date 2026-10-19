@@ -22,10 +22,10 @@ import pytest
 import torch
 
 import jigsaw.convert as convert
+from jigsaw.gather import gather_1d_results
+from jigsaw.modules import normalization as norm
 from jigsaw.modules import roll
 from jigsaw.modules.linear.linear import _SUPPORTED_XWT_LAYOUTS
-from jigsaw.modules.normalization import normalization as norm
-from jigsaw.utils_aggregate import gather_1d_results
 from tests.parity import all_ranks_ok, assert_close
 
 pytestmark = [pytest.mark.dist_required]
@@ -399,7 +399,7 @@ class TestNormalizationReshard:
         global_dim = 24
 
         ln = norm.DistributedLayerNorm(
-            local_dim=global_dim // from_mesh["col"].size(),
+            normalized_dim=global_dim,
             local_rank=from_mesh["model"].rank(),
             device=device,
             row_group=from_mesh["row"],
@@ -474,38 +474,41 @@ class TestNormalizationReshard:
         global_channels, global_groups = 24, 4
 
         gn = norm.DistributedGroupNorm(
-            num_local_groups=global_groups // from_mesh["col"].size(),
-            num_channels=global_channels // from_mesh["col"].size(),
+            num_groups=global_groups,
+            num_channels=global_channels,
             device=device,
             channel_group=from_mesh["col"],
+            spatial_group=from_mesh["row"],
         )
         torch.manual_seed(from_mesh["col"].rank())
-        gn.group_norm.weight.data = torch.randn_like(gn.group_norm.weight)
-        gn.group_norm.bias.data = torch.randn_like(gn.group_norm.bias)
-        w_global = gather_1d_results(
-            gn.group_norm.weight.data, from_mesh, dim=0, pm_key="col"
-        )
-        b_global = gather_1d_results(
-            gn.group_norm.bias.data, from_mesh, dim=0, pm_key="col"
-        )
+        gn.weight.data = torch.randn_like(gn.weight)
+        gn.bias.data = torch.randn_like(gn.bias)
+        w_global = gather_1d_results(gn.weight.data, from_mesh, dim=0, pm_key="col")
+        b_global = gather_1d_results(gn.bias.data, from_mesh, dim=0, pm_key="col")
 
         gn.reshard_parameters(from_mesh, to_mesh)
 
         grp = to_mesh["model"]
         assert all_ranks_ok(
-            gn.num_channels == global_channels // to_mesh["col"].size(), device, grp
+            gn.num_local_channels == global_channels // to_mesh["col"].size(),
+            device,
+            grp,
         )
-        w_after = gather_1d_results(
-            gn.group_norm.weight.data, to_mesh, dim=0, pm_key="col"
-        )
+        w_after = gather_1d_results(gn.weight.data, to_mesh, dim=0, pm_key="col")
         assert_close("gn weight", w_after, w_global, 1e-6, 1e-6, device, grp)
+
+        # Channels split over ``col``, the length over ``row``: the statistics
+        # must be reduced over the target mesh's row group.
+        def gather_channels_and_length(t: torch.Tensor) -> torch.Tensor:
+            t = gather_1d_results(t, to_mesh, dim=-1, pm_key="row")
+            return gather_1d_results(t, to_mesh, dim=1, pm_key="col")
 
         torch.manual_seed(grp.rank())
         x = torch.randn(2, global_channels // to_mesh["col"].size(), 8, device=device)
-        x_global = gather_1d_results(x, to_mesh, dim=1, pm_key="col")
+        x_global = gather_channels_and_length(x)
         ref = torch.nn.GroupNorm(global_groups, global_channels, device=device)
         ref.weight.data, ref.bias.data = w_global, b_global
-        y = gather_1d_results(gn(x), to_mesh, dim=1, pm_key="col")
+        y = gather_channels_and_length(gn(x))
         assert_close("gn forward", y, ref(x_global), 1e-4, 1e-5, device, grp)
 
 

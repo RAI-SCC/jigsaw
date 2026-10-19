@@ -4,24 +4,24 @@ import pytest
 import torch
 
 import jigsaw.convert as convert
+from jigsaw.gather import gather_1d_results, gather_results
+from jigsaw.modules.activation import DistributedSoftmax
 from jigsaw.modules.attention import Attention, DistributedAttention
 from jigsaw.modules.attention.attention import attn_core_dtype
 from jigsaw.modules.linear import (
+    DistributedLinear,
     DistributedMatMulXTW,
     DistributedMatMulXW,
     DistributedMatMulXWT,
-    DistributedXWT,
     MatMulXTW,
     MatMulXW,
     MatMulXWT,
 )
 from jigsaw.modules.normalization import (
     DistributedGroupNorm,
-    DistributedNoParamLayerNorm,
-    DistributedSoftMax,
+    DistributedLayerNorm,
 )
 from jigsaw.modules.roll import Roll
-from jigsaw.utils_aggregate import gather_1d_results, gather_results
 from tests.parity import assert_close
 
 # Every test here builds a 2x2 / 2x1x2 mesh, so it needs exactly 4 ranks;
@@ -62,7 +62,7 @@ class TestConvertToTorch:
 
         jigsaw_linear = convert.convert_to_jigsaw(linear, process_mesh_dict, device)
 
-        assert isinstance(jigsaw_linear, DistributedXWT)
+        assert isinstance(jigsaw_linear, DistributedLinear)
         assert hasattr(jigsaw_linear, "reshard_parameters")
 
         x_global = torch.randn(1, x_seq, in_features, device=device).requires_grad_(
@@ -430,8 +430,8 @@ class TestConvertToTorch:
                 )
 
                 # Match the dtype of jigsaw's attention core: bf16 on CUDA, the
-                # input dtype (fp32) otherwise. A bf16 reference on CPU differs
-                # from the fp32 core by bf16 rounding, well above the tolerances.
+                # input dtype (fp32) otherwise. A half-precision reference on CPU
+                # differs from the fp32 core by its rounding, above the tolerances.
                 core_dtype = attn_core_dtype(x)
                 q = q.permute(0, 2, 1, 3).to(core_dtype)
                 k = k.permute(0, 2, 1, 3).to(core_dtype)
@@ -525,12 +525,16 @@ class TestConvertToTorch:
         assert isinstance(ref_v_grad, torch.Tensor)
         assert isinstance(ref_x_grad, torch.Tensor)
         grp = process_mesh_dict_2x1x2["model"]
-        assert_close("forward", dist_forward, ref_forward, 1e-4, 1e-5, device, grp)
+        # On CUDA the attention core runs in bf16 (``attn_core_dtype``). The sharded
+        # q/k/v differ from the serial ones by fp32 reduction order, which can flip
+        # the odd half-precision rounding; a wrong shard is off by O(1).
+        atol, rtol = (5e-3, 5e-3) if device.type == "cuda" else (1e-4, 1e-5)
+        assert_close("forward", dist_forward, ref_forward, atol, rtol, device, grp)
         assert_close("qkv weight", dist_q_w, q_weight, 1e-4, 1e-5, device, grp)
-        assert_close("q.weight grad", dist_q_grad, ref_q_grad, 1e-4, 1e-5, device, grp)
-        assert_close("k.weight grad", dist_k_grad, ref_k_grad, 1e-4, 1e-5, device, grp)
-        assert_close("v.weight grad", dist_v_grad, ref_v_grad, 1e-4, 1e-5, device, grp)
-        assert_close("input grad", dist_x_grad, ref_x_grad, 1e-4, 1e-5, device, grp)
+        assert_close("q.weight grad", dist_q_grad, ref_q_grad, atol, rtol, device, grp)
+        assert_close("k.weight grad", dist_k_grad, ref_k_grad, atol, rtol, device, grp)
+        assert_close("v.weight grad", dist_v_grad, ref_v_grad, atol, rtol, device, grp)
+        assert_close("input grad", dist_x_grad, ref_x_grad, atol, rtol, device, grp)
 
     def test_jigsaw_transformer(
         self, device: torch.device, process_mesh_dict_2x1x2: dict
@@ -622,7 +626,11 @@ class TestConvertToTorch:
         assert ref_head_cat_grad is not None
         assert ref_x_grad is not None
         grp = process_mesh_dict_2x1x2["model"]
-        assert_close("forward", dist_forward, ref_forward, 1e-5, 1e-5, device, grp)
+        # On CUDA the attention core runs in bf16 (``attn_core_dtype``). The sharded
+        # q/k/v differ from the serial ones by fp32 reduction order, which can flip
+        # the odd half-precision rounding; a wrong shard is off by O(1).
+        atol, rtol = (5e-3, 5e-3) if device.type == "cuda" else (1e-5, 1e-5)
+        assert_close("forward", dist_forward, ref_forward, atol, rtol, device, grp)
         assert_close(
             "qkv weight sum",
             dist_qkv_w.sum(),
@@ -635,12 +643,13 @@ class TestConvertToTorch:
         # Gradient reduction order differs between the sharded qkv matmul and
         # the serial reference, so this needs the same ~1e-4 slack as the
         # other gradient checks in this test rather than allclose's 1e-5 default.
+        grad_atol = max(atol, 1e-4)
         assert_close(
             "qkv weight grad sum",
             dist_qkv_grad.sum(),
             ref_qkv_grad.sum(),
-            1e-4,
-            1e-5,
+            grad_atol,
+            rtol,
             device,
             grp,
         )
@@ -660,12 +669,14 @@ class TestConvertToTorch:
             "head concat weight grad",
             dist_head_cat_grad,
             ref_head_cat_grad,
-            1e-4,
-            1e-5,
+            grad_atol,
+            rtol,
             device,
             grp,
         )
-        assert_close("input grad", dist_x_grad, ref_x_grad, 1e-4, 1e-5, device, grp)
+        assert_close(
+            "input grad", dist_x_grad, ref_x_grad, grad_atol, rtol, device, grp
+        )
 
     def test_jigsaw_conv2d(
         self, device: torch.device, process_mesh_dict_2x2: dict
@@ -764,7 +775,7 @@ class TestConvertToTorch:
     def test_jigsaw_conv2dtranspose(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        """Test conversion of Conv2DTranspose on a 2x2 process mesh."""
+        """Test conversion of ConvTranspose2d on a 2x2 process mesh."""
         torch.manual_seed(1)
         in_channels = 32
         out_channels = 32
@@ -972,11 +983,11 @@ class TestConvertToTorch:
     def test_convert_group_norm(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        """Test conversion of a channel-sharded GroupNorm.
+        """Test conversion of a channel- and spatially sharded GroupNorm.
 
         Channels are split so no group straddles a shard (groups=4, col=2 ->
-        2 groups per shard), which is what makes the per-shard local forward
-        equal the matching slice of the global GroupNorm.
+        2 groups per shard); the width is split over ``row`` as for a
+        converted conv, so the group statistics must be reduced over it.
         """
         torch.manual_seed(1)
         process_mesh_dict = process_mesh_dict_2x2
@@ -1002,9 +1013,19 @@ class TestConvertToTorch:
             process_mesh_dict["col"].rank(),
             process_mesh_dict["col"].size(),
         )
+        row_rank, row_size = (
+            process_mesh_dict["row"].rank(),
+            process_mesh_dict["row"].size(),
+        )
         local_channels = num_channels // col_size
+        local_w = w // row_size
         x_local = (
-            x_global[:, col_rank * local_channels : (col_rank + 1) * local_channels]
+            x_global[
+                :,
+                col_rank * local_channels : (col_rank + 1) * local_channels,
+                :,
+                row_rank * local_w : (row_rank + 1) * local_w,
+            ]
             .detach()
             .contiguous()
             .requires_grad_(True)
@@ -1013,8 +1034,8 @@ class TestConvertToTorch:
         dist_forward = jigsaw_group_norm(x_local)
         dist_forward.backward(torch.ones_like(dist_forward))
 
-        dist_w = jigsaw_group_norm.group_norm.weight.grad
-        dist_b = jigsaw_group_norm.group_norm.bias.grad
+        dist_w = jigsaw_group_norm.weight.grad
+        dist_b = jigsaw_group_norm.bias.grad
         dist_x = x_local.grad
         assert dist_w is not None
         assert dist_b is not None
@@ -1023,12 +1044,14 @@ class TestConvertToTorch:
         assert ref_b_grad is not None
         assert ref_x_grad is not None
 
-        dist_forward = gather_1d_results(
-            dist_forward, process_mesh_dict, dim=1, pm_key="col"
-        )
+        def gather_channels_and_width(t: torch.Tensor) -> torch.Tensor:
+            t = gather_1d_results(t, process_mesh_dict, dim=-1, pm_key="row")
+            return gather_1d_results(t, process_mesh_dict, dim=1, pm_key="col")
+
+        dist_forward = gather_channels_and_width(dist_forward)
         dist_w_grad = gather_1d_results(dist_w, process_mesh_dict, dim=0, pm_key="col")
         dist_b_grad = gather_1d_results(dist_b, process_mesh_dict, dim=0, pm_key="col")
-        dist_x_grad = gather_1d_results(dist_x, process_mesh_dict, dim=1, pm_key="col")
+        dist_x_grad = gather_channels_and_width(dist_x)
 
         grp = process_mesh_dict["model"]
         assert_close("forward", dist_forward, ref_forward, 1e-5, 1e-5, device, grp)
@@ -1069,7 +1092,7 @@ class TestConvertToTorch:
         softmax = torch.nn.Softmax(dim=-1)
 
         jigsaw_softmax = convert.convert_to_jigsaw(softmax, process_mesh_dict, device)
-        assert isinstance(jigsaw_softmax, DistributedSoftMax)
+        assert isinstance(jigsaw_softmax, DistributedSoftmax)
 
         x_global = torch.randn(2, x_seq, dim_size, device=device).requires_grad_(True)
         ref_forward = softmax(x_global)
@@ -1108,15 +1131,10 @@ class TestConvertToTorch:
         assert isinstance(back, torch.nn.Softmax)
         assert back.dim == -1
 
-    def test_convert_layer_norm_no_affine_routes_to_no_param(
+    def test_convert_layer_norm_no_affine(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        """``elementwise_affine=False`` must route to ``DistributedNoParamLayerNorm``.
-
-        Before this, ``DistributedLayerNorm.convert_to_jigsaw`` raised
-        ``NotImplementedError`` for this case instead of routing to the
-        parameter-free converter that already existed for it.
-        """
+        """``elementwise_affine=False`` converts to a parameter-free ``DistributedLayerNorm``."""
         torch.manual_seed(1)
         process_mesh_dict = process_mesh_dict_2x2
         normalized_dim = 8
@@ -1124,7 +1142,8 @@ class TestConvertToTorch:
         ln = torch.nn.LayerNorm(normalized_dim, elementwise_affine=False, device=device)
 
         jigsaw_ln = convert.convert_to_jigsaw(ln, process_mesh_dict, device)
-        assert isinstance(jigsaw_ln, DistributedNoParamLayerNorm)
+        assert isinstance(jigsaw_ln, DistributedLayerNorm)
+        assert jigsaw_ln.elementwise_affine is False
 
         x_global = torch.randn(2, x_seq, normalized_dim, device=device).requires_grad_(
             True

@@ -8,7 +8,8 @@ from typing import Optional, cast
 import torch
 import torch.distributed as dist
 
-from jigsaw.comm import get_empty
+from jigsaw._core.comm import get_empty
+from jigsaw._core.offload import NVLinkActivationOffloader
 from jigsaw.modules.attention.config import (
     RingAttentionConfig,
     SaveBackward,
@@ -16,7 +17,6 @@ from jigsaw.modules.attention.config import (
     SendForward,
     SendOp,
 )
-from jigsaw.offload import NVLinkActivationOffloader
 
 from ._comm_overlap import PrefetchBuffer, consume, issue_on_comm_stream
 from .ring import _compute_kv, get_hybrid_topology

@@ -1,4 +1,6 @@
 """Distributed roll."""
 
-from .roll import DistributedRoll as DistributedRoll
-from .roll import Roll as Roll
+from .config import RollConfig
+from .roll import DistributedRoll, Roll
+
+__all__ = ["DistributedRoll", "Roll", "RollConfig"]

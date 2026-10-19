@@ -12,7 +12,7 @@ gradients with the serial module through ``check_parity``.
   each row's window separately. That runs on ``4x1`` (spatial only) and on ``2x2``
   (spatial and channel).
 * The converted weights must agree over the rows and their gradients must be summed over
-  them, including the output bias, which ``DistributedXWT`` already syncs on its own.
+  them, including the output bias, which ``DistributedLinear`` already syncs on its own.
 """
 
 import pytest
@@ -37,10 +37,9 @@ def _tols(device: torch.device) -> dict[str, float]:
     """Tolerances of a ``check_parity`` against the serial module.
 
     On CUDA the attention core runs in bf16 (``attn_core_dtype``), and the serial module
-    uses the flash kernel where ``attn_backend="math"`` does not: the two differ by bf16
-    rounding. That is ~1e-3 on the output and, summed over the tokens, ~1e-2 on the
-    weight gradients (which are O(1) here); a wrong shard or weight layout is off by
-    the size of the entries themselves.
+    uses the flash kernel where ``attn_backend="math"`` does not: the two differ by
+    half-precision rounding, larger on the weight gradients, which sum over the tokens;
+    a wrong shard or weight layout is off by the size of the entries themselves.
     """
     if device.type == "cuda":
         return dict(atol=5e-3, rtol=5e-3, grad_atol=5e-2, grad_rtol=5e-3)

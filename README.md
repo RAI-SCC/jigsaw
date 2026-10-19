@@ -19,6 +19,30 @@ This installs `torch` and `einops`, the library's only runtime dependencies. The
 pip install -e .[dev]
 ```
 
+#### Running tests
+Tests run under MPI; a test marked `@pytest.mark.dist(N)` only runs when the
+rank count is exactly `N`, so cover each layout with its own launch:
+```
+mpirun -n 4 pytest tests --device cpu    # CPU / gloo
+mpirun -n 4 pytest tests --device cuda   # GPU / nccl, one rank per GPU
+```
+CI runs the CPU suite on 1, 4 and 8 ranks (2 and 6 ranks on a manual
+"full" dispatch). GPU tests, and the 10/12/24-rank layouts, are not run in CI —
+run them on a GPU machine before merging changes that touch the CUDA paths.
+
+#### Supported platforms
+- **Process-group backends:** `nccl` (NVIDIA NCCL, or AMD RCCL — ROCm builds of
+  PyTorch register it under the same name), `gloo` (CPU tensors), or a mix such
+  as `"cpu:gloo,cuda:nccl"`. `make_process_mesh` raises on any other backend
+  (`mpi`, `ucc`, `xccl`, ...).
+- **Devices:** `cuda` (NVIDIA, or AMD via ROCm/HIP) and `cpu`. Other device types
+  raise when a module picks its kernels.
+- **ROCm:** expected to work for all comm paths and the `sdpa`/`math` attention
+  backends, but not covered by the test suite. `attn_backend="te"` uses the
+  `flash_attn` core there (`JIGSAW_TE_CORE=cudnn` forces TE's fused core, untested).
+- `init_cuda()` always initialises `nccl`; on CPU call
+  `dist.init_process_group("gloo")` yourself.
+
 ### Option B: containerized (enables TransformerEngine)
 Running inside an NGC PyTorch container is optional. It gives a matched
 CUDA/NCCL stack and a working `transformer_engine`, which unlocks the `te`
@@ -52,16 +76,16 @@ invocation works from a login shell, from inside an `salloc` allocation, and
 from an `sbatch` script — `run.sh` derives `MASTER_ADDR` / `MASTER_PORT` from the
 SLURM allocation, and jigsaw reads `SLURM_PROCID` / `SLURM_NTASKS` /
 `SLURM_LOCALID` (which `srun` sets) via `resolve_launch_env()` in
-[`jigsaw/utils.py`](jigsaw/utils.py). `torchrun`'s `RANK` / `WORLD_SIZE` /
+[`jigsaw/launch.py`](jigsaw/launch.py). `torchrun`'s `RANK` / `WORLD_SIZE` /
 `LOCAL_RANK` are accepted too.
 
 ```bash
 # single process — login node or interactive allocation
-JIGSAW_SITE=horeka scripts/run.sh python -c "import transformer_engine; print('ok')"
+JIGSAW_SITE=cluster_name scripts/run.sh python -c "import transformer_engine; print('ok')"
 
 # distributed — one task per GPU. Identical whether run directly from a login
 # shell or as a step inside `salloc` / `sbatch`.
-JIGSAW_SITE=horeka srun --account=hk-project-XXXX --partition=accelerated-h100 \
+JIGSAW_SITE=cluster_name srun --account=<account> --partition=<partition> \
     --nodes=2 --ntasks-per-node=4 --gres=gpu:4 --mpi=pmix \
     scripts/run.sh python -m your_script --attn-backend te
 
@@ -100,7 +124,7 @@ _jigsaw_ follows the interface of PyTorch: build the model from _jigsaw_ layers,
 ```python
 import torch
 import jigsaw
-from jigsaw.utils import init_cuda, set_all_seeds
+from jigsaw.launch import init_cuda, set_all_seeds
 
 device, _, rank, world_size = init_cuda()  # NCCL init from the SLURM / torchrun env
 mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})  # 4 ranks, one model replica
@@ -109,15 +133,15 @@ mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})  # 4 ranks, one model repl
 class Linear(torch.nn.Module):
     def __init__(self, in_dim, out_dim, mesh, device):
         super().__init__()
-        self.lin = jigsaw.linear.DistributedXWT(
+        self.lin = jigsaw.linear.DistributedLinear(
             in_dim=in_dim,
             out_dim=out_dim,
             bias=True,
             local_rank=mesh["model"].rank(),
             device=device,
             model_group=mesh["model"],
-            column_group=mesh["col"],
             row_group=mesh["row"],
+            col_group=mesh["col"],
         )
 
     def forward(self, x):
@@ -131,7 +155,7 @@ model = Linear(1024, 1024, mesh, device)
 
 Run it with one process per GPU, e.g. `torchrun --nproc-per-node 4 train.py` or `srun` (see [Launching](#launching)).
 
-Complete, runnable scripts -- a CNN, a Vision Transformer, a Swin Transformer, a dataloader, converting an existing model, re-sharding a trained one -- are in [`examples/`](examples/README.md). Each runs with `torchrun --nproc-per-node 4`, on GPUs or on the CPU.
+Complete, runnable scripts -- a CNN, a Vision Transformer, a Swin Transformer, a dataloader, converting an existing model, re-sharding a trained one, a data-parallel training loop -- are in [`examples/`](examples/README.md). Each runs with `torchrun --nproc-per-node 4`, on GPUs or on the CPU; the CNN, the ViT and the Swin Transformer take `--ddp` (8 ranks or more) for data parallelism on top.
 
 ### Mixed precision (autocast)
 
@@ -147,19 +171,22 @@ loss.backward()  # outside the autocast region
 _jigsaw_'s layers are custom `torch.autograd.Function`s, which `torch.autocast` does **not**
 descend into automatically, so each opts in by hand. Behaviour:
 
-- **Matmul family** — `DistributedXWT`, attention (plain + ring), `DistributedConv*` /
+- **Matmul family** — `DistributedLinear`, attention (plain + ring), `DistributedConv*` /
   `DistributedConv*Transpose`: the forward runs in the autocast dtype and the output carries
   it (bias included); gradients are reconciled to the **fp32 (parameter) dtype** in backward,
   i.e. you keep fp32 master gradients for free.
-- **`DistributedLayerNorm` / `DistributedNoParamLayerNorm` / `DistributedSoftMax`** follow
-  stock-AMP "fp32 list" semantics: computed and emitted in fp32 even when fed bf16/fp16.
+- **`DistributedLayerNorm` (with or without `elementwise_affine`) / `DistributedSoftmax`**
+  follow stock-AMP "fp32 list" semantics: computed and emitted in fp32 even when fed bf16/fp16.
 - **Attention core (SDPA / TransformerEngine)**: under autocast it uses the autocast dtype
-  (so `autocast(float16)` stays fp16); with no autocast it uses bf16 on CUDA — keeping the
-  flash kernel eligible, which rejects fp32 — and the input dtype on CPU (SDPA math backend).
+  (so `autocast(bfloat16)` stays bf16 and `autocast(float16)` fp16). With no autocast it uses
+  the input dtype, except that fp32 inputs on CUDA run the core in bf16 — the flash kernel
+  rejects fp32, and fp16 would underflow small gradients without a loss scaler. On CPU fp32
+  stays fp32 (SDPA math backend). A float `attn_mask` is cast to the core dtype for you.
 
 Only `float16` and `bfloat16` are autocast dtypes. `float64` params work for the matmul,
-conv and norm layers but not attention (it force-casts q/k/v). `float8` is not supported by
-any hand-rolled layer — it needs TransformerEngine's own `fp8_autocast` path.
+conv and norm layers but not attention (it force-casts q/k/v). FP8 is not supported:
+TransformerEngine's `fp8_autocast` has no effect on _jigsaw_'s layers, including the
+`te` attention backend, which runs non-FP8 kernels only.
 
 ### Process mesh
 Each module accepts a ```process_mesh_dict``` -- a mapping ``{axis name -> ProcessGroup}``. The last two axes represent the DTP (default kw ``row`` and ``col``); any leading axes are data-parallel replicas. On top of the per-axis groups the dict carries a ``model`` group spanning one full parameter replica, which the parameter-free matmul, the weight-merging converters and seed setup all read.
@@ -187,6 +214,33 @@ mesh = jigsaw.make_process_mesh({"sh": 2, "sw": 2, "col": 2})
 There are two options
 1) Training the model in a fully domain--tensor parallel manner. This means that a process mesh of size (4, 2) will have the parameters sharded across 8 processes.
 2) Training the model with domain-parallelism across the ``rows`` axis, and with domain--tensor parallelism across the ``col`` axis. See the individual modules for detailed usage.
+
+### Data parallelism (DDP)
+
+Add a `dp` axis to the mesh and wrap the model in DDP over it. Each `row` x `col` group holds
+one model copy; DDP averages gradients across the copies.
+
+```python
+# 8 ranks: 2 copies (dp) of a model split 2x2 over row x col
+mesh = jigsaw.make_process_mesh(
+    {"dp": -1, "row": 2, "col": 2}, model_parallel_axes=("row", "col")
+)
+model = build_model(mesh)  # jigsaw layers on mesh["row"] / mesh["col"]
+model = jigsaw.parallel.wrap_ddp(model, mesh)  # DDP over mesh["dp"], checks the replicas match
+# faster sync of replicated grads: wrap_ddp(model, mesh, joint_hook=True)
+
+for x, y in loader:  # sampler keyed by mesh["dp"].rank(); each rank loads its shard
+    loss = loss_fn(model(x), y)
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+```
+
+After wrapping, it's plain DDP: `no_sync()`, gradient accumulation and comm hooks all work.
+Using `DistributedDataParallel(model, process_group=mesh["dp"])` is also correct.
+[docs/ddp.md](docs/ddp.md) has the details including joint comm hook (faster), plain PyTorch layers inside a jigsaw model,
+and debugging replica drift.
+Running examples: `examples/ddp.py`, `examples/vit.py --ddp` and `examples/swin.py --ddp`.
 
 ### Distributed logging
 
