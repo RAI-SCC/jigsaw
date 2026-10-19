@@ -143,6 +143,7 @@ venv.bak/
 
 # mypy
 .mypy_cache/
+.mypy_cache_precommit/
 .dmypy.json
 dmypy.json
 
