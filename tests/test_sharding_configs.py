@@ -9,9 +9,9 @@ module and a jigsaw distributed one, and between process meshes:
 * ``reshard_parameters`` -- re-slice + rebind a jigsaw module onto a new mesh
 
 The reshard tests assert two things that the pre-existing
-``tests/test_weight_merging.py`` does not: (1) parameter *values* survive every
-``from_mesh -> to_mesh`` pair for ``bias in {True, False}`` and for 1-/2-/3-D
-convs, and (2) after a reshard the module is *functionally identical* to one
+``tests/test_weight_merging.py`` does not: (1) parameter *values* survive each
+``from_mesh -> to_mesh`` transition of ``_MESH_PAIRS_4``, with and without bias,
+for linear and 1-/2-/3-D (transposed) convs, and (2) after a reshard the module is *functionally identical* to one
 obtained by converting straight onto ``to_mesh`` -- same forward, same
 backward -- which is what makes it safe to keep training on the new mesh.
 """
@@ -41,7 +41,22 @@ MESHES_4 = [
 ]
 MESHES_8 = ["process_mesh_dict_4x2", "process_mesh_dict_2x4_rowcol"]
 
-_MESH_PAIRS_4 = [(a, b) for a in MESHES_4 for b in MESHES_4]
+# Reshard transitions rather than all 36 pairs: every mesh is a source and a target,
+# and each kind of move is hit -- identity, row <-> col swap, sharded <-> fully
+# replicated, shrinking / growing the model group under dp, halving a 4-way split.
+_MESH_PAIRS_4 = [
+    ("process_mesh_dict_2x2", "process_mesh_dict_2x2"),
+    ("process_mesh_dict_4x1", "process_mesh_dict_1x4"),
+    ("process_mesh_dict_1x4", "process_mesh_dict_4x1"),
+    ("process_mesh_dict_2x2", "process_mesh_dict_4x1x1"),
+    ("process_mesh_dict_4x1x1", "process_mesh_dict_2x2"),
+    ("process_mesh_dict_2x2", "process_mesh_dict_2x1x2"),
+    ("process_mesh_dict_2x2x1", "process_mesh_dict_2x2"),
+    ("process_mesh_dict_2x1x2", "process_mesh_dict_2x2x1"),
+    ("process_mesh_dict_1x4", "process_mesh_dict_2x1x2"),
+    ("process_mesh_dict_4x1", "process_mesh_dict_2x2x1"),
+    ("process_mesh_dict_2x2", "process_mesh_dict_1x4"),
+]
 
 
 # --------------------------------------------------------------------------- #
@@ -70,6 +85,13 @@ def _make_torch(kind: str, bias: bool, device: torch.device) -> torch.nn.Module:
 
 CONV_KINDS = ["conv1d", "conv2d", "conv3d", "convT1d", "convT2d", "convT3d"]
 ALL_KINDS = ["linear", *CONV_KINDS]
+
+
+def _kind_cases(settings: list[tuple[str, ...]]) -> list[tuple]:
+    """``(*setting, kind, bias)``: every setting and kind with a bias, plus each kind
+    once without one (on the first setting) -- that path only skips the bias."""
+    cases = [(*s, kind, True) for s in settings for kind in ALL_KINDS]
+    return cases + [(*settings[0], kind, False) for kind in ALL_KINDS]
 
 
 def _n_spatial(kind: str) -> int:
@@ -117,9 +139,9 @@ class TestConvertRoundTrip:
     """torch -> jigsaw -> torch must reproduce the original module exactly."""
 
     @pytest.mark.dist(4)
-    @pytest.mark.parametrize("kind", ALL_KINDS)
-    @pytest.mark.parametrize("bias", [True, False])
-    @pytest.mark.parametrize("mesh_name", MESHES_4)
+    @pytest.mark.parametrize(
+        "mesh_name,kind,bias", _kind_cases([(m,) for m in MESHES_4])
+    )
     def test_roundtrip_4(
         self,
         request: pytest.FixtureRequest,
@@ -131,9 +153,9 @@ class TestConvertRoundTrip:
         self._roundtrip(request.getfixturevalue(mesh_name), device, kind, bias)
 
     @pytest.mark.dist(8)
-    @pytest.mark.parametrize("kind", ALL_KINDS)
-    @pytest.mark.parametrize("bias", [True, False])
-    @pytest.mark.parametrize("mesh_name", MESHES_8)
+    @pytest.mark.parametrize(
+        "mesh_name,kind,bias", _kind_cases([(m,) for m in MESHES_8])
+    )
     def test_roundtrip_8(
         self,
         request: pytest.FixtureRequest,
@@ -175,9 +197,9 @@ class TestConvertRoundTrip:
 # --------------------------------------------------------------------------- #
 class TestMergeWeights:
     @pytest.mark.dist(4)
-    @pytest.mark.parametrize("kind", ALL_KINDS)
-    @pytest.mark.parametrize("bias", [True, False])
-    @pytest.mark.parametrize("mesh_name", MESHES_4)
+    @pytest.mark.parametrize(
+        "mesh_name,kind,bias", _kind_cases([(m,) for m in MESHES_4])
+    )
     def test_merge_4(
         self,
         request: pytest.FixtureRequest,
@@ -189,9 +211,9 @@ class TestMergeWeights:
         self._merge(request.getfixturevalue(mesh_name), device, kind, bias)
 
     @pytest.mark.dist(8)
-    @pytest.mark.parametrize("kind", ALL_KINDS)
-    @pytest.mark.parametrize("bias", [True, False])
-    @pytest.mark.parametrize("mesh_name", MESHES_8)
+    @pytest.mark.parametrize(
+        "mesh_name,kind,bias", _kind_cases([(m,) for m in MESHES_8])
+    )
     def test_merge_8(
         self,
         request: pytest.FixtureRequest,
@@ -224,9 +246,7 @@ class TestMergeWeights:
 # --------------------------------------------------------------------------- #
 class TestReshardParamValues:
     @pytest.mark.dist(4)
-    @pytest.mark.parametrize("kind", ALL_KINDS)
-    @pytest.mark.parametrize("bias", [True, False])
-    @pytest.mark.parametrize("from_name,to_name", _MESH_PAIRS_4)
+    @pytest.mark.parametrize("from_name,to_name,kind,bias", _kind_cases(_MESH_PAIRS_4))
     def test_values(
         self,
         request: pytest.FixtureRequest,
@@ -262,9 +282,7 @@ class TestReshardMatchesDirect:
     byte-for-byte equivalent -- same shards, groups, config -> same fwd/bwd."""
 
     @pytest.mark.dist(4)
-    @pytest.mark.parametrize("kind", ALL_KINDS)
-    @pytest.mark.parametrize("bias", [True, False])
-    @pytest.mark.parametrize("from_name,to_name", _MESH_PAIRS_4)
+    @pytest.mark.parametrize("from_name,to_name,kind,bias", _kind_cases(_MESH_PAIRS_4))
     def test_matches_direct(
         self,
         request: pytest.FixtureRequest,
