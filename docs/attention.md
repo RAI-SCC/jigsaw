@@ -29,12 +29,18 @@ Both schemes parallelise attention over `spatial_group` and work with any
   in a P2P ring over the inter-node one — which keeps the all-to-all on the
   fast intra-node fabric.
 
-Ring attention splits the sequence over the mesh rows and by default needs an
-unsharded channel dimension, so the mesh columns must have size 1; without
-`ring`, columns split the heads. To combine the two, pass a
-`RingAttentionConfig` that sends and saves the keys and values
-(`send_in_forward=SendForward.KV`, `save_for_backward=SaveBackward.KV`), as
-[`examples/vit.py`](../examples/vit.py) does.
+Ring attention splits the sequence over the mesh rows; the mesh columns split the
+heads, with or without `ring`. With split heads (or `qk_norm`) the ring has to
+circulate the projected keys and values instead of the input `x`, which is only a
+slice of the features. Without a `config` this is chosen for you; an explicit
+`RingAttentionConfig` must set `send_in_forward=SendForward.KV` and
+`save_for_backward=SaveBackward.KV` (the default), or the module raises a
+`ValueError`. [`examples/vit.py`](../examples/vit.py) shows the explicit version.
+
+`RingAttentionConfig.send_op` picks how the ring exchanges chunks. The default,
+`ALLTOALL`, works for any ring size. The `HYBRID_*` ops split the ring into intra- and
+inter-node parts and need the ring size to be a multiple of `gpus_per_node`
+(default 4).
 
 Both schemes can overlap their K/V communication with the attention core on a
 dedicated CUDA stream: `overlap_comm` on `RingAttentionConfig` for the plain

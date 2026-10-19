@@ -16,7 +16,7 @@ The only runtime dependencies are `torch` and `einops`.
 ## Quickstart
 
 Each layer takes the *global* (unsharded) sizes and the process groups of a mesh, and
-works on this rank's shard of the input:
+works on this rank's shard of the input. Training is plain PyTorch:
 
 ```python
 import torch
@@ -25,17 +25,66 @@ from jigsaw.launch import init_cuda
 
 device, _, rank, world_size = init_cuda()  # NCCL, from the SLURM / torchrun env
 mesh = jigsaw.make_process_mesh({"sh": 2, "sw": 2, "col": 1})  # 4 ranks: a 2x2 grid of tiles
+spatial = (mesh["sh"], mesh["sw"])  # groups splitting (H, W)
 
-conv = jigsaw.modules.DistributedConv2d(
-    3, 16, kernel_size=3, padding=1, device=device,
-    spatial_group=(mesh["sh"], mesh["sw"]),  # split (H, W)
-    channel_group=mesh["col"],               # split channels (size 1: not split)
-)
-x = torch.randn(8, 3, 256, 256, device=device)  # this rank's tile of a 512x512 image
-y = conv(x)  # exchanges halos with the neighbouring tiles
+
+def conv(cin, cout):
+    return jigsaw.modules.DistributedConv2d(
+        cin, cout, kernel_size=3, padding=1, device=device,
+        spatial_group=spatial,       # exchanges halos with the neighbouring tiles
+        channel_group=mesh["col"],   # size 1: channels not split
+    )
+
+
+model = torch.nn.Sequential(conv(3, 16), torch.nn.GELU(), conv(16, 3))
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+loss_fn = jigsaw.modules.DistributedMSELoss(reduce_groups=spatial)  # loss over the full image
+
+for x, target in loader:  # each rank loads its 256x256 tile of a 512x512 image
+    loss = loss_fn(model(x), target)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
 ```
 
 Launch one process per GPU: `torchrun --nproc-per-node 4 train.py`, or `srun`.
+
+### Converting an existing model
+
+`jigsaw.convert.convert_to_jigsaw` swaps every layer it knows (`nn.Linear`, `nn.Conv*`,
+`nn.ConvTranspose*`, `nn.LayerNorm`, `jigsaw.modules.Attention`, `jigsaw.modules.Roll`)
+for its distributed version and keeps each rank's shard of the weights. For example, a
+small transformer with the tokens split over `row` and the heads/channels over `col`:
+
+```python
+from torch import nn
+from jigsaw.convert import convert_to_jigsaw
+
+
+class Block(nn.Module):
+    def __init__(self, dim=64, heads=4):
+        super().__init__()
+        self.norm1, self.norm2 = nn.LayerNorm(dim), nn.LayerNorm(dim)
+        self.attn = jigsaw.modules.Attention(
+            in_dim=dim, embed_dim=dim, out_dim=dim, heads=heads, device=device
+        )
+        self.mlp = nn.Sequential(nn.Linear(dim, 4 * dim), nn.GELU(), nn.Linear(4 * dim, dim))
+
+    def forward(self, x):  # x: (batch, tokens, dim)
+        x = x + self.attn(self.norm1(x))
+        return x + self.mlp(self.norm2(x))
+
+
+mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})
+torch.manual_seed(0)  # every rank converts the same full model
+model = convert_to_jigsaw(nn.Sequential(Block(), Block()), mesh, device)  # ring attention over "row"
+
+x = torch.randn(8, 1024 // 2, 64 // 2, device=device)  # this rank's (tokens, channels) shard
+y = model(x)
+```
+
+[`examples/autoconvert.py`](examples/autoconvert.py) also checks the converted model
+against the original.
 
 ## Tutorials
 

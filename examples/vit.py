@@ -51,7 +51,7 @@ from _common import data_seed, ddp_flags, setup, shard, steps_flag
 import jigsaw
 from jigsaw import log
 from jigsaw.modules import RingAttentionConfig
-from jigsaw.modules.attention import SaveScope, SendForward, SendOp
+from jigsaw.modules.attention import SendForward
 from jigsaw.launch import set_all_seeds
 
 IN_CHANNELS, PATCH, DIM, HEADS, DEPTH = 4, 4, 64, 4, 2
@@ -102,14 +102,11 @@ class Block(nn.Module):
             config=RingAttentionConfig(
                 device=device,
                 # The ring passes the keys/values around. Sending them (rather than
-                # the default, the input x) is required with a channel split: x is
-                # only a slice of the features, too little to rebuild K and V from.
+                # the input x) is required with a channel split: x is only a slice
+                # of the features, too little to rebuild K and V from. Without a
+                # config this is picked for you; an explicit config without it
+                # raises a ValueError.
                 send_in_forward=SendForward.KV,
-                # With the heads split over "col", these two must not stay at their
-                # defaults (HYBRID_P2P, GLOBAL): the gradients come out wrong, while
-                # the forward pass is still exact. tests/test_examples.py checks them.
-                send_op=SendOp.P2P,
-                save_scope=SaveScope.LOCAL,
             ),
         )
         self.mlp = nn.Sequential(linear(DIM, 4 * DIM), nn.GELU(), linear(4 * DIM, DIM))
