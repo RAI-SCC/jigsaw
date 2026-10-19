@@ -35,7 +35,7 @@ import sys
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from _common import setup, shard
+from _common import setup, shard, steps_flag
 from vit import H, IN_CHANNELS, W, ViT
 
 import jigsaw
@@ -126,4 +126,4 @@ def main(steps: int = 100, joint_hook: bool = True) -> list[float]:
 
 
 if __name__ == "__main__":
-    main(joint_hook="--plain" not in sys.argv)
+    main(joint_hook="--plain" not in sys.argv, **steps_flag(sys.argv))

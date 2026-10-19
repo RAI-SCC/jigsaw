@@ -1,5 +1,6 @@
 """Boilerplate shared by the tutorials: process-group bring-up and data sharding."""
 
+import atexit
 import os
 
 import torch
@@ -31,6 +32,11 @@ def _gpus_on_this_node() -> int:
     return n_gpus
 
 
+def _destroy_process_group() -> None:
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
 def setup() -> tuple[torch.device, int, int]:
     """Initialise ``torch.distributed`` and return ``(device, rank, world_size)``.
 
@@ -38,7 +44,11 @@ def setup() -> tuple[torch.device, int, int]:
     ``srun`` or ``torchrun``). Otherwise -- no GPU, or fewer GPUs than processes on the
     node, as on a laptop -- it falls back to gloo on CPU, so every tutorial also runs
     with ``torchrun --nproc-per-node 4``.
+
+    The process group is destroyed when the script exits. Left to interpreter
+    shutdown, gloo's threads can be torn down first and abort the process.
     """
+    atexit.register(_destroy_process_group)
     env = resolve_launch_env()
     n_gpus = _gpus_on_this_node()
     if n_gpus and n_gpus >= _processes_on_this_node(env.world_size):
@@ -68,6 +78,13 @@ def ddp_flags(argv: list[str]) -> dict[str, bool]:
     """
     joint = "--joint-hook" in argv
     return {"data_parallel": joint or "--ddp" in argv, "joint_hook": joint}
+
+
+def steps_flag(argv: list[str]) -> dict[str, int]:
+    """``main()`` keyword argument for ``--steps N``; empty (the default) without it."""
+    if "--steps" not in argv:
+        return {}
+    return {"steps": int(argv[argv.index("--steps") + 1])}
 
 
 def data_seed(step: int, mesh: dict[str, dist.ProcessGroup]) -> int:
