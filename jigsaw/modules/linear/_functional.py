@@ -56,9 +56,11 @@ def _linear_vmap(
     * Matmul of two operands (no layer weight): both get the leading axis.
     * Layer weight and bias not vmapped: the vmapped axis is folded into the
       batch axis.
-    * Layer weight or bias vmapped (e.g. stacked ensemble members): ``fn`` runs
-      with :meth:`LinearConfig.for_vmap`, which broadcasts each member's weight
-      over that member's ``(batch, seq)`` input.
+    * Layer weight or bias vmapped (e.g. stacked ensemble members): ``x`` runs
+      as ``(members, batch, seq, in)``, the weight as ``(members, 1, out, in)``
+      and the bias as ``(members, 1, 1, out)``, so each member's parameters
+      broadcast over that member's input. The backward sums the gradients back
+      to those shapes, and autograd drops the singleton axes.
     """
     check_not_vmapped(config)
     size = info.batch_size
@@ -78,9 +80,11 @@ def _linear_vmap(
         )
         return out.unflatten(0, (size, -1)), 0
 
-    w = cast(torch.Tensor, to_front(w, w_dim, size))
+    w = cast(torch.Tensor, to_front(w, w_dim, size)).unsqueeze(1)
     b = to_front(b, b_dim, size)
-    # The vmapped config expects ``x`` as ``(members, batch, seq, in)``.
+    if b is not None:
+        b = b[:, None, None]
+    # The kernels broadcast each member's weight over its ``(batch, seq)`` input.
     lead = x.shape[1:-1]
     x = x.reshape(size, -1, lead[-1] if lead else 1, x.shape[-1]).contiguous()
     out = fn(x, w, b, local_rank, device, config.for_vmap(), model_group)
@@ -124,13 +128,13 @@ class _XWT(torch.autograd.Function):
         torch.Tensor
             Local output.
         """
-        w = config.reshape_weights(w)
         # Opt into autocast: this Function hides the inner matmul from autocast's
         # op-level policy. ``_XWT`` casts x/w here (its kernel does not); casting
-        # the bias too keeps ``add_bias`` from promoting the output back to fp32.
+        # the bias too keeps the bias add from promoting the output back to fp32.
         x, w, b = cast_to_autocast_dtype(x, w, b)
         xwt = config.mm_kernels[0](x, w, local_rank, device, model_group)
-        xwt = config.add_bias(xwt, b)
+        if b is not None:
+            xwt = xwt.add(b)
 
         xwt = cast(torch.Tensor, xwt)
 
@@ -164,13 +168,12 @@ class _XWT(torch.autograd.Function):
             Gradients of the input, weight and bias, followed by ``None`` for
             the non-differentiable arguments.
         """
-        input, weight, _ = ctx.saved_tensors
+        input, weight, bias = ctx.saved_tensors
         local_rank = ctx.local_rank
         device = ctx.device
         config = ctx.config
         model_group = ctx.model_group
 
-        weight = config.reshape_weights(weight)
         # handle conversion if necessary here
         grad_output = grad_output.to(weight.dtype)
         input = input.to(weight.dtype)
@@ -182,9 +185,11 @@ class _XWT(torch.autograd.Function):
             device=device,
             model_group=model_group,
         )
-        grad_weight = config.grad_sum(grad_weight)  # sum along batch dimension
+        # Sum over the batch axes the weight and bias broadcast over; a
+        # vmapped weight/bias keeps its members axis.
+        grad_weight = grad_weight.sum_to_size(weight.shape)
 
-        grad_b = config.grad_bias(grad_output)
+        grad_b = None if bias is None else grad_output.sum_to_size(bias.shape)
 
         return grad_input, grad_weight, grad_b, None, None, None, None
 
@@ -235,12 +240,12 @@ class _XW(torch.autograd.Function):
         torch.Tensor
             Local output.
         """
-        w = config.reshape_weights(w)
         # Cast the bias to the autocast dtype (the kernel casts x/w itself) so
-        # ``add_bias`` does not promote the output back to fp32 under autocast.
+        # the bias add does not promote the output back to fp32 under autocast.
         (b,) = cast_to_autocast_dtype(b)
         xw = config.mm_kernels[1](x, w, local_rank, device, model_group)
-        xw = config.add_bias(xw, b)
+        if b is not None:
+            xw = xw.add(b)
         xw = cast(torch.Tensor, xw)
         return xw
 
@@ -278,8 +283,6 @@ class _XW(torch.autograd.Function):
         config = ctx.config
         model_group = ctx.model_group
 
-        weight = config.reshape_weights(weight)
-
         grad_input = config.mm_kernels[0](
             grad_output,
             weight,
@@ -295,8 +298,10 @@ class _XW(torch.autograd.Function):
             model_group=model_group,
         )
 
-        grad_weight = config.grad_sum(grad_weight)
-        grad_b = config.grad_bias(grad_output)
+        # Sum over the batch axes the weight and bias broadcast over; a
+        # vmapped weight/bias keeps its members axis.
+        grad_weight = grad_weight.sum_to_size(weight.shape)
+        grad_b = None if bias is None else grad_output.sum_to_size(bias.shape)
 
         return grad_input, grad_weight, grad_b, None, None, None, None
 
@@ -347,12 +352,12 @@ class _XTW(torch.autograd.Function):
         torch.Tensor
             Local output.
         """
-        w = config.reshape_weights(w)
         # Cast the bias to the autocast dtype (the kernel casts x/w itself) so
-        # ``add_bias`` does not promote the output back to fp32 under autocast.
+        # the bias add does not promote the output back to fp32 under autocast.
         (b,) = cast_to_autocast_dtype(b)
         xtw = config.mm_kernels[2](x, w, local_rank, device, model_group)
-        xtw = config.add_bias(xtw, b)
+        if b is not None:
+            xtw = xtw.add(b)
         xtw = cast(torch.Tensor, xtw)
         return xtw
 
@@ -384,13 +389,11 @@ class _XTW(torch.autograd.Function):
             Gradients of the input, weight and bias, followed by ``None`` for
             the non-differentiable arguments.
         """
-        input, weight, _ = ctx.saved_tensors
+        input, weight, bias = ctx.saved_tensors
         local_rank = ctx.local_rank
         device = ctx.device
         config = ctx.config
         model_group = ctx.model_group
-
-        weight = config.reshape_weights(weight)
 
         grad_input = config.mm_kernels[0](
             weight,
@@ -407,8 +410,10 @@ class _XTW(torch.autograd.Function):
             model_group=model_group,
         )
 
-        grad_weight = config.grad_sum(grad_weight)
-        grad_b = config.grad_bias(grad_output)
+        # Sum over the batch axes the weight and bias broadcast over; a
+        # vmapped weight/bias keeps its members axis.
+        grad_weight = grad_weight.sum_to_size(weight.shape)
+        grad_b = None if bias is None else grad_output.sum_to_size(bias.shape)
 
         return grad_input, grad_weight, grad_b, None, None, None, None
 

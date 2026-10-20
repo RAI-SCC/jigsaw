@@ -115,7 +115,6 @@ class DistributedLinear(torch.nn.Module):
         self.config = (
             LinearConfig(
                 self.parallelism,
-                self.bias,
                 linear_layer=True,
                 device=self.device,
             )
@@ -450,7 +449,6 @@ class DistributedLinear(torch.nn.Module):
         self.out_dim, self.in_dim = tuple(self.weight.shape)
         self.config = LinearConfig(
             self.parallelism,
-            self.bias,
             linear_layer=True,
             device=self.device,
         )
@@ -503,7 +501,7 @@ class _DistributedMatMul(torch.nn.Module):
         self.config = (
             config
             if config is not None
-            else LinearConfig(parallelism, None, linear_layer=False, device=device)
+            else LinearConfig(parallelism, linear_layer=False, device=device)
         )
         self.matmul = self._autograd_fn.apply
 
