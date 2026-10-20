@@ -57,7 +57,7 @@ if JIGSAW_TE_AVAILABLE:
         faithful stand-in. A kernel that cannot serve a shape raises rather than
         falling back silently.
 
-        ``torch.vmap`` support (``torch_blue``'s Bayesian ensembles) survives the
+        ``torch.vmap`` support (e.g. for stacked-parameter ensembles) survives the
         move: see the :meth:`vmap` staticmethod.
         """
 
@@ -150,8 +150,8 @@ if JIGSAW_TE_AVAILABLE:
             """Fold the vmapped (samples) axis into the batch, run one plain call, unfold.
 
             ``transformer_engine``'s kernels are opaque C++/CUDA extensions with no
-            batching rule, so calling them under ``torch.vmap`` (as ``torch_blue``
-            does for Bayesian sampling) fails; having a ``vmap`` staticmethod lets
+            batching rule, so calling them under ``torch.vmap`` (e.g. to run an
+            ensemble of stacked parameters) fails; having a ``vmap`` staticmethod lets
             us decide what happens instead. Since attention is independent across
             the batch axis, ``[samples, batch, ...] -> [samples * batch, ...]`` is
             exact.
