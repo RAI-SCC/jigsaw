@@ -1,6 +1,6 @@
 """Autograd functions of the distributed linear layers."""
 
-from typing import Any, Optional, Protocol, Union, cast
+from typing import Any, Optional, Protocol, cast
 
 import torch
 import torch.distributed as dist
@@ -192,18 +192,10 @@ class _XWT(torch.autograd.Function):
     def vmap(
         info: Any,
         in_dims: tuple[Optional[int], ...],
-        x: torch.Tensor,
-        w: torch.Tensor,
-        b: Union[torch.Tensor, None],
-        local_rank: int,
-        device: torch.device,
-        config: LinearConfig,
-        model_group: dist.ProcessGroup,
+        *args: Any,
     ) -> tuple[torch.Tensor, Optional[int]]:
         """Batching rule for ``torch.vmap``."""
-        return _linear_vmap(
-            _XWT.apply, info, in_dims, x, w, b, local_rank, device, config, model_group
-        )
+        return _linear_vmap(_XWT.apply, info, in_dims, *args)
 
 
 class _XW(torch.autograd.Function):
@@ -312,18 +304,10 @@ class _XW(torch.autograd.Function):
     def vmap(
         info: Any,
         in_dims: tuple[Optional[int], ...],
-        x: torch.Tensor,
-        w: torch.Tensor,
-        b: Optional[torch.Tensor],
-        local_rank: int,
-        device: torch.device,
-        config: LinearConfig,
-        model_group: dist.ProcessGroup,
+        *args: Any,
     ) -> tuple[torch.Tensor, Optional[int]]:
         """Batching rule for ``torch.vmap``."""
-        return _linear_vmap(
-            _XW.apply, info, in_dims, x, w, b, local_rank, device, config, model_group
-        )
+        return _linear_vmap(_XW.apply, info, in_dims, *args)
 
 
 class _XTW(torch.autograd.Function):
@@ -432,15 +416,7 @@ class _XTW(torch.autograd.Function):
     def vmap(
         info: Any,
         in_dims: tuple[Optional[int], ...],
-        x: torch.Tensor,
-        w: torch.Tensor,
-        b: Optional[torch.Tensor],
-        local_rank: int,
-        device: torch.device,
-        config: LinearConfig,
-        model_group: dist.ProcessGroup,
+        *args: Any,
     ) -> tuple[torch.Tensor, Optional[int]]:
         """Batching rule for ``torch.vmap``."""
-        return _linear_vmap(
-            _XTW.apply, info, in_dims, x, w, b, local_rank, device, config, model_group
-        )
+        return _linear_vmap(_XTW.apply, info, in_dims, *args)

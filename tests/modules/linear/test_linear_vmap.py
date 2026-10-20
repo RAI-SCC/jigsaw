@@ -104,14 +104,78 @@ class TestLinearVmap:
         ref = torch.stack([layer(xi) for xi in x])
         _check("output", got, ref, device, mesh)
 
+
+class TestLinearNestedVmap:
+    B = 2  # size of the inner vmap
+
+    def _setup(self, mesh: dict, device: torch.device) -> tuple:
+        torch.manual_seed(mesh["model"].rank())
+        members = [_layer(mesh, device) for _ in range(E)]
+        base = _layer(mesh, device)
+        params, _ = stack_module_state(members)
+        x = torch.randn(E, self.B, 2, 5, IN // mesh["col"].size(), device=device)
+        return members, base, params, x
+
     @pytest.mark.dist(4)
-    def test_nested_vmap_over_member_weights_raises(
+    def test_outer_member_weights_inner_input(
         self, device, process_mesh_dict_2x2
     ) -> None:
-        mesh = process_mesh_dict_2x2
-        layer = _layer(mesh, device)
-        cfg = layer.config.for_vmap()
-        with pytest.raises(NotImplementedError, match="nested"):
-            from jigsaw._core.vmap import check_not_vmapped
+        """Outer vmap over member weights, inner over the input: matches a loop.
 
-            check_not_vmapped(cfg)
+        The inner level folds its axis into the batch, so only the outer level
+        uses the members config; the bias gradient keeps one members axis.
+        """
+        mesh = process_mesh_dict_2x2
+        members, base, params, x = self._setup(mesh, device)
+
+        def f(p, xe):
+            return torch.vmap(lambda xi: functional_call(base, p, (xi,)))(xe)
+
+        got = torch.vmap(f)(params, x)
+        ref = torch.stack(
+            [torch.stack([m(xi) for xi in x[e]]) for e, m in enumerate(members)]
+        )
+        _check("output", got, ref, device, mesh)
+
+        g = torch.randn_like(ref)
+        (got * g).sum().backward()
+        (ref * g).sum().backward()
+        _check(
+            "grad_weight",
+            params["weight"].grad,
+            torch.stack([m.weight.grad for m in members]),
+            device,
+            mesh,
+        )
+        # functional_call bypasses the bias replica grad-sync; replay it.
+        grad_b = params["bias"].grad.clone()
+        dist.all_reduce(grad_b, group=mesh["row"])
+        _check(
+            "grad_bias",
+            grad_b,
+            torch.stack([m.bias.grad for m in members]),
+            device,
+            mesh,
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("outer", ["input", "member_weights"])
+    def test_inner_member_weights_raises(
+        self, device, process_mesh_dict_2x2, outer: str
+    ) -> None:
+        """A vmap around one over member weights reaches the rule twice: raises."""
+        mesh = process_mesh_dict_2x2
+        _, base, params, x = self._setup(mesh, device)
+
+        def g(p, xi):
+            return functional_call(base, p, (xi,))
+
+        with pytest.raises(NotImplementedError, match="nested"):
+            if outer == "input":
+                torch.vmap(lambda xb: torch.vmap(g)(params, xb))(x.transpose(0, 1))
+            else:
+                p2 = {
+                    k: v.unsqueeze(1).expand(E, self.B, *v.shape[1:]).contiguous()
+                    for k, v in params.items()
+                }
+                torch.vmap(torch.vmap(g))(p2, x)
