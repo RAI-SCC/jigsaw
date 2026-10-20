@@ -66,7 +66,11 @@ class VmapConfig:
         return cast(_C, self._vmap_config)
 
     def _select_vmapped(self) -> None:
-        """Swap in the members-axis kernels on the vmapped copy."""
+        """Swap in the members-axis kernels on the vmapped copy.
+
+        Hook for subclasses, called by :meth:`for_vmap` on the copy. The default
+        is a no-op, for configs whose kernels need no swap.
+        """
 
     def __getstate__(self) -> dict:
         """Drop the cached vmapped config (it holds ``torch.vmap`` closures)."""
