@@ -49,7 +49,6 @@ def test_count_parameters_with_mesh_is_the_whole_model(
         col_group=mesh["col"],
         row_group=mesh["row"],
         bias=bias,
-        bayesian=False,
     ).to(device)
 
     total = debug.count_parameters(layer, mesh)

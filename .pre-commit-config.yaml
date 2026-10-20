@@ -14,7 +14,9 @@ repos:
       stages: [pre-push]
     - id: mypy
       name: mypy
-      entry: ./.venv/bin/mypy --config-file pyproject.toml --ignore-missing-imports
+      # Own cache dir: the VS Code mypy extension (a different mypy version) writes
+      # .mypy_cache and invalidates it, forcing a full re-check of torch every commit.
+      entry: ./.venv/bin/mypy --config-file pyproject.toml --ignore-missing-imports --cache-dir .mypy_cache_precommit
       language: system
       types: [python]
       pass_filenames: false

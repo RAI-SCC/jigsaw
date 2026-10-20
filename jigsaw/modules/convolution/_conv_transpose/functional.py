@@ -7,6 +7,7 @@ import torch.distributed as dist
 
 from jigsaw._core.autocast import cast_to_autocast_dtype
 
+from .._common.vmap import conv_vmap
 from .config import ConvTransposeNdConfig
 
 
@@ -157,27 +158,7 @@ class _ConvTransposeNd(torch.autograd.Function):
     def vmap(
         info: Any,
         in_dims: tuple[Optional[int], ...],
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        bias: Optional[torch.Tensor],
-        stride: int,
-        padding: int,
-        dilation: int,
-        spatial_groups: tuple[dist.ProcessGroup | None, ...],
-        channel_group: dist.ProcessGroup,
-        config: ConvTransposeNdConfig,
-    ) -> tuple[torch.Tensor, Optional[int]]:
+        *args: Any,
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[int, int]]:
         """Batching rule for ``torch.vmap``."""
-        out = _ConvTransposeNd.apply(
-            x,
-            weight,
-            bias,
-            stride,
-            padding,
-            dilation,
-            spatial_groups,
-            channel_group,
-            config,
-        )
-
-        return out, 0
+        return conv_vmap(_ConvTransposeNd.apply, info, in_dims, *args)

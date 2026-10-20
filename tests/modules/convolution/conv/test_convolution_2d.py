@@ -112,7 +112,6 @@ def _conv2d_reference_check(
         dilation=dilation,
         groups=groups,
         bias=True,
-        bayesian=False,
         dtype=torch.float32,
         channel_comm=channel_comm,
     ).to(device)
@@ -261,7 +260,6 @@ def _conv2d_optimizer_parity_check(
         dilation=dilation,
         groups=groups,
         bias=True,
-        bayesian=False,
         dtype=torch.float32,
         channel_comm=channel_comm,
     ).to(device)
@@ -422,7 +420,6 @@ class TestConv2d:
             dilation=1,
             groups=1,
             bias=True,
-            bayesian=False,
             dtype=torch.float32,
         ).to(device)
 
@@ -480,7 +477,6 @@ class TestConv2d:
                 dilation=1,
                 groups=1,
                 bias=True,
-                bayesian=False,
                 dtype=torch.float32,
                 channel_comm=channel_comm,
             ).to(device)
@@ -586,7 +582,6 @@ class TestConv2d:
             dilation=1,
             groups=1,
             bias=True,
-            bayesian=False,
             dtype=torch.float32,
         ).to(device)
 
@@ -623,7 +618,6 @@ class TestConv2d:
                 dilation=dilation,
                 groups=1,
                 bias=True,
-                bayesian=False,
                 dtype=torch.float32,
             ).to(device)
 
@@ -746,7 +740,6 @@ class TestConv2d:
             dilation=1,
             groups=1,
             bias=True,
-            bayesian=False,
             dtype=torch.float32,
         ).to(device)
         x = torch.randn(2, 4, 16, 8, device=device)
@@ -885,7 +878,6 @@ class TestConv2dParallel:
             padding=(0,),
             dilation=1,
             bias=True,
-            bayesian=False,
             dtype=torch.float32,
         ).to(device)
         _assert_weight_replicated_across_spatial(conv.weight, process_mesh_dict_3x2)
@@ -1064,7 +1056,6 @@ class TestConv2dChannelGroupOne:
             padding=1,
             dilation=2,
             bias=True,
-            bayesian=False,
             dtype=torch.float32,
         ).to(device)
 
@@ -1550,7 +1541,6 @@ class TestConv2dTranspose:
             dilation=1,
             groups=1,
             bias=True,
-            bayesian=False,
             dtype=torch.float32,
         ).to(device)
 
@@ -1595,7 +1585,6 @@ class TestConv2dTranspose:
             dilation=1,
             groups=1,
             bias=True,
-            bayesian=False,
             dtype=torch.float32,
         ).to(device)
 

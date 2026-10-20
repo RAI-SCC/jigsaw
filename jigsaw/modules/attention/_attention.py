@@ -57,7 +57,7 @@ if JIGSAW_TE_AVAILABLE:
         faithful stand-in. A kernel that cannot serve a shape raises rather than
         falling back silently.
 
-        ``torch.vmap`` support (``torch_blue``'s Bayesian ensembles) survives the
+        ``torch.vmap`` support (e.g. for stacked-parameter ensembles) survives the
         move: see the :meth:`vmap` staticmethod.
         """
 
@@ -150,8 +150,8 @@ if JIGSAW_TE_AVAILABLE:
             """Fold the vmapped (samples) axis into the batch, run one plain call, unfold.
 
             ``transformer_engine``'s kernels are opaque C++/CUDA extensions with no
-            batching rule, so calling them under ``torch.vmap`` (as ``torch_blue``
-            does for Bayesian sampling) fails; having a ``vmap`` staticmethod lets
+            batching rule, so calling them under ``torch.vmap`` (e.g. to run an
+            ensemble of stacked parameters) fails; having a ``vmap`` staticmethod lets
             us decide what happens instead. Since attention is independent across
             the batch axis, ``[samples, batch, ...] -> [samples * batch, ...]`` is
             exact.
@@ -256,7 +256,6 @@ class DistributedAttention(torch.nn.Module):
         spatial_group: dist.ProcessGroup,
         channel_group: dist.ProcessGroup,
         dropout_p: float = 0.0,
-        bayesian: bool = False,
         qk_norm: bool = False,
         ring: bool = False,
         ulysses: bool = False,
@@ -300,8 +299,6 @@ class DistributedAttention(torch.nn.Module):
             Process group along the channel dimension.
         dropout_p : float
             Dropout probability.
-        bayesian : bool
-            Whether the linear layers are Bayesian.
         qk_norm : bool
             Whether to normalize queries and keys.
         ring : bool
@@ -524,7 +521,6 @@ class DistributedAttention(torch.nn.Module):
                 row_group=self.spatial_group,
                 col_group=self.channel_group,
                 bias=False,
-                bayesian=bayesian,
                 dtype=self.dtype,
             )
 
@@ -546,7 +542,6 @@ class DistributedAttention(torch.nn.Module):
                 row_group=self.spatial_group,
                 col_group=self.channel_group,
                 bias=out_bias,
-                bayesian=bayesian,
                 dtype=self.dtype,
             )
 
@@ -1321,7 +1316,6 @@ class Attention(torch.nn.Module):
             device=device,
             spatial_group=spatial_group,
             channel_group=process_mesh_dict[col_kw],
-            bayesian=False,
             qk_norm=attention.qk_norm,
             ring=ring,
             ulysses=ulysses,

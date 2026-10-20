@@ -856,7 +856,6 @@ class TestLinearTrainingParity:
             col_group=pmd["col"],
             row_group=pmd["row"],
             bias=False,
-            bayesian=False,
         ).to(device)
         w = gather_results(dist_lin.weight.data, process_mesh_dict=pmd)
         ref_lin = torch.nn.Linear(in_dim, out_dim, bias=False).to(device)
