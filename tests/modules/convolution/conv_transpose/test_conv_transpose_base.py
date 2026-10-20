@@ -11,6 +11,7 @@ import torch
 
 import jigsaw.modules.convolution as convolution
 from jigsaw.gather import gather_1d_results
+from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
 
@@ -169,3 +170,37 @@ class TestConvTransposeConvertToTorch:
         y_ref = torch_conv(x_global)
         assert y_ref.shape == y_global.shape
         assert torch.allclose(y_global, y_ref, atol=1e-4, rtol=1e-4)
+
+
+class TestConvTransposeSampledNoBias:
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("n_spatial", [1, 2, 3])
+    def test_sampled_weight_without_bias(
+        self, device: torch.device, process_mesh_dict_4x1: dict, n_spatial: int
+    ) -> None:
+        """A bayesian layer with ``bias=False`` runs a per-sample weight stack.
+
+        Patchify on a 4x1 mesh takes ``_forward_local``; the stacked weight
+        selects the vmapped primitive, which must not be handed a ``None`` bias.
+        """
+        mesh = process_mesh_dict_4x1
+        conv = _CONV_CLS[n_spatial](
+            4,
+            6,
+            2,
+            device=device,
+            spatial_group=mesh["row"],
+            channel_group=mesh["col"],
+            stride=2,
+            bias=False,
+            bayesian=True,
+        ).to(device)
+        samples = 3
+        weight = torch.randn(samples, *conv.weight.shape, device=device)
+        x = torch.randn(samples, 2, 4, *([4] * n_spatial), device=device)
+
+        y = torch.func.functional_call(conv, {"weight": weight}, (x,))
+
+        native = conv.config.native_conv_transpose_fn
+        y_ref = torch.stack([native(x[s], weight[s], stride=2) for s in range(samples)])
+        assert_close("y", y, y_ref, 1e-5, 1e-5, device, mesh["row"])
