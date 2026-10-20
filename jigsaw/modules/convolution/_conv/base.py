@@ -29,7 +29,6 @@ class _DistributedConvNd(torch.nn.Module):
     # type-hints
     bias: Optional[Parameter]
     config: ConvNdConfig
-    bayesian: bool
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...]
     channel_group: dist.ProcessGroup
     device: torch.device
@@ -56,7 +55,6 @@ class _DistributedConvNd(torch.nn.Module):
         groups: int = 1,
         bias: bool = True,
         # --- distributed (optional) ---
-        bayesian: bool = False,
         dtype: torch.dtype = torch.float32,
         channel_comm: str = "auto",
         config: Optional[ConvNdConfig] = None,
@@ -90,8 +88,6 @@ class _DistributedConvNd(torch.nn.Module):
             ``channel_group.size()``.
         bias : bool
             Whether to add a bias.
-        bayesian : bool
-            Whether the model is Bayesian.
         dtype : torch.dtype
             Data type of the parameters.
         channel_comm : str
@@ -136,7 +132,6 @@ class _DistributedConvNd(torch.nn.Module):
         self.channel_group = channel_group
         self.device = device
         self.dtype = dtype
-        self.bayesian = bayesian
 
         # Global (unsharded) weight/bias shape, torch.nn.Conv{1,2,3}d layout
         # ``(C_out, C_in / groups, *kernel)``. ``reset_parameters`` keys the init
@@ -173,7 +168,6 @@ class _DistributedConvNd(torch.nn.Module):
 
         self.config = (
             ConvNdConfig(
-                self.bayesian,
                 self.channel_group,
                 self.bias,
                 self.kernel_size,
@@ -275,7 +269,6 @@ class _DistributedConvNd(torch.nn.Module):
             spatial_group=process_mesh_dict[row_kw],
             channel_group=process_mesh_dict[col_kw],
             device=device,
-            bayesian=False,  # TODO
             dtype=model.weight.dtype,
         )
         # Map weights — clone so the original graph is detached. The channel
@@ -477,7 +470,6 @@ class _DistributedConvNd(torch.nn.Module):
             self.channel_group.size(),
         )
         self.config = ConvNdConfig(
-            self.bayesian,
             self.channel_group,
             self.bias,
             self.kernel_size,
@@ -518,17 +510,12 @@ class _DistributedConvNd(torch.nn.Module):
                 "_forward_local reached with a halo-needing spatial split; "
                 "forward() should have routed this through _conv_apply."
             )
-        # The vmapped primitive expects a leading sample axis on the weight;
-        # without it, use the native primitive.
-        sampled = weight.dim() > self._n_spatial + 2
-        conv: Callable[..., torch.Tensor] = (
-            self.config.conv_fn if sampled else self.config.native_conv_fn
-        )
-        # The vmapped primitive maps every positional input over axis 0, so a
-        # ``None`` bias must be left out rather than passed.
-        args = (x, weight) if bias is None else (x, weight, bias)
-        y = conv(
-            *args,
+        # Under torch.vmap the native primitive's own batching rule handles a
+        # vmapped weight.
+        y = self.config.native_conv_fn(
+            x,
+            weight,
+            bias,
             stride=self.stride,
             padding=self.padding,
             dilation=self.dilation,
@@ -577,7 +564,6 @@ class _DistributedConvNd(torch.nn.Module):
             self.dilation,
             self.spatial_groups,
             self.channel_group,
-            self.bayesian,
             self.config,
         )
 

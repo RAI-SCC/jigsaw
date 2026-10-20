@@ -109,7 +109,6 @@ def conv_nway_backward(
     local_in_spatial: tuple[int, ...],
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
     channel_group: dist.ProcessGroup,
-    bayesian: bool,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute the gradients of the convolution without halo exchange.
@@ -137,8 +136,6 @@ def conv_nway_backward(
         Process group of each spatial axis, ``None`` if the axis is not split.
     channel_group : dist.ProcessGroup
         Process group splitting the channels.
-    bayesian : bool
-        Whether the model is Bayesian.
     config : ConvNdConfig
         Kernel selection.
 
@@ -158,12 +155,11 @@ def conv_nway_backward(
             local_in_spatial,
             spatial_groups,
             channel_group,
-            bayesian,
             config,
         )
 
     g_x = config.conv_input_fn(
-        x_aug.shape[int(bayesian) :],
+        x_aug.shape[int(config.vmapped) :],
         weight,
         grad_output.to(weight.dtype),  # handles autocast
         stride=stride,
@@ -176,7 +172,7 @@ def conv_nway_backward(
 
     g_w = config.conv_weight_fn(
         x_aug,
-        weight.shape[int(bayesian) :],
+        weight.shape[int(config.vmapped) :],
         grad_output.to(weight.dtype),
         stride=stride,
         padding=padding,
@@ -290,7 +286,6 @@ def conv_halo_nway_backward(
     local_in_spatial: tuple[int, ...],
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
     channel_group: dist.ProcessGroup,
-    bayesian: bool,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute the gradients of the convolution with halo exchange.
@@ -315,8 +310,6 @@ def conv_halo_nway_backward(
         Process group of each spatial axis, ``None`` if the axis is not split.
     channel_group : dist.ProcessGroup
         Process group splitting the channels.
-    bayesian : bool
-        Whether the model is Bayesian.
     config : ConvNdConfig
         Kernel selection.
 
@@ -328,7 +321,7 @@ def conv_halo_nway_backward(
     local_padding = _local_padding(padding, spatial_groups)
 
     g_x_need = config.conv_input_fn(
-        x_aug.shape[int(bayesian) :],
+        x_aug.shape[int(config.vmapped) :],
         weight,
         grad_output.to(weight.dtype),  # handles autocast
         stride=stride,
@@ -341,7 +334,7 @@ def conv_halo_nway_backward(
     # two overlap instead of running back to back.
     g_w = config.conv_weight_fn(
         x_aug,
-        weight.shape[int(bayesian) :],
+        weight.shape[int(config.vmapped) :],
         grad_output.to(weight.dtype),
         stride=stride,
         padding=local_padding,

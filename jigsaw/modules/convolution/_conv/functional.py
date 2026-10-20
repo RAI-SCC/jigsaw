@@ -7,6 +7,7 @@ import torch.distributed as dist
 
 from jigsaw._core.autocast import cast_to_autocast_dtype
 
+from .._common.vmap import conv_vmap
 from .config import ConvNdConfig
 
 
@@ -19,7 +20,6 @@ class ConvNdCtx(Protocol):
     dilation: int | tuple[int, ...]
     spatial_groups: tuple[dist.ProcessGroup | None, ...]
     channel_group: dist.ProcessGroup
-    bayesian: bool
     config: ConvNdConfig
     saved_tensors: tuple[torch.Tensor, torch.Tensor]
 
@@ -37,7 +37,6 @@ class _ConvNd(torch.autograd.Function):
         dilation: tuple[int, ...],
         spatial_groups: tuple[dist.ProcessGroup | None, ...],
         channel_group: dist.ProcessGroup,
-        bayesian: bool,
         config: ConvNdConfig,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute the local output slice.
@@ -81,7 +80,6 @@ class _ConvNd(torch.autograd.Function):
             dilation,
             spatial_groups,
             channel_group,
-            bayesian,
             config,
         ) = inputs
 
@@ -101,7 +99,6 @@ class _ConvNd(torch.autograd.Function):
         c.stride = stride
         c.padding = padding
         c.dilation = dilation
-        c.bayesian = bayesian
         c.config = config
 
     @staticmethod
@@ -113,7 +110,6 @@ class _ConvNd(torch.autograd.Function):
         torch.Tensor,
         torch.Tensor,
         Optional[torch.Tensor],
-        None,
         None,
         None,
         None,
@@ -143,7 +139,6 @@ class _ConvNd(torch.autograd.Function):
             c.local_in_spatial,
             c.spatial_groups,
             c.channel_group,
-            c.bayesian,
             config,
         )
 
@@ -157,36 +152,13 @@ class _ConvNd(torch.autograd.Function):
             None,
             None,
             None,
-            None,
         )
 
     @staticmethod
     def vmap(
         info: Any,
         in_dims: tuple[Optional[int], ...],
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        bias: Optional[torch.Tensor],
-        stride: int,
-        padding: int,
-        dilation: int,
-        spatial_groups: tuple[dist.ProcessGroup | None, ...],
-        channel_group: dist.ProcessGroup,
-        bayesian: bool,
-        config: ConvNdConfig,
-    ) -> tuple[torch.Tensor, Optional[int]]:
+        *args: Any,
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[int, int]]:
         """Batching rule for ``torch.vmap``."""
-        out = _ConvNd.apply(
-            x,
-            weight,
-            bias,
-            stride,
-            padding,
-            dilation,
-            spatial_groups,
-            channel_group,
-            bayesian,
-            config,
-        )
-
-        return out, 0
+        return conv_vmap(_ConvNd.apply, info, in_dims, *args)

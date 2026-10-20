@@ -165,7 +165,9 @@ def _over_channels_local(
         y = post_fn(y)
     if b is not None:
         y = y + _bias_view(b, n_spatial_dims)
-    return y, span
+    # ``span`` can be ``x`` itself; under ``torch.vmap`` the Function may not
+    # save an input it returns as-is, so return a view of it.
+    return y, span.view_as(span)
 
 
 def over_channels_transpose(

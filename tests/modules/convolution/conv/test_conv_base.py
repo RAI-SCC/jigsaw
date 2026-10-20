@@ -11,6 +11,7 @@ Covers the pieces the forward/backward reference suites never touch:
 
 import pytest
 import torch
+import torch.distributed as dist
 
 import jigsaw.modules.convolution as convolution
 from jigsaw.gather import gather_1d_results
@@ -171,35 +172,50 @@ class TestConvConvertToTorch:
         assert torch.allclose(y_global, y_ref, atol=1e-4, rtol=1e-4)
 
 
-class TestConvSampledNoBias:
+class TestVmapMembersNoBias:
     @pytest.mark.dist(4)
     @pytest.mark.parametrize("n_spatial", [1, 2, 3])
-    def test_sampled_weight_without_bias(
-        self, device: torch.device, process_mesh_dict_4x1: dict, n_spatial: int
+    @pytest.mark.parametrize(
+        ("mesh_name", "kernel", "stride", "padding"),
+        [("4x1", 2, 2, 0), ("4x1", 3, 1, 1), ("2x2", 2, 2, 0)],
+        ids=["local", "halo", "channel_gather"],
+    )
+    def test_vmap_over_weights_without_bias(
+        self,
+        request: pytest.FixtureRequest,
+        device: torch.device,
+        n_spatial: int,
+        mesh_name: str,
+        kernel: int,
+        stride: int,
+        padding: int,
     ) -> None:
-        """A bayesian layer with ``bias=False`` runs a per-sample weight stack.
+        """``torch.vmap`` over a weight stack works for a layer with ``bias=False``.
 
-        Patchify on a 4x1 mesh takes ``_forward_local``; the stacked weight
-        selects the vmapped primitive, which must not be handed a ``None`` bias.
+        ``local`` runs ``_forward_local`` (the native batching rule), ``halo`` and
+        ``channel_gather`` run ``_conv_apply`` (the ``conv_vmap`` rule with the
+        members config). Each must match calling the layer once per member.
         """
-        mesh = process_mesh_dict_4x1
+        mesh = request.getfixturevalue(f"process_mesh_dict_{mesh_name}")
         conv = _CONV_CLS[n_spatial](
             4,
             6,
-            2,
+            kernel,
             device=device,
             spatial_group=mesh["row"],
             channel_group=mesh["col"],
-            stride=2,
+            stride=stride,
+            padding=padding,
             bias=False,
-            bayesian=True,
         ).to(device)
-        samples = 3
-        weight = torch.randn(samples, *conv.weight.shape, device=device)
-        x = torch.randn(samples, 2, 4, *([4] * n_spatial), device=device)
+        members = 3
+        weight = torch.randn(members, *conv.weight.shape, device=device)
+        local_in = 4 // mesh["col"].size()
+        x = torch.randn(members, 2, local_in, *([4] * n_spatial), device=device)
 
-        y = torch.func.functional_call(conv, {"weight": weight}, (x,))
+        def call(w: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+            return torch.func.functional_call(conv, {"weight": w}, (xi,))
 
-        native = conv.config.native_conv_fn
-        y_ref = torch.stack([native(x[s], weight[s], stride=2) for s in range(samples)])
-        assert_close("y", y, y_ref, 1e-5, 1e-5, device, mesh["row"])
+        y = torch.vmap(call)(weight, x)
+        y_ref = torch.stack([call(weight[m], x[m]) for m in range(members)])
+        assert_close("y", y, y_ref, 1e-5, 1e-5, device, dist.group.WORLD)

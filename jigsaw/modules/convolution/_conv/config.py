@@ -15,6 +15,8 @@ from torch.nn.grad import (
 )
 from torch.nn.parameter import Parameter
 
+from jigsaw._core.vmap import VmapConfig
+
 from .._common.channel_comm import resolve_channel_comm
 from . import distributed as dist_conv
 
@@ -24,7 +26,7 @@ _CONV_INPUT_FN = (conv1d_input, conv2d_input, conv3d_input)
 _CONV_WEIGHT_FN = (conv1d_weight, conv2d_weight, conv3d_weight)
 
 
-class ConvNdConfig:
+class ConvNdConfig(VmapConfig):
     """Selection of the convolution kernels of the forward and backward pass."""
 
     # type hints
@@ -34,7 +36,6 @@ class ConvNdConfig:
 
     def __init__(
         self,
-        bayesian: bool,
         channel_group: dist.ProcessGroup,
         bias: Parameter | None,
         kernel_size: tuple[int, ...],
@@ -47,8 +48,6 @@ class ConvNdConfig:
 
         Parameters
         ----------
-        bayesian : bool
-            Whether the model is Bayesian.
         channel_group : dist.ProcessGroup
             Channel process group.
         bias : torch.Tensor | None
@@ -76,10 +75,9 @@ class ConvNdConfig:
         self.channel_local = groups % group_size == 0
         self.groups_local = groups // group_size if self.channel_local else 1
         self.native_conv_fn = _CONV_FN[self.n_spatial - 1]
-        self.conv_fn = self._conv_fn_selection(bayesian)
-        self.conv_input_fn = self._conv_input_fn_selection(bayesian)
-        self.conv_weight_fn = self._conv_weight_fn_selection(bayesian)
-        self.weight_reshape = self._reshape_weights_selection(bayesian)
+        self.conv_fn: Callable = self.native_conv_fn
+        self.conv_input_fn: Callable = _CONV_INPUT_FN[self.n_spatial - 1]
+        self.conv_weight_fn: Callable = _CONV_WEIGHT_FN[self.n_spatial - 1]
         self.grad_bias = self._grad_bias_selection(bias)
         # ``stride == kernel_size`` tiles the domain with no overlap, so the
         # spatial split needs no communication. Otherwise neighbouring output
@@ -91,39 +89,15 @@ class ConvNdConfig:
             self.dist_conv_fn = dist_conv.conv_halo_nway
             self.dist_conv_backward_fn = dist_conv.conv_halo_nway_backward
 
-    def _conv_fn_selection(self, bayesian: bool) -> Callable:
-        """Select the forward primitive."""
-        if bayesian:
-            return torch.vmap(self.native_conv_fn)
-        return self.native_conv_fn
+    def _select_vmapped(self) -> None:
+        """Swap in the members-axis primitives on the vmapped copy.
 
-    def _conv_input_fn_selection(self, bayesian: bool) -> Callable:
-        """Select the grad-input primitive."""
-        conv_input = _CONV_INPUT_FN[self.n_spatial - 1]
-        if bayesian:
-            return torch.vmap(conv_input, in_dims=(None, 0, 0))
-        return conv_input
-
-    def _conv_weight_fn_selection(self, bayesian: bool) -> Callable:
-        """Select the grad-weight primitive."""
-        conv_weight = _CONV_WEIGHT_FN[self.n_spatial - 1]
-        if bayesian:
-            return torch.vmap(conv_weight, in_dims=(0, None, 0))
-        return conv_weight
-
-    def _reshape_weights_selection(self, bayesian: bool) -> Callable:
-        """Select the weight-reshape function."""
-        if bayesian:
-            return self._reshape_weights
-        return self._no_reshape_weights
-
-    def _reshape_weights(self, w: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        """Broadcast the weights over the vmap dimension."""
-        return w.expand(x.shape[0], *w.shape)
-
-    def _no_reshape_weights(self, w: torch.Tensor, **kwargs: Any) -> torch.Tensor:
-        """No-op."""
-        return w
+        ``x``, the weight and the bias carry a leading members axis; the local
+        primitives are vmapped over it. The collectives are members-agnostic.
+        """
+        self.conv_fn = torch.vmap(self.native_conv_fn)
+        self.conv_input_fn = torch.vmap(self.conv_input_fn, in_dims=(None, 0, 0))
+        self.conv_weight_fn = torch.vmap(self.conv_weight_fn, in_dims=(0, None, 0))
 
     def _grad_bias_selection(self, bias: Optional[torch.Tensor]) -> Callable:
         """Select the grad-bias function."""

@@ -103,7 +103,6 @@ def _conv1d_transpose_reference_check(
         dilation=dilation,
         groups=groups,
         bias=True,
-        bayesian=False,
         dtype=torch.float32,
         channel_comm=channel_comm,
     ).to(device)
@@ -219,7 +218,6 @@ class TestConv1dTranspose:
             dilation=1,
             groups=1,
             bias=True,
-            bayesian=False,
             dtype=torch.float32,
         ).to(device)
 
@@ -313,28 +311,26 @@ class TestConv1dTranspose:
         with pytest.raises(RuntimeError, match="all-to-all"):
             conv(x)
 
-    def test_string_padding_rejected_with_halo(
-        self, device: torch.device, process_mesh_dict_2x2: dict
+    @pytest.mark.parametrize("padding", ["same", "valid"])
+    def test_string_padding_rejected(
+        self, device: torch.device, process_mesh_dict_2x2: dict, padding: str
     ) -> None:
-        """String padding is not supported once a halo exchange is needed."""
-        conv = convolution.DistributedConvTranspose1d(
-            8,
-            12,
-            4,
-            device=device,
-            spatial_group=process_mesh_dict_2x2["row"],
-            channel_group=process_mesh_dict_2x2["col"],
-            stride=2,
-            padding="same",
-            dilation=1,
-            groups=1,
-            bias=True,
-            bayesian=False,
-            dtype=torch.float32,
-        ).to(device)
-        x = torch.randn(2, 4, 16, device=device)
-        with pytest.raises(NotImplementedError):
-            conv(x)
+        """String padding modes are rejected at construction."""
+        with pytest.raises(NotImplementedError, match="string padding"):
+            convolution.DistributedConvTranspose1d(
+                8,
+                12,
+                4,
+                device=device,
+                spatial_group=process_mesh_dict_2x2["row"],
+                channel_group=process_mesh_dict_2x2["col"],
+                stride=2,
+                padding=padding,
+                dilation=1,
+                groups=1,
+                bias=True,
+                dtype=torch.float32,
+            )
 
 
 class TestConv1dTransposeParallel:

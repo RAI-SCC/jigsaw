@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 
 from jigsaw._core.autocast import promote_to_fp32_under_autocast
+from jigsaw._core.vmap import to_front
 
 
 class _LayerNorm(torch.autograd.Function):
@@ -77,18 +78,34 @@ class _LayerNorm(torch.autograd.Function):
 
     @staticmethod
     def vmap(
-        info: Any,  # type: ignore[no-untyped-def]
+        info: Any,
         in_dims: tuple[Optional[int], ...],
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: Optional[torch.Tensor],
         channel_group: dist.ProcessGroup,
         eps: float,
-    ) -> tuple[torch.Tensor, int]:
-        """Batching rule for ``torch.vmap``."""
-        out = _LayerNorm.apply(x, weight, bias, channel_group, eps)
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[Optional[int], ...]]:
+        """Batching rule for ``torch.vmap``.
 
-        return out, 0
+        The vmapped axis of ``x`` is moved to the front; the normalization is
+        independent over every leading axis. A vmapped weight or bias (e.g.
+        stacked ensemble members) is viewed as ``(members, 1, ..., 1, C)`` so
+        each member's parameters broadcast over its own input; the backward
+        reduces their gradients back to that shape.
+        """
+        size = info.batch_size
+        x_dim, w_dim, b_dim = in_dims[:3]
+        x = to_front(x, x_dim, size)  # type: ignore[assignment]
+        params_batched = w_dim is not None or b_dim is not None
+        if params_batched:
+            shape = (size, *([1] * (x.ndim - 2)), x.shape[-1])
+            weight = to_front(weight, w_dim, size).reshape(shape)  # type: ignore[union-attr]
+            bias = to_front(bias, b_dim, size)
+            if bias is not None:
+                bias = bias.reshape(shape)
+        out = _LayerNorm.apply(x, weight, bias, channel_group, eps)
+        return out, (0, 0, 0 if params_batched else None, 0)
 
     @staticmethod
     def backward(
@@ -130,11 +147,11 @@ class _LayerNorm(torch.autograd.Function):
         # Gradients for weight and bias
         # Sum over batch and sequence dimensions, keep feature dim
 
-        grad_weight = (grad_output * x_norm).sum(
-            dim=tuple(range(grad_output.dim() - 1))
-        )
+        # (``sum_to_size`` keeps the members axis of a vmapped weight/bias, which
+        # the batching rule shapes like the weight.)
+        grad_weight = (grad_output * x_norm).sum_to_size(weight.shape)
         grad_bias = (
-            grad_output.sum(dim=tuple(range(grad_output.dim() - 1)))
+            grad_output.sum_to_size(weight.shape)
             if ctx.has_bias  # type: ignore[attr-defined]
             else None
         )
@@ -239,11 +256,15 @@ class _LayerNormNoAffine(torch.autograd.Function):
         x: torch.Tensor,
         channel_group: dist.ProcessGroup,
         eps: float,
-    ) -> tuple[torch.Tensor, int]:
-        """Batching rule for ``torch.vmap``."""
-        out = _LayerNormNoAffine.apply(x, channel_group, eps)
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[int, int]]:
+        """Batching rule for ``torch.vmap``.
 
-        return out, 0
+        The vmapped axis of ``x`` is moved to the front; the normalization is
+        independent over every leading axis.
+        """
+        x = x.movedim(in_dims[0], 0)  # type: ignore[arg-type]
+        out = _LayerNormNoAffine.apply(x, channel_group, eps)
+        return out, (0, 0)
 
     @staticmethod
     def backward(
