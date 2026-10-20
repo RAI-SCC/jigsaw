@@ -121,7 +121,7 @@ def conv_transpose_nway(
     w: torch.Tensor,
     b: torch.Tensor,
     stride: tuple[int, ...],
-    padding: str | tuple[int, ...],
+    padding: tuple[int, ...],
     dilation: tuple[int, ...],
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
     channel_group: dist.ProcessGroup,
@@ -142,8 +142,8 @@ def conv_transpose_nway(
         Local bias.
     stride : tuple[int, ...]
         Stride of each spatial axis.
-    padding : str | tuple[int, ...]
-        Padding of each spatial axis or a padding mode.
+    padding : tuple[int, ...]
+        Padding of each spatial axis.
     dilation : tuple[int, ...]
         Dilation of each spatial axis.
     spatial_groups : tuple[dist.ProcessGroup | None, ...]
@@ -258,7 +258,7 @@ def conv_transpose_halo_nway(
     w: torch.Tensor,
     b: torch.Tensor,
     stride: tuple[int, ...],
-    padding: str | tuple[int, ...],
+    padding: tuple[int, ...],
     dilation: tuple[int, ...],
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
     channel_group: dist.ProcessGroup,
@@ -279,8 +279,8 @@ def conv_transpose_halo_nway(
         Local bias.
     stride : tuple[int, ...]
         Stride of each spatial axis.
-    padding : str | tuple[int, ...]
-        Padding of each spatial axis. Strings are unsupported.
+    padding : tuple[int, ...]
+        Padding of each spatial axis.
     dilation : tuple[int, ...]
         Dilation of each spatial axis.
     spatial_groups : tuple[dist.ProcessGroup | None, ...]
@@ -294,19 +294,7 @@ def conv_transpose_halo_nway(
     -------
     tuple[torch.Tensor, torch.Tensor]
         Output and the full-channel input kept for the backward pass.
-
-    Raises
-    ------
-    NotImplementedError
-        If ``padding`` is a string.
     """
-    if not isinstance(padding, tuple):
-        raise NotImplementedError(
-            "Distributed ConvTransposeNd with stride != kernel_size does not "
-            f"support string padding ({padding!r}); pass an explicit per-axis "
-            "padding."
-        )
-
     local_in_spatial = tuple(x.shape[-config.n_spatial :])
 
     def post_fn(y: torch.Tensor) -> torch.Tensor:

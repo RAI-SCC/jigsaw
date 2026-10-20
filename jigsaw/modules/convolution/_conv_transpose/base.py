@@ -38,7 +38,7 @@ class _DistributedConvTransposeNd(torch.nn.Module):
     device: torch.device
     kernel_size: tuple[int, ...]
     stride: tuple[int, ...]
-    padding: str | tuple[int, ...]
+    padding: tuple[int, ...]
     dilation: tuple[int, ...]
     channel_comm: str
 
@@ -54,7 +54,7 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         channel_group: dist.ProcessGroup,
         # --- core ConvTranspose (optional, pytorch-standard-order) ---
         stride: int | tuple[int, ...] = 1,
-        padding: str | tuple[int, ...] = (0,),
+        padding: int | tuple[int, ...] = (0,),
         dilation: int | tuple[int, ...] = 1,
         groups: int = 1,
         bias: bool = True,
@@ -83,8 +83,9 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             Process group splitting the channels.
         stride : int | tuple[int, ...]
             Stride in the convolution.
-        padding : str | tuple[int, ...]
-            Padding. Strings are unsupported if ``stride != kernel_size``.
+        padding : int | tuple[int, ...]
+            Padding. String padding modes are unsupported, as in
+            :class:`torch.nn.ConvTranspose1d`.
         dilation : int | tuple[int, ...]
             Dilation.
         groups : int
@@ -114,9 +115,11 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         self.dilation = to_ntuple(dilation)
 
         if isinstance(padding, str):
-            self.padding = padding
-        else:
-            self.padding = to_ntuple(padding)
+            raise NotImplementedError(
+                f"Distributed ConvTransposeNd does not support string padding "
+                f"({padding!r}); pass an explicit per-axis padding."
+            )
+        self.padding = to_ntuple(padding)
 
         self.groups = groups
         # ``channel_local``: every channel-parallel rank owns whole conv-groups,
@@ -518,9 +521,10 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         """Return whether the spatial split requires a halo exchange."""
         zero = (0,) * self._n_spatial
         unit = (1,) * self._n_spatial
-        zero_pad = self.padding == zero or self.padding == "valid"
         return not (
-            self.kernel_size == self.stride and zero_pad and self.dilation == unit
+            self.kernel_size == self.stride
+            and self.padding == zero
+            and self.dilation == unit
         )
 
     def _forward_local(
@@ -538,26 +542,15 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             )
         # Under torch.vmap the native primitive's own batching rule handles a
         # vmapped weight.
-        conv_transpose = self.config.native_conv_transpose_fn
-        if bias is not None:
-            y = conv_transpose(
-                x,
-                weight,
-                bias,
-                stride=self.stride,
-                padding=cast(tuple[int, ...], self.padding),
-                dilation=self.dilation,
-                groups=self._groups_local,
-            )
-        else:
-            y = conv_transpose(
-                x,
-                weight,
-                stride=self.stride,
-                padding=cast(tuple[int, ...], self.padding),
-                dilation=self.dilation,
-                groups=self._groups_local,
-            )
+        y = self.config.native_conv_transpose_fn(
+            x,
+            weight,
+            bias,
+            stride=self.stride,
+            padding=self.padding,
+            dilation=self.dilation,
+            groups=self._groups_local,
+        )
         return cast(torch.Tensor, y)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
