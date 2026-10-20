@@ -13,7 +13,7 @@ BIAS = torch.zeros(3)
 
 
 def _config(parallelism=1, bias=BIAS, linear_layer=True, device=CPU):
-    return LinearConfig(parallelism, bias, linear_layer, device)
+    return LinearConfig(parallelism, bias, linear_layer=linear_layer, device=device)
 
 
 class TestMatmulKernelSelection:

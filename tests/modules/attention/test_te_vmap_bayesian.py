@@ -304,7 +304,7 @@ class TestDistributedAttentionEnsembleVmap:
         )
 
     _XWT_VMAP_GRAD = pytest.mark.xfail(
-        strict=False,
+        strict=True,
         reason="c10d collectives in the Functions' backward have no batching rule under vmap(grad)",
     )
 

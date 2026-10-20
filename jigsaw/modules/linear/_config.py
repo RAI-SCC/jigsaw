@@ -18,6 +18,7 @@ class LinearConfig(VmapConfig):
         self,
         parallelism: int,
         bias: torch.Tensor | None,
+        *,
         linear_layer: bool = True,
         device: torch.device = torch.device("cuda"),
     ):
