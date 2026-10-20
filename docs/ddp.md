@@ -206,8 +206,8 @@ Summing those over `R` would scale them by `|R|`.
 Read the raw parameter for such terms, not the output of `sync_grad`. Only the path through
 `sync_grad` is summed (mode 1) or scaled (mode 2). The raw path is left alone, and the final
 average (over `dp` in mode 1, over `dp x R` in mode 2) leaves an identical gradient unchanged.
-For example, a Bayesian layer draws its weight samples from synced parameters, while the KL
-term reads the unsynced ones.
+For example, a layer can compute its forward pass from the synced parameters, while a
+regularizer on the parameters reads the unsynced ones.
 
 ## Loss scaling
 

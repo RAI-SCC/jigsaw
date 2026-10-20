@@ -45,7 +45,7 @@ def conv_vmap(
         y, x_aug = fn(x.flatten(0, 1).contiguous(), weight, bias, *args)
         return (y.unflatten(0, (size, -1)), x_aug.unflatten(0, (size, -1))), (0, 0)
 
-    # Weight or bias vmapped (ensemble members, Bayesian weight samples): run
+    # Weight or bias vmapped (ensemble members, per-sample weights): run
     # the members config. ``to_front`` expands whichever of x/weight/bias is
     # shared, so no input needs a pre-expanded members axis.
     weight = to_front(weight, w_dim, size).contiguous()  # type: ignore[union-attr]

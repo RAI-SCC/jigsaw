@@ -1,6 +1,6 @@
-"""``torch.vmap`` / Bayesian-ensemble coverage for the TE attention backend.
+"""``torch.vmap`` / ensemble coverage for the TE attention backend.
 
-``torch_blue`` trains a Bayesian ensemble by giving every parameter a leading
+An ensemble can be run by giving every parameter a leading
 "members" axis and running the model under ``torch.vmap``. The attention path
 was never exercised under ``vmap`` -- these tests pin it, at increasing levels
 of integration:
@@ -172,7 +172,7 @@ def _local_x(mesh: dict, device: torch.device, *, members: int | None = None):
 class TestDistributedAttentionPlain:
     """A non-ring ``DistributedAttention`` on a channel-parallel mesh, no vmap,
     no ensemble -- the simplest thing that must work before any of the
-    vmap/Bayesian story does.
+    vmap/ensemble story does.
 
     Regression guards for two fixes:
 
@@ -221,13 +221,13 @@ class TestDistributedAttentionPlain:
 
 
 # --------------------------------------------------------------------------- #
-# 3. full DistributedAttention under vmap (Bayesian ensemble)
+# 3. full DistributedAttention under vmap (ensemble)
 # --------------------------------------------------------------------------- #
 @pytest.mark.gpu_required
 class TestDistributedAttentionEnsembleVmap:
     """A non-ring ``DistributedAttention`` under ``vmap(functional_call(...))``
     with an ensemble (leading members axis) of stacked parameters -- the shape
-    ``torch_blue`` drives for Bayesian sampling.
+    an ensemble of stacked parameters drives.
 
     Reference is a per-member Python loop over the same modules, so a mismatch
     is the vmap members axis, not the sharding.
