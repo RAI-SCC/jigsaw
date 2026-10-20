@@ -53,57 +53,6 @@ class TestMatmulKernelSelection:
             _config(parallelism, device=torch.device("meta"))
 
 
-class TestBiasSelection:
-    def test_no_bias_means_identity_add_and_no_gradient(self):
-        cfg = _config(bias=None)
-        x = torch.randn(2, 3)
-        assert cfg.add_bias(x, None) is x
-        assert cfg.grad_bias(x) is None
-
-    def test_add_bias_broadcasts(self):
-        cfg = _config(bias=BIAS)
-        x, b = torch.zeros(2, 4, 3), torch.arange(3.0)
-        assert torch.equal(cfg.add_bias(x, b), b.expand(2, 4, 3))
-
-    def test_vmapped_add_bias_inserts_member_axes(self):
-        cfg = _config(bias=BIAS).for_vmap()
-        x, b = torch.zeros(2, 5, 4, 3), torch.arange(6.0).reshape(2, 3)
-        out = cfg.add_bias(x, b)
-        assert out.shape == x.shape
-        assert torch.equal(out[1, 2, 3], b[1])
-
-    def test_grad_bias_sums_batch_and_space_for_3d_and_up(self):
-        cfg = _config(bias=BIAS)
-        grad = torch.randn(2, 4, 3)
-        assert torch.allclose(cfg.grad_bias(grad), grad.sum(dim=(-3, -2)))
-
-    def test_grad_bias_sums_rows_for_2d(self):
-        cfg = _config(bias=BIAS)
-        grad = torch.randn(4, 3)
-        assert torch.allclose(cfg.grad_bias(grad), grad.sum(dim=-2))
-
-
-class TestWeightSelection:
-    def test_reshape_only_for_vmapped_linear_layers(self):
-        w = torch.randn(3, 4)
-        assert _config().for_vmap().reshape_weights(w).shape == (3, 1, 4)
-        assert _config().reshape_weights(w) is w
-        assert _config(linear_layer=False).for_vmap().reshape_weights(w) is w
-
-    def test_grad_sum_reduces_batch_dim_of_linear_layers(self):
-        grad = torch.randn(2, 3, 4)
-        cfg = _config(linear_layer=True)
-        assert torch.equal(cfg.grad_sum(grad), grad.sum(dim=0))
-
-    def test_grad_sum_leaves_2d_gradients_alone(self):
-        grad = torch.randn(3, 4)
-        assert _config(linear_layer=True).grad_sum(grad) is grad
-
-    def test_grad_sum_is_identity_for_raw_matrix_ops(self):
-        grad = torch.randn(2, 3, 4)
-        assert _config(linear_layer=False).grad_sum(grad) is grad
-
-
 SELECTORS = [
     "_select_xw_transpose_kernel",
     "_select_xw_kernel",
@@ -118,17 +67,6 @@ class TestForVmap:
         vc = cfg.for_vmap()
         assert vc is cfg.for_vmap() and vc.for_vmap() is vc
         assert vc.vmapped and not cfg.vmapped
-
-    def test_keeps_the_member_axis_of_the_gradients(self):
-        vc = _config(bias=BIAS).for_vmap()
-        grad_w = torch.randn(2, 5, 3, 4)  # (members, batch, out, in)
-        assert torch.allclose(vc.grad_sum(grad_w), grad_w.sum(dim=1))
-        grad_out = torch.randn(2, 5, 6, 3)  # (members, batch, seq, out)
-        assert torch.allclose(vc.grad_bias(grad_out), grad_out.sum(dim=(1, 2)))
-
-    def test_grad_sum_reduces_every_leading_dim_when_not_vmapped(self):
-        grad = torch.randn(2, 5, 3, 4)
-        assert torch.allclose(_config().grad_sum(grad), grad.sum(dim=(0, 1)))
 
 
 class TestEachSelectorValidates:
