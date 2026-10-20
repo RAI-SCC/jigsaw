@@ -512,26 +512,15 @@ class _DistributedConvNd(torch.nn.Module):
             )
         # Under torch.vmap the native primitive's own batching rule handles a
         # vmapped weight.
-        conv = self.config.native_conv_fn
-        if bias is not None:
-            y = conv(
-                x,
-                weight,
-                bias,
-                stride=self.stride,
-                padding=self.padding,
-                dilation=self.dilation,
-                groups=self._groups_local,
-            )
-        else:
-            y = conv(
-                x,
-                weight,
-                stride=self.stride,
-                padding=self.padding,
-                dilation=self.dilation,
-                groups=self._groups_local,
-            )
+        y = self.config.native_conv_fn(
+            x,
+            weight,
+            bias,
+            stride=self.stride,
+            padding=self.padding,
+            dilation=self.dilation,
+            groups=self._groups_local,
+        )
         return cast(torch.Tensor, y)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

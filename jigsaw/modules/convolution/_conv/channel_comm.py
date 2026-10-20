@@ -154,7 +154,9 @@ def _over_channels_local(
         y = conv_func(span, w, b, **conv_kwargs)
     else:
         y = conv_func(span, w, **conv_kwargs)
-    return y, span
+    # ``span`` can be ``x`` itself; under ``torch.vmap`` the Function may not
+    # save an input it returns as-is, so return a view of it.
+    return y, span.view_as(span)
 
 
 def over_channels(
