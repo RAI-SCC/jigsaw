@@ -551,30 +551,21 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         # The ConvNd batching rule passes the sample axis through, so it still
         # gets the vmapped primitive.
         sampled = weight.dim() > self._n_spatial + 2
-        conv_transpose = (
+        conv_transpose: Callable[..., torch.Tensor] = (
             self.config.conv_transpose_fn
             if sampled
             else self.config.native_conv_transpose_fn
         )
-        if bias is not None:
-            y = conv_transpose(
-                x,
-                weight,
-                bias,
-                stride=self.stride,
-                padding=cast(tuple[int, ...], self.padding),
-                dilation=self.dilation,
-                groups=self._groups_local,
-            )
-        else:
-            y = conv_transpose(
-                x,
-                weight,
-                stride=self.stride,
-                padding=cast(tuple[int, ...], self.padding),
-                dilation=self.dilation,
-                groups=self._groups_local,
-            )
+        # The vmapped primitive maps every positional input over axis 0, so a
+        # ``None`` bias must be left out rather than passed.
+        args = (x, weight) if bias is None else (x, weight, bias)
+        y = conv_transpose(
+            *args,
+            stride=self.stride,
+            padding=cast(tuple[int, ...], self.padding),
+            dilation=self.dilation,
+            groups=self._groups_local,
+        )
         return cast(torch.Tensor, y)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
