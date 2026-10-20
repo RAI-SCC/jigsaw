@@ -521,26 +521,19 @@ class _DistributedConvNd(torch.nn.Module):
         # The vmapped primitive expects a leading sample axis on the weight;
         # without it, use the native primitive.
         sampled = weight.dim() > self._n_spatial + 2
-        conv = self.config.conv_fn if sampled else self.config.native_conv_fn
-        if bias is not None:
-            y = conv(
-                x,
-                weight,
-                bias,
-                stride=self.stride,
-                padding=self.padding,
-                dilation=self.dilation,
-                groups=self._groups_local,
-            )
-        else:
-            y = conv(
-                x,
-                weight,
-                stride=self.stride,
-                padding=self.padding,
-                dilation=self.dilation,
-                groups=self._groups_local,
-            )
+        conv: Callable[..., torch.Tensor] = (
+            self.config.conv_fn if sampled else self.config.native_conv_fn
+        )
+        # The vmapped primitive maps every positional input over axis 0, so a
+        # ``None`` bias must be left out rather than passed.
+        args = (x, weight) if bias is None else (x, weight, bias)
+        y = conv(
+            *args,
+            stride=self.stride,
+            padding=self.padding,
+            dilation=self.dilation,
+            groups=self._groups_local,
+        )
         return cast(torch.Tensor, y)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
