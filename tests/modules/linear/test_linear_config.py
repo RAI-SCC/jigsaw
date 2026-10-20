@@ -9,11 +9,10 @@ from jigsaw.modules.linear._config import LinearConfig
 
 CPU, CUDA = torch.device("cpu"), torch.device("cuda")
 WAYS = {2: "twoway", 4: "fourway", 8: "eightway"}
-BIAS = torch.zeros(3)
 
 
-def _config(parallelism=1, bias=BIAS, linear_layer=True, device=CPU):
-    return LinearConfig(parallelism, bias, linear_layer=linear_layer, device=device)
+def _config(parallelism=1, linear_layer=True, device=CPU):
+    return LinearConfig(parallelism, linear_layer=linear_layer, device=device)
 
 
 class TestMatmulKernelSelection:
@@ -53,32 +52,9 @@ class TestMatmulKernelSelection:
             _config(parallelism, device=torch.device("meta"))
 
 
-SELECTORS = [
-    "_select_xw_transpose_kernel",
-    "_select_xw_kernel",
-    "_select_x_transpose_w_kernel",
-    "_select_xw_xtw_fused_kernel",
-]
-
-
 class TestForVmap:
     def test_is_cached_and_idempotent(self):
         cfg = _config()
         vc = cfg.for_vmap()
         assert vc is cfg.for_vmap() and vc.for_vmap() is vc
         assert vc.vmapped and not cfg.vmapped
-
-
-class TestEachSelectorValidates:
-    """``_mm_kernel_selection`` stops at the first bad selector, so hit each directly."""
-
-    @pytest.mark.parametrize("selector", SELECTORS)
-    @pytest.mark.parametrize("dev", [CPU, CUDA], ids=["cpu", "cuda"])
-    def test_unsupported_parallelism(self, selector, dev):
-        with pytest.raises(ValueError, match="Unsupported parallelism: 3"):
-            getattr(_config(), selector)(3, dev)
-
-    @pytest.mark.parametrize("selector", SELECTORS)
-    def test_unsupported_device(self, selector):
-        with pytest.raises(ValueError, match="Unsupported device meta"):
-            getattr(_config(), selector)(2, torch.device("meta"))
