@@ -91,6 +91,33 @@ def replica_groups(param: Optional[torch.Tensor]) -> Groups:
     return getattr(param, _ATTR, ())
 
 
+def parameter_count(module: torch.nn.Module) -> int:
+    """Return this rank's share of the parameter count of ``module``.
+
+    A parameter replicated over its marked groups is counted only on the rank
+    that is rank 0 of every one of them, so summing the result over the model's
+    ranks counts each replicated shard once and gives the global count, exactly
+    and with no rounding. Unmarked parameters count fully on every rank.
+    Replication that is not marked (e.g. data-parallel copies) is not
+    corrected for.
+
+    Parameters
+    ----------
+    module : torch.nn.Module
+        Module whose parameters (recursively) to count.
+
+    Returns
+    -------
+    int
+        Number of parameters this rank accounts for.
+    """
+    return sum(
+        p.numel()
+        for p in module.parameters()
+        if all(g.rank() == 0 for g in replica_groups(p))
+    )
+
+
 def broadcast_replicas(module: torch.nn.Module, src: int = 0) -> None:
     """Make every marked parameter of ``module`` identical over its groups.
 

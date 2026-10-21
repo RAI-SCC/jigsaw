@@ -223,10 +223,12 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         return math.prod(g.size() for g in self._spatial_sync_groups)
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters."""
-        replicas = self.spatial_world_size
-        num_param = 0 if self.bias is None else self.bias.numel() // replicas
-        return num_param + self.weight.numel() // replicas
+        """Return this rank's share of the parameter count.
+
+        Summed over the model's ranks it gives the global count; see
+        :func:`jigsaw.parallel.parameter_count`.
+        """
+        return parallel.parameter_count(self)
 
     @classmethod
     def convert_to_jigsaw(

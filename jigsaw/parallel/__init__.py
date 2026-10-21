@@ -37,12 +37,18 @@ from jigsaw._core.public import set_module as _set_module
 
 from ._ddp import check_ddp, wrap_ddp
 from ._joint import JointCommHookState, joint_comm_hook, register_joint_comm_hook
-from ._replicas import broadcast_replicas, mark_replicated, replica_groups
+from ._replicas import (
+    broadcast_replicas,
+    mark_replicated,
+    parameter_count,
+    replica_groups,
+)
 from ._sync import sync_grad, synced_call, synced_parameters
 
 __all__ = [
     "mark_replicated",
     "replica_groups",
+    "parameter_count",
     "sync_grad",
     "synced_parameters",
     "synced_call",

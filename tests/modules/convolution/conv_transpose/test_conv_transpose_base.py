@@ -58,11 +58,11 @@ class TestConvTransposeChannelSizes:
 class TestConvTransposeParameterCount:
     @pytest.mark.dist(4)
     @pytest.mark.parametrize("n_spatial", [1, 2, 3])
-    def test_count_divides_by_spatial_replicas(
+    def test_count_once_per_spatial_replica_set(
         self, device: torch.device, process_mesh_dict_2x2: dict, n_spatial: int
     ) -> None:
         """2 (spatial) x 2 (channel) mesh: params are replicated over the two
-        spatial ranks, so the effective count halves them."""
+        spatial ranks, so only one of them counts them."""
         mesh = process_mesh_dict_2x2
         conv = _CONV_CLS[n_spatial](
             8,
@@ -76,15 +76,20 @@ class TestConvTransposeParameterCount:
         ).to(device)
 
         assert conv.spatial_world_size == mesh["row"].size() == 2
-        replicas = conv.spatial_world_size
-        expected = conv.weight.numel() // replicas + conv.bias.numel() // replicas
+        # Only spatial rank 0 counts the replicated shard, so the sum over the
+        # mesh is each channel shard once.
+        local = conv.weight.numel() + conv.bias.numel()
+        expected = local if mesh["row"].rank() == 0 else 0
         assert conv.get_parameter_count() == expected
+        total = torch.tensor([conv.get_parameter_count()], device=device)
+        dist.all_reduce(total, group=mesh["model"])
+        assert total.item() == local * mesh["col"].size()
 
     @pytest.mark.dist(4)
     def test_pure_channel_split_has_no_spatial_replicas(
         self, device: torch.device, process_mesh_dict_1x4: dict
     ) -> None:
-        """No split spatial axis -> ``spatial_world_size == 1`` and nothing is divided."""
+        """No split spatial axis -> ``spatial_world_size == 1`` and every rank counts its shard."""
         mesh = process_mesh_dict_1x4
         conv = convolution.DistributedConvTranspose2d(
             8,
@@ -118,9 +123,8 @@ class TestConvTransposeParameterCount:
         ).to(device)
 
         assert conv.bias is None
-        assert (
-            conv.get_parameter_count() == conv.weight.numel() // conv.spatial_world_size
-        )
+        expected = conv.weight.numel() if mesh["row"].rank() == 0 else 0
+        assert conv.get_parameter_count() == expected
 
 
 class TestConvTransposeConvertToTorch:

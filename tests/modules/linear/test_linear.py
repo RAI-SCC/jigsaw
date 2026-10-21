@@ -1045,12 +1045,18 @@ class TestBackward:
 class TestParameterCount:
     @pytest.mark.dist(4)
     @pytest.mark.parametrize("bias", [True, False])
+    # out_dim=6: the local bias (3) is not divisible by the row size (2)
+    @pytest.mark.parametrize("out_dim", [8, 6])
     def test_local_counts_sum_to_the_global_parameter_count(
-        self, device: torch.device, process_mesh_dict_2x2: dict, bias: bool
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        bias: bool,
+        out_dim: int,
     ) -> None:
         """The bias is replicated over the row group, so it is counted once overall."""
         mesh = process_mesh_dict_2x2
-        in_dim, out_dim = 6, 8
+        in_dim = 6
         layer = linear.DistributedLinear(
             in_dim,
             out_dim,
@@ -1063,8 +1069,9 @@ class TestParameterCount:
         ).to(device)
 
         local = layer.get_parameter_count()
+        # Only row rank 0 counts the bias, which is replicated over the row group.
         expected_local = layer.weight.numel() + (
-            layer.bias.numel() // mesh["row"].size() if bias else 0
+            layer.bias.numel() if bias and mesh["row"].rank() == 0 else 0
         )
         total = torch.tensor([local], dtype=torch.int64, device=device)
         dist.all_reduce(total, group=mesh["model"])

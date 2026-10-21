@@ -186,13 +186,12 @@ class DistributedLinear(torch.nn.Module):
         return cij
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters."""
-        num_param = (
-            0
-            if self.bias is None
-            else self.bias.numel() // dist.get_world_size(group=self.row_group)
-        )
-        return num_param + self.weight.numel()
+        """Return this rank's share of the parameter count.
+
+        Summed over the model's ranks it gives the global count; see
+        :func:`jigsaw.parallel.parameter_count`.
+        """
+        return parallel.parameter_count(self)
 
     @classmethod
     def convert_to_jigsaw(

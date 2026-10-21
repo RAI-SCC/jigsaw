@@ -51,7 +51,8 @@ def test_layernorm_vmap_matches_loop_and_counts_parameters(batched, device):
         module.weight.copy_(torch.linspace(0.5, 1.5, C))
         module.bias.copy_(torch.linspace(-1.0, 1.0, C))
     assert torch.allclose(torch.vmap(module)(batched), _loop(module, batched))
-    assert module.get_parameter_count() == 2 * C // dist.get_world_size()
+    # Replicated over the world group: rank 0 counts it, the others not.
+    assert module.get_parameter_count() == (2 * C if dist.get_rank() == 0 else 0)
 
 
 def _layernorm(device, affine: bool = True) -> norm.DistributedLayerNorm:

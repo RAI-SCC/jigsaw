@@ -20,6 +20,7 @@ import torch
 import torch.distributed as dist
 
 import jigsaw.modules.attention as attention
+from jigsaw import parallel
 from jigsaw.gather import gather_1d_results
 from jigsaw.modules.attention import _config as cfg
 from jigsaw.modules.attention._attention import attn_core_dtype
@@ -430,6 +431,33 @@ class TestDistributedAttentionPaths:
         assert x.grad is not None and torch.isfinite(x.grad).all()
         assert model.q_norm.weight.grad is not None
         assert model.k_norm.weight.grad is not None
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("qk_norm", [False, True])
+    def test_parameter_count_sums_to_serial(
+        self, device: torch.device, process_mesh_dict_2x2: dict, qk_norm: bool
+    ) -> None:
+        """The qkv/head_concat weights are replicated over the spatial group,
+        outside their ``model_group``; summed over the mesh they still count once."""
+        mesh = process_mesh_dict_2x2
+        model = attention.DistributedAttention(
+            in_dim=DIM,
+            embed_dim=DIM,
+            out_dim=DIM,
+            heads=HEADS,
+            local_rank=mesh["col"].rank(),
+            device=device,
+            spatial_group=mesh["row"],
+            channel_group=mesh["col"],
+            qk_norm=qk_norm,
+            attn_backend="math",
+        )
+        serial = attention.Attention(DIM, DIM, DIM, HEADS, device, qk_norm=qk_norm)
+        # The serial head_concat has no bias; the distributed one (out_bias) does.
+        expected = sum(p.numel() for p in serial.parameters()) + DIM
+        whole = torch.tensor([parallel.parameter_count(model)], device=device)
+        dist.all_reduce(whole)
+        assert all_ranks_ok(whole.item() == expected, device, dist.group.WORLD)
 
 
 class TestSingleProcessHelpers:
