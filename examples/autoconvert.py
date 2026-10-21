@@ -30,9 +30,8 @@ full input and compare against the gathered output of the converted one.
 ``TinyTransformer`` below repeats the exercise for a pre-norm transformer block --
 ``nn.LayerNorm`` and ``jigsaw.modules.Attention`` convert the same way the conv and
 linear layers of ``PatchMLP`` do. With the heads split over "col" (channel size > 1),
-the attention's default ring configuration gives an exact forward pass but a wrong
-backward one -- pass a ``config`` with ``send_op=P2P`` and ``save_scope=LOCAL`` (see
-``vit.py`` for the full explanation); the check below would catch getting this wrong.
+the ring has to circulate the keys/values rather than the input; the default
+configuration does this for you (see ``vit.py`` for the explicit version).
 
 Run with one process per GPU (or 4 CPU processes):
 
@@ -48,8 +47,6 @@ from _common import setup, shard
 import jigsaw
 from jigsaw import log
 from jigsaw.convert import convert_to_jigsaw
-from jigsaw.modules import RingAttentionConfig
-from jigsaw.modules.attention import SaveScope, SendForward, SendOp
 from jigsaw.launch import setup_precision
 from jigsaw.gather import gather_1d_results
 
@@ -194,22 +191,13 @@ def main() -> None:
     torch.testing.assert_close(plain.bias, reference.fc1.bias)
 
     # --- TinyTransformer: the same exercise, now for layer norm and attention -------
-    # With "col" > 1 the heads are split, so the attention's qkv projection needs its
-    # K/V circulated (rather than rebuilt from a circulated `x`) for the ring to give
-    # the right *gradients* -- the forward pass is exact either way. The defaults don't
-    # do this; ask for it explicitly (see vit.py's Block for the long version).
-    ring_config = RingAttentionConfig(
-        device=device,
-        send_in_forward=SendForward.KV,
-        send_op=SendOp.P2P,
-        save_scope=SaveScope.LOCAL,
-    )
+    # With "col" > 1 the heads are split, so the ring must circulate the projected K/V
+    # (a sharded `x` is too little to rebuild them from). Without a `config` the
+    # converted attention picks that for itself.
     torch.manual_seed(1)
     dim, heads = 64, 4
     reference2 = TinyTransformer(device, dim=dim, heads=heads)
-    model2 = convert_to_jigsaw(
-        copy.deepcopy(reference2), mesh, device, config=ring_config
-    )
+    model2 = convert_to_jigsaw(copy.deepcopy(reference2), mesh, device)
     log.info(
         "converted block layers: %s",
         [type(m).__name__ for m in model2.blocks[0].children()],

@@ -290,5 +290,5 @@ class TestRingAttentionConfig:
 
     def test_repr_lists_the_policies(self):
         text = repr(RingAttentionConfig(device=CPU, attn_backend="math"))
-        for token in ("send_op=HYBRID_P2P", "save_scope=GLOBAL", "attn_backend=MATH"):
+        for token in ("send_op=ALLTOALL", "save_scope=GLOBAL", "attn_backend=MATH"):
             assert token in text
