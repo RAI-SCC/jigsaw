@@ -41,10 +41,7 @@ def clip_grad_norm_(
         Maximum norm of the gradients.
     group : dist.ProcessGroup
         The model-parallel group, over which the model is sharded and
-        replicated (e.g. ``mesh["model"]``). Not the data-parallel axis, nor a
-        group spanning it: data-parallel copies would be counted again.
-        Parameters neither sharded nor marked replicated over ``group`` count
-        once per rank of it.
+        replicated (e.g. ``mesh["model"]``).
     norm_type : float
         Type of the p-norm; ``inf`` for the max norm.
     error_if_nonfinite : bool
@@ -66,7 +63,7 @@ def clip_grad_norm_(
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
     params = [p for p in parameters if p.grad is not None]
-    grads = [p.grad for p in params]
+    grads = [p.grad for p in params if p.grad is not None]
     norm_type = float(norm_type)
     device = grads[0].device if grads else get_device_of_process_group(group)
     dtype = grads[0].dtype if grads else torch.get_default_dtype()
@@ -112,8 +109,8 @@ def clip_grad_norm_(
         clip_coef = torch.clamp(max_norm / (total + 1e-6), max=1.0)
         # foreach needs one device and dtype per call.
         buckets: dict[tuple[torch.device, torch.dtype], list[torch.Tensor]] = {}
-        for g in grads:
-            buckets.setdefault((g.device, g.dtype), []).append(g)
+        for grad in grads:
+            buckets.setdefault((grad.device, grad.dtype), []).append(grad)
         for (dev, dt), gs in buckets.items():
             torch._foreach_mul_(gs, clip_coef.to(dev, dt))
     return total.to(dtype)

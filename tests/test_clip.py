@@ -41,7 +41,9 @@ def _mixed_params(mesh: dict, device: torch.device) -> list[torch.nn.Parameter]:
     r = dist.get_rank()
     b = dist.get_rank(mesh["b"])
     dt = torch.float64
-    sharded = _with_grad((r + 1) * torch.tensor([1.0, 2.0, 3.0], dtype=dt, device=device))
+    sharded = _with_grad(
+        (r + 1) * torch.tensor([1.0, 2.0, 3.0], dtype=dt, device=device)
+    )
     rep_a = _with_grad((b + 1) * torch.ones(2, dtype=dt, device=device))
     rep_ab = _with_grad(torch.tensor([5.0], dtype=dt, device=device))
     parallel.mark_replicated(rep_a, mesh["a"])
