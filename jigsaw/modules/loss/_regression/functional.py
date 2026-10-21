@@ -23,7 +23,8 @@ def _distributed_elementwise_loss(
     if reduction == "none":
         return fn(input, target, reduction="none")
     local_sum = fn(input, target, reduction="sum")
-    local_count = input.new_full((), float(input.numel()))
+    # In the dtype of the sum (fp32 under autocast): bf16 would round the count.
+    local_count = local_sum.new_full((), float(input.numel()))
     return reduce_scalar_loss(local_sum, local_count, reduction, groups)
 
 

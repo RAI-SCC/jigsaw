@@ -624,6 +624,38 @@ class TestRegressionLosses:
         )
 
     @pytest.mark.parametrize("mesh_name", MESHES_4)
+    @pytest.mark.parametrize("loss_name", list(_REG_LOSSES))
+    def test_regression_loss_bf16_autocast_mean(
+        self,
+        request: pytest.FixtureRequest,
+        device: torch.device,
+        mesh_name: str,
+        loss_name: str,
+    ) -> None:
+        """A bf16 input under autocast is averaged over its exact element count.
+
+        Every shard holds 1028 elements, which bf16 rounds to 1024.
+        """
+        pmd = request.getfixturevalue(mesh_name)
+        distributed_fn, ref_fn = _REG_LOSSES[loss_name]
+        n, c, s = 1, 4, 1028
+
+        torch.manual_seed(0)
+        pred = torch.randn(n, c, s, device=device).bfloat16()
+        torch.manual_seed(1)
+        target = torch.randn(n, c, s, device=device).bfloat16()
+
+        with torch.autocast(device.type, dtype=torch.bfloat16):
+            got = distributed_fn(
+                _shard(pred, pmd, {"col": 1, "row": 2}),
+                _shard(target, pmd, {"col": 1, "row": 2}),
+                reduction="mean",
+                reduce_groups=(pmd["col"], pmd["row"]),
+            )
+        ref = ref_fn(pred.float(), target.float())
+        assert_close("loss", got.float(), ref, FATOL, FRTOL, device, pmd["model"])
+
+    @pytest.mark.parametrize("mesh_name", MESHES_4)
     def test_regression_module_wrappers(
         self, request: pytest.FixtureRequest, device: torch.device, mesh_name: str
     ) -> None:
