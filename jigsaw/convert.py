@@ -1,6 +1,7 @@
 """Conversion of PyTorch models to jigsaw modules."""
 
-from typing import Any, Callable
+import warnings
+from typing import Any, Callable, Iterator, Literal
 
 import torch
 
@@ -34,6 +35,64 @@ mapped_modules: dict[type[torch.nn.Module], Any] = {
 container_converters: dict[type[torch.nn.Module], Callable[..., torch.nn.Module]] = {
     attention.Attention: attention.Attention.convert_to_jigsaw
 }
+# Leaf modules that are correct on a sharded tensor as-is: elementwise, no
+# parameters, no mixing along any dimension.
+shard_safe_modules: tuple[type[torch.nn.Module], ...] = (
+    torch.nn.Identity,
+    torch.nn.ReLU,
+    torch.nn.ReLU6,
+    torch.nn.LeakyReLU,
+    torch.nn.ELU,
+    torch.nn.SELU,
+    torch.nn.CELU,
+    torch.nn.GELU,
+    torch.nn.SiLU,
+    torch.nn.Mish,
+    torch.nn.Sigmoid,
+    torch.nn.Tanh,
+    torch.nn.Hardtanh,
+    torch.nn.Hardsigmoid,
+    torch.nn.Hardswish,
+    torch.nn.Softplus,
+    torch.nn.Dropout,
+    torch.nn.Dropout1d,
+    torch.nn.Dropout2d,
+    torch.nn.Dropout3d,
+    torch.nn.AlphaDropout,
+)
+
+
+def _unrecognized_modules(
+    model: torch.nn.Module, prefix: str, convert_layer_norm: bool
+) -> Iterator[tuple[str, str]]:
+    """Yield ``(qualified name, reason)`` for modules the converter cannot handle.
+
+    Walks the tree the way :func:`convert_to_jigsaw` does: converted containers
+    and leaves are not descended into.
+    """
+    name = prefix or "<root>"
+    if type(model) in container_converters or type(model) in mapped_modules:
+        return
+    if isinstance(model, torch.nn.LayerNorm) and not convert_layer_norm:
+        return  # explicit opt-out, see ``convert_layer_norm``
+    if type(model).__module__.startswith("jigsaw."):
+        return  # already a jigsaw module
+    children = list(model.named_children())
+    if not children:
+        if not isinstance(model, shard_safe_modules):
+            yield name, f"unrecognized leaf module {type(model).__name__}"
+        return
+    if any(True for _ in model.parameters(recurse=False)):
+        yield (
+            name,
+            (f"{type(model).__name__} owns parameters directly, which are not sharded"),
+        )
+    for child_name, child in children:
+        yield from _unrecognized_modules(
+            child,
+            f"{prefix}.{child_name}" if prefix else child_name,
+            convert_layer_norm,
+        )
 
 
 def convert_to_jigsaw(
@@ -44,6 +103,7 @@ def convert_to_jigsaw(
     col_kw: str = "col",
     model_kw: str = "model",
     convert_layer_norm: bool = True,
+    on_unrecognized: Literal["warn", "raise", "ignore"] = "warn",
     **kwargs: bool,
 ) -> torch.nn.Module | Any:
     """Convert a PyTorch model into a jigsaw distributed model in place.
@@ -71,6 +131,15 @@ def convert_to_jigsaw(
         skipping the distributed version avoids its extra all-reduces. With a
         sharded normalized dimension, turning this off silently computes
         statistics on the local shard only, which is wrong.
+    on_unrecognized : {"warn", "raise", "ignore"}
+        What to do about modules the converter leaves untouched: leaf modules
+        that are neither converted nor in ``shard_safe_modules``, and container
+        modules that own parameters directly. Such a module runs as plain torch
+        on whatever local shard it receives, which is wrong if it reduces over
+        or mixes along a sharded dimension. The check runs before anything is
+        converted, so ``"raise"`` leaves ``model`` unchanged. Ops called
+        functionally inside ``forward`` (e.g. ``torch.logsumexp``) are not
+        visible to this check.
     **kwargs : Any
         Forwarded to the ``convert_to_jigsaw`` of each converted module.
 
@@ -78,7 +147,52 @@ def convert_to_jigsaw(
     -------
     torch.nn.Module
         The converted model.
+
+    Raises
+    ------
+    ValueError
+        If ``on_unrecognized`` is ``"raise"`` and an unrecognized module is found,
+        or if ``on_unrecognized`` is not one of the accepted values.
     """
+    if on_unrecognized not in ("warn", "raise", "ignore"):
+        raise ValueError(
+            f"on_unrecognized must be 'warn', 'raise' or 'ignore', got {on_unrecognized!r}"
+        )
+    if on_unrecognized != "ignore":
+        found = list(_unrecognized_modules(model, "", convert_layer_norm))
+        if found:
+            msg = (
+                "convert_to_jigsaw leaves these modules as plain torch; they "
+                "compute on the local shard only, which is wrong if they reduce "
+                "over or mix along a sharded dimension:\n"
+                + "\n".join(f"  {name}: {reason}" for name, reason in found)
+            )
+            if on_unrecognized == "raise":
+                raise ValueError(msg)
+            warnings.warn(msg, stacklevel=2)
+    return _convert(
+        model,
+        process_mesh_dict,
+        device,
+        row_kw=row_kw,
+        col_kw=col_kw,
+        model_kw=model_kw,
+        convert_layer_norm=convert_layer_norm,
+        **kwargs,
+    )
+
+
+def _convert(
+    model: torch.nn.Module,
+    process_mesh_dict: dict,
+    device: torch.device,
+    row_kw: str,
+    col_kw: str,
+    model_kw: str,
+    convert_layer_norm: bool,
+    **kwargs: bool,
+) -> torch.nn.Module | Any:
+    """Recursive worker of :func:`convert_to_jigsaw`, without the module check."""
     # 1. Container match: hand off entirely, do NOT recurse afterward
     container_fn = container_converters.get(type(model))
     if container_fn is not None:
@@ -109,7 +223,7 @@ def convert_to_jigsaw(
 
     # 3. Generic container: recurse into children
     for name, child in model.named_children():
-        new_child = convert_to_jigsaw(
+        new_child = _convert(
             child,
             process_mesh_dict,
             device,
