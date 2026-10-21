@@ -69,32 +69,30 @@ def clip_grad_norm_(
     dtype = grads[0].dtype if grads else torch.get_default_dtype()
 
     with torch.no_grad():
-        # float64 so the sum over many large shards neither overflows nor loses
-        # the small ones.
+        # Each gradient's norm is in its own dtype; the sum over gradients is in
+        # float64 so many large shards neither overflow nor lose the small ones.
         total = torch.zeros((), dtype=torch.float64, device=device)
-        if grads:
-            norms = torch.stack(
-                [n.to(device) for n in torch._foreach_norm(grads, norm_type)]
-            ).double()
-            if math.isinf(norm_type):
-                # Replicas hold the same values; the max needs no correction.
-                total = norms.max()
-            else:
-                # One check per distinct replica-group tuple, not per parameter.
-                cache: dict[Groups, int] = {}
-                for p in params:
-                    g = replica_groups(p)
-                    if g not in cache:
-                        cache[g] = _copies(g, group)
-                copies = torch.tensor(
-                    [cache[replica_groups(p)] for p in params],
-                    dtype=torch.float64,
-                    device=device,
-                )
-                total = (norms.pow(norm_type) / copies).sum()
         if math.isinf(norm_type):
+            if grads:
+                # Replicas hold the same values; the max needs no correction.
+                total = _norms(grads, norm_type, device).max()
             dist.all_reduce(total, op=dist.ReduceOp.MAX, group=group)
         else:
+            # Bucket by number of copies (few distinct values) and divide by a
+            # Python int: a per-parameter copies tensor would need a blocking
+            # host-to-device copy every step. One check per distinct
+            # replica-group tuple, not per parameter.
+            cache: dict[Groups, int] = {}
+            by_copies: dict[int, list[torch.Tensor]] = {}
+            for p, grad in zip(params, grads):
+                g = replica_groups(p)
+                if g not in cache:
+                    cache[g] = _copies(g, group)
+                by_copies.setdefault(cache[g], []).append(grad)
+            for copies, gs in by_copies.items():
+                total = (
+                    total + _norms(gs, norm_type, device).pow(norm_type).sum() / copies
+                )
             dist.all_reduce(total, op=dist.ReduceOp.SUM, group=group)
             total = total.pow(1.0 / norm_type)
 
@@ -114,6 +112,29 @@ def clip_grad_norm_(
         for (dev, dt), gs in buckets.items():
             torch._foreach_mul_(gs, clip_coef.to(dev, dt))
     return total.to(dtype)
+
+
+def _norms(
+    grads: list[torch.Tensor], norm_type: float, device: torch.device
+) -> torch.Tensor:
+    """Return the per-gradient norms as one float64 vector on ``device``.
+
+    Parameters
+    ----------
+    grads : list[torch.Tensor]
+        Gradients, possibly on different devices.
+    norm_type : float
+        Type of the p-norm.
+    device : torch.device
+        Device of the result.
+
+    Returns
+    -------
+    torch.Tensor
+        Norm of each gradient, in order.
+    """
+    norms = torch._foreach_norm(grads, norm_type)
+    return torch.stack([n.to(device) for n in norms]).double()
 
 
 def _copies(groups: Groups, group: dist.ProcessGroup) -> int:
