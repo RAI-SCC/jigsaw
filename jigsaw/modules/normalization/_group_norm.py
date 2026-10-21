@@ -337,3 +337,12 @@ class DistributedGroupNorm(torch.nn.Module):
         # are gone. Re-mark them over the new spatial group.
         for p in self.parameters():
             parallel.mark_replicated(p, self._spatial_sync_groups)
+
+    def get_parameter_count(self) -> int:
+        """Return the number of local parameters.
+
+        Notes
+        -----
+        This method calculates the number of parameters based on the value of self.num_channels instead of counting the number of elements of the local parameters and scaling according to the respective communication group sizes.
+        """
+        return sum(self.num_channels for p in (self.weight, self.bias) if p is not None)
