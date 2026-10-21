@@ -62,8 +62,12 @@ def clip_grad_norm_(
     """
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
-    params = [p for p in parameters if p.grad is not None]
-    grads = [p.grad for p in params if p.grad is not None]
+    params: list[torch.Tensor] = []
+    grads: list[torch.Tensor] = []
+    for p in parameters:
+        if p.grad is not None:
+            params.append(p)
+            grads.append(p.grad)
     norm_type = float(norm_type)
     device = grads[0].device if grads else get_device_of_process_group(group)
     dtype = grads[0].dtype if grads else torch.get_default_dtype()
