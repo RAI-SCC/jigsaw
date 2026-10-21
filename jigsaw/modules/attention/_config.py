@@ -357,7 +357,7 @@ class RingAttentionConfig:
         self,
         device: torch.device = torch.device("cuda"),
         send_in_forward: SendForward | str = SendForward.X,
-        send_op: SendOp | str = SendOp.HYBRID_P2P,
+        send_op: SendOp | str = SendOp.ALLTOALL,
         save_for_backward: SaveBackward | str = SaveBackward.KV,
         save_scope: SaveScope | str = SaveScope.GLOBAL,
         send_backward: SendBackward | str = SendBackward.SEND_DKV,
@@ -379,7 +379,11 @@ class RingAttentionConfig:
         send_in_forward : SendForward or str
             Tensor representation communicated during the forward pass.
         send_op : SendOp or str
-            Communication operation used by the ring.
+            Communication operation used by the ring. ``ALLTOALL`` (default)
+            runs the ring exchange as one all-to-all collective per step and
+            works for any ring size. The ``HYBRID_*`` ops split the ring into
+            intra- and inter-node parts and need the ring size to be a
+            multiple of ``gpus_per_node``.
         save_for_backward : SaveBackward or str
             Tensor representation saved for the backward pass.
         save_scope : SaveScope or str
@@ -390,6 +394,7 @@ class RingAttentionConfig:
             Activation offloading policy.
         gpus_per_node : int
             Number of ranks assigned to each node for hybrid communication.
+            Only used by the ``HYBRID_*`` send ops.
         attn_backend : AttnBackend or str
             Inner per-chunk attention core. ``SDPA`` (default) keeps the
             device-based pick (flash on CUDA, math on CPU); ``TE`` uses the
