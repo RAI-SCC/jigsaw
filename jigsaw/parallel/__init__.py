@@ -31,10 +31,15 @@ groups in the graph, then averaged over ``dp`` by DDP.
 group ``dp x replica groups`` inside DDP's buckets, with only a scaling left in
 the graph. This takes the replica sum off the critical path and lets NCCL reduce
 within a node before crossing nodes.
+
+Gradient clipping: :func:`clip_grad_norm_` clips by the norm of the whole
+model's gradient, with shards and replicas each counted once, so the threshold
+means the same on every process mesh.
 """
 
 from jigsaw._core.public import set_module as _set_module
 
+from ._clip import clip_grad_norm_
 from ._ddp import check_ddp, wrap_ddp
 from ._joint import JointCommHookState, joint_comm_hook, register_joint_comm_hook
 from ._replicas import broadcast_replicas, mark_replicated, replica_groups
@@ -52,6 +57,7 @@ __all__ = [
     "joint_comm_hook",
     "register_joint_comm_hook",
     "check_ddp",
+    "clip_grad_norm_",
 ]
 
 _set_module(globals(), __all__)
