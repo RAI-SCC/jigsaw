@@ -96,14 +96,18 @@ target-version = "py311"
 exclude = ["docs", "examples", "scaling_scripts", "stash"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "D", "D417", "N"]
+select = ["E", "F", "I", "D", "D417", "N", "ARG001"]
 ignore = ["E501", "NPY201", "N812"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["D", "F403"]
+# ARG001: pytest fixtures requested only for their side effects.
+"tests/*" = ["D", "F403", "ARG001"]
 # Triton kernels: UPPERCASE params are the ecosystem convention for
 # `tl.constexpr` / shape arguments.
 "jigsaw/modules/attention/_functional/_merge_kernel.py" = ["N803"]
+
+[tool.ruff.lint.flake8-unused-arguments]
+ignore-variadic-names = true
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"

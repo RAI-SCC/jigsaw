@@ -15,6 +15,8 @@ gradients with the serial module through ``check_parity``.
   them, including the output bias, which ``DistributedLinear`` already syncs on its own.
 """
 
+import inspect
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -48,12 +50,26 @@ def _tols(device: torch.device) -> dict[str, float]:
 
 def _serial(device: torch.device, out_bias: bool) -> attention.Attention:
     torch.manual_seed(0)  # identical reference on every rank
-    serial = attention.Attention(IN_DIM, EMBED_DIM, OUT_DIM, HEADS, device)
-    if out_bias:
-        serial.head_concat = torch.nn.Linear(
-            EMBED_DIM, OUT_DIM, bias=True, device=device
-        )
-    return serial
+    return attention.Attention(
+        IN_DIM, EMBED_DIM, OUT_DIM, HEADS, device, out_bias=out_bias
+    )
+
+
+@pytest.mark.parametrize("out_bias", [False, True])
+def test_serial_out_bias(device: torch.device, out_bias: bool) -> None:
+    serial = attention.Attention(
+        IN_DIM, EMBED_DIM, OUT_DIM, HEADS, device, out_bias=out_bias
+    )
+    assert (serial.head_concat.bias is not None) == out_bias
+
+
+def test_serial_out_bias_default_matches_distributed() -> None:
+    """Built with the same arguments, both hold the same parameters."""
+
+    def default(cls: type) -> bool:
+        return inspect.signature(cls.__init__).parameters["out_bias"].default
+
+    assert default(attention.Attention) == default(attention.DistributedAttention)
 
 
 def _windowed(n_windows: int):
