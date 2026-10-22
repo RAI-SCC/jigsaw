@@ -105,7 +105,6 @@ class DistributedRoll(torch.nn.Module):
         self.distributed_dims = tuple(distributed_dims)
         self.spatial_groups = tuple(spatial_groups)
         self.dtype = dtype
-        self.empty = torch.empty(0, device=device, dtype=dtype)
         self.config = RollConfig(device) if config is None else config
 
     def get_parameter_count(self) -> int:
@@ -225,7 +224,6 @@ class DistributedRoll(torch.nn.Module):
             self.dims,
             self.distributed_dims,
             self.spatial_groups,
-            self.empty,
             self.config,
         )
         out = cast(torch.Tensor, out)

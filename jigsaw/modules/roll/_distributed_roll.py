@@ -11,7 +11,6 @@ def exchange_halo_1d(
     dim: int,
     window_size: int,
     group: dist.ProcessGroup,
-    empty: torch.Tensor,
     comm_halo_1d_fn: Callable,
 ) -> torch.Tensor:
     """Exchange a halo along one dimension of a tensor.
@@ -31,8 +30,6 @@ def exchange_halo_1d(
         Signed size of the halo.
     group : dist.ProcessGroup
         Process group along which the halo is exchanged.
-    empty : torch.Tensor
-        Unused.
     comm_halo_1d_fn : Callable
         Function performing the communication.
 
@@ -57,7 +54,6 @@ def exchange_halo_1d(
         offset,
         group=group,
         async_op=False,
-        empty=torch.empty(0, device=x.device, dtype=x.dtype),
     )
 
     x[sl_tuple] = recv
@@ -70,7 +66,6 @@ def distributed_roll(
     dims: Tuple[int, ...],
     distributed_dims: list[int],
     spatial_process_groups: list[dist.ProcessGroup],
-    empty: torch.Tensor,
     exchange_halo_1d_fn: Callable,
 ) -> torch.Tensor:
     """Roll a tensor and exchange the halos of its distributed dimensions.
@@ -88,8 +83,6 @@ def distributed_roll(
         counted from either end.
     spatial_process_groups : list[dist.ProcessGroup]
         Process group of each entry of ``distributed_dims``.
-    empty : torch.Tensor
-        Passed on to :func:`exchange_halo_1d`, which does not use it.
     exchange_halo_1d_fn : Callable
         Function performing the communication of a halo.
 
@@ -115,7 +108,6 @@ def distributed_roll(
             dim=d,
             window_size=dim_to_shift[d % x.ndim],
             group=pg,
-            empty=empty,
             comm_halo_1d_fn=exchange_halo_1d_fn,
         )
     return x
