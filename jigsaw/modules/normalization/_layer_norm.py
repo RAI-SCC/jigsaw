@@ -91,9 +91,15 @@ class DistributedLayerNorm(torch.nn.Module):
             parallel.mark_replicated(p, self.spatial_group)
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters."""
-        local = sum(p.numel() for p in (self.weight, self.bias) if p is not None)
-        return local // dist.get_world_size(group=self.spatial_group)
+        """Return the number of local parameters.
+
+        Notes
+        -----
+        This method calculates the number of parameters based on the value of self.normalized_dim instead of counting the number of elements of the local parameters and scaling according to the respective communication group sizes.
+        """
+        return sum(
+            self.normalized_dim for p in (self.weight, self.bias) if p is not None
+        )
 
     @classmethod
     def convert_to_jigsaw(

@@ -1069,6 +1069,22 @@ class DistributedAttention(torch.nn.Module):
         # Output: [n_batch, seq_length, output_dim]
         return out
 
+    def get_parameter_count(self) -> int:
+        """Return the number of local parameters.
+
+        Notes
+        -----
+        This method calculates the number of parameters instead of counting the number of elements of the local parameters.
+        """
+        if not self.qk_norm:
+            return 0
+
+        global_heads = self.heads * self.channel_group.size()
+
+        return 4 * (
+            self.embed_dim // global_heads
+        )  # 2 norms (q and k) * 2 parameters (scale and bias) * normalized_dim
+
 
 class Attention(torch.nn.Module):
     """Multi-head attention that can be converted with :meth:`convert_to_jigsaw`."""

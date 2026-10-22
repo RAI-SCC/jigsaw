@@ -2,8 +2,8 @@
 
 Covers the pieces the forward/backward reference suites never touch:
 
-* ``spatial_world_size`` / ``get_parameter_count`` -- the effective (replica-
-  divided) local parameter count.
+* ``spatial_world_size`` / ``get_parameter_count`` -- the global parameter
+  count, computed from the global shapes, against the plain torch layer.
 * ``convert_to_torch`` -- rebuilding a plain ``torch.nn.Conv{1,2,3}d`` from the
   channel-sharded, spatially-replicated jigsaw layer and checking it reproduces
   the distributed forward.
@@ -54,14 +54,21 @@ class TestConvChannelSizes:
         assert conv.local_out_channels == 3 == conv.weight.shape[0]
 
 
+def _reference_count(n_spatial: int, *args: int, bias: bool) -> int:
+    ref = _REF_CLS[n_spatial](*args, bias=bias)
+    return sum(p.numel() for p in ref.parameters())
+
+
 class TestConvParameterCount:
+    """``get_parameter_count`` is the global count, the same on every rank."""
+
     @pytest.mark.dist(4)
     @pytest.mark.parametrize("n_spatial", [1, 2, 3])
-    def test_count_divides_by_spatial_replicas(
+    def test_count_is_global_with_spatial_replicas(
         self, device: torch.device, process_mesh_dict_2x2: dict, n_spatial: int
     ) -> None:
-        """On a 2 (spatial) x 2 (channel) mesh the params are replicated over the
-        two spatial ranks, so the effective count halves them."""
+        """2 (spatial) x 2 (channel) mesh: replicated over the two spatial ranks,
+        split over the two channel ranks; neither changes the count."""
         mesh = process_mesh_dict_2x2
         conv = _CONV_CLS[n_spatial](
             8,
@@ -75,17 +82,17 @@ class TestConvParameterCount:
         ).to(device)
 
         assert conv.spatial_world_size == mesh["row"].size() == 2
-        replicas = conv.spatial_world_size
-        expected = conv.weight.numel() // replicas + conv.bias.numel() // replicas
-        assert conv.get_parameter_count() == expected
+        assert conv.get_parameter_count() == _reference_count(
+            n_spatial, 8, 12, 2, bias=True
+        )
 
     @pytest.mark.dist(4)
-    def test_pure_channel_split_has_no_spatial_replicas(
+    def test_count_is_global_with_pure_channel_split(
         self, device: torch.device, process_mesh_dict_1x4: dict
     ) -> None:
-        """No split spatial axis -> ``spatial_world_size == 1`` and nothing is divided."""
+        """No split spatial axis: ``spatial_world_size == 1``, the count is global."""
         mesh = process_mesh_dict_1x4
-        conv = convolution.DistributedConv2d(
+        conv = _CONV_CLS[2](
             8,
             16,
             2,
@@ -97,7 +104,7 @@ class TestConvParameterCount:
         ).to(device)
 
         assert conv.spatial_world_size == 1
-        assert conv.get_parameter_count() == conv.weight.numel() + conv.bias.numel()
+        assert conv.get_parameter_count() == _reference_count(2, 8, 16, 2, bias=True)
 
     @pytest.mark.dist(4)
     def test_bias_false_is_excluded_from_the_count(
@@ -105,7 +112,7 @@ class TestConvParameterCount:
     ) -> None:
         """With ``bias=False`` only the weight contributes."""
         mesh = process_mesh_dict_2x2
-        conv = convolution.DistributedConv2d(
+        conv = _CONV_CLS[2](
             8,
             12,
             2,
@@ -117,9 +124,7 @@ class TestConvParameterCount:
         ).to(device)
 
         assert conv.bias is None
-        assert (
-            conv.get_parameter_count() == conv.weight.numel() // conv.spatial_world_size
-        )
+        assert conv.get_parameter_count() == _reference_count(2, 8, 12, 2, bias=False)
 
 
 class TestConvConvertToTorch:
