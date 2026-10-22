@@ -919,7 +919,7 @@ class DistributedAttention(torch.nn.Module):
 
 
 class Attention(torch.nn.Module):
-    """Multi-head attention that can be converted with :meth:`convert_to_jigsaw`.
+    """Non-distributed multi-head attention, convertible with :meth:`convert_to_jigsaw`.
 
     Parameters
     ----------
