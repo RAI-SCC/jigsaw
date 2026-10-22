@@ -34,8 +34,8 @@ def _a2a_heads_to_seq(x: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor
     send = x.reshape(*lead, s, p, h // p, d).movedim(nlead + 1, 0).contiguous()
     recv = torch.empty_like(send)
     dist.all_to_all_single(recv, send, group=group)
-    # recv[src] is src's local sequence on our head-slice; put P back just
-    # before s, so the gathered sequence is source-rank-major.
+    # recv[src] is src's local sequence on this rank's head-slice; put P back
+    # just before s, so the gathered sequence is source-rank-major.
     return recv.movedim(0, nlead).reshape(*lead, p * s, h // p, d).contiguous()
 
 
@@ -56,8 +56,8 @@ def _a2a_seq_to_heads(x: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor
     send = x.reshape(*lead, p, s // p, hp, d).movedim(nlead, 0).contiguous()
     recv = torch.empty_like(send)
     dist.all_to_all_single(recv, send, group=group)
-    # recv[src] is our sequence-block on src's heads; put P just before h_p, so
-    # the gathered heads are source-rank-major (the pre-Ulysses layout).
+    # recv[src] is this rank's sequence-block on src's heads; put P just before
+    # h_p, so the gathered heads are source-rank-major (the pre-Ulysses layout).
     return recv.movedim(0, nlead + 1).reshape(*lead, s // p, hp * p, d).contiguous()
 
 

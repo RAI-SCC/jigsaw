@@ -406,7 +406,6 @@ class DistributedLinear(torch.nn.Module):
                 f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
             )
 
-        # Gather
         global_weights, global_bias = self.merge_weights(
             from_process_mesh, pm_row_key, pm_col_key, pm_model_key
         )

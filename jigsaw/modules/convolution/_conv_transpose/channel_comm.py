@@ -118,7 +118,7 @@ def _over_channels_streaming(
     buf_b = torch.empty_like(x)
     recv_buf = buf_a
 
-    # Prime the ring: this rank's own slice sets off while we convolve it.
+    # Prime the ring: this rank's own slice is sent while it is convolved locally.
     recv_buf, handle = hop_fn(
         x, recv_buf, direction=1, group=channel_group, async_op=True
     )

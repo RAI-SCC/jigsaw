@@ -87,6 +87,7 @@ def main(steps: int = 100) -> None:
         err = (plain(x_test.to(device)) - expected).abs().max()
     log.info("plain nn.Sequential vs distributed: max diff %.2e", err)
     assert err < 1e-4, err
+    # Optional: save the plain model.
     # if rank == 0:
     #     torch.save(plain.state_dict(), "model.pt")  # loads with plain PyTorch, anywhere
 

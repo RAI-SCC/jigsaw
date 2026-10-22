@@ -29,7 +29,7 @@ SCRIPTS = sorted(p.stem for p in EXAMPLES.glob("*.py") if not p.name.startswith(
 LAUNCH_STEPS = 4
 
 # Anything a launcher (this one, mpirun, srun) put in the environment would be
-# inherited by the job we start and be taken for *its* launch.
+# inherited by the launched job and be taken for *its* launch.
 _LAUNCHER_VARS = (
     "SLURM_",
     "OMPI_",

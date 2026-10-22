@@ -473,7 +473,7 @@ def _hybrid_dkv_relay_peers(topo: HybridTopology, step: int) -> tuple[int, int]:
     At backward ``step`` this rank holds the gradient for the chunk owned by
     ``rank_at(node_idx - step // gpn, local_idx + step)``. Hand it straight to
     that owner, and receive (from the mirror-image rank) the partial destined
-    for our own chunk.
+    for this rank's own chunk.
 
     Unlike the K/V sends, this one changes both the intra group and the local
     index at once, so neither sub-group can address it and it uses ranks of
@@ -524,7 +524,8 @@ def _accumulate_dkv_send(
     dkv = torch.cat([dk_j, dv_j], dim=0).contiguous()
     recv_buf = torch.empty_like(dkv)
 
-    # hybrid
+    # Hybrid rings relay the partial straight to its owner, which is addressed
+    # by full-ring-group rank; the other send ops shift it by ``step``.
     if ring_config.send_op in _INTRA_ROTATING_HYBRIDS:
         topo = get_hybrid_topology(group, ring_config.gpus_per_node)
         send_recv_ranks = _hybrid_dkv_relay_peers(topo, step)

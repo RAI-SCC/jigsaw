@@ -48,8 +48,8 @@ class TestUlyssesAllToAll:
         assert gathered.shape == (b, s_loc * p, h // p, d)
 
         # Sequence axis is source-rank-major: block r is rank r's local x, sliced
-        # to this rank's head window -- gather every rank's *full* local x first,
-        # then slice each by our own window (the one every source sent to us).
+        # to this rank's head window: gather every rank's *full* local x first,
+        # then slice each by this rank's window (the one every source sent here).
         head0 = rank * (h // p)
         full_blocks = gather_1d_results_list(x.contiguous(), {"g": group}, pm_key="g")
         ref_blocks = [block[:, :, head0 : head0 + h // p, :] for block in full_blocks]
@@ -451,9 +451,8 @@ class TestUlyssesAttention:
                 ulysses=True,
                 **common,
             )
-        # spatial=2 but heads//channel = 4 // 2 = 2 ... divisible; force a bad
-        # count with heads that do not divide the 2-way spatial group after the
-        # channel split: heads=2, channel=2 -> heads//channel = 1, not % 2.
+        # heads=2 over channel=2 leaves 1 head per channel shard, which the 2-way
+        # spatial group cannot split.
         with pytest.raises(AssertionError, match="divisible by spatial group size"):
             attention.DistributedAttention(
                 local_rank=process_mesh_dict_2x2["col"].rank(),

@@ -120,7 +120,6 @@ class TestGlooNcclBackend:
         x = torch.randn(40, 4, device=device)
         x_cpu = x.to("cpu")
 
-        # all-reduce
         dist.all_reduce(x)
         dist.all_reduce(x_cpu)
         x_cpu = x_cpu.to(device)

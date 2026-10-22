@@ -269,7 +269,6 @@ class TestRingAttention:
             True
         )
 
-        # Reference calculation
         with torch.nn.attention.sdpa_kernel(
             [
                 torch.nn.attention.SDPBackend.FLASH_ATTENTION,
@@ -311,16 +310,13 @@ class TestRingAttention:
             ring_config=ring_config,
         )
 
-        # Backward pass
         out_ref.backward(torch.ones_like(out_ref))
         dq_ref, dk_ref, dv_ref = q_ref.grad, k_ref.grad, v_ref.grad
 
         out_core.backward(torch.ones_like(out_core))
         atol = 1e-2 if dtype == torch.bfloat16 else 1e-3
         ring_group = process_mesh_dict["row"]
-        # dq_ref: results from calling torch.nn.SDPA
-        # q_ref2: results from calling forward-backward core functionality
-        # from ring_config.attn_core_forward_fn
+        # Grads from attn_core_forward_fn (*_ref2) vs torch SDPA (*_ref).
         assert_close(
             "dq core vs sdpa", q_ref2.grad, dq_ref, atol, 1e-5, device, ring_group
         )
@@ -331,7 +327,6 @@ class TestRingAttention:
             "dv core vs sdpa", v_ref2.grad, dv_ref, atol, 1e-5, device, ring_group
         )
 
-        # gather
         dq_full = gather_1d_results(dq_local, process_mesh_dict, dim=2)
         dk_full = gather_1d_results(dk_local, process_mesh_dict, dim=2)
         dv_full = gather_1d_results(dv_local, process_mesh_dict, dim=2)
@@ -674,7 +669,6 @@ def _check_ring_hybrid(
     k_ref = gather_1d_results(k_local, process_mesh_dict, dim=2).requires_grad_(True)
     v_ref = gather_1d_results(v_local, process_mesh_dict, dim=2).requires_grad_(True)
 
-    # Reference calculation
     with torch.nn.attention.sdpa_kernel(
         [
             torch.nn.attention.SDPBackend.FLASH_ATTENTION,
@@ -715,22 +709,17 @@ def _check_ring_hybrid(
         ring_config=ring_config,
     )
 
-    # Backward pass
     out_ref.backward(torch.ones_like(out_ref))
     dq_ref, dk_ref, dv_ref = q_ref.grad, k_ref.grad, v_ref.grad
 
     out_core.backward(torch.ones_like(out_core))
     atol = 1e-2 if dtype == torch.bfloat16 else 1e-3
     ring_group = process_mesh_dict["model"]
-    # dq_ref: results from calling torch.nn.SDPA
-    # q_ref2: results from calling forward-backward core functionality
-    # from ring_config.attn_core_forward_fn
-
+    # Grads from attn_core_forward_fn (*_ref2) vs torch SDPA (*_ref).
     assert_close("dq core vs sdpa", q_ref2.grad, dq_ref, atol, 1e-5, device, ring_group)
     assert_close("dk core vs sdpa", k_ref2.grad, dk_ref, atol, 1e-5, device, ring_group)
     assert_close("dv core vs sdpa", v_ref2.grad, dv_ref, atol, 1e-5, device, ring_group)
 
-    # gather
     dq_full = gather_1d_results(dq_local, process_mesh_dict, dim=2)
     dk_full = gather_1d_results(dk_local, process_mesh_dict, dim=2)
     dv_full = gather_1d_results(dv_local, process_mesh_dict, dim=2)

@@ -26,7 +26,6 @@ class _DistributedConvNd(torch.nn.Module):
     # spatial rank (1, 2 or 3); pinned by the concrete subclass.
     _n_spatial: int
 
-    # type-hints
     bias: Optional[Parameter]
     config: ConvNdConfig
     spatial_groups: tuple[Optional[dist.ProcessGroup], ...]
