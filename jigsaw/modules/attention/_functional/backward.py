@@ -31,11 +31,9 @@ _INTRA_ROTATING_HYBRIDS = frozenset({SendOp.HYBRID_P2P, SendOp.HYBRID_ALLTOALL})
 # --------------------------------------------------------------------------- #
 # backward: which global chunk does step `step` hold?
 #
-# Shared by the dropout-mask seed lookup (below, before the core call) and
-# `accumulate_dkv`'s dK/dV bucketing (which needs the same answer *after* the
-# core call) -- both need to know, for LOCAL save_scope, which global chunk
-# the backward ring re-circulated into this step, and the mapping is the same
-# regardless of what either caller does with it.
+# Shared by the dropout-mask seed lookup and `accumulate_dkv`'s dK/dV
+# bucketing, which both need, for LOCAL save_scope, the global chunk the
+# backward ring brought to this step.
 # --------------------------------------------------------------------------- #
 def _local_scope_global_chunk_idx(
     ring_config: RingAttentionConfig,
@@ -47,12 +45,11 @@ def _local_scope_global_chunk_idx(
     """Return the global chunk index held at backward ``step`` for ``SaveScope.LOCAL``."""
     match ring_config.send_op:
         case SendOp.HYBRID_P2P | SendOp.HYBRID_BROADCAST | SendOp.HYBRID_ALLTOALL:
-            # The chunk sits on node `node_idx - step // gpn` (the inter-node
+            # The chunk sits on intra group `node_idx - step // gpn` (the outer
             # ring runs backwards relative to the forward). HYBRID_P2P and
-            # HYBRID_ALLTOALL also rotate it intra-node, so its local index
-            # is `local_idx + step`; HYBRID_BROADCAST leaves it put and
-            # node-local rank `step % gpn` was the broadcast source, so
-            # `step` is the local index.
+            # HYBRID_ALLTOALL also rotate it within the intra group, so its
+            # local index is `local_idx + step`. HYBRID_BROADCAST doesn't:
+            # local rank `step % gpn` was the broadcast source.
             topo = get_hybrid_topology(group, ring_config.gpus_per_node)
             node_step = step // topo.gpus_per_node
             local = (
@@ -172,17 +169,11 @@ def ring_backward(
     """
     layout = ring_config.core_layout
     b, h, seq_local, d = _bhnd(q.shape, layout)
-    # Reconcile dtypes before the cores run. Under autocast the forward saves
-    # bf16/fp16 tensors (``out``, ``lse`` and the K/V chunks the provider
-    # replays) and ``q``/``dout`` may arrive downcast too; the cores matmul
-    # ``q`` against those chunks, so a mixed-dtype pair raises. Run the cores
-    # in ``q``'s own (already-reconciled) precision -- the dtype
-    # ``attn_core_dtype()`` picked in forward (the autocast dtype under AMP,
-    # else the model dtype). ``w_qkv.dtype`` looks equivalent for a genuinely
-    # bf16/fp16 model (weight dtype == compute dtype there), but under
-    # ``master_weights`` the projection weight is the fp32 master copy while
-    # attention itself still runs in the autocast dtype -- using it here would
-    # force q/out back to fp32, which the TE/cuDNN cores don't support.
+    # Run the cores in ``q``'s dtype, the one ``attn_core_dtype()`` picked in
+    # forward. Under autocast, ``out``, ``lse`` and the saved K/V chunks may be
+    # bf16/fp16, and the cores matmul ``q`` against the chunks, so mixed dtypes
+    # raise. ``w_qkv.dtype`` won't do: under ``master_weights`` it is the fp32
+    # master copy, and the TE/cuDNN cores don't support fp32.
     core_dtype = q.dtype
     dout, q = dout.to(core_dtype), q.to(core_dtype)
     out = out.to(core_dtype)
@@ -194,17 +185,15 @@ def ring_backward(
     dq = torch.zeros_like(q, dtype=core_dtype)
     dk_buf, dv_buf = get_dkv_buffer(ring_config, q, ring_group_size)
 
-    # Cases where every rank processes the *same* global chunk `step` at ring
-    # step `step`: the partial dK/dV for chunk `step` just needs a SUM
-    # all-reduce, with the owning rank (`local_rank == step`) keeping it. The
-    # kept buffer is already the final local per-rank gradient, so it bypasses
-    # `postprocess_dkv` entirely (its GATHER_DKV branch would slice a global
-    # buffer this path never builds).
-    #   * BROADCAST + LOCAL: rank `step` fans its chunk out each step.
-    #   * any GLOBAL + SEND_DKV: the forward stored `chunks_to_save` by global
-    #     chunk id, so `_GlobalChunkProvider` hands every rank global chunk
-    #     `step`; SEND_DKV keeps a local-sized buffer (GATHER_DKV keeps its
-    #     global buffer + final all-reduce instead).
+    # Cases where every rank processes global chunk `step` at ring step `step`:
+    # the partial dK/dV for that chunk only needs a SUM all-reduce, kept by its
+    # owner (`local_rank == step`). The result is already the final local
+    # gradient, so it skips `postprocess_dkv` (whose GATHER_DKV branch would
+    # slice a global buffer this path never builds).
+    #   * BROADCAST + LOCAL: rank `step` broadcasts its chunk each step.
+    #   * GLOBAL + SEND_DKV: `_GlobalChunkProvider` hands every rank global
+    #     chunk `step`. GATHER_DKV keeps a global buffer and a final
+    #     all-reduce instead.
     all_reduce_dkv = (
         ring_config.send_op == SendOp.BROADCAST
         and ring_config.save_scope == SaveScope.LOCAL
@@ -213,20 +202,15 @@ def ring_backward(
         and ring_config.send_backward == SendBackward.SEND_DKV
     )
 
-    # Comm-stream overlap for the re-ringing path, split into the two things it
-    # independently gates:
-    #
-    #   * `kv_overlap`: the K/V chunk provider itself. Every LOCAL-scope re-ring
-    #     strategy -- plain P2P/all-to-all and all three hybrid ops -- has a
-    #     comm-stream overlap variant (see `_build_backward_chunk_provider`);
-    #     `maybe_forward` has to run *before* each step's core exactly when that
-    #     variant is the one in use, so this also picks the loop order below.
-    #   * `dkv_overlap`: the dK/dV relay (`_DkvRelay`), which additionally needs
-    #     the SEND_DKV direct-swap accumulation (`_accumulate_dkv_send`'s
-    #     shape). HYBRID_BROADCAST's accumulation
-    #     (`_accumulate_dkv_hybrid_broadcast`: an intra-node all-reduce plus a
-    #     conditional inter-node hop) doesn't fit that shape, so it keeps its
-    #     synchronous path even though its K/V provider is overlapped.
+    # Comm-stream overlap for the re-ringing path, gated in two parts:
+    #   * `kv_overlap`: the K/V chunk provider. Every LOCAL-scope re-ring op
+    #     has an overlap variant (see `_build_backward_chunk_provider`). It
+    #     also sets the loop order below: with overlap, `maybe_forward` runs
+    #     before each step's core.
+    #   * `dkv_overlap`: the dK/dV relay (`_DkvRelay`), which also needs
+    #     SEND_DKV. HYBRID_BROADCAST's accumulation (an intra-group all-reduce
+    #     plus a conditional outer-ring hop) doesn't fit the relay, so it stays
+    #     synchronous even though its K/V provider overlaps.
     kv_overlap = (
         ring_config.overlap_active
         and ring_config.save_scope == SaveScope.LOCAL
@@ -578,24 +562,20 @@ def _accumulate_dkv_send(
 
 
 class _DkvRelay:
-    """Async, comm-stream dK/dV relay for the SEND_DKV ring backward.
+    """Async dK/dV relay on the comm stream for the SEND_DKV ring backward.
 
-    The overlap counterpart of :func:`_accumulate_dkv_send`, which does a
-    synchronous ``p2p_fn(async_op=False)`` round trip per step fully serialized
-    with the attention cores. Here each step's partial is staged into a
-    persistent buffer, relayed on ``ring_config.comm_stream`` with
-    ``async_op=True``, and folded into ``dk_buf`` / ``dv_buf`` one step later --
-    so the transfer completes under the next step's core. Two send/receive
-    buffer pairs ping-pong (deferring by exactly one step).
+    Overlapped version of :func:`_accumulate_dkv_send`. Each step's partial is
+    staged into a persistent buffer, sent on ``ring_config.comm_stream`` with
+    ``async_op=True``, and added into ``dk_buf`` / ``dv_buf`` one step later,
+    so the transfer runs under the next step's core. Two send/receive buffer
+    pairs alternate.
 
-    Step 0 is local (this rank already holds its own chunk), matching
-    :func:`_accumulate_dkv_send`. Routing mirrors it too: the plain P2P/all-to-all
-    ring (and ``BROADCAST``, unreachable here -- see :func:`ring_backward`'s
-    ``all_reduce_dkv``) sends ``step`` hops along the ring; ``HYBRID_P2P`` /
-    ``HYBRID_ALLTOALL`` instead hand the partial to
-    :func:`_hybrid_dkv_relay_peers`, which moves along both the node and
-    node-local axes at once. ``HYBRID_BROADCAST`` never reaches this class --
-    see ``ring_backward``'s ``dkv_overlap``.
+    Step 0 stays local, as in :func:`_accumulate_dkv_send`. P2P/all-to-all send
+    the partial ``step`` hops along the ring; ``HYBRID_P2P`` /
+    ``HYBRID_ALLTOALL`` use :func:`_hybrid_dkv_relay_peers`, which moves along
+    the outer ring and within the intra group at once. ``BROADCAST`` and
+    ``HYBRID_BROADCAST`` never reach this class (see ``all_reduce_dkv`` and
+    ``dkv_overlap`` in :func:`ring_backward`).
     """
 
     def __init__(
