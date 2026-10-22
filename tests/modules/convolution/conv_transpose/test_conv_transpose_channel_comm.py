@@ -3,7 +3,7 @@
 ``_bias_view`` is a pure reshape and needs no distributed environment. It has to
 broadcast the raw bias parameter against the transpose-conv output for a plain
 ``(C_out,)`` bias *and* for the ``(S, C_out)`` bias handed in under ``vmap``
-(stacked ensemble members) -- the streaming / all-gather drivers add the bias by hand
+(stacked ensemble members); the streaming / all-gather drivers add the bias by hand
 (it cannot go through ``conv_func`` in the halo regime, or overlapped positions
 double-count it), so this reshape is the only thing keeping the channel axis
 aligned.

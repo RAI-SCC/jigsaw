@@ -4,25 +4,25 @@ Motivated by Swin's shifted-window attention on a global (lat/lon) grid: the cyc
 shift used to move the window grid wraps the longitude axis correctly, but a window
 straddling a pole in the latitude direction must *not* let the two sides it stitched
 together attend to each other. That needs an arbitrary per-window mask, broadcastable
-to ``q``'s ``(..., heads, seq, seq)`` shape -- not a simple per-sample valid-length
+to ``q``'s ``(..., heads, seq, seq)`` shape, not a simple per-sample valid-length
 ("padding") cutoff.
 
 ``transformer_engine``'s fused kernels (what :mod:`.functional.cores.te` calls
-directly) only implement ``attn_mask_type`` in ``{no_mask, causal, padding, ...}`` --
+directly) only implement ``attn_mask_type`` in ``{no_mask, causal, padding, ...}``:
 no tensor-valued mask, no ``"arbitrary"``. TE's own ``DotProductAttention`` *does*
 accept an arbitrary mask, but routes it to its *unfused* backend.
 
 Torch's own ``scaled_dot_product_attention`` does run an arbitrary mask fused, on its
-memory-efficient (xFormers-derived) and cuDNN backends, which avoid materialising the
+memory-efficient (xFormers-derived) and cuDNN backends, which avoid materializing the
 ``(batch, heads, N, N)`` score matrix the unfused math kernel needs. So:
 
 * ``attn_backend`` in ``{"sdpa", "math"}`` (the non-ring, non-Ulysses core): genuinely,
-  and efficiently, supported -- :meth:`Attention._attn_core`/
+  and efficiently, supported: :meth:`Attention._attn_core`/
   :meth:`DistributedAttention._attn_core` allow the memory-efficient and cuDNN ``sdpa``
   backends precisely so a masked call lands on one of those instead of falling all the
   way to unfused math.
 * ``attn_backend="te"``, ``ring=True``, ``ulysses=True``: all raise ``ValueError``
-  rather than silently taking an unfused detour or ignoring the mask -- see each core's
+  rather than silently taking an unfused detour or ignoring the mask; see each core's
   docstring in ``attention.py``.
 """
 
@@ -44,8 +44,8 @@ def _block_mask(n0: int, n1: int) -> torch.Tensor:
     Mimics a shifted Swin window straddling a border it must not attend across (a
     pole, on a global grid): tokens keep their own region's visibility and nothing
     else. Block-diagonal masking exactly decomposes attention into two independent
-    per-region calls -- each query's softmax normalises only over the keys it can
-    see -- which is what the tests below check against.
+    per-region calls (each query's softmax normalizes only over the keys it can
+    see), which is what the tests below check against.
     """
     n = n0 + n1
     mask = torch.zeros(n, n, dtype=torch.bool)
@@ -55,7 +55,7 @@ def _block_mask(n0: int, n1: int) -> torch.Tensor:
 
 
 def _arbitrary_bool_mask(n: int, device: torch.device) -> torch.Tensor:
-    """A random, non-block boolean mask -- no two rows need share a visible set.
+    """A random, non-block boolean mask: no two rows need share a visible set.
 
     Unlike ``_block_mask``, this can't be decomposed into separate per-region
     attention calls, so it exercises the actual masked-softmax path rather than
@@ -70,7 +70,7 @@ def _arbitrary_bool_mask(n: int, device: torch.device) -> torch.Tensor:
 def _arbitrary_float_mask(
     n: int, device: torch.device, dtype: torch.dtype
 ) -> torch.Tensor:
-    """A random finite additive bias -- not just 0/``-inf`` standing in for a bool
+    """A random finite additive bias: not just 0/``-inf`` standing in for a bool
     mask, but a genuinely continuous per-position weighting.
     """
     return (torch.randn(n, n, device=device) * 2.0).to(dtype)
@@ -165,7 +165,7 @@ class TestAttentionMask:
         torch.testing.assert_close(out_bool, out_float, rtol=tol, atol=tol)
 
     def test_no_mask_is_unaffected(self, device: torch.device) -> None:
-        """``attn_mask=None`` (the default) reproduces the pre-existing behaviour."""
+        """``attn_mask=None`` (the default) reproduces the pre-existing behavior."""
         model = self._model(device)
         torch.manual_seed(1)
         x = torch.randn(2, self.n0 + self.n1, DIM, device=device)
@@ -508,7 +508,7 @@ class TestAttnMaskWithTe:
         )
         assert model.attn_backend is cfg.AttnBackend.TE  # the real core, not a fallback
 
-        # x stays in the module's own (float32) dtype -- `attn_core_dtype` casts
+        # x stays in the module's own (float32) dtype; `attn_core_dtype` casts
         # internally to bf16 for the core; it is not a dtype the caller must match.
         x = torch.randn(2, 8, DIM, device=device)
         with pytest.raises(ValueError, match="attn_backend='te'"):

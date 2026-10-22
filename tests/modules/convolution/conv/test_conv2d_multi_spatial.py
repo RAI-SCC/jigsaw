@@ -1,8 +1,8 @@
 """Distributed Conv2d with the domain split along several spatial axes.
 
 Split out of ``test_convolution_2d.py``: the single-spatial-axis (width-only)
-distributed conv lives there, everything that splits height -- or height *and*
-width, optionally combined with a channel split -- lives here.
+distributed conv lives there, everything that splits height (or height *and*
+width, optionally combined with a channel split) lives here.
 """
 
 import pytest
@@ -19,7 +19,7 @@ Pair = int | tuple[int, int]
 
 
 def _pair(value: Pair) -> tuple[int, int]:
-    """Normalise an ``int`` or 2-tuple to a ``(h, w)`` tuple."""
+    """Normalize an ``int`` or 2-tuple to a ``(h, w)`` tuple."""
     return (value, value) if isinstance(value, int) else tuple(value)
 
 
@@ -48,7 +48,7 @@ def _deterministic_cudnn():
 # ---------------------------------------------------------------------------
 # multi-spatial-dim parallelism: the domain is split along height *and* width
 # ---------------------------------------------------------------------------
-# (kernel, stride, padding, dilation) -- each entry is an int or an (h, w)
+# (kernel, stride, padding, dilation): each entry is an int or an (h, w)
 # tuple, so asymmetric kernels/strides/paddings/dilations are covered. Sweeps
 # the no-halo regime, stride < / > kernel, unit-stride, dilated, stride ==
 # kernel forced onto the halo path by padding/dilation, and combos whose global
@@ -253,7 +253,7 @@ class TestConv2dMultiSpatial:
 
         Each combo is either matched against a single-process conv2d or (when
         its global output is not divisible by the spatial group) asserted to be
-        rejected with ``NotImplementedError`` -- never silently wrong.
+        rejected with ``NotImplementedError``, never silently wrong.
         """
         _conv2d_multi_spatial_reference_check(
             device,
@@ -418,7 +418,7 @@ class TestConv2dMultiSpatial:
             ).to(device)
 
 
-# (kernel, stride, padding, dilation) -- an int or an (h, w) tuple per entry, so
+# (kernel, stride, padding, dilation): an int or an (h, w) tuple per entry, so
 # asymmetric hyper-parameters are covered. Spans every regime: stride == kernel
 # with no padding (no communication), stride == kernel forced onto the halo path
 # by padding or dilation, overlapping windows (stride < kernel), strided with a
@@ -446,8 +446,8 @@ class TestConv2dSpatialGridSweep:
     """Arbitrary kernel/stride/padding/dilation over a range of ``(n_h, n_w)`` grids.
 
     Every (grid, hyper-parameter) pair is either matched against a single-process
-    conv2d or -- when a split axis's global output is not divisible by that
-    axis's group size -- asserted to be rejected with ``NotImplementedError``.
+    conv2d or (when a split axis's global output is not divisible by that
+    axis's group size) asserted to be rejected with ``NotImplementedError``.
     So each pair is checked to be either numerically correct or cleanly refused,
     never silently wrong. ``height`` / ``width`` are multiples of the grid so the
     domain shards evenly on both axes.

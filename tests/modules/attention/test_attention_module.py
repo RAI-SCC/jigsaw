@@ -3,10 +3,10 @@
 * ``_RingAttention`` is driven through ``autograd`` (forward, ``setup_context``,
   ``backward``) on a 4-rank ring and compared with plain SDPA on the global sequence;
   ``test_ring_attention.py`` only calls ``ring_forward`` / ``ring_backward`` directly.
-* ``DistributedAttention`` non-ring paths that the other files do not reach --
-  ``test_backend_matches_serial`` across all three ``attn_backend``s (math,
-  sdpa -- default and forced-efficient-attention -- te -- both the cuDNN and
-  the ``flash_attn`` cores), ``qk_norm`` -- plus the single-process helpers.
+* ``DistributedAttention`` non-ring paths that the other files do not reach:
+  ``test_backend_matches_serial`` across all three ``attn_backend``s (math;
+  sdpa, default and forced-efficient-attention; te, both the cuDNN and
+  the ``flash_attn`` cores), ``qk_norm``, plus the single-process helpers.
 
 ``DistributedAttention(ring=True)`` end to end is covered by ``test_attention_convert.py``.
 By default the ring recomputes K/V as ``x @ w_qkv.mT`` on the local shard, which is only
@@ -152,18 +152,18 @@ _ATTN_CORE_ATTR = {
 #: is ``None`` for the default dispatch, otherwise it pins a specific kernel
 #: that the default priority order would not otherwise reach on every GPU:
 #:
-#: * ``("te", "cudnn" | "flash")`` -- TE's two arms (cuDNN fused attention vs.
+#: * ``("te", "cudnn" | "flash")``: TE's two arms (cuDNN fused attention vs.
 #:   the ``flash_attn`` package), selected via ``JIGSAW_TE_CORE`` rather than
 #:   letting ``te_cores.select_core`` pick by GPU architecture. Each is
 #:   skipped at runtime if that arm's package is not importable
 #:   (``te_required`` only guarantees ``transformer_engine`` itself, not
 #:   ``flash_attn``).
-#: * ``("sdpa", "efficient")`` -- torch's own memory-efficient attention
+#: * ``("sdpa", "efficient")``: torch's own memory-efficient attention
 #:   kernel (``SDPBackend.EFFICIENT_ATTENTION``), forced via
 #:   :func:`~tests.parity.forced_sdpa_backend`. ``_attn_core``'s own
 #:   ``sdpa_kernel`` priority list is ``[FLASH, CUDNN, EFFICIENT, MATH]``, so
 #:   plain ``attn_backend="sdpa"`` with no forcing exercises flash (or cuDNN)
-#:   on every GPU this suite runs on -- efficient-attention has no other
+#:   on every GPU this suite runs on; efficient-attention has no other
 #:   coverage without this.
 _BACKEND_CASES = [
     ("math", None),
@@ -206,7 +206,7 @@ class TestDistributedAttentionPaths:
         1-rank group, never that a sharded, multi-rank run agrees with
         anything. The serial reference always runs the *default*,
         unforced ``sdpa`` priority (flash, typically) regardless of
-        ``variant`` -- that is the independent ground truth every other
+        ``variant``; that is the independent ground truth every other
         kernel is checked against. ``te``/``efficient`` run their own kernel
         rather than that default one, so they get the same looser tolerance
         ``test_te_attn_forward_backward_matches_sdpa`` uses for TE.
@@ -227,7 +227,7 @@ class TestDistributedAttentionPaths:
         torch.manual_seed(1)
         serial = attention.Attention(DIM, DIM, DIM, HEADS, device)
         x_global = torch.randn(1, 10, DIM, device=device)
-        y_ref = serial(x_global)  # unforced default sdpa priority -- the ground truth
+        y_ref = serial(x_global)  # unforced default sdpa priority: the ground truth
         model = attention.Attention.convert_to_jigsaw(
             serial, mesh, device, ring=False, attn_backend=attn_backend
         )
@@ -248,7 +248,7 @@ class TestDistributedAttentionPaths:
             # would hang the rest.
             if not all_ranks_ok(forced.count > 0, device, mesh["model"]):
                 raise AssertionError(
-                    "forced_sdpa_backend intercepted no sdpa_kernel dispatch -- "
+                    "forced_sdpa_backend intercepted no sdpa_kernel dispatch; "
                     "the efficient kernel was never pinned, so this ran the "
                     "default priority list"
                 )
@@ -376,7 +376,7 @@ class TestDistributedAttentionPaths:
             got = getattr(getattr(model, norm_name), p_name).grad
             ref = getattr(getattr(serial, norm_name), p_name).grad
             # Summed over every token, so the bf16 rounding grows with the size
-            # of the entries -- the same scaling the qkv gradient needs below.
+            # of the entries: the same scaling the qkv gradient needs below.
             # ``tol`` as a flat absolute bound is too tight for large entries.
             atol = tol * max(1.0, float(ref.abs().max()))
             assert_close(

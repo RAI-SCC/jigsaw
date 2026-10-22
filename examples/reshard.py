@@ -8,12 +8,12 @@ parameters from one mesh onto another:
     layer.reshard_parameters(from_mesh, to_mesh)
 
 which gathers the weights and keeps the slice the layer needs on the new mesh, rebinding
-the layer to the new groups. Both meshes must span the same ranks. Here we go from
+the layer to the new groups. Both meshes must span the same ranks. This example moves
 
     training   {"row": 2, "col": 2}             one replica on all 4 ranks
     inference  {"dp": 4, "row": 1, "col": 1}    4 replicas, each rank holds the full model
 
-For a single, plain PyTorch copy -- to save a checkpoint that needs no jigsaw, say --
+For a single, plain PyTorch copy (to save a checkpoint that needs no jigsaw, say),
 ``layer.convert_to_torch(mesh)`` merges the shards into an ``nn.Linear`` / ``nn.Conv2d``.
 
 Run with one process per GPU (or 4 CPU processes):
@@ -87,6 +87,7 @@ def main(steps: int = 100) -> None:
         err = (plain(x_test.to(device)) - expected).abs().max()
     log.info("plain nn.Sequential vs distributed: max diff %.2e", err)
     assert err < 1e-4, err
+    # Optional: save the plain model.
     # if rank == 0:
     #     torch.save(plain.state_dict(), "model.pt")  # loads with plain PyTorch, anywhere
 
@@ -98,7 +99,7 @@ def main(steps: int = 100) -> None:
         if hasattr(layer, "reshard_parameters"):  # every layer that owns parameters
             layer.reshard_parameters(train_mesh, infer_mesh)
 
-    # On this mesh nothing is split, so the model takes full, unsharded inputs -- and
+    # On this mesh nothing is split, so the model takes full, unsharded inputs;
     # every rank can serve its own requests.
     with torch.no_grad():
         out = model(x_test.to(device))

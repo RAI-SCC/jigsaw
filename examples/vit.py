@@ -15,7 +15,7 @@ patch recovery all consume and produce these shards.
     recovery      DistributedConvTranspose2d
 
 Attention is global: every token attends to the whole image, not just to the tokens
-on its own rank -- the ring passes the key/value chunks around "row".
+on its own rank; the ring passes the key/value chunks around "row".
 
 Run with one process per GPU (or 4 CPU processes):
 
@@ -36,7 +36,7 @@ Each copy's parameters are of two kinds, and need different reductions:
 
 ``jigsaw.parallel.wrap_ddp`` wraps the model in a plain ``DistributedDataParallel`` over
 ``mesh["dp"]``; the layers sum their replicated gradients over "row" themselves. A DDP
-over the default group would average sharded weights with other shards -- jigsaw
+over the default group would average sharded weights with other shards; jigsaw
 raises if you try. With ``--joint-hook`` the sum and the average become one all-reduce
 in DDP's buckets (see ``docs/ddp.md``); the gradients are the same.
 """
@@ -69,7 +69,7 @@ class Block(nn.Module):
 
         def norm() -> nn.Module:
             return jigsaw.modules.DistributedLayerNorm(
-                normalized_dim=DIM,  # global size; each rank normalises its slice ...
+                normalized_dim=DIM,  # global size; each rank normalizes its slice ...
                 local_rank=model_group.rank(),
                 device=device,
                 row_group=row,
@@ -122,7 +122,7 @@ def sincos_pos_embed(
     """Fixed 2-D sin/cos embedding evaluated at *global* patch indices.
 
     Because it is a function of the global position, a token gets the same embedding
-    no matter which rank it lives on -- so the model does not depend on the mesh.
+    no matter which rank it lives on, so the model does not depend on the mesh.
     """
     omega = 1.0 / 10000 ** (torch.arange(dim // 4) / (dim // 4))
 
@@ -177,7 +177,7 @@ class ViT(nn.Module):
         z = self.embed(x)  # (B, E / col, Hp, Wp / row)
         b, e, hp, wp = z.shape
         z = z.permute(0, 2, 3, 1) + self.pos_embed  # (B, Hp, Wp / row, E / col)
-        # tokens: (B, N / row, E / col). The ring sends its input to the neighbour
+        # tokens: (B, N / row, E / col). The ring sends its input to the neighbor
         # ranks, which needs contiguous memory (the permute above left it strided).
         z = z.reshape(b, hp * wp, e).contiguous()
         for block in self.blocks:
@@ -227,7 +227,7 @@ def main(
     else:
         mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})
 
-    # Every rank needs its own seed so that the shards are initialised independently.
+    # Every rank needs its own seed so that the shards are initialized independently.
     # (The copies start equal anyway: DDP broadcasts copy 0's weights over "dp".)
     set_all_seeds(mesh["model"].rank())
 

@@ -26,7 +26,7 @@ def _clear_buffer_cache():
 
 # --- helpers -----------------------------------------------------------------
 # Calls routed through a helper all share a single call site (one source line),
-# which is exactly what the "reuse across iterations" behaviour keys on.
+# which is exactly what the "reuse across iterations" behavior keys on.
 
 
 def _alloc(shape=(8,), dtype=torch.float32, local_rank=0, device=CPU, index=0):

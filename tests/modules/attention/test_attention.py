@@ -49,7 +49,7 @@ def _assert_shard_replication(
 
     ``shards`` holds one tensor per model-group rank; a row-major 2x2 mesh puts
     rank ``r`` at ``(row, col) = divmod(r, 2)``, so shards 0 and 2 share a channel
-    column -- they must match after the spatial broadcast + grad-sync -- while
+    column (they must match after the spatial broadcast + grad-sync), while
     shards 0 and 1 sit in different columns and must differ. Routed through the
     parity helpers so a mismatch on a subset of ranks fails the job instead of
     hanging the rest in the next collective.
@@ -123,7 +123,7 @@ class TestDistributedAttention:
         cannot work once the projection is channel-parallel, so
         ``DistributedAttention`` forces the ring to circulate K/V instead
         (``send_in_forward = save_for_backward = KV``). This exercises that path
-        forward and backward -- ``local_seq_len != heads`` here, which is also
+        forward and backward: ``local_seq_len != heads`` here, which is also
         what surfaced the ``(b, h, s)`` vs ``(b, s, h)`` LSE-layout bug in the
         backward. Correctness (vs a serial reference) is left to the functional
         ``test_ring_attention`` suite; this only guards the wiring.

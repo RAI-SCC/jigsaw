@@ -228,8 +228,7 @@ class TestRingAttention:
         x = x.contiguous()
 
         qkv = x @ w_qkv.mT
-        # QKV shape: [B, Nlocal, 3*d*h]
-        # We need QKV to have shape: []
+        # [B, Nlocal, 3*h*d] -> q, k, v each [B, h, Nlocal, d]
         q_local, k_local, v_local = qkv.reshape(b, n_local, 3, h, d).permute(
             2, 0, 3, 1, 4
         )
@@ -269,7 +268,6 @@ class TestRingAttention:
             True
         )
 
-        # Reference calculation
         with torch.nn.attention.sdpa_kernel(
             [
                 torch.nn.attention.SDPBackend.FLASH_ATTENTION,
@@ -311,16 +309,13 @@ class TestRingAttention:
             ring_config=ring_config,
         )
 
-        # Backward pass
         out_ref.backward(torch.ones_like(out_ref))
         dq_ref, dk_ref, dv_ref = q_ref.grad, k_ref.grad, v_ref.grad
 
         out_core.backward(torch.ones_like(out_core))
         atol = 1e-2 if dtype == torch.bfloat16 else 1e-3
         ring_group = process_mesh_dict["row"]
-        # dq_ref: results from calling torch.nn.SDPA
-        # q_ref2: results from calling forward-backward core functionality
-        # from ring_config.attn_core_forward_fn
+        # Grads from attn_core_forward_fn (*_ref2) vs torch SDPA (*_ref).
         assert_close(
             "dq core vs sdpa", q_ref2.grad, dq_ref, atol, 1e-5, device, ring_group
         )
@@ -331,7 +326,6 @@ class TestRingAttention:
             "dv core vs sdpa", v_ref2.grad, dv_ref, atol, 1e-5, device, ring_group
         )
 
-        # gather
         dq_full = gather_1d_results(dq_local, process_mesh_dict, dim=2)
         dk_full = gather_1d_results(dk_local, process_mesh_dict, dim=2)
         dv_full = gather_1d_results(dv_local, process_mesh_dict, dim=2)
@@ -640,8 +634,7 @@ def _check_ring_hybrid(
     x = x.contiguous()
 
     qkv = x @ w_qkv.mT
-    # QKV shape: [B, Nlocal, 3*d*h]
-    # We need QKV to have shape: []
+    # [B, Nlocal, 3*h*d] -> q, k, v each [B, h, Nlocal, d]
     q_local, k_local, v_local = qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
 
     q_local, k_local, v_local = (
@@ -674,7 +667,6 @@ def _check_ring_hybrid(
     k_ref = gather_1d_results(k_local, process_mesh_dict, dim=2).requires_grad_(True)
     v_ref = gather_1d_results(v_local, process_mesh_dict, dim=2).requires_grad_(True)
 
-    # Reference calculation
     with torch.nn.attention.sdpa_kernel(
         [
             torch.nn.attention.SDPBackend.FLASH_ATTENTION,
@@ -715,22 +707,17 @@ def _check_ring_hybrid(
         ring_config=ring_config,
     )
 
-    # Backward pass
     out_ref.backward(torch.ones_like(out_ref))
     dq_ref, dk_ref, dv_ref = q_ref.grad, k_ref.grad, v_ref.grad
 
     out_core.backward(torch.ones_like(out_core))
     atol = 1e-2 if dtype == torch.bfloat16 else 1e-3
     ring_group = process_mesh_dict["model"]
-    # dq_ref: results from calling torch.nn.SDPA
-    # q_ref2: results from calling forward-backward core functionality
-    # from ring_config.attn_core_forward_fn
-
+    # Grads from attn_core_forward_fn (*_ref2) vs torch SDPA (*_ref).
     assert_close("dq core vs sdpa", q_ref2.grad, dq_ref, atol, 1e-5, device, ring_group)
     assert_close("dk core vs sdpa", k_ref2.grad, dk_ref, atol, 1e-5, device, ring_group)
     assert_close("dv core vs sdpa", v_ref2.grad, dv_ref, atol, 1e-5, device, ring_group)
 
-    # gather
     dq_full = gather_1d_results(dq_local, process_mesh_dict, dim=2)
     dk_full = gather_1d_results(dk_local, process_mesh_dict, dim=2)
     dv_full = gather_1d_results(dv_local, process_mesh_dict, dim=2)
@@ -857,7 +844,7 @@ def test_ring_hybrid_four_nodes(
     ``n_nodes == 2`` (every other hybrid test) ``internode_peer(1)`` and
     ``internode_peer(-1)`` name the same rank, so a provider that keeps
     re-sending its *original* chunk every round instead of relaying the chunk
-    it just received is indistinguishable from a correct one -- this is the
+    it just received is indistinguishable from a correct one; this is the
     smallest topology where the two diverge.
     """
     _check_ring_hybrid(
@@ -981,7 +968,7 @@ def test_ring_overlap_comm_parity(
     Runs the plain ``SendOp.P2P`` ring forward+backward with the comm-stream
     overlap off and then on (dedicated CUDA stream + double-buffered K/V
     circulation, hoisted dK/dV relay) and asserts the results are numerically
-    identical -- the ops and their accumulation order are unchanged, only which
+    identical: the ops and their accumulation order are unchanged, only which
     stream they run on. ``send_backward`` is ``SEND_DKV`` so ``save_scope=LOCAL``
     exercises the ``_DkvRelay`` async path and ``GLOBAL`` the all-reduce path
     (overlap inert there, so it doubles as a no-regression check).
@@ -1078,8 +1065,8 @@ def test_ring_overlap_comm_parity_hybrid(
     the intra-/inter-node K/V hop overlap
     (``_HybridP2PForwardChunkProviderOverlap`` /
     ``_HybridBroadcastForwardChunkProviderOverlap`` and their backward twins)
-    for all three hybrid send ops, and -- for ``HYBRID_P2P`` /
-    ``HYBRID_ALLTOALL`` with ``save_scope=LOCAL`` -- the hybrid-routed dK/dV
+    for all three hybrid send ops, and (for ``HYBRID_P2P`` /
+    ``HYBRID_ALLTOALL`` with ``save_scope=LOCAL``) the hybrid-routed dK/dV
     relay (``_DkvRelay`` via ``_hybrid_dkv_relay_peers``). ``HYBRID_BROADCAST``
     at ``LOCAL`` scope exercises its (unoverlapped) dK/dV all-reduce path
     alongside the overlapped K/V providers, doubling as a no-regression check

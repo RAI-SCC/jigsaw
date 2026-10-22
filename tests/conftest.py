@@ -58,7 +58,7 @@ def pytest_configure(config):
     # The reference-comparison tests check a distributed op against a
     # single-process ``F.*`` result with ~1e-4 tolerances. On Ampere+ GPUs cuDNN
     # / cuBLAS run fp32 convs and matmuls in TF32 by default (~1e-3 relative
-    # error), and which kernel a call lands on depends on its shape -- so the
+    # error), and which kernel a call lands on depends on its shape, so the
     # sharded path and the whole-tensor reference disagree well past 1e-4 even
     # though the maths is identical. There is no TF32 on CPU, which is why the
     # same tests pass there. Force true fp32 so the tolerances mean something.
@@ -85,7 +85,7 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
-        "dist(n_ranks): Mark test to run only when running parallel tests, and optionaly, only with the specified ranks",
+        "dist(n_ranks): Mark test to run only when running parallel tests, and optionally, only with the specified ranks",
     )
 
 
@@ -123,8 +123,8 @@ def dist_env(
 
     Stays session-scoped and autouse so it runs before the session-scoped
     ``process_mesh_dict_*`` fixtures, which need the default group. When *every*
-    selected test is marked ``no_dist_env`` -- e.g. running ``test_gloo_nccl.py``
-    on its own, which brings up its own ``cpu:gloo,cuda:nccl`` group -- the
+    selected test is marked ``no_dist_env`` (e.g. running ``test_gloo_nccl.py``
+    on its own, which brings up its own ``cpu:gloo,cuda:nccl`` group), the
     shared group is not created, so that is not a double init.
     """
     items = request.session.items
@@ -143,7 +143,7 @@ def dist_env(
     # Default to a single-machine rendezvous for local/CI runs; a real launcher
     # that already computed the job's actual rendezvous host (e.g. run.sh
     # deriving it from SLURM_JOB_NODELIST) exports MASTER_ADDR itself, and that
-    # must win here or a multi-node run can never actually rendezvous --
+    # must win here or a multi-node run can never actually rendezvous:
     # "localhost" resolves to a different loopback on every node.
     os.environ.setdefault("MASTER_ADDR", "localhost")
     os.environ.setdefault("MASTER_PORT", "12355")

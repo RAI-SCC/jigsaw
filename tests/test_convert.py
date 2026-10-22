@@ -72,8 +72,6 @@ class TestConvertToTorch:
         ref_forward = linear(x_global)
         ref_forward.backward(torch.ones_like(ref_forward, device=device))
 
-        # gradients
-
         ref_w = linear.weight.clone()
         ref_d_w = linear.weight.grad
         ref_d_x = x_global.grad
@@ -103,11 +101,9 @@ class TestConvertToTorch:
             .requires_grad_(True)
         )
 
-        # distributed calls
         dist_forward = jigsaw_linear(x_local)
         dist_forward.backward(torch.ones_like(dist_forward, device=device))
 
-        # gather values
         dist_w = jigsaw_linear.weight
         dist_d_w = jigsaw_linear.weight.grad
         dist_d_x = x_local.grad
@@ -130,14 +126,12 @@ class TestConvertToTorch:
         assert_close("weight grad", dist_d_w, ref_d_w, 1e-8, 1e-5, device, grp)
         assert_close("input grad", dist_d_x, ref_d_x, 1e-8, 1e-5, device, grp)
 
-        # bias
         if bias:
             assert jigsaw_linear.bias is not None
             assert jigsaw_linear.bias.grad is not None
             ref_d_b = linear.bias.grad
             dist_b = jigsaw_linear.bias.data
             dist_d_b = jigsaw_linear.bias.grad
-            # gather
             dist_b = gather_1d_results(
                 dist_b, process_mesh_dict=process_mesh_dict, dim=0, pm_key="col"
             )
@@ -224,7 +218,6 @@ class TestConvertToTorch:
 
         mlp = MLP(in_features, hidden_dim, out_features)
 
-        # copy weights
         ref_w_1, ref_w_2 = (
             mlp.linear1.weight.clone(),
             mlp.linear2.weight.clone(),
@@ -317,7 +310,6 @@ class TestConvertToTorch:
         )
         assert_close("input grad", dist_dx, ref_dx, 1e-8, 1e-5, device, grp)
 
-        # bias terms
         if bias:
             assert isinstance(jigsaw_mlp.linear1.bias.grad, torch.Tensor)
             assert isinstance(jigsaw_mlp.linear2.bias.grad, torch.Tensor)
@@ -453,7 +445,6 @@ class TestConvertToTorch:
                 return values
 
         transformer = Attention(embed_dim, heads)
-        # copy weights
         q_weight = transformer.q.weight.clone()
         x_global = torch.randn(1, x_seq, embed_dim, device=device)
         x_global.requires_grad_(True)
@@ -552,7 +543,6 @@ class TestConvertToTorch:
             in_features, embed_dim, out_features, heads, device, dropout_p=0.0
         )
 
-        # copy weights
         ref_qkv_w = transformer.qkv.weight.clone()
         ref_head_cat_w = transformer.head_concat.weight.clone()
         x_global = torch.randn(1, x_seq, in_features, device=device)
@@ -699,7 +689,6 @@ class TestConvertToTorch:
             bias=False,
             device=device,
         )
-        # copy weights
         ref_conv_weights = conv.weight.clone()
 
         x_global = torch.randn(1, in_channels, h, w, device=device)
@@ -738,7 +727,6 @@ class TestConvertToTorch:
         dist_forward.backward(torch.ones_like(dist_forward, device=device))
         dist_d_x = x_local.grad
 
-        # weights
         dist_w = jigsaw_conv2d.weight
         dist_d_w = jigsaw_conv2d.weight.grad
         # gather the results in two steps due to convolution
@@ -792,7 +780,6 @@ class TestConvertToTorch:
             bias=False,
             device=device,
         )
-        # copy weights
         ref_conv_weights = conv.weight.clone()
         _ = conv.bias.clone() if conv.bias is not None else None
 
@@ -834,7 +821,6 @@ class TestConvertToTorch:
         dist_forward.backward(torch.ones_like(dist_forward, device=device) / 100)
         dist_d_x = x_local.grad
 
-        # weights
         dist_w = jigsaw_conv2d.weight
         dist_d_w = jigsaw_conv2d.weight.grad
         # gather the results in two steps due to convolution
@@ -949,7 +935,7 @@ class TestConvertToTorch:
         """``MatMul{XWT,XW,XTW}`` must dispatch to their distributed counterpart.
 
         Before this, these were absent from ``convert.mapped_modules`` and so
-        passed through ``convert_to_jigsaw`` untouched -- a silent no-op that
+        passed through ``convert_to_jigsaw`` untouched: a silent no-op that
         would compute the plain (non-sharded) matmul on local shards.
         """
         process_mesh_dict = process_mesh_dict_2x2
@@ -1059,7 +1045,6 @@ class TestConvertToTorch:
         assert_close("bias grad", dist_b_grad, ref_b_grad, 1e-5, 1e-5, device, grp)
         assert_close("input grad", dist_x_grad, ref_x_grad, 1e-4, 1e-5, device, grp)
 
-        # round trip
         back = jigsaw_group_norm.convert_to_torch(process_mesh_dict)
         assert isinstance(back, torch.nn.GroupNorm)
         assert_close(

@@ -1,7 +1,7 @@
 """Contract- and edge-case coverage for the sharding-conversion API.
 
-``tests/test_sharding_configs.py`` sweeps the happy path -- every
-``from_mesh -> to_mesh`` pair, every conv rank, ``bias`` on/off -- for the four
+``tests/test_sharding_configs.py`` sweeps the happy path (every
+``from_mesh -> to_mesh`` pair, every conv rank, ``bias`` on/off) for the four
 methods that move parameters between a plain ``torch.nn`` module and a jigsaw one
 and between process meshes (``convert_to_jigsaw`` / ``convert_to_torch`` /
 ``merge_weights`` / ``reshard_parameters``). This file covers what that sweep

@@ -4,7 +4,7 @@ The GPU-free checks:
 
 * the ring's ``math`` core (the CPU fallback for every backend) reproduces,
   via seed replay, the exact backward a plain autograd graph gives for the
-  same forward dropout mask -- the mechanism ``ring_forward`` /
+  same forward dropout mask: the mechanism ``ring_forward`` /
   ``ring_backward`` rely on to keep forward and backward masks in sync.
 * ``_combine_dropout_seed`` is a deterministic function of its inputs.
 * dropout is gated by ``self.training`` for the non-ring ``Attention`` /
@@ -14,10 +14,10 @@ The GPU-free checks:
 The GPU-only checks (``gpu_required``, and ``te_required`` for the TE ones;
 skipped where the hardware or ``transformer_engine`` is missing):
 
-* ``TestSdpaTeCoreDropoutReplay`` -- the ring's SDPA and TE (cuDNN and flash)
+* ``TestSdpaTeCoreDropoutReplay``: the ring's SDPA and TE (cuDNN and flash)
   inner cores draw an opaque mask in a CUDA kernel and must replay it from the
   saved RNG state in their backward.
-* ``TestTeAttnDropoutReplay`` -- the non-ring ``_TransformerEngineAttention``
+* ``TestTeAttnDropoutReplay``: the non-ring ``_TransformerEngineAttention``
   wrapper, which drives those same cores in ``bshd`` and replays their mask
   through the same kernel-supplied ``rng_state``.
 """
@@ -59,7 +59,7 @@ class TestMathCoreDropout:
     def test_backward_matches_autograd(self) -> None:
         """``backward``'s analytic dq/dk/dv match autograd through the same dropout mask.
 
-        ``backward`` doesn't differentiate through a live graph -- it
+        ``backward`` doesn't differentiate through a live graph; it
         recomputes dq/dk/dv analytically from the saved *global* ``(out,
         lse)``, which for ``dropout_p > 0`` must also replay the identical
         mask (see ``math.py``'s module docstring for the derivation).
@@ -99,7 +99,7 @@ class TestMathCoreDropout:
         torch.testing.assert_close(dv, v.grad)
 
     def test_zero_dropout_ignores_seed(self) -> None:
-        """``dropout_p == 0`` must behave exactly as before -- no mask, seed unused."""
+        """``dropout_p == 0`` must behave exactly as before: no mask, seed unused."""
         torch.manual_seed(2)
         b, h, s, d = 2, 2, 4, 4
         q, k, v = (torch.randn(b, h, s, d) for _ in range(3))
@@ -230,7 +230,7 @@ _CORES = [
 class TestSdpaTeCoreDropoutReplay:
     """The SDPA-flash / TE cores must replay their forward dropout mask in backward.
 
-    The kernels draw an *opaque* mask, so we make it observable: with ``S == d``
+    The kernels draw an *opaque* mask, so the test makes it observable: with ``S == d``
     and ``V`` the identity (per ``(b, h)``), the attention output *is* the
     post-dropout probability matrix, and a differentiable reference built from
     that same recovered mask gives the ground-truth ``dq/dk/dv`` to compare
@@ -324,13 +324,13 @@ class TestSdpaTeCoreDropoutReplay:
 class TestTeAttnDropoutReplay:
     """``_TransformerEngineAttention`` (the non-ring, ``bshd`` wrapper around the
     same cores as :mod:`~jigsaw.modules.attention._functional.cores.te`) must
-    replay its forward dropout mask in backward -- on either arm, so both are
+    replay its forward dropout mask in backward on either arm, so both are
     covered here regardless of which one this GPU's architecture selects.
 
     Same observability trick as :class:`TestSdpaTeCoreDropoutReplay`, one level
     up: with ``S == d`` and ``V`` the identity per ``(b, h)``, the attention
-    output *is* the post-dropout probability matrix, so the mask cuDNN drew --
-    opaque inside the kernel -- can be recovered from the output and used to
+    output *is* the post-dropout probability matrix, so the mask cuDNN drew
+    (opaque inside the kernel) can be recovered from the output and used to
     build a differentiable ground-truth reference.
 
     The wrapper carries the kernel's own ``rng_state`` from ``forward`` into its

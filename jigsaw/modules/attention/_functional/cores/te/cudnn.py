@@ -105,7 +105,7 @@ def _te_call(
             )
     kwargs.update({k: v for k, v in optional.items() if k in accepted})
 
-    # Anything mandatory we did not supply is a genuine incompatibility; say so
+    # Any mandatory parameter left unsupplied is a genuine incompatibility; say so
     # with the signature rather than letting Python raise a bare TypeError.
     missing = [
         name

@@ -9,21 +9,21 @@ Cut the feature map into a 2x2 grid of tiles, one tile per rank, and choose the 
 size to be a multiple of the window size. Then every window lies inside one tile and
 almost everything is local:
 
-    window attention    no communication -- a batch of small independent attentions
-    patch merging       no communication -- a 2x2 neighbourhood never spans two tiles
-    MLP, layer norm     no communication -- they act on one token at a time
-    shift               ``DistributedRoll`` -- the only layer that talks to neighbours
+    window attention    no communication: a batch of small independent attentions
+    patch merging       no communication: a 2x2 neighborhood never spans two tiles
+    MLP, layer norm     no communication: they act on one token at a time
+    shift               ``DistributedRoll``: the only layer that talks to neighbors
 
 The shift is a cyclic ``torch.roll`` of the *whole* map, so a few rows and columns have
 to cross the tile borders. ``DistributedRoll`` does exactly that: a halo exchange with
-the neighbouring tiles, wrapping around the border of the image.
+the neighboring tiles, wrapping around the border of the image.
 
 Two details that are easy to get wrong with a split image:
 
   * The mask of the shifted windows (tokens that were wrapped around the image border
     must not attend to each other) depends on the *global* position of a window, so
     each rank builds it from the position of its tile.
-  * The weights are replicated, and ``jigsaw`` only synchronises the ones inside its own
+  * The weights are replicated, and ``jigsaw`` only synchronizes the ones inside its own
     layers. ``replicate`` below does the same for the plain PyTorch layers: broadcast
     the weights from rank 0 and mark them replicated over the tiles; ``Swin.forward``
     then routes them through ``jigsaw.parallel.synced_parameters``, which sums their

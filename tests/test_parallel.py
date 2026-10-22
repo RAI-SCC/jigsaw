@@ -1,7 +1,7 @@
 """Unit tests for the in-graph gradient sync in :mod:`jigsaw.parallel`.
 
 Rank ``r`` contributes the gradient ``(r + 1) * [1, 2, 3]``, so a SUM over a
-group of global ranks ``R`` is ``sum(r + 1 for r in R) * [1, 2, 3]`` -- exact in
+group of global ranks ``R`` is ``sum(r + 1 for r in R) * [1, 2, 3]``, exact in
 floating point, and different from any single rank's share.
 """
 
@@ -349,7 +349,7 @@ class TestJointGroup:
         assert new_subgroups == [[[0, 2, 5], [1, 4], [3, 6, 7]]]
 
     def test_long_chain_is_connected(self, new_subgroups):
-        # 7-3-5-1-6-2-4-0: each column links only neighbours, so the smallest
+        # 7-3-5-1-6-2-4-0: each column links only neighbors, so the smallest
         # label has to travel the whole chain over several sweeps.
         a = [[7, 3], [5, 1], [6, 2], [4, 0]]
         b = [[3, 5], [1, 6], [2, 4]]

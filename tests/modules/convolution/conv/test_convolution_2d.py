@@ -17,7 +17,7 @@ Pair = int | tuple[int, int]
 
 
 def _pair(value: Pair) -> tuple[int, int]:
-    """Normalise an ``int`` or 2-tuple to a ``(h, w)`` tuple."""
+    """Normalize an ``int`` or 2-tuple to a ``(h, w)`` tuple."""
     return (value, value) if isinstance(value, int) else tuple(value)
 
 
@@ -230,7 +230,7 @@ def _conv2d_optimizer_parity_check(
     ``grad_output``. After each step this checks, in order:
 
     * the weight / bias **gradients** gathered from the shards equal the
-      reference's -- i.e. the ``register_post_accumulate_grad_hook`` really did
+      reference's, i.e. the ``register_post_accumulate_grad_hook`` really did
       sum the per-spatial-rank partial gradients (a missing or double hook shows
       up here as a 1/n or 2x gradient);
     * the forward output matches;
@@ -530,7 +530,7 @@ class TestConv2d:
     def test_unknown_channel_comm_rejected(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        """An unrecognised ``channel_comm`` name fails fast at construction."""
+        """An unrecognized ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
             convolution.DistributedConv2d(
                 8,
@@ -924,10 +924,10 @@ class TestConv2dParallel:
 
         The spatial split is along width only, so the local convolution keeps the
         *full* height padding on every rank while the width padding is
-        materialised only at the two global edges: rank 0 gets ``pad_w`` zero
+        materialized only at the two global edges: rank 0 gets ``pad_w`` zero
         columns on its left, rank 3 gets ``pad_w`` on its right, ranks 1 and 2
         get none. Parity with a single-process ``F.conv2d(..., padding=padding)``
-        pins that distribution down -- a wrong local padding (``pad_w`` on every
+        pins that distribution down: a wrong local padding (``pad_w`` on every
         rank, or the edge columns dropped) breaks the output and the gradients.
 
         ``kernel_size=3, stride=1`` is used because a 4-way width split with
@@ -1115,8 +1115,8 @@ class TestConv2dGroups:
     """Grouped convolution (``groups > 1``) across spatial / channel group sizes.
 
     A grouped conv only mixes channels within a group, so once the
-    channel-parallel group (``col``) owns whole conv-groups -- ``groups`` a
-    multiple of ``col.size()`` -- every rank runs a plain grouped conv on its own
+    channel-parallel group (``col``) owns whole conv-groups (``groups`` a
+    multiple of ``col.size()``), every rank runs a plain grouped conv on its own
     channel shard with no channel-group communication. ``groups == 1`` keeps the
     historical full-channel-gather path; ``1 < groups`` not divisible by
     ``col.size()`` is rejected at construction.
@@ -1304,7 +1304,7 @@ class TestConv2dGroups:
 
         ``col.size() == 2`` here, so an odd ``groups`` that still divides the
         channel counts (18 is 2 * 9, 9 = 3 * 3) can only mean several channel
-        ranks share one conv-group -- unsupported.
+        ranks share one conv-group, which is unsupported.
         """
         with pytest.raises(NotImplementedError):
             convolution.DistributedConv2d(
@@ -1348,9 +1348,9 @@ class TestConv2dOptimizerParity:
 
     A single backward already checks the gradient (see ``TestConv2dParallel``);
     these run several *training steps* so a wrong
-    ``register_post_accumulate_grad_hook`` -- one that fails to sum the
+    ``register_post_accumulate_grad_hook`` (one that fails to sum the
     per-spatial-rank partial gradients, sums them twice, or lets the optimizer
-    step before the async all-reduce lands -- shows up as the weight shards
+    step before the async all-reduce lands) shows up as the weight shards
     drifting apart or away from the reference within a step or two (momentum
     makes any drift compound).
     """

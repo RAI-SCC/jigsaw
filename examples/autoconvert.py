@@ -2,32 +2,35 @@
 
 The model below is ordinary PyTorch: it knows nothing about process meshes.
 ``jigsaw.convert.convert_to_jigsaw`` walks it and swaps every layer it knows for its
-distributed twin, carrying the weights over -- each rank keeps only its shard of them:
+distributed twin, carrying the weights over; each rank keeps only its shard of them:
 
     nn.Linear                       -> DistributedLinear
-    nn.Conv{1,2,3}d                 -> DistributedConv{1,2,3}D
-    nn.ConvTranspose{1,2,3}d        -> DistributedConv{1,2,3}DTranspose
+    nn.Conv{1,2,3}d                 -> DistributedConv{1,2,3}d
+    nn.ConvTranspose{1,2,3}d        -> DistributedConvTranspose{1,2,3}d
     nn.LayerNorm                    -> DistributedLayerNorm
-    jigsaw.modules.Attention      -> DistributedAttention
-    jigsaw.modules.Roll                -> DistributedRoll
+    nn.GroupNorm                    -> DistributedGroupNorm
+    nn.Softmax                      -> DistributedSoftmax
+    jigsaw.modules.MatMulX{WT,W,TW} -> DistributedMatMulX{WT,W,TW}
+    jigsaw.modules.Attention        -> DistributedAttention
+    jigsaw.modules.Roll             -> DistributedRoll
 
-Everything else (activations, reshapes, ...) is left alone, which is fine as long as it
-is elementwise or only touches the *local* shapes. A layer the converter does not know
-would silently compute on the shard only if it touches the sharded dimension -- swap
-those by hand (see ``vit.py``).
+Elementwise modules (activations, dropout, ...) are left alone; they are correct on a
+shard as-is. Any other module the converter does not know is left as plain torch with a
+warning (``on_unrecognized="raise"`` makes it an error), and modules known to reduce over
+or mix along a dimension (pooling, batch norm, ...) raise ``ValueError`` unless
+``non_safe=True``. Swap such layers by hand (see ``vit.py``).
 
-``nn.LayerNorm`` is only converted when its normalized dimension is actually sharded at
-that point in the model; pass ``convert_layer_norm=False`` to leave it a plain
-``nn.LayerNorm`` instead -- correct only if that dimension is replicated (not split)
-there, and worth it to skip the distributed version's extra all-reduces.
+``nn.LayerNorm`` is converted by default; pass ``convert_layer_norm=False`` to leave it
+a plain ``nn.LayerNorm`` instead. That is correct only if its normalized dimension is
+replicated (not split) there, and it skips the distributed version's extra all-reduces.
 
 The converted model then expects sharded inputs: the mesh's "row" axis splits the
 image width (or the token sequence), its "col" axis splits the channels.
 
-We check the conversion the way you should check yours: run the original model on the
-full input and compare against the gathered output of the converted one.
+The script checks the conversion the way you should check yours: run the original model
+on the full input and compare against the gathered output of the converted one.
 
-``TinyTransformer`` below repeats the exercise for a pre-norm transformer block --
+``TinyTransformer`` below repeats the exercise for a pre-norm transformer block:
 ``nn.LayerNorm`` and ``jigsaw.modules.Attention`` convert the same way the conv and
 linear layers of ``PatchMLP`` do. With the heads split over "col" (channel size > 1),
 the ring has to circulate the keys/values rather than the input; the default
@@ -104,7 +107,7 @@ class TinyTransformer(nn.Module):
 
     Plain PyTorch, laid out exactly like ``PatchMLP``: the patch embedding and
     recovery split the image over the mesh, and the tokens in between carry the same
-    sharding the converted attention and layer norms expect -- sequence over "row",
+    sharding the converted attention and layer norms expect: sequence over "row",
     embedding over "col".
     """
 

@@ -2,10 +2,10 @@
 
 Two counts are checked against the reference module's ``numel``:
 
-* ``get_parameter_count`` -- each layer *computes* its global count from its global
+* ``get_parameter_count``: each layer *computes* its global count from its global
   shapes, with no communication (summed over a model by
   :func:`tests.parity.global_parameter_count`).
-* ``debug.count_parameters`` -- counts the actual shards over the mesh.
+* ``debug.count_parameters``: counts the actual shards over the mesh.
 
 ``debug.count_parameters(module, mesh)`` sums shards over the model group and
 counts a :func:`jigsaw.parallel.mark_replicated` parameter once per replica

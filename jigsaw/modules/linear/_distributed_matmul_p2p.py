@@ -288,11 +288,12 @@ def xw_transpose_fourway(
             w_buffer_1 = get_preallocated_buffer(
                 wij.shape, wij.dtype, local_rank, device
             )
+            # x: send to 1; recv from 1
             send_x = dist.isend(xij, group_dst=1, group=model_group)
             recv_x = dist.irecv(buffer_x, group_src=1, group=model_group)
+            # w: send to 2; recv from 1
             send_w_2 = dist.isend(wij, group_dst=2, group=model_group)
             recv_w_1 = dist.irecv(w_buffer_1, group_src=1, group=model_group)
-            # send w to rank + 2, receive w from rank + 1
 
         case 1:
             w_buffer_2 = get_preallocated_buffer(
@@ -301,14 +302,16 @@ def xw_transpose_fourway(
             w_buffer_3 = get_preallocated_buffer(
                 wij.shape, wij.dtype, local_rank, device
             )
+            # x: send to 0; recv from 0
             recv_x = dist.irecv(buffer_x, group_src=0, group=model_group)
             send_x = dist.isend(xij, group_dst=0, group=model_group)
+            # w: send to 0, 2; recv from 2, 3
             send_w_0 = dist.isend(wij, group_dst=0, group=model_group)
             recv_w_3 = dist.irecv(w_buffer_3, group_src=3, group=model_group)
             send_w_2 = dist.isend(wij, group_dst=2, group=model_group)
-            # send w to 0 & 2, receive w from 2 & 3
             recv_w_2 = dist.irecv(w_buffer_2, group_src=2, group=model_group)
         case 2:
+            # x: send to 3; recv from 3
             send_x = dist.isend(xij, group_dst=3, group=model_group)
             recv_x = dist.irecv(buffer_x, group_src=3, group=model_group)
             w_buffer_0 = get_preallocated_buffer(
@@ -317,18 +320,19 @@ def xw_transpose_fourway(
             w_buffer_1 = get_preallocated_buffer(
                 wij.shape, wij.dtype, local_rank, device
             )
+            # w: send to 1, 3; recv from 0, 1
             recv_w_0 = dist.irecv(w_buffer_0, group_src=0, group=model_group)
             recv_w_1 = dist.irecv(w_buffer_1, group_src=1, group=model_group)
             send_w_1 = dist.isend(wij, group_dst=1, group=model_group)
             send_w_3 = dist.isend(wij, group_dst=3, group=model_group)
-            # send w to 1 & 3, receive w from 0 & 1
         case 3:
+            # x: send to 2; recv from 2
             recv_x = dist.irecv(buffer_x, group_src=2, group=model_group)
             send_x = dist.isend(xij, group_dst=2, group=model_group)
             w_buffer_2 = get_preallocated_buffer(
                 wij.shape, wij.dtype, local_rank, device
             )
-            # send w to 1, receive w from 2
+            # w: send to 1; recv from 2
             send_w_1 = dist.isend(wij, group_dst=1, group=model_group)
             recv_w_2 = dist.irecv(w_buffer_2, group_src=2, group=model_group)
 
@@ -504,102 +508,102 @@ def fused_xw_xtw_fourway(
             buffer_grad_2 = get_preallocated_buffer(
                 grad_output.shape, xdtype, local_rank, device
             )
-            # send to 1, receive from 1 & 2
+            # grad: send to 1; recv from 1, 2
             send_grad_1 = dist.isend(grad_output, group_dst=1, group=model_group)
             recv_grad_1 = dist.irecv(buffer_grad_1, group_src=1, group=model_group)
             recv_grad_2 = dist.irecv(buffer_grad_2, group_src=2, group=model_group)
 
-            # w: send to 2, recv from 2
             buffer_w_2 = get_preallocated_buffer(
                 weight.shape, wdtype, local_rank, device
             )
+            # w: send to 2; recv from 2
             send_w_2 = dist.isend(weight, group_dst=2, group=model_group)
             recv_w_2 = dist.irecv(buffer_w_2, group_src=2, group=model_group)
 
-            # input: send to 2, recv from 2
             buffer_in_2 = get_preallocated_buffer(
                 input.shape, idtype, local_rank, device
             )
+            # input: send to 2; recv from 2
             send_in_2 = dist.isend(input, group_dst=2, group=model_group)
             recv_in_2 = dist.irecv(buffer_in_2, group_src=2, group=model_group)
         case 1:
-            # send to 0, 2, 3, recv from 0,2
             buffer_grad_0 = get_preallocated_buffer(
                 grad_output.shape, xdtype, local_rank, device
             )
             buffer_grad_2 = get_preallocated_buffer(
                 grad_output.shape, xdtype, local_rank, device
             )
+            # grad: send to 0, 2, 3; recv from 0, 2
             recv_grad_0 = dist.irecv(buffer_grad_0, group_src=0, group=model_group)
             send_grad_0 = dist.isend(grad_output, group_dst=0, group=model_group)
             recv_grad_2 = dist.irecv(buffer_grad_2, group_src=2, group=model_group)
             send_grad_2 = dist.isend(grad_output, group_dst=2, group=model_group)
             send_grad_3 = dist.isend(grad_output, group_dst=3, group=model_group)
 
-            # w: send to 3, recv from 3
             buffer_w_3 = get_preallocated_buffer(
                 weight.shape, wdtype, local_rank, device
             )
+            # w: send to 3; recv from 3
             send_w_3 = dist.isend(weight, group_dst=3, group=model_group)
             recv_w_3 = dist.irecv(buffer_w_3, group_src=3, group=model_group)
 
-            # input: send to 3, recv from 3
             buffer_in_3 = get_preallocated_buffer(
                 input.shape, idtype, local_rank, device
             )
+            # input: send to 3; recv from 3
             recv_in_3 = dist.irecv(buffer_in_3, group_src=3, group=model_group)
             send_in_3 = dist.isend(input, group_dst=3, group=model_group)
         case 2:
-            # send to 0, 1, 3, recv from 1, 3
             buffer_grad_1 = get_preallocated_buffer(
                 grad_output.shape, xdtype, local_rank, device
             )
             buffer_grad_3 = get_preallocated_buffer(
                 grad_output.shape, xdtype, local_rank, device
             )
+            # grad: send to 0, 1, 3; recv from 1, 3
             send_grad_0 = dist.isend(grad_output, group_dst=0, group=model_group)
             send_grad_1 = dist.isend(grad_output, group_dst=1, group=model_group)
             recv_grad_1 = dist.irecv(buffer_grad_1, group_src=1, group=model_group)
             send_grad_3 = dist.isend(grad_output, group_dst=3, group=model_group)
             recv_grad_3 = dist.irecv(buffer_grad_3, group_src=3, group=model_group)
 
-            # w: send to 0, recv from 0
             buffer_w_0 = get_preallocated_buffer(
                 weight.shape, wdtype, local_rank, device
             )
+            # w: send to 0; recv from 0
             recv_w_0 = dist.irecv(buffer_w_0, group_src=0, group=model_group)
             send_w_0 = dist.isend(weight, group_dst=0, group=model_group)
 
-            # input: send to 0, recv from 0
             buffer_in_0 = get_preallocated_buffer(
                 input.shape, idtype, local_rank, device
             )
+            # input: send to 0; recv from 0
             recv_in_0 = dist.irecv(buffer_in_0, group_src=0, group=model_group)
             send_in_0 = dist.isend(input, group_dst=0, group=model_group)
 
         case 3:
-            # send to 2, recv from 1, 2
             buffer_grad_1 = get_preallocated_buffer(
                 grad_output.shape, xdtype, local_rank, device
             )
             buffer_grad_2 = get_preallocated_buffer(
                 grad_output.shape, xdtype, local_rank, device
             )
+            # grad: send to 2; recv from 1, 2
             recv_grad_2 = dist.irecv(buffer_grad_2, group_src=2, group=model_group)
             send_grad_2 = dist.isend(grad_output, group_dst=2, group=model_group)
             recv_grad_1 = dist.irecv(buffer_grad_1, group_src=1, group=model_group)
 
-            # w: send to 1, recv from 1
             buffer_w_1 = get_preallocated_buffer(
                 weight.shape, wdtype, local_rank, device
             )
+            # w: send to 1; recv from 1
             recv_w_1 = dist.irecv(buffer_w_1, group_src=1, group=model_group)
             send_w_1 = dist.isend(weight, group_dst=1, group=model_group)
 
-            # input: send to 1, recv from 1
             buffer_in_1 = get_preallocated_buffer(
                 input.shape, idtype, local_rank, device
             )
+            # input: send to 1; recv from 1
             send_in_1 = dist.isend(input, group_dst=1, group=model_group)
             recv_in_1 = dist.irecv(buffer_in_1, group_src=1, group=model_group)
 
@@ -709,45 +713,45 @@ def x_transpose_w_fourway(
     xij = xij.contiguous()
     match mod:
         case 0:
-            # x: send to 1, recv from 2
             buffer_x_2 = get_preallocated_buffer(xij.shape, xdtype, mod, device)
+            # x: send to 1; recv from 2
             send_x_1 = dist.isend(xij, dst=local_rank + 1, group=model_group)
             recv_x_2 = dist.irecv(buffer_x_2, src=local_rank + 2, group=model_group)
-            # w: send to 2, recv from 2
             buffer_w_2 = get_preallocated_buffer(wij.shape, wdtype, mod, device)
+            # w: send to 2; recv from 2
             send_w_2 = dist.isend(wij, dst=local_rank + 2, group=model_group)
             recv_w_2 = dist.irecv(buffer_w_2, src=local_rank + 2, group=model_group)
         case 1:
-            # send to 2,3 recv from 0,2
             buffer_x_0 = get_preallocated_buffer(xij.shape, xdtype, mod, device)
             buffer_x_2 = get_preallocated_buffer(xij.shape, xdtype, mod, device)
+            # x: send to 2, 3; recv from 0, 2
             recv_x_0 = dist.irecv(buffer_x_0, src=local_rank - 1, group=model_group)
             send_x_2 = dist.isend(xij, dst=local_rank + 1, group=model_group)
             send_x_3 = dist.isend(xij, dst=local_rank + 2, group=model_group)
             recv_x_2 = dist.irecv(buffer_x_2, src=local_rank + 1, group=model_group)
-            # send to 3, recv from 3
             buffer_w_3 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
+            # w: send to 3; recv from 3
             send_w_3 = dist.isend(wij, dst=local_rank + 2, group=model_group)
             recv_w_3 = dist.irecv(buffer_w_3, src=local_rank + 2, group=model_group)
         case 2:
-            # x: send to 0,1 recv from 1,3
             buffer_x_1 = get_preallocated_buffer(xij.shape, xdtype, mod, device)
             buffer_x_3 = get_preallocated_buffer(xij.shape, xdtype, mod, device)
+            # x: send to 0, 1; recv from 1, 3
             recv_x_1 = dist.irecv(buffer_x_1, src=local_rank - 1, group=model_group)
             send_x_0 = dist.isend(xij, dst=local_rank - 2, group=model_group)
             recv_x_3 = dist.irecv(buffer_x_3, src=local_rank + 1, group=model_group)
             send_x_1 = dist.isend(xij, dst=local_rank - 1, group=model_group)
-            # w: send to 0, recv from 0
             buffer_w_0 = get_preallocated_buffer(wij.shape, wdtype, mod, device)
+            # w: send to 0; recv from 0
             recv_w_0 = dist.irecv(buffer_w_0, src=local_rank - 2, group=model_group)
             send_w_0 = dist.isend(wij, dst=local_rank - 2, group=model_group)
         case 3:
-            # x: send to 2, recv from 1
             buffer_x_1 = get_preallocated_buffer(xij.shape, xdtype, mod, device)
+            # x: send to 2; recv from 1
             recv_x_1 = dist.irecv(buffer_x_1, src=local_rank - 2, group=model_group)
             send_x_2 = dist.isend(xij, dst=local_rank - 1, group=model_group)
-            # w: send to 1, recv from 1
             buffer_w_1 = get_preallocated_buffer(wij.shape, wdtype, mod, device)
+            # w: send to 1; recv from 1
             recv_w_1 = dist.irecv(buffer_w_1, src=local_rank - 2, group=model_group)
             send_w_1 = dist.isend(wij, dst=local_rank - 2, group=model_group)
 
@@ -826,14 +830,14 @@ def xw_transpose_eightway(
 
     match mod:
         case 0:
-            # x: send to 1, recv from 1
             buffer_x_1 = get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
+            # x: send to 1; recv from 1
             send_x_1 = dist.isend(xij, group_dst=1, group=model_group)
             recv_x_1 = dist.irecv(buffer_x_1, group_src=1, group=model_group)
-            # w: send to 2, 4, 6, recv from 1,2,3
             buffer_w_1 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_2 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_3 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
+            # w: send to 2, 4, 6; recv from 1, 2, 3
             send_w_2 = dist.isend(wij, group_dst=2, group=model_group)
             send_w_4 = dist.isend(wij, group_dst=4, group=model_group)
             send_w_6 = dist.isend(wij, group_dst=6, group=model_group)
@@ -842,15 +846,15 @@ def xw_transpose_eightway(
             recv_w_3 = dist.irecv(buffer_w_3, group_src=3, group=model_group)
 
         case 1:
-            # x: send to 0, recv from 0
             buffer_x_0 = get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
+            # x: send to 0; recv from 0
             recv_x_0 = dist.irecv(buffer_x_0, group_src=0, group=model_group)
             send_x_0 = dist.isend(xij, group_dst=0, group=model_group)
-            # w: send to 0, 2, 4, 6, recv from 4, 5, 6, 7
             buffer_w_4 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_5 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_6 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_7 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
+            # w: send to 0, 2, 4, 6; recv from 4, 5, 6, 7
             send_w_0 = dist.isend(wij, group_dst=0, group=model_group)
             send_w_2 = dist.isend(wij, group_dst=2, group=model_group)
             send_w_4 = dist.isend(wij, group_dst=4, group=model_group)
@@ -860,14 +864,14 @@ def xw_transpose_eightway(
             recv_w_6 = dist.irecv(buffer_w_6, group_src=6, group=model_group)
             recv_w_7 = dist.irecv(buffer_w_7, group_src=7, group=model_group)
         case 2:
-            # x: send to 3, recv from 3
             buffer_x_3 = get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
+            # x: send to 3; recv from 3
             send_x_3 = dist.isend(xij, group_dst=3, group=model_group)
             recv_x_3 = dist.irecv(buffer_x_3, group_src=3, group=model_group)
-            # w: send to 0, 4, 6, recv from 0,1,3
             buffer_w_0 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_1 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_3 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
+            # w: send to 0, 4, 6; recv from 0, 1, 3
             recv_w_0 = dist.irecv(buffer_w_0, group_src=0, group=model_group)
             recv_w_1 = dist.irecv(buffer_w_1, group_src=1, group=model_group)
             send_w_0 = dist.isend(wij, group_dst=0, group=model_group)
@@ -875,16 +879,16 @@ def xw_transpose_eightway(
             send_w_6 = dist.isend(wij, group_dst=6, group=model_group)
             recv_w_3 = dist.irecv(buffer_w_3, group_src=3, group=model_group)
         case 3:
-            # x: send to 2, recv from 2
             buffer_x_2 = get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
+            # x: send to 2; recv from 2
             recv_x_2 = dist.irecv(buffer_x_2, group_src=2, group=model_group)
             send_x_2 = dist.isend(xij, group_dst=2, group=model_group)
-            # w: send to 0, 2, 4, 6, recv from 4, 5, 6, 7
             buffer_w_4 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_5 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_6 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_7 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
 
+            # w: send to 0, 2, 4, 6; recv from 4, 5, 6, 7
             send_w_0 = dist.isend(wij, group_dst=0, group=model_group)
             send_w_2 = dist.isend(wij, group_dst=2, group=model_group)
             send_w_4 = dist.isend(wij, group_dst=4, group=model_group)
@@ -894,15 +898,15 @@ def xw_transpose_eightway(
             recv_w_6 = dist.irecv(buffer_w_6, group_src=6, group=model_group)
             recv_w_7 = dist.irecv(buffer_w_7, group_src=7, group=model_group)
         case 4:
-            # x: send to 5, recv from 5
             buffer_x_5 = get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
+            # x: send to 5; recv from 5
             send_x_5 = dist.isend(xij, group_dst=5, group=model_group)
             recv_x_5 = dist.irecv(buffer_x_5, group_src=5, group=model_group)
-            # w: send to 1, 3, 5, 7, recv from 0,1,2,3
             buffer_w_0 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_1 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_2 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_3 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
+            # w: send to 1, 3, 5, 7; recv from 0, 1, 2, 3
             recv_w_0 = dist.irecv(buffer_w_0, group_src=0, group=model_group)
             recv_w_1 = dist.irecv(buffer_w_1, group_src=1, group=model_group)
             recv_w_2 = dist.irecv(buffer_w_2, group_src=2, group=model_group)
@@ -912,14 +916,14 @@ def xw_transpose_eightway(
             send_w_5 = dist.isend(wij, group_dst=5, group=model_group)
             send_w_7 = dist.isend(wij, group_dst=7, group=model_group)
         case 5:
-            # x: send to 4, recv from 4
             buffer_x_4 = get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
+            # x: send to 4; recv from 4
             recv_x_4 = dist.irecv(buffer_x_4, group_src=4, group=model_group)
             send_x_4 = dist.isend(xij, group_dst=4, group=model_group)
-            # w: send to 1, 3, 7, recv from 4, 6, 7
             buffer_w_4 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_6 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_7 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
+            # w: send to 1, 3, 7; recv from 4, 6, 7
             recv_w_4 = dist.irecv(buffer_w_4, group_src=4, group=model_group)
             send_w_1 = dist.isend(wij, group_dst=1, group=model_group)
             send_w_3 = dist.isend(wij, group_dst=3, group=model_group)
@@ -927,15 +931,15 @@ def xw_transpose_eightway(
             recv_w_6 = dist.irecv(buffer_w_6, group_src=6, group=model_group)
             recv_w_7 = dist.irecv(buffer_w_7, group_src=7, group=model_group)
         case 6:
-            # x: send to 7, recv from 7
             buffer_x_7 = get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
+            # x: send to 7; recv from 7
             send_x_7 = dist.isend(xij, group_dst=7, group=model_group)
             recv_x_7 = dist.irecv(buffer_x_7, group_src=7, group=model_group)
-            # w: send to 1, 3, 5, 7 recv from 0,1,2,3
             buffer_w_0 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_1 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_2 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_3 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
+            # w: send to 1, 3, 5, 7; recv from 0, 1, 2, 3
             recv_w_0 = dist.irecv(buffer_w_0, group_src=0, group=model_group)
             recv_w_1 = dist.irecv(buffer_w_1, group_src=1, group=model_group)
             recv_w_2 = dist.irecv(buffer_w_2, group_src=2, group=model_group)
@@ -945,14 +949,14 @@ def xw_transpose_eightway(
             send_w_5 = dist.isend(wij, group_dst=5, group=model_group)
             send_w_7 = dist.isend(wij, group_dst=7, group=model_group)
         case 7:
-            # x: send to 6, recv from 6
             buffer_x_6 = get_preallocated_buffer(xij.shape, xdtype, local_rank, device)
+            # x: send to 6; recv from 6
             recv_x_6 = dist.irecv(buffer_x_6, group_src=6, group=model_group)
             send_x_6 = dist.isend(xij, group_dst=6, group=model_group)
-            # w: send to 1, 3, 5, recv from 4,5,6
             buffer_w_4 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_5 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_6 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
+            # w: send to 1, 3, 5; recv from 4, 5, 6
             recv_w_4 = dist.irecv(buffer_w_4, group_src=4, group=model_group)
             recv_w_5 = dist.irecv(buffer_w_5, group_src=5, group=model_group)
             recv_w_6 = dist.irecv(buffer_w_6, group_src=6, group=model_group)
@@ -1137,7 +1141,7 @@ def xw_eightway(
 
     match mod:
         case 0:
-            # x: send to 1, recv from 1
+            # x: send to 1; recv from 1
             send_x = dist.isend(xij, group_dst=1, group=model_group)
             recv_x = dist.irecv(buffer_x, group_src=1, group=model_group)
             # w: send to 2, 4, 6; recv from 2, 4, 6
@@ -1156,7 +1160,7 @@ def xw_eightway(
 
             w0[..., :split_size, :].copy_(wij)
         case 1:
-            # x: send to 0, recv from 0
+            # x: send to 0; recv from 0
             recv_x = dist.irecv(buffer_x, group_src=0, group=model_group)
             send_x = dist.isend(xij, group_dst=0, group=model_group)
 
@@ -1176,7 +1180,7 @@ def xw_eightway(
 
             w1[..., :split_size, :].copy_(wij)
         case 2:
-            # x: send to 3, recv from 3
+            # x: send to 3; recv from 3
             send_x = dist.isend(xij, group_dst=3, group=model_group)
             recv_x = dist.irecv(buffer_x, group_src=3, group=model_group)
             # w: send to 0, 4, 6; recv from 0, 4, 6
@@ -1195,7 +1199,7 @@ def xw_eightway(
 
             w0[..., split_size:, :].copy_(wij)
         case 3:
-            # x: send to 2, recv from 2
+            # x: send to 2; recv from 2
             recv_x = dist.irecv(buffer_x, group_src=2, group=model_group)
             send_x = dist.isend(xij, group_dst=2, group=model_group)
             # w: send to 1, 5, 7; recv from 1, 5, 7
@@ -1215,8 +1219,7 @@ def xw_eightway(
 
             w1[..., split_size:, :].copy_(wij)
         case 4:
-            # x: send to 5, recv from 5
-
+            # x: send to 5; recv from 5
             send_x = dist.isend(xij, group_dst=5, group=model_group)
             recv_x = dist.irecv(buffer_x, group_src=5, group=model_group)
             # w: send to 0, 2, 6; recv from 0, 2, 6
@@ -1235,7 +1238,7 @@ def xw_eightway(
 
             w1[..., :split_size, :].copy_(wij)
         case 5:
-            # x: send to 4, recv from 4
+            # x: send to 4; recv from 4
             recv_x = dist.irecv(buffer_x, group_src=4, group=model_group)
             send_x = dist.isend(xij, group_dst=4, group=model_group)
             # w: send to 1, 3, 7; recv from 1, 3, 7
@@ -1255,8 +1258,7 @@ def xw_eightway(
 
             w0[..., :split_size, :].copy_(wij)
         case 6:
-            # x: send to 7, recv from 7
-
+            # x: send to 7; recv from 7
             send_x = dist.isend(xij, group_dst=7, group=model_group)
             recv_x = dist.irecv(buffer_x, group_src=7, group=model_group)
             # w: send to 0, 2, 4; recv from 0, 2, 4
@@ -1276,7 +1278,7 @@ def xw_eightway(
 
             w1[..., split_size:, :].copy_(wij)
         case 7:
-            # x: send to 6, recv from 6
+            # x: send to 6; recv from 6
             recv_x = dist.irecv(buffer_x, group_src=6, group=model_group)
             send_x = dist.isend(xij, group_dst=6, group=model_group)
             # w: send to 1, 3, 5; recv from 1, 3, 5
@@ -1431,9 +1433,8 @@ def x_transpose_w_eightway(
             buffer_x_6 = get_preallocated_buffer(
                 x_transpose_shape, xdtype, local_rank, device
             )
-            # x0: send to 1; x1: send to 2, 3;
+            # x0: send to 1; x1: send to 2, 3
             # x: recv from 2, 4, 6
-            # w: send to 2, 4, 6; recv from 2, 4, 6
             send_x_1 = dist.isend(x0, group_dst=1, group=model_group)
             send_x_2 = dist.isend(x1, group_dst=2, group=model_group)
             send_x_3 = dist.isend(x1, group_dst=3, group=model_group)
@@ -1444,6 +1445,7 @@ def x_transpose_w_eightway(
             buffer_w_2 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_4 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_6 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
+            # w: send to 2, 4, 6; recv from 2, 4, 6
             send_w_2 = dist.isend(wij, group_dst=2, group=model_group)
             send_w_4 = dist.isend(wij, group_dst=4, group=model_group)
             send_w_6 = dist.isend(wij, group_dst=6, group=model_group)
@@ -1463,6 +1465,8 @@ def x_transpose_w_eightway(
             buffer_x_6 = get_preallocated_buffer(
                 x_transpose_shape, xdtype, local_rank, device
             )
+            # x0: send to 4, 5; x1: send to 6, 7
+            # x: recv from 0, 2, 4, 6
             recv_x_0 = dist.irecv(buffer_x_0, group_src=0, group=model_group)
             send_x_4 = dist.isend(x0, group_dst=4, group=model_group)
             send_x_5 = dist.isend(x0, group_dst=5, group=model_group)
@@ -1471,13 +1475,11 @@ def x_transpose_w_eightway(
             recv_x_2 = dist.irecv(buffer_x_2, group_src=2, group=model_group)
             recv_x_4 = dist.irecv(buffer_x_4, group_src=4, group=model_group)
             recv_x_6 = dist.irecv(buffer_x_6, group_src=6, group=model_group)
-            # x0: send to 4, 5; x1: send to 6, 7;
-            # x: recv from 0, 2, 4, 6
-            # w: send to 3, 5, 7; recv from 3, 5, 7
             buffer_w_3 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_5 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_7 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
 
+            # w: send to 3, 5, 7; recv from 3, 5, 7
             send_w_3 = dist.isend(wij, group_dst=3, group=model_group)
             send_w_5 = dist.isend(wij, group_dst=5, group=model_group)
             send_w_7 = dist.isend(wij, group_dst=7, group=model_group)
@@ -1494,18 +1496,18 @@ def x_transpose_w_eightway(
             buffer_x_6 = get_preallocated_buffer(
                 x_transpose_shape, xdtype, local_rank, device
             )
+            # x0: send to 0, 1; x1: send to 3
+            # x: recv from 0, 4, 6
             recv_x_0 = dist.irecv(buffer_x_0, group_src=0, group=model_group)
-            # x0: send to 0, 1; x1: send to 3;
             send_x_0 = dist.isend(x0, group_dst=0, group=model_group)
             send_x_1 = dist.isend(x0, group_dst=1, group=model_group)
             send_x_3 = dist.isend(x1, group_dst=3, group=model_group)
             recv_x_4 = dist.irecv(buffer_x_4, group_src=4, group=model_group)
             recv_x_6 = dist.irecv(buffer_x_6, group_src=6, group=model_group)
-            # x: recv from 0, 4, 6
-            # w: send to 0, 4, 6; recv from 0, 4, 6
             buffer_w_0 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_4 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_6 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
+            # w: send to 0, 4, 6; recv from 0, 4, 6
             recv_w_0 = dist.irecv(buffer_w_0, group_src=0, group=model_group)
             send_w_0 = dist.isend(wij, group_dst=0, group=model_group)
             send_w_4 = dist.isend(wij, group_dst=4, group=model_group)
@@ -1525,6 +1527,8 @@ def x_transpose_w_eightway(
             buffer_x_6 = get_preallocated_buffer(
                 x_transpose_shape, xdtype, local_rank, device
             )
+            # x0: send to 4, 5; x1: send to 6, 7
+            # x: recv from 0, 2, 4, 6
             recv_x_0 = dist.irecv(buffer_x_0, group_src=0, group=model_group)
             recv_x_2 = dist.irecv(buffer_x_2, group_src=2, group=model_group)
             send_x_4 = dist.isend(x0, group_dst=4, group=model_group)
@@ -1534,12 +1538,10 @@ def x_transpose_w_eightway(
             recv_x_4 = dist.irecv(buffer_x_4, group_src=4, group=model_group)
             recv_x_6 = dist.irecv(buffer_x_6, group_src=6, group=model_group)
 
-            # x0: send to 4, 5; x1: send to 6, 7
-            # x: recv from 0, 2, 4, 6
-            # w: send to 1, 5, 7; recv from 1, 5, 7
             buffer_w_1 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_5 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_7 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
+            # w: send to 1, 5, 7; recv from 1, 5, 7
             recv_w_1 = dist.irecv(buffer_w_1, group_src=1, group=model_group)
             send_w_1 = dist.isend(wij, group_dst=1, group=model_group)
             send_w_5 = dist.isend(wij, group_dst=5, group=model_group)
@@ -1559,6 +1561,8 @@ def x_transpose_w_eightway(
             buffer_x_7 = get_preallocated_buffer(
                 x_transpose_shape, xdtype, local_rank, device
             )
+            # x0: send to 0, 1; x1: send to 2, 3
+            # x: recv from 1, 3, 5, 7
             recv_x_1 = dist.irecv(buffer_x_1, group_src=1, group=model_group)
             recv_x_3 = dist.irecv(buffer_x_3, group_src=3, group=model_group)
             send_x_0 = dist.isend(x0, group_dst=0, group=model_group)
@@ -1568,12 +1572,10 @@ def x_transpose_w_eightway(
             recv_x_5 = dist.irecv(buffer_x_5, group_src=5, group=model_group)
             recv_x_7 = dist.irecv(buffer_x_7, group_src=7, group=model_group)
 
-            # x0: send to 0, 1; x1: send to 2, 3
-            # x: recv from 1, 3, 5, 7
-            # w: send to 0, 2, 6; recv from 0, 2, 6
             buffer_w_0 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_2 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_6 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
+            # w: send to 0, 2, 6; recv from 0, 2, 6
             recv_w_0 = dist.irecv(buffer_w_0, group_src=0, group=model_group)
             recv_w_2 = dist.irecv(buffer_w_2, group_src=2, group=model_group)
             send_w_0 = dist.isend(wij, group_dst=0, group=model_group)
@@ -1590,18 +1592,18 @@ def x_transpose_w_eightway(
             buffer_x_7 = get_preallocated_buffer(
                 x_transpose_shape, xdtype, local_rank, device
             )
+            # x0: send to 4; x1: send to 6, 7
+            # x: recv from 1, 3, 7
             recv_x_1 = dist.irecv(buffer_x_1, group_src=1, group=model_group)
             recv_x_3 = dist.irecv(buffer_x_3, group_src=3, group=model_group)
             send_x_4 = dist.isend(x0, group_dst=4, group=model_group)
             send_x_6 = dist.isend(x1, group_dst=6, group=model_group)
             send_x_7 = dist.isend(x1, group_dst=7, group=model_group)
             recv_x_7 = dist.irecv(buffer_x_7, group_src=7, group=model_group)
-            # x0: send to 4; x1: send to 6, 7
-            # x: recv from 1, 3, 7
-            # w: send to 1, 3, 7; recv from 1, 3, 7
             buffer_w_1 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_3 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_7 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
+            # w: send to 1, 3, 7; recv from 1, 3, 7
             recv_w_1 = dist.irecv(buffer_w_1, group_src=1, group=model_group)
             recv_w_3 = dist.irecv(buffer_w_3, group_src=3, group=model_group)
             send_w_1 = dist.isend(wij, group_dst=1, group=model_group)
@@ -1621,6 +1623,8 @@ def x_transpose_w_eightway(
             buffer_x_7 = get_preallocated_buffer(
                 x_transpose_shape, xdtype, local_rank, device
             )
+            # x0: send to 0, 1; x1: send to 2, 3
+            # x: recv from 1, 3, 5, 7
             recv_x_1 = dist.irecv(buffer_x_1, group_src=1, group=model_group)
             recv_x_3 = dist.irecv(buffer_x_3, group_src=3, group=model_group)
             recv_x_5 = dist.irecv(buffer_x_5, group_src=5, group=model_group)
@@ -1629,12 +1633,10 @@ def x_transpose_w_eightway(
             send_x_2 = dist.isend(x1, group_dst=2, group=model_group)
             send_x_3 = dist.isend(x1, group_dst=3, group=model_group)
             recv_x_7 = dist.irecv(buffer_x_7, group_src=7, group=model_group)
-            # x0: send to 0, 1; x1: send to 2, 3
-            # x: recv from 1, 3, 5, 7
-            # w: send to 0, 2, 4; recv from 0, 2, 4
             buffer_w_0 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_2 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_4 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
+            # w: send to 0, 2, 4; recv from 0, 2, 4
             recv_w_0 = dist.irecv(buffer_w_0, group_src=0, group=model_group)
             recv_w_2 = dist.irecv(buffer_w_2, group_src=2, group=model_group)
             recv_w_4 = dist.irecv(buffer_w_4, group_src=4, group=model_group)
@@ -1651,18 +1653,18 @@ def x_transpose_w_eightway(
             buffer_x_5 = get_preallocated_buffer(
                 x_transpose_shape, xdtype, local_rank, device
             )
+            # x0: send to 4, 5; x1: send to 6
+            # x: recv from 1, 3, 5
             recv_x_1 = dist.irecv(buffer_x_1, group_src=1, group=model_group)
             recv_x_3 = dist.irecv(buffer_x_3, group_src=3, group=model_group)
             recv_x_5 = dist.irecv(buffer_x_5, group_src=5, group=model_group)
             send_x_4 = dist.isend(x0, group_dst=4, group=model_group)
             send_x_5 = dist.isend(x0, group_dst=5, group=model_group)
             send_x_6 = dist.isend(x1, group_dst=6, group=model_group)
-            # x0: send to 4, 5; x1: send to 6
-            # x: recv from 1, 3, 5
-            # w: send to 1, 3, 5; recv from 1, 3, 5
             buffer_w_1 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_3 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             buffer_w_5 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
+            # w: send to 1, 3, 5; recv from 1, 3, 5
             recv_w_1 = dist.irecv(buffer_w_1, group_src=1, group=model_group)
             recv_w_3 = dist.irecv(buffer_w_3, group_src=3, group=model_group)
             recv_w_5 = dist.irecv(buffer_w_5, group_src=5, group=model_group)
@@ -1896,7 +1898,7 @@ def fused_xw_xtw_eightway(
     # ---- post grad_input (XW) point-to-point communication ----
     match mod:
         case 0:
-            # x: send to 1, recv from 1
+            # grad: send to 1; recv from 1
             send_x = dist.isend(grad_output, group_dst=1, group=model_group)
             recv_x = dist.irecv(buffer_x, group_src=1, group=model_group)
             # w: send to 2, 4, 6; recv from 2, 4, 6
@@ -1915,7 +1917,7 @@ def fused_xw_xtw_eightway(
 
             w0[..., :split_size, :].copy_(weight)
         case 1:
-            # x: send to 0, recv from 0
+            # grad: send to 0; recv from 0
             recv_x = dist.irecv(buffer_x, group_src=0, group=model_group)
             send_x = dist.isend(grad_output, group_dst=0, group=model_group)
 
@@ -1935,7 +1937,7 @@ def fused_xw_xtw_eightway(
 
             w1[..., :split_size, :].copy_(weight)
         case 2:
-            # x: send to 3, recv from 3
+            # grad: send to 3; recv from 3
             send_x = dist.isend(grad_output, group_dst=3, group=model_group)
             recv_x = dist.irecv(buffer_x, group_src=3, group=model_group)
             # w: send to 0, 4, 6; recv from 0, 4, 6
@@ -1954,7 +1956,7 @@ def fused_xw_xtw_eightway(
 
             w0[..., split_size:, :].copy_(weight)
         case 3:
-            # x: send to 2, recv from 2
+            # grad: send to 2; recv from 2
             recv_x = dist.irecv(buffer_x, group_src=2, group=model_group)
             send_x = dist.isend(grad_output, group_dst=2, group=model_group)
             # w: send to 1, 5, 7; recv from 1, 5, 7
@@ -1974,8 +1976,7 @@ def fused_xw_xtw_eightway(
 
             w1[..., split_size:, :].copy_(weight)
         case 4:
-            # x: send to 5, recv from 5
-
+            # grad: send to 5; recv from 5
             send_x = dist.isend(grad_output, group_dst=5, group=model_group)
             recv_x = dist.irecv(buffer_x, group_src=5, group=model_group)
             # w: send to 0, 2, 6; recv from 0, 2, 6
@@ -1994,7 +1995,7 @@ def fused_xw_xtw_eightway(
 
             w1[..., :split_size, :].copy_(weight)
         case 5:
-            # x: send to 4, recv from 4
+            # grad: send to 4; recv from 4
             recv_x = dist.irecv(buffer_x, group_src=4, group=model_group)
             send_x = dist.isend(grad_output, group_dst=4, group=model_group)
             # w: send to 1, 3, 7; recv from 1, 3, 7
@@ -2014,8 +2015,7 @@ def fused_xw_xtw_eightway(
 
             w0[..., :split_size, :].copy_(weight)
         case 6:
-            # x: send to 7, recv from 7
-
+            # grad: send to 7; recv from 7
             send_x = dist.isend(grad_output, group_dst=7, group=model_group)
             recv_x = dist.irecv(buffer_x, group_src=7, group=model_group)
             # w: send to 0, 2, 4; recv from 0, 2, 4
@@ -2035,7 +2035,7 @@ def fused_xw_xtw_eightway(
 
             w1[..., split_size:, :].copy_(weight)
         case 7:
-            # x: send to 6, recv from 6
+            # grad: send to 6; recv from 6
             recv_x = dist.irecv(buffer_x, group_src=6, group=model_group)
             send_x = dist.isend(grad_output, group_dst=6, group=model_group)
             # w: send to 1, 3, 5; recv from 1, 3, 5
@@ -2067,9 +2067,8 @@ def fused_xw_xtw_eightway(
             t_buffer_x_6 = get_preallocated_buffer(
                 t_x_transpose_shape, t_xdtype, local_rank, device
             )
-            # t_x0: send to 1; t_x1: send to 2, 3;
-            # x: recv from 2, 4, 6
-            # w: send to 2, 4, 6; recv from 2, 4, 6
+            # t_x0: send to 1; t_x1: send to 2, 3
+            # t_x: recv from 2, 4, 6
             t_send_x_1 = dist.isend(t_x0, group_dst=1, group=model_group)
             t_send_x_2 = dist.isend(t_x1, group_dst=2, group=model_group)
             t_send_x_3 = dist.isend(t_x1, group_dst=3, group=model_group)
@@ -2086,6 +2085,7 @@ def fused_xw_xtw_eightway(
             t_buffer_w_6 = get_preallocated_buffer(
                 input.shape, t_wdtype, local_rank, device
             )
+            # input: send to 2, 4, 6; recv from 2, 4, 6
             t_send_w_2 = dist.isend(input, group_dst=2, group=model_group)
             t_send_w_4 = dist.isend(input, group_dst=4, group=model_group)
             t_send_w_6 = dist.isend(input, group_dst=6, group=model_group)
@@ -2105,6 +2105,8 @@ def fused_xw_xtw_eightway(
             t_buffer_x_6 = get_preallocated_buffer(
                 t_x_transpose_shape, t_xdtype, local_rank, device
             )
+            # t_x0: send to 4, 5; t_x1: send to 6, 7
+            # t_x: recv from 0, 2, 4, 6
             t_recv_x_0 = dist.irecv(t_buffer_x_0, group_src=0, group=model_group)
             t_send_x_4 = dist.isend(t_x0, group_dst=4, group=model_group)
             t_send_x_5 = dist.isend(t_x0, group_dst=5, group=model_group)
@@ -2113,9 +2115,6 @@ def fused_xw_xtw_eightway(
             t_recv_x_2 = dist.irecv(t_buffer_x_2, group_src=2, group=model_group)
             t_recv_x_4 = dist.irecv(t_buffer_x_4, group_src=4, group=model_group)
             t_recv_x_6 = dist.irecv(t_buffer_x_6, group_src=6, group=model_group)
-            # t_x0: send to 4, 5; t_x1: send to 6, 7;
-            # x: recv from 0, 2, 4, 6
-            # w: send to 3, 5, 7; recv from 3, 5, 7
             t_buffer_w_3 = get_preallocated_buffer(
                 input.shape, t_wdtype, local_rank, device
             )
@@ -2126,6 +2125,7 @@ def fused_xw_xtw_eightway(
                 input.shape, t_wdtype, local_rank, device
             )
 
+            # input: send to 3, 5, 7; recv from 3, 5, 7
             t_send_w_3 = dist.isend(input, group_dst=3, group=model_group)
             t_send_w_5 = dist.isend(input, group_dst=5, group=model_group)
             t_send_w_7 = dist.isend(input, group_dst=7, group=model_group)
@@ -2142,15 +2142,14 @@ def fused_xw_xtw_eightway(
             t_buffer_x_6 = get_preallocated_buffer(
                 t_x_transpose_shape, t_xdtype, local_rank, device
             )
+            # t_x0: send to 0, 1; t_x1: send to 3
+            # t_x: recv from 0, 4, 6
             t_recv_x_0 = dist.irecv(t_buffer_x_0, group_src=0, group=model_group)
-            # t_x0: send to 0, 1; t_x1: send to 3;
             t_send_x_0 = dist.isend(t_x0, group_dst=0, group=model_group)
             t_send_x_1 = dist.isend(t_x0, group_dst=1, group=model_group)
             t_send_x_3 = dist.isend(t_x1, group_dst=3, group=model_group)
             t_recv_x_4 = dist.irecv(t_buffer_x_4, group_src=4, group=model_group)
             t_recv_x_6 = dist.irecv(t_buffer_x_6, group_src=6, group=model_group)
-            # x: recv from 0, 4, 6
-            # w: send to 0, 4, 6; recv from 0, 4, 6
             t_buffer_w_0 = get_preallocated_buffer(
                 input.shape, t_wdtype, local_rank, device
             )
@@ -2160,6 +2159,7 @@ def fused_xw_xtw_eightway(
             t_buffer_w_6 = get_preallocated_buffer(
                 input.shape, t_wdtype, local_rank, device
             )
+            # input: send to 0, 4, 6; recv from 0, 4, 6
             t_recv_w_0 = dist.irecv(t_buffer_w_0, group_src=0, group=model_group)
             t_send_w_0 = dist.isend(input, group_dst=0, group=model_group)
             t_send_w_4 = dist.isend(input, group_dst=4, group=model_group)
@@ -2179,6 +2179,8 @@ def fused_xw_xtw_eightway(
             t_buffer_x_6 = get_preallocated_buffer(
                 t_x_transpose_shape, t_xdtype, local_rank, device
             )
+            # t_x0: send to 4, 5; t_x1: send to 6, 7
+            # t_x: recv from 0, 2, 4, 6
             t_recv_x_0 = dist.irecv(t_buffer_x_0, group_src=0, group=model_group)
             t_recv_x_2 = dist.irecv(t_buffer_x_2, group_src=2, group=model_group)
             t_send_x_4 = dist.isend(t_x0, group_dst=4, group=model_group)
@@ -2188,9 +2190,6 @@ def fused_xw_xtw_eightway(
             t_recv_x_4 = dist.irecv(t_buffer_x_4, group_src=4, group=model_group)
             t_recv_x_6 = dist.irecv(t_buffer_x_6, group_src=6, group=model_group)
 
-            # t_x0: send to 4, 5; t_x1: send to 6, 7
-            # x: recv from 0, 2, 4, 6
-            # w: send to 1, 5, 7; recv from 1, 5, 7
             t_buffer_w_1 = get_preallocated_buffer(
                 input.shape, t_wdtype, local_rank, device
             )
@@ -2200,6 +2199,7 @@ def fused_xw_xtw_eightway(
             t_buffer_w_7 = get_preallocated_buffer(
                 input.shape, t_wdtype, local_rank, device
             )
+            # input: send to 1, 5, 7; recv from 1, 5, 7
             t_recv_w_1 = dist.irecv(t_buffer_w_1, group_src=1, group=model_group)
             t_send_w_1 = dist.isend(input, group_dst=1, group=model_group)
             t_send_w_5 = dist.isend(input, group_dst=5, group=model_group)
@@ -2219,6 +2219,8 @@ def fused_xw_xtw_eightway(
             t_buffer_x_7 = get_preallocated_buffer(
                 t_x_transpose_shape, t_xdtype, local_rank, device
             )
+            # t_x0: send to 0, 1; t_x1: send to 2, 3
+            # t_x: recv from 1, 3, 5, 7
             t_recv_x_1 = dist.irecv(t_buffer_x_1, group_src=1, group=model_group)
             t_recv_x_3 = dist.irecv(t_buffer_x_3, group_src=3, group=model_group)
             t_send_x_0 = dist.isend(t_x0, group_dst=0, group=model_group)
@@ -2228,9 +2230,6 @@ def fused_xw_xtw_eightway(
             t_recv_x_5 = dist.irecv(t_buffer_x_5, group_src=5, group=model_group)
             t_recv_x_7 = dist.irecv(t_buffer_x_7, group_src=7, group=model_group)
 
-            # t_x0: send to 0, 1; t_x1: send to 2, 3
-            # x: recv from 1, 3, 5, 7
-            # w: send to 0, 2, 6; recv from 0, 2, 6
             t_buffer_w_0 = get_preallocated_buffer(
                 input.shape, t_wdtype, local_rank, device
             )
@@ -2240,6 +2239,7 @@ def fused_xw_xtw_eightway(
             t_buffer_w_6 = get_preallocated_buffer(
                 input.shape, t_wdtype, local_rank, device
             )
+            # input: send to 0, 2, 6; recv from 0, 2, 6
             t_recv_w_0 = dist.irecv(t_buffer_w_0, group_src=0, group=model_group)
             t_recv_w_2 = dist.irecv(t_buffer_w_2, group_src=2, group=model_group)
             t_send_w_0 = dist.isend(input, group_dst=0, group=model_group)
@@ -2256,15 +2256,14 @@ def fused_xw_xtw_eightway(
             t_buffer_x_7 = get_preallocated_buffer(
                 t_x_transpose_shape, t_xdtype, local_rank, device
             )
+            # t_x0: send to 4; t_x1: send to 6, 7
+            # t_x: recv from 1, 3, 7
             t_recv_x_1 = dist.irecv(t_buffer_x_1, group_src=1, group=model_group)
             t_recv_x_3 = dist.irecv(t_buffer_x_3, group_src=3, group=model_group)
             t_send_x_4 = dist.isend(t_x0, group_dst=4, group=model_group)
             t_send_x_6 = dist.isend(t_x1, group_dst=6, group=model_group)
             t_send_x_7 = dist.isend(t_x1, group_dst=7, group=model_group)
             t_recv_x_7 = dist.irecv(t_buffer_x_7, group_src=7, group=model_group)
-            # t_x0: send to 4; t_x1: send to 6, 7
-            # x: recv from 1, 3, 7
-            # w: send to 1, 3, 7; recv from 1, 3, 7
             t_buffer_w_1 = get_preallocated_buffer(
                 input.shape, t_wdtype, local_rank, device
             )
@@ -2274,6 +2273,7 @@ def fused_xw_xtw_eightway(
             t_buffer_w_7 = get_preallocated_buffer(
                 input.shape, t_wdtype, local_rank, device
             )
+            # input: send to 1, 3, 7; recv from 1, 3, 7
             t_recv_w_1 = dist.irecv(t_buffer_w_1, group_src=1, group=model_group)
             t_recv_w_3 = dist.irecv(t_buffer_w_3, group_src=3, group=model_group)
             t_send_w_1 = dist.isend(input, group_dst=1, group=model_group)
@@ -2293,6 +2293,8 @@ def fused_xw_xtw_eightway(
             t_buffer_x_7 = get_preallocated_buffer(
                 t_x_transpose_shape, t_xdtype, local_rank, device
             )
+            # t_x0: send to 0, 1; t_x1: send to 2, 3
+            # t_x: recv from 1, 3, 5, 7
             t_recv_x_1 = dist.irecv(t_buffer_x_1, group_src=1, group=model_group)
             t_recv_x_3 = dist.irecv(t_buffer_x_3, group_src=3, group=model_group)
             t_recv_x_5 = dist.irecv(t_buffer_x_5, group_src=5, group=model_group)
@@ -2301,9 +2303,6 @@ def fused_xw_xtw_eightway(
             t_send_x_2 = dist.isend(t_x1, group_dst=2, group=model_group)
             t_send_x_3 = dist.isend(t_x1, group_dst=3, group=model_group)
             t_recv_x_7 = dist.irecv(t_buffer_x_7, group_src=7, group=model_group)
-            # t_x0: send to 0, 1; t_x1: send to 2, 3
-            # x: recv from 1, 3, 5, 7
-            # w: send to 0, 2, 4; recv from 0, 2, 4
             t_buffer_w_0 = get_preallocated_buffer(
                 input.shape, t_wdtype, local_rank, device
             )
@@ -2313,6 +2312,7 @@ def fused_xw_xtw_eightway(
             t_buffer_w_4 = get_preallocated_buffer(
                 input.shape, t_wdtype, local_rank, device
             )
+            # input: send to 0, 2, 4; recv from 0, 2, 4
             t_recv_w_0 = dist.irecv(t_buffer_w_0, group_src=0, group=model_group)
             t_recv_w_2 = dist.irecv(t_buffer_w_2, group_src=2, group=model_group)
             t_recv_w_4 = dist.irecv(t_buffer_w_4, group_src=4, group=model_group)
@@ -2329,15 +2329,14 @@ def fused_xw_xtw_eightway(
             t_buffer_x_5 = get_preallocated_buffer(
                 t_x_transpose_shape, t_xdtype, local_rank, device
             )
+            # t_x0: send to 4, 5; t_x1: send to 6
+            # t_x: recv from 1, 3, 5
             t_recv_x_1 = dist.irecv(t_buffer_x_1, group_src=1, group=model_group)
             t_recv_x_3 = dist.irecv(t_buffer_x_3, group_src=3, group=model_group)
             t_recv_x_5 = dist.irecv(t_buffer_x_5, group_src=5, group=model_group)
             t_send_x_4 = dist.isend(t_x0, group_dst=4, group=model_group)
             t_send_x_5 = dist.isend(t_x0, group_dst=5, group=model_group)
             t_send_x_6 = dist.isend(t_x1, group_dst=6, group=model_group)
-            # t_x0: send to 4, 5; t_x1: send to 6
-            # x: recv from 1, 3, 5
-            # w: send to 1, 3, 5; recv from 1, 3, 5
             t_buffer_w_1 = get_preallocated_buffer(
                 input.shape, t_wdtype, local_rank, device
             )
@@ -2347,6 +2346,7 @@ def fused_xw_xtw_eightway(
             t_buffer_w_5 = get_preallocated_buffer(
                 input.shape, t_wdtype, local_rank, device
             )
+            # input: send to 1, 3, 5; recv from 1, 3, 5
             t_recv_w_1 = dist.irecv(t_buffer_w_1, group_src=1, group=model_group)
             t_recv_w_3 = dist.irecv(t_buffer_w_3, group_src=3, group=model_group)
             t_recv_w_5 = dist.irecv(t_buffer_w_5, group_src=5, group=model_group)

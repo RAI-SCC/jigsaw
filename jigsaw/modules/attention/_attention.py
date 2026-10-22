@@ -185,7 +185,7 @@ def _mask_to(
 
 
 class DistributedAttention(torch.nn.Module):
-    """Distributed multi-head attention, parallelised over ``spatial_group``.
+    """Distributed multi-head attention, parallelized over ``spatial_group``.
 
     Three mutually exclusive schemes, selected by ``ring`` / ``ulysses``: plain
     (each rank attends to its own local sequence shard), ring (K/V circulate

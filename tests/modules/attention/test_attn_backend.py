@@ -1,13 +1,13 @@
 """``AttnBackend`` selection, coercion and the TE-unavailable fallback.
 
 The container path adds a three-way attention-core switch
-(:class:`jigsaw.modules.attention._config.AttnBackend` -- ``te`` / ``sdpa`` /
+(:class:`jigsaw.modules.attention._config.AttnBackend`: ``te`` / ``sdpa`` /
 ``math``). These tests pin:
 
 * enum construction and string coercion,
 * the ring core selectors (``_select_attn_core_{forward,backward}_fn``) and the
   ``_te_core_or_raise`` guard, with TE availability forced via ``monkeypatch``,
-* the deliberate asymmetry for ``attn_backend="te"`` when TE is missing --
+* the deliberate asymmetry for ``attn_backend="te"`` when TE is missing:
   :class:`~jigsaw.modules.attention._attention.DistributedAttention` *warns and
   falls back to sdpa*, while :class:`~...config.RingAttentionConfig` *raises*.
 
@@ -64,7 +64,7 @@ class TestAttnBackendEnum:
         assert AttnBackend(AttnBackend.TE) is AttnBackend.TE
 
     def test_is_str_enum(self):
-        """``class AttnBackend(str, Enum)`` -- members compare equal to their value."""
+        """``class AttnBackend(str, Enum)``: members compare equal to their value."""
         assert AttnBackend.SDPA == "sdpa"
         assert AttnBackend.TE.value == "te"
 
@@ -122,7 +122,7 @@ class TestTeCoreSelection:
             te_cores.select_core(CPU)
 
     def test_cpu_resolves_to_cudnn(self, monkeypatch):
-        """Historical behaviour: the selector succeeds, the kernel call reports
+        """Historical behavior: the selector succeeds, the kernel call reports
         that there is no GPU."""
         monkeypatch.delenv("JIGSAW_TE_CORE", raising=False)
         assert te_cores.select_core(CPU) is te_cores.cudnn
@@ -132,7 +132,7 @@ class TestTeCoreSelection:
         [((8, 0), "flash"), ((8, 6), "flash"), ((9, 0), "cudnn"), ((10, 0), "cudnn")],
     )
     def test_architecture_rule(self, monkeypatch, capability, expected):
-        # Pure selection logic -- force both arms "available" so this passes
+        # Pure selection logic: force both arms "available" so this passes
         # without transformer_engine/flash_attn installed (e.g. CPU-only CI).
         monkeypatch.setattr(te_cores.cudnn, "CUDNN_CORE_AVAILABLE", True)
         monkeypatch.setattr(te_cores.flash, "FLASH_CORE_AVAILABLE", True)
@@ -287,7 +287,7 @@ class TestDistributedAttentionBackend:
 
 
 # --------------------------------------------------------------------------- #
-# RingAttentionConfig: the asymmetric TE behaviour + repr
+# RingAttentionConfig: the asymmetric TE behavior + repr
 # --------------------------------------------------------------------------- #
 class TestRingAttentionConfigBackend:
     def test_default_backend_and_repr(self):
@@ -322,7 +322,7 @@ class TestBackendWithTe:
         assert model.attn_backend is AttnBackend.TE
         assert model.te is True
         # The TE core carries no `te.DotProductAttention` submodule: it calls the
-        # kernels through the shared wrapper, parameterised per call by
+        # kernels through the shared wrapper, parameterized per call by
         # `self.scale` / `self.dropout_p` and by the core resolved here.
         assert model.attn_core.__func__ is DistributedAttention._transformer_attn_core
         assert not hasattr(model, "attn")

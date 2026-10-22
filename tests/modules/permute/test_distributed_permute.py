@@ -236,7 +236,7 @@ def _check_permute(
     x_global = _global(shape, dtype, device, seed)
     x = _shard_dims(x_global, n_rows, n_cols, group.rank(), row_dim, col_dim)
     # mesh["row"]/mesh["col"] shard the *fixed* positions row_dim/col_dim of both the
-    # input and the output -- not wherever the original row_dim/col_dim axis's data
+    # input and the output, not wherever the original row_dim/col_dim axis's data
     # ends up (that's `dims.index(row_dim)`, which only coincides with row_dim itself
     # when `dims` doesn't swap the tracked pair).
     expected = _shard_dims(
@@ -294,7 +294,7 @@ class TestDistributedPermuteGeneral:
     """row_dim/col_dim *not* trailing: the all-gather based general path.
 
     Shape is ``(E, S, H, C)`` with ``S`` (dim 1) row-sharded and ``C`` (dim 3)
-    col-sharded, ``H`` (dim 2) sitting between them untouched -- the shape of
+    col-sharded, ``H`` (dim 2) sitting between them untouched: the shape of
     problem this module couldn't express before: the sharded axes aren't the
     trailing two, and the mesh shape (2x2) isn't tied to a specific kernel.
     """
@@ -325,12 +325,12 @@ class TestDistributedPermuteGeneral:
         """A swap of the tracked pair also moves whatever `dims` does to the rest.
 
         Axis 0 and axis 2 aren't row_dim/col_dim, so `distributed_permute` never
-        reads or reshards them directly here -- but `_check_permute`'s reference
+        reads or reshards them directly here, but `_check_permute`'s reference
         is computed from the same `x_global` every rank builds identically, which
         is the one invariant this whole module relies on: an axis that isn't
         row_dim/col_dim must be uniform across mesh["row"] x mesh["col"] (it may
         still be sharded by some other, orthogonal mesh axis held fixed for this
-        call -- just not by row/col themselves).
+        call, just not by row/col themselves).
         """
         dims = (2, 3, 0, 1)
         _check_permute(

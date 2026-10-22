@@ -2,32 +2,32 @@
 
 An ensemble can be run by giving every parameter a leading
 "members" axis and running the model under ``torch.vmap``. The attention path
-was never exercised under ``vmap`` -- these tests pin it, at increasing levels
+was never exercised under ``vmap``; these tests pin it, at increasing levels
 of integration:
 
-1. :class:`TestTransformerEngineAttentionVmap` -- the
+1. :class:`TestTransformerEngineAttentionVmap`: the
    :class:`~jigsaw.modules.attention._attention._TransformerEngineAttention`
    ``autograd.Function`` alone. It is the only piece that *has* to route through
    a custom Function under vmap (``te``'s fused kernels register no batching
    rule); its ``vmap`` staticmethod folds the members axis into the batch,
    runs one un-vmapped call, and unfolds. Forward + grad vs a Python loop.
-   **Passes** -- including after the wrapper moved off
+   **Passes**, including after the wrapper moved off
    ``te.DotProductAttention`` onto the fused kernels directly: the fold makes
    the folded ``q/k/v`` produce a matching folded LSE / ``rng_state``, so the
    re-entrant ``apply`` inside the rule sends gradients through the wrapper's
    own ``fused_attn_bwd`` backward.
-2. :class:`TestDistributedAttentionPlain` -- a plain (no vmap, no ensemble)
+2. :class:`TestDistributedAttentionPlain`: a plain (no vmap, no ensemble)
    ``DistributedAttention`` forward+backward on a channel-parallel mesh, sdpa
    and te. **Passes.** Regression guards for two fixes: ``forward`` now casts
    the half-precision core output back to the model dtype on the ``_te_bshd`` branch too,
    and ``fused_xw_xtw_twoway`` makes ``grad_output`` contiguous before its
    ``all_to_all``.
-3. :class:`TestDistributedAttentionEnsembleVmap` -- a full non-ring
+3. :class:`TestDistributedAttentionEnsembleVmap`: a full non-ring
    ``DistributedAttention`` under ``vmap(functional_call(...))`` with stacked
    ensemble parameters, vs a per-member loop, sdpa and te. **Forward passes;
-   grad xfails** -- under ``vmap(grad(...))`` the backward collectives run on
+   grad xfails**: under ``vmap(grad(...))`` the backward collectives run on
    BatchedTensors, and ``c10d`` ops register no batching rule.
-4. :class:`TestRingVmap` -- ``torch.vmap`` over a ``ring=True``
+4. :class:`TestRingVmap`: ``torch.vmap`` over a ``ring=True``
    ``DistributedAttention`` raises: ``_RingAttention`` has no ``vmap``
    staticmethod. **Passes** (asserts the raise); flip to a parity test when a
    fold-into-batch rule lands.
@@ -48,7 +48,7 @@ from jigsaw.modules.attention._functional.cores import te as te_cores
 from tests.parity import assert_close
 
 # TE fused attention needs fp16/bf16 and (on CUDA) the attn core runs in half
-# precision regardless of backend -- so vmap-vs-loop parity is a half-precision
+# precision regardless of backend, so vmap-vs-loop parity is a half-precision
 # comparison (bf16 for the direct-core tests, which feed bf16 q/k/v).
 _FWD_TOL = dict(atol=2e-2, rtol=2e-2)
 _GRAD_TOL = dict(atol=3e-2, rtol=3e-2)  # grads flow through the half-precision core
@@ -171,7 +171,7 @@ def _local_x(mesh: dict, device: torch.device, *, members: int | None = None):
 @pytest.mark.gpu_required
 class TestDistributedAttentionPlain:
     """A non-ring ``DistributedAttention`` on a channel-parallel mesh, no vmap,
-    no ensemble -- the simplest thing that must work before any of the
+    no ensemble: the simplest thing that must work before any of the
     vmap/ensemble story does.
 
     Regression guards for two fixes:
@@ -226,7 +226,7 @@ class TestDistributedAttentionPlain:
 @pytest.mark.gpu_required
 class TestDistributedAttentionEnsembleVmap:
     """A non-ring ``DistributedAttention`` under ``vmap(functional_call(...))``
-    with an ensemble (leading members axis) of stacked parameters -- the shape
+    with an ensemble (leading members axis) of stacked parameters: the shape
     an ensemble of stacked parameters drives.
 
     Reference is a per-member Python loop over the same modules, so a mismatch
@@ -343,7 +343,7 @@ class TestDistributedAttentionEnsembleVmap:
 
 
 # --------------------------------------------------------------------------- #
-# 4. ring attention under vmap -- not supported yet
+# 4. ring attention under vmap: not supported yet
 # --------------------------------------------------------------------------- #
 @pytest.mark.gpu_required
 class TestRingVmap:

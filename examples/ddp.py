@@ -15,7 +15,7 @@ ViT of ``vit.py`` (split 2x2 over "row" and "col") with a "dp" axis of copies on
   * The **loss to log** is the mean over the copies, not just that of rank 0's copy.
   * A **replica check** every few steps: ``jigsaw.debug.assert_replica_consistency``
     raises on every rank once a replicated weight has drifted apart across its
-    copies -- the symptom of a parameter whose gradient is not summed over them.
+    copies: the symptom of a parameter whose gradient is not summed over them.
 
 Checkpointing needs nothing special: ``ddp.module.state_dict()`` holds this rank's
 shards, which are the same on every copy, so only the ranks of copy 0

@@ -17,7 +17,7 @@ Triple = int | tuple[int, int, int]
 
 
 def _triple(value: Triple) -> tuple[int, int, int]:
-    """Normalise an ``int`` or 3-tuple to a ``(d, h, w)`` tuple."""
+    """Normalize an ``int`` or 3-tuple to a ``(d, h, w)`` tuple."""
     return (value, value, value) if isinstance(value, int) else tuple(value)
 
 
@@ -27,7 +27,7 @@ def _skip_if_unsupported(channel_comm: str) -> None:
         pytest.skip("all_to_all channel comm needs a non-gloo backend")
 
 
-# (kernel, stride, padding, dilation) -- each entry is an int or a (d, h, w)
+# (kernel, stride, padding, dilation): each entry is an int or a (d, h, w)
 # tuple, so asymmetric kernels/strides/paddings/dilations are covered. The split
 # axis is the width (last) axis. The last entries exercise the ``stride ==
 # kernel`` config branch with non-trivial split-axis padding/dilation (must still
@@ -340,7 +340,7 @@ class TestConv3d:
     def test_unknown_channel_comm_rejected(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        """An unrecognised ``channel_comm`` name fails fast at construction."""
+        """An unrecognized ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
             convolution.DistributedConv3d(
                 8,
@@ -637,7 +637,7 @@ def _conv3d_multi_spatial_reference_check(
     # The parameter grads reduce over every output position; across a big volume
     # the distributed partial sums land in a different float32 order than the
     # single-process reference, so allow ~1e-3 there (a real bug is orders of
-    # magnitude larger -- cf. the exact ``y`` / ``g_x`` checks above).
+    # magnitude larger; cf. the exact ``y`` / ``g_x`` checks above).
     assert_close(
         "weight grad",
         w_grad_global,
@@ -878,7 +878,7 @@ class TestConv3dMultiSpatial:
 
         Each combo is either matched against a single-process conv3d or (when
         its global output is not divisible by the spatial group) asserted to be
-        rejected with ``NotImplementedError`` -- never silently wrong.
+        rejected with ``NotImplementedError``, never silently wrong.
         """
         _conv3d_multi_spatial_reference_check(
             device,
@@ -1036,7 +1036,7 @@ class TestConv3dMultiSpatial:
             ).to(device)
 
 
-# (kernel, stride, padding, dilation) -- an int or a (d, h, w) tuple per entry.
+# (kernel, stride, padding, dilation): an int or a (d, h, w) tuple per entry.
 # Spans exact tiling (no halo), same-conv, overlapping windows (stride < kernel),
 # a gap between windows (stride > kernel), stride == kernel forced onto the halo
 # path by padding, *different padding per axis*, per-axis dilation, and a fully
@@ -1065,8 +1065,8 @@ class TestConv3dSpatialGridSweep:
     Covers ``(n_d, n_h, n_w)`` grids with a size-1 axis and with every axis
     split, both with no channel parallelism and with a 2-way channel split.
     Every (grid, case) pair is either matched against a single-process conv3d
-    or -- when a split axis's global output is not divisible by that axis's
-    group size -- asserted to be rejected with ``NotImplementedError``, never
+    or (when a split axis's global output is not divisible by that axis's
+    group size) asserted to be rejected with ``NotImplementedError``, never
     silently wrong. ``depth`` / ``height`` / ``width`` are multiples of the grid
     so the domain shards evenly on every axis.
     """

@@ -3,17 +3,17 @@
 Exercises the four methods that move parameters between a plain ``torch.nn``
 module and a jigsaw distributed one, and between process meshes:
 
-* ``convert_to_jigsaw``  -- torch -> jigsaw on a mesh
-* ``convert_to_torch``   -- jigsaw -> torch (rank-local, fully merged)
-* ``merge_weights``      -- gather the sharded parameters into global tensors
-* ``reshard_parameters`` -- re-slice + rebind a jigsaw module onto a new mesh
+* ``convert_to_jigsaw``: torch -> jigsaw on a mesh
+* ``convert_to_torch``: jigsaw -> torch (rank-local, fully merged)
+* ``merge_weights``: gather the sharded parameters into global tensors
+* ``reshard_parameters``: re-slice + rebind a jigsaw module onto a new mesh
 
 The reshard tests assert that (1) parameter *values* survive each
 ``from_mesh -> to_mesh`` transition of ``_MESH_PAIRS_4``, with and without bias,
 for linear and 1-/2-/3-D (transposed) convs, checked against the plain-torch
 reference, and (2) after a reshard the module is *functionally identical* to one
-obtained by converting straight onto ``to_mesh`` -- same forward, same
-backward -- which is what makes it safe to keep training on the new mesh.
+obtained by converting straight onto ``to_mesh`` (same forward, same
+backward), which is what makes it safe to keep training on the new mesh.
 """
 
 import copy
@@ -42,7 +42,7 @@ MESHES_4 = [
 MESHES_8 = ["process_mesh_dict_4x2", "process_mesh_dict_2x4_rowcol"]
 
 # Reshard transitions rather than all 36 pairs: every mesh is a source and a target,
-# and each kind of move is hit -- identity, row <-> col swap, sharded <-> fully
+# and each kind of move is hit: identity, row <-> col swap, sharded <-> fully
 # replicated, shrinking / growing the model group under dp, halving a 4-way split.
 _MESH_PAIRS_4 = [
     ("process_mesh_dict_2x2", "process_mesh_dict_2x2"),
@@ -89,7 +89,7 @@ ALL_KINDS = ["linear", *CONV_KINDS]
 
 def _kind_cases(settings: list[tuple[str, ...]]) -> list[tuple]:
     """``(*setting, kind, bias)``: every setting and kind with a bias, plus each kind
-    once without one (on the first setting) -- that path only skips the bias."""
+    once without one (on the first setting); that path only skips the bias."""
     cases = [(*s, kind, True) for s in settings for kind in ALL_KINDS]
     return cases + [(*settings[0], kind, False) for kind in ALL_KINDS]
 
@@ -109,7 +109,7 @@ def _local_input(jm: torch.nn.Module, kind: str, device: torch.device) -> torch.
     """A per-rank input tensor of the shape ``jm`` expects on its current mesh.
 
     Its numeric content only has to be identical between two modules built on the
-    same mesh, so a rank-seeded ``randn`` is enough -- the reshard tests compare
+    same mesh, so a rank-seeded ``randn`` is enough; the reshard tests compare
     two jigsaw modules against each other, not against a windowed serial run.
     """
     torch.manual_seed(99)
@@ -279,7 +279,7 @@ class TestReshardParamValues:
 # --------------------------------------------------------------------------- #
 class TestReshardMatchesDirect:
     """A resharded module and a freshly-converted one on the same mesh must be
-    byte-for-byte equivalent -- same shards, groups, config -> same fwd/bwd."""
+    byte-for-byte equivalent: same shards, groups, config -> same fwd/bwd."""
 
     @pytest.mark.dist(4)
     @pytest.mark.parametrize("from_name,to_name,kind,bias", _kind_cases(_MESH_PAIRS_4))
@@ -327,7 +327,7 @@ class TestReshardMatchesDirect:
             )
 
         # The XWT kernels only implement a fixed set of row x col arrangements
-        # (see ``_SUPPORTED_XWT_LAYOUTS``); on any other factorisation
+        # (see ``_SUPPORTED_XWT_LAYOUTS``); on any other factorization
         # ``forward`` raises rather than returning a mis-shaped result. The
         # reshard still has to land the module in the *same* state as a direct
         # conversion, so both must raise identically.

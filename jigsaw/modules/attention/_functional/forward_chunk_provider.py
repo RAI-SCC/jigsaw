@@ -282,7 +282,7 @@ class _BroadcastForwardChunkProvider(_ForwardChunkProvider):
 
         if self.send_x:
             if step == self.local_rank:
-                # Our own chunk: reuse local K/V instead of recomputing.
+                # This rank's own chunk: reuse local K/V instead of recomputing.
                 self.kv_j, self.kj, self.vj = self.kv, self.k, self.v
             else:
                 self._kv_from_x()

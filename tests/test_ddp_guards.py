@@ -2,8 +2,8 @@
 
 ``DistributedDataParallel`` on the wrong process group, or around replicas that
 were never made identical, trains without an error and produces a wrong model.
-These tests check that each such setup raises -- on every rank, so nothing
-hangs -- and that the debug check catches a perturbed replica.
+These tests check that each such setup raises (on every rank, so nothing
+hangs) and that the debug check catches a perturbed replica.
 """
 
 import pytest

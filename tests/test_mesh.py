@@ -5,7 +5,7 @@ import jigsaw
 
 
 class TestValidation:
-    """Checks that hold at any world size -- run in the default session too."""
+    """Checks that hold at any world size; run in the default session too."""
 
     def test_all_axes_form_the_model_group_by_default(self, device):
         world = dist.get_world_size()

@@ -201,7 +201,7 @@ def _public_objects() -> list[tuple[str, str, object]]:
 
 
 def _canonical_module(module_name: str, name: str) -> str:
-    """The public path a name is documented, and labelled, under."""
+    """The public path a name is documented, and labeled, under."""
     if name in EXPECTED_ALL["jigsaw.modules"]:
         return "jigsaw.modules"
     if name in EXPECTED_ALL["jigsaw.modules.functional"]:

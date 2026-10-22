@@ -5,7 +5,7 @@ The rest of the convolution suite builds the distributed layer directly and rebu
 the serial reference by gathering its shards. This file goes the other way: start from
 a plain ``torch.nn.Conv{1,2,3}d``, run it, then hand it to
 ``jigsaw.convert.convert_to_jigsaw`` and check the sharded layer reproduces the serial
-output, input gradient and -- the part the hand-rolled checks skip -- every parameter
+output, input gradient and (the part the hand-rolled checks skip) every parameter
 value and parameter gradient, via the shared harness in ``tests/parity``.
 
 Weight and bias are declared ``REPLICATED`` over the spatial (``row``) group: the
@@ -46,8 +46,8 @@ _IDS = [f"conv{n}d_k{k}_s{s}_p{p}" for (n, _, _, _, _, k, s, p) in _CASES]
 class TestConvParity:
     # ``groups`` is 1 (full-channel-gather path) or 2 == col.size() (every
     # channel rank owns whole conv-groups, no channel comm). The converter maps a
-    # grouped ``torch.nn.Conv*`` the same way -- weight sharded on the output
-    # axis over ``col``, replicated over ``row`` -- so the parity rules are
+    # grouped ``torch.nn.Conv*`` the same way (weight sharded on the output
+    # axis over ``col``, replicated over ``row``), so the parity rules are
     # unchanged.
     @pytest.mark.parametrize("groups", [1, 2])
     @pytest.mark.parametrize("bias", [False, True])

@@ -2,11 +2,11 @@
 
 Two kinds of test, both run under ``mpirun -n 4 pytest tests``:
 
-* **Smoke** -- ``main()`` of every tutorial runs to completion. The tutorials that
+* **Smoke**: ``main()`` of every tutorial runs to completion. The tutorials that
   check themselves (``autoconvert``, ``reshard``, ``dataloader``) assert inside
   ``main()``, so running them *is* their parity check; the training tutorials must
   additionally bring their loss down.
-* **Parity** -- the models the training tutorials define give the same output, loss
+* **Parity**: the models the training tutorials define give the same output, loss
   and gradients as an undistributed version of the same model:
 
   ======================  ======================================================
@@ -301,8 +301,8 @@ class TestParity:
         The reference is the same architecture written with ``nn.Conv2d``,
         ``nn.LayerNorm``, ``nn.Linear`` and ``F.scaled_dot_product_attention``, holding
         the *merged* weights of the distributed model. This checks the whole forward
-        pass -- including the global position embedding and the ring attention, whose
-        result must not depend on how the tokens are split -- and, on the backward
+        pass (including the global position embedding and the ring attention, whose
+        result must not depend on how the tokens are split) and, on the backward
         pass, the gradients of the input and of parameters of three different kinds
         (channel-sharded, sharded in both axes, attention).
         """

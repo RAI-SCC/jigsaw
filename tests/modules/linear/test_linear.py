@@ -21,7 +21,7 @@ class TestForward:
     ) -> None:
         """Test single forward pass of a linear layer."""
         local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
-        torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
+        torch.manual_seed(local_rank)
 
         # global dims
         in_dim, out_dim = 4, 4
@@ -76,7 +76,7 @@ class TestForward:
         """Test single forward pass of a linear layer."""
         local_rank = dist.get_rank(group=process_mesh_dict_2x1x2["model"])
         print(f"keys {process_mesh_dict_2x1x2.keys()}")
-        torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
+        torch.manual_seed(local_rank)  # same weights and data on both dp replicas
 
         # global
         in_dim, out_dim = 4, 4
@@ -125,7 +125,7 @@ class TestForward:
     ) -> None:
         """Ensure bias terms are synchronized across row groups."""
         local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
-        torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
+        torch.manual_seed(local_rank)
 
         in_dim, out_dim = 6, 10
 
@@ -176,7 +176,7 @@ class TestForward:
     ) -> None:
         """Test forward pass including a bias."""
         local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
-        torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
+        torch.manual_seed(local_rank)
 
         in_dim, out_dim = 6, 10
         seq_global = 20
@@ -233,7 +233,7 @@ class TestBackward:
     ) -> None:
         """Test single forward and backward pass of a linear layer."""
         local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
-        torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
+        torch.manual_seed(local_rank)
 
         in_dim, out_dim = 6, 4
         seq_local = 4
@@ -344,7 +344,7 @@ class TestBackward:
     ) -> None:
         """Test forward and backward pass of a few iterations."""
         local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
-        torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
+        torch.manual_seed(local_rank)
 
         in_dim, out_dim = 4, 2
         seq_local = 4
@@ -440,7 +440,7 @@ class TestBackward:
     ) -> None:
         """Test single forward and backward pass of a linear layer including bias."""
         local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
-        torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
+        torch.manual_seed(local_rank)
 
         in_dim, out_dim = 6, 2
         seq_global = 4
@@ -588,7 +588,7 @@ class TestBackward:
     ) -> None:
         """Test forward--backward pass of a 2-way sharded model."""
         local_rank = dist.get_rank(group=process_mesh_dict_2x1x2["model"])
-        torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
+        torch.manual_seed(local_rank)  # same weights and data on both dp replicas
 
         in_dim, out_dim = 4, 4
         seq_global = 10
@@ -952,7 +952,7 @@ class TestBackward:
     ) -> None:
         """Test forward and backward pass of a few iterations."""
         local_rank = dist.get_rank(group=process_mesh_dict_4x2["model"])
-        torch.manual_seed(local_rank)  # for now, force the two "pairs" to have the same
+        torch.manual_seed(local_rank)
 
         in_dim, out_dim = 8, 4
         seq_local = 4

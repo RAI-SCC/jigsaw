@@ -23,11 +23,11 @@ def _skip_if_unsupported(channel_comm: str) -> None:
 
 
 def _single(value: Pair) -> tuple[int]:
-    """Normalise an ``int`` or length-1 tuple to a 1-element tuple."""
+    """Normalize an ``int`` or length-1 tuple to a 1-element tuple."""
     return (value,) if isinstance(value, int) else (value[0],)
 
 
-# (kernel, stride, padding, dilation) -- arbitrary combos on the (single) split
+# (kernel, stride, padding, dilation): arbitrary combos on the (single) split
 # axis. The last few deliberately exercise the ``stride == kernel`` config branch
 # with non-trivial padding / dilation (must still route through the halo path)
 # and a combo whose global output length is not divisible by an even spatial
@@ -275,7 +275,7 @@ class TestConv1dTranspose:
     def test_unknown_channel_comm_rejected(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        """An unrecognised ``channel_comm`` name fails fast at construction."""
+        """An unrecognized ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
             convolution.DistributedConvTranspose1d(
                 8,
