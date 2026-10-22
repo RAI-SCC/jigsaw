@@ -461,10 +461,12 @@ class DistributedAttention(torch.nn.Module):
     ) -> Optional[attention_config.RingAttentionConfig]:
         """Pick the ``RingAttentionConfig`` for this module.
 
-        With a sharded ``qkv`` projection (channel group > 1) or ``qk_norm``, the
-        ring cannot rebuild K/V from ``x``, so it needs ``send_in_forward=KV``
-        and ``save_for_backward=KV``. The default config is built that way; an
-        explicit config without them raises.
+        The ring rebuilds K/V from a received ``x`` with a plain local matmul.
+        That would skip the communication of a sharded ``qkv`` projection
+        (channel group > 1) and ``k_norm``, so either one needs
+        ``send_in_forward=KV`` and ``save_for_backward=KV``. The default config
+        is built that way; an explicit config without them raises
+        :class:`ValueError`.
         """
         if not ring:
             return config
