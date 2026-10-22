@@ -12,7 +12,8 @@ Two kinds of test, both run under ``mpirun -n 4 pytest tests``:
   ======================  ======================================================
   ``domain_parallel``     the same layers converted to plain ``nn.Conv2d`` etc.
   ``swin``                the same model on a mesh that does not split anything
-  ``vit``                 a plain-PyTorch ViT carrying the same weights
+  ``vit``                 a plain-PyTorch ViT carrying the same weights (also
+                          its parameter count, against ``get_parameter_count``)
   ======================  ======================================================
 
 The launcher side (``torchrun --nproc-per-node 4 examples/x.py``) is covered by
@@ -37,7 +38,7 @@ import jigsaw
 from jigsaw.gather import gather_1d_results, gather_results
 from jigsaw.launch import set_all_seeds
 from jigsaw.modules.roll import DistributedRoll
-from tests.parity import all_ranks_ok, no_tf32
+from tests.parity import all_ranks_ok, global_parameter_count, no_tf32
 from tests.parity import assert_close as _assert_close
 
 pytestmark = [pytest.mark.dist_required, pytest.mark.dist(4)]
@@ -410,6 +411,13 @@ class TestParity:
                 return x + self.recover(z)
 
         plain = PlainViT()
+        n_params = global_parameter_count(model)
+        n_plain = sum(p.numel() for p in plain.parameters())
+        _agree(
+            n_params == n_plain,
+            device,
+            f"get_parameter_count gives {n_params}, plain ViT has {n_plain}",
+        )
 
         # --- forward and backward on the same data ------------------------------------
         torch.manual_seed(1)  # the same on every rank
