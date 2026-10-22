@@ -217,14 +217,12 @@ class DistributedSegmentationMetrics(torch.nn.Module):
         self.confusion = torch.zeros(num_classes, num_classes, dtype=torch.int64)
 
     def get_parameter_count(self) -> int:
-        """Return the global number of parameters of this layer.
+        """Return the global number of parameters of this metric.
 
         Returns
         -------
         int
-            Global (unsharded) count of this layer's parameters, including plain
-            ``torch.nn`` children; children with ``get_parameter_count`` report
-            their own. No communication.
+            ``0``; the metric has no parameters.
         """
         return 0
 

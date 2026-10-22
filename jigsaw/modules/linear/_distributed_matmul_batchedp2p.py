@@ -1378,7 +1378,7 @@ def xw_eightway(
 
             w0[..., split_size:, :].copy_(wij)
         case 3:
-            # x: send to 3, recv from 2
+            # x: send to 2, recv from 2
             recv_x = irecv(buffer_x, group_src=2, group=model_group)
             send_x = isend(xij, group_dst=2, group=model_group)
             # w: send to 1, 5, 7; recv from 1, 5, 7
@@ -2092,7 +2092,7 @@ def fused_xw_xtw_eightway(
 
             w0[..., split_size:, :].copy_(weight)
         case 3:
-            # x: send to 3, recv from 2
+            # x: send to 2, recv from 2
             recv_x = irecv(buffer_x, group_src=2, group=model_group)
             send_x = isend(grad_output, group_dst=2, group=model_group)
             # w: send to 1, 5, 7; recv from 1, 5, 7

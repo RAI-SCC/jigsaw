@@ -116,7 +116,7 @@ class DistributedGroupNorm(torch.nn.Module):
 
         Channels are partitioned across ``col_kw`` so that no normalization
         group straddles two shards: this requires ``num_groups`` itself (not
-        just ``num_channels``) to divide the column group size.
+        just ``num_channels``) to be divisible by the column group size.
 
         Parameters
         ----------

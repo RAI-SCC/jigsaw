@@ -29,14 +29,12 @@ class DistributedMSELoss(torch.nn.Module):
         self.reduction = reduction
 
     def get_parameter_count(self) -> int:
-        """Return the global number of parameters of this layer.
+        """Return the global number of parameters of this loss.
 
         Returns
         -------
         int
-            Global (unsharded) count of this layer's parameters, including plain
-            ``torch.nn`` children; children with ``get_parameter_count`` report
-            their own. No communication.
+            ``0``; the loss has no parameters.
         """
         return 0
 
@@ -86,14 +84,12 @@ class DistributedL1Loss(torch.nn.Module):
         self.reduction = reduction
 
     def get_parameter_count(self) -> int:
-        """Return the global number of parameters of this layer.
+        """Return the global number of parameters of this loss.
 
         Returns
         -------
         int
-            Global (unsharded) count of this layer's parameters, including plain
-            ``torch.nn`` children; children with ``get_parameter_count`` report
-            their own. No communication.
+            ``0``; the loss has no parameters.
         """
         return 0
 
@@ -147,14 +143,12 @@ class DistributedSmoothL1Loss(torch.nn.Module):
         self.reduction = reduction
 
     def get_parameter_count(self) -> int:
-        """Return the global number of parameters of this layer.
+        """Return the global number of parameters of this loss.
 
         Returns
         -------
         int
-            Global (unsharded) count of this layer's parameters, including plain
-            ``torch.nn`` children; children with ``get_parameter_count`` report
-            their own. No communication.
+            ``0``; the loss has no parameters.
         """
         return 0
 

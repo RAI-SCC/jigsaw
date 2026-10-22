@@ -313,7 +313,7 @@ class DistributedLayerNorm(torch.nn.Module):
         self.channel_group = to_col
         self.local_rank = to_process_mesh.get("model", to_col).rank()
         # The re-sliced parameters are fresh Parameters, so the __init__ marks
-        # are gone. Re-mark them over the new spatial group.
+        # are gone. Re-mark them over the new row group.
         for p in self.parameters():
             parallel.mark_replicated(p, self.spatial_group)
 

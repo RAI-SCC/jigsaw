@@ -113,9 +113,7 @@ class DistributedRoll(torch.nn.Module):
         Returns
         -------
         int
-            Global (unsharded) count of this layer's parameters, including plain
-            ``torch.nn`` children; children with ``get_parameter_count`` report
-            their own. No communication.
+            ``0``; the layer has no parameters.
         """
         return 0
 

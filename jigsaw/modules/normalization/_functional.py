@@ -230,7 +230,6 @@ class _LayerNormNoAffine(torch.autograd.Function):
         # Normalize
         x_norm = (x - mean) / torch.sqrt(var + eps)
 
-        # Apply affine transformation
         return x_norm, var + eps  # type: ignore[return-value]
 
     @staticmethod
@@ -295,9 +294,6 @@ class _LayerNormNoAffine(torch.autograd.Function):
         n = (
             x_norm.shape[-1] * channel_group.size()
         )  # normalized dimension size (global)
-
-        # Gradients for weight and bias
-        # Sum over batch and sequence dimensions, keep feature dim
 
         grad_x_norm_mean = grad_output.mean(dim=-1, keepdim=True)
         g_gx_handle = dist.all_reduce(
