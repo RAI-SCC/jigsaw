@@ -245,7 +245,7 @@ class Swin(nn.Module):
         tile = (H // PATCH // sh.size(), W // PATCH // sw.size())  # local token grid
         stages: list[nn.Module] = []
         for i, (dim, heads, depth) in enumerate(zip(DIMS, HEADS, DEPTHS)):
-            # The tile must hold a whole number of windows, and the shift a window.
+            # The tile must hold a whole number of windows.
             assert tile[0] % WINDOW == 0 and tile[1] % WINDOW == 0, tile
             blocks = [
                 SwinBlock(

@@ -229,8 +229,8 @@ class DistributedLinear(torch.nn.Module):
         DistributedLinear
             Distributed layer with the weights and bias of ``model``.
         """
-        # The columns shard the input dimension of the weight and the bias, the
-        # rows the output dimension of the weight.
+        # The columns shard the input dimension of the weight and the (output-sized)
+        # bias; the rows shard the output dimension of the weight.
         assert model.in_features % process_mesh_dict[col_kw].size() == 0, (
             "in_features is not divisible by process mesh columns"
         )
