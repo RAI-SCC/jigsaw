@@ -1083,6 +1083,7 @@ class Attention(torch.nn.Module):
         dropout_p: float = 0.0,
         qk_norm: bool = False,
         dtype: torch.dtype = torch.float32,
+        out_bias: bool = True,
     ):
         """Initialize the module.
 
@@ -1105,6 +1106,8 @@ class Attention(torch.nn.Module):
             Whether to normalize queries and keys.
         dtype : torch.dtype
             Data type of the parameters.
+        out_bias : bool
+            Whether the output projection has a bias.
         """
         super().__init__()
         self.qkv = torch.nn.Linear(
@@ -1117,7 +1120,7 @@ class Attention(torch.nn.Module):
         self.head_concat = torch.nn.Linear(
             in_features=embed_dim,
             out_features=out_dim,
-            bias=False,
+            bias=out_bias,
             device=device,
             dtype=dtype,
         )
