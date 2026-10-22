@@ -8,19 +8,19 @@ from jigsaw._core import comm
 
 
 class RollConfig:
-    """Selection of the halo exchange of the distributed roll."""
+    """Selection of the halo exchange of the distributed roll.
+
+    Parameters
+    ----------
+    device : torch.device
+        Device of the module.
+    """
 
     def __init__(
         self,
         device: torch.device = torch.device("cuda"),
     ):
-        """Initialize the configuration.
-
-        Parameters
-        ----------
-        device : torch.device
-            Device of the module.
-        """
+        """Initialize the configuration."""
         self.comm_halo_1d_fn = self._comm_halo_1d_fn_selection(device)
 
     def _comm_halo_1d_fn_selection(self, device: torch.device) -> Callable:

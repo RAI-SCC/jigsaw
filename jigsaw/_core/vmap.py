@@ -22,6 +22,20 @@ def to_front(
 
     An unbatched ``t`` (``dim is None``) is expanded to ``size`` along a new
     leading axis.
+
+    Parameters
+    ----------
+    t : torch.Tensor or None
+        Tensor to move; ``None`` passes through.
+    dim : int or None
+        Its vmapped axis, or ``None`` if ``t`` is unbatched.
+    size : int
+        Batch size of the vmap.
+
+    Returns
+    -------
+    torch.Tensor or None
+        ``t`` with the batch axis first, or ``None`` if ``t`` is ``None``.
     """
     if t is None:
         return None
@@ -31,7 +45,13 @@ def to_front(
 
 
 def check_not_vmapped(config: object) -> None:
-    """Raise if ``config`` is already the vmapped config (nested ``vmap``)."""
+    """Raise if ``config`` is already the vmapped config (nested ``vmap``).
+
+    Parameters
+    ----------
+    config : object
+        Layer config to check.
+    """
     if getattr(config, "vmapped", False):
         raise NotImplementedError(
             "nested torch.vmap over a jigsaw layer is not supported"
@@ -51,7 +71,13 @@ class VmapConfig:
     _vmap_config: Optional[VmapConfig] = None
 
     def for_vmap(self: _C) -> _C:
-        """Return the config for a vmapped layer weight (cached)."""
+        """Return the config for a vmapped layer weight (cached).
+
+        Returns
+        -------
+        _C
+            Config of the same type, set up for ``torch.vmap``.
+        """
         if self.vmapped:
             return self
         if self._vmap_config is None:
@@ -73,7 +99,13 @@ class VmapConfig:
         """
 
     def __getstate__(self) -> dict:
-        """Drop the cached vmapped config (it holds ``torch.vmap`` closures)."""
+        """Drop the cached vmapped config (it holds ``torch.vmap`` closures).
+
+        Returns
+        -------
+        dict
+            Instance state without the cached vmapped config.
+        """
         state = self.__dict__.copy()
         state.pop("_vmap_config", None)
         return state

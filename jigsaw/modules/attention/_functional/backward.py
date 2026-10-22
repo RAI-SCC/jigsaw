@@ -137,11 +137,13 @@ def ring_backward(
 
     Parameters
     ----------
-    dout, q, out, lse : torch.Tensor
-        Output gradient, local query, and the forward's output / log-sum-exp,
-        as returned by :func:`~.forward.ring_forward`.
+    dout, q, out : torch.Tensor
+        Output gradient, local query, and the forward's output, as returned by
+        :func:`~.forward.ring_forward`.
     x : torch.Tensor
         Local input sequence chunk.
+    lse : torch.Tensor
+        The forward's log-sum-exp, as returned by :func:`~.forward.ring_forward`.
     w_qkv : torch.Tensor
         Fused query, key, and value projection weights.
     scale : float

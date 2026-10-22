@@ -237,8 +237,96 @@ class DistributedAttention(torch.nn.Module):
     (each rank attends to its own local sequence shard), ring (K/V circulate
     around ``spatial_group``), or Ulysses (a single all-to-all trades sequence
     shard for head shard -- flat, or hierarchical when ``ulysses_gpus_per_node``
-    is also set: intra-node Ulysses nested in an inter-node ring). See
-    :meth:`__init__` for the full parameter reference.
+    is also set: intra-node Ulysses nested in an inter-node ring).
+
+    Parameters
+    ----------
+    in_dim : int
+        Global input dimension.
+    embed_dim : int
+        Global embedding dimension, shared by all heads.
+    out_dim : int
+        Global output dimension.
+    heads : int
+        Global number of heads.
+    local_rank : int
+        Rank within the channel group. Kept for compatibility: the module
+        reads the channel rank and the ring rank from the groups.
+    device : torch.device
+        Device of the module.
+    spatial_group : dist.ProcessGroup
+        Process group along the sequence dimension.
+    channel_group : dist.ProcessGroup
+        Process group along the channel dimension.
+    dropout_p : float
+        Dropout probability.
+    qk_norm : bool
+        Whether to normalize queries and keys.
+    ring : bool
+        Run ring (sequence-parallel) attention over ``spatial_group``. A
+        separate switch from ``attn_backend``: the ring's inner per-chunk
+        attention still uses the chosen backend.
+    ulysses : bool
+        Run Ulysses (all-to-all, head-parallel) sequence parallelism over
+        ``spatial_group`` instead of the ring: one all-to-all trades the
+        local sequence shard for a head shard, a single dense attention runs
+        over the full sequence on ``heads // (channel * spatial)`` heads, and
+        an all-to-all brings the result back. Mutually exclusive with
+        ``ring``; needs ``heads // channel_group.size()`` divisible by
+        ``spatial_group.size()``. See :mod:`._functional.ulysses`.
+    ulysses_gpus_per_node : int
+        When ``> 0`` and ``ulysses`` is set, run the *hierarchical* scheme
+        (Transformer Engine's ``cp_comm_type="a2a+p2p"`` analogue): an
+        all-to-all over an intra-node sub-group of this many consecutive
+        spatial ranks, nested in a P2P ring over the inter-node sub-group
+        (``spatial // ulysses_gpus_per_node`` ranks), so only ``n_nodes``
+        K/V chunks ever ring over the slow fabric. Needs ``spatial``
+        divisible by this into a ring of ``>= 2``, and ``heads // channel``
+        divisible by it. ``0`` (default) keeps the flat single-level
+        Ulysses. ``ulysses_inter_save_scope``/``ulysses_inter_overlap`` tune
+        the inter-node ring.
+    ulysses_inter_save_scope : SaveScope | str
+        ``save_scope`` for the hierarchical scheme's inter-node K/V ring
+        (only read when ``ulysses_gpus_per_node > 0``). ``LOCAL`` (default)
+        keeps only this rank's own chunk and re-rings the rest over the
+        slow fabric in the backward. ``GLOBAL`` keeps every K/V chunk the
+        forward ring received so the backward reads them from memory, at
+        one extra ``n_nodes``-chunk buffer per rank, but routes dK/dV
+        through an all-reduce per backward step instead -- worthwhile only
+        once ``n_nodes`` is large enough that ``LOCAL``'s re-ringing costs
+        more than that all-reduce.
+    ulysses_inter_overlap : bool
+        Put the hierarchical scheme's inter-node K/V ring (and its backward
+        dK/dV relay) on a dedicated CUDA stream with double buffering, so
+        each inter-node transfer overlaps the node-local attention core --
+        the ``cp_stream`` trick Transformer Engine's ``a2a+p2p`` uses. Only
+        read when ``ulysses_gpus_per_node > 0``; forwarded to the inter-node
+        ring's :class:`~jigsaw.modules.RingAttentionConfig` as ``overlap_comm``
+        (CUDA-only, inert otherwise). Requires
+        ``ulysses_inter_save_scope=LOCAL`` to also overlap the *backward*
+        (the re-ringing dK/dV relay the overlap targets); paired with
+        ``GLOBAL`` only the forward K/V ring overlaps and a warning is
+        emitted.
+    ulysses_inter_offload : Offload | str
+        ``offload`` for the hierarchical scheme's inter-node K/V ring (only
+        read when ``ulysses_gpus_per_node > 0``): forwarded as-is to the
+        inter-node ring's :class:`~jigsaw.modules.RingAttentionConfig`, which is the
+        same ``RingAttentionConfig`` the plain ``ring=True`` path uses --
+        see :class:`.offload.NVLinkActivationOffloader`. ``CPU`` moves the
+        chunk kept for backward (per ``ulysses_inter_save_scope``) to
+        pinned host memory between forward and backward, trading GPU HBM
+        for PCIe/NVLink traffic that the offloader's side streams overlap
+        with compute. ``DISABLED`` (default) keeps it on-device.
+    attn_backend : AttnBackend | str
+        Attention core implementation -- ``"te"``, ``"sdpa"`` (default) or
+        ``"math"``. See :class:`._config.AttnBackend`.
+    dtype : torch.dtype
+        Data type of the parameters.
+    config : RingAttentionConfig, optional
+        Ring-attention configuration. Defaults to a configuration for
+        ``attn_backend``.
+    out_bias : bool
+        Whether the output projection has a bias.
     """
 
     # type hints
@@ -277,95 +365,6 @@ class DistributedAttention(torch.nn.Module):
         The weights are replicated over ``spatial_group``, which splits the
         sequence, and sharded over ``channel_group``, which splits the heads.
         Their gradients are summed over ``spatial_group``.
-
-        Parameters
-        ----------
-        in_dim : int
-            Global input dimension.
-        embed_dim : int
-            Global embedding dimension, shared by all heads.
-        out_dim : int
-            Global output dimension.
-        heads : int
-            Global number of heads.
-        local_rank : int
-            Rank within the channel group. Kept for compatibility: the module
-            reads the channel rank and the ring rank from the groups.
-        device : torch.device
-            Device of the module.
-        spatial_group : dist.ProcessGroup
-            Process group along the sequence dimension.
-        channel_group : dist.ProcessGroup
-            Process group along the channel dimension.
-        dropout_p : float
-            Dropout probability.
-        qk_norm : bool
-            Whether to normalize queries and keys.
-        ring : bool
-            Run ring (sequence-parallel) attention over ``spatial_group``. A
-            separate switch from ``attn_backend``: the ring's inner per-chunk
-            attention still uses the chosen backend.
-        ulysses : bool
-            Run Ulysses (all-to-all, head-parallel) sequence parallelism over
-            ``spatial_group`` instead of the ring: one all-to-all trades the
-            local sequence shard for a head shard, a single dense attention runs
-            over the full sequence on ``heads // (channel * spatial)`` heads, and
-            an all-to-all brings the result back. Mutually exclusive with
-            ``ring``; needs ``heads // channel_group.size()`` divisible by
-            ``spatial_group.size()``. See :mod:`._functional.ulysses`.
-        ulysses_gpus_per_node : int
-            When ``> 0`` and ``ulysses`` is set, run the *hierarchical* scheme
-            (Transformer Engine's ``cp_comm_type="a2a+p2p"`` analogue): an
-            all-to-all over an intra-node sub-group of this many consecutive
-            spatial ranks, nested in a P2P ring over the inter-node sub-group
-            (``spatial // ulysses_gpus_per_node`` ranks), so only ``n_nodes``
-            K/V chunks ever ring over the slow fabric. Needs ``spatial``
-            divisible by this into a ring of ``>= 2``, and ``heads // channel``
-            divisible by it. ``0`` (default) keeps the flat single-level
-            Ulysses. ``ulysses_inter_save_scope``/``ulysses_inter_overlap`` tune
-            the inter-node ring.
-        ulysses_inter_save_scope : SaveScope | str
-            ``save_scope`` for the hierarchical scheme's inter-node K/V ring
-            (only read when ``ulysses_gpus_per_node > 0``). ``LOCAL`` (default)
-            keeps only this rank's own chunk and re-rings the rest over the
-            slow fabric in the backward. ``GLOBAL`` keeps every K/V chunk the
-            forward ring received so the backward reads them from memory, at
-            one extra ``n_nodes``-chunk buffer per rank, but routes dK/dV
-            through an all-reduce per backward step instead -- worthwhile only
-            once ``n_nodes`` is large enough that ``LOCAL``'s re-ringing costs
-            more than that all-reduce.
-        ulysses_inter_overlap : bool
-            Put the hierarchical scheme's inter-node K/V ring (and its backward
-            dK/dV relay) on a dedicated CUDA stream with double buffering, so
-            each inter-node transfer overlaps the node-local attention core --
-            the ``cp_stream`` trick Transformer Engine's ``a2a+p2p`` uses. Only
-            read when ``ulysses_gpus_per_node > 0``; forwarded to the inter-node
-            ring's :class:`~jigsaw.modules.RingAttentionConfig` as ``overlap_comm``
-            (CUDA-only, inert otherwise). Requires
-            ``ulysses_inter_save_scope=LOCAL`` to also overlap the *backward*
-            (the re-ringing dK/dV relay the overlap targets); paired with
-            ``GLOBAL`` only the forward K/V ring overlaps and a warning is
-            emitted.
-        ulysses_inter_offload : Offload | str
-            ``offload`` for the hierarchical scheme's inter-node K/V ring (only
-            read when ``ulysses_gpus_per_node > 0``): forwarded as-is to the
-            inter-node ring's :class:`~jigsaw.modules.RingAttentionConfig`, which is the
-            same ``RingAttentionConfig`` the plain ``ring=True`` path uses --
-            see :class:`.offload.NVLinkActivationOffloader`. ``CPU`` moves the
-            chunk kept for backward (per ``ulysses_inter_save_scope``) to
-            pinned host memory between forward and backward, trading GPU HBM
-            for PCIe/NVLink traffic that the offloader's side streams overlap
-            with compute. ``DISABLED`` (default) keeps it on-device.
-        attn_backend : AttnBackend | str
-            Attention core implementation -- ``"te"``, ``"sdpa"`` (default) or
-            ``"math"``. See :class:`._config.AttnBackend`.
-        dtype : torch.dtype
-            Data type of the parameters.
-        config : RingAttentionConfig, optional
-            Ring-attention configuration. Defaults to a configuration for
-            ``attn_backend``.
-        out_bias : bool
-            Whether the output projection has a bias.
         """
         super().__init__()
         self.local_rank = local_rank
@@ -1072,7 +1071,14 @@ class DistributedAttention(torch.nn.Module):
         return out
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters.
+        """Return the global number of parameters of this layer.
+
+        Returns
+        -------
+        int
+            Global (unsharded) count of this layer's parameters, including plain
+            ``torch.nn`` children; children with ``get_parameter_count`` report
+            their own. No communication.
 
         Notes
         -----
@@ -1089,7 +1095,30 @@ class DistributedAttention(torch.nn.Module):
 
 
 class Attention(torch.nn.Module):
-    """Multi-head attention that can be converted with :meth:`convert_to_jigsaw`."""
+    """Multi-head attention that can be converted with :meth:`convert_to_jigsaw`.
+
+    Parameters
+    ----------
+    in_dim : int
+        Input dimension.
+    embed_dim : int
+        Embedding dimension shared by all heads. Must be divisible by
+        ``heads``.
+    out_dim : int
+        Output dimension.
+    heads : int
+        Number of heads.
+    device : torch.device
+        Device of the module.
+    dropout_p : float
+        Dropout probability.
+    qk_norm : bool
+        Whether to normalize queries and keys.
+    dtype : torch.dtype
+        Data type of the parameters.
+    out_bias : bool
+        Whether the output projection has a bias.
+    """
 
     def __init__(
         self,
@@ -1103,30 +1132,7 @@ class Attention(torch.nn.Module):
         dtype: torch.dtype = torch.float32,
         out_bias: bool = True,
     ):
-        """Initialize the module.
-
-        Parameters
-        ----------
-        in_dim : int
-            Input dimension.
-        embed_dim : int
-            Embedding dimension shared by all heads. Must be divisible by
-            ``heads``.
-        out_dim : int
-            Output dimension.
-        heads : int
-            Number of heads.
-        device : torch.device
-            Device of the module.
-        dropout_p : float
-            Dropout probability.
-        qk_norm : bool
-            Whether to normalize queries and keys.
-        dtype : torch.dtype
-            Data type of the parameters.
-        out_bias : bool
-            Whether the output projection has a bias.
-        """
+        """Initialize the module."""
         super().__init__()
         self.qkv = torch.nn.Linear(
             in_features=in_dim,
@@ -1298,8 +1304,14 @@ class Attention(torch.nn.Module):
         ulysses : bool
             Run Ulysses (all-to-all, head-parallel) sequence parallelism on the
             "row" dimension instead of the ring. Mutually exclusive with ``ring``.
-        ulysses_gpus_per_node, ulysses_inter_save_scope, ulysses_inter_overlap, ulysses_inter_offload
-            Forwarded to :class:`DistributedAttention`. See its docstring.
+        ulysses_gpus_per_node : int
+            Forwarded to :class:`DistributedAttention`.
+        ulysses_inter_save_scope : SaveScope | str
+            Forwarded to :class:`DistributedAttention`.
+        ulysses_inter_overlap : bool
+            Forwarded to :class:`DistributedAttention`.
+        ulysses_inter_offload : Offload | str
+            Forwarded to :class:`DistributedAttention`.
         attn_backend : AttnBackend | str
             Attention core, ``"te"``, ``"sdpa"`` or ``"math"``.
         config : RingAttentionConfig, optional

@@ -37,6 +37,24 @@ def issue_on_comm_stream(
     for its completion (not a host block -- see :func:`consume` for how the
     caller later waits on ``event``). ``keep_alive`` tensors are ``record_stream``'d
     onto ``comm_stream`` so the allocator doesn't recycle them mid-transfer.
+
+    Parameters
+    ----------
+    comm_stream : torch.cuda.Stream
+        Side stream the transfer runs on.
+    produce : ProduceFn
+        Issues the comm op and returns ``(recv_buf, work)``.
+    keep_alive : tuple[torch.Tensor, ...]
+        Tensors the transfer reads, kept alive on ``comm_stream``.
+
+    Returns
+    -------
+    recv_buf : torch.Tensor
+        Buffer the transfer writes into.
+    work : dist.Work or None
+        Handle of the comm op, if it was asynchronous.
+    event : torch.cuda.Event
+        Recorded on ``comm_stream`` after the transfer; pass it to :func:`consume`.
     """
     compute = torch.cuda.current_stream()
     comm_stream.wait_stream(compute)
@@ -61,6 +79,13 @@ def consume(event: torch.cuda.Event, *bufs: torch.Tensor) -> None:
     The mirror of :func:`issue_on_comm_stream`: the compute stream blocks until
     the recorded transfer is done, then each buffer is ``record_stream``'d back
     onto the compute stream (it is about to be read there).
+
+    Parameters
+    ----------
+    event : torch.cuda.Event
+        Event returned by :func:`issue_on_comm_stream`.
+    *bufs : torch.Tensor
+        Buffers the transfer wrote, about to be read on the compute stream.
     """
     compute = torch.cuda.current_stream()
     compute.wait_event(event)
@@ -80,6 +105,13 @@ class PrefetchBuffer:
     persistent buffers shaped like ``like`` ping-pong: :meth:`kick` issues a
     transfer into whichever one is currently free, :meth:`wait` adopts the
     other (the one the previous :meth:`kick` targeted).
+
+    Parameters
+    ----------
+    comm_stream : torch.cuda.Stream
+        Side stream the transfers run on.
+    like : torch.Tensor
+        Template for the shape, dtype and device of both buffers.
     """
 
     def __init__(self, comm_stream: torch.cuda.Stream, like: torch.Tensor) -> None:
@@ -103,6 +135,13 @@ class PrefetchBuffer:
         names any source tensor ``comm_call`` reads besides ``buf`` itself (e.g.
         ``src`` above), so it is ``record_stream``'d too -- see
         :func:`issue_on_comm_stream`.
+
+        Parameters
+        ----------
+        comm_call : Callable[[torch.Tensor], tuple[torch.Tensor, dist.Work or None]]
+            Comm primitive taking the destination buffer.
+        extra_keep_alive : tuple[torch.Tensor, ...], optional
+            Source tensors ``comm_call`` reads besides the buffer.
         """
         into = 1 - self._pending
         buf = self._bufs[into]
@@ -112,7 +151,13 @@ class PrefetchBuffer:
         self._pending = into
 
     def wait(self) -> torch.Tensor:
-        """Make the compute stream wait for the pending transfer; return its buffer."""
+        """Make the compute stream wait for the pending transfer; return its buffer.
+
+        Returns
+        -------
+        torch.Tensor
+            Buffer the last :meth:`kick` wrote into.
+        """
         assert self._event is not None
         buf = self._bufs[self._pending]
         consume(self._event, buf)

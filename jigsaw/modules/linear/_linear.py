@@ -27,7 +27,35 @@ _SUPPORTED_XWT_LAYOUTS = frozenset({(1, 1), (1, 2), (2, 2), (4, 2)})
 
 
 class DistributedLinear(torch.nn.Module):
-    """Distributed linear layer computing ``x @ w.mT``."""
+    """Distributed linear layer computing ``x @ w.mT``.
+
+    Parameters
+    ----------
+    in_dim : int
+        Input dimension of the global (unsharded) weight.
+    out_dim : int
+        Output dimension of the global (unsharded) weight.
+    local_rank : int
+        Rank within the model group.
+    device : torch.device
+        Device of the module.
+    model_group : dist.ProcessGroup
+        Process group of one model-parallel instance, usually the union of
+        the row and column groups. The first dimension of ``w`` is split
+        ``model_group.size() // col_group.size()`` ways.
+    row_group : dist.ProcessGroup
+        Process group splitting the leading (row) dimensions of ``x``. The
+        bias is replicated over it.
+    col_group : dist.ProcessGroup
+        Process group splitting the last dimension of ``x`` and ``w``.
+    bias : bool
+        Whether to add a bias.
+    config : LinearConfig, optional
+        Kernel selection. Defaults to a configuration built from the
+        arguments.
+    dtype : torch.dtype
+        Data type of the parameters and computations.
+    """
 
     def __init__(
         self,
@@ -42,35 +70,7 @@ class DistributedLinear(torch.nn.Module):
         config: Optional[LinearConfig] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
-        """Initialize the layer.
-
-        Parameters
-        ----------
-        in_dim : int
-            Input dimension of the global (unsharded) weight.
-        out_dim : int
-            Output dimension of the global (unsharded) weight.
-        local_rank : int
-            Rank within the model group.
-        device : torch.device
-            Device of the module.
-        model_group : dist.ProcessGroup
-            Process group of one model-parallel instance, usually the union of
-            the row and column groups. The first dimension of ``w`` is split
-            ``model_group.size() // col_group.size()`` ways.
-        row_group : dist.ProcessGroup
-            Process group splitting the leading (row) dimensions of ``x``. The
-            bias is replicated over it.
-        col_group : dist.ProcessGroup
-            Process group splitting the last dimension of ``x`` and ``w``.
-        bias : bool
-            Whether to add a bias.
-        config : LinearConfig, optional
-            Kernel selection. Defaults to a configuration built from the
-            arguments.
-        dtype : torch.dtype
-            Data type of the parameters and computations.
-        """
+        """Initialize the layer."""
         super().__init__()
 
         self.dtype = dtype
@@ -186,7 +186,14 @@ class DistributedLinear(torch.nn.Module):
         return cij
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters.
+        """Return the global number of parameters of this layer.
+
+        Returns
+        -------
+        int
+            Global (unsharded) count of this layer's parameters, including plain
+            ``torch.nn`` children; children with ``get_parameter_count`` report
+            their own. No communication.
 
         Notes
         -----
@@ -618,7 +625,20 @@ class MatMulXWT(_MatMul):
     """Batched matmul ``x @ w.mT``."""
 
     def forward(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-        """Return ``x @ w.mT``."""
+        """Return ``x @ w.mT``.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Left operand.
+        w : torch.Tensor
+            Right operand.
+
+        Returns
+        -------
+        torch.Tensor
+            ``x @ w.mT``.
+        """
         return x @ w.mT
 
 
@@ -626,7 +646,20 @@ class MatMulXW(_MatMul):
     """Batched matmul ``x @ w``."""
 
     def forward(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-        """Return ``x @ w``."""
+        """Return ``x @ w``.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Left operand.
+        w : torch.Tensor
+            Right operand.
+
+        Returns
+        -------
+        torch.Tensor
+            ``x @ w``.
+        """
         return x @ w
 
 
@@ -634,5 +667,18 @@ class MatMulXTW(_MatMul):
     """Batched matmul ``x.mT @ w``."""
 
     def forward(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-        """Return ``x.mT @ w``."""
+        """Return ``x.mT @ w``.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Left operand.
+        w : torch.Tensor
+            Right operand.
+
+        Returns
+        -------
+        torch.Tensor
+            ``x.mT @ w``.
+        """
         return x.mT @ w

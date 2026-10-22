@@ -172,7 +172,7 @@ def hierarchical_ulysses_attention(
     ring_core: AttnCore,
     qkv_stack: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Ulysses over an intra-node sub-group, a P2P ring over the inter-node one.
+    """Run Ulysses over an intra-node sub-group and a P2P ring over the inter-node one.
 
     The mirror of Transformer Engine's ``cp_comm_type="a2a+p2p"``: the
     ``intra_group`` all-to-all (fast, NVLink) scatters heads and gathers one
@@ -190,5 +190,21 @@ def hierarchical_ulysses_attention(
     intra_group.size()``) and must return the same shape. Needs
     ``local_heads % A == 0``. ``qkv_stack`` is forwarded to
     :func:`ulysses_attention` (skips the ``torch.stack``).
+
+    Parameters
+    ----------
+    q, k, v : torch.Tensor
+        Query, key and value, ``bshd`` ``[b, seq // spatial, local_heads, d]``.
+    intra_group : dist.ProcessGroup
+        Node-local group the all-to-all runs over.
+    ring_core : AttnCore
+        Attention over the inter-node ring.
+    qkv_stack : torch.Tensor, optional
+        ``q``/``k``/``v`` already stacked, forwarded to :func:`ulysses_attention`.
+
+    Returns
+    -------
+    torch.Tensor
+        Attention output, ``bshd``, same shape as ``q``.
     """
     return ulysses_attention(q, k, v, intra_group, ring_core, qkv_stack=qkv_stack)

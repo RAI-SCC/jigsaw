@@ -10,7 +10,17 @@ from ._functional import _Roll
 
 
 class Roll(torch.nn.Module):
-    """Wrapper of :func:`torch.roll` as a module."""
+    """Wrapper of :func:`torch.roll` as a module.
+
+    Parameters
+    ----------
+    shifts : tuple[int, ...]
+        Shift along each dimension of ``dims``.
+    dims : tuple[int, ...]
+        Dimensions to roll.
+    dtype : torch.dtype
+        Data type of the input.
+    """
 
     def __init__(
         self,
@@ -18,17 +28,7 @@ class Roll(torch.nn.Module):
         dims: tuple,
         dtype: torch.dtype = torch.float32,
     ):
-        """Initialize the module.
-
-        Parameters
-        ----------
-        shifts : tuple[int, ...]
-            Shift along each dimension of ``dims``.
-        dims : tuple[int, ...]
-            Dimensions to roll.
-        dtype : torch.dtype
-            Data type of the input.
-        """
+        """Initialize the module."""
         super().__init__()
         self.shifts = shifts
         self.dims = dims
@@ -51,7 +51,33 @@ class Roll(torch.nn.Module):
 
 
 class DistributedRoll(torch.nn.Module):
-    """Roll of a tensor partitioned across process groups."""
+    """Roll of a tensor partitioned across process groups.
+
+    Parameters
+    ----------
+    shifts : tuple[int, ...]
+        Shift along each dimension of ``dims``.
+    dims : tuple[int, ...]
+        Dimensions to roll.
+    distributed_dims : tuple[int, ...]
+        Dimensions across which the input is partitioned. Each must appear in
+        ``dims``, counted from either end: ``-2`` matches ``2`` on a 4-D input.
+    spatial_groups : tuple[dist.ProcessGroup, ...]
+        Process group of each entry of ``distributed_dims``.
+    device : torch.device
+        Device of the module.
+    dtype : torch.dtype
+        Data type of the input.
+    config : RollConfig, optional
+        Kernel selection. Defaults to a configuration built from ``device``.
+
+    Raises
+    ------
+    ValueError
+        If ``distributed_dims`` and ``spatial_groups`` differ in length, or an entry
+        of ``distributed_dims`` is not in ``dims``. If the two count from different
+        ends, that is only known, and raised, in the forward pass.
+    """
 
     def __init__(
         self,
@@ -63,33 +89,7 @@ class DistributedRoll(torch.nn.Module):
         dtype: torch.dtype = torch.float32,
         config: Optional[RollConfig] = None,
     ) -> None:
-        """Initialize the module.
-
-        Parameters
-        ----------
-        shifts : tuple[int, ...]
-            Shift along each dimension of ``dims``.
-        dims : tuple[int, ...]
-            Dimensions to roll.
-        distributed_dims : tuple[int, ...]
-            Dimensions across which the input is partitioned. Each must appear in
-            ``dims``, counted from either end: ``-2`` matches ``2`` on a 4-D input.
-        spatial_groups : tuple[dist.ProcessGroup, ...]
-            Process group of each entry of ``distributed_dims``.
-        device : torch.device
-            Device of the module.
-        dtype : torch.dtype
-            Data type of the input.
-        config : RollConfig, optional
-            Kernel selection. Defaults to a configuration built from ``device``.
-
-        Raises
-        ------
-        ValueError
-            If ``distributed_dims`` and ``spatial_groups`` differ in length, or an entry
-            of ``distributed_dims`` is not in ``dims``. If the two count from different
-            ends, that is only known, and raised, in the forward pass.
-        """
+        """Initialize the module."""
         super().__init__()
         if len(distributed_dims) != len(spatial_groups):
             raise ValueError("distributed_dims and spatial_groups must align")
@@ -108,7 +108,15 @@ class DistributedRoll(torch.nn.Module):
         self.config = RollConfig(device) if config is None else config
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters."""
+        """Return the global number of parameters of this layer.
+
+        Returns
+        -------
+        int
+            Global (unsharded) count of this layer's parameters, including plain
+            ``torch.nn`` children; children with ``get_parameter_count`` report
+            their own. No communication.
+        """
         return 0
 
     @classmethod

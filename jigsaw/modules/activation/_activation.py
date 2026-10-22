@@ -9,25 +9,33 @@ from . import _functional as functional
 
 
 class DistributedSoftmax(torch.nn.Module):
-    """Softmax over a sharded dimension."""
+    """Softmax over a sharded dimension.
+
+    Parameters
+    ----------
+    group : dist.ProcessGroup
+        Process group across which ``dim`` is partitioned.
+    dim : int
+        Dimension along which the softmax is applied.
+    """
 
     def __init__(self, group: dist.ProcessGroup, dim: int = -1) -> None:
-        """Initialize the layer.
-
-        Parameters
-        ----------
-        group : dist.ProcessGroup
-            Process group across which ``dim`` is partitioned.
-        dim : int
-            Dimension along which the softmax is applied.
-        """
+        """Initialize the layer."""
         super().__init__()
         self.dim = dim
         self.group = group
         self.softmax = functional._Softmax.apply
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters."""
+        """Return the global number of parameters of this layer.
+
+        Returns
+        -------
+        int
+            Global (unsharded) count of this layer's parameters, including plain
+            ``torch.nn`` children; children with ``get_parameter_count`` report
+            their own. No communication.
+        """
         return 0
 
     @classmethod

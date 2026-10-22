@@ -115,6 +115,24 @@ def fused_online_softmax_merge_(
     eager merge). ``l_new`` is a fresh fp32 ``(b, h, n)`` tensor, matching the
     eager path (which also cannot write ``l1`` in place -- ``l2`` may still carry
     autograd history from the core).
+
+    Parameters
+    ----------
+    o1 : torch.Tensor
+        Running output, updated in place.
+    l1 : torch.Tensor
+        Running log-sum-exp.
+    o2 : torch.Tensor
+        Output of the new block.
+    l2 : torch.Tensor
+        Log-sum-exp of the new block.
+    layout : str
+        Layout of ``o1`` / ``o2``.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor] or None
+        ``(o1, l_new)``, or ``None`` if the kernel does not support the inputs.
     """
     global _KERNEL_USABLE
     if not _KERNEL_USABLE or not o1.is_cuda:

@@ -137,19 +137,60 @@ class HybridTopology:
 
     @property
     def ring_rank(self) -> int:
-        """Return the position of this rank in the ring."""
+        """Return the position of this rank in the ring.
+
+        Returns
+        -------
+        int
+            Ring position, ``node_idx * gpus_per_node + local_idx``.
+        """
         return self.node_idx * self.gpus_per_node + self.local_idx
 
     def rank_at(self, node: int, local: int) -> int:
-        """Return the ring position at ``(node, local)``, both taken modulo their extent."""
+        """Return the ring position at ``(node, local)``, both taken modulo their extent.
+
+        Parameters
+        ----------
+        node : int
+            Node index.
+        local : int
+            Index within the node.
+
+        Returns
+        -------
+        int
+            Ring position over the full group.
+        """
         return self._grid[node % self.n_nodes][local % self.gpus_per_node]
 
     def intra_peer(self, offset: int) -> int:
-        """Return the ring position ``offset`` steps along the intra-node ring."""
+        """Return the ring position ``offset`` steps along the intra-node ring.
+
+        Parameters
+        ----------
+        offset : int
+            Steps along the ring; negative goes backwards.
+
+        Returns
+        -------
+        int
+            Ring position over the full group.
+        """
         return self.rank_at(self.node_idx, self.local_idx + offset)
 
     def inter_peer(self, offset: int) -> int:
-        """Return the ring position ``offset`` steps along the inter-node ring."""
+        """Return the ring position ``offset`` steps along the inter-node ring.
+
+        Parameters
+        ----------
+        offset : int
+            Steps along the ring; negative goes backwards.
+
+        Returns
+        -------
+        int
+            Ring position over the full group.
+        """
         return self.rank_at(self.node_idx + offset, self.local_idx)
 
     def intranode_peer(self, offset: int) -> int:
@@ -158,6 +199,16 @@ class HybridTopology:
         ``intranode_group`` lists this node's ranks in node-local-index order, so
         its rank ``i`` is node-local index ``i`` and this rank sits at
         ``local_idx``.
+
+        Parameters
+        ----------
+        offset : int
+            Steps along the ring; negative goes backwards.
+
+        Returns
+        -------
+        int
+            Group rank in ``intranode_group``.
         """
         return (self.local_idx + offset) % self.gpus_per_node
 
@@ -166,6 +217,16 @@ class HybridTopology:
 
         ``internode_group`` lists its members in node order, so its rank ``i`` is
         node ``i`` and this rank sits at ``node_idx``.
+
+        Parameters
+        ----------
+        offset : int
+            Steps along the ring; negative goes backwards.
+
+        Returns
+        -------
+        int
+            Group rank in ``internode_group``.
         """
         return (self.node_idx + offset) % self.n_nodes
 

@@ -110,13 +110,13 @@ def backward(
         Saved log-sum-exp.
     scale : float
         Softmax scale.
+    *args : Any
+        Unused.
     dropout_p : float
         Dropout probability.
     seed : int, optional
         Seed of the dropout mask.
     rng_state : torch.Tensor, optional
-        Unused.
-    *args : Any
         Unused.
     **kwargs : Any
         Unused.

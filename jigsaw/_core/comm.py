@@ -462,6 +462,15 @@ def broadcast_params_(
     (fast) actual compute. Flattening same-dtype tensors into one contiguous
     buffer before broadcasting collapses that to a single round trip per
     dtype present in ``params``, regardless of how many tensors there are.
+
+    Parameters
+    ----------
+    params : Iterable[torch.nn.Parameter]
+        Tensors to broadcast, in place.
+    group : dist.ProcessGroup
+        Group to broadcast over.
+    src : int, optional
+        Group rank to broadcast from. Default 0.
     """
     buckets: dict[torch.dtype, list[torch.nn.Parameter]] = defaultdict(list)
     for p in params:
@@ -482,6 +491,14 @@ def broadcast_params_(
 
 
 def all_reduce_max(t: torch.Tensor, groups: Iterable[dist.ProcessGroup]) -> None:
-    """All-reduce ``t`` with MAX over each group in turn, in place."""
+    """All-reduce ``t`` with MAX over each group in turn, in place.
+
+    Parameters
+    ----------
+    t : torch.Tensor
+        Tensor to reduce, in place.
+    groups : Iterable[dist.ProcessGroup]
+        Groups to reduce over, one after another.
+    """
     for g in groups:
         dist.all_reduce(t, op=dist.ReduceOp.MAX, group=g)

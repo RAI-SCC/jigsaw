@@ -22,7 +22,38 @@ def _sync_groups(
 
 
 class DistributedGroupNorm(torch.nn.Module):
-    """GroupNorm over a channel- and spatially sharded input."""
+    """GroupNorm over a channel- and spatially sharded input.
+
+    Parameters
+    ----------
+    num_groups : int
+        Global (unsharded) number of normalization groups. Must be
+        divisible by ``channel_group.size()``, so that no group straddles
+        two shards.
+    num_channels : int
+        Global (unsharded) number of channels. Must be divisible by
+        ``channel_group.size()``.
+    device : torch.device
+        Device of the module.
+    channel_group : dist.ProcessGroup, optional
+        Process group across which the channels are partitioned. ``None``
+        means the channels are not partitioned.
+    eps : float
+        Term added to the variance for numerical stability.
+    affine : bool
+        Whether the layer has learnable affine parameters.
+    bias : bool
+        Whether the affine transformation has a bias. Ignored if ``affine``
+        is ``False``.
+    dtype : torch.dtype, optional
+        Data type of the parameters.
+    spatial_group : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
+        Process group(s) across which the spatial dimensions are partitioned,
+        e.g. the ``spatial_group`` of the preceding convolution. The group
+        statistics are reduced over them, and the weight and bias are
+        replicated over them. ``None`` means the spatial dimensions are not
+        partitioned.
+    """
 
     def __init__(
         self,
@@ -36,38 +67,7 @@ class DistributedGroupNorm(torch.nn.Module):
         dtype: Optional[torch.dtype] = None,
         spatial_group: "dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]] | None" = None,
     ) -> None:
-        """Initialize the layer.
-
-        Parameters
-        ----------
-        num_groups : int
-            Global (unsharded) number of normalization groups. Must be
-            divisible by ``channel_group.size()``, so that no group straddles
-            two shards.
-        num_channels : int
-            Global (unsharded) number of channels. Must be divisible by
-            ``channel_group.size()``.
-        device : torch.device
-            Device of the module.
-        channel_group : dist.ProcessGroup, optional
-            Process group across which the channels are partitioned. ``None``
-            means the channels are not partitioned.
-        eps : float
-            Term added to the variance for numerical stability.
-        affine : bool
-            Whether the layer has learnable affine parameters.
-        bias : bool
-            Whether the affine transformation has a bias. Ignored if ``affine``
-            is ``False``.
-        dtype : torch.dtype, optional
-            Data type of the parameters.
-        spatial_group : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
-            Process group(s) across which the spatial dimensions are partitioned,
-            e.g. the ``spatial_group`` of the preceding convolution. The group
-            statistics are reduced over them, and the weight and bias are
-            replicated over them. ``None`` means the spatial dimensions are not
-            partitioned.
-        """
+        """Initialize the layer."""
         super().__init__()
 
         channel_size = channel_group.size() if channel_group is not None else 1
@@ -339,7 +339,14 @@ class DistributedGroupNorm(torch.nn.Module):
             parallel.mark_replicated(p, self._spatial_sync_groups)
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters.
+        """Return the global number of parameters of this layer.
+
+        Returns
+        -------
+        int
+            Global (unsharded) count of this layer's parameters, including plain
+            ``torch.nn`` children; children with ``get_parameter_count`` report
+            their own. No communication.
 
         Notes
         -----

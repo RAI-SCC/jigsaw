@@ -86,11 +86,33 @@ def forward(
     *,
     layout: Layout = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    """FA2 forward. Returns ``(out, logsumexp (b,h,s), rng_state)``.
+    """FA2 forward, returning ``(out, logsumexp (b,h,s), rng_state)``.
 
     ``out`` comes back in the same ``layout`` ``q``/``k``/``v`` were given in.
     ``rng_state`` is the kernel's own opaque philox state (``None`` when
     ``dropout_p == 0``), threaded back for :func:`backward` to replay.
+
+    Parameters
+    ----------
+    q, k, v : torch.Tensor
+        Query, key and value in ``layout``.
+    scale : float
+        Softmax scale.
+    dropout_p : float
+        Dropout probability.
+    seed : int, optional
+        Unused; the kernel draws its own RNG state.
+    layout : {"bhsd", "bshd"}, optional
+        Layout of ``q``/``k``/``v`` and of the returned ``out``. Default ``"bhsd"``.
+
+    Returns
+    -------
+    out : torch.Tensor
+        Attention output in ``layout``.
+    logsumexp : torch.Tensor
+        Log-sum-exp, ``(b, h, s)``.
+    rng_state : torch.Tensor or None
+        Kernel dropout RNG state for :func:`backward`; ``None`` without dropout.
     """
     head_dim = q.shape[-1]
     q_b, k_b, v_b = (_pad_head_dim(_to_bshd(t, layout), head_dim) for t in (q, k, v))
@@ -142,6 +164,36 @@ def backward(
     the identical dropout mask. FA2 writes the gradients into buffers we
     allocate (its op declares ``dq``/``dk``/``dv`` as mutated), and ``logsumexp``
     must be fp32: the ring hands it back downcast to the model dtype.
+
+    Parameters
+    ----------
+    grad_out : torch.Tensor
+        Gradient of the output, in ``layout``.
+    q, k, v : torch.Tensor
+        Query, key and value, in ``layout``.
+    out : torch.Tensor
+        Saved (globally normalised) attention output, in ``layout``.
+    logsumexp : torch.Tensor
+        Saved (global) log-sum-exp, ``(b, h, s)``.
+    scale : float
+        Softmax scale.
+    *_ : object
+        Unused; interface parity with the other cores.
+    dropout_p : float, optional
+        Dropout probability. Default 0.
+    seed : int, optional
+        Unused; ``rng_state`` replays the mask.
+    rng_state : torch.Tensor, optional
+        Dropout RNG state from this chunk's :func:`forward`.
+    layout : {"bhsd", "bshd"}, optional
+        Layout of the tensors and of the returned gradients. Default ``"bhsd"``.
+    **__ : object
+        Unused; interface parity with the other cores.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Gradients ``(dq, dk, dv)`` in ``layout``.
     """
     head_dim = q.shape[-1]
     q_b, k_b, v_b, o_b, do_b = (

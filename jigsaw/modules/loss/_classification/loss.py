@@ -10,7 +10,23 @@ from . import functional as F
 
 
 class DistributedNLLLoss(torch.nn.Module):
-    """Negative log-likelihood loss of a class-sharded input."""
+    """Negative log-likelihood loss of a class-sharded input.
+
+    Parameters
+    ----------
+    channel_group : dist.ProcessGroup, optional
+        Group across which the class dimension is partitioned.
+    reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
+        Groups across which the batch and spatial dimensions are partitioned.
+    weight : torch.Tensor, optional
+        Per-class weight of the global class dimension.
+    ignore_index : int
+        Target value that contributes neither loss nor normalization.
+    reduction : str
+        ``"none"``, ``"sum"`` or ``"mean"``.
+    dim : int
+        Class dimension of the input.
+    """
 
     def __init__(
         self,
@@ -22,23 +38,7 @@ class DistributedNLLLoss(torch.nn.Module):
         reduction: str = "mean",
         dim: int = 1,
     ) -> None:
-        """Initialize the loss.
-
-        Parameters
-        ----------
-        channel_group : dist.ProcessGroup, optional
-            Group across which the class dimension is partitioned.
-        reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
-            Groups across which the batch and spatial dimensions are partitioned.
-        weight : torch.Tensor, optional
-            Per-class weight of the global class dimension.
-        ignore_index : int
-            Target value that contributes neither loss nor normalization.
-        reduction : str
-            ``"none"``, ``"sum"`` or ``"mean"``.
-        dim : int
-            Class dimension of the input.
-        """
+        """Initialize the loss."""
         super().__init__()
         self.channel_group = channel_group
         self.reduce_groups = reduce_groups
@@ -49,7 +49,15 @@ class DistributedNLLLoss(torch.nn.Module):
         self.dim = dim
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters."""
+        """Return the global number of parameters of this layer.
+
+        Returns
+        -------
+        int
+            Global (unsharded) count of this layer's parameters, including plain
+            ``torch.nn`` children; children with ``get_parameter_count`` report
+            their own. No communication.
+        """
         return 0
 
     def forward(self, log_probs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -80,7 +88,26 @@ class DistributedNLLLoss(torch.nn.Module):
 
 
 class DistributedCrossEntropyLoss(torch.nn.Module):
-    """Cross-entropy loss of a class-sharded input."""
+    """Cross-entropy loss of a class-sharded input.
+
+    Parameters
+    ----------
+    channel_group : dist.ProcessGroup, optional
+        Group across which the class dimension is partitioned.
+    reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
+        Groups across which the batch and spatial dimensions are partitioned.
+    weight : torch.Tensor, optional
+        Per-class weight of the global class dimension.
+    ignore_index : int
+        Target value that contributes neither loss nor normalization. Only applies
+        to class-index targets.
+    reduction : str
+        ``"none"``, ``"sum"`` or ``"mean"``.
+    label_smoothing : float
+        Label smoothing in ``[0, 1)``.
+    dim : int
+        Class dimension of the input.
+    """
 
     def __init__(
         self,
@@ -93,26 +120,7 @@ class DistributedCrossEntropyLoss(torch.nn.Module):
         label_smoothing: float = 0.0,
         dim: int = 1,
     ) -> None:
-        """Initialize the loss.
-
-        Parameters
-        ----------
-        channel_group : dist.ProcessGroup, optional
-            Group across which the class dimension is partitioned.
-        reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
-            Groups across which the batch and spatial dimensions are partitioned.
-        weight : torch.Tensor, optional
-            Per-class weight of the global class dimension.
-        ignore_index : int
-            Target value that contributes neither loss nor normalization. Only applies
-            to class-index targets.
-        reduction : str
-            ``"none"``, ``"sum"`` or ``"mean"``.
-        label_smoothing : float
-            Label smoothing in ``[0, 1)``.
-        dim : int
-            Class dimension of the input.
-        """
+        """Initialize the loss."""
         super().__init__()
         self.channel_group = channel_group
         self.reduce_groups = reduce_groups
@@ -124,7 +132,15 @@ class DistributedCrossEntropyLoss(torch.nn.Module):
         self.dim = dim
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters."""
+        """Return the global number of parameters of this layer.
+
+        Returns
+        -------
+        int
+            Global (unsharded) count of this layer's parameters, including plain
+            ``torch.nn`` children; children with ``get_parameter_count`` report
+            their own. No communication.
+        """
         return 0
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -156,7 +172,17 @@ class DistributedCrossEntropyLoss(torch.nn.Module):
 
 
 class DistributedBCELoss(torch.nn.Module):
-    """Binary cross-entropy loss of a sharded input."""
+    """Binary cross-entropy loss of a sharded input.
+
+    Parameters
+    ----------
+    reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
+        Every group across which the input is partitioned.
+    weight : torch.Tensor, optional
+        Elementwise weight broadcastable to the input.
+    reduction : str
+        ``"none"``, ``"sum"`` or ``"mean"``.
+    """
 
     def __init__(
         self,
@@ -165,17 +191,7 @@ class DistributedBCELoss(torch.nn.Module):
         weight: Optional[torch.Tensor] = None,
         reduction: str = "mean",
     ) -> None:
-        """Initialize the loss.
-
-        Parameters
-        ----------
-        reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
-            Every group across which the input is partitioned.
-        weight : torch.Tensor, optional
-            Elementwise weight broadcastable to the input.
-        reduction : str
-            ``"none"``, ``"sum"`` or ``"mean"``.
-        """
+        """Initialize the loss."""
         super().__init__()
         self.reduce_groups = reduce_groups
         self.register_buffer("weight", weight)
@@ -183,7 +199,15 @@ class DistributedBCELoss(torch.nn.Module):
         self.reduction = reduction
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters."""
+        """Return the global number of parameters of this layer.
+
+        Returns
+        -------
+        int
+            Global (unsharded) count of this layer's parameters, including plain
+            ``torch.nn`` children; children with ``get_parameter_count`` report
+            their own. No communication.
+        """
         return 0
 
     def forward(self, probs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -211,7 +235,19 @@ class DistributedBCELoss(torch.nn.Module):
 
 
 class DistributedBCEWithLogitsLoss(torch.nn.Module):
-    """Binary cross-entropy with logits of a sharded input."""
+    """Binary cross-entropy with logits of a sharded input.
+
+    Parameters
+    ----------
+    reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
+        Every group across which the input is partitioned.
+    weight : torch.Tensor, optional
+        Elementwise weight broadcastable to the input.
+    pos_weight : torch.Tensor, optional
+        Weight of the positive examples, broadcastable to the class dimension.
+    reduction : str
+        ``"none"``, ``"sum"`` or ``"mean"``.
+    """
 
     def __init__(
         self,
@@ -221,19 +257,7 @@ class DistributedBCEWithLogitsLoss(torch.nn.Module):
         pos_weight: Optional[torch.Tensor] = None,
         reduction: str = "mean",
     ) -> None:
-        """Initialize the loss.
-
-        Parameters
-        ----------
-        reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
-            Every group across which the input is partitioned.
-        weight : torch.Tensor, optional
-            Elementwise weight broadcastable to the input.
-        pos_weight : torch.Tensor, optional
-            Weight of the positive examples, broadcastable to the class dimension.
-        reduction : str
-            ``"none"``, ``"sum"`` or ``"mean"``.
-        """
+        """Initialize the loss."""
         super().__init__()
         self.reduce_groups = reduce_groups
         self.register_buffer("weight", weight)
@@ -243,7 +267,15 @@ class DistributedBCEWithLogitsLoss(torch.nn.Module):
         self.reduction = reduction
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters."""
+        """Return the global number of parameters of this layer.
+
+        Returns
+        -------
+        int
+            Global (unsharded) count of this layer's parameters, including plain
+            ``torch.nn`` children; children with ``get_parameter_count`` report
+            their own. No communication.
+        """
         return 0
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

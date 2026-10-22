@@ -244,7 +244,7 @@ def conv_halo_nway(
             f"string padding ({padding!r}); pass an explicit per-axis padding."
         )
 
-    def halo_fn(t: torch.Tensor) -> torch.Tensor:
+    def _halo_fn(t: torch.Tensor) -> torch.Tensor:
         for idx, axis, group in _split_axes(spatial_groups):
             t, _ = halo_gather(
                 t,
@@ -271,7 +271,7 @@ def conv_halo_nway(
         conv_func=config.conv_fn,
         n_spatial_dims=config.n_spatial,
         channel_comm=config.channel_comm,
-        halo_fn=halo_fn,
+        halo_fn=_halo_fn,
         local=config.channel_local,
     )
 

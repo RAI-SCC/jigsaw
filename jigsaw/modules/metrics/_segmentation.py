@@ -178,7 +178,23 @@ def confusion_to_metrics(
 
 
 class DistributedSegmentationMetrics(torch.nn.Module):
-    """Confusion-matrix accumulator for distributed semantic segmentation."""
+    """Confusion-matrix accumulator for distributed semantic segmentation.
+
+    Parameters
+    ----------
+    num_classes : int
+        Global number of classes.
+    channel_group : dist.ProcessGroup, optional
+        Group across which the class dimension of the predictions is partitioned.
+    reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
+        Every group across which the batch and spatial dimensions are partitioned.
+    ignore_index : int, optional
+        Target value to exclude from the matrix.
+    dim : int
+        Class dimension of the predictions.
+    exclude : Sequence[int], optional
+        Classes whose rows and columns are zeroed by :meth:`compute`.
+    """
 
     def __init__(
         self,
@@ -190,23 +206,7 @@ class DistributedSegmentationMetrics(torch.nn.Module):
         dim: int = 1,
         exclude: Optional[Sequence[int]] = None,
     ) -> None:
-        """Initialize the accumulator.
-
-        Parameters
-        ----------
-        num_classes : int
-            Global number of classes.
-        channel_group : dist.ProcessGroup, optional
-            Group across which the class dimension of the predictions is partitioned.
-        reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
-            Every group across which the batch and spatial dimensions are partitioned.
-        ignore_index : int, optional
-            Target value to exclude from the matrix.
-        dim : int
-            Class dimension of the predictions.
-        exclude : Sequence[int], optional
-            Classes whose rows and columns are zeroed by :meth:`compute`.
-        """
+        """Initialize the accumulator."""
         super().__init__()
         self.num_classes = num_classes
         self.channel_group = channel_group
@@ -217,7 +217,15 @@ class DistributedSegmentationMetrics(torch.nn.Module):
         self.confusion = torch.zeros(num_classes, num_classes, dtype=torch.int64)
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters."""
+        """Return the global number of parameters of this layer.
+
+        Returns
+        -------
+        int
+            Global (unsharded) count of this layer's parameters, including plain
+            ``torch.nn`` children; children with ``get_parameter_count`` report
+            their own. No communication.
+        """
         return 0
 
     def reset(self) -> None:

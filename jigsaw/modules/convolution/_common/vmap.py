@@ -26,6 +26,28 @@ def conv_vmap(
     * Weight or bias vmapped (e.g. stacked ensemble members): ``fn`` runs with
       the config's :meth:`~jigsaw._core.vmap.VmapConfig.for_vmap`, which vmaps
       the local conv primitives over the leading members axis.
+
+    Parameters
+    ----------
+    fn : Any
+        The autograd Function's ``apply``.
+    info : Any
+        ``torch.vmap`` info (batch size, randomness).
+    in_dims : tuple[int or None, ...]
+        Vmapped axis of each input, ``None`` if not vmapped.
+    x : torch.Tensor
+        Input.
+    weight : torch.Tensor
+        Convolution weight.
+    bias : torch.Tensor or None
+        Convolution bias.
+    *args : Any
+        Remaining arguments of ``fn``, the config last.
+
+    Returns
+    -------
+    tuple[tuple[torch.Tensor, torch.Tensor], tuple[int, int]]
+        ``fn``'s outputs ``(y, x_aug)`` and their vmapped axes, ``(0, 0)``.
     """
     *rest, config = args
     check_not_vmapped(config)

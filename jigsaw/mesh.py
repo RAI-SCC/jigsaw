@@ -27,6 +27,13 @@ class ProcessMesh(dict):
     ``DistributedDataParallel(model, device_mesh=mesh.device_mesh["dp"])``.
     The ``model`` group is not a dimension of it.
 
+    Parameters
+    ----------
+    groups : Mapping[str, dist.ProcessGroup]
+        Axis name to process group.
+    device_mesh : torch.distributed.device_mesh.DeviceMesh
+        The n-d mesh the groups were cut from.
+
     Attributes
     ----------
     device_mesh : torch.distributed.device_mesh.DeviceMesh

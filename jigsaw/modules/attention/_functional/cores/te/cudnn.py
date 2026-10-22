@@ -250,6 +250,28 @@ def forward(
     ``rng_state`` is cuDNN's own opaque dropout RNG state (``None`` when
     ``dropout_p == 0``), threaded back for :func:`backward` to replay (see
     module docstring).
+
+    Parameters
+    ----------
+    q, k, v : torch.Tensor
+        Query, key and value in ``layout``.
+    scale : float
+        Softmax scale.
+    dropout_p : float
+        Dropout probability.
+    seed : int, optional
+        Unused; the kernel draws its own RNG state.
+    layout : {"bhsd", "bshd"}, optional
+        Layout of ``q``/``k``/``v`` and of the returned ``out``. Default ``"bhsd"``.
+
+    Returns
+    -------
+    out : torch.Tensor
+        Attention output in ``layout``.
+    logsumexp : torch.Tensor
+        Log-sum-exp, ``(b, h, s)``.
+    rng_state : torch.Tensor or None
+        Kernel dropout RNG state for :func:`backward`; ``None`` without dropout.
     """
     b, h, s_q, s_kv, d = _shape(q, k, layout)
     q_b, k_b, v_b = (_to_bshd(t, layout) for t in (q, k, v))
@@ -336,6 +358,36 @@ def backward(
     ``layout`` describes ``q``/``k``/``v``/``out``/``grad_out`` and the returned
     gradients, exactly as in :func:`forward`; ``logsumexp`` is ``(b,h,s)``
     regardless.
+
+    Parameters
+    ----------
+    grad_out : torch.Tensor
+        Gradient of the output, in ``layout``.
+    q, k, v : torch.Tensor
+        Query, key and value, in ``layout``.
+    out : torch.Tensor
+        Saved (globally normalised) attention output, in ``layout``.
+    logsumexp : torch.Tensor
+        Saved (global) log-sum-exp, ``(b, h, s)``.
+    scale : float
+        Softmax scale.
+    *_ : object
+        Unused; interface parity with the other cores.
+    dropout_p : float, optional
+        Dropout probability. Default 0.
+    seed : int, optional
+        Unused; ``rng_state`` replays the mask.
+    rng_state : torch.Tensor, optional
+        Dropout RNG state from this chunk's :func:`forward`.
+    layout : {"bhsd", "bshd"}, optional
+        Layout of the tensors and of the returned gradients. Default ``"bhsd"``.
+    **__ : object
+        Unused; interface parity with the other cores.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Gradients ``(dq, dk, dv)`` in ``layout``.
     """
     b, h, s_q, s_kv, d = _shape(q, k, layout)
     q_b, k_b, v_b, o_b, do_b = (_to_bshd(t, layout) for t in (q, k, v, out, grad_out))

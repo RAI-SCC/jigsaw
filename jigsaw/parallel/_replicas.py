@@ -87,7 +87,18 @@ def mark_replicated(
 
 
 def replica_groups(param: Optional[torch.Tensor]) -> Groups:
-    """Return the groups ``param`` is marked replicated over, or ``()``."""
+    """Return the groups ``param`` is marked replicated over, or ``()``.
+
+    Parameters
+    ----------
+    param : torch.Tensor or None
+        Tensor to look up.
+
+    Returns
+    -------
+    Groups
+        Replica groups of ``param``; ``()`` if unmarked or ``None``.
+    """
     return getattr(param, _ATTR, ())
 
 

@@ -29,11 +29,15 @@ def _reference_device_type(
 
 
 @overload
-def cast_to_autocast_dtype(t0: _T0, /) -> tuple[_T0]: ...
+def cast_to_autocast_dtype(t0: _T0, /) -> tuple[_T0]: ...  # numpydoc ignore=GL08
 @overload
-def cast_to_autocast_dtype(t0: _T0, t1: _T1, /) -> tuple[_T0, _T1]: ...
+def cast_to_autocast_dtype(
+    t0: _T0, t1: _T1, /
+) -> tuple[_T0, _T1]: ...  # numpydoc ignore=GL08
 @overload
-def cast_to_autocast_dtype(t0: _T0, t1: _T1, t2: _T2, /) -> tuple[_T0, _T1, _T2]: ...
+def cast_to_autocast_dtype(
+    t0: _T0, t1: _T1, t2: _T2, /
+) -> tuple[_T0, _T1, _T2]: ...  # numpydoc ignore=GL08
 
 
 def cast_to_autocast_dtype(
@@ -62,11 +66,15 @@ def cast_to_autocast_dtype(
 
 
 @overload
-def promote_to_fp32_under_autocast(t0: _T0, /) -> tuple[_T0]: ...
-@overload
-def promote_to_fp32_under_autocast(t0: _T0, t1: _T1, /) -> tuple[_T0, _T1]: ...
+def promote_to_fp32_under_autocast(
+    t0: _T0, /
+) -> tuple[_T0]: ...  # numpydoc ignore=GL08
 @overload
 def promote_to_fp32_under_autocast(
+    t0: _T0, t1: _T1, /
+) -> tuple[_T0, _T1]: ...  # numpydoc ignore=GL08
+@overload
+def promote_to_fp32_under_autocast(  # numpydoc ignore=GL08
     t0: _T0, t1: _T1, t2: _T2, /
 ) -> tuple[_T0, _T1, _T2]: ...
 

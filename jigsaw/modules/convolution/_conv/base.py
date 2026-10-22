@@ -216,7 +216,14 @@ class _DistributedConvNd(torch.nn.Module):
         return math.prod(g.size() for g in self._spatial_sync_groups)
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters.
+        """Return the global number of parameters of this layer.
+
+        Returns
+        -------
+        int
+            Global (unsharded) count of this layer's parameters, including plain
+            ``torch.nn`` children; children with ``get_parameter_count`` report
+            their own. No communication.
 
         Notes
         -----

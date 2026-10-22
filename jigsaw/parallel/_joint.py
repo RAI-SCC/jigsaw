@@ -134,15 +134,48 @@ class JointCommHookState:
                 setattr(p, _JOINT_PARAM_GROUP, self._of[id(p)])
 
     def reduces(self, param: torch.nn.Parameter) -> bool:
-        """Return whether DDP's buckets, hence the hook, reduce ``param``."""
+        """Return whether DDP's buckets, hence the hook, reduce ``param``.
+
+        Parameters
+        ----------
+        param : torch.nn.Parameter
+            Parameter to look up.
+
+        Returns
+        -------
+        bool
+            Whether the hook reduces ``param``.
+        """
         return id(param) in self._of
 
     def factor(self, groups: Groups) -> float:
-        """Return ``|joint group| / |dp|`` for replica groups ``groups``."""
+        """Return ``|joint group| / |dp|`` for replica groups ``groups``.
+
+        Parameters
+        ----------
+        groups : Groups
+            Replica groups of a parameter.
+
+        Returns
+        -------
+        float
+            Ratio of the joint group's size to the ``dp`` group's.
+        """
         return self._factor[groups]
 
     def group_of(self, param: torch.nn.Parameter) -> dist.ProcessGroup:
-        """Return the group the hook averages ``param``'s gradient over."""
+        """Return the group the hook averages ``param``'s gradient over.
+
+        Parameters
+        ----------
+        param : torch.nn.Parameter
+            Parameter the hook reduces.
+
+        Returns
+        -------
+        dist.ProcessGroup
+            Joint group of ``param``.
+        """
         return self._of[id(param)]
 
 
@@ -261,14 +294,14 @@ def joint_comm_hook(
     # DDP expects a single future; chain the others onto the last one.
     last = works[-1].get_future()
 
-    def join(_: Any) -> torch.Tensor:
+    def _join(_: Any) -> torch.Tensor:
         # Wait on each process group's own future: it carries NCCL's stream
         # dependency, which ``torch.futures.collect_all`` would drop.
         for w in works[:-1]:
             w.get_future().wait()
         return buf
 
-    return last.then(join)
+    return last.then(_join)
 
 
 def _reduce_param_grad(grad: torch.Tensor, param: torch.nn.Parameter) -> None:
@@ -331,7 +364,13 @@ def register_joint_comm_hook(
 
 
 def active_joint_state() -> Optional[JointCommHookState]:
-    """Return the joint-hook state of the DDP whose forward is running, if any."""
+    """Return the joint-hook state of the DDP whose forward is running, if any.
+
+    Returns
+    -------
+    JointCommHookState or None
+        State of the running DDP's joint hook, or ``None``.
+    """
     ddp = getattr(DistributedDataParallel, "_active_ddp_module", None)
     state = getattr(ddp, _JOINT, None) if ddp is not None else None
     if not isinstance(state, JointCommHookState):
@@ -343,7 +382,21 @@ def active_joint_state() -> Optional[JointCommHookState]:
 def joint_state_of(
     param: torch.nn.Parameter, active: Optional[JointCommHookState]
 ) -> Optional[JointCommHookState]:
-    """Return the joint-hook state whose hook reduces ``param``, if any."""
+    """Return the joint-hook state whose hook reduces ``param``, if any.
+
+    Parameters
+    ----------
+    param : torch.nn.Parameter
+        Parameter to look up.
+    active : JointCommHookState or None
+        State of the running DDP's joint hook (:func:`active_joint_state`).
+
+    Returns
+    -------
+    JointCommHookState or None
+        With a running DDP, ``active`` if its hook reduces ``param``; otherwise
+        (the Python reducer) the state ``param`` is marked with. ``None`` if neither.
+    """
     if active is not None:
         return active if active.reduces(param) else None
     # DDP's Python reducer runs the forward outside ``_inside_ddp_forward``, so

@@ -66,6 +66,16 @@ def select_core(device: torch.device) -> ModuleType:
     Non-CUDA devices resolve to :mod:`.cudnn`, preserving the historical
     behaviour: the selector succeeds and the kernel call is what reports that
     there is no GPU.
+
+    Parameters
+    ----------
+    device : torch.device
+        Device the attention runs on.
+
+    Returns
+    -------
+    ModuleType
+        The :mod:`.cudnn` or :mod:`.flash` core module.
     """
     override = os.environ.get(_ENV_OVERRIDE)
     if override is not None:
