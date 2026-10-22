@@ -15,8 +15,13 @@ import torch.distributed as dist
 
 from jigsaw import parallel
 from jigsaw.mesh import make_process_mesh
+from tests.parity import assert_close
 
 NORM_TYPES = [1.0, 2.0, 3.0, math.inf]
+
+# torch.testing.assert_close's defaults per dtype
+F32_ATOL, F32_RTOL = 1e-5, 1.3e-6
+F64_ATOL, F64_RTOL = 1e-7, 1e-7
 
 _MESH_CACHE: dict = {}
 
@@ -73,9 +78,10 @@ def test_matches_torch_on_replicas(norm_type: float, device: torch.device) -> No
     total = parallel.clip_grad_norm_(ours, 0.5, dist.group.WORLD, norm_type)
     expected = torch.nn.utils.clip_grad_norm_(ref, 0.5, norm_type)
 
-    torch.testing.assert_close(total, expected)
-    for p, q in zip(ours, ref):
-        torch.testing.assert_close(p.grad, q.grad)
+    group = dist.group.WORLD
+    assert_close("norm", total, expected, F32_ATOL, F32_RTOL, device, group)
+    for i, (p, q) in enumerate(zip(ours, ref)):
+        assert_close(f"grad {i}", p.grad, q.grad, F32_ATOL, F32_RTOL, device, group)
 
 
 @pytest.mark.dist(4)
@@ -90,10 +96,12 @@ def test_counts_shards_and_replicas_once(
 
     total = parallel.clip_grad_norm_(params, expected / 2, mesh["model"], norm_type)
 
-    assert total.item() == pytest.approx(expected, rel=1e-12)
+    group = mesh["model"]
+    ref = torch.tensor(expected, dtype=total.dtype, device=device)
+    assert_close("norm", total, ref, 0.0, 1e-12, device, group)
     coef = (expected / 2) / (expected + 1e-6)
-    for p, g in zip(params, before):
-        torch.testing.assert_close(p.grad, g * coef)
+    for i, (p, g) in enumerate(zip(params, before)):
+        assert_close(f"grad {i}", p.grad, g * coef, F64_ATOL, F64_RTOL, device, group)
 
 
 @pytest.mark.dist(4)
@@ -104,8 +112,8 @@ def test_no_clipping_below_max_norm(device: torch.device) -> None:
 
     parallel.clip_grad_norm_(params, 2 * _expected_norm(2.0), mesh["model"])
 
-    for p, g in zip(params, before):
-        torch.testing.assert_close(p.grad, g)
+    for i, (p, g) in enumerate(zip(params, before)):
+        assert_close(f"grad {i}", p.grad, g, 0.0, 0.0, device, mesh["model"])
 
 
 def test_rank_without_gradients(device: torch.device) -> None:
@@ -117,8 +125,10 @@ def test_rank_without_gradients(device: torch.device) -> None:
     total = parallel.clip_grad_norm_([p], 1.0, dist.group.WORLD)
 
     world = dist.get_world_size()
-    expected = math.sqrt(18 * (world - 1))
-    assert total.item() == pytest.approx(expected, rel=1e-6)
+    expected = torch.tensor(
+        math.sqrt(18 * (world - 1)), dtype=total.dtype, device=device
+    )
+    assert_close("norm", total, expected, 0.0, 1e-6, device, dist.group.WORLD)
 
 
 @pytest.mark.dist(4)
