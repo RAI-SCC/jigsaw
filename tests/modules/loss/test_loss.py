@@ -656,6 +656,39 @@ class TestRegressionLosses:
         assert_close("loss", got.float(), ref, FATOL, FRTOL, device, pmd["model"])
 
     @pytest.mark.parametrize("mesh_name", MESHES_4)
+    @pytest.mark.parametrize("loss_name", list(_REG_LOSSES))
+    def test_regression_loss_bf16_mean(
+        self,
+        request: pytest.FixtureRequest,
+        device: torch.device,
+        mesh_name: str,
+        loss_name: str,
+    ) -> None:
+        """A bf16 input without autocast is averaged over its exact element count.
+
+        A single nonzero error keeps every local sum exact in bf16. The exact
+        mean 1/4112 rounds to the bf16 value below 2**-12; with the count rounded
+        (4112 to 4096) it would be 2**-12 itself, so torch is matched bitwise.
+        """
+        pmd = request.getfixturevalue(mesh_name)
+        distributed_fn, ref_fn = _REG_LOSSES[loss_name]
+        n, c, s = 1, 4, 1028
+
+        pred = torch.zeros(n, c, s, dtype=torch.bfloat16, device=device)
+        pred[0, 1, 300] = 1.0
+        target = torch.zeros_like(pred)
+
+        got = distributed_fn(
+            _shard(pred, pmd, {"col": 1, "row": 2}),
+            _shard(target, pmd, {"col": 1, "row": 2}),
+            reduction="mean",
+            reduce_groups=(pmd["col"], pmd["row"]),
+        )
+        ref = ref_fn(pred, target)
+        assert got.dtype == torch.bfloat16
+        assert_close("loss", got, ref, 0.0, 0.0, device, pmd["model"])
+
+    @pytest.mark.parametrize("mesh_name", MESHES_4)
     def test_regression_module_wrappers(
         self, request: pytest.FixtureRequest, device: torch.device, mesh_name: str
     ) -> None:

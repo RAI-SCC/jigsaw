@@ -347,7 +347,8 @@ def distributed_binary_cross_entropy(
     if reduction == "none":
         return F.binary_cross_entropy(probs, target, weight=weight, reduction="none")
     local_sum = F.binary_cross_entropy(probs, target, weight=weight, reduction="sum")
-    local_count = probs.new_full((), float(probs.numel()))
+    # float32: bfloat16 would round the count.
+    local_count = local_sum.new_full((), float(probs.numel()), dtype=torch.float32)
     return reduce_scalar_loss(local_sum, local_count, reduction, groups)
 
 
@@ -392,5 +393,6 @@ def distributed_binary_cross_entropy_with_logits(
     local_sum = F.binary_cross_entropy_with_logits(
         logits, target, weight=weight, pos_weight=pos_weight, reduction="sum"
     )
-    local_count = logits.new_full((), float(logits.numel()))
+    # float32: bfloat16 would round the count.
+    local_count = local_sum.new_full((), float(logits.numel()), dtype=torch.float32)
     return reduce_scalar_loss(local_sum, local_count, reduction, groups)

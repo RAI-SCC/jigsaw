@@ -99,10 +99,18 @@ def _mean_over_groups(
     local_denom: torch.Tensor,
     reduce_groups: Groups,
 ) -> torch.Tensor:
-    """Sum the numerator and denominator over ``reduce_groups`` and divide."""
-    stacked = torch.stack((local_sum, local_denom.to(local_sum.dtype)))
+    """Sum the numerator and denominator over ``reduce_groups`` and divide.
+
+    Reduced and divided in at least float32, then cast back to the dtype of
+    ``local_sum``: in bfloat16 the element count would round (1028 to 1024)
+    and the cross-shard sum would lose precision.
+    """
+    acc = torch.promote_types(
+        torch.promote_types(local_sum.dtype, local_denom.dtype), torch.float32
+    )
+    stacked = torch.stack((local_sum.to(acc), local_denom.to(acc)))
     total, norm = _RedundantAllReduce.apply(stacked, reduce_groups).unbind()
-    return total / norm  # type: ignore[no-any-return]
+    return (total / norm).to(local_sum.dtype)  # type: ignore[no-any-return]
 
 
 def reduce_scalar_loss(
