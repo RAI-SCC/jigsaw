@@ -612,7 +612,9 @@ def _check_parity(
         param = dist_params.get(pname)
         assert param is not None, f"distributed module has no parameter {pname!r}"
 
-        def _gather(tensor: torch.Tensor, label: str) -> torch.Tensor:
+        def _gather(
+            tensor: torch.Tensor, label: str, rule: ParamRule = rule
+        ) -> torch.Tensor:
             if isinstance(rule, ShardSpec):
                 return gather_tensor(
                     tensor,

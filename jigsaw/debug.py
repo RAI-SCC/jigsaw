@@ -74,9 +74,10 @@ def assert_replica_consistency(
     if not entries:
         div = torch.zeros(1, dtype=torch.float64, device=_device(mesh))
     all_reduce_max(div, mesh.values())
+    # Not strict: with no entries ``div`` still holds the one placeholder above.
     bad = [
         (f"{name} ({d:.3g})", missing_mark)
-        for (name, _, _, missing_mark), d in zip(entries, div.tolist())
+        for (name, _, _, missing_mark), d in zip(entries, div.tolist(), strict=False)
         if d > atol
     ]
     if bad:

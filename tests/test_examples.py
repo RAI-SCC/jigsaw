@@ -230,7 +230,7 @@ class TestParity:
         full = gather_results(out.detach(), mesh, pm_key_row="sh", pm_key_col="sw")
         _check("output", full, ref_out.detach(), device, group)
         _check("loss", loss.detach(), ref_loss.detach(), device, group)
-        for i, (layer, ref) in enumerate(zip(model, plain)):
+        for i, (layer, ref) in enumerate(zip(model, plain, strict=True)):
             if hasattr(layer, "convert_to_torch"):
                 for p in ("weight", "bias"):
                     got, want = getattr(layer, p).grad, getattr(ref, p).grad

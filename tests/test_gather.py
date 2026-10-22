@@ -15,7 +15,7 @@ class TestAveraging:
         ]
         expected = [t.clone() for t in tensors]
         average_weights([tensors[0], None, tensors[1]], dist.group.WORLD)
-        for got, want in zip(tensors, expected):
+        for got, want in zip(tensors, expected, strict=True):
             assert torch.equal(got, want)
 
     @pytest.mark.parametrize("bias_only", [False, True])

@@ -66,7 +66,7 @@ def test_gradient_check_fails(shape, kind, device, monkeypatch) -> None:
     _step(_wrap(model, "ddp", mesh["dp"]), make_input, 1)
     ok = all(
         torch.allclose(p.grad, e, rtol=1e-5, atol=1e-6)
-        for p, e in zip(model.parameters(), expected)
+        for p, e in zip(model.parameters(), expected, strict=True)
     )
     assert not all_ranks_ok(ok, device, dist.group.WORLD)
 

@@ -171,7 +171,8 @@ def fused_online_softmax_merge_(
         _KERNEL_USABLE = False
         warnings.warn(
             f"fused online-softmax merge kernel failed ({exc!r}); falling back "
-            "to the eager merge for the rest of this run."
+            "to the eager merge for the rest of this run.",
+            stacklevel=2,
         )
         return None
     return o1, l_new

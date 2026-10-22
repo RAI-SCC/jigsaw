@@ -145,7 +145,7 @@ def test_spatially_sharded_matches_torch(request, device, mesh_name, affine, bia
     y_ref.backward(grad_out)
 
     index = [slice(None), channels]
-    for dim, g in zip((2, 3), spatial_groups):
+    for dim, g in zip((2, 3), spatial_groups, strict=True):
         n = x.shape[dim] // (g.size() if g is not None else 1)
         r = g.rank() if g is not None else 0
         index.append(slice(r * n, (r + 1) * n))

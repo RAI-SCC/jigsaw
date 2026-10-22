@@ -72,6 +72,7 @@ check_untyped_defs=true
 warn_return_any=true
 show_error_codes =true
 warn_unused_ignores=false
+warn_redundant_casts=true
 follow_imports = "normal"
 follow_untyped_imports = true
 
@@ -90,13 +91,26 @@ module = ["triton", "triton.*"]
 follow_imports = "skip"
 follow_imports_for_stubs = true
 
+# The TE/flash-attn cores import these behind try/except; they exist only in the GPU
+# container. Only silences the "not found" error, so where installed they are still
+# followed and checked.
+[[tool.mypy.overrides]]
+module = [
+    "transformer_engine",
+    "transformer_engine.*",
+    "transformer_engine_torch",
+    "flash_attn",
+    "flash_attn.*",
+]
+ignore_missing_imports = true
+
 # Ruff
 [tool.ruff]
 target-version = "py311"
 exclude = ["docs", "examples", "scaling_scripts", "stash"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "D", "D417", "N", "ARG001"]
+select = ["E", "F", "I", "D", "D417", "N", "ARG001", "B", "RUF100"]
 ignore = ["E501", "NPY201", "N812"]
 
 [tool.ruff.lint.per-file-ignores]
@@ -105,6 +119,10 @@ ignore = ["E501", "NPY201", "N812"]
 # Triton kernels: UPPERCASE params are the ecosystem convention for
 # `tl.constexpr` / shape arguments.
 "jigsaw/modules/attention/_functional/_merge_kernel.py" = ["N803"]
+
+# torch.device is immutable, so it is safe as a default argument value.
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["torch.device"]
 
 [tool.ruff.lint.flake8-unused-arguments]
 ignore-variadic-names = true

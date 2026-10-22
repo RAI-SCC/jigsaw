@@ -109,7 +109,7 @@ def clip_grad_norm_(
             # Python int: a per-parameter copies tensor would need a blocking
             # host-to-device copy every step.
             by_copies: dict[int, list[torch.Tensor]] = {}
-            for grad, n in zip(grads, copies):
+            for grad, n in zip(grads, copies, strict=True):
                 by_copies.setdefault(n, []).append(grad)
             for n, gs in by_copies.items():
                 total = total + _norms(gs, norm_type, device).pow(norm_type).sum() / n

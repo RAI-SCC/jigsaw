@@ -71,7 +71,7 @@ class ConvTransposeNdConfig(VmapConfig):
         # output with no overlap, so the spatial split needs no communication.
         # Otherwise neighbouring ranks' raw outputs overlap and the spatial ranks
         # exchange halos.
-        if all(k == s for k, s in zip(kernel_size, stride)):
+        if all(k == s for k, s in zip(kernel_size, stride, strict=True)):
             self.dist_conv_transpose_fn = dist_conv.conv_transpose_nway
             self.dist_conv_transpose_backward_fn = (
                 dist_conv.conv_transpose_nway_backward

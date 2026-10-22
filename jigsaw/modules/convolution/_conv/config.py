@@ -82,7 +82,7 @@ class ConvNdConfig(VmapConfig):
         # ``stride == kernel_size`` tiles the domain with no overlap, so the
         # spatial split needs no communication. Otherwise neighbouring output
         # positions share input positions and the spatial ranks exchange halos.
-        if all(k == s for k, s in zip(kernel_size, stride)):
+        if all(k == s for k, s in zip(kernel_size, stride, strict=True)):
             self.dist_conv_fn = dist_conv.conv_nway
             self.dist_conv_backward_fn = dist_conv.conv_nway_backward
         else:

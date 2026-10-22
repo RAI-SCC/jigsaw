@@ -64,7 +64,7 @@ class TestLinearVmap:
         got = torch.vmap(f, in_dims=(0, 0 if x_batched else None))(
             params, x if x_batched else x[0]
         )
-        ref = torch.stack([m(xi) for m, xi in zip(members, x_m)])
+        ref = torch.stack([m(xi) for m, xi in zip(members, x_m, strict=True)])
         _check("output", got, ref, device, mesh)
 
         g = torch.randn_like(ref)

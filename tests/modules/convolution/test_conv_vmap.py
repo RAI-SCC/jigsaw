@@ -95,7 +95,7 @@ def test_member_weights(
         lambda p, b, xi: functional_call(base, (p, b), (xi,)),
         in_dims=(0, 0, None if x_shared else 0),
     )(params, buffers, x[0] if x_shared else x)
-    ref = torch.stack([m(xi) for m, xi in zip(members, x_m)])
+    ref = torch.stack([m(xi) for m, xi in zip(members, x_m, strict=True)])
     _check(f"{module} {regime} forward", got, ref, mesh, device, _FWD_TOL)
 
     g = torch.randn_like(ref)

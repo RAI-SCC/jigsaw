@@ -631,7 +631,7 @@ def _teardown_process_group() -> None:
         return
     try:
         dist.destroy_process_group()
-    except Exception:  # noqa: BLE001 - shutdown path, nothing useful to do
+    except Exception:  # shutdown path, nothing useful to do
         pass
 
 

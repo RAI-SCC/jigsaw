@@ -43,7 +43,7 @@ class _SyncGrad(torch.autograd.Function):
             dist.all_reduce(flat, op=dist.ReduceOp.SUM, group=group)
         # Unflatten into views of the reduced buffer, one per input.
         chunks = flat.split([g.numel() for g in grads])
-        return (None, *(c.view_as(g) for c, g in zip(chunks, grads)))
+        return (None, *(c.view_as(g) for c, g in zip(chunks, grads, strict=True)))
 
     @staticmethod
     def vmap(
@@ -130,7 +130,7 @@ def sync_grad(*tensors: Optional[torch.Tensor]) -> tuple[Optional[torch.Tensor],
         else:
             synced = _SyncGrad.apply(groups, *ts)
         # Scatter the synced views back to their input positions.
-        for i, s in zip(idx, synced):
+        for i, s in zip(idx, synced, strict=True):
             out[i] = s
     return tuple(out)
 
@@ -163,7 +163,7 @@ def synced_parameters(module: torch.nn.Module) -> dict[str, torch.Tensor]:
     # Keep only what sync_grad actually rerouted (nothing with grad mode off).
     return {
         n: s
-        for (n, p), s in zip(marked.items(), synced)
+        for (n, p), s in zip(marked.items(), synced, strict=True)
         if s is not p and s is not None
     }
 
