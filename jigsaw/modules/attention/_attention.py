@@ -15,11 +15,7 @@ from ._config import AttnBackend
 from ._functional.cores import te as te_core
 from ._functional.ring import _RingAttention, get_hybrid_topology
 
-#: Whether ``attn_backend="te"`` can be run at all. Both TE paths -- the ring's
-#: inner core and :class:`_TransformerEngineAttention` below -- go through
-#: :mod:`._functional.cores.te`, so one probe covers both: it is false only when
-#: *neither* arm is importable (no ``transformer_engine`` for cuDNN, no
-#: ``flash_attn`` for flash).
+#: Whether ``attn_backend="te"`` can run (cuDNN or flash core importable).
 JIGSAW_TE_AVAILABLE = te_core.TE_CORE_AVAILABLE
 
 if JIGSAW_TE_AVAILABLE:
@@ -27,38 +23,13 @@ if JIGSAW_TE_AVAILABLE:
     class _TransformerEngineAttention(torch.autograd.Function):
         """Autograd wrapper around the TransformerEngine attention kernels.
 
-        Drives :mod:`._functional.cores.te` -- the same cores the ring's inner
-        step uses -- in the non-ring, ``bshd`` configuration, so
-        ``attn_backend="te"`` means the same kernel whether or not ``ring`` is
-        set. Which kernel that is (cuDNN on Hopper+, ``flash_attn`` on Ampere)
-        is resolved once into ``self.te_core`` by
-        :func:`._functional.cores.te.select_core`, then passed in as ``core``.
+        Runs the same :mod:`._functional.cores.te` kernels as the ring's inner
+        step (cuDNN on Hopper+, ``flash_attn`` on Ampere), in ``bshd`` layout,
+        with their native backward and ``rng_state``. The softmax LSE is dropped.
 
-        Replaces a wrapper around ``te.DotProductAttention``, which is itself an
-        ``autograd.Function`` -- a graph boundary that forced the old wrapper to
-        recompute the whole forward under ``enable_grad`` just to get something
-        to differentiate, plus an RNG snapshot/restore dance to redraw the same
-        dropout mask. Calling the kernels directly gives their real backward and
-        own ``rng_state`` instead: no recompute, no RNG bookkeeping, measurably
-        faster fwd+bwd, with the biggest wins at short sequences where
-        ``DotProductAttention``'s per-call backend-selection overhead also goes
-        away.
-
-        The softmax LSE the cores return is dropped here (the ring needs it for
-        its online-softmax merge; a single un-chunked call does not) -- for free,
-        since both kernels compute it regardless as their own backward's
-        normaliser.
-
-        Gives up relative to ``DotProductAttention``: FP8, bias, mask, GQA, and
-        its per-shape backend dispatch -- the last costs little since jigsaw's
-        problem class (non-FP8, no mask, no bias, no GQA) gets the same verdict
-        from TE's selector across shapes, which is what makes the coarse
-        per-architecture rule in :func:`._functional.cores.te.select_core` a
-        faithful stand-in. A kernel that cannot serve a shape raises rather than
-        falling back silently.
-
-        ``torch.vmap`` support (e.g. for stacked-parameter ensembles) survives the
-        move: see the :meth:`vmap` staticmethod.
+        Unsupported: FP8, bias, mask and GQA. A kernel that cannot serve a shape
+        raises rather than falling back. ``torch.vmap`` is supported via
+        :meth:`vmap`.
         """
 
         @staticmethod
@@ -78,25 +49,18 @@ if JIGSAW_TE_AVAILABLE:
                 Query/key/value tensors in ``bshd`` format
                 (``[batch, seq, heads, head_dim]``), fp16 or bf16.
             scale : float
-                Softmax scale (``head_dim ** -0.5`` for the callers here --
-                ``te.DotProductAttention``'s default).
+                Softmax scale.
             dropout_p : float
-                Attention dropout probability. Already gated on training mode by
-                the caller; this function has no ``self.training`` to consult.
+                Dropout probability, already gated on training mode by the caller.
             core : module
-                The TE core to run -- :mod:`._functional.cores.te.cudnn` or
-                :mod:`._functional.cores.te.flash`, resolved once per module by
-                :func:`._functional.cores.te.select_core`.
+                :mod:`._functional.cores.te.cudnn` or :mod:`._functional.cores.te.flash`.
 
             Returns
             -------
             tuple
-                ``(out, logsumexp, rng_state)``. ``out`` is
-                ``[batch, seq, heads * head_dim]`` -- heads merged, matching what
-                ``te.DotProductAttention(qkv_format="bshd")`` returned.
-                ``logsumexp`` ``(b, h, s)`` and ``rng_state`` exist only so
-                :meth:`setup_context` can hand them to :meth:`backward`; callers
-                take ``[0]``.
+                ``(out, logsumexp, rng_state)`` with ``out`` of shape
+                ``[batch, seq, heads * head_dim]``. Callers take ``[0]``; the rest
+                is for :meth:`backward`.
             """
             out, lse, rng_state = core.forward(q, k, v, scale, dropout_p, layout="bshd")
             return out.flatten(-2), lse, rng_state
@@ -149,16 +113,8 @@ if JIGSAW_TE_AVAILABLE:
         ) -> tuple[tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]], tuple]:
             """Fold the vmapped (samples) axis into the batch, run one plain call, unfold.
 
-            ``transformer_engine``'s kernels are opaque C++/CUDA extensions with no
-            batching rule, so calling them under ``torch.vmap`` (e.g. to run an
-            ensemble of stacked parameters) fails; having a ``vmap`` staticmethod lets
-            us decide what happens instead. Since attention is independent across
-            the batch axis, ``[samples, batch, ...] -> [samples * batch, ...]`` is
-            exact.
-
-            It re-enters :meth:`forward` via ``apply``, so gradients route
-            through :meth:`backward` -- the folded ``q/k/v`` produce the matching
-            folded LSE / ``rng_state``, which is what ``fused_attn_bwd`` needs.
+            The TE kernels have no batching rule; folding is exact because
+            attention is independent across the batch axis.
             """
             q_bdim, k_bdim, v_bdim = in_dims[0], in_dims[1], in_dims[2]
 
@@ -199,10 +155,8 @@ if JIGSAW_TE_AVAILABLE:
 def attn_core_dtype(x: torch.Tensor) -> torch.dtype:
     """Return the dtype of the attention core.
 
-    This is the autocast dtype under autocast. Otherwise it is the input dtype, except
-    that fp32 (or fp64) inputs on CUDA run the core in bf16: the flash kernels reject
-    fp32, and fp16 would need loss scaling -- without it, the small gradients of a loss
-    averaged over many outputs underflow to zero in the attention backward.
+    The autocast dtype under autocast, else the input dtype -- except fp32/fp64 on
+    CUDA, which runs in bf16 (flash rejects fp32; fp16 would need loss scaling).
 
     Parameters
     ----------
@@ -263,60 +217,24 @@ class DistributedAttention(torch.nn.Module):
     qk_norm : bool
         Whether to normalize queries and keys.
     ring : bool
-        Run ring (sequence-parallel) attention over ``spatial_group``. A
-        separate switch from ``attn_backend``: the ring's inner per-chunk
-        attention still uses the chosen backend.
+        Run ring (sequence-parallel) attention over ``spatial_group``. The
+        inner per-chunk attention still uses ``attn_backend``.
     ulysses : bool
-        Run Ulysses (all-to-all, head-parallel) sequence parallelism over
-        ``spatial_group`` instead of the ring: one all-to-all trades the
-        local sequence shard for a head shard, a single dense attention runs
-        over the full sequence on ``heads // (channel * spatial)`` heads, and
-        an all-to-all brings the result back. Mutually exclusive with
-        ``ring``; needs ``heads // channel_group.size()`` divisible by
-        ``spatial_group.size()``. See :mod:`._functional.ulysses`.
+        Run Ulysses (all-to-all, head-parallel) attention over
+        ``spatial_group``. Mutually exclusive with ``ring``; needs
+        ``heads // channel_group.size()`` divisible by ``spatial_group.size()``.
+        See :mod:`._functional.ulysses`.
     ulysses_gpus_per_node : int
-        When ``> 0`` and ``ulysses`` is set, run the *hierarchical* scheme
-        (Transformer Engine's ``cp_comm_type="a2a+p2p"`` analogue): an
-        all-to-all over an intra-node sub-group of this many consecutive
-        spatial ranks, nested in a P2P ring over the inter-node sub-group
-        (``spatial // ulysses_gpus_per_node`` ranks), so only ``n_nodes``
-        K/V chunks ever ring over the slow fabric. Needs ``spatial``
-        divisible by this into a ring of ``>= 2``, and ``heads // channel``
-        divisible by it. ``0`` (default) keeps the flat single-level
-        Ulysses. ``ulysses_inter_save_scope``/``ulysses_inter_overlap`` tune
-        the inter-node ring.
+        If ``> 0`` (with ``ulysses``), run hierarchical Ulysses: all-to-all
+        within groups of this many spatial ranks, nested in a ring across
+        them. ``0`` (default) runs flat Ulysses.
     ulysses_inter_save_scope : SaveScope | str
-        ``save_scope`` for the hierarchical scheme's inter-node K/V ring
-        (only read when ``ulysses_gpus_per_node > 0``). ``LOCAL`` (default)
-        keeps only this rank's own chunk and re-rings the rest over the
-        slow fabric in the backward. ``GLOBAL`` keeps every K/V chunk the
-        forward ring received so the backward reads them from memory, at
-        one extra ``n_nodes``-chunk buffer per rank, but routes dK/dV
-        through an all-reduce per backward step instead -- worthwhile only
-        once ``n_nodes`` is large enough that ``LOCAL``'s re-ringing costs
-        more than that all-reduce.
+        ``save_scope`` of the hierarchical scheme's inter-node ring.
     ulysses_inter_overlap : bool
-        Put the hierarchical scheme's inter-node K/V ring (and its backward
-        dK/dV relay) on a dedicated CUDA stream with double buffering, so
-        each inter-node transfer overlaps the node-local attention core --
-        the ``cp_stream`` trick Transformer Engine's ``a2a+p2p`` uses. Only
-        read when ``ulysses_gpus_per_node > 0``; forwarded to the inter-node
-        ring's :class:`~jigsaw.modules.RingAttentionConfig` as ``overlap_comm``
-        (CUDA-only, inert otherwise). Requires
-        ``ulysses_inter_save_scope=LOCAL`` to also overlap the *backward*
-        (the re-ringing dK/dV relay the overlap targets); paired with
-        ``GLOBAL`` only the forward K/V ring overlaps and a warning is
-        emitted.
+        ``overlap_comm`` of the hierarchical scheme's inter-node ring. The
+        backward overlaps only with ``ulysses_inter_save_scope=LOCAL``.
     ulysses_inter_offload : Offload | str
-        ``offload`` for the hierarchical scheme's inter-node K/V ring (only
-        read when ``ulysses_gpus_per_node > 0``): forwarded as-is to the
-        inter-node ring's :class:`~jigsaw.modules.RingAttentionConfig`, which is the
-        same ``RingAttentionConfig`` the plain ``ring=True`` path uses --
-        see :class:`.offload.NVLinkActivationOffloader`. ``CPU`` moves the
-        chunk kept for backward (per ``ulysses_inter_save_scope``) to
-        pinned host memory between forward and backward, trading GPU HBM
-        for PCIe/NVLink traffic that the offloader's side streams overlap
-        with compute. ``DISABLED`` (default) keeps it on-device.
+        ``offload`` of the hierarchical scheme's inter-node ring.
     attn_backend : AttnBackend | str
         Attention core implementation -- ``"te"``, ``"sdpa"`` (default) or
         ``"math"``. See :class:`._config.AttnBackend`.
@@ -411,11 +329,7 @@ class DistributedAttention(torch.nn.Module):
             attention_config._coerce_enum(AttnBackend, attn_backend, "attn_backend")
         )
         self.te = self.attn_backend == AttnBackend.TE
-        # Both TE paths run bshd q/k/v (``self.te`` gates the rearrange in
-        # ``forward``); the Ulysses path is bshd for every backend. They differ
-        # only in the *output*: the non-ring, non-ulysses TE core returns
-        # ``... n s (h d)`` (heads already folded), the ring and Ulysses cores
-        # return ``... n s h d``. ``_te_bshd`` marks the folded case.
+        # ``_te_bshd``: the plain TE core returns heads already folded.
         self._bshd_qkv = self.te or self.ulysses
         self._te_bshd = self.te and not ring and not ulysses
 
@@ -459,33 +373,12 @@ class DistributedAttention(torch.nn.Module):
                     device=self.device,
                     send_in_forward=attention_config.SendForward.KV,
                     save_for_backward=attention_config.SaveBackward.KV,
-                    # LOCAL (default): keep only this rank's chunk; the backward
-                    # re-rings the rest. At n_nodes == 2 that is one inter-node
-                    # hop, same as GLOBAL would cost (GLOBAL keeps every arrived
-                    # K/V chunk but then all-reduces dK/dV each backward step) --
-                    # measured a wash there; GLOBAL is expected to pay off only
-                    # at n_nodes >= 4. SendOp.ALLTOALL still runs the same p2p
-                    # ring exchange, just issued as an all-to-all collective
-                    # instead of individual send/recv -- measured faster here.
                     save_scope=self.ulysses_inter_save_scope,
                     send_op=attention_config.SendOp.ALLTOALL,
-                    # Relay dK/dV P2P around the inter-node ring (not a global
-                    # buffer + final all-reduce). Pinned, not left to the config
-                    # default, because ``ring_backward`` only takes the
-                    # comm-stream backward-overlap path for LOCAL + SEND_DKV --
-                    # see ``overlap_comm`` below and ``backward.ring_backward``.
+                    # Pinned: backward overlap needs LOCAL + SEND_DKV.
                     send_backward=attention_config.SendBackward.SEND_DKV,
                     attn_backend=self.attn_backend,
-                    # cp_stream-style overlap of the inter-node K/V + dK/dV
-                    # transfers with the node-local cores (CUDA-only; inert
-                    # otherwise). The backward half of this engages only with
-                    # save_scope=LOCAL (the __init__ warning covers GLOBAL).
-                    # See `RingAttentionConfig.overlap_comm`.
                     overlap_comm=self.ulysses_inter_overlap,
-                    # CPU-offload the chunk `save_for_backward` keeps (per
-                    # ulysses_inter_save_scope) between forward and backward --
-                    # same mechanism the plain ring path uses. See
-                    # NVLinkActivationOffloader.
                     offload=self.ulysses_inter_offload,
                 )
             else:
@@ -519,10 +412,7 @@ class DistributedAttention(torch.nn.Module):
             )
 
         if channel_group.size() == 1:
-            # No channel/tensor parallelism: the output projection is a plain
-            # local matmul, same as ``qkv`` above. ``DistributedLinear`` only has
-            # kernels for (row, col) in {(1,1),(1,2),(2,2),(4,2)}, so this also
-            # unblocks a pure ring (spatial=N, channel=1).
+            # No channel parallelism: plain local matmul (also allows a pure ring).
             self.head_concat = torch.nn.Linear(
                 embed_dim, out_dim, bias=out_bias, device=device, dtype=self.dtype
             )
@@ -555,18 +445,12 @@ class DistributedAttention(torch.nn.Module):
                     parallel.mark_replicated(p, norm_sync_groups)
 
         for p in self.parameters():
-            # A duplicate mark would sum that gradient twice, scaling it by
-            # ``spatial_group.size()``. DistributedLinear already marks its own
-            # ``bias`` over its ``row_group``, which is ``spatial_group`` here,
-            # so skip anything already claimed.
+            # Skip already-marked params; a duplicate mark would otherwise
+            # double-sum the grad.
             if parallel.replica_groups(p):
                 continue
             parallel.mark_replicated(p, self.spatial_group)
-        # Make every replica identical from the start, over each group it is
-        # marked with (the qk norms over the channel group too), so a plain
-        # DistributedDataParallel needs no extra broadcast: one coalesced
-        # broadcast per group and dtype. head_concat's bias gets broadcast twice
-        # (DistributedLinear.__init__ already does its own) -- harmless.
+        # Make replicas identical from the start, so plain DDP needs no broadcast.
         parallel.broadcast_replicas(self)
 
     def _resolve_ring_config(
@@ -577,18 +461,10 @@ class DistributedAttention(torch.nn.Module):
     ) -> Optional[attention_config.RingAttentionConfig]:
         """Pick the ``RingAttentionConfig`` for this module.
 
-        With channel/tensor parallelism the fused ``qkv`` projection is split
-        across the channel group (a distributed ``DistributedLinear`` matmul), so
-        the ring cannot rebuild K/V from a circulated ``x`` chunk with the plain
-        local matmul in :func:`.._functional.ring._compute_kv`. ``qk_norm`` needs
-        the same thing for a different reason: the key norm is a separate
-        module step applied after the projection, not fused into it, so a
-        remote chunk's K/V rebuilt from its circulated ``x`` would miss it.
-        Either case needs the ring to circulate the already-projected K/V
-        directly -- i.e. ``send_in_forward=KV`` *and* ``save_for_backward=KV``
-        (the only pairing that never calls ``_compute_kv``, forward or
-        backward). A default config is built that way; an explicit one is
-        required to already be.
+        With a sharded ``qkv`` projection (channel group > 1) or ``qk_norm``, the
+        ring cannot rebuild K/V from ``x``, so it needs ``send_in_forward=KV``
+        and ``save_for_backward=KV``. The default config is built that way; an
+        explicit config without them raises.
         """
         if not ring:
             return config
@@ -633,13 +509,7 @@ class DistributedAttention(torch.nn.Module):
         return attn_backend
 
     def _select_attn_core(self) -> Callable[..., torch.Tensor]:
-        """Resolve ``self.attn_backend`` to its non-ring attention core.
-
-        The ``TE`` arm resolves *which* TE kernel this GPU gets (``self.te_core``);
-        it needs no other per-module state, going straight to that core via
-        :class:`_TransformerEngineAttention`, parameterised per call by
-        ``self.scale`` / ``self.dropout_p``.
-        """
+        """Resolve ``self.attn_backend`` to its non-ring attention core."""
         match self.attn_backend:
             case AttnBackend.TE:
                 # cuDNN on Hopper+, flash_attn on Ampere -- resolved once here so
@@ -739,11 +609,6 @@ class DistributedAttention(torch.nn.Module):
     ) -> torch.Tensor:
         """Attention computation on the TransformerEngine kernels.
 
-        Runs ``self.te_core`` -- cuDNN on Hopper+, ``flash_attn`` on Ampere --
-        shared with the ring's inner core; see
-        :class:`_TransformerEngineAttention` for why the kernels are called
-        directly rather than through ``te.DotProductAttention``.
-
         Parameters
         ----------
         q : torch.Tensor
@@ -753,11 +618,8 @@ class DistributedAttention(torch.nn.Module):
         v : torch.Tensor
             Values tensor, ``bshd``.
         attn_mask : torch.Tensor, optional
-            Not supported: ``fused_attn_fwd``/``fused_attn_bwd`` (what
-            :mod:`._functional.cores.te` calls) only implement
-            ``attn_mask_type`` in ``{no_mask, causal, padding, ...}``, no
-            arbitrary mask. Raises rather than silently taking TE's unfused
-            detour; use ``attn_backend="sdpa"`` for masked attention instead.
+            Not supported; a non-``None`` mask raises :class:`ValueError`. Use
+            ``attn_backend="sdpa"`` (memory-efficient kernel) for masked attention.
         **kwargs : torch.Tensor
             Unused.
 
@@ -799,9 +661,7 @@ class DistributedAttention(torch.nn.Module):
         x : torch.Tensor
             Local input chunk.
         attn_mask : torch.Tensor, optional
-            Not supported: K/V circulate chunk-by-chunk around the ring and
-            :class:`._functional.ring._RingAttention` has no per-step
-            masking. Raises rather than silently ignoring it; use
+            Not supported; a non-``None`` mask raises :class:`ValueError`. Use
             ``ring=False`` for masked attention.
         **kwargs : torch.Tensor
             Unused.
@@ -881,14 +741,8 @@ class DistributedAttention(torch.nn.Module):
     ) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
         """Build a P2P ring over the inter-node group on ``bshd`` ``q``/``k``/``v``.
 
-        The inner core of the hierarchical Ulysses scheme: after the intra-node
-        all-to-all, ``q``/``k``/``v`` cover one node's worth of sequence on
-        ``local_heads // A`` heads, and this rings the (already-projected) K/V
-        around the ``n_nodes`` inter-node peers via :class:`_RingAttention`
-        with ``send_in_forward = save_for_backward = KV`` (so it never rebuilds
-        K/V from ``x`` -- the dummy ``x`` / ``w_qkv`` below are unused).
-        ``_uly_ring_cfg.core_layout`` is ``bshd`` for the TE core, ``bhsd``
-        otherwise; transpose around the call for the latter.
+        The inner core of hierarchical Ulysses: rings the projected K/V around
+        the inter-node peers after the intra-node all-to-all.
         """
         layout = self._uly_ring_cfg.core_layout
         inter_rank = dist.get_rank(self._uly_inter_group)
@@ -926,17 +780,8 @@ class DistributedAttention(torch.nn.Module):
         """Ulysses (all-to-all, head-parallel) sequence-parallel attention.
 
         ``q``/``k``/``v`` are ``bshd`` ``[b, seq // spatial, local_heads, d]``.
-
-        Flat (``ulysses_gpus_per_node == 0``): one all-to-all over the whole
-        spatial group -> ``[b, seq, local_heads // spatial, d]``, one dense
-        attention, one all-to-all back.
-
-        Hierarchical (``> 0``, the ``a2a+p2p`` analogue): an all-to-all over the
-        intra-node sub-group -> ``[b, seq // n_nodes, local_heads // A, d]``,
-        then a P2P ring over the inter-node sub-group, then an all-to-all back.
-
-        ``attn_mask`` is not supported: the inner dense core takes no mask
-        parameter. Raises rather than silently ignoring it.
+        Flat when ``ulysses_gpus_per_node == 0``, hierarchical otherwise. A
+        non-``None`` ``attn_mask`` raises :class:`ValueError`.
         """
         if attn_mask is not None:
             raise ValueError(
@@ -976,39 +821,25 @@ class DistributedAttention(torch.nn.Module):
     ) -> torch.Tensor:
         """Forward pass for distributed multi-head attention.
 
-        Projects ``x`` to Q/K/V, dispatches to the plain, ring, or Ulysses
-        attention core per the constructor's config, and concatenates heads
-        back to the output projection.
-
         Parameters
         ----------
         x : torch.Tensor
             ``(n_batch, vars, n_lat, n_lon)``, already sharded per
-            ``spatial_group`` / ``channel_group``. A leading extra axis
-            between the batch and the sequence (e.g. Swin's window axis) is
-            fine too -- ``qkv``'s rearrange keeps whatever sits between the
-            leading ``...`` batch dims and the trailing ``(three h d)``.
+            ``spatial_group`` / ``channel_group``. Extra axes between batch and
+            sequence (e.g. Swin windows) are kept.
         attn_mask : torch.Tensor, optional
             Additive (float) or keep-true (bool) mask broadcastable to
-            ``q``'s ``(..., heads, seq, seq)`` shape, e.g. a per-window Swin
-            shift mask. Only the plain (non-ring, non-Ulysses) core supports
-            it, and only with ``attn_backend`` in ``{"sdpa", "math"}``;
-            ``"te"``, ``ring=True`` and ``ulysses=True`` raise ``ValueError``
-            instead -- see each core's docstring.
+            ``(..., heads, seq, seq)``. Only supported by the plain core with
+            ``attn_backend`` ``"sdpa"`` or ``"math"``; otherwise raises
+            :class:`ValueError`.
 
         Returns
         -------
         torch.Tensor
             ``(n_batch, seq_length, output_dim)``.
         """
-        # The replicated parameters -- including those of the plain
-        # ``nn.Linear`` / ``nn.LayerNorm`` submodules, whose forward jigsaw does
-        # not own -- are summed over their groups in-graph (see
-        # :mod:`jigsaw.parallel`). ``functional_call`` swaps the synced tensors
-        # in for the whole forward, so every use (``self.qkv(x)``, the ring
-        # core's ``self.qkv.weight``) sees them. They carry no mark, so the
-        # re-entered ``forward`` finds nothing left to sync and falls through,
-        # and a DistributedLinear submodule does not sync its bias a second time.
+        # Swap in the in-graph-synced replicated parameters for the whole forward;
+        # they carry no mark, so the re-entered forward falls through.
         synced = parallel.synced_parameters(self)
         if synced:
             return cast(
@@ -1021,9 +852,7 @@ class DistributedAttention(torch.nn.Module):
         # shape: [n_batches, spatial_tokens, channel_tokens]
         qkv = self.qkv(x)
 
-        # TE cores (ring and non-ring) are bshd-native -- feed them ``n s h d`` so
-        # nothing transposes per chunk; the Ulysses path is bshd end to end and
-        # transposes only around a non-TE inner kernel. SDPA / math want ``n h s d``.
+        # TE and Ulysses take bshd; SDPA / math take bhsd.
         if self._bshd_qkv:
             qkv = rearrange(
                 qkv, "... n s (three h d) -> three ... n s h d", three=3, h=self.heads
@@ -1034,12 +863,7 @@ class DistributedAttention(torch.nn.Module):
             )
 
         core_dtype = attn_core_dtype(x)
-        # ``qkv_stack`` -- the contiguous ``[3, ... n s h d]`` tensor ``q/k/v`` are
-        # unbound from -- is handed to the Ulysses core so it feeds the
-        # sequence<->head all-to-all directly instead of re-``torch.stack``-ing
-        # its three views (a full [3, b, s, h, d] copy per forward, and its
-        # transpose in the backward). Only when ``qk_norm`` is off; the norm
-        # rewrites q/k after the unbind, so the stack no longer matches.
+        # Ulysses reuses ``qkv_stack`` to skip a re-stack; invalid after qk_norm.
         if self.qk_norm:
             q, k, v = qkv.unbind(0)
             q = self.q_norm(q).to(core_dtype)
@@ -1054,10 +878,7 @@ class DistributedAttention(torch.nn.Module):
         out = self.attn_core(
             q, k, v, x=x, qkv_stack=qkv_stack, attn_mask=_mask_to(attn_mask, core_dtype)
         )
-        # Fold ``out`` to ``... n s (h d)`` in ``x.dtype`` before ``head_concat``
-        # (which holds model-dtype weights). The non-ring TE core already returns
-        # ``... n s (h d)``; the ring TE core and the Ulysses core return bshd
-        # ``... n s h d``; every other core returns bhsd ``... n h s d``.
+        # Fold ``out`` to ``... n s (h d)`` in ``x.dtype`` for ``head_concat``.
         if self._te_bshd:
             pass
         elif self.te or self.ulysses:
