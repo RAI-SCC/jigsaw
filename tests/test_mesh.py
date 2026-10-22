@@ -66,7 +66,7 @@ class TestValidation:
 
     def test_requires_an_initialised_process_group(self, monkeypatch):
         monkeypatch.setattr(dist, "is_initialized", lambda: False)
-        with pytest.raises(RuntimeError, match="initialised default process group"):
+        with pytest.raises(RuntimeError, match="initialized default process group"):
             jigsaw.make_process_mesh({"a": 1})
 
     def test_rejects_unsupported_backend(self, monkeypatch):

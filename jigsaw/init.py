@@ -15,7 +15,7 @@ import torch.nn.init as _torch_init
 calculate_gain = _torch_init.calculate_gain
 
 # Per-element initializers: the value distribution does not depend on the tensor
-# shape, so filling a shard is identical to filling the whole parameter -- these
+# shape, so filling a shard is identical to filling the whole parameter. These
 # are re-exported verbatim from ``torch.nn.init`` (each already wraps the write
 # in ``no_grad``).
 constant_ = _torch_init.constant_

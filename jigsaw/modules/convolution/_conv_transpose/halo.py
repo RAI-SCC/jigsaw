@@ -135,13 +135,13 @@ def transpose_halo_reduce(
     recv_sizes: list[int] = []
     recv_start: list[int] = []
     for peer in range(group_size):
-        # part of my raw span that lands in peer's output shard -> send to peer
+        # part of this rank's raw span that lands in peer's output shard -> send to peer
         peer_keep_lo = peer * out_local
         s0 = max(base, peer_keep_lo, 0)
         sn = max(min(base + wloc, peer_keep_lo + out_local, global_out) - s0, 0)
         send_sizes.append(sn)
         send_parts.append(y_raw.narrow(axis, s0 - base, sn) if sn > 0 else empty)
-        # part of my output shard that peer's raw span produced -> receive and sum
+        # part of this rank's output shard that peer's raw span produced -> receive and sum
         peer_base, peer_wloc, _, _ = produced_output_span(
             peer, group_size, local_in_size, kernel, stride, padding, dilation
         )
@@ -232,14 +232,14 @@ def transpose_halo_expand(
         peer_base, peer_wloc, _, _ = produced_output_span(
             peer, group_size, local_in_size, kernel, stride, padding, dilation
         )
-        # part of my output shard that peer's raw span needs -> send to peer
+        # part of this rank's output shard that peer's raw span needs -> send to peer
         s0 = max(keep_lo, peer_base, 0)
         sn = max(min(keep_lo + out_local, peer_base + peer_wloc, global_out) - s0, 0)
         send_sizes.append(sn)
         send_parts.append(
             grad_local.narrow(axis, s0 - keep_lo, sn) if sn > 0 else empty
         )
-        # part of my raw span that peer owns -> receive
+        # part of this rank's raw span that peer owns -> receive
         peer_keep_lo = peer * out_local
         r0 = max(base, peer_keep_lo, 0)
         recv_sizes.append(

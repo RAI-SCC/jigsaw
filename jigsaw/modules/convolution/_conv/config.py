@@ -48,7 +48,6 @@ class ConvNdConfig(VmapConfig):
         Number of convolution groups.
     """
 
-    # type hints
     n_spatial: int
     dist_conv_fn: Callable
     dist_conv_backward_fn: Callable
@@ -80,7 +79,7 @@ class ConvNdConfig(VmapConfig):
         self.conv_weight_fn: Callable = _CONV_WEIGHT_FN[self.n_spatial - 1]
         self.grad_bias = self._grad_bias_selection(bias)
         # ``stride == kernel_size`` tiles the domain with no overlap, so the
-        # spatial split needs no communication. Otherwise neighbouring output
+        # spatial split needs no communication. Otherwise neighboring output
         # positions share input positions and the spatial ranks exchange halos.
         if all(k == s for k, s in zip(kernel_size, stride, strict=True)):
             self.dist_conv_fn = dist_conv.conv_nway

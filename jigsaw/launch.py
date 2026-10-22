@@ -169,7 +169,7 @@ def init_cuda() -> tuple[torch.device, int, int, int]:
             dist.get_backend(),
         )
     else:
-        log.error_all("process group failed to initialise on rank %d", rank)
+        log.error_all("process group failed to initialize on rank %d", rank)
 
     return device, slurm_localid, rank, world_size
 

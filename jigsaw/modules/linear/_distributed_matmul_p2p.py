@@ -45,9 +45,8 @@ def fused_xw_xtw_twoway(
     """
     mod = local_rank % 2
     w0, w1 = torch.split(weight, weight.shape[-2] // 2, dim=-2)
-    # ``grad_output`` is sent verbatim through ``isend`` below, which rejects
-    # non-contiguous tensors; autograd routinely hands us a strided gradient
-    # (e.g. through a preceding transpose / broadcast, as ``sum()``'s does).
+    # ``isend`` rejects non-contiguous tensors, and autograd can pass a strided
+    # ``grad_output``, e.g. the expanded gradient of a ``sum()`` loss.
     grad_output = grad_output.contiguous()
     buffer_x = get_preallocated_buffer(
         grad_output.shape, grad_output.dtype, local_rank, device
@@ -1329,7 +1328,6 @@ def xw_eightway(
             send_w_3.wait()
             send_w_5.wait()
             recv_w_5.wait()
-    # same for all
     cij0 = torch.matmul(xij, w0)
 
     match mod:
@@ -2392,7 +2390,6 @@ def fused_xw_xtw_eightway(
             send_w_3.wait()
             send_w_5.wait()
             recv_w_5.wait()
-    # same for all
     gi_cij0 = torch.matmul(grad_output, w0)
 
     match mod:

@@ -174,7 +174,8 @@ class _XWT(torch.autograd.Function):
         config = ctx.config
         model_group = ctx.model_group
 
-        # handle conversion if necessary here
+        # Under autocast, grad_output comes in the autocast dtype; run the
+        # backward in the weight's dtype so grad_weight matches the parameter.
         grad_output = grad_output.to(weight.dtype)
         input = input.to(weight.dtype)
         grad_input, grad_weight = config.mm_kernels[3](

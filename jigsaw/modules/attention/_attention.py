@@ -83,7 +83,7 @@ if JIGSAW_TE_AVAILABLE:
             _grad_lse: Optional[torch.Tensor],
             _grad_rng: Optional[torch.Tensor],
         ) -> tuple[Optional[torch.Tensor], ...]:
-            """dq/dk/dv straight from the kernel's backward -- no forward recompute."""
+            """dq/dk/dv straight from the kernel's backward, with no forward recompute."""
             q, k, v, out, lse, rng_state = ctx.saved_tensors
             bshd = q.shape  # [b, s, h, d]; forward merged (h, d) in its output
             dq, dk, dv = ctx.core.backward(
@@ -155,7 +155,7 @@ if JIGSAW_TE_AVAILABLE:
 def attn_core_dtype(x: torch.Tensor) -> torch.dtype:
     """Return the dtype of the attention core.
 
-    The autocast dtype under autocast, else the input dtype -- except fp32/fp64 on
+    The autocast dtype under autocast, else the input dtype, except fp32/fp64 on
     CUDA, which runs in bf16 (flash rejects fp32; fp16 would need loss scaling).
 
     Parameters
@@ -190,7 +190,7 @@ class DistributedAttention(torch.nn.Module):
     Three mutually exclusive schemes, selected by ``ring`` / ``ulysses``: plain
     (each rank attends to its own local sequence shard), ring (K/V circulate
     around ``spatial_group``), or Ulysses (a single all-to-all trades sequence
-    shard for head shard -- flat, or hierarchical when ``ulysses_gpus_per_node``
+    shard for head shard; flat, or hierarchical when ``ulysses_gpus_per_node``
     is also set: Ulysses within groups of ranks, nested in a ring across them).
 
     Parameters
@@ -236,7 +236,7 @@ class DistributedAttention(torch.nn.Module):
     ulysses_inter_offload : Offload | str
         ``offload`` of the hierarchical scheme's outer ring.
     attn_backend : AttnBackend | str
-        Attention core implementation -- ``"te"``, ``"sdpa"`` (default) or
+        Attention core implementation: ``"te"``, ``"sdpa"`` (default) or
         ``"math"``. See :class:`._config.AttnBackend`.
     dtype : torch.dtype
         Data type of the parameters.
@@ -247,7 +247,6 @@ class DistributedAttention(torch.nn.Module):
         Whether the output projection has a bias.
     """
 
-    # type hints
     qkv: torch.nn.Linear | linear.DistributedLinear
     head_concat: torch.nn.Linear | linear.DistributedLinear
 
@@ -487,7 +486,7 @@ class DistributedAttention(torch.nn.Module):
                 "ring attention with channel/tensor parallelism or qk_norm "
                 f"(channel_group.size()={self.channel_group.size()}, "
                 f"qk_norm={self.qk_norm}) needs send_in_forward=KV and "
-                "save_for_backward=KV -- the qkv projection is sharded across "
+                "save_for_backward=KV: the qkv projection is sharded across "
                 "the channel group and/or the normalized keys only exist "
                 "after the local projection, so the ring cannot recompute "
                 "K/V from a circulated x chunk. Got "
@@ -633,7 +632,7 @@ class DistributedAttention(torch.nn.Module):
             raise ValueError(
                 "attn_backend='te' does not support attn_mask: the TE kernels "
                 "this core calls (fused_attn_fwd/bwd) have no fused path for an "
-                "arbitrary mask -- only no_mask/causal/padding attn_mask_types. "
+                "arbitrary mask, only no_mask/causal/padding attn_mask_types. "
                 "Use attn_backend='sdpa' or 'math' for masked (e.g. shifted-"
                 "window) attention."
             )
@@ -700,7 +699,7 @@ class DistributedAttention(torch.nn.Module):
 
         The resolved TE kernel (``bshd``-native) or torch SDPA (transposed to
         ``bhsd`` around the call and back). Used as the inner core of flat
-        Ulysses -- over the whole gathered sequence.
+        Ulysses, over the whole gathered sequence.
         """
         if self.te:
 
@@ -755,8 +754,8 @@ class DistributedAttention(torch.nn.Module):
                 qc,
                 kc,
                 vc,
-                qc.detach(),  # dummy x -- unused with send_in_forward=KV
-                self.qkv.weight,  # dummy w_qkv -- unused with send_in_forward=KV
+                qc.detach(),  # dummy x: unused with send_in_forward=KV
+                self.qkv.weight,  # dummy w_qkv: unused with send_in_forward=KV
                 self.scale,
                 dropout_p,
                 self._uly_inter_group,

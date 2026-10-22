@@ -1,11 +1,9 @@
-"""Layout type and the shared half of the bshd conversion for the TE cores.
+"""Layout type and the conversion back from ``bshd`` for the TE cores.
 
-Both :mod:`.cudnn` and :mod:`.flash` speak ``bshd`` natively and accept a
-caller ``layout`` of ``"bhsd"`` (the ring's convention) or ``"bshd"``. Only
-the "back to caller layout" transpose is identical between them, so just that
-piece lives here -- the "into bshd" direction is deliberately *not* shared:
-cuDNN needs its input contiguous, FA2 needs it not to be (see
-:func:`.flash._to_bshd`).
+:mod:`.cudnn` and :mod:`.flash` compute in ``bshd`` and accept a ``layout`` of
+``"bhsd"`` (the ring's convention) or ``"bshd"``. Only the conversion back to
+the caller's layout is shared. Each core converts into ``bshd`` itself: cuDNN
+needs a contiguous copy, while FA2 only needs ``stride(-1) == 1`` and skips it.
 """
 
 from __future__ import annotations

@@ -1481,7 +1481,6 @@ def xw_eightway(
             send_w_3.wait()
             send_w_5.wait()
             recv_w_5.wait()
-    # same for all
     cij0 = torch.matmul(xij, w0)
 
     match mod:
@@ -2498,7 +2497,6 @@ def fused_xw_xtw_eightway(
             send_w_3.wait()
             send_w_5.wait()
             recv_w_5.wait()
-    # same for all
     gi_cij0 = torch.matmul(grad_output, w0)
 
     match mod:

@@ -350,6 +350,6 @@ class DistributedGroupNorm(torch.nn.Module):
 
         Notes
         -----
-        This method calculates the number of parameters based on the value of self.num_channels instead of counting the number of elements of the local parameters and scaling according to the respective communication group sizes.
+        Computed from ``num_channels``, not from the local shards.
         """
         return sum(self.num_channels for p in (self.weight, self.bias) if p is not None)

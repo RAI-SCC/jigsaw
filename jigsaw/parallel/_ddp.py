@@ -30,8 +30,8 @@ def wrap_ddp(
     ``mesh[dp_key]`` and averages gradients over it. The result is checked with
     :func:`check_ddp`.
 
-    Optional: a hand-built ``DistributedDataParallel(module,
-    process_group=mesh[dp_key])`` is checked the same way in its first forward.
+    A ``DistributedDataParallel(module, process_group=mesh[dp_key])`` built by
+    hand is checked the same way, in its first forward.
 
     Parameters
     ----------

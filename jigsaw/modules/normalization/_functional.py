@@ -42,7 +42,6 @@ class _LayerNorm(torch.autograd.Function):
             output are kept for the backward pass.
         """
         x, weight, bias = promote_to_fp32_under_autocast(x, weight, bias)
-        # Compute mean and variance locally
         local_mean = x.mean(dim=-1, keepdim=True)
         local_var = x.var(dim=-1, keepdim=True, unbiased=False)
 
@@ -52,7 +51,6 @@ class _LayerNorm(torch.autograd.Function):
         var = local_var + (local_mean - mean) ** 2
         dist.all_reduce(var, op=dist.ReduceOp.AVG, group=channel_group)
 
-        # Normalize
         x_norm = (x - mean) / torch.sqrt(var + eps)
 
         # Apply affine transformation
@@ -73,7 +71,6 @@ class _LayerNorm(torch.autograd.Function):
         ctx.channel_group = channel_group  # type: ignore[attr-defined]
         ctx.has_bias = bias is not None  # type: ignore[attr-defined]
 
-        # Save for backward
         ctx.save_for_backward(x_norm, weight, torch.sqrt(var))
 
     @staticmethod
@@ -172,7 +169,6 @@ class _LayerNorm(torch.autograd.Function):
         g_gx_handle.wait()
         x_g_x_handle.wait()
 
-        # LayerNorm backward formula
         grad_x = (1.0 / std) * (
             grad_x_norm - grad_x_norm_mean - x_norm * x_grad_x_term / n
         )
@@ -212,8 +208,6 @@ class _LayerNormNoAffine(torch.autograd.Function):
             backward pass.
         """
         (x,) = promote_to_fp32_under_autocast(x)
-        # Compute mean and variance locally
-
         local_mean = x.mean(dim=-1, keepdim=True)
         local_var = x.var(dim=-1, keepdim=True, unbiased=False)
 
@@ -222,12 +216,10 @@ class _LayerNormNoAffine(torch.autograd.Function):
 
         # Combine each shard's *biased* variance (matching plain LayerNorm, which
         # divides by n rather than n-1) via the shifted-mean identity, then average
-        # across equally-sized shards -- same combination as _LayerNorm,
-        # minus the affine transform.
+        # across equally-sized shards, as in _LayerNorm.
         var = local_var + (local_mean - mean) ** 2
         dist.all_reduce(var, op=dist.ReduceOp.AVG, group=channel_group)
 
-        # Normalize
         x_norm = (x - mean) / torch.sqrt(var + eps)
 
         return x_norm, var + eps  # type: ignore[return-value]
@@ -245,7 +237,6 @@ class _LayerNormNoAffine(torch.autograd.Function):
         ctx.mark_non_differentiable(var)
         ctx.channel_group = channel_group  # type: ignore[attr-defined]
         std = torch.sqrt(var)
-        # Save for backward
         ctx.save_for_backward(x_norm, std)
 
     @staticmethod
@@ -309,7 +300,6 @@ class _LayerNormNoAffine(torch.autograd.Function):
         g_gx_handle.wait()
         x_g_x_handle.wait()
 
-        # LayerNorm backward formula
         grad_x = (1.0 / std) * (
             grad_output - grad_x_norm_mean - x_norm * x_grad_x_term / n
         )
@@ -370,7 +360,7 @@ class _GroupNorm(torch.autograd.Function):
         n, total = stats.unbind(dim=-1)
         mean = (total / n).unsqueeze(-1)
 
-        # Centre on the global mean before squaring, as two-pass variance.
+        # Center on the global mean before squaring, as two-pass variance.
         centred = xg - mean
         var = (centred * centred).sum(dim=-1, keepdim=True)
         _all_reduce_sum(var, spatial_groups)

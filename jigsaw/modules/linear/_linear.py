@@ -77,7 +77,7 @@ class DistributedLinear(torch.nn.Module):
         # Global (unsharded) weight/bias shape, torch.nn.Linear layout ``(out,
         # in)``. ``reset_parameters`` keys the init distribution off these, so a
         # freshly built layer is drawn from the same distribution as the
-        # equivalent ``torch.nn.Linear`` -- the row-/column-group shard sizes
+        # equivalent ``torch.nn.Linear``. The row-/column-group shard sizes
         # only decide which slice of that distribution this rank samples.
         self.global_weight_shape = (out_dim, in_dim)
         self.global_bias_shape = (out_dim,) if bias else None

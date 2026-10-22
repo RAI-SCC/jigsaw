@@ -313,7 +313,7 @@ def distributed_permute(
         Local input.
     dims : tuple[int, ...]
         Target axis order, as in ``torch.permute``. Must feed ``row_dim`` and ``col_dim``
-        from ``{row_dim, col_dim}`` -- either unchanged or swapped with each other.
+        from ``{row_dim, col_dim}``, either unchanged or swapped with each other.
     row_dim : int
         Axis of ``x`` sharded by ``mesh["row"]``.
     col_dim : int
@@ -342,7 +342,7 @@ def distributed_permute(
         raise ValueError(
             f"dims {dims} moves an axis other than row_dim={row_dim}/col_dim={col_dim} "
             "into one of those two positions (or moves one of them out); "
-            "distributed_permute only knows how to reshard those two axes -- the others "
+            "distributed_permute only knows how to reshard those two axes; the others "
             "may be sharded by a mesh it has no knowledge of"
         )
 

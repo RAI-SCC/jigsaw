@@ -135,13 +135,13 @@ def halo_gather(
         peer_lo, peer_hi, _, _ = needed_input_span(
             peer, group_size, local_n, kernel, stride, padding, dilation
         )
-        # positions I own that peer needs
+        # positions this rank owns that peer needs
         s0 = max(peer_lo, rank * local_n)
         sn = max(min(peer_hi, (rank + 1) * local_n) - s0, 0)
         send_sizes.append(sn)
         col = s0 - rank * local_n
         send_parts.append(x_full.narrow(axis, col, sn) if sn > 0 else empty)
-        # positions of my span that peer owns (clipped to the real domain)
+        # positions of this rank's span that peer owns (clipped to the real domain)
         r0 = max(lo, peer * local_n, 0)
         recv_sizes.append(max(min(hi, (peer + 1) * local_n, global_n) - r0, 0))
         recv_start.append(r0)
@@ -226,12 +226,12 @@ def halo_scatter_add(
     recv_sizes: list[int] = []
     recv_off: list[int] = []
     for peer in range(group_size):
-        # part of my span that peer owns -> send it back to peer
+        # part of this rank's span that peer owns -> send it back to peer
         s0 = max(lo, peer * local_in_size, 0)
         sn = max(min(hi, (peer + 1) * local_in_size, global_n) - s0, 0)
         send_sizes.append(sn)
         send_parts.append(g_x_need.narrow(axis, s0 - lo, sn) if sn > 0 else empty)
-        # part of peer's span that I own -> receive and accumulate
+        # part of peer's span that this rank owns -> receive and accumulate
         peer_lo, peer_hi, _, _ = needed_input_span(
             peer, group_size, local_in_size, kernel, stride, padding, dilation
         )

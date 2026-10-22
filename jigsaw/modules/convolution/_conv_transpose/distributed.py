@@ -38,7 +38,7 @@ def _grad_input_weight(
         grad_output.to(weight.dtype),  # handles autocast
         x_full,
         weight,
-        None,  # bias_sizes -- grad_bias handled separately
+        None,  # bias_sizes: grad_bias is handled separately
         list(stride),
         list(padding),
         list(dilation),

@@ -71,7 +71,6 @@ class DistributedLayerNorm(torch.nn.Module):
         self.eps = eps
 
         if elementwise_affine:
-            # Learnable parameters
             self.weight = torch.nn.Parameter(
                 torch.ones(local_dim, device=device, dtype=dtype)
             )
@@ -102,7 +101,7 @@ class DistributedLayerNorm(torch.nn.Module):
 
         Notes
         -----
-        This method calculates the number of parameters based on the value of self.normalized_dim instead of counting the number of elements of the local parameters and scaling according to the respective communication group sizes.
+        Computed from ``normalized_dim``, not from the local shards.
         """
         return sum(
             self.normalized_dim for p in (self.weight, self.bias) if p is not None
@@ -131,12 +130,10 @@ class DistributedLayerNorm(torch.nn.Module):
         device : torch.device
             Device of the converted module.
         row_kw : str
-            Key of the row process group. The converted layer replicates its
-            weight and bias across this group, and reduces their gradients
-            over it -- correct only if the input is also replicated (not
-            sharded) across the same group, as it is for the row/column split
-            used by :func:`jigsaw.convert.convert_to_jigsaw`. Unused if
-            ``model`` has no weight or bias.
+            Key of the row process group, across which the input's leading
+            dimensions are split. The weight and bias are replicated across it
+            and their gradients summed over it. Unused if ``model`` has no
+            weight or bias.
         col_kw : str
             Key of the column process group across which the normalized
             dimension is partitioned.

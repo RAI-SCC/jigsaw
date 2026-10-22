@@ -372,11 +372,10 @@ class RingAttentionConfig:
         device-based pick (flash on CUDA, math on CPU); ``TE`` uses the
         TransformerEngine fused core; ``MATH`` the unfused reference.
     overlap_comm : bool
-        Put the ring's K/V circulation -- and the backward dK/dV relay,
-        where the accumulation shape allows it -- on a dedicated CUDA
-        stream with double buffering, so each transfer overlaps the
-        attention core on the default stream (the ``cp_stream`` trick
-        Transformer Engine uses). CUDA only; elsewhere it is inert and the
+        Put the ring's K/V circulation, and the backward dK/dV relay where
+        the accumulation shape allows it, on a dedicated CUDA stream with
+        double buffering, so each transfer overlaps the attention core on
+        the default stream. CUDA only; elsewhere it is inert and the
         synchronous path runs unchanged. K/V circulation is overlapped for
         every ``send_op`` except ``BROADCAST`` (a fresh collective each
         step, nothing to prefetch ahead of); the dK/dV relay is overlapped
@@ -437,7 +436,7 @@ class RingAttentionConfig:
         )
 
         # Layout the ring circulates q/k/v/out in, and hands to the inner core.
-        # The TE cores (cuDNN / FA2) are natively bshd -- carrying the ring in
+        # The TE cores (cuDNN / FA2) compute in bshd; carrying the ring in
         # bshd for them means zero transposes per chunk; SDPA / math are bhsd.
         self.core_layout = "bshd" if self.attn_backend == AttnBackend.TE else "bhsd"
 

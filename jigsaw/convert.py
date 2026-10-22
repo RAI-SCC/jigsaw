@@ -241,7 +241,7 @@ def convert_to_jigsaw(
         :class:`~jigsaw.modules.DistributedLayerNorm`. Leave
         this at the default unless the normalized dimension is *not* sharded
         at the point where the layer norm sits (e.g. it is never split across
-        ``col_kw``) -- a plain ``nn.LayerNorm`` is only correct there, and
+        ``col_kw``): a plain ``nn.LayerNorm`` is only correct there, and
         skipping the distributed version avoids its extra all-reduces. With a
         sharded normalized dimension, turning this off silently computes
         statistics on the local shard only, which is wrong.
@@ -255,7 +255,7 @@ def convert_to_jigsaw(
         functionally inside ``forward`` (e.g. ``torch.logsumexp``) are not
         visible to this check.
     non_safe : bool
-        Allow modules in ``shard_unsafe_modules`` -- torch modules known to
+        Allow modules in ``shard_unsafe_modules``: torch modules known to
         reduce over, mix along or reshape a dimension (softmax variants, batch
         norm, pooling, padding, losses, embeddings, RNNs, ...) that jigsaw does
         not convert. By default any such module raises a ``ValueError``. With

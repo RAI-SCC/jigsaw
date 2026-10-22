@@ -461,7 +461,7 @@ class _LocalChunkProviderOverlap(_LocalChunkProvider):
         self._pending = into
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return chunk ``step`` -- local on step 0, else adopted off the comm stream."""
+        """Return chunk ``step``: local on step 0, else adopted off the comm stream."""
         if step == 0:
             kv = self._kv0()
             send_buf = self.x if self.config.send_in_forward == SendForward.X else kv

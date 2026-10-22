@@ -61,10 +61,8 @@ class DistributedSoftmax(torch.nn.Module):
         row_kw : str
             Key of the row process group. Unused.
         col_kw : str
-            Key of the column process group across which ``model.dim`` is
-            partitioned -- correct only when the input is actually sharded
-            along that dimension across ``col_kw``, as it is for the
-            row/column split used by :func:`jigsaw.convert.convert_to_jigsaw`.
+            Key of the column process group across which ``model.dim`` of the
+            input is split, as in :func:`jigsaw.convert.convert_to_jigsaw`.
         model_kw : str
             Key of the model process group. Unused.
         **kwargs : Any
@@ -79,10 +77,8 @@ class DistributedSoftmax(torch.nn.Module):
         Raises
         ------
         NotImplementedError
-            If ``model.dim`` is ``None``. Plain ``nn.Softmax`` then infers the
-            dimension from the input shape at call time (with a deprecation
-            warning); replicating that heuristic here without seeing the
-            input would risk silently normalizing over the wrong axis.
+            If ``model.dim`` is ``None``: ``nn.Softmax`` then infers the
+            dimension from the input, which the converter cannot see.
         """
         if model.dim is None:
             raise NotImplementedError(

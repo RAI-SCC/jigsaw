@@ -105,7 +105,7 @@ class _ConvNd(torch.autograd.Function):
     def backward(
         ctx: torch.autograd.function.FunctionCtx,
         grad_output: torch.Tensor,
-        grad_x_aug: None,  # No gradient for x_aug
+        grad_x_aug: None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
