@@ -59,7 +59,10 @@ def clip_grad_norm_(
     Returns
     -------
     torch.Tensor
-        Total norm of the gradients before clipping, as one vector.
+        Total norm of all gradients before clipping, viewed as one vector. Its
+        dtype is that of all ``parameters`` promoted together and to at least
+        float32, so a half-precision norm does not overflow; parameters without
+        a gradient count, so it matches across ranks.
 
     Raises
     ------
@@ -73,13 +76,16 @@ def clip_grad_norm_(
         parameters = [parameters]
     params: list[torch.Tensor] = []
     grads: list[torch.Tensor] = []
+    # From every parameter, with a gradient or not: ranks holding the same
+    # parameters then return the same dtype.
+    dtype = torch.float32
     for p in parameters:
+        dtype = torch.promote_types(dtype, p.dtype)
         if p.grad is not None:
             params.append(p)
             grads.append(p.grad)
     norm_type = float(norm_type)
     device = grads[0].device if grads else get_device_of_process_group(group)
-    dtype = grads[0].dtype if grads else torch.get_default_dtype()
 
     with torch.no_grad():
         # Each gradient's norm is in at least float32 (see _norms); the sum over

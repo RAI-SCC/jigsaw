@@ -156,16 +156,41 @@ def test_error_if_nonfinite(device: torch.device) -> None:
 
 
 def test_half_precision_norm_does_not_overflow(device: torch.device) -> None:
-    """A float16 gradient whose norm exceeds float16's range still clips."""
+    """A float16 gradient whose norm exceeds float16's range still clips.
+
+    The norm comes back in float32, so it is finite too.
+    """
     # norm 1000 * sqrt(10000) = 1e5 > 65504; each element and the clipped
     # result (1000 / 1e5 = 0.01) are representable
     p = _with_grad(torch.full((10000,), 1000.0, dtype=torch.float16, device=device))
     parallel.mark_replicated(p, dist.group.WORLD)
 
-    parallel.clip_grad_norm_([p], 1.0, dist.group.WORLD)
+    total = parallel.clip_grad_norm_([p], 1.0, dist.group.WORLD)
 
+    group = dist.group.WORLD
+    assert total.dtype == torch.float32
+    ref = torch.tensor(1e5, device=device)
+    # float32 accumulation of 10000 squares of 1e6
+    assert_close("norm", total, ref, 0.0, 1e-5, device, group)
     expected = torch.full_like(p.grad, 0.01)
-    assert_close("grad", p.grad, expected, 0.0, 1e-3, device, dist.group.WORLD)
+    assert_close("grad", p.grad, expected, 0.0, 1e-3, device, group)
+
+
+def test_norm_dtype_promotes_over_all_parameters(device: torch.device) -> None:
+    """The norm's dtype comes from every parameter, also those without grads.
+
+    Rank 0's float64 parameter has no gradient, yet every rank returns float64.
+    """
+    half = _with_grad(torch.ones(4, dtype=torch.bfloat16, device=device))
+    wide = torch.nn.Parameter(torch.ones(2, dtype=torch.float64, device=device))
+    if dist.get_rank() != 0:
+        wide.grad = torch.ones_like(wide)
+    for p in (half, wide):
+        parallel.mark_replicated(p, dist.group.WORLD)
+
+    total = parallel.clip_grad_norm_([half, wide], 100.0, dist.group.WORLD)
+
+    assert total.dtype == torch.float64
 
 
 class _Model(torch.nn.Module):
