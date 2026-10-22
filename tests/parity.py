@@ -28,7 +28,7 @@ reference checks in ``tests/modules/convolution``. ``ShardSpec`` is keyed by mes
 *name*, so the same harness drives a 2-D ``row`` x ``col`` mesh and an N-way spatial mesh
 (``sh``/``sw``/``sd`` + ``col``) without change. ``assert_close`` / ``all_ranks_ok`` give
 every rank the same verdict so a mismatch fails the job instead of hanging it; those two
-are re-used directly by the convolution reference checks.
+are reused directly by the convolution reference checks.
 """
 
 import contextlib

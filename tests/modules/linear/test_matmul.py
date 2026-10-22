@@ -23,7 +23,6 @@ class TestDistributedMatMul:
         model = DistributedMatMulXWT(
             local_rank=process_mesh_dict["model"].rank(),
             device=device,
-            parallelism=process_mesh_dict["model"].size(),
             model_group=process_mesh_dict["model"],
         )
 
@@ -48,7 +47,6 @@ class TestDistributedMatMul:
         model = DistributedMatMulXW(
             local_rank=process_mesh_dict["model"].rank(),
             device=device,
-            parallelism=process_mesh_dict["model"].size(),
             model_group=process_mesh_dict["model"],
         )
 
@@ -73,7 +71,6 @@ class TestDistributedMatMul:
         model = DistributedMatMulXTW(
             local_rank=process_mesh_dict["model"].rank(),
             device=device,
-            parallelism=process_mesh_dict["model"].size(),
             model_group=process_mesh_dict["model"],
         )
 
