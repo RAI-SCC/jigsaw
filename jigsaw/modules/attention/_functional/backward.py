@@ -209,7 +209,7 @@ def ring_backward(
     #     before each step's core.
     #   * `dkv_overlap`: the dK/dV relay (`_DkvRelay`), which also needs
     #     SEND_DKV. HYBRID_BROADCAST's accumulation (an intra-group all-reduce
-    #     plus a conditional outer-ring hop) doesn't fit the relay, so it stays
+    #     plus a conditional outer-ring send) doesn't fit the relay, so it stays
     #     synchronous even though its K/V provider overlaps.
     kv_overlap = (
         ring_config.overlap_active
@@ -485,9 +485,9 @@ def _hybrid_dkv_relay_peers(topo: HybridTopology, step: int) -> tuple[int, int]:
     that owner, and receive (from the mirror-image rank) the partial destined
     for our own chunk.
 
-    Unlike the K/V hops, this one moves along *both* axes at once (a different
-    node and a different node-local index), so it has no counterpart in either
-    sub-group and stays in ring-position space over the full ring group.
+    Unlike the K/V sends, this one changes both the intra group and the local
+    index at once, so neither sub-group can address it and it uses ranks of
+    the full ring group.
     """
     node_step = step // topo.gpus_per_node
     send_to = topo.rank_at(topo.node_idx - node_step, topo.local_idx + step)
@@ -571,7 +571,7 @@ class _DkvRelay:
     pairs alternate.
 
     Step 0 stays local, as in :func:`_accumulate_dkv_send`. P2P/all-to-all send
-    the partial ``step`` hops along the ring; ``HYBRID_P2P`` /
+    the partial ``step`` ranks along the ring; ``HYBRID_P2P`` /
     ``HYBRID_ALLTOALL`` use :func:`_hybrid_dkv_relay_peers`, which moves along
     the outer ring and within the intra group at once. ``BROADCAST`` and
     ``HYBRID_BROADCAST`` never reach this class (see ``all_reduce_dkv`` and
@@ -682,11 +682,12 @@ def _accumulate_dkv_hybrid_broadcast(
     dist.all_reduce(dkv, op=dist.ReduceOp.SUM, group=topo.intranode_group)
 
     if node_step != 0:
-        # Inter-node ring hop as a permutation of `internode_group`: every rank
-        # hands its node-sum to its counterpart at node ``node_idx - node_step``
-        # and receives from ``node_idx + node_step``. Only node-local rank
-        # ``phase`` ends up with the partial for a chunk it owns; the rest take
-        # part to keep the collective whole and discard what they receive.
+        # Outer-ring exchange as a permutation of `internode_group`: every rank
+        # sends its intra-group sum to its counterpart in intra group
+        # ``node_idx - node_step`` and receives from ``node_idx + node_step``.
+        # Only local rank ``phase`` gets the partial for a chunk it owns; the
+        # rest take part to keep the collective whole and discard what they
+        # receive.
         recv = torch.empty_like(dkv)
         recv, _ = ring_config.p2p_fn(
             dkv,
