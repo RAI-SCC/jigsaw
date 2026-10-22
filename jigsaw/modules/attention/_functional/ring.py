@@ -102,10 +102,12 @@ class HybridTopology:
 
     Each ``intranode_group`` has ``gpus_per_node`` ranks (typically, but not
     necessarily, one node). Ring position ``p`` owns sequence chunk ``p`` and
-    sits at ``(p // gpus_per_node, p % gpus_per_node)``. :meth:`intranode_peer`
-    / :meth:`internode_peer` return ranks within the sub-groups;
-    :meth:`intra_peer`, :meth:`inter_peer` and :meth:`rank_at` return ring
-    positions over the full group.
+    sits at ``(p // gpus_per_node, p % gpus_per_node)``.
+
+    The peer methods take ``offset``, the number of steps along a ring (negative
+    goes backwards). :meth:`intra_peer`, :meth:`inter_peer` and :meth:`rank_at`
+    return ring positions over the full group; :meth:`intranode_peer` and
+    :meth:`internode_peer` return ranks within the sub-groups.
     """
 
     n_nodes: int
@@ -144,64 +146,20 @@ class HybridTopology:
         """
         return self._grid[node % self.n_nodes][local % self.gpus_per_node]
 
-    def intra_peer(self, offset: int) -> int:
-        """Return the ring position ``offset`` steps along the intra-group ring.
-
-        Parameters
-        ----------
-        offset : int
-            Steps along the ring; negative goes backwards.
-
-        Returns
-        -------
-        int
-            Ring position over the full group.
-        """
+    def intra_peer(self, offset: int) -> int:  # numpydoc ignore=PR01,RT01
+        """Return the ring position ``offset`` steps along the intra-group ring."""
         return self.rank_at(self.node_idx, self.local_idx + offset)
 
-    def inter_peer(self, offset: int) -> int:
-        """Return the ring position ``offset`` steps along the outer ring.
-
-        Parameters
-        ----------
-        offset : int
-            Steps along the ring; negative goes backwards.
-
-        Returns
-        -------
-        int
-            Ring position over the full group.
-        """
+    def inter_peer(self, offset: int) -> int:  # numpydoc ignore=PR01,RT01
+        """Return the ring position ``offset`` steps along the outer ring."""
         return self.rank_at(self.node_idx + offset, self.local_idx)
 
-    def intranode_peer(self, offset: int) -> int:
-        """Rank *within* ``intranode_group``, ``offset`` steps along its ring.
-
-        Parameters
-        ----------
-        offset : int
-            Steps along the ring; negative goes backwards.
-
-        Returns
-        -------
-        int
-            Group rank in ``intranode_group``.
-        """
+    def intranode_peer(self, offset: int) -> int:  # numpydoc ignore=PR01,RT01
+        """Return the rank in ``intranode_group`` ``offset`` steps along its ring."""
         return (self.local_idx + offset) % self.gpus_per_node
 
-    def internode_peer(self, offset: int) -> int:
-        """Rank *within* ``internode_group``, ``offset`` steps along its ring.
-
-        Parameters
-        ----------
-        offset : int
-            Steps along the ring; negative goes backwards.
-
-        Returns
-        -------
-        int
-            Group rank in ``internode_group``.
-        """
+    def internode_peer(self, offset: int) -> int:  # numpydoc ignore=PR01,RT01
+        """Return the rank in ``internode_group`` ``offset`` steps along its ring."""
         return (self.node_idx + offset) % self.n_nodes
 
 
