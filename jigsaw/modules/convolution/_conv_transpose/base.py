@@ -229,7 +229,9 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         -----
         This method calculates the number of parameters based on the global weight and bias shape calculated at initialization instead of counting the number of elements of the local parameters and scaling according to the respective communication group sizes.
         """
-        num_param = 0 if self.bias is None else math.prod(self.self.global_bias_shape)
+        num_param = (
+            0 if self.bias is None else math.prod(cast(tuple, self.global_bias_shape))
+        )
         return num_param + math.prod(self.global_weight_shape)
 
     @classmethod

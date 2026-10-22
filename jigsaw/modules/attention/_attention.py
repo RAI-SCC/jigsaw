@@ -1087,8 +1087,9 @@ class DistributedAttention(torch.nn.Module):
 
         global_heads = self.heads * self.channel_group.size()
 
-        return 4 * (self.embed_dim // global_heads)  # 2 norms (q and k) * 2 parameters (scale and bias) * normalized_dim
-
+        return 4 * (
+            self.embed_dim // global_heads
+        )  # 2 norms (q and k) * 2 parameters (scale and bias) * normalized_dim
 
 
 class Attention(torch.nn.Module):
