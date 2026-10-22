@@ -37,10 +37,7 @@ def _combine_dropout_seed(
     ) % _SEED_MODULUS
 
 
-#: Ring q/k/v/out layouts. ``"bhsd"`` is the ring's historical convention (SDPA /
-#: math cores); ``"bshd"`` is what the TE cores speak natively, so the TE ring
-#: carries it end to end and skips every per-chunk transpose. Set on
-#: :class:`~jigsaw.modules.RingAttentionConfig.core_layout`.
+#: Sequence axis per ring layout: ``"bhsd"`` (SDPA / math) or ``"bshd"`` (TE).
 _SEQ_DIM = {"bhsd": 2, "bshd": 1}
 
 
@@ -97,34 +94,18 @@ def _compute_kv(
 
 
 # --------------------------------------------------------------------------- #
-# hybrid (intra-node + inter-node) ring topology
+# hybrid (intra-group + inter-group) ring topology
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class HybridTopology:
-    """Layout of a 1-D ring split into nodes of equal size.
+    """Layout of a 1-D ring split into equal intra groups.
 
-    The ring's ranks (``group.size()`` of them) are cut into ``n_nodes``
-    contiguous nodes of ``gpus_per_node`` ranks each. Ring position ``p``
-    (``0 <= p < group.size()``) owns global sequence chunk ``p`` and lives at
-    ``(p // gpus_per_node, p % gpus_per_node)``. Every peer lookup a hybrid ring
-    needs -- the next rank along the intra-node ring, the next along the
-    inter-node ring, or the rank at an arbitrary ``(node, local)`` -- is a table
-    lookup here, so callers never open-code ``// gpus_per_node`` /
-    ``% gpus_per_node`` arithmetic.
-
-    ``intranode_group`` / ``internode_group`` are the sub-groups containing this
-    rank, and are what every one-level hop -- the intra-node ring/broadcast and
-    the inter-node ring alike -- actually communicates over, so the two levels
-    sit on separate NCCL communicators and can progress independently. Each is
-    built in the obvious order (:func:`get_hybrid_topology`), so this rank's
-    position is ``local_idx`` in ``intranode_group`` and ``node_idx`` in
-    ``internode_group``; :meth:`intranode_peer` / :meth:`internode_peer` return
-    peers in that space.
-
-    :meth:`intra_peer` / :meth:`inter_peer` / :meth:`rank_at` stay in ring-position
-    space over the *full* group -- still needed by hops that move along both axes
-    at once (the backward dK/dV relay, which hands a partial straight to its
-    owner across nodes *and* local indices) and by global-chunk-id arithmetic.
+    Each ``intranode_group`` has ``gpus_per_node`` ranks (typically, but not
+    necessarily, one node). Ring position ``p`` owns sequence chunk ``p`` and
+    sits at ``(p // gpus_per_node, p % gpus_per_node)``. :meth:`intranode_peer`
+    / :meth:`internode_peer` return ranks within the sub-groups;
+    :meth:`intra_peer`, :meth:`inter_peer` and :meth:`rank_at` return ring
+    positions over the full group.
     """
 
     n_nodes: int
@@ -194,11 +175,7 @@ class HybridTopology:
         return self.rank_at(self.node_idx + offset, self.local_idx)
 
     def intranode_peer(self, offset: int) -> int:
-        """Rank *within* ``intranode_group``, ``offset`` steps along the node's ring.
-
-        ``intranode_group`` lists this node's ranks in node-local-index order, so
-        its rank ``i`` is node-local index ``i`` and this rank sits at
-        ``local_idx``.
+        """Rank *within* ``intranode_group``, ``offset`` steps along its ring.
 
         Parameters
         ----------
@@ -213,10 +190,7 @@ class HybridTopology:
         return (self.local_idx + offset) % self.gpus_per_node
 
     def internode_peer(self, offset: int) -> int:
-        """Rank *within* ``internode_group``, ``offset`` steps along the node ring.
-
-        ``internode_group`` lists its members in node order, so its rank ``i`` is
-        node ``i`` and this rank sits at ``node_idx``.
+        """Rank *within* ``internode_group``, ``offset`` steps along its ring.
 
         Parameters
         ----------
@@ -242,7 +216,7 @@ def get_hybrid_topology(group: dist.ProcessGroup, gpus_per_node: int) -> HybridT
     group : dist.ProcessGroup
         Process group of the ring.
     gpus_per_node : int
-        Number of consecutive ring ranks that share a node.
+        Size of each intra group (typically one node).
 
     Returns
     -------
@@ -278,15 +252,13 @@ def get_hybrid_topology(group: dist.ProcessGroup, gpus_per_node: int) -> HybridT
 
     node_idx, local_idx = divmod(dist.get_rank(group), gpus_per_node)
 
-    # Build only the two sub-groups this rank belongs to. Every other member of
-    # each sub-group derives the identical rank list, and
-    # `use_local_synchronization=True` keeps the barrier local to those members,
-    # so the rings at other mesh coordinates stay independent.
+    # Build only the two sub-groups this rank belongs to; local synchronization
+    # keeps rings at other mesh coordinates independent.
     #
-    # Member order is load-bearing: `intranode_group` is listed in node-local
-    # index order and `internode_group` in node order, which is what lets
-    # `HybridTopology.intranode_peer` / `.internode_peer` return a sub-group rank
-    # as plain modular arithmetic on `local_idx` / `node_idx`.
+    # Member order matters: rank i of `intranode_group` is local index i, and
+    # rank i of `internode_group` is group i. That is why `intranode_peer` /
+    # `internode_peer` can compute a peer's sub-group rank as
+    # `(local_idx + offset) % gpus_per_node` / `(node_idx + offset) % n_nodes`.
     intranode_group = dist.new_group(
         ranks=[ring_global_ranks[p] for p in grid[node_idx]],
         use_local_synchronization=True,
