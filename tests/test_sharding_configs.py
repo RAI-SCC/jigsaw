@@ -8,10 +8,10 @@ module and a jigsaw distributed one, and between process meshes:
 * ``merge_weights``      -- gather the sharded parameters into global tensors
 * ``reshard_parameters`` -- re-slice + rebind a jigsaw module onto a new mesh
 
-The reshard tests assert two things that the pre-existing
-``tests/test_weight_merging.py`` does not: (1) parameter *values* survive each
+The reshard tests assert that (1) parameter *values* survive each
 ``from_mesh -> to_mesh`` transition of ``_MESH_PAIRS_4``, with and without bias,
-for linear and 1-/2-/3-D (transposed) convs, and (2) after a reshard the module is *functionally identical* to one
+for linear and 1-/2-/3-D (transposed) convs, checked against the plain-torch
+reference, and (2) after a reshard the module is *functionally identical* to one
 obtained by converting straight onto ``to_mesh`` -- same forward, same
 backward -- which is what makes it safe to keep training on the new mesh.
 """
@@ -377,6 +377,47 @@ class TestReshardMatchesDirect:
                 1e-5,
                 device,
                 grp,
+            )
+
+
+# --------------------------------------------------------------------------- #
+# reshard_parameters: a multi-layer model, every layer moved onto one mesh
+# --------------------------------------------------------------------------- #
+class TestReshardModel:
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize(
+        "from_name", [m for m in MESHES_4 if m != "process_mesh_dict_4x1x1"]
+    )
+    def test_mlp_values(
+        self,
+        request: pytest.FixtureRequest,
+        device: torch.device,
+        from_name: str,
+        process_mesh_dict_4x1x1: dict,
+    ) -> None:
+        """Resharding each layer of a converted MLP onto the fully replicated mesh
+        keeps every layer's parameters."""
+        from_mesh = request.getfixturevalue(from_name)
+        to_mesh = process_mesh_dict_4x1x1
+        torch.manual_seed(1234)
+        ref = torch.nn.Sequential(
+            torch.nn.Linear(12, 12, device=device),
+            torch.nn.GELU(),
+            torch.nn.Linear(12, 12, device=device),
+        )
+        jm = convert.convert_to_jigsaw(copy.deepcopy(ref), from_mesh, device)
+        for module in jm.modules():
+            if hasattr(module, "reshard_parameters"):
+                module.reshard_parameters(from_mesh, to_mesh)
+
+        grp = to_mesh["model"]
+        for i in (0, 2):
+            w, b = jm[i].merge_weights(to_mesh)
+            assert_close(
+                f"layer {i} weight", w, ref[i].weight.data, 1e-6, 1e-6, device, grp
+            )
+            assert_close(
+                f"layer {i} bias", b, ref[i].bias.data, 1e-6, 1e-6, device, grp
             )
 
 
