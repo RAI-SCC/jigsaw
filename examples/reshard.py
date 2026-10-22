@@ -8,7 +8,7 @@ parameters from one mesh onto another:
     layer.reshard_parameters(from_mesh, to_mesh)
 
 which gathers the weights and keeps the slice the layer needs on the new mesh, rebinding
-the layer to the new groups. Both meshes must span the same ranks. Here we go from
+the layer to the new groups. Both meshes must span the same ranks. This example moves
 
     training   {"row": 2, "col": 2}             one replica on all 4 ranks
     inference  {"dp": 4, "row": 1, "col": 1}    4 replicas, each rank holds the full model

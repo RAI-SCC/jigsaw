@@ -228,8 +228,7 @@ class TestRingAttention:
         x = x.contiguous()
 
         qkv = x @ w_qkv.mT
-        # QKV shape: [B, Nlocal, 3*d*h]
-        # We need QKV to have shape: []
+        # [B, Nlocal, 3*h*d] -> q, k, v each [B, h, Nlocal, d]
         q_local, k_local, v_local = qkv.reshape(b, n_local, 3, h, d).permute(
             2, 0, 3, 1, 4
         )
@@ -635,8 +634,7 @@ def _check_ring_hybrid(
     x = x.contiguous()
 
     qkv = x @ w_qkv.mT
-    # QKV shape: [B, Nlocal, 3*d*h]
-    # We need QKV to have shape: []
+    # [B, Nlocal, 3*h*d] -> q, k, v each [B, h, Nlocal, d]
     q_local, k_local, v_local = qkv.reshape(b, n_local, 3, h, d).permute(2, 0, 3, 1, 4)
 
     q_local, k_local, v_local = (

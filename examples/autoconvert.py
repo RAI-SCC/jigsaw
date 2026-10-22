@@ -24,8 +24,8 @@ there, and worth it to skip the distributed version's extra all-reduces.
 The converted model then expects sharded inputs: the mesh's "row" axis splits the
 image width (or the token sequence), its "col" axis splits the channels.
 
-We check the conversion the way you should check yours: run the original model on the
-full input and compare against the gathered output of the converted one.
+The script checks the conversion the way you should check yours: run the original model
+on the full input and compare against the gathered output of the converted one.
 
 ``TinyTransformer`` below repeats the exercise for a pre-norm transformer block --
 ``nn.LayerNorm`` and ``jigsaw.modules.Attention`` convert the same way the conv and

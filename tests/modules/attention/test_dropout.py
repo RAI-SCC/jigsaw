@@ -230,7 +230,7 @@ _CORES = [
 class TestSdpaTeCoreDropoutReplay:
     """The SDPA-flash / TE cores must replay their forward dropout mask in backward.
 
-    The kernels draw an *opaque* mask, so we make it observable: with ``S == d``
+    The kernels draw an *opaque* mask, so the test makes it observable: with ``S == d``
     and ``V`` the identity (per ``(b, h)``), the attention output *is* the
     post-dropout probability matrix, and a differentiable reference built from
     that same recovered mask gives the ground-truth ``dq/dk/dv`` to compare
