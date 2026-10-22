@@ -191,7 +191,7 @@ class DistributedAttention(torch.nn.Module):
     (each rank attends to its own local sequence shard), ring (K/V circulate
     around ``spatial_group``), or Ulysses (a single all-to-all trades sequence
     shard for head shard -- flat, or hierarchical when ``ulysses_gpus_per_node``
-    is also set: intra-node Ulysses nested in an inter-node ring).
+    is also set: Ulysses within groups of ranks, nested in a ring across them).
 
     Parameters
     ----------
@@ -229,12 +229,12 @@ class DistributedAttention(torch.nn.Module):
         within groups of this many spatial ranks, nested in a ring across
         them. ``0`` (default) runs flat Ulysses.
     ulysses_inter_save_scope : SaveScope | str
-        ``save_scope`` of the hierarchical scheme's inter-node ring.
+        ``save_scope`` of the hierarchical scheme's outer ring.
     ulysses_inter_overlap : bool
-        ``overlap_comm`` of the hierarchical scheme's inter-node ring. The
+        ``overlap_comm`` of the hierarchical scheme's outer ring. The
         backward overlaps only with ``ulysses_inter_save_scope=LOCAL``.
     ulysses_inter_offload : Offload | str
-        ``offload`` of the hierarchical scheme's inter-node ring.
+        ``offload`` of the hierarchical scheme's outer ring.
     attn_backend : AttnBackend | str
         Attention core implementation -- ``"te"``, ``"sdpa"`` (default) or
         ``"math"``. See :class:`._config.AttnBackend`.
@@ -739,10 +739,10 @@ class DistributedAttention(torch.nn.Module):
     def _inter_node_ring_core(
         self, dropout_p: float
     ) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
-        """Build a P2P ring over the inter-node group on ``bshd`` ``q``/``k``/``v``.
+        """Build the outer P2P ring of hierarchical Ulysses on ``bshd`` ``q``/``k``/``v``.
 
-        The inner core of hierarchical Ulysses: rings the projected K/V around
-        the inter-node peers after the intra-node all-to-all.
+        Rings the projected K/V across the all-to-all groups, after the
+        all-to-all within each group.
         """
         layout = self._uly_ring_cfg.core_layout
         inter_rank = dist.get_rank(self._uly_inter_group)
