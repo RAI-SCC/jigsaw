@@ -17,7 +17,26 @@ _CONV_TRANSPOSE_FN = (F.conv_transpose1d, F.conv_transpose2d, F.conv_transpose3d
 
 
 class ConvTransposeNdConfig(VmapConfig):
-    """Selection of the transpose-convolution kernels of the forward and backward pass."""
+    """Selection of the transpose-convolution kernels of the forward and backward pass.
+
+    Parameters
+    ----------
+    channel_group : dist.ProcessGroup
+        Channel process group.
+    bias : torch.Tensor | None
+        Bias, if any.
+    kernel_size : tuple[int, ...]
+        Kernel size. Its length is the number of spatial dimensions.
+    stride : tuple[int, ...]
+        Stride.
+    device : torch.device
+        Device of the module.
+    channel_comm : str
+        Channel communication strategy: ``"all_gather"``, ``"p2p"``,
+        ``"all_to_all"`` or ``"auto"``.
+    groups : int
+        Number of convolution groups.
+    """
 
     # type hints
     n_spatial: int
@@ -34,26 +53,7 @@ class ConvTransposeNdConfig(VmapConfig):
         channel_comm: str = "auto",
         groups: int = 1,
     ):
-        """Initialize the configuration.
-
-        Parameters
-        ----------
-        channel_group : dist.ProcessGroup
-            Channel process group.
-        bias : torch.Tensor | None
-            Bias, if any.
-        kernel_size : tuple[int, ...]
-            Kernel size. Its length is the number of spatial dimensions.
-        stride : tuple[int, ...]
-            Stride.
-        device : torch.device
-            Device of the module.
-        channel_comm : str
-            Channel communication strategy: ``"all_gather"``, ``"p2p"``,
-            ``"all_to_all"`` or ``"auto"``.
-        groups : int
-            Number of convolution groups.
-        """
+        """Initialize the configuration."""
         self.n_spatial = len(kernel_size)
         self.channel_comm = resolve_channel_comm(channel_comm, device)
         self.groups = groups

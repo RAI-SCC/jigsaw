@@ -1,15 +1,9 @@
-"""Helpers for running the ring's point-to-point comm on a dedicated CUDA stream.
+"""Helpers for running the ring's communication on a dedicated CUDA stream.
 
-Gated by :attr:`~jigsaw.modules.RingAttentionConfig.overlap_comm`.
-Originally built for (and still used directly by) the plain ``SendOp.P2P`` /
-``SendOp.ALLTOALL`` chunk providers; :class:`PrefetchBuffer` below generalizes
-the same ping-pong pattern for the hybrid (intra-/inter-node) providers, which
-have more than one concurrent hop in flight. The pattern mirrors
-:mod:`jigsaw._core.offload` and the stream pairs in
-:mod:`jigsaw.modules.linear._distributed_matmul`: issue the transfer on a side
-stream, tag the buffers with ``record_stream`` so the caching allocator will not
-recycle them mid-flight, and hand back a CUDA event the consumer waits on from
-the compute stream instead of blocking the host on ``Work.wait()``.
+Gated by :attr:`~jigsaw.modules.RingAttentionConfig.overlap_comm`. Each
+transfer runs on a side stream, its buffers are ``record_stream``'d so the
+caching allocator does not recycle them mid-transfer, and the compute stream
+waits on a CUDA event instead of the host blocking on ``Work.wait()``.
 """
 
 from __future__ import annotations
@@ -19,9 +13,8 @@ from typing import Callable, Optional
 import torch
 import torch.distributed as dist
 
-#: ``produce()`` issues the async comm and returns ``(recv_buf, work)`` -- the
-#: exact shape :func:`jigsaw._core.comm.comm_1d_p2p` / :func:`~jigsaw._core.comm.comm_1d_alltoall`
-#: already return.
+#: Issues the async comm and returns ``(recv_buf, work)``, as
+#: :func:`jigsaw._core.comm.comm_1d_p2p` does.
 ProduceFn = Callable[[], "tuple[torch.Tensor, Optional[dist.Work]]"]
 
 
@@ -32,11 +25,27 @@ def issue_on_comm_stream(
 ) -> "tuple[torch.Tensor, Optional[dist.Work], torch.cuda.Event]":
     """Run ``produce`` on ``comm_stream`` and return ``(recv_buf, work, event)``.
 
-    ``comm_stream`` waits on the compute stream so the send source is ready, then
-    ``produce`` issues the NCCL op and ``work.wait()`` inserts a stream-side wait
-    for its completion (not a host block -- see :func:`consume` for how the
-    caller later waits on ``event``). ``keep_alive`` tensors are ``record_stream``'d
-    onto ``comm_stream`` so the allocator doesn't recycle them mid-transfer.
+    ``comm_stream`` first waits on the compute stream so the send source is
+    ready. ``work.wait()`` then makes ``comm_stream``, not the host, wait for the
+    transfer.
+
+    Parameters
+    ----------
+    comm_stream : torch.cuda.Stream
+        Side stream the transfer runs on.
+    produce : ProduceFn
+        Issues the comm op and returns ``(recv_buf, work)``.
+    keep_alive : tuple[torch.Tensor, ...]
+        Tensors the transfer reads, kept alive on ``comm_stream``.
+
+    Returns
+    -------
+    recv_buf : torch.Tensor
+        Buffer the transfer writes into.
+    work : dist.Work or None
+        Handle of the comm op, if it was asynchronous.
+    event : torch.cuda.Event
+        Recorded on ``comm_stream`` after the transfer; pass it to :func:`consume`.
     """
     compute = torch.cuda.current_stream()
     comm_stream.wait_stream(compute)
@@ -46,10 +55,8 @@ def issue_on_comm_stream(
             work.wait()
     for t in keep_alive:
         t.record_stream(comm_stream)
-    # `event` must be recorded only after `work.wait()` above has enqueued NCCL's
-    # completion wait onto `comm_stream` -- recording it any earlier would mark a
-    # point this stream reaches immediately, before the transfer actually lands,
-    # letting the consumer adopt the buffer while it's still being written.
+    # Record after `work.wait()`: an earlier event would complete before the
+    # transfer lands, letting the consumer read a buffer still being written.
     event = torch.cuda.Event()
     event.record(comm_stream)
     return recv_buf, work, event
@@ -58,9 +65,15 @@ def issue_on_comm_stream(
 def consume(event: torch.cuda.Event, *bufs: torch.Tensor) -> None:
     """Make the compute stream wait on ``event`` and adopt ``bufs``.
 
-    The mirror of :func:`issue_on_comm_stream`: the compute stream blocks until
-    the recorded transfer is done, then each buffer is ``record_stream``'d back
-    onto the compute stream (it is about to be read there).
+    Each buffer is ``record_stream``'d onto the compute stream, which reads it
+    next.
+
+    Parameters
+    ----------
+    event : torch.cuda.Event
+        Event returned by :func:`issue_on_comm_stream`.
+    *bufs : torch.Tensor
+        Buffers the transfer wrote, about to be read on the compute stream.
     """
     compute = torch.cuda.current_stream()
     compute.wait_event(event)
@@ -69,17 +82,19 @@ def consume(event: torch.cuda.Event, *bufs: torch.Tensor) -> None:
 
 
 class PrefetchBuffer:
-    """Double-buffered, one-hop-ahead comm-stream prefetch.
+    """Double-buffered prefetch of one transfer at a time on the comm stream.
 
-    Generalizes the ping-pong buffering the plain-ring overlap providers
-    (:class:`~.forward_chunk_provider._RingForwardChunkProviderOverlap`,
-    :class:`~.backward_chunk_provider._LocalChunkProviderOverlap`) hand-roll, so
-    every hybrid-ring overlap variant -- which juggles more than one concurrent
-    hop (an intra-node ring/broadcast *and* an inter-node ring) -- gets one
-    instance per hop instead of duplicating the buffer/event bookkeeping. Two
-    persistent buffers shaped like ``like`` ping-pong: :meth:`kick` issues a
-    transfer into whichever one is currently free, :meth:`wait` adopts the
-    other (the one the previous :meth:`kick` targeted).
+    The hybrid overlap providers use one per concurrent transfer (intra group
+    and outer ring). :meth:`kick` starts a transfer into the buffer not
+    returned by the last :meth:`wait`; :meth:`wait` returns the buffer of the
+    last :meth:`kick`.
+
+    Parameters
+    ----------
+    comm_stream : torch.cuda.Stream
+        Side stream the transfers run on.
+    like : torch.Tensor
+        Template for the shape, dtype and device of both buffers.
     """
 
     def __init__(self, comm_stream: torch.cuda.Stream, like: torch.Tensor) -> None:
@@ -97,12 +112,12 @@ class PrefetchBuffer:
     ) -> None:
         """Issue ``comm_call(buf)`` on the comm stream into the free buffer.
 
-        ``comm_call`` is the concrete comm primitive bound to everything except
-        its destination buffer -- e.g. ``lambda buf: config.send_op_fn(src, buf,
-        direction=-1, group=group, async_op=True, tag=tag)``. ``extra_keep_alive``
-        names any source tensor ``comm_call`` reads besides ``buf`` itself (e.g.
-        ``src`` above), so it is ``record_stream``'d too -- see
-        :func:`issue_on_comm_stream`.
+        Parameters
+        ----------
+        comm_call : Callable[[torch.Tensor], tuple[torch.Tensor, dist.Work or None]]
+            Comm primitive taking the destination buffer.
+        extra_keep_alive : tuple[torch.Tensor, ...], optional
+            Source tensors ``comm_call`` reads besides the buffer.
         """
         into = 1 - self._pending
         buf = self._bufs[into]
@@ -112,7 +127,13 @@ class PrefetchBuffer:
         self._pending = into
 
     def wait(self) -> torch.Tensor:
-        """Make the compute stream wait for the pending transfer; return its buffer."""
+        """Make the compute stream wait for the pending transfer; return its buffer.
+
+        Returns
+        -------
+        torch.Tensor
+            Buffer the last :meth:`kick` wrote into.
+        """
         assert self._event is not None
         buf = self._bufs[self._pending]
         consume(self._event, buf)

@@ -1,30 +1,10 @@
 """Ulysses (DeepSpeed-style) sequence-parallel attention.
 
-An alternative to the ring (:mod:`.forward`) for parallelising over
-``spatial_group``: instead of circulating K/V through P2P steps with an
-online-softmax merge after each, one all-to-all trades the local *sequence*
-shard for a *head* shard, runs a single local attention over the full
-sequence on ``local_heads / spatial_group.size()`` heads, then all-to-alls
-back.
-
-Trade-off vs. the ring: O(1) collectives and one fused kernel instead of many
-small ones plus LSE merges (TE's ``cp_comm_type="a2a"``), but it needs
-``local_heads % P == 0`` (the ring works for any head count), and exposes the
-all-to-all directly when the group crosses a slow multi-node fabric --
-:func:`hierarchical_ulysses_attention` (Ulysses intra-node, ring inter-node,
-the ``cp_comm_type="a2a+p2p"`` analogue) keeps the a2a on the fast fabric.
-
-Q/K/V ride one all-to-all: the scatter/gather helpers take arbitrary leading
-dims, so a ``[3, b, s, h, d]`` stack goes through a single
-``all_to_all_single`` instead of three.
-
-Composes with channel/tensor parallelism unchanged -- the all-to-all sits
-between the (already channel-sharded) ``qkv`` projection and ``head_concat``,
-orthogonal to how ``qkv`` was sharded.
-
-All tensors here are ``bshd`` (the TE cores' native layout); the SDPA path
-transposes around its kernel call in
-:meth:`~jigsaw.modules.DistributedAttention._ulysses_attn_core`.
+An all-to-all trades each rank's sequence shard for a head shard, so attention
+runs head-parallel over the full sequence; a second all-to-all reverses it.
+Needs the local head count divisible by the group size.
+:func:`hierarchical_ulysses_attention` nests it in a K/V ring. All
+tensors are ``bshd``.
 """
 
 from __future__ import annotations
@@ -135,20 +115,15 @@ def ulysses_attention(
         ``[b, seq // P, local_heads, head_dim]`` (``P = group.size()``).
     group : dist.ProcessGroup
         The all-to-all group to gather the sequence over -- the whole spatial
-        group for flat Ulysses, or the intra-node sub-group for the
-        hierarchical scheme.
+        group for flat Ulysses, or the intra group for the hierarchical
+        scheme.
     core : callable
-        ``core(q, k, v) -> out`` running attention over the sequence the
-        all-to-all made local, on ``bshd`` tensors, and returning ``bshd``
-        ``[b, seq_after_a2a, local_heads // P, head_dim]``. For flat Ulysses
-        this is a single dense kernel over the full sequence; for the
-        hierarchical scheme it is a P2P ring over the inter-node group.
+        ``core(q, k, v) -> out`` on ``bshd`` tensors with ``local_heads // P``
+        heads: a dense kernel (flat) or a ring across the all-to-all groups
+        (hierarchical).
     qkv_stack : torch.Tensor, optional
-        The contiguous ``[3, b, seq // P, local_heads, head_dim]`` tensor
-        ``q``/``k``/``v`` were unbound from (:meth:`DistributedAttention.forward`
-        keeps it when ``qk_norm`` is off). When given it is fed to the
-        all-to-all as-is, skipping a ``torch.stack((q, k, v))`` -- a full
-        ``[3, ...]`` copy each forward, plus its transpose in the backward.
+        The ``[3, b, seq // P, local_heads, head_dim]`` tensor ``q``/``k``/``v``
+        were unbound from; skips re-stacking them.
 
     Returns
     -------
@@ -172,23 +147,29 @@ def hierarchical_ulysses_attention(
     ring_core: AttnCore,
     qkv_stack: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Ulysses over an intra-node sub-group, a P2P ring over the inter-node one.
+    """Run Ulysses over ``intra_group``, nested in a K/V ring across those groups.
 
-    The mirror of Transformer Engine's ``cp_comm_type="a2a+p2p"``: the
-    ``intra_group`` all-to-all (fast, NVLink) scatters heads and gathers one
-    node's worth of sequence, so ``ring_core`` -- a ring over the inter-node
-    group -- circulates only ``n_nodes`` K/V chunks instead of the full spatial
-    ring, and its inner attention runs on ``local_heads // intra_group.size()``
-    heads over ``seq // n_nodes`` tokens.
+    ``intra_group`` can be node-local, keeping the all-to-all on the fast fabric.
 
-    ``ring_core`` is expected to be an overlapped ring (jigsaw's P2P provider
-    kicks each inter-node K/V send before the matching attention block, so the
-    inter-node exchange runs under the node-local attention compute).
+    The all-to-all runs over ``intra_group`` (``A`` ranks); ``ring_core`` then
+    rings K/V over the ``spatial // A`` remaining peers, receiving
+    ``[b, seq // (spatial // A), local_heads // A, d]`` and returning the same
+    shape.
 
-    ``q``/``k``/``v`` are ``bshd`` ``[b, seq // spatial, local_heads, d]``;
-    ``ring_core`` gets ``[b, seq // n_nodes, local_heads // A, d]`` (``A =
-    intra_group.size()``) and must return the same shape. Needs
-    ``local_heads % A == 0``. ``qkv_stack`` is forwarded to
-    :func:`ulysses_attention` (skips the ``torch.stack``).
+    Parameters
+    ----------
+    q, k, v : torch.Tensor
+        Query, key and value, ``bshd`` ``[b, seq // spatial, local_heads, d]``.
+    intra_group : dist.ProcessGroup
+        Group the all-to-all runs over.
+    ring_core : AttnCore
+        Attention over the ring across ``intra_group`` instances.
+    qkv_stack : torch.Tensor, optional
+        ``q``/``k``/``v`` already stacked, forwarded to :func:`ulysses_attention`.
+
+    Returns
+    -------
+    torch.Tensor
+        Attention output, ``bshd``, same shape as ``q``.
     """
     return ulysses_attention(q, k, v, intra_group, ring_core, qkv_stack=qkv_stack)

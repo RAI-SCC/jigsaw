@@ -1,32 +1,8 @@
-"""TransformerEngine's cuDNN fused-attention core (``te.cudnn``).
+"""TransformerEngine's cuDNN fused-attention core (``te.cudnn``), for sm90+.
 
-The Hopper-and-newer arm of ``attn_backend="te"`` (:mod:`.flash` is the Ampere
-arm; see :mod:`..te` for the rule). ``te.DotProductAttention`` returns only the
-output, but the ring needs a per-chunk LSE for its online-softmax merge
-(:func:`...forward._attend_step`) and recomputes ``dQ/dK/dV`` from the
-*global* output/LSE in backward (:func:`...backward.ring_backward`). So this
-module drives ``fused_attn_fwd``/``fused_attn_bwd`` directly, reading the LSE
-from ``aux_ctx_tensors[0]``.
-
-The non-ring core
-(:meth:`~jigsaw.modules.DistributedAttention._transformer_attn_core`)
-goes through here too with ``layout="bshd"`` and just discards the LSE (cuDNN
-computes it regardless as its own backward's normaliser, so it's a free
-extra). What direct kernel calls buy there is the explicit
-``fused_attn_bwd``, which ``te.DotProductAttention`` hides behind its own
-``autograd.Function`` -- see
-:class:`~jigsaw.modules.attention._attention._TransformerEngineAttention`.
-
-Also the only TE path that can ever carry FP8 (not yet implemented here).
-
-Scope: non-FP8, no bias, no mask, no GQA. ``layout`` is the caller's tensor
-convention -- ``"bhsd"`` (ring) or ``"bshd"`` (non-ring, cuDNN's native
-layout, no transposes); LSE is ``(b, h, s)`` either way.
-
-Dropout replay mirrors :mod:`..sdpa`: cuDNN generates its own opaque RNG
-state (``aux_ctx_tensors[1]``) rather than taking a caller seed, so it's
-threaded back verbatim as ``rng_state`` for :func:`backward` to replay,
-instead of rederiving a mask from an int like :mod:`..math` does.
+Calls ``fused_attn_fwd``/``fused_attn_bwd`` directly, since
+``te.DotProductAttention`` does not expose the LSE the ring needs. Dropout is
+replayed from cuDNN's opaque ``rng_state``. No FP8, bias, mask or GQA.
 """
 
 from __future__ import annotations
@@ -64,23 +40,9 @@ _LAYOUT = "bshd_bshd_bshd"
 
 # --- transformer-engine ABI compatibility ---------------------------------
 #
-# ``fused_attn_fwd``/``fused_attn_bwd`` live in TE's *private*
-# ``cpp_extensions`` namespace and their parameter list grows between TE
-# releases (page tables, quantizers, softmax_type, bottom_right_diagonal,
-# return_max_logit, cuda_graph, ... were all added over 2.x). Calling them
-# positionally therefore silently misaligns on any TE but the one this module
-# was written against: on TE newer than 2.12 the ``"vanilla"`` meant for
-# ``softmax_type`` lands on ``attn_bias_type`` and the kernel dies with
-# "attn_bias tensor cannot be None when attn_bias_type='vanilla'".
-#
-# So: pass the leading, mandatory block positionally (those parameters have no
-# defaults and are stable), and everything after it by keyword.
-#   * arguments that carry *meaning* for us (scale, dropout, layout, bias/mask
-#     type, window) are required -- if the installed TE has no parameter for
-#     one, that is a hard error, never a silent drop;
-#   * arguments that merely restate a TE default (the Nones, fast_zero_fill,
-#     softmax_type="vanilla", deterministic=False, ...) are passed when the
-#     installed TE accepts them and skipped when it does not.
+# The private ``fused_attn_fwd``/``bwd`` signatures change between TE releases,
+# so every argument goes by keyword. Meaningful ones are required (missing ->
+# error); ones restating a TE default are dropped if the installed TE lacks them.
 #
 # Parameter names TE has used for the same logical argument, best first.
 _TE_ALIASES: dict[str, tuple[str, ...]] = {
@@ -119,15 +81,12 @@ def _te_call(
     required: dict[str, Any],
     optional: dict[str, Any],
 ) -> Any:
-    """Call a TE fused-attn entry point across TE versions.
-
-    *Everything* goes by keyword, including the mandatory block: TE 2.16
-    dropped ``dqkv_dtype`` from ``fused_attn_bwd``'s mandatory arguments, so
-    even that block cannot be passed positionally without drifting.
+    """Call a TE fused-attn entry point by keyword, across TE versions.
 
     ``required`` must exist in the installed signature (under one of its
-    :data:`_TE_ALIASES`); ``optional`` is filtered down to what the installed
-    signature accepts.
+    :data:`_TE_ALIASES`); ``optional`` is filtered to what it accepts. Raises
+    :class:`RuntimeError` if the signature lacks a required argument or needs
+    one not supplied.
     """
     accepted = _te_params(fn)
 
@@ -200,6 +159,7 @@ def _fused_attn_backend(
 
     Cached on its arguments: the ring calls it once per chunk per ring step, and
     the answer only depends on the (shape, dtype, dropout) problem description.
+    Raises :class:`RuntimeError` if no sub-backend serves it.
     """
     backend = tex.get_fused_attn_backend(
         is_training,
@@ -237,19 +197,33 @@ def forward(
     v: torch.Tensor,
     scale: float,
     dropout_p: float,
-    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
+    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see ..math)
     *,
     layout: Layout = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """TE fused attention forward.
 
-    Returns ``(out, logsumexp (b,h,s), rng_state)``. ``out`` comes back in the
-    same ``layout`` ``q``/``k``/``v`` were given in -- ``(b,h,s,d)`` by default
-    (the ring's convention), ``(b,s,h,d)`` for ``layout="bshd"``, which skips
-    the transposes entirely. ``logsumexp`` is ``(b,h,s)`` either way.
-    ``rng_state`` is cuDNN's own opaque dropout RNG state (``None`` when
-    ``dropout_p == 0``), threaded back for :func:`backward` to replay (see
-    module docstring).
+    Parameters
+    ----------
+    q, k, v : torch.Tensor
+        Query, key and value in ``layout``.
+    scale : float
+        Softmax scale.
+    dropout_p : float
+        Dropout probability.
+    seed : int, optional
+        Unused; the kernel draws its own RNG state.
+    layout : {"bhsd", "bshd"}, optional
+        Layout of ``q``/``k``/``v`` and of the returned ``out``. Default ``"bhsd"``.
+
+    Returns
+    -------
+    out : torch.Tensor
+        Attention output in ``layout``.
+    logsumexp : torch.Tensor
+        Log-sum-exp, ``(b, h, s)``.
+    rng_state : torch.Tensor or None
+        Kernel dropout RNG state for :func:`backward`; ``None`` without dropout.
     """
     b, h, s_q, s_kv, d = _shape(q, k, layout)
     q_b, k_b, v_b = (_to_bshd(t, layout) for t in (q, k, v))
@@ -286,13 +260,7 @@ def forward(
             "s_quantizer": None,
             "o_quantizer": None,
             "fast_zero_fill": True,
-            # TE >= 2.16 decouples the output format from ``qkv_layout`` and
-            # defaults it to "sbhd", so without this ``out`` comes back
-            # (s, b, h, d) while the ring's accumulator is (b, s, h, d) -- the
-            # merge then dies in ``_online_softmax_merge_`` with a
-            # "doesn't match the broadcast shape" in-place error. On older TE
-            # the parameter does not exist and the output implicitly follows
-            # ``qkv_layout``, which is already what we want.
+            # TE >= 2.16 defaults the output to sbhd; older TE follows qkv_layout.
             "o_format": "bshd",
             "softmax_type": "vanilla",
             "bottom_right_diagonal": None,
@@ -318,33 +286,52 @@ def backward(
     scale: float,
     *_: object,
     dropout_p: float = 0.0,
-    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
+    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see ..math)
     rng_state: Optional[torch.Tensor] = None,
     layout: Layout = "bhsd",
     **__: object,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """TE fused attention backward from the saved (global) ``out`` / ``logsumexp``.
 
-    ``fused_attn_bwd`` recomputes ``S = scale * QK^T``, ``P = exp(S - lse)`` and
-    the dot-product-attention gradients using the passed ``o`` and ``lse``; with
-    the ring's globally normalised ``out`` / ``lse`` this yields the correct
-    per-chunk ``dQ/dK/dV``. ``rng_state`` -- cuDNN's own dropout RNG state,
-    threaded back from this same chunk's :func:`forward` call -- reproduces the
-    identical dropout mask; ``None`` (the ``dropout_p == 0`` case) falls back
-    to a placeholder, matching cuDNN's own "unused" convention for no-dropout.
+    With the ring's globally normalised ``out`` / ``logsumexp`` this yields the
+    correct per-chunk ``dQ/dK/dV``.
 
-    ``layout`` describes ``q``/``k``/``v``/``out``/``grad_out`` and the returned
-    gradients, exactly as in :func:`forward`; ``logsumexp`` is ``(b,h,s)``
-    regardless.
+    Parameters
+    ----------
+    grad_out : torch.Tensor
+        Gradient of the output, in ``layout``.
+    q, k, v : torch.Tensor
+        Query, key and value, in ``layout``.
+    out : torch.Tensor
+        Saved (globally normalised) attention output, in ``layout``.
+    logsumexp : torch.Tensor
+        Saved (global) log-sum-exp, ``(b, h, s)``.
+    scale : float
+        Softmax scale.
+    *_ : object
+        Unused; interface parity with the other cores.
+    dropout_p : float, optional
+        Dropout probability. Default 0.
+    seed : int, optional
+        Unused; ``rng_state`` replays the mask.
+    rng_state : torch.Tensor, optional
+        Dropout RNG state from this chunk's :func:`forward`.
+    layout : {"bhsd", "bshd"}, optional
+        Layout of the tensors and of the returned gradients. Default ``"bhsd"``.
+    **__ : object
+        Unused; interface parity with the other cores.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Gradients ``(dq, dk, dv)`` in ``layout``.
     """
     b, h, s_q, s_kv, d = _shape(q, k, layout)
     q_b, k_b, v_b, o_b, do_b = (_to_bshd(t, layout) for t in (q, k, v, out, grad_out))
     backend = _fused_attn_backend(True, q_b.dtype, h, s_q, s_kv, d, dropout_p)
     cu_q = _full_cu_seqlens(b, s_q, q.device)
     cu_kv = _full_cu_seqlens(b, s_kv, q.device)
-    # cuDNN's bwd wants the LSE shaped as its fwd emitted it, (b, h, s_q, 1),
-    # and in fp32 -- a 16-bit LSE (the ring hands it back downcast to the model
-    # dtype) makes the kernel recompute the softmax wrong.
+    # cuDNN's bwd needs the LSE as (b, h, s_q, 1) in fp32; 16-bit gives wrong grads.
     lse = logsumexp.to(torch.float32)
     if lse.dim() == 3:
         lse = lse.unsqueeze(-1)
@@ -386,9 +373,7 @@ def backward(
             "dp_quantizer": None,
             "dqkv_quantizer": None,
             "fast_zero_fill": True,
-            # See the forward: on TE >= 2.16 every tensor format is explicit
-            # and defaults to sbhd/sbh3d. ``o``/``d_o`` are handed in as bshd,
-            # and dQ/dK/dV must come back the same way for _from_bshd.
+            # TE >= 2.16 defaults these to sbhd; see the forward.
             "o_format": "bshd",
             "do_format": "bshd",
             "dqkv_layout": _LAYOUT,

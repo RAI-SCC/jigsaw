@@ -302,12 +302,8 @@ def comm_1d_alltoall(
     else:
         send_to, recv_from = send_recv_ranks
 
-    # ``dist.all_to_all`` requires every tensor it touches to be contiguous.
-    # Callers can hand this a view with a non-standard memory layout (e.g. a
-    # permute+reshape that happened to avoid a copy) without ever noticing --
-    # the shape checks out, only the strides are wrong. ``.contiguous()`` is a
-    # no-op when the tensor already satisfies that, so this costs nothing on
-    # the common path.
+    # ``dist.all_to_all`` needs contiguous tensors, and callers may pass a
+    # strided view; ``.contiguous()`` is a no-op otherwise.
     data = data.contiguous()
     buffer = buffer.contiguous()
 
@@ -367,7 +363,7 @@ def comm_1d_p2p(
     async_op : bool
         Whether to communicate asynchronously.
     tag : int
-        Tag for P2P operations.
+        Unused; P2P ops between a rank pair are matched in post order.
     group_size : int, optional
         Size of the process group.
     *args : Any
@@ -451,17 +447,18 @@ def broadcast_params_(
 ) -> None:
     """Broadcast every tensor in ``params`` from ``src``, in one call per dtype.
 
-    Model construction commonly needs to replicate a handful of freshly
-    initialized tensors (weights, biases) from rank 0 across a group -- e.g.
-    once per transformer block, times however many tensors that block owns.
-    Issuing that as ``for p in params: dist.broadcast(p.data, ...)`` makes
-    every tensor its own blocking round trip: with many blocks, each
-    contributing several tensors, that is dozens of sequential
-    cross-rank synchronizations even though each payload is tiny, and setup
-    time ends up scaling with model depth instead of being dominated by the
-    (fast) actual compute. Flattening same-dtype tensors into one contiguous
-    buffer before broadcasting collapses that to a single round trip per
-    dtype present in ``params``, regardless of how many tensors there are.
+    Flattening same-dtype tensors into one buffer replaces one blocking
+    broadcast per tensor with one per dtype, so setup time does not grow with
+    model depth.
+
+    Parameters
+    ----------
+    params : Iterable[torch.nn.Parameter]
+        Tensors to broadcast, in place.
+    group : dist.ProcessGroup
+        Group to broadcast over.
+    src : int, optional
+        Group rank to broadcast from. Default 0.
     """
     buckets: dict[torch.dtype, list[torch.nn.Parameter]] = defaultdict(list)
     for p in params:
@@ -482,6 +479,14 @@ def broadcast_params_(
 
 
 def all_reduce_max(t: torch.Tensor, groups: Iterable[dist.ProcessGroup]) -> None:
-    """All-reduce ``t`` with MAX over each group in turn, in place."""
+    """All-reduce ``t`` with MAX over each group in turn, in place.
+
+    Parameters
+    ----------
+    t : torch.Tensor
+        Tensor to reduce, in place.
+    groups : Iterable[dist.ProcessGroup]
+        Groups to reduce over, one after another.
+    """
     for g in groups:
         dist.all_reduce(t, op=dist.ReduceOp.MAX, group=g)

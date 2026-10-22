@@ -3,14 +3,6 @@
 Records carry the rank and elapsed time. Ordinary calls emit from one print
 rank only, while :func:`at` and :func:`info_all` select other ranks.
 
-Examples
---------
->>> from jigsaw import log
->>> log.configure_logging()  # doctest: +SKIP
->>> log.info("world_size=%d", 4)  # doctest: +SKIP
->>> log.at(2).debug("q shard %s", (2, 3))  # doctest: +SKIP
->>> log.info_all("process group ready")  # doctest: +SKIP
-
 Notes
 -----
 :func:`configure_logging` reads these environment variables, which explicit
@@ -24,6 +16,14 @@ arguments override:
     Directory for per-rank log files (default: none).
 ``JIGSAW_LOG_FORMAT``
     ``"json"`` for JSON lines, otherwise the human-readable format.
+
+Examples
+--------
+>>> from jigsaw import log
+>>> log.configure_logging()  # doctest: +SKIP
+>>> log.info("world_size=%d", 4)  # doctest: +SKIP
+>>> log.at(2).debug("q shard %s", (2, 3))  # doctest: +SKIP
+>>> log.info_all("process group ready")  # doctest: +SKIP
 """
 
 from __future__ import annotations

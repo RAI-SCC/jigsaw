@@ -12,7 +12,35 @@ from . import _functional as functional
 
 
 class DistributedLayerNorm(torch.nn.Module):
-    """LayerNorm over a channel-sharded last dimension."""
+    """LayerNorm over a channel-sharded last dimension.
+
+    Parameters
+    ----------
+    normalized_dim : int
+        Global (unsharded) size of the normalized dimension. Must be
+        divisible by ``col_group.size()``.
+    local_rank : int
+        Rank within the model group.
+    device : torch.device
+        Device of the module.
+    row_group : dist.ProcessGroup
+        Process group the weight and bias are replicated over; their
+        gradients are summed over it by :func:`jigsaw.parallel.sync_grad`.
+        Unused if ``elementwise_affine`` is ``False``: there are then no
+        parameters to reduce gradients for.
+    col_group : dist.ProcessGroup
+        Process group across which the normalized dimension is partitioned.
+    eps : float
+        Term added to the variance for numerical stability.
+    elementwise_affine : bool
+        Whether the layer has a learnable weight (and bias, see ``bias``),
+        as in ``torch.nn.LayerNorm``.
+    bias : bool
+        Whether the layer has a learnable bias. Ignored if
+        ``elementwise_affine`` is ``False``.
+    dtype : torch.dtype, optional
+        Data type of the parameters. Defaults to the torch default dtype.
+    """
 
     def __init__(
         self,
@@ -26,35 +54,7 @@ class DistributedLayerNorm(torch.nn.Module):
         bias: bool = True,
         dtype: Optional[torch.dtype] = None,
     ) -> None:
-        """Initialize the layer.
-
-        Parameters
-        ----------
-        normalized_dim : int
-            Global (unsharded) size of the normalized dimension. Must be
-            divisible by ``col_group.size()``.
-        local_rank : int
-            Rank within the model group.
-        device : torch.device
-            Device of the module.
-        row_group : dist.ProcessGroup
-            Process group the weight and bias are replicated over; their
-            gradients are summed over it by :func:`jigsaw.parallel.sync_grad`.
-            Unused if ``elementwise_affine`` is ``False``: there are then no
-            parameters to reduce gradients for.
-        col_group : dist.ProcessGroup
-            Process group across which the normalized dimension is partitioned.
-        eps : float
-            Term added to the variance for numerical stability.
-        elementwise_affine : bool
-            Whether the layer has a learnable weight (and bias, see ``bias``),
-            as in ``torch.nn.LayerNorm``.
-        bias : bool
-            Whether the layer has a learnable bias. Ignored if
-            ``elementwise_affine`` is ``False``.
-        dtype : torch.dtype, optional
-            Data type of the parameters. Defaults to the torch default dtype.
-        """
+        """Initialize the layer."""
         super().__init__()
         assert normalized_dim % col_group.size() == 0, (
             f"normalized_dim={normalized_dim} is not divisible by the column "
@@ -91,7 +91,14 @@ class DistributedLayerNorm(torch.nn.Module):
             parallel.mark_replicated(p, self.spatial_group)
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters.
+        """Return the global number of parameters of this layer.
+
+        Returns
+        -------
+        int
+            Global (unsharded) count of this layer's parameters, including plain
+            ``torch.nn`` children; children with ``get_parameter_count`` report
+            their own. No communication.
 
         Notes
         -----

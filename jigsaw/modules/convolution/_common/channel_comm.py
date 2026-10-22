@@ -13,11 +13,11 @@ CHANNEL_COMMS: tuple[str, ...] = ("all_gather", "p2p", "all_to_all")
 # A convolution primitive: ``fn(x, w[, b], stride=, padding=, dilation=) -> y``.
 ConvFn = Callable[..., torch.Tensor]
 
-# A per-hop transport: ``fn(data, buffer, direction=, group=, async_op=) ->
+# The send of one ring step: ``fn(data, buffer, direction=, group=, async_op=) ->
 # (recv_buffer, wait_handle)``. Satisfied by ``comm_1d_p2p`` / ``comm_1d_alltoall``.
 _HopFn = Callable[..., tuple[torch.Tensor, Optional[dist.Work]]]
 
-# The per-hop transport behind each streaming ``channel_comm``.
+# The per-step send behind each streaming ``channel_comm``.
 _CHANNEL_HOP_FNS: dict[str, _HopFn] = {
     "p2p": comm_1d_p2p,
     "all_to_all": comm_1d_alltoall,

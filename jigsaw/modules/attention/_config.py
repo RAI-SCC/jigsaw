@@ -60,20 +60,14 @@ class SendOp(Enum):
 
 
 class AttnBackend(str, Enum):
-    """Attention core implementation.
+    """Attention core implementation, used both with and without ``ring``.
 
-    Applies to both the plain :class:`~jigsaw.modules.DistributedAttention` core and
-    the ring's per-chunk inner attention.
-
-    - ``TE``: whichever kernel TransformerEngine would run on this GPU -- the
-      cuDNN fused kernels on Hopper and newer, the ``flash_attn`` package on
-      Ampere. CUDA only; see :mod:`._functional.cores.te`.
-    - ``SDPA``: PyTorch scaled-dot-product attention -- the flash kernel on CUDA
-      (with a math fallback), the math kernel on CPU. Default.
-    - ``MATH``: the unfused ``softmax(QK^T)V`` reference. Any device/shape/dtype.
-
-    ``ring`` is a separate switch (see ``DistributedAttention``); it composes with
-    every backend here.
+    - ``TE``: cuDNN fused kernels on Hopper and newer, the ``flash_attn``
+      package on Ampere. CUDA only.
+    - ``SDPA``: PyTorch scaled-dot-product attention on CUDA, the math kernel
+      on CPU. Default.
+    - ``MATH``: the unfused ``softmax(QK^T)V`` reference. Any device, shape and
+      dtype.
     """
 
     TE = "te"
@@ -89,8 +83,8 @@ def _coerce_enum(enum_cls: type[_E], value: Any, arg: str) -> _E:
 
     Accepts the member itself or its name as a string in any case
     (``send_op="hybrid_p2p"``), and for string enums also the value
-    (``attn_backend="te"``). Anything else raises, instead of being stored
-    unchanged and then silently matching none of the policy branches.
+    (``attn_backend="te"``). Anything else raises :class:`ValueError` rather
+    than silently matching none of the policy branches.
 
     Parameters
     ----------
@@ -132,10 +126,8 @@ def _coerce_enum(enum_cls: type[_E], value: Any, arg: str) -> _E:
 # --------------------------------------------------------------------------- #
 # policy -> callable resolution
 #
-# Every `RingAttentionConfig` attribute that holds a strategy-specific callable
-# is produced by one `_select_*` function here, so the forward/backward code
-# only ever calls `config.<thing>()` and never branches on a raw enum. The
-# attention cores themselves live in `functional/cores/{sdpa,math,te}.py`.
+# Each strategy-specific callable on `RingAttentionConfig` comes from one
+# `_select_*` function, so the forward and backward never branch on an enum.
 # --------------------------------------------------------------------------- #
 CommFn = Callable[..., Any]
 AttnCoreFn = Callable[..., Any]
@@ -170,7 +162,8 @@ def _te_core_or_raise() -> None:
 
     if not TE_CORE_AVAILABLE:
         raise RuntimeError(
-            "attn_backend=te needs transformer_engine (run inside the container)."
+            "attn_backend=te needs transformer_engine or flash_attn "
+            "(run inside the container)."
         )
 
 
@@ -179,10 +172,8 @@ def _select_attn_core_forward_fn(
 ) -> AttnCoreFn:
     """Pick the ring inner-attention forward core for ``device`` / ``attn_backend``.
 
-    ``SDPA`` keeps the historical device-based pick (flash on CUDA, math on CPU).
-    ``TE`` picks by GPU architecture -- cuDNN on Hopper and newer, ``flash_attn``
-    on Ampere; see :func:`._functional.cores.te.select_core`.
-    Cores live in :mod:`._functional.cores`; each exposes ``forward`` / ``backward``.
+    ``SDPA`` picks by device (SDPA on CUDA, math on CPU), ``TE`` by GPU
+    architecture (see :func:`._functional.cores.te.select_core`).
     """
     from ._functional.cores import math as math_core
     from ._functional.cores import sdpa as sdpa_core
@@ -231,7 +222,7 @@ def _select_attn_core_backward_fn(
 
 
 def _select_p2p_fn(send_op: SendOp) -> CommFn:
-    """Select the communication function for inter-node hops and the dK/dV relay."""
+    """Select the communication function for outer-ring sends and the dK/dV relay."""
     if dist.get_backend() == "gloo":
         return comm.comm_1d_p2p
     alltoall = {SendOp.ALLTOALL, SendOp.BROADCAST, SendOp.HYBRID_ALLTOALL}
@@ -351,6 +342,47 @@ class RingAttentionConfig:
 
     Holds the communication, saving and offloading policies together with the
     functions that implement them.
+
+    Parameters
+    ----------
+    device : torch.device
+        Device on which tensors and communication are placed.
+    send_in_forward : SendForward or str
+        Tensor representation communicated during the forward pass.
+    send_op : SendOp or str
+        Communication operation used by the ring. ``ALLTOALL`` (default)
+        runs the ring exchange as one all-to-all collective per step and
+        works for any ring size. The ``HYBRID_*`` ops split the ring into
+        intra groups of ``gpus_per_node`` ranks (typically, but not
+        necessarily, one node) joined by an outer ring, and need the ring
+        size to be a multiple of ``gpus_per_node``.
+    save_for_backward : SaveBackward or str
+        Tensor representation saved for the backward pass.
+    save_scope : SaveScope or str
+        Scope in which intermediate tensors are saved.
+    send_backward : SendBackward or str
+        Strategy used to communicate backward gradients.
+    offload : Offload or str
+        Activation offloading policy.
+    gpus_per_node : int
+        Number of ranks assigned to each node for hybrid communication.
+        Only used by the ``HYBRID_*`` send ops.
+    attn_backend : AttnBackend or str
+        Inner per-chunk attention core. ``SDPA`` (default) keeps the
+        device-based pick (flash on CUDA, math on CPU); ``TE`` uses the
+        TransformerEngine fused core; ``MATH`` the unfused reference.
+    overlap_comm : bool
+        Put the ring's K/V circulation -- and the backward dK/dV relay,
+        where the accumulation shape allows it -- on a dedicated CUDA
+        stream with double buffering, so each transfer overlaps the
+        attention core on the default stream (the ``cp_stream`` trick
+        Transformer Engine uses). CUDA only; elsewhere it is inert and the
+        synchronous path runs unchanged. K/V circulation is overlapped for
+        every ``send_op`` except ``BROADCAST`` (a fresh collective each
+        step, nothing to prefetch ahead of); the dK/dV relay is overlapped
+        too when ``save_scope=LOCAL`` and ``send_backward=SEND_DKV``,
+        except under ``HYBRID_BROADCAST`` whose dK/dV accumulation doesn't
+        fit the direct-swap relay. See :attr:`overlap_active`.
     """
 
     def __init__(
@@ -371,46 +403,6 @@ class RingAttentionConfig:
         Every enum argument also takes the member's name as a string, in any
         case (``send_op="hybrid_p2p"``); ``attn_backend`` also takes its value
         (``"te"``). Unknown names raise :class:`ValueError`.
-
-        Parameters
-        ----------
-        device : torch.device
-            Device on which tensors and communication are placed.
-        send_in_forward : SendForward or str
-            Tensor representation communicated during the forward pass.
-        send_op : SendOp or str
-            Communication operation used by the ring. ``ALLTOALL`` (default)
-            runs the ring exchange as one all-to-all collective per step and
-            works for any ring size. The ``HYBRID_*`` ops split the ring into
-            intra- and inter-node parts and need the ring size to be a
-            multiple of ``gpus_per_node``.
-        save_for_backward : SaveBackward or str
-            Tensor representation saved for the backward pass.
-        save_scope : SaveScope or str
-            Scope in which intermediate tensors are saved.
-        send_backward : SendBackward or str
-            Strategy used to communicate backward gradients.
-        offload : Offload or str
-            Activation offloading policy.
-        gpus_per_node : int
-            Number of ranks assigned to each node for hybrid communication.
-            Only used by the ``HYBRID_*`` send ops.
-        attn_backend : AttnBackend or str
-            Inner per-chunk attention core. ``SDPA`` (default) keeps the
-            device-based pick (flash on CUDA, math on CPU); ``TE`` uses the
-            TransformerEngine fused core; ``MATH`` the unfused reference.
-        overlap_comm : bool
-            Put the ring's K/V circulation -- and the backward dK/dV relay,
-            where the accumulation shape allows it -- on a dedicated CUDA
-            stream with double buffering, so each transfer overlaps the
-            attention core on the default stream (the ``cp_stream`` trick
-            Transformer Engine uses). CUDA only; elsewhere it is inert and the
-            synchronous path runs unchanged. K/V circulation is overlapped for
-            every ``send_op`` except ``BROADCAST`` (a fresh collective each
-            step, nothing to prefetch ahead of); the dK/dV relay is overlapped
-            too when ``save_scope=LOCAL`` and ``send_backward=SEND_DKV``,
-            except under ``HYBRID_BROADCAST`` whose dK/dV accumulation doesn't
-            fit the direct-swap relay. See :attr:`overlap_active`.
         """
         if gpus_per_node <= 0:
             raise ValueError("gpus_per_node must be positive")
@@ -469,7 +461,13 @@ class RingAttentionConfig:
 
     @property
     def comm_stream(self) -> Optional[torch.cuda.Stream]:
-        """Dedicated CUDA stream for ring comm, or ``None`` when overlap is off."""
+        """Dedicated CUDA stream for ring comm, or ``None`` when overlap is off.
+
+        Returns
+        -------
+        torch.cuda.Stream or None
+            The comm stream, if overlap is active.
+        """
         return self._comm_stream
 
     @property
@@ -479,6 +477,11 @@ class RingAttentionConfig:
         ``True`` only when ``overlap_comm`` was requested *and* a CUDA stream
         could be built for it; provider builders gate on this so a non-CUDA
         device silently keeps the synchronous path.
+
+        Returns
+        -------
+        bool
+            Whether ring comm runs on :attr:`comm_stream`.
         """
         return self._comm_stream is not None
 
@@ -488,7 +491,13 @@ class RingAttentionConfig:
             self.offloader.wait_offloads()
 
     def __repr__(self) -> str:
-        """Return a string representation of the configuration."""
+        """Return a string representation of the configuration.
+
+        Returns
+        -------
+        str
+            The resolved policies and their values.
+        """
         return (
             f"RingAttentionConfig("
             f"send_in_forward={self.send_in_forward.name}, "

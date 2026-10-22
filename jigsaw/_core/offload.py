@@ -8,16 +8,15 @@ class NVLinkActivationOffloader:
 
     Device-to-host copies overlap with compute. Source tensors must stay alive
     until :meth:`wait_offloads` is called.
+
+    Parameters
+    ----------
+    device : torch.device
+        Device on which tensors and communication are placed.
     """
 
     def __init__(self, device: torch.device) -> None:
-        """Initialize the offloader.
-
-        Parameters
-        ----------
-        device : torch.device
-            Device on which tensors and communication are placed.
-        """
+        """Initialize the offloader."""
         self.device = device
         self.d2h_stream = torch.cuda.Stream(device)
         self.h2d_stream = torch.cuda.Stream(device)

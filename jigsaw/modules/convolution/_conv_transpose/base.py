@@ -144,12 +144,9 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         self.device = device
         self.dtype = dtype
 
-        # Global (unsharded) weight/bias shape, torch.nn.ConvTranspose{1,2,3}d
-        # layout ``(C_in, C_out / groups, *kernel)``. ``reset_parameters`` keys
-        # the init distribution off these, so a freshly built layer is drawn
-        # from the same distribution as the equivalent
-        # ``torch.nn.ConvTransposeNd`` -- the channel-group shard size only
-        # decides which slice of that distribution this rank samples.
+        # Global (unsharded) shapes in torch.nn.ConvTransposeNd layout.
+        # ``reset_parameters`` derives the init distribution from these, so it
+        # matches torch.nn.ConvTransposeNd.
         self.global_weight_shape = (
             in_channels,
             out_channels // groups,
@@ -227,7 +224,14 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         return math.prod(g.size() for g in self._spatial_sync_groups)
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters.
+        """Return the global number of parameters of this layer.
+
+        Returns
+        -------
+        int
+            Global (unsharded) count of this layer's parameters, including plain
+            ``torch.nn`` children; children with ``get_parameter_count`` report
+            their own. No communication.
 
         Notes
         -----
@@ -576,19 +580,11 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         torch.Tensor
             Local output of shape ``(N, Cout / n_channel, *spatial' / n_spatial)``.
         """
-        # When every channel-parallel rank owns whole conv-groups
-        # (``_channel_local`` -- always true with no channel split) the custom
-        # autograd Function buys nothing: the transpose conv runs on this rank's
-        # channel shard with no channel-group communication. The exception is a
-        # spatially-split transpose conv that needs a halo exchange; that still
-        # goes through ``_conv_apply`` (its kernel treats a group of one, or a
-        # group that owns whole conv-groups, as the identity gather).
-        # ``_spatial_sync_groups`` is non-empty iff some spatial axis is really
-        # split -- checking only the innermost ``spatial_groups[-1]`` would miss
-        # a non-innermost-only split (its width group has size 1).
-        # Sync before the branch: a patchify conv (kernel == stride, no
-        # padding) takes ``_forward_local`` even when spatially split, and its
-        # replicated weight and bias still need their gradients summed.
+        # Channel-local convs need no channel communication, so they skip the
+        # autograd Function unless a spatial split needs a halo exchange.
+        # Sync before the branch: a patchify conv (kernel == stride, no padding)
+        # takes ``_forward_local`` even when spatially split, and its replicated
+        # weight and bias still need their gradients summed.
         weight, bias = parallel.sync_grad(self.weight, self.bias)
         weight = cast(torch.Tensor, weight)
         if self._channel_local and not (

@@ -7,7 +7,15 @@ from . import functional as F
 
 
 class DistributedMSELoss(torch.nn.Module):
-    """Mean-squared-error loss of a sharded input."""
+    """Mean-squared-error loss of a sharded input.
+
+    Parameters
+    ----------
+    reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
+        Every group across which the input is partitioned.
+    reduction : str
+        ``"none"``, ``"sum"`` or ``"mean"``.
+    """
 
     def __init__(
         self,
@@ -15,21 +23,21 @@ class DistributedMSELoss(torch.nn.Module):
         *,
         reduction: str = "mean",
     ) -> None:
-        """Initialize the loss.
-
-        Parameters
-        ----------
-        reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
-            Every group across which the input is partitioned.
-        reduction : str
-            ``"none"``, ``"sum"`` or ``"mean"``.
-        """
+        """Initialize the loss."""
         super().__init__()
         self.reduce_groups = reduce_groups
         self.reduction = reduction
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters."""
+        """Return the global number of parameters of this layer.
+
+        Returns
+        -------
+        int
+            Global (unsharded) count of this layer's parameters, including plain
+            ``torch.nn`` children; children with ``get_parameter_count`` report
+            their own. No communication.
+        """
         return 0
 
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -56,7 +64,15 @@ class DistributedMSELoss(torch.nn.Module):
 
 
 class DistributedL1Loss(torch.nn.Module):
-    """Mean-absolute-error loss of a sharded input."""
+    """Mean-absolute-error loss of a sharded input.
+
+    Parameters
+    ----------
+    reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
+        Every group across which the input is partitioned.
+    reduction : str
+        ``"none"``, ``"sum"`` or ``"mean"``.
+    """
 
     def __init__(
         self,
@@ -64,21 +80,21 @@ class DistributedL1Loss(torch.nn.Module):
         *,
         reduction: str = "mean",
     ) -> None:
-        """Initialize the loss.
-
-        Parameters
-        ----------
-        reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
-            Every group across which the input is partitioned.
-        reduction : str
-            ``"none"``, ``"sum"`` or ``"mean"``.
-        """
+        """Initialize the loss."""
         super().__init__()
         self.reduce_groups = reduce_groups
         self.reduction = reduction
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters."""
+        """Return the global number of parameters of this layer.
+
+        Returns
+        -------
+        int
+            Global (unsharded) count of this layer's parameters, including plain
+            ``torch.nn`` children; children with ``get_parameter_count`` report
+            their own. No communication.
+        """
         return 0
 
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -105,7 +121,17 @@ class DistributedL1Loss(torch.nn.Module):
 
 
 class DistributedSmoothL1Loss(torch.nn.Module):
-    """Smooth-L1 loss of a sharded input."""
+    """Smooth-L1 loss of a sharded input.
+
+    Parameters
+    ----------
+    reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
+        Every group across which the input is partitioned.
+    beta : float
+        Transition point between the quadratic and the linear regime.
+    reduction : str
+        ``"none"``, ``"sum"`` or ``"mean"``.
+    """
 
     def __init__(
         self,
@@ -114,24 +140,22 @@ class DistributedSmoothL1Loss(torch.nn.Module):
         beta: float = 1.0,
         reduction: str = "mean",
     ) -> None:
-        """Initialize the loss.
-
-        Parameters
-        ----------
-        reduce_groups : dist.ProcessGroup | Sequence[dist.ProcessGroup | None], optional
-            Every group across which the input is partitioned.
-        beta : float
-            Transition point between the quadratic and the linear regime.
-        reduction : str
-            ``"none"``, ``"sum"`` or ``"mean"``.
-        """
+        """Initialize the loss."""
         super().__init__()
         self.reduce_groups = reduce_groups
         self.beta = beta
         self.reduction = reduction
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters."""
+        """Return the global number of parameters of this layer.
+
+        Returns
+        -------
+        int
+            Global (unsharded) count of this layer's parameters, including plain
+            ``torch.nn`` children; children with ``get_parameter_count`` report
+            their own. No communication.
+        """
         return 0
 
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

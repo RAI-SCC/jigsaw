@@ -25,7 +25,17 @@ _ONEWAY: tuple[Callable, ...] = (
 
 
 class LinearConfig(VmapConfig):
-    """Selection of the kernels of the distributed linear operation."""
+    """Selection of the kernels of the distributed linear operation.
+
+    Parameters
+    ----------
+    parallelism : int
+        Number of model-parallel processes.
+    linear_layer : bool
+        Whether the operation belongs to a linear layer.
+    device : torch.device
+        Device of the module.
+    """
 
     def __init__(
         self,
@@ -34,17 +44,7 @@ class LinearConfig(VmapConfig):
         linear_layer: bool = True,
         device: torch.device = torch.device("cuda"),
     ):
-        """Initialize the configuration.
-
-        Parameters
-        ----------
-        parallelism : int
-            Number of model-parallel processes.
-        linear_layer : bool
-            Whether the operation belongs to a linear layer.
-        device : torch.device
-            Device of the module.
-        """
+        """Initialize the configuration."""
         self.linear_layer = linear_layer
         self.mm_kernels = _select_mm_kernels(parallelism, device)
 

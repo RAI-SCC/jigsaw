@@ -30,6 +30,37 @@ repos:
         args: [ --fix ]
       # Run the formatter.
       - id: ruff-format
+  # TorchFix: deprecated or unsafe torch APIs (torch.cuda.amp, torch.load without
+  # weights_only, functorch, ...). A flake8 plugin, so ruff cannot run it.
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.4.1
+    hooks:
+      - id: flake8
+        name: torchfix
+        args: [--isolated, --select=TOR]
+        additional_dependencies: [torchfix==0.7.0]
+  # Docstrings against numpydoc; configured in pyproject.toml.
+  - repo: https://github.com/numpy/numpydoc
+    rev: v1.11.0
+    hooks:
+      - id: numpydoc-validation
+        files: ^jigsaw/
+  # Abbreviations used in the code (te, dout, ...) are allowlisted in pyproject.toml.
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.3
+    hooks:
+      - id: codespell
+        additional_dependencies: [tomli]
+  # pyproject.toml packaging metadata against its schema (check-toml only checks syntax).
+  - repo: https://github.com/abravalheri/validate-pyproject
+    rev: v0.27
+    hooks:
+      - id: validate-pyproject
+  # Workflow files against the GitHub Actions schema.
+  - repo: https://github.com/python-jsonschema/check-jsonschema
+    rev: 0.38.2
+    hooks:
+      - id: check-github-workflows
   # Conventional Commits on the commit message (rules in .commitlintrc.yaml).
   # pre-commit bootstraps its own node, so no system node is needed.
   - repo: https://github.com/alessandrojcm/commitlint-pre-commit-hook

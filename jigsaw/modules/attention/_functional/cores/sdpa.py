@@ -76,12 +76,9 @@ def forward(
         return_debug_mask=False,
     )
 
-    # ``philox_seed`` / ``philox_offset`` are the flash kernel's opaque dropout
-    # RNG state. Their shapes are build-dependent and need not match (this torch
-    # build returns ``(2,)`` and ``()``), so flatten and concatenate into a
-    # single 1-D tensor -- the ring stores ``rng_state`` via
-    # ``ctx.save_for_backward``, which takes tensors, not tuples -- and split it
-    # back in :func:`backward`. ``philox_offset`` is always the last element.
+    # Pack the flash kernel's dropout RNG state (build-dependent shapes) into one
+    # 1-D tensor, since ``ctx.save_for_backward`` takes tensors, not tuples.
+    # :func:`backward` splits it; ``philox_offset`` is the last element.
     rng_state = (
         torch.cat([philox_seed.reshape(-1), philox_offset.reshape(-1)])
         if dropout_p > 0.0

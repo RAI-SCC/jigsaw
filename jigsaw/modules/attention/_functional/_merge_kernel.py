@@ -1,26 +1,14 @@
-"""Fused online-softmax merge for the ring-attention forward loop.
+"""Fused Triton kernel for the ring-attention online-softmax merge.
 
-:func:`fused_online_softmax_merge_` is a drop-in for the eager merge in
-:func:`..forward._online_softmax_merge_`: given the ring's running accumulator
-``(o1, l1)`` and one step's partial ``(o2, l2)`` it computes, in a single Triton
-kernel and in place on ``o1``,
+Computes, in place on ``o1``::
 
-    w      = sigmoid(l2 - l1)                       # blend weight, (0, 1)
-    o1    <- o1 + w * (o2 - o1)                     # == (1 - w) * o1 + w * o2
-    l_new  = logaddexp(l1, l2)
+    w = sigmoid(l2 - l1)
+    o1 = o1 + w * (o2 - o1)
+    l_new = logaddexp(l1, l2)
 
-collapsing the eager path's ``sigmoid`` + ``mul_`` + ``addcmul_`` + ``logaddexp``
-(four kernels, three passes over the big ``(b, h, n, d)`` accumulator, plus a
-bf16->fp32 temp for ``o2``) into one launch with a single read of ``o2`` and a
-single read-modify-write of ``o1``. Measured ~1.7x faster on the merge alone at
-s8192 / h16 (A100).
-
-Triton's runtime build needs a working host toolchain and a resolvable
-``libcuda`` -- ``scripts/run.sh`` fixes both inside the container. When Triton is
-unavailable (import fails, non-CUDA tensors, an unsupported dtype, or a
-non-contiguous input) :func:`fused_online_softmax_merge_` returns ``None`` and
-the caller falls back to the eager path, so this module never hard-depends on
-Triton.
+in one launch instead of four eager kernels.
+:func:`fused_online_softmax_merge_` returns ``None`` whenever Triton or the
+inputs are unsupported, and the caller falls back to the eager merge.
 """
 
 from __future__ import annotations
@@ -39,10 +27,7 @@ try:
 except Exception:  # pragma: no cover - triton missing / broken toolchain
     _TRITON_AVAILABLE = False
 
-#: Flipped to ``False`` the first time a launch raises (a broken runtime-build
-#: toolchain surfaces only when the kernel is actually compiled, not at import),
-#: so one failure downgrades every subsequent merge to the eager path instead of
-#: crashing the run. Set ``JIGSAW_DISABLE_TRITON_MERGE=1`` to force it off.
+#: Disabled after the first failed launch, or by ``JIGSAW_DISABLE_TRITON_MERGE=1``.
 _KERNEL_USABLE = _TRITON_AVAILABLE and os.environ.get(
     "JIGSAW_DISABLE_TRITON_MERGE", ""
 ).strip().lower() not in ("1", "true", "yes")
@@ -108,13 +93,27 @@ def fused_online_softmax_merge_(
     l2: torch.Tensor,
     layout: str,
 ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
-    """Triton fast path for :func:`..forward._online_softmax_merge_`.
+    """Triton fast path for :func:`.forward._online_softmax_merge_`.
 
-    Returns ``(o1, l_new)`` with ``o1`` mutated in place, or ``None`` when the
-    inputs are outside the kernel's supported set (the caller then runs the
-    eager merge). ``l_new`` is a fresh fp32 ``(b, h, n)`` tensor, matching the
-    eager path (which also cannot write ``l1`` in place -- ``l2`` may still carry
-    autograd history from the core).
+    Mutates ``o1`` in place; ``l_new`` is a fresh fp32 ``(b, h, n)`` tensor.
+
+    Parameters
+    ----------
+    o1 : torch.Tensor
+        Running output, updated in place.
+    l1 : torch.Tensor
+        Running log-sum-exp.
+    o2 : torch.Tensor
+        Output of the new block.
+    l2 : torch.Tensor
+        Log-sum-exp of the new block.
+    layout : str
+        Layout of ``o1`` / ``o2``.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor] or None
+        ``(o1, l_new)``, or ``None`` if the kernel does not support the inputs.
     """
     global _KERNEL_USABLE
     if not _KERNEL_USABLE or not o1.is_cuda:
@@ -147,11 +146,7 @@ def fused_online_softmax_merge_(
     block_m = max(1, 2048 // block_d)  # ~2K elements/program
     grid = (triton.cdiv(n_rows, block_m),)
     try:
-        # Two unavoidable mypy waivers on this launch: ``num_warps`` is a
-        # triton *launcher* meta-parameter rather than one of the kernel's own
-        # arguments, and ``tl.constexpr`` parameters are declared as that type
-        # but handed plain Python values, which triton specializes on at
-        # compile time. Both are how every triton kernel is called.
+        # num_warps is a launcher meta-arg; constexprs take plain Python values.
         _merge_kernel[grid](  # type: ignore[call-arg]
             o1f,
             o2f,

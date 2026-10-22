@@ -297,7 +297,7 @@ def conv_transpose_halo_nway(
     """
     local_in_spatial = tuple(x.shape[-config.n_spatial :])
 
-    def post_fn(y: torch.Tensor) -> torch.Tensor:
+    def _post_fn(y: torch.Tensor) -> torch.Tensor:
         for idx, axis, group in _split_axes(spatial_groups):
             y = transpose_halo_reduce(
                 y,
@@ -325,7 +325,7 @@ def conv_transpose_halo_nway(
         conv_func=config.conv_transpose_fn,
         n_spatial_dims=config.n_spatial,
         channel_comm=config.channel_comm,
-        post_fn=post_fn,
+        post_fn=_post_fn,
         local=config.channel_local,
     )
 

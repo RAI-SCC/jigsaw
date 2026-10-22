@@ -110,7 +110,7 @@ target-version = "py311"
 exclude = ["docs", "examples", "scaling_scripts", "stash"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "D", "D417", "N", "ARG001", "B", "RUF100"]
+select = ["E", "F", "I", "D", "D417", "N", "ARG001", "B", "RUF100", "ISC", "PIE", "PERF"]
 ignore = ["E501", "NPY201", "N812"]
 
 [tool.ruff.lint.per-file-ignores]
@@ -132,6 +132,24 @@ convention = "numpy"
 
 [tool.ruff.format]
 docstring-code-format = true
+
+# Spelling
+[tool.codespell]
+# te: TransformerEngine; dout: output gradient; nd: N-d; fo: fan-out.
+ignore-words-list = "te,dout,nd,fo"
+
+# Docstrings - numpydoc's own validator (also run via pre-commit)
+[tool.numpydoc_validation]
+checks = [
+    "all",
+    "ES01",  # an extended summary is optional
+    "EX01",  # an Examples section is optional
+    "SA01",  # a See Also section is optional
+]
+# Public API only. Constructors are documented in the class docstring, as numpydoc
+# prescribes. Private names (and so every autograd Function, all ``_``-named) are left
+# to ruff's D rules: their ctx / grad_* arguments are conventional.
+exclude = ['\.__init__$', '\._[^_]']
 
 # Testing
 [tool.pytest.ini_options]

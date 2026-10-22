@@ -96,7 +96,33 @@ def isend(
     tag: int = 0,
     group_dst: int | None = None,
 ) -> _BatchedWork:
-    """Queue an ``isend`` on the active batch."""
+    """Queue an ``isend`` on the active batch.
+
+    Mirrors :func:`torch.distributed.isend`.
+
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Tensor to send.
+    dst : int, optional
+        Destination global rank.
+    group : dist.ProcessGroup, optional
+        Process group of the op.
+    tag : int, optional
+        Tag to match sends with receives.
+    group_dst : int, optional
+        Destination rank within ``group``, instead of ``dst``.
+
+    Returns
+    -------
+    _BatchedWork
+        Handle whose ``wait()`` issues the batch, if not yet issued, and waits on this op.
+
+    Raises
+    ------
+    RuntimeError
+        If called outside a ``@_batched`` function.
+    """
     batch = _active_batch.get()
     if batch is None:
         raise RuntimeError("isend() called outside a @_batched function")
@@ -119,7 +145,33 @@ def irecv(
     tag: int = 0,
     group_src: int | None = None,
 ) -> _BatchedWork:
-    """Queue an ``irecv`` on the active batch."""
+    """Queue an ``irecv`` on the active batch.
+
+    Mirrors :func:`torch.distributed.irecv`.
+
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Tensor to receive into.
+    src : int, optional
+        Source global rank.
+    group : dist.ProcessGroup, optional
+        Process group of the op.
+    tag : int, optional
+        Tag to match sends with receives.
+    group_src : int, optional
+        Source rank within ``group``, instead of ``src``.
+
+    Returns
+    -------
+    _BatchedWork
+        Handle whose ``wait()`` issues the batch, if not yet issued, and waits on this op.
+
+    Raises
+    ------
+    RuntimeError
+        If called outside a ``@_batched`` function.
+    """
     batch = _active_batch.get()
     if batch is None:
         raise RuntimeError("irecv() called outside a @_batched function")

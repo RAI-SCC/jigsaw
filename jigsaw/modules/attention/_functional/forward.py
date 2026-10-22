@@ -31,31 +31,10 @@ def _online_softmax_merge_(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Merge a partial online-softmax result ``(o2, l2)`` into ``(o1, l1)`` in place.
 
-    ``o1`` and ``l1`` are the ring's running accumulators, owned by
-    :func:`ring_forward` and aliased nowhere else, so this mutates them in place:
-    no per-step ``(b, h, n, d)`` / ``(b, h, n)`` allocation, and the accumulator
-    itself is allocated once instead of being rebuilt every ring step.
-
-    Algebra (``l1``/``l2`` are log-sum-exps, not raw maxima): with
-    ``l_new = logaddexp(l1, l2)`` the two blend weights of the old
-    ``exp(l1 - l_new) * o1 + exp(l2 - l_new) * o2`` are just
-    ``1 - w`` and ``w`` for ``w = exp(l2 - l_new) = sigmoid(l2 - l1)``, so the
-    running-max cancels and only one small ``(b, h, n)`` weight is materialised.
-    The output update is then ``o1 <- (1 - w) * o1 + w * o2`` as two in-place
-    big-tensor kernels (``mul_`` then ``addcmul_``) with no temporaries -- down
-    from three big kernels and three big allocations. ``addcmul_`` promotes
-    ``o2`` (fp16/bf16 from the core) into ``o1``'s fp32 accumulator for free.
-    At the seed state ``l1 = -inf`` -> ``w = sigmoid(+inf) = 1`` -> ``o1 := o2``.
-
-    ``l1`` (small, ``(b, h, n)``) is returned fresh rather than updated in place:
-    an ``out=`` ``logaddexp`` cannot run when ``l2`` still carries autograd
-    history (the TE cores return a grad-tracked ``lse``), and the caller rebinds
-    it anyway.
-
-    ``o1``/``o2`` follow ``layout`` (``"bhsd"`` or ``"bshd"``); ``l1``/``l2`` are
-    ``(b, h, n)`` either way (every core emits the LSE in that shape), so for
-    ``"bshd"`` the blend weight is transposed to ``(b, n, h, 1)`` before it
-    broadcasts over ``o1``'s trailing ``d``.
+    Computes ``o1 <- (1 - w) * o1 + w * o2`` with ``w = sigmoid(l2 - l1)`` and
+    ``l_new = logaddexp(l1, l2)``. Uses the fused Triton kernel
+    (:func:`._merge_kernel.fused_online_softmax_merge_`) when available. ``l1`` is
+    returned fresh, since ``l2`` may carry autograd history.
 
     Parameters
     ----------
@@ -71,13 +50,6 @@ def _online_softmax_merge_(
     -------
     tuple[torch.Tensor, torch.Tensor]
         ``o1`` (mutated) and the new ``l1``.
-
-    A Triton kernel (:func:`._merge_kernel.fused_online_softmax_merge_`) fuses
-    the whole thing -- ``sigmoid`` + the blend + ``logaddexp`` -- into one launch
-    with a single read of ``o2`` and one read-modify-write of ``o1``, ~1.7x
-    faster than the eager path below. It returns ``None`` (and this falls back to
-    eager) when Triton is unavailable or the inputs are outside its supported
-    set.
     """
     fused = fused_online_softmax_merge_(o1, l1, o2, l2, layout)
     if fused is not None:
@@ -153,7 +125,7 @@ def ring_forward(
     Parameters
     ----------
     q, k, v : torch.Tensor
-        Local query, key, and value tensors, shaped ``(b, h, n_local, d)``.
+        Local query, key, and value tensors in ``ring_config.core_layout``.
     x : torch.Tensor
         Local input sequence chunk.
     w_qkv : torch.Tensor
@@ -177,31 +149,17 @@ def ring_forward(
         Output, log-sum-exp, chunks saved for backward, dropout base seed
         (``None`` without dropout) and per-chunk RNG states.
     """
-    # Accumulate ``out`` / ``lse`` in at least fp32, mutated in place across ring
-    # steps by ``_online_softmax_merge_``. ``lse`` is a softmax normaliser, never
-    # matmul'd, and the fused SDPA/TE backward kernels read it as fp32 -- a
-    # 16-bit ``lse`` makes them recompute the softmax wrong (see
-    # ``backward.ring_backward``); the old code only reached fp32 here by
-    # accident of dtype promotion. ``out`` is cast back to ``q.dtype`` on return.
-    # An fp64 model keeps fp64 for both. Shapes track ``q`` so this is agnostic
-    # to ``ring_config.core_layout`` (bhsd / bshd).
-    # Build the provider first: its ``__init__`` kicks the ring's first KV
-    # send (a P2P/all-to-all whose bytes then move on the NCCL stream while the
-    # host sets everything else up). The ``out``/``lse`` zero-fills and the
-    # dropout seed below don't depend on it, so issuing the send ahead of them
-    # overlaps the send launch with that host work -- it matters most for the
-    # hierarchical Ulysses inter-node ring, where that first send crosses the
-    # slow fabric.
+    # Build the provider first: the plain ring starts its first send here,
+    # overlapping it with the setup below.
     provider = build_forward_chunk_provider(
         ring_config, q, k, v, x, w_qkv, group, local_rank, ring_group_size
     )
 
+    # Accumulate in >= fp32; the fused backward kernels need an fp32 ``lse``.
     acc_dtype = torch.promote_types(q.dtype, torch.float32)
     b, heads, n_local, _ = _bhnd(q.shape, ring_config.core_layout)
     out = torch.zeros(q.shape, device=q.device, dtype=acc_dtype)
-    # ``lse`` is always ``(b, h, n)`` -- both the SDPA and TE cores emit and
-    # consume it in that shape regardless of the q/k/v layout; the merge
-    # transposes the blend weight instead (see ``_online_softmax_merge_``).
+    # ``lse`` is ``(b, h, n)`` regardless of layout.
     lse = torch.full(
         (b, heads, n_local), float("-inf"), device=q.device, dtype=acc_dtype
     )
@@ -218,11 +176,7 @@ def ring_forward(
             if base_seed is not None
             else None
         )
-        # A chunk recomputed from a received ``x`` comes out in ``w_qkv``'s dtype,
-        # while ``q`` is already in the core dtype (bf16 on CUDA): the cores
-        # matmul ``q`` against the chunk, so a mixed-dtype pair raises. Fold the
-        # chunk into ``q``'s dtype here, as ``ring_backward`` does for its cores;
-        # the provider keeps (and saves) the chunk in its original precision.
+        # Chunks rebuilt from ``x`` are in ``w_qkv``'s dtype; match ``q``'s.
         out, lse, rng_state_j = _attend_step(
             ring_config,
             q,

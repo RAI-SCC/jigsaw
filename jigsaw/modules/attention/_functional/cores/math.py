@@ -1,22 +1,18 @@
 """Unfused reference attention core for the ring's inner attention.
 
-Runs for any device / shape / dtype and is what the SDPA selectors fall back to
-on CPU. The backward takes the ring's globally normalised ``out`` / ``logsumexp``
-and recomputes ``dQ/dK/dV`` from them directly.
+Runs on any device, shape and dtype, and is the SDPA selectors' fallback on
+CPU. The backward recomputes ``dQ/dK/dV`` from the ring's globally normalised
+``out`` and ``logsumexp``.
 
-Dropout is applied post-softmax (inverted dropout: kept elements scaled by
-``1 / (1 - dropout_p)``), matching ``torch.nn.functional.scaled_dot_product_attention``'s
-convention. ``logsumexp`` is computed from the *pre*-dropout scores -- dropout
-doesn't change the normalising constant, and the ring's online-softmax merge
-(:func:`..forward._online_softmax_merge_`) needs the undropped value to combine
-chunks correctly.
+Dropout is inverted dropout applied after the softmax, as in
+``torch.nn.functional.scaled_dot_product_attention``. ``logsumexp`` comes from
+the pre-dropout scores, which the ring's online-softmax merge
+(:func:`..forward._online_softmax_merge_`) needs to combine chunks.
 
-Since this core has no opaque kernel-internal RNG state to thread back (unlike
-:mod:`.sdpa` / :mod:`.te`), it reconstructs its dropout mask from ``seed``: an
-int the ring independently recomputes identically in the forward and backward
-loops (see :func:`.._functional._combine_dropout_seed`), rather than a saved
-tensor. A dedicated ``torch.Generator`` seeded from it keeps the draw
-reproducible without disturbing the ambient default RNG stream.
+The dropout mask is rebuilt from ``seed``, which the ring recomputes
+identically in forward and backward (see
+:func:`..ring._combine_dropout_seed`). A dedicated ``torch.Generator``
+keeps the draw from disturbing the default RNG stream.
 """
 
 from __future__ import annotations
@@ -27,7 +23,7 @@ import torch
 
 
 def _dropout_mask(shape: torch.Size, device: torch.device, seed: int) -> torch.Tensor:
-    """Return a boolean dropout keep-mask that is reproducible from ``seed``."""
+    """Return uniform draws for the dropout mask, reproducible from ``seed``."""
     generator = torch.Generator(device=device).manual_seed(seed)
     return torch.rand(shape, generator=generator, device=device, dtype=torch.float32)
 
@@ -110,13 +106,13 @@ def backward(
         Saved log-sum-exp.
     scale : float
         Softmax scale.
+    *args : Any
+        Unused.
     dropout_p : float
         Dropout probability.
     seed : int, optional
         Seed of the dropout mask.
     rng_state : torch.Tensor, optional
-        Unused.
-    *args : Any
         Unused.
     **kwargs : Any
         Unused.
@@ -127,11 +123,9 @@ def backward(
         Gradients ``(dq, dk, dv)``.
     """
     attn = (q @ k.mT) * scale  # (B, H, Sq, Sk)
-    # The ring's accumulator keeps `logsumexp` in at least fp32 (see
-    # `_online_softmax_merge_`) regardless of q/k/v's working dtype; cast it
-    # down first so the subtraction doesn't promote `p` (and everything built
-    # from it below) to fp32, which the final matmuls against bf16/fp16
-    # grad_out/k/q would then reject as a dtype mismatch.
+    # The ring keeps `logsumexp` in at least fp32 (see `_online_softmax_merge_`).
+    # Cast it to the scores' dtype so `p` stays bf16/fp16; otherwise the
+    # matmuls against grad_out/k/q below reject the mixed dtypes.
     p = torch.exp(
         attn - logsumexp.unsqueeze(-1).to(attn.dtype)
     )  # global norm via saved lse
