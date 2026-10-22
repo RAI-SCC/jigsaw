@@ -103,9 +103,7 @@ class TestValidation:
 
     def test_functional_rejects_distributed_dim_outside_dims(self):
         with pytest.raises(ValueError, match="not in dims"):
-            dist_roll.distributed_roll(
-                torch.zeros(2, 2), (1,), (0,), [1], [None], torch.empty(0), None
-            )
+            dist_roll.distributed_roll(torch.zeros(2, 2), (1,), (0,), [1], [None], None)
 
 
 class TestExchangeHalo:
@@ -115,7 +113,7 @@ class TestExchangeHalo:
         def fail(*args, **kwargs):
             raise AssertionError("no communication expected")
 
-        out = dist_roll.exchange_halo_1d(x, 0, 0, None, torch.empty(0), fail)
+        out = dist_roll.exchange_halo_1d(x, 0, 0, None, fail)
         assert out is x
 
     @pytest.mark.parametrize(
@@ -130,7 +128,7 @@ class TestExchangeHalo:
             buffer.fill_(-1.0)
             return buffer, None
 
-        out = dist_roll.exchange_halo_1d(x, 0, window, None, torch.empty(0), fake_comm)
+        out = dist_roll.exchange_halo_1d(x, 0, window, None, fake_comm)
         reference = torch.arange(12.0).reshape(6, 2)
         assert torch.equal(sent["data"], reference[expected_slice])
         assert sent["offset"] == (1 if window > 0 else -1)

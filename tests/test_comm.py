@@ -184,9 +184,7 @@ class TestBatchWork:
 
 def test_2way_p2p_invalid_rank():
     with pytest.raises(ValueError, match="not valid"):
-        comm.comm_2way_p2p(
-            torch.ones(1), torch.zeros(1), torch.empty(0), FakeGroup(2, 3)
-        )
+        comm.comm_2way_p2p(torch.ones(1), torch.zeros(1), FakeGroup(2, 3))
 
 
 @pytest.mark.dist(2)
@@ -200,9 +198,7 @@ class TestTwoRanks:
         rank = dist.get_rank()
         data = torch.full((3,), float(rank + 1), device=device)
         buffer = torch.zeros(3, device=device)
-        out, handles = comm.comm_2way_p2p(
-            data, buffer, torch.empty(0, device=device), group, async_op=async_op
-        )
+        out, handles = comm.comm_2way_p2p(data, buffer, group, async_op=async_op)
         assert len(handles) == 2
         for handle in handles:
             if handle is not None:
