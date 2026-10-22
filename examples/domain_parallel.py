@@ -150,7 +150,8 @@ def main(
             log.info("step %3d  loss %.4f", step, losses[-1])
 
     # To look at a full prediction, gather the tiles: `gather_results` stitches the last
-    # two dimensions back together (the "row" axis is the height, "col" the width).
+    # two dimensions back together, the height over `pm_key_row` and the width over
+    # `pm_key_col`.
     with torch.no_grad():
         pred = gather_results(model(x), mesh, pm_key_row="sh", pm_key_col="sw")
     log.info(

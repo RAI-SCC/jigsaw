@@ -1118,10 +1118,9 @@ class Attention(torch.nn.Module):
             Key of the model process group. Unused, the ranks come from the
             row and column groups.
         ring : bool
-            Whether to use ring attention over the rows. With its default
-            ``config`` that needs a column group of size 1 and no ``qk_norm``,
-            see :class:`DistributedAttention`. Otherwise, each row attends within
-            its own chunk.
+            Whether to use ring attention over the rows; if ``False``, each row
+            attends within its own chunk. With a column group larger than 1 or
+            ``qk_norm``, the default ``config`` circulates K/V instead of ``x``.
         ulysses : bool
             Run Ulysses (all-to-all, head-parallel) sequence parallelism on the
             "row" dimension instead of the ring. Mutually exclusive with ``ring``.

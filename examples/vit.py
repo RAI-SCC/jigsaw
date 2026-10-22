@@ -10,7 +10,7 @@ patch recovery all consume and produce these shards.
 
     patch embed   DistributedConv2d          kernel == stride, so no halo exchange
     attention     DistributedAttention       ring attention over "row", heads over "col"
-    MLP           DistributedLinear             weights split over both axes
+    MLP           DistributedLinear          weights split over both axes
     layer norm    DistributedLayerNorm       statistics reduced over "col"
     recovery      DistributedConvTranspose2d
 
@@ -177,8 +177,9 @@ class ViT(nn.Module):
         z = self.embed(x)  # (B, E / col, Hp, Wp / row)
         b, e, hp, wp = z.shape
         z = z.permute(0, 2, 3, 1) + self.pos_embed  # (B, Hp, Wp / row, E / col)
-        # tokens: (B, N / row, E / col). The ring sends its input to the neighbor
-        # ranks, which needs contiguous memory (the permute above left it strided).
+        # tokens: (B, N / row, E / col). The distributed linears of the MLP send their
+        # input to other ranks, which needs contiguous memory (the permute above left
+        # it strided).
         z = z.reshape(b, hp * wp, e).contiguous()
         for block in self.blocks:
             z = block(z)
