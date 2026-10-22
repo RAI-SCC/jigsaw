@@ -23,7 +23,7 @@ def _skip_if_unsupported(channel_comm: str) -> None:
 
 
 def _single(value: Pair) -> tuple[int]:
-    """Normalise an ``int`` or length-1 tuple to a 1-element tuple."""
+    """Normalize an ``int`` or length-1 tuple to a 1-element tuple."""
     return (value,) if isinstance(value, int) else (value[0],)
 
 
@@ -275,7 +275,7 @@ class TestConv1dTranspose:
     def test_unknown_channel_comm_rejected(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        """An unrecognised ``channel_comm`` name fails fast at construction."""
+        """An unrecognized ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
             convolution.DistributedConvTranspose1d(
                 8,

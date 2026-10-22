@@ -214,7 +214,7 @@ def _all_gather_uneven(
     All-gather tensors that may differ in shape between ranks.
 
     ``dist.all_gather`` needs every tensor the same size, so the halo regime (where
-    ``kernel != stride`` leaves neighbouring ranks with output shards that differ by a
+    ``kernel != stride`` leaves neighboring ranks with output shards that differ by a
     row) cannot use it directly. Gather the shapes first; if they already agree take
     the fast path, otherwise pad every rank up to the elementwise-max shape, gather, and
     narrow each part back to its real extent.

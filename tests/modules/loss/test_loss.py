@@ -256,7 +256,7 @@ class TestCrossEntropy:
     def test_cross_entropy_weight(
         self, request: pytest.FixtureRequest, device: torch.device, mesh_name: str
     ) -> None:
-        """Per-class ``weight`` is honoured in forward and backward."""
+        """Per-class ``weight`` is honored in forward and backward."""
         pmd = request.getfixturevalue(mesh_name)
         n, c, s = 3, 8, 16
 

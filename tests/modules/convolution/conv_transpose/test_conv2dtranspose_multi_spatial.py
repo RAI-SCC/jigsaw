@@ -19,7 +19,7 @@ Pair = int | tuple[int, int]
 
 
 def _pair(value: Pair) -> tuple[int, int]:
-    """Normalise an ``int`` or 2-tuple to a ``(h, w)`` tuple."""
+    """Normalize an ``int`` or 2-tuple to a ``(h, w)`` tuple."""
     return (value, value) if isinstance(value, int) else tuple(value)
 
 

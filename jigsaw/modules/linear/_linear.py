@@ -16,7 +16,7 @@ from ._functional import _XTW, _XW, _XWT
 # Effective ``(model_group.size() // col_group.size(), col_group.size())``
 # layouts the XWT kernels implement. The kernel is picked by
 # ``model_group.size()`` alone and each bakes in a fixed layout, so other
-# factorisations of the same rank count don't work. Only ``forward`` is
+# factorizations of the same rank count don't work. Only ``forward`` is
 # constrained; ``merge_weights`` / ``reshard_parameters`` work for any layout.
 _SUPPORTED_XWT_LAYOUTS = frozenset({(1, 1), (1, 2), (2, 2), (4, 2)})
 

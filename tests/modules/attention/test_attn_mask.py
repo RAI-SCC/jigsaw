@@ -13,7 +13,7 @@ no tensor-valued mask, no ``"arbitrary"``. TE's own ``DotProductAttention`` *doe
 accept an arbitrary mask, but routes it to its *unfused* backend.
 
 Torch's own ``scaled_dot_product_attention`` does run an arbitrary mask fused, on its
-memory-efficient (xFormers-derived) and cuDNN backends, which avoid materialising the
+memory-efficient (xFormers-derived) and cuDNN backends, which avoid materializing the
 ``(batch, heads, N, N)`` score matrix the unfused math kernel needs. So:
 
 * ``attn_backend`` in ``{"sdpa", "math"}`` (the non-ring, non-Ulysses core): genuinely,
@@ -44,7 +44,7 @@ def _block_mask(n0: int, n1: int) -> torch.Tensor:
     Mimics a shifted Swin window straddling a border it must not attend across (a
     pole, on a global grid): tokens keep their own region's visibility and nothing
     else. Block-diagonal masking exactly decomposes attention into two independent
-    per-region calls (each query's softmax normalises only over the keys it can
+    per-region calls (each query's softmax normalizes only over the keys it can
     see), which is what the tests below check against.
     """
     n = n0 + n1
@@ -165,7 +165,7 @@ class TestAttentionMask:
         torch.testing.assert_close(out_bool, out_float, rtol=tol, atol=tol)
 
     def test_no_mask_is_unaffected(self, device: torch.device) -> None:
-        """``attn_mask=None`` (the default) reproduces the pre-existing behaviour."""
+        """``attn_mask=None`` (the default) reproduces the pre-existing behavior."""
         model = self._model(device)
         torch.manual_seed(1)
         x = torch.randn(2, self.n0 + self.n1, DIM, device=device)

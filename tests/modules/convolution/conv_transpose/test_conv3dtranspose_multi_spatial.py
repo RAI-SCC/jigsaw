@@ -19,7 +19,7 @@ Triple = int | tuple[int, int, int]
 
 
 def _triple(value: Triple) -> tuple[int, int, int]:
-    """Normalise an ``int`` or 3-tuple to a ``(d, h, w)`` tuple."""
+    """Normalize an ``int`` or 3-tuple to a ``(d, h, w)`` tuple."""
     return (value, value, value) if isinstance(value, int) else tuple(value)
 
 

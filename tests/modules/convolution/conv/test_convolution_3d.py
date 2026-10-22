@@ -17,7 +17,7 @@ Triple = int | tuple[int, int, int]
 
 
 def _triple(value: Triple) -> tuple[int, int, int]:
-    """Normalise an ``int`` or 3-tuple to a ``(d, h, w)`` tuple."""
+    """Normalize an ``int`` or 3-tuple to a ``(d, h, w)`` tuple."""
     return (value, value, value) if isinstance(value, int) else tuple(value)
 
 
@@ -340,7 +340,7 @@ class TestConv3d:
     def test_unknown_channel_comm_rejected(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        """An unrecognised ``channel_comm`` name fails fast at construction."""
+        """An unrecognized ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
             convolution.DistributedConv3d(
                 8,

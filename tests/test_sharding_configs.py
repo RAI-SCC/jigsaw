@@ -327,7 +327,7 @@ class TestReshardMatchesDirect:
             )
 
         # The XWT kernels only implement a fixed set of row x col arrangements
-        # (see ``_SUPPORTED_XWT_LAYOUTS``); on any other factorisation
+        # (see ``_SUPPORTED_XWT_LAYOUTS``); on any other factorization
         # ``forward`` raises rather than returning a mis-shaped result. The
         # reshard still has to land the module in the *same* state as a direct
         # conversion, so both must raise identically.

@@ -38,7 +38,7 @@ def _destroy_process_group() -> None:
 
 
 def setup() -> tuple[torch.device, int, int]:
-    """Initialise ``torch.distributed`` and return ``(device, rank, world_size)``.
+    """Initialize ``torch.distributed`` and return ``(device, rank, world_size)``.
 
     With one GPU per process this is :func:`jigsaw.launch.init_cuda` (NCCL, launched by
     ``srun`` or ``torchrun``). Otherwise (no GPU, or fewer GPUs than processes on the

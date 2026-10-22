@@ -23,7 +23,7 @@ def _skip_if_unsupported(channel_comm: str) -> None:
 
 
 def _pair(value: Pair) -> tuple[int, int]:
-    """Normalise an ``int`` or 2-tuple to a ``(h, w)`` tuple."""
+    """Normalize an ``int`` or 2-tuple to a ``(h, w)`` tuple."""
     return (value, value) if isinstance(value, int) else tuple(value)
 
 
@@ -277,7 +277,7 @@ class TestConv2dTranspose:
     def test_unknown_channel_comm_rejected(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        """An unrecognised ``channel_comm`` name fails fast at construction."""
+        """An unrecognized ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
             convolution.DistributedConvTranspose2d(
                 8,

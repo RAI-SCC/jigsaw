@@ -122,7 +122,7 @@ class TestTeCoreSelection:
             te_cores.select_core(CPU)
 
     def test_cpu_resolves_to_cudnn(self, monkeypatch):
-        """Historical behaviour: the selector succeeds, the kernel call reports
+        """Historical behavior: the selector succeeds, the kernel call reports
         that there is no GPU."""
         monkeypatch.delenv("JIGSAW_TE_CORE", raising=False)
         assert te_cores.select_core(CPU) is te_cores.cudnn
@@ -287,7 +287,7 @@ class TestDistributedAttentionBackend:
 
 
 # --------------------------------------------------------------------------- #
-# RingAttentionConfig: the asymmetric TE behaviour + repr
+# RingAttentionConfig: the asymmetric TE behavior + repr
 # --------------------------------------------------------------------------- #
 class TestRingAttentionConfigBackend:
     def test_default_backend_and_repr(self):
@@ -322,7 +322,7 @@ class TestBackendWithTe:
         assert model.attn_backend is AttnBackend.TE
         assert model.te is True
         # The TE core carries no `te.DotProductAttention` submodule: it calls the
-        # kernels through the shared wrapper, parameterised per call by
+        # kernels through the shared wrapper, parameterized per call by
         # `self.scale` / `self.dropout_p` and by the core resolved here.
         assert model.attn_core.__func__ is DistributedAttention._transformer_attn_core
         assert not hasattr(model, "attn")

@@ -139,7 +139,7 @@ class TestDefaults:
 
         ``os.getenv("SLURM_PROCID") is not None`` is ``True`` for ``""``, so the
         SLURM branch is taken and ``int("")`` raises. Documents current
-        behaviour; arguably it should fall through to the next launcher.
+        behavior; arguably it should fall through to the next launcher.
         """
         monkeypatch.setenv("SLURM_PROCID", "")
 

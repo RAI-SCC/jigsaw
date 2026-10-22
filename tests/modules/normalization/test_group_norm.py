@@ -1,6 +1,6 @@
 """``DistributedGroupNorm``: local forward, and resharding of affine / bias-free layers.
 
-The layer normalises each channel shard on its own, which equals the matching slice of a
+The layer normalizes each channel shard on its own, which equals the matching slice of a
 global ``GroupNorm`` as long as no group straddles two shards. ``test_reshard_convert_coverage``
 only checks the reshard assertions, so the forward pass and the ``affine=False`` /
 ``bias=False`` reshard branches are covered here.

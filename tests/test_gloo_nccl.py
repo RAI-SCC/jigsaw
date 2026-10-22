@@ -3,7 +3,7 @@
 Marked ``no_dist_env`` so the shared session group is *not* set up: this file
 brings up its own hybrid-backend group. That means it only works when run on
 its own (``pytest tests/test_gloo_nccl.py`` under ``srun -n8``); inside the full
-suite another test initialises the default group first and the fixture skips.
+suite another test initializes the default group first and the fixture skips.
 """
 
 import math

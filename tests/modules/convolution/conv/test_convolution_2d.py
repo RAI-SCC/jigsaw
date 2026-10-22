@@ -17,7 +17,7 @@ Pair = int | tuple[int, int]
 
 
 def _pair(value: Pair) -> tuple[int, int]:
-    """Normalise an ``int`` or 2-tuple to a ``(h, w)`` tuple."""
+    """Normalize an ``int`` or 2-tuple to a ``(h, w)`` tuple."""
     return (value, value) if isinstance(value, int) else tuple(value)
 
 
@@ -530,7 +530,7 @@ class TestConv2d:
     def test_unknown_channel_comm_rejected(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        """An unrecognised ``channel_comm`` name fails fast at construction."""
+        """An unrecognized ``channel_comm`` name fails fast at construction."""
         with pytest.raises(ValueError):
             convolution.DistributedConv2d(
                 8,
@@ -924,7 +924,7 @@ class TestConv2dParallel:
 
         The spatial split is along width only, so the local convolution keeps the
         *full* height padding on every rank while the width padding is
-        materialised only at the two global edges: rank 0 gets ``pad_w`` zero
+        materialized only at the two global edges: rank 0 gets ``pad_w`` zero
         columns on its left, rank 3 gets ``pad_w`` on its right, ranks 1 and 2
         get none. Parity with a single-process ``F.conv2d(..., padding=padding)``
         pins that distribution down: a wrong local padding (``pad_w`` on every

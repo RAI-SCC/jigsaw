@@ -69,7 +69,7 @@ class Block(nn.Module):
 
         def norm() -> nn.Module:
             return jigsaw.modules.DistributedLayerNorm(
-                normalized_dim=DIM,  # global size; each rank normalises its slice ...
+                normalized_dim=DIM,  # global size; each rank normalizes its slice ...
                 local_rank=model_group.rank(),
                 device=device,
                 row_group=row,
@@ -177,7 +177,7 @@ class ViT(nn.Module):
         z = self.embed(x)  # (B, E / col, Hp, Wp / row)
         b, e, hp, wp = z.shape
         z = z.permute(0, 2, 3, 1) + self.pos_embed  # (B, Hp, Wp / row, E / col)
-        # tokens: (B, N / row, E / col). The ring sends its input to the neighbour
+        # tokens: (B, N / row, E / col). The ring sends its input to the neighbor
         # ranks, which needs contiguous memory (the permute above left it strided).
         z = z.reshape(b, hp * wp, e).contiguous()
         for block in self.blocks:
@@ -227,7 +227,7 @@ def main(
     else:
         mesh = jigsaw.make_process_mesh({"row": 2, "col": 2})
 
-    # Every rank needs its own seed so that the shards are initialised independently.
+    # Every rank needs its own seed so that the shards are initialized independently.
     # (The copies start equal anyway: DDP broadcasts copy 0's weights over "dp".)
     set_all_seeds(mesh["model"].rank())
 

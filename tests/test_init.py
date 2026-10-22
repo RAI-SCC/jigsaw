@@ -4,7 +4,7 @@ Two properties matter here:
 
 * With no ``global_shape`` / ``fan_in`` / ``fan_out`` given, every function must be a
   bit-for-bit drop-in for its ``torch.nn.init`` namesake; these are plain,
-  non-distributed calls and jigsaw never gets to change their behaviour.
+  non-distributed calls and jigsaw never gets to change their behavior.
 * With a ``global_shape`` describing a bigger (unsharded) tensor, the fan (and
   therefore the sampling bound / std) must be computed from that shape, not from the
   tensor actually being filled. This is what lets a jigsaw layer initialize a local
@@ -73,7 +73,7 @@ class TestDropInEquivalence:
         "name", ["uniform_", "normal_", "constant_", "ones_", "zeros_", "trunc_normal_"]
     )
     def test_shape_independent_helpers_are_torchs_own(self, name: str) -> None:
-        """These are re-exported verbatim: same object, not just same behaviour."""
+        """These are re-exported verbatim: same object, not just same behavior."""
         assert getattr(init, name) is getattr(torch.nn.init, name)
 
 
