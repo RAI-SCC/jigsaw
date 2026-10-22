@@ -5,18 +5,16 @@ from ``kaiming_uniform_(a=sqrt(5))`` and ``bias`` from ``U(-1/sqrt(fan_in),
 1/sqrt(fan_in))``, both keyed off the layer's *global* fan. A distributed jigsaw
 layer only ever samples a shard of that tensor, so the bound that shard is drawn
 from must be computed from the same global fan, not from the local shard's own
-(smaller) shape. Get that wrong (as the row-/channel-group shard size used to
-leak into the bound, see git history) and the concatenated global parameter is
-still uniform, just over a *narrower* range than ``torch.nn`` would use:
-invisible to a plain sharded-forward-pass check, but a real difference in the
-trained model's effective init scale.
+(smaller) shape. If the row- or channel-group shard size leaks into the bound,
+the concatenated global parameter is still uniform, just over a *narrower* range
+than ``torch.nn`` would use: invisible to a plain sharded-forward-pass check, but
+a real difference in the trained model's effective init scale.
 
 These tests gather each layer's global weight/bias (via the module's own
 ``merge_weights``) and check its empirical bound against the closed-form
-``torch.nn`` bound: comfortably below it (``uniform_`` samples ``[-b, b)``,
-never above) and, since gathering thousands of i.i.d. uniform draws is used,
-comfortably close to it too, catching an accidental extra ``1/sqrt(group
-size)`` factor either way.
+``torch.nn`` bound: at most the bound (``uniform_`` samples ``[-b, b)``) and,
+since the gathered tensor holds thousands of i.i.d. uniform draws, above 85% of
+it, catching an accidental extra ``1/sqrt(group size)`` factor either way.
 """
 
 import math
@@ -34,8 +32,8 @@ pytestmark = [pytest.mark.dist_required]
 def _assert_bound(
     tensor: torch.Tensor, bound: float, *, low_frac: float = 0.85
 ) -> None:
-    """``tensor`` should be ~U(-bound, bound): comfortably under the bound, and (with
-    enough elements) comfortably above ``low_frac * bound`` too."""
+    """``tensor`` should be ~U(-bound, bound): its max magnitude is at most the bound
+    and (with enough elements) above ``low_frac * bound``."""
     max_abs = tensor.abs().max().item()
     assert max_abs <= bound + 1e-6, f"{max_abs} exceeds the torch.nn bound {bound}"
     assert max_abs > low_frac * bound, (
