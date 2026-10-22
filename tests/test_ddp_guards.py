@@ -74,7 +74,7 @@ def test_modules_start_with_identical_replicas(kind, device) -> None:
     div = replica_divergence(params)
     all_reduce_max(div, mesh.values())
     names = [n for n, _ in model.named_parameters()]
-    assert not div.any(), [n for n, d in zip(names, div.tolist()) if d > 0]
+    assert not div.any(), [n for n, d in zip(names, div.tolist(), strict=True) if d > 0]
     DistributedDataParallel(model, process_group=mesh["dp"])(make_input(0))
 
 
@@ -155,7 +155,7 @@ def test_reshard_remarks_onto_new_groups(device, monkeypatch) -> None:
     ddp = parallel.wrap_ddp(conv, new)
     y = ddp(make_input(0))
     y.backward(_int_tensor(y.shape, 500 + 10 * dist.get_rank(), device))
-    for (name, p), e in zip(conv.named_parameters(), expected):
+    for (name, p), e in zip(conv.named_parameters(), expected, strict=True):
         assert torch.equal(p.grad, e), name
 
 

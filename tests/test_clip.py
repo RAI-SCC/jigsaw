@@ -89,7 +89,7 @@ def test_matches_torch_on_replicas(norm_type: float, device: torch.device) -> No
 
     group = dist.group.WORLD
     assert_close("norm", total, expected, F32_ATOL, F32_RTOL, device, group)
-    for i, (p, q) in enumerate(zip(ours, ref)):
+    for i, (p, q) in enumerate(zip(ours, ref, strict=True)):
         assert_close(f"grad {i}", p.grad, q.grad, F32_ATOL, F32_RTOL, device, group)
 
 
@@ -109,7 +109,7 @@ def test_counts_shards_and_replicas_once(
     ref = torch.tensor(expected, dtype=total.dtype, device=device)
     assert_close("norm", total, ref, 0.0, 1e-12, device, group)
     coef = (expected / 2) / (expected + 1e-6)
-    for i, (p, g) in enumerate(zip(params, before)):
+    for i, (p, g) in enumerate(zip(params, before, strict=True)):
         assert_close(f"grad {i}", p.grad, g * coef, F64_ATOL, F64_RTOL, device, group)
 
 
@@ -121,7 +121,7 @@ def test_no_clipping_below_max_norm(device: torch.device) -> None:
 
     parallel.clip_grad_norm_(params, 2 * _expected_norm(2.0), mesh["model"])
 
-    for i, (p, g) in enumerate(zip(params, before)):
+    for i, (p, g) in enumerate(zip(params, before, strict=True)):
         assert_close(f"grad {i}", p.grad, g, 0.0, 0.0, device, mesh["model"])
 
 

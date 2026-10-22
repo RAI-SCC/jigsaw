@@ -201,7 +201,7 @@ def _local_grads(model, make_input, n_micro: int, monkeypatch) -> list:
 
 def _expected(model, local: list, dp: dist.ProcessGroup, ddp: bool) -> list:
     out = []
-    for p, g in zip(model.parameters(), local):
+    for p, g in zip(model.parameters(), local, strict=True):
         e = g.clone()
         for grp in parallel.replica_groups(p):
             dist.all_reduce(e, group=grp)
@@ -246,7 +246,7 @@ def test_ddp_composition(shape, kind, variant, device, monkeypatch) -> None:
     wrapped = _wrap(model, variant, dp, mesh)
     _step(wrapped, make_input, n_micro, no_sync=_uses_no_sync(variant))
 
-    for (name, p), e in zip(model.named_parameters(), expected):
+    for (name, p), e in zip(model.named_parameters(), expected, strict=True):
         assert p.grad is not None, name
         if kind in EXACT_KINDS:
             assert torch.equal(p.grad, e), f"{name}: {p.grad} != {e}"
@@ -261,7 +261,7 @@ def test_ddp_composition(shape, kind, variant, device, monkeypatch) -> None:
                 else (1e-5, max(1e-4 * e.abs().max().item(), 1e-6))
             )
             torch.testing.assert_close(
-                p.grad, e, rtol=rtol, atol=atol, msg=lambda m: f"{name}: {m}"
+                p.grad, e, rtol=rtol, atol=atol, msg=lambda m, name=name: f"{name}: {m}"
             )
         for grp in parallel.replica_groups(p):
             _assert_identical_over(p.grad, grp, f"{name}.grad")
@@ -279,7 +279,10 @@ def test_sync_switched_off_is_detected(device, monkeypatch) -> None:
     wrapped = _wrap(model, "ddp", mesh["dp"])
     _disable_sync(monkeypatch)
     _step(wrapped, make_input, 1)
-    assert not all(torch.equal(p.grad, e) for p, e in zip(model.parameters(), expected))
+    assert not all(
+        torch.equal(p.grad, e)
+        for p, e in zip(model.parameters(), expected, strict=True)
+    )
 
 
 @pytest.mark.dist(8)
@@ -399,7 +402,7 @@ def test_ddp_compiled_autograd(
         parallel.register_joint_comm_hook(ddp)
     _compiled_step(ddp, make_input, n_micro, no_sync, "aot_eager")
 
-    for (name, p), e in zip(model.named_parameters(), expected):
+    for (name, p), e in zip(model.named_parameters(), expected, strict=True):
         assert p.grad is not None, name
         if kind in EXACT_KINDS:
             assert torch.equal(p.grad, e), f"{name}: {p.grad} != {e}"
@@ -409,7 +412,7 @@ def test_ddp_compiled_autograd(
                 e,
                 rtol=1e-5,
                 atol=max(1e-4 * e.abs().max().item(), 1e-6),
-                msg=lambda m: f"{name}: {m}",
+                msg=lambda m, name=name: f"{name}: {m}",
             )
         for grp in [*parallel.replica_groups(p), dp]:
             _assert_identical_over(p.grad, grp, f"{name}.grad")
@@ -438,7 +441,7 @@ def test_joint_hook_inductor_fusion(device, monkeypatch, python_reducer) -> None
     parallel.register_joint_comm_hook(ddp)
     _compiled_step(ddp, make_input, 1, False, "inductor")
 
-    for (name, p), e in zip(model.named_parameters(), expected):
+    for (name, p), e in zip(model.named_parameters(), expected, strict=True):
         assert torch.equal(p.grad, e), f"{name}: {p.grad} != {e}"
 
 

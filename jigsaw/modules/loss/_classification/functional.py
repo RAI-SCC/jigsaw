@@ -210,7 +210,9 @@ class _ChannelParallelCrossEntropy(torch.autograd.Function):
 
         logits, local_idx, local_hit, elem_weight = (
             _front(t, bdim)
-            for t, bdim in zip((logits, local_idx, local_hit, elem_weight), in_dims[:4])
+            for t, bdim in zip(
+                (logits, local_idx, local_hit, elem_weight), in_dims[:4], strict=True
+            )
         )
         class_dim = dim + 1 if dim >= 0 else dim
         out = _ChannelParallelCrossEntropy.apply(

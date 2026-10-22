@@ -270,10 +270,10 @@ class _DistributedConvNd(torch.nn.Module):
         instance = cls(
             in_channels=model.in_channels,
             out_channels=model.out_channels,
-            kernel_size=cast(tuple[int, ...], model.kernel_size),
-            stride=cast(tuple[int, ...], model.stride),
+            kernel_size=model.kernel_size,
+            stride=model.stride,
             padding=cast(tuple[int, ...], model.padding),
-            dilation=cast(tuple[int, ...], model.dilation),
+            dilation=model.dilation,
             groups=model.groups,
             bias=model.bias is not None,
             spatial_group=process_mesh_dict[row_kw],
@@ -531,7 +531,7 @@ class _DistributedConvNd(torch.nn.Module):
             dilation=self.dilation,
             groups=self._groups_local,
         )
-        return cast(torch.Tensor, y)
+        return y
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply the distributed convolution.
@@ -577,4 +577,4 @@ class _DistributedConvNd(torch.nn.Module):
             self.config,
         )
 
-        return cast(torch.Tensor, out[0])
+        return out[0]

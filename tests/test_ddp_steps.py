@@ -54,7 +54,10 @@ def train(shape, kind, device, steps: int = STEPS) -> list:
             for grp in parallel.replica_groups(p):
                 _assert_identical_over(p.detach(), grp, f"step {step}: {name}")
             _assert_identical_over(p.detach(), mesh["dp"], f"step {step}: {name}")
-    return [(name, p, b) for (name, p), b in zip(model.named_parameters(), before)]
+    return [
+        (name, p, b)
+        for (name, p), b in zip(model.named_parameters(), before, strict=True)
+    ]
 
 
 @pytest.mark.parametrize("shape, kind", list(_cases()))

@@ -139,7 +139,7 @@ def _conv2d_transpose_multi_spatial_reference_check(
     # cleanly rather than returning a wrong result.
     split_idxs = [i for i, n in enumerate((nh, nw)) if n > 1]
     groups_per_axis = (nh, nw)
-    halo = not all(k == s for k, s in zip(kernel_size, stride)) or any(
+    halo = not all(k == s for k, s in zip(kernel_size, stride, strict=True)) or any(
         padding[i] != 0 or dilation[i] != 1 for i in split_idxs
     )
     if halo and any(y_ref.shape[-2:][i] % groups_per_axis[i] != 0 for i in split_idxs):

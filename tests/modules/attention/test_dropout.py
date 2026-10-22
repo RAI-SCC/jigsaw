@@ -413,7 +413,7 @@ class TestTeAttnDropoutReplay:
         ref_out.backward(self._bhsd(grad_out).float())
 
         for name, got, ref in zip(
-            "qkv", (q.grad, k.grad, v.grad), (qg.grad, kg.grad, vg.grad)
+            "qkv", (q.grad, k.grad, v.grad), (qg.grad, kg.grad, vg.grad), strict=True
         ):
             assert got is not None, f"no grad for {name}"
             torch.testing.assert_close(

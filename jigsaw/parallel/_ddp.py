@@ -149,7 +149,7 @@ def check_ddp(ddp: DistributedDataParallel) -> None:
             'DistributedDataParallel(model, process_group=mesh["dp"]), or '
             "jigsaw.parallel.wrap_ddp(model, mesh)."
         )
-    bad = [n for (n, _, _), d in zip(named, flags[1:].tolist()) if d > 0]
+    bad = [n for (n, _, _), d in zip(named, flags[1:].tolist(), strict=True) if d > 0]
     if bad:
         raise RuntimeError(
             f"{len(bad)} replicated parameter(s) differ across their replica groups "

@@ -1040,7 +1040,7 @@ def test_ring_overlap_comm_parity(
 
     ref = run(False)
     got = run(True)
-    for name, a, c in zip(("out", "dq", "dk", "dv"), ref, got):
+    for name, a, c in zip(("out", "dq", "dk", "dv"), ref, got, strict=True):
         assert torch.allclose(a, c, atol=1e-3, rtol=0), (
             f"{name}: overlap changed the result "
             f"(max |Δ| = {(a.float() - c.float()).abs().max().item():.3e})"
@@ -1140,7 +1140,7 @@ def test_ring_overlap_comm_parity_hybrid(
 
     ref = run(False)
     got = run(True)
-    for name, a, c in zip(("out", "dq", "dk", "dv"), ref, got):
+    for name, a, c in zip(("out", "dq", "dk", "dv"), ref, got, strict=True):
         assert torch.allclose(a, c, atol=1e-3, rtol=0), (
             f"{name}: overlap changed the result "
             f"(max |Δ| = {(a.float() - c.float()).abs().max().item():.3e})"

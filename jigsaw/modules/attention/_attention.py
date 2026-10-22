@@ -402,7 +402,8 @@ class DistributedAttention(torch.nn.Module):
                 "overlaps only the forward inter-node K/V ring: GLOBAL keeps "
                 "every arrived chunk and all-reduces dK/dV, so the backward has "
                 "no re-ringing relay to hide. Use ulysses_inter_save_scope=LOCAL "
-                "to overlap the backward too."
+                "to overlap the backward too.",
+                stacklevel=2,
             )
         if ring and ulysses:
             raise ValueError("ring and ulysses are mutually exclusive")
@@ -626,7 +627,8 @@ class DistributedAttention(torch.nn.Module):
         if attn_backend is AttnBackend.TE and not JIGSAW_TE_AVAILABLE:
             warnings.warn(
                 "attn_backend='te' but transformer_engine is unavailable; "
-                "falling back to 'sdpa'. Install it or update your container."
+                "falling back to 'sdpa'. Install it or update your container.",
+                stacklevel=3,  # past __init__, to the module's construction
             )
             return AttnBackend.SDPA
         return attn_backend

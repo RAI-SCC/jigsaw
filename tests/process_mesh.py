@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 import pytest
 import torch
 
@@ -10,8 +12,8 @@ import jigsaw
 
 def make_process_mesh(
     device_type: str = "cuda",
-    mesh_shape: list[int] = [2, 2],
-    mesh_dim_names: list[str] = ["row", "col"],
+    mesh_shape: Sequence[int] = (2, 2),
+    mesh_dim_names: Sequence[str] = ("row", "col"),
     model_name: str = "model",
 ) -> dict:
     """Return process mesh with rows, columns, and model group."""

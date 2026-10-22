@@ -99,8 +99,8 @@ def distributed_roll(
     x = torch.roll(x, shifts=shifts, dims=dims)
 
     # Compare the dimensions as counted from the front: ``-2`` is ``2`` in 4-D.
-    dim_to_shift = {d % x.ndim: s for d, s in zip(dims, shifts)}
-    for d, pg in zip(distributed_dims, spatial_process_groups):
+    dim_to_shift = {d % x.ndim: s for d, s in zip(dims, shifts, strict=True)}
+    for d, pg in zip(distributed_dims, spatial_process_groups, strict=True):
         if d % x.ndim not in dim_to_shift:
             raise ValueError(f"distributed dim {d} not in dims {dims}")
         x = exchange_halo_1d(

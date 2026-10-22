@@ -133,7 +133,7 @@ def _broadcast_coalesced(
         dist.broadcast(flat, group_src=src, group=group)
         # Unpack: copy each slice back into its parameter. ``detach`` lets this
         # write into leaf parameters that require grad.
-        for p, chunk in zip(ps, flat.split([p.numel() for p in ps])):
+        for p, chunk in zip(ps, flat.split([p.numel() for p in ps]), strict=True):
             p.detach().copy_(chunk.view_as(p))
 
 
@@ -175,7 +175,7 @@ def replica_divergence(
                 d = (mine - ref).abs()
                 # NaN on one rank only is a divergence; NaN on both is not.
                 d = torch.where(mine.isnan() != ref.isnan(), torch.inf, d.nan_to_num())
-                for i, chunk in zip(idx, d.split(sizes)):
+                for i, chunk in zip(idx, d.split(sizes), strict=True):
                     if chunk.numel():
                         div[i] = torch.maximum(div[i], chunk.max())
     return div

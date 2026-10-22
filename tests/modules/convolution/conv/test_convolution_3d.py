@@ -554,7 +554,7 @@ def _conv3d_multi_spatial_reference_check(
     split_idxs = [i for i, n in enumerate((nd, nh, nw)) if n > 1]
     groups_per_axis = (nd, nh, nw)
     global_sizes = (depth, height, width)
-    halo = not all(k == s for k, s in zip(kernel_size, stride)) or any(
+    halo = not all(k == s for k, s in zip(kernel_size, stride, strict=True)) or any(
         padding[i] != 0 or dilation[i] != 1 for i in split_idxs
     )
     if halo:

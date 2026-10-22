@@ -127,7 +127,7 @@ class TestTransformerEngineAttentionVmap:
             ref_members.append((qi.grad, ki.grad, vi.grad))
         ref = tuple(torch.stack([m[j] for m in ref_members]) for j in range(3))
 
-        for name, g, r in zip("qkv", got, ref):
+        for name, g, r in zip("qkv", got, ref, strict=True):
             assert g is not None, f"no grad for {name}"
             torch.testing.assert_close(g, r, **_GRAD_TOL)
 

@@ -347,7 +347,7 @@ class TestConfigureLogging:
     def test_capture_warnings_routes_through_logger(self, isolated_config, capsys):
         kw = self._kw() | {"capture_warnings": True}
         log.configure_logging("INFO", colour=False, **kw)
-        warnings.warn("careful now", UserWarning)
+        warnings.warn("careful now", UserWarning, stacklevel=1)
         assert "careful now" in capsys.readouterr().err
 
     def test_excepthook_logs_and_chains(self, isolated_config, capsys, monkeypatch):

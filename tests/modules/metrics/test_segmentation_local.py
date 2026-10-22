@@ -19,7 +19,7 @@ def _case() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     logits = torch.randn(2, NUM_CLASSES, 5, 3)
     target = torch.randint(0, NUM_CLASSES, (2, 5, 3))
     expected = torch.zeros(NUM_CLASSES, NUM_CLASSES, dtype=torch.int64)
-    for t, p in zip(target.flatten(), logits.argmax(1).flatten()):
+    for t, p in zip(target.flatten(), logits.argmax(1).flatten(), strict=True):
         expected[t, p] += 1
     return logits, target, expected
 

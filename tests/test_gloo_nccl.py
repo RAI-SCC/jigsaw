@@ -51,9 +51,10 @@ def dist_gloo_env():
 
 
 def make_process_mesh(
-    device_type="nccl", mesh_shape=[4, 2], mesh_dim_names=["row", "col"]
+    device_type="nccl", mesh_shape=(4, 2), mesh_dim_names=("row", "col")
 ):
     """Return process mesh with rows, columns, and model group."""
+    mesh_shape = list(mesh_shape)  # the -1 fill below must not touch the caller's
     assert len(mesh_shape) == len(mesh_dim_names)
 
     world_size = dist.get_world_size(group=None)

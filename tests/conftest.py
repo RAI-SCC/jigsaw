@@ -11,7 +11,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from tests.process_mesh import *  # noqa: F401
+from tests.process_mesh import *
 
 comm = MPI.COMM_WORLD
 mpi_size = comm.Get_size()

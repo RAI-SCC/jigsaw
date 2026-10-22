@@ -18,14 +18,15 @@ repos:
       # .mypy_cache and invalidates it, forcing a full re-check of torch every commit.
       entry: ./.venv/bin/mypy --config-file pyproject.toml --ignore-missing-imports --cache-dir .mypy_cache_precommit
       language: system
-      types: [python]
+      # toml too, so a change to the [tool.mypy] config in pyproject.toml re-checks.
+      types_or: [python, toml]
       pass_filenames: false
   - repo: https://github.com/astral-sh/ruff-pre-commit
     # Ruff version.
     rev: v0.15.12
     hooks:
       # Run the linter.
-      - id: ruff
+      - id: ruff-check
         args: [ --fix ]
       # Run the formatter.
       - id: ruff-format
@@ -37,11 +38,21 @@ repos:
       - id: commitlint
         stages: [commit-msg]
         additional_dependencies: ["@commitlint/config-conventional@21.2.2"]
+  - repo: https://github.com/citation-file-format/cffconvert
+    # No stable release for the pre-commit hook here, so commit pinned
+    rev: 054bda51dbe278b3e86f27c890e3f3ac877d616c
+    hooks:
+      # Validate CITATION.cff against the Citation File Format schema.
+      - id: validate-cff
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+      # pyproject.toml carries the ruff, mypy and pytest config.
+      - id: check-toml
       - id: check-added-large-files
-      # assuming
+      - id: check-merge-conflict
+      # A stray breakpoint() hangs every rank under mpirun instead of failing.
+      - id: debug-statements

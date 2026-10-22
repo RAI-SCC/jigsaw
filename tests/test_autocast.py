@@ -251,7 +251,7 @@ class TestAutocastAttention:
         ref = run(autocast=False)
 
         atol, rtol = _ATTN_TOL
-        for name, g, r in zip(("out", "dq", "dk", "dv"), got, ref):
+        for name, g, r in zip(("out", "dq", "dk", "dv"), got, ref, strict=True):
             assert torch.isfinite(g).all(), f"non-finite ring {name}"
             assert_close(
                 f"ring {name}", g.float(), r.float(), atol, rtol, device, ring_group

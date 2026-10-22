@@ -65,7 +65,7 @@ def _check_transpose(
     error = None
     try:
         got = kernel(x, group.rank(), device, group)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         error = exc
     if not all_ranks_ok(error is None, device, group):
         raise AssertionError(f"{kernel.__name__} raised on some rank: {error!r}")
@@ -246,7 +246,7 @@ def _check_permute(
     error = None
     try:
         got = distributed_permute(x, dims, row_dim, col_dim, group.rank(), device, mesh)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         error = exc
     if not all_ranks_ok(error is None, device, group):
         raise AssertionError(f"distributed_permute raised on some rank: {error!r}")

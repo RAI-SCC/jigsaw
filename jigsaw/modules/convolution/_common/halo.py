@@ -40,7 +40,7 @@ def exchange_along_axis(
     axis %= template.dim()
     other = (*template.shape[:axis], *template.shape[axis + 1 :])
 
-    parts = [p for p, n in zip(send_parts, send_sizes) if n > 0]
+    parts = [p for p, n in zip(send_parts, send_sizes, strict=True) if n > 0]
     if parts:
         send_cat = torch.cat(parts, dim=axis).movedim(axis, 0).contiguous()
     else:

@@ -81,7 +81,9 @@ class TestMaybeForwardSchedule:
             provider._internode_recv_buf = arrived
             provider._recv_buf = torch.zeros(1)
             sent = []
-            provider._launch_intra_backward = lambda src, step: sent.append(src)
+            provider._launch_intra_backward = lambda src, step, sent=sent: sent.append(
+                src
+            )
             provider.maybe_forward(step, ring)
             if 0 < step < ring - 1 and step % gpn == 0 and gpn > 1:
                 # Whatever the relay did to ``_internode_recv_buf``, the intra-node
