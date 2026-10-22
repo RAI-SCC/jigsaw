@@ -100,6 +100,10 @@ class _DistributedConvNd(torch.nn.Module):
         super().__init__()
         to_ntuple = _ntuple(self._n_spatial)
 
+        assert out_channels % channel_group.size() == 0, (
+            "out_channels is not divisible by channel_group size"
+        )
+
         self.in_channels = in_channels
         self.out_channels = out_channels
         # Output channels are sharded across the channel-parallel group.
@@ -212,10 +216,16 @@ class _DistributedConvNd(torch.nn.Module):
         return math.prod(g.size() for g in self._spatial_sync_groups)
 
     def get_parameter_count(self) -> int:
-        """Return the number of local parameters."""
-        replicas = self.spatial_world_size
-        num_param = 0 if self.bias is None else self.bias.numel() // replicas
-        return num_param + self.weight.numel() // replicas
+        """Return the number of local parameters.
+
+        Notes
+        -----
+        This method calculates the number of parameters based on the global weight and bias shape calculated at initialization instead of counting the number of elements of the local parameters and scaling according to the respective communication group sizes.
+        """
+        num_bias_param = (
+            0 if self.global_bias_shape is None else math.prod(self.global_bias_shape)
+        )
+        return num_bias_param + math.prod(self.global_weight_shape)
 
     @classmethod
     def convert_to_jigsaw(

@@ -392,6 +392,29 @@ def all_ranks_ok(ok: bool, device: torch.device, group: dist.ProcessGroup) -> bo
     return bool(flag.item())
 
 
+def global_parameter_count(model: torch.nn.Module) -> int:
+    """Whole-model parameter count from the layers' ``get_parameter_count``.
+
+    A module with ``get_parameter_count`` reports the global count of its own
+    parameters and of its plain-torch children (e.g. the q/k norms of
+    ``DistributedAttention``); its children that have the method report themselves.
+    A module without it (``nn.Sequential``, a user ``nn.Module``) contributes the
+    numel of its direct parameters. No communication.
+    """
+    own_counter = hasattr(model, "get_parameter_count")
+    if own_counter:
+        total = model.get_parameter_count()
+    else:
+        total = sum(p.numel() for p in model.parameters(recurse=False))
+    for child in model.children():
+        if own_counter and not any(
+            hasattr(m, "get_parameter_count") for m in child.modules()
+        ):
+            continue  # a plain-torch child, counted by ``model``
+        total += global_parameter_count(child)
+    return total
+
+
 def assert_close(
     name: str,
     got: torch.Tensor,

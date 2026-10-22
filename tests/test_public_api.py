@@ -50,6 +50,7 @@ EXPECTED_ALL: dict[str, set[str]] = {
         "JointCommHookState",
         "broadcast_replicas",
         "check_ddp",
+        "clip_grad_norm_",
         "joint_comm_hook",
         "mark_replicated",
         "register_joint_comm_hook",

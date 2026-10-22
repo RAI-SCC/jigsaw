@@ -419,19 +419,13 @@ class DistributedAttention(torch.nn.Module):
         self._bshd_qkv = self.te or self.ulysses
         self._te_bshd = self.te and not ring and not ulysses
 
-        self.heads = heads // self.channel_group.size()
-        self.scale = (embed_dim // heads) ** -0.5
-        self.empty = torch.empty(0, device=device)
-
         assert heads % self.channel_group.size() == 0, (
             "heads is not divisible by channel group size"
         )
+        assert embed_dim % heads == 0, "embed_dim is not divisible by heads"
 
-        # Resolved here (rather than at its usual place below) so the
-        # explicit-config validation inside it -- channel split and/or
-        # qk_norm need send_in_forward=KV and save_for_backward=KV -- runs
-        # before anything else gets built from a config that would be
-        # rejected anyway.
+        self.heads = heads // self.channel_group.size()
+        self.scale = (embed_dim // heads) ** -0.5
         self.config = self._resolve_ring_config(ring, config, device)
 
         if self.ring:
@@ -1075,6 +1069,22 @@ class DistributedAttention(torch.nn.Module):
         # Output: [n_batch, seq_length, output_dim]
         return out
 
+    def get_parameter_count(self) -> int:
+        """Return the number of local parameters.
+
+        Notes
+        -----
+        This method calculates the number of parameters instead of counting the number of elements of the local parameters.
+        """
+        if not self.qk_norm:
+            return 0
+
+        global_heads = self.heads * self.channel_group.size()
+
+        return 4 * (
+            self.embed_dim // global_heads
+        )  # 2 norms (q and k) * 2 parameters (scale and bias) * normalized_dim
+
 
 class Attention(torch.nn.Module):
     """Multi-head attention that can be converted with :meth:`convert_to_jigsaw`."""
@@ -1089,6 +1099,7 @@ class Attention(torch.nn.Module):
         dropout_p: float = 0.0,
         qk_norm: bool = False,
         dtype: torch.dtype = torch.float32,
+        out_bias: bool = True,
     ):
         """Initialize the module.
 
@@ -1111,6 +1122,8 @@ class Attention(torch.nn.Module):
             Whether to normalize queries and keys.
         dtype : torch.dtype
             Data type of the parameters.
+        out_bias : bool
+            Whether the output projection has a bias.
         """
         super().__init__()
         self.qkv = torch.nn.Linear(
@@ -1123,7 +1136,7 @@ class Attention(torch.nn.Module):
         self.head_concat = torch.nn.Linear(
             in_features=embed_dim,
             out_features=out_dim,
-            bias=False,
+            bias=out_bias,
             device=device,
             dtype=dtype,
         )
