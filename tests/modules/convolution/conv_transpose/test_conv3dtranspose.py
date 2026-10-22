@@ -27,7 +27,7 @@ def _triple(value: Triple) -> tuple[int, int, int]:
     return (value, value, value) if isinstance(value, int) else tuple(value)
 
 
-# (kernel, stride, padding, dilation) -- each entry is an int or a (d, h, w)
+# (kernel, stride, padding, dilation): each entry is an int or a (d, h, w)
 # tuple, so asymmetric kernels/strides/paddings/dilations are covered. The split
 # axis is the width (last) axis. The last few entries exercise the
 # ``stride == kernel`` config branch with non-trivial split-axis padding/dilation

@@ -3,11 +3,11 @@
 ``resolve_launch_env`` is the pure environment-parsing half of the launch
 contract that ``scripts/run.sh`` sets up: it turns ``srun`` / ``torchrun`` /
 bare-shell environment variables into a :class:`~jigsaw.launch.LaunchEnv`. It
-touches no CUDA and starts no process group, so these are plain unit tests --
+touches no CUDA and starts no process group, so these are plain unit tests:
 every launcher environment is faked with ``monkeypatch``.
 
-The last class covers the one decision ``init_cuda`` adds on top of it -- which
-CUDA device a process takes -- with CUDA and the process group faked as well.
+The last class covers the one decision ``init_cuda`` adds on top of it (which
+CUDA device a process takes), with CUDA and the process group faked as well.
 The trailing tests cover the seeding and precision helpers of the same module.
 """
 
@@ -139,7 +139,7 @@ class TestDefaults:
 
         ``os.getenv("SLURM_PROCID") is not None`` is ``True`` for ``""``, so the
         SLURM branch is taken and ``int("")`` raises. Documents current
-        behaviour -- arguably it should fall through to the next launcher.
+        behaviour; arguably it should fall through to the next launcher.
         """
         monkeypatch.setenv("SLURM_PROCID", "")
 

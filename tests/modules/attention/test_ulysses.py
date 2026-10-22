@@ -97,7 +97,7 @@ def _dense_reference(
     x_full: torch.Tensor,
 ) -> torch.Tensor:
     """Replay ``DistributedAttention.forward`` on the full (un-sharded) sequence
-    with a single dense SDPA call -- the thing Ulysses must reproduce."""
+    with a single dense SDPA call: the thing Ulysses must reproduce."""
     qkv = model.qkv(x_full)
     q, k, v = (
         rearrange(
@@ -123,12 +123,12 @@ def _dense_reference(
 #: ``variant`` is ``None`` for the default dispatch, otherwise it pins a
 #: kernel the default priority order would not otherwise reach on every GPU:
 #:
-#: * ``("te", "cudnn" | "flash")`` -- TE's two arms (cuDNN fused attention vs.
+#: * ``("te", "cudnn" | "flash")``: TE's two arms (cuDNN fused attention vs.
 #:   the ``flash_attn`` package), selected via ``JIGSAW_TE_CORE`` rather than
 #:   letting ``te_cores.select_core`` pick by GPU architecture; needs the
 #:   container and a GPU, and each is skipped at runtime if that arm's
 #:   package is not importable.
-#: * ``("sdpa", "efficient")`` -- torch's own memory-efficient attention
+#: * ``("sdpa", "efficient")``: torch's own memory-efficient attention
 #:   kernel (``SDPBackend.EFFICIENT_ATTENTION``), forced via
 #:   :func:`~tests.parity.forced_sdpa_backend`; ``_dense_bshd_core``'s own
 #:   list is ``[FLASH, MATH]``, so plain ``attn_backend="sdpa"`` never
@@ -187,7 +187,7 @@ class TestUlyssesAttention:
         with spatially-replicated weights, so every rank can build the exact
         reference from ``model.<w>`` and the all-gathered input. The reference
         itself always runs plain, unforced SDPA (see ``_dense_reference``)
-        regardless of ``attn_backend``/``variant`` -- that is the independent
+        regardless of ``attn_backend``/``variant``; that is the independent
         ground truth every backend's Ulysses path must reproduce.
         """
         if attn_backend == "te" and variant is not None:
@@ -245,7 +245,7 @@ class TestUlyssesAttention:
             # and grad sync below), so one rank raising alone would hang the rest.
             if not all_ranks_ok(forced.count > 0, device, model_group):
                 raise AssertionError(
-                    "forced_sdpa_backend intercepted no sdpa_kernel dispatch -- "
+                    "forced_sdpa_backend intercepted no sdpa_kernel dispatch; "
                     "the efficient kernel was never pinned, so this ran the "
                     "default priority list"
                 )
@@ -253,7 +253,7 @@ class TestUlyssesAttention:
             out_local = model(x_local)
         assert out_local.shape == (b, s_loc, _OUT_DIM)
 
-        # Reference on the gathered sequence -- built *outside* any forcing
+        # Reference on the gathered sequence, built *outside* any forcing
         # context, so it stays on the default, unforced priority list even
         # when ``out_local`` above was forced onto a specific kernel.
         x_full = gather_1d_results(x_local.detach(), mesh, dim=1, pm_key="row")
@@ -301,14 +301,14 @@ class TestUlyssesAttention:
         flat single-kernel path does not. Every ``attn_backend`` (math, sdpa,
         te) feeds both the intra-node all-to-all's inner dense core
         (``_dense_bshd_core``) and the inter-node ring's inner core
-        (``_inter_node_ring_core``) -- ``te`` picks its kernel by GPU
+        (``_inter_node_ring_core``); ``te`` picks its kernel by GPU
         architecture here rather than forcing a specific core, unlike
         ``test_matches_dense_reference``'s split cases, to keep this grid's
         size in check.
 
         ``inter_offload=CPU`` additionally routes the inter-node ring's saved
         K/V chunk through :class:`.offload.NVLinkActivationOffloader` (pinned
-        host memory between forward and backward) -- same mechanism, same
+        host memory between forward and backward): same mechanism, same
         parity expectation, as the plain ring's own offload tests.
         """
         if inter_offload == attention_config.Offload.CPU and device.type != "cuda":

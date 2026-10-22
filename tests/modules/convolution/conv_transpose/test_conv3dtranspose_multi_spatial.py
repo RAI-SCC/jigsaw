@@ -1,8 +1,8 @@
 """Distributed Conv3dTranspose with the domain split along several spatial axes.
 
 Split out of ``test_conv3dtranspose.py``: the single-spatial-axis (width-only)
-distributed transpose conv lives there, everything that splits depth / height --
-or any combination, optionally with a channel split -- lives here.
+distributed transpose conv lives there, everything that splits depth / height
+(or any combination, optionally with a channel split) lives here.
 """
 
 import pytest
@@ -23,7 +23,7 @@ def _triple(value: Triple) -> tuple[int, int, int]:
     return (value, value, value) if isinstance(value, int) else tuple(value)
 
 
-# (kernel, stride, padding, dilation) -- int or (d, h, w) tuple. Sweeps the
+# (kernel, stride, padding, dilation): int or (d, h, w) tuple. Sweeps the
 # no-halo regime, stride < / > kernel, unit-stride, dilated and stride == kernel
 # forced onto the halo path by padding/dilation.
 MULTI_CASES_3D = [

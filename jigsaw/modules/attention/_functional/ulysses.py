@@ -20,7 +20,7 @@ def _a2a_heads_to_seq(x: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor
 
     Scatters the head axis (``-2``) across ``group`` and gathers the sequence
     axis (``-3``): sends head-block ``p`` of the local sequence to rank ``p`` and
-    stacks the sequence shards received from every rank in source-rank order --
+    stacks the sequence shards received from every rank in source-rank order:
     exactly how the sequence was sharded across ``group``. Leading dims (batch,
     or a ``3`` for a stacked Q/K/V) are carried through untouched.
     """

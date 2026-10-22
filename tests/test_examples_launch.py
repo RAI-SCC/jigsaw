@@ -1,7 +1,7 @@
 """The tutorials the way ``examples/README.md`` tells a user to run them.
 
 ``test_examples.py`` imports the tutorials and runs them inside the test session. This
-file starts them as a user would -- ``torchrun --nproc-per-node 4 examples/x.py`` -- in
+file starts them as a user would (``torchrun --nproc-per-node 4 examples/x.py``) in
 a job of its own, so it runs in the single-process CI job and is skipped under ``mpirun``.
 It always uses the CPU (gloo), whatever the machine has.
 """
@@ -99,7 +99,7 @@ def test_runs_under_torchrun(name: str) -> None:
 
 
 def test_bare_python_says_how_to_launch() -> None:
-    """The first thing a user tries -- ``python examples/x.py`` -- explains itself."""
+    """The first thing a user tries (``python examples/x.py``) explains itself."""
     proc = _run(["examples/domain_parallel.py"])
     assert proc.returncode != 0
     assert "needs exactly 4 ranks" in proc.stderr, proc.stderr[-2000:]

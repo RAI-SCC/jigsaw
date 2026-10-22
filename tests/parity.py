@@ -3,7 +3,7 @@ Shared harness for comparing a distributed jigsaw layer against a serial referen
 
 The pattern: build the serial module, run a forward and backward pass on the *global*
 tensors, then split the input and the upstream gradient across the process mesh, run the
-distributed module, gather its results back and compare -- output, input gradient,
+distributed module, gather its results back and compare: output, input gradient,
 parameter values and parameter gradients in one call.
 
 Two design-shaping points:
@@ -28,7 +28,7 @@ reference checks in ``tests/modules/convolution``. ``ShardSpec`` is keyed by mes
 *name*, so the same harness drives a 2-D ``row`` x ``col`` mesh and an N-way spatial mesh
 (``sh``/``sw``/``sd`` + ``col``) without change. ``assert_close`` / ``all_ranks_ok`` give
 every rank the same verdict so a mismatch fails the job instead of hanging it; those two
-are re-used directly by the convolution reference checks.
+are reused directly by the convolution reference checks.
 """
 
 import contextlib
@@ -99,12 +99,12 @@ def forced_sdpa_backend(
     ``_attn_core_math``, ``_dense_bshd_core``) each open their *own*
     ``torch.nn.attention.sdpa_kernel([...])`` context with a hardcoded
     priority list (flash first), so a context a caller enters *around* the
-    whole call is overridden the moment that inner one is entered --
+    whole call is overridden the moment that inner one is entered:
     nesting ``sdpa_kernel`` does not restrict anything, the innermost one
     always wins. Monkeypatching the ``sdpa_kernel`` symbol itself is the only
     way in: every call site looks it up fresh on ``torch.nn.attention`` each
-    time, so replacing it here makes the next kernel dispatch -- whatever
-    list it asked for -- resolve to just ``backend``, which then either runs
+    time, so replacing it here makes the next kernel dispatch (whatever
+    list it asked for) resolve to just ``backend``, which then either runs
     or raises if that shape/dtype/mask combination is not one ``backend`` can
     serve. There is no silent fallback to another kernel to mistake for a
     pass: a single-entry list leaves torch nothing else enabled to pick.
@@ -213,9 +213,9 @@ def _all_gather_uneven(
     """
     All-gather tensors that may differ in shape between ranks.
 
-    ``dist.all_gather`` needs every tensor the same size, so the halo regime -- where
+    ``dist.all_gather`` needs every tensor the same size, so the halo regime (where
     ``kernel != stride`` leaves neighbouring ranks with output shards that differ by a
-    row -- cannot use it directly. Gather the shapes first; if they already agree take
+    row) cannot use it directly. Gather the shapes first; if they already agree take
     the fast path, otherwise pad every rank up to the elementwise-max shape, gather, and
     narrow each part back to its real extent.
     """
@@ -316,7 +316,7 @@ def _nd_merge(
 ) -> torch.Tensor:
     """Fold the flat list of shards back along one mesh axis at a time.
 
-    ``parts`` is indexed by model-group rank, which -- with a row-major mesh -- is
+    ``parts`` is indexed by model-group rank, which (with a row-major mesh) is
     ``((r0 * n1) + r1) * n2 + ...``. The first axis therefore varies slowest, so its
     ``n0`` blocks are contiguous runs of ``len(parts) // n0``.
     """

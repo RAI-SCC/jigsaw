@@ -1,16 +1,16 @@
 """Autocast coverage for the distributed custom-autograd layers.
 
 ``torch.autocast`` only ever targets fp16 or bf16. fp64 and fp8 are *not*
-autocast dtypes -- pass either and PyTorch warns, disables autocast and stays in
-fp32 -- so "autocast in fp8" is not a thing that exists; fp8 needs an explicit
+autocast dtypes: pass either and PyTorch warns, disables autocast and stays in
+fp32, so "autocast in fp8" is not a thing that exists; fp8 needs an explicit
 scaled path (``torch._scaled_mm`` / transformer_engine) and a transport that can
 carry it (Gloo cannot). Within the fp16/bf16 range, jigsaw's Functions cast by
 hand and these tests pin the contract:
 
-* the matmul family (``XWT`` / ``XW`` / ``XTW`` -- bias included -- attention,
+* the matmul family (``XWT`` / ``XW`` / ``XTW`` (bias included), attention,
   ring attention, ``ConvNd`` / ``ConvTransposeNd``) runs forward in the autocast
   dtype and reconciles gradients to the fp32 parameter dtype in backward;
-* LayerNorm and softmax follow stock-AMP fp32-list semantics -- computed and
+* LayerNorm and softmax follow stock-AMP fp32-list semantics: computed and
   emitted in fp32 under autocast even when fed bf16/fp16;
 * nothing goes non-finite, and every result tracks a high-precision reference.
 
@@ -22,7 +22,7 @@ Known quirks this file documents rather than hides:
   parameter set (it force-casts q/k/v), so attention tests use fp32 params.
 * ring attention drives its forward under autocast (bf16/fp16 saved tensors) and
   ``ring_backward`` reconciles them to the ``w_qkv`` (master) dtype before the
-  cores run -- the same backward-in-master-precision rule ``XWT`` follows.
+  cores run: the same backward-in-master-precision rule ``XWT`` follows.
 """
 
 import contextlib
@@ -136,7 +136,7 @@ class TestAutocastAttention:
     """DistributedAttention, plain and ring: autocast-safe, finite, fp32-close.
 
     The core runs in the autocast dtype (see ``attn_core_dtype``) and the module
-    output carries it -- the ``head_concat`` bias is cast down too. fp64 params
+    output carries it; the ``head_concat`` bias is cast down too. fp64 params
     remain unsupported (q/k/v are force-cast).
     """
 
@@ -195,8 +195,8 @@ class TestAutocastAttention:
         autocast_dtype: torch.dtype,
     ) -> None:
         # Drive the ring forward / backward directly (as tests/modules/attention
-        # does): the forward runs under autocast -- its saved ``out`` / ``lse`` /
-        # K-V chunks come back in the autocast dtype -- and ``ring_backward``
+        # does): the forward runs under autocast (its saved ``out`` / ``lse`` /
+        # K-V chunks come back in the autocast dtype), and ``ring_backward``
         # must reconcile them against the fp32 ``q`` without a dtype clash.
         from jigsaw.modules.attention import _config as attn_config
         from jigsaw.modules.attention._functional import backward as ring_bwd
@@ -361,8 +361,8 @@ class TestAutocastFp32List:
 class TestAutocastConv:
     """ConvNd / ConvTransposeNd: forward emits the autocast dtype, backward fp32.
 
-    Both regimes -- ``stride == kernel`` (no channel/halo comm in backward) and
-    ``stride != kernel`` (halo exchange) -- are swept, both with a real channel
+    Both regimes, ``stride == kernel`` (no channel/halo comm in backward) and
+    ``stride != kernel`` (halo exchange), are swept, both with a real channel
     split so the custom Function (not the ``_forward_local`` shortcut) runs.
     """
 

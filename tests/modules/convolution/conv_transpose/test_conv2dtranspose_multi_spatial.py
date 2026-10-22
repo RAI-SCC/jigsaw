@@ -1,8 +1,8 @@
 """Distributed Conv2dTranspose with the domain split along several spatial axes.
 
 Split out of ``test_conv2dtranspose.py``: the single-spatial-axis (width-only)
-distributed transpose conv lives there, everything that splits height -- or
-height *and* width, optionally combined with a channel split -- lives here.
+distributed transpose conv lives there, everything that splits height (or
+height *and* width, optionally combined with a channel split) lives here.
 """
 
 import pytest
@@ -23,7 +23,7 @@ def _pair(value: Pair) -> tuple[int, int]:
     return (value, value) if isinstance(value, int) else tuple(value)
 
 
-# (kernel, stride, padding, dilation) -- each entry is an int or an (h, w) tuple,
+# (kernel, stride, padding, dilation): each entry is an int or an (h, w) tuple,
 # so asymmetric kernels/strides/paddings/dilations are covered. Sweeps the
 # no-halo regime, stride < / > kernel, unit-stride, dilated, stride == kernel
 # forced onto the halo path by padding/dilation, and combos whose global output

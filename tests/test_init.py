@@ -3,10 +3,10 @@
 Two properties matter here:
 
 * With no ``global_shape`` / ``fan_in`` / ``fan_out`` given, every function must be a
-  bit-for-bit drop-in for its ``torch.nn.init`` namesake -- these are plain,
+  bit-for-bit drop-in for its ``torch.nn.init`` namesake; these are plain,
   non-distributed calls and jigsaw never gets to change their behaviour.
-* With a ``global_shape`` describing a bigger (unsharded) tensor, the fan -- and
-  therefore the sampling bound / std -- must be computed from that shape, not from the
+* With a ``global_shape`` describing a bigger (unsharded) tensor, the fan (and
+  therefore the sampling bound / std) must be computed from that shape, not from the
   tensor actually being filled. This is what lets a jigsaw layer initialize a local
   shard from the same distribution as the equivalent whole, non-distributed parameter.
 """
@@ -73,7 +73,7 @@ class TestDropInEquivalence:
         "name", ["uniform_", "normal_", "constant_", "ones_", "zeros_", "trunc_normal_"]
     )
     def test_shape_independent_helpers_are_torchs_own(self, name: str) -> None:
-        """These are re-exported verbatim -- same object, not just same behaviour."""
+        """These are re-exported verbatim: same object, not just same behaviour."""
         assert getattr(init, name) is getattr(torch.nn.init, name)
 
 
@@ -135,7 +135,7 @@ class TestGlobalShapeOverride:
         for part in (whole, left, right):
             assert part.abs().max().item() <= bound + 1e-6
         # both halves were drawn from the same (global-fan) bound, so their
-        # empirical maxima should land in the same ballpark -- this is exactly
+        # empirical maxima should land in the same ballpark; this is exactly
         # the property that broke before global_shape existed (a channel- or
         # row-sharded rank silently sampled a *tighter* distribution).
         assert left.abs().max().item() > 0.85 * bound

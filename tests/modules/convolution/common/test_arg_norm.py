@@ -2,7 +2,7 @@
 
 These do not need a distributed environment: ``_ntuple`` is the pure helper in
 :mod:`jigsaw.modules.convolution._common.arg_norm` shared by the conv and
-conv-transpose modules -- it lets them accept ``stride`` / ``padding`` /
+conv-transpose modules; it lets them accept ``stride`` / ``padding`` /
 ``dilation`` as a plain ``int`` instead of a per-axis tuple. ``_pair`` here is
 the 2-axis instance used by the 2D modules.
 """

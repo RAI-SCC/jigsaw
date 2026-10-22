@@ -2,10 +2,10 @@
 
 Run under ``mpirun -n 8 pytest tests``: two data-parallel copies of each 4-rank model.
 
-* **Smoke** (``slow``: ``--runslow``, before a release) -- ``main()`` of every
+* **Smoke** (``slow``: ``--runslow``, before a release): ``main()`` of every
   tutorial runs in every DDP mode, the loss goes down, and the copies train on
   different images.
-* **Parity with data-serial training** -- the model of each tutorial, wrapped in DDP
+* **Parity with data-serial training**: the model of each tutorial, wrapped in DDP
   over ``dp`` the three ways the tutorials and ``docs/ddp.md`` show (a hand-built
   ``DistributedDataParallel``, ``wrap_ddp``, ``wrap_ddp(joint_hook=True)``), with each
   copy training on its half of the global batch, against the same model without DDP
@@ -278,7 +278,7 @@ def test_matches_data_serial_training(
 def test_ddp_tutorial_step_matches_full_batch(
     example: Callable[[str], ModuleType], device: torch.device, joint_hook: bool
 ) -> None:
-    """``ddp.py``'s step -- split over dp, accumulated over microbatches -- is exact.
+    """``ddp.py``'s step (split over dp, accumulated over microbatches) is exact.
 
     Each copy gets half of the global batch in two microbatches, accumulated under
     ``no_sync``; the reference takes the whole batch in one forward pass, no DDP.

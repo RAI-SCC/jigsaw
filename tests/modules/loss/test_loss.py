@@ -83,7 +83,7 @@ class TestFunctionalNoGroups:
     """With no groups the functionals collapse onto their torch equivalents.
 
     These run on every rank with rank-local data and issue no collectives, so a
-    bare ``allclose`` cannot hang anything -- a failing rank just fails.
+    bare ``allclose`` cannot hang anything; a failing rank just fails.
     """
 
     def test_functional_matches_torch_without_groups(
@@ -891,14 +891,14 @@ class TestModuleWrappers:
 class TestLinearTrainingParity:
     """A ``DistributedLinear`` trained for a few SGD steps with a distributed loss
     reproduces the *gathered* ``nn.Linear`` trained with the stock ``torch`` loss
-    it mirrors -- identical per-step loss values and identical weights after
+    it mirrors: identical per-step loss values and identical weights after
     every step.
 
     ``DistributedLinear`` shards the weight ``(out, in)`` with ``out`` across ``row``
     and ``in`` across ``col``; activations are ``(1, seq, features)`` with ``seq``
     across ``row`` and ``features`` across ``col``.  The distributed loss is
     handed ``channel_group`` / ``reduce_groups`` matching that layout and no
-    manual ``/ world_size`` rescaling -- it does the global reduction itself.
+    manual ``/ world_size`` rescaling; it does the global reduction itself.
     """
 
     pytestmark = pytest.mark.dist(4)
@@ -1026,7 +1026,7 @@ class TestLinearTrainingParity:
                 device=device,
             )
             # the label indexes a shared sequence position, so it must be
-            # identical across the class (``col``) group -- seed by the row.
+            # identical across the class (``col``) group; seed by the row.
             torch.manual_seed(700 + 10 * step + row_rank)
             target = torch.randint(0, out_dim, (1, seq_local), device=device)
 

@@ -1,13 +1,13 @@
 """``AttnBackend`` selection, coercion and the TE-unavailable fallback.
 
 The container path adds a three-way attention-core switch
-(:class:`jigsaw.modules.attention._config.AttnBackend` -- ``te`` / ``sdpa`` /
+(:class:`jigsaw.modules.attention._config.AttnBackend`: ``te`` / ``sdpa`` /
 ``math``). These tests pin:
 
 * enum construction and string coercion,
 * the ring core selectors (``_select_attn_core_{forward,backward}_fn``) and the
   ``_te_core_or_raise`` guard, with TE availability forced via ``monkeypatch``,
-* the deliberate asymmetry for ``attn_backend="te"`` when TE is missing --
+* the deliberate asymmetry for ``attn_backend="te"`` when TE is missing:
   :class:`~jigsaw.modules.attention._attention.DistributedAttention` *warns and
   falls back to sdpa*, while :class:`~...config.RingAttentionConfig` *raises*.
 
@@ -64,7 +64,7 @@ class TestAttnBackendEnum:
         assert AttnBackend(AttnBackend.TE) is AttnBackend.TE
 
     def test_is_str_enum(self):
-        """``class AttnBackend(str, Enum)`` -- members compare equal to their value."""
+        """``class AttnBackend(str, Enum)``: members compare equal to their value."""
         assert AttnBackend.SDPA == "sdpa"
         assert AttnBackend.TE.value == "te"
 
@@ -132,7 +132,7 @@ class TestTeCoreSelection:
         [((8, 0), "flash"), ((8, 6), "flash"), ((9, 0), "cudnn"), ((10, 0), "cudnn")],
     )
     def test_architecture_rule(self, monkeypatch, capability, expected):
-        # Pure selection logic -- force both arms "available" so this passes
+        # Pure selection logic: force both arms "available" so this passes
         # without transformer_engine/flash_attn installed (e.g. CPU-only CI).
         monkeypatch.setattr(te_cores.cudnn, "CUDNN_CORE_AVAILABLE", True)
         monkeypatch.setattr(te_cores.flash, "FLASH_CORE_AVAILABLE", True)

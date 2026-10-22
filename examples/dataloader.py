@@ -10,7 +10,7 @@ each on a different piece of it. That changes what a dataloader has to do:
   2. All ranks of a model replica must draw the same sample indices in the same order,
      or the tiles they hold do not belong together. Ranks of *different* replicas must
      draw different indices. So the sampler is keyed by the **data-parallel index**
-     (``mesh["dp"].rank()``), not by the global rank -- the usual
+     (``mesh["dp"].rank()``), not by the global rank; the usual
      ``DistributedSampler(dataset)`` would hand every rank its own samples.
   3. Every replica has to run the same number of steps, because every step contains
      collectives: use ``drop_last=True``.

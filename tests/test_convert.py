@@ -935,7 +935,7 @@ class TestConvertToTorch:
         """``MatMul{XWT,XW,XTW}`` must dispatch to their distributed counterpart.
 
         Before this, these were absent from ``convert.mapped_modules`` and so
-        passed through ``convert_to_jigsaw`` untouched -- a silent no-op that
+        passed through ``convert_to_jigsaw`` untouched: a silent no-op that
         would compute the plain (non-sharded) matmul on local shards.
         """
         process_mesh_dict = process_mesh_dict_2x2

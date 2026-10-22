@@ -844,7 +844,7 @@ def test_ring_hybrid_four_nodes(
     ``n_nodes == 2`` (every other hybrid test) ``internode_peer(1)`` and
     ``internode_peer(-1)`` name the same rank, so a provider that keeps
     re-sending its *original* chunk every round instead of relaying the chunk
-    it just received is indistinguishable from a correct one -- this is the
+    it just received is indistinguishable from a correct one; this is the
     smallest topology where the two diverge.
     """
     _check_ring_hybrid(
@@ -968,7 +968,7 @@ def test_ring_overlap_comm_parity(
     Runs the plain ``SendOp.P2P`` ring forward+backward with the comm-stream
     overlap off and then on (dedicated CUDA stream + double-buffered K/V
     circulation, hoisted dK/dV relay) and asserts the results are numerically
-    identical -- the ops and their accumulation order are unchanged, only which
+    identical: the ops and their accumulation order are unchanged, only which
     stream they run on. ``send_backward`` is ``SEND_DKV`` so ``save_scope=LOCAL``
     exercises the ``_DkvRelay`` async path and ``GLOBAL`` the all-reduce path
     (overlap inert there, so it doubles as a no-regression check).
@@ -1065,8 +1065,8 @@ def test_ring_overlap_comm_parity_hybrid(
     the intra-/inter-node K/V hop overlap
     (``_HybridP2PForwardChunkProviderOverlap`` /
     ``_HybridBroadcastForwardChunkProviderOverlap`` and their backward twins)
-    for all three hybrid send ops, and -- for ``HYBRID_P2P`` /
-    ``HYBRID_ALLTOALL`` with ``save_scope=LOCAL`` -- the hybrid-routed dK/dV
+    for all three hybrid send ops, and (for ``HYBRID_P2P`` /
+    ``HYBRID_ALLTOALL`` with ``save_scope=LOCAL``) the hybrid-routed dK/dV
     relay (``_DkvRelay`` via ``_hybrid_dkv_relay_peers``). ``HYBRID_BROADCAST``
     at ``LOCAL`` scope exercises its (unoverlapped) dK/dV all-reduce path
     alongside the overlapped K/V providers, doubling as a no-regression check

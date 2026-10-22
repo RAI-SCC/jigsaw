@@ -2,9 +2,9 @@
 
 Covers the pieces the forward/backward reference suites never touch:
 
-* ``spatial_world_size`` / ``get_parameter_count`` -- the global parameter
+* ``spatial_world_size`` / ``get_parameter_count``: the global parameter
   count, computed from the global shapes, against the plain torch layer.
-* ``convert_to_torch`` -- rebuilding a plain ``torch.nn.Conv{1,2,3}d`` from the
+* ``convert_to_torch``: rebuilding a plain ``torch.nn.Conv{1,2,3}d`` from the
   channel-sharded, spatially-replicated jigsaw layer and checking it reproduces
   the distributed forward.
 """

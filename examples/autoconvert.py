@@ -2,7 +2,7 @@
 
 The model below is ordinary PyTorch: it knows nothing about process meshes.
 ``jigsaw.convert.convert_to_jigsaw`` walks it and swaps every layer it knows for its
-distributed twin, carrying the weights over -- each rank keeps only its shard of them:
+distributed twin, carrying the weights over; each rank keeps only its shard of them:
 
     nn.Linear                       -> DistributedLinear
     nn.Conv{1,2,3}d                 -> DistributedConv{1,2,3}D
@@ -13,12 +13,12 @@ distributed twin, carrying the weights over -- each rank keeps only its shard of
 
 Everything else (activations, reshapes, ...) is left alone, which is fine as long as it
 is elementwise or only touches the *local* shapes. A layer the converter does not know
-would silently compute on the shard only if it touches the sharded dimension -- swap
+would silently compute on the shard only if it touches the sharded dimension; swap
 those by hand (see ``vit.py``).
 
 ``nn.LayerNorm`` is only converted when its normalized dimension is actually sharded at
 that point in the model; pass ``convert_layer_norm=False`` to leave it a plain
-``nn.LayerNorm`` instead -- correct only if that dimension is replicated (not split)
+``nn.LayerNorm`` instead: correct only if that dimension is replicated (not split)
 there, and worth it to skip the distributed version's extra all-reduces.
 
 The converted model then expects sharded inputs: the mesh's "row" axis splits the
@@ -27,7 +27,7 @@ image width (or the token sequence), its "col" axis splits the channels.
 The script checks the conversion the way you should check yours: run the original model
 on the full input and compare against the gathered output of the converted one.
 
-``TinyTransformer`` below repeats the exercise for a pre-norm transformer block --
+``TinyTransformer`` below repeats the exercise for a pre-norm transformer block:
 ``nn.LayerNorm`` and ``jigsaw.modules.Attention`` convert the same way the conv and
 linear layers of ``PatchMLP`` do. With the heads split over "col" (channel size > 1),
 the ring has to circulate the keys/values rather than the input; the default
@@ -104,7 +104,7 @@ class TinyTransformer(nn.Module):
 
     Plain PyTorch, laid out exactly like ``PatchMLP``: the patch embedding and
     recovery split the image over the mesh, and the tokens in between carry the same
-    sharding the converted attention and layer norms expect -- sequence over "row",
+    sharding the converted attention and layer norms expect: sequence over "row",
     embedding over "col".
     """
 

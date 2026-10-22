@@ -353,8 +353,8 @@ def _compiled_step(model, make_input, n_micro, no_sync, backend: str) -> None:
 
 COMPILED_VARIANTS = ["compiled", "joint_compiled", "joint_compiled_no_sync"]
 # Each case compiles from scratch (``python_reducer`` resets dynamo), so the default
-# run takes one case per kind -- every module's backward traced under compiled
-# autograd -- and all variants on conv_halo, whose replicated weight puts it in a
+# run takes one case per kind (every module's backward traced under compiled
+# autograd) and all variants on conv_halo, whose replicated weight puts it in a
 # joint group. The rest of the matrix is ``slow`` (``--runslow``, before a release).
 _COMPILED_DEFAULT = {
     *(("conv_halo", v) for v in COMPILED_VARIANTS),

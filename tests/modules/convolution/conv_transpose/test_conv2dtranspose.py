@@ -27,7 +27,7 @@ def _pair(value: Pair) -> tuple[int, int]:
     return (value, value) if isinstance(value, int) else tuple(value)
 
 
-# (kernel, stride, padding, dilation) -- each entry is an int or an (h, w) tuple,
+# (kernel, stride, padding, dilation): each entry is an int or an (h, w) tuple,
 # so asymmetric kernels/strides/paddings/dilations are covered. The split axis is
 # the width (last) axis. The last few entries deliberately exercise the
 # ``stride == kernel`` config branch with non-trivial split-axis padding/dilation

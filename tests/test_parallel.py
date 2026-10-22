@@ -1,7 +1,7 @@
 """Unit tests for the in-graph gradient sync in :mod:`jigsaw.parallel`.
 
 Rank ``r`` contributes the gradient ``(r + 1) * [1, 2, 3]``, so a SUM over a
-group of global ranks ``R`` is ``sum(r + 1 for r in R) * [1, 2, 3]`` -- exact in
+group of global ranks ``R`` is ``sum(r + 1 for r in R) * [1, 2, 3]``, exact in
 floating point, and different from any single rank's share.
 """
 

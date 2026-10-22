@@ -1,7 +1,7 @@
 """Unit tests for :mod:`jigsaw.modules.convolution._common.channel_comm`.
 
-The pure helpers -- ``resolve_channel_comm`` (``"auto"`` resolution + name
-validation) and ``_in_channel_block`` (the weight input-channel slicer) -- need
+The pure helpers, ``resolve_channel_comm`` (``"auto"`` resolution + name
+validation) and ``_in_channel_block`` (the weight input-channel slicer), need
 no distributed environment. ``_resolve_channel_hop`` and ``gather_full_channels``
 take a process group: their group-size-one paths run against a singleton group
 built on the fly, and the real multi-rank gather is checked under

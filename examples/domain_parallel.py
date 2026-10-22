@@ -1,7 +1,7 @@
 """Domain parallelism only: split the image over the ranks, replicate the weights.
 
 A U-Net-style denoiser is trained on images that are cut into a 2x2 grid of tiles,
-one tile per rank. No parameter is sharded -- every rank holds the full model -- so
+one tile per rank. No parameter is sharded (every rank holds the full model), so
 memory per rank only shrinks with the *activations*, which is what dominates for
 large images. This is the simplest way to use jigsaw.
 

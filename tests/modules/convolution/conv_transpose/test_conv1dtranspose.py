@@ -27,7 +27,7 @@ def _single(value: Pair) -> tuple[int]:
     return (value,) if isinstance(value, int) else (value[0],)
 
 
-# (kernel, stride, padding, dilation) -- arbitrary combos on the (single) split
+# (kernel, stride, padding, dilation): arbitrary combos on the (single) split
 # axis. The last few deliberately exercise the ``stride == kernel`` config branch
 # with non-trivial padding / dilation (must still route through the halo path)
 # and a combo whose global output length is not divisible by an even spatial

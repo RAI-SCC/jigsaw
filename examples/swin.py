@@ -9,10 +9,10 @@ Cut the feature map into a 2x2 grid of tiles, one tile per rank, and choose the 
 size to be a multiple of the window size. Then every window lies inside one tile and
 almost everything is local:
 
-    window attention    no communication -- a batch of small independent attentions
-    patch merging       no communication -- a 2x2 neighbourhood never spans two tiles
-    MLP, layer norm     no communication -- they act on one token at a time
-    shift               ``DistributedRoll`` -- the only layer that talks to neighbours
+    window attention    no communication: a batch of small independent attentions
+    patch merging       no communication: a 2x2 neighbourhood never spans two tiles
+    MLP, layer norm     no communication: they act on one token at a time
+    shift               ``DistributedRoll``: the only layer that talks to neighbours
 
 The shift is a cyclic ``torch.roll`` of the *whole* map, so a few rows and columns have
 to cross the tile borders. ``DistributedRoll`` does exactly that: a halo exchange with
