@@ -28,17 +28,15 @@ def assert_replica_consistency(
     it after ``optimizer.step()`` to find the first step at which replicas
     diverge.
 
-    A parameter that is replicated over a model-parallel axis but carries no mark
-    keeps only its local gradient share, so its copies drift apart; the check
-    above cannot see that, because it only knows the groups a mark names. With
-    ``unmarked`` every unmarked parameter of a module from outside jigsaw (a
-    plain ``torch.nn.Linear`` in a jigsaw model, say) is compared over *every*
-    axis of ``mesh`` too. Leave it off for such modules whose parameters you
-    shard yourself.
+    An unmarked parameter replicated over a model-parallel axis keeps only its
+    local gradient share, so its copies drift apart without the check above
+    noticing. ``unmarked`` catches this for modules from outside jigsaw (a
+    plain ``torch.nn.Linear`` in a jigsaw model, say) by comparing their
+    unmarked parameters over every axis of ``mesh``. Leave it off if you shard
+    such parameters yourself.
 
-    Collective over every group in ``mesh``: call it on every rank. The verdict
-    is reduced over the whole mesh, so every rank raises the same error or none
-    does.
+    Collective over every group in ``mesh``: call it on every rank. Every rank
+    raises the same error or none does.
 
     Parameters
     ----------
@@ -57,7 +55,7 @@ def assert_replica_consistency(
     Raises
     ------
     AssertionError
-        Naming the parameters that differ by more than ``atol``.
+        If a parameter differs by more than ``atol``; the message names them.
     """
     dp = mesh.get(dp_key)
     every_axis = list({id(g): g for g in mesh.values()}.values())
@@ -104,15 +102,13 @@ def count_parameters(
 ) -> int:
     """Count the trainable parameters of a model.
 
-    Without ``mesh``, this is the count held by the calling rank. With ``mesh``,
-    it is the size of the whole model: the local counts are summed over
-    ``mesh[model_key]``, with a parameter marked by
-    :func:`jigsaw.parallel.mark_replicated` counted only on rank 0 of each of its
-    replica groups. Data-parallel copies are not counted.
-
-    An unmarked parameter is taken to be a shard, so an unmarked replica (see
-    :func:`assert_replica_consistency` with ``unmarked``) is counted once per
-    copy.
+    Without ``mesh``, counts the parameters held by the calling rank. With
+    ``mesh``, counts the whole model: local counts are summed over
+    ``mesh[model_key]``, and a parameter marked by
+    :func:`jigsaw.parallel.mark_replicated` is counted only on rank 0 of each
+    of its replica groups. Data-parallel copies are not counted. An unmarked
+    parameter is taken to be a shard, so an unmarked replica is counted once
+    per copy.
 
     With ``mesh``, collective over ``mesh[model_key]``: call it on every rank.
 
