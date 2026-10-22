@@ -67,8 +67,9 @@ mesh = jigsaw.make_process_mesh(
 model = build_model(mesh)  # jigsaw layers on mesh["row"] / mesh["col"]
 ```
 
-jigsaw raises an error, on every rank and in the first forward, for the two mistakes that
-would otherwise train silently into a wrong model:
+jigsaw raises RuntimeError, on every rank and in the first forward (under `torch.compile`,
+only in `wrap_ddp`), for the two mistakes that would otherwise train silently into a wrong
+model:
 
 - **DDP over the default group** (`DistributedDataParallel(model)`): it would average
   sharded parameters with other shards.

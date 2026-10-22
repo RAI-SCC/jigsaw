@@ -13,7 +13,8 @@ Base image is `nvcr.io/nvidia/pytorch:26.04-py3`
 - NCCL 2.29, and
 - HPC-X OpenMPI under `/opt/hpcx/ompi`.
 
-`zarr`, `timm`, `xarray`, `h5netcdf`, `mpi4py`, and jigsaw are excluded.
+The image does not ship jigsaw, `mpi4py` (needed by the test suite), or data libraries
+such as `zarr`, `timm`, `xarray` and `h5netcdf`; the steps below add them.
 
 Pull the container with:
 
@@ -21,9 +22,10 @@ Pull the container with:
 apptainer pull pytorch26.04.sif docker://nvcr.io/nvidia/pytorch:26.04-py3
 ```
 
-When bumping the tag, re-pull, update the digest above, and confirm
-transformer-engine still exposes
-`transformer_engine.pytorch.DotProductAttention`.
+When bumping the tag, re-pull, update the digest above, and confirm that
+`transformer_engine.pytorch.cpp_extensions.fused_attn` still exposes `fused_attn_fwd` /
+`fused_attn_bwd`, which the `te` attention core calls directly; otherwise
+`attn_backend="te"` falls back to `flash_attn` or `sdpa`.
 
 ## Installing jigsaw with a venv overlay
 
@@ -34,13 +36,14 @@ reach:
 ```bash
 SIF=/path/to/pytorch26.04.sif
 ENV=$HOME/envs/jigsaw-te
+REPO=/path/to/jigsaw   # this checkout
 
 apptainer exec --nv "$SIF" python -m venv --system-site-packages "$ENV"
 
-# jigsaw without touching torch / TE / mpi4py; its only other runtime
-# dependency is einops. Add whatever your own data pipeline needs (zarr,
-# xarray, ...) the same way.
-apptainer exec --nv "$SIF" "$ENV/bin/pip" install --no-build-isolation --no-deps -e ..
+# jigsaw without touching torch / TE / mpi4py. Of its other runtime dependencies,
+# numpy ships with the image and einops does not. Add whatever your own data
+# pipeline needs (zarr, xarray, ...) the same way.
+apptainer exec --nv "$SIF" "$ENV/bin/pip" install --no-build-isolation --no-deps -e "$REPO"
 apptainer exec --nv "$SIF" "$ENV/bin/pip" install --no-build-isolation einops
 
 # mpi4py, built against the image's OpenMPI
@@ -50,7 +53,8 @@ apptainer exec --nv "$SIF" bash -c \
 
 Then set `JIGSAW_VENV=$ENV` in the site preset.
 
-The `--no-deps` flag on the jigsaw install stops pip from pulling a second `torch` / `torchvision` on top of the image's build.
+The `--no-deps` flag on the jigsaw install stops pip from pulling a second `torch` on
+top of the image's build.
 
 ## Running code in the container
 

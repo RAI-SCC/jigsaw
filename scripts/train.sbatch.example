@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Batch template. Copy it, fill in the site-specific SBATCH directives, and
-# submit with `sbatch`. Run-specific batch scripts are not committed - keep
+# submit with `sbatch`. Run-specific batch scripts are not committed; keep
 # your copy under experiments/ (gitignored) or outside the repo.
 #
 #SBATCH --job-name=jigsaw

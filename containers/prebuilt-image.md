@@ -21,5 +21,7 @@ Build with:
 apptainer build jigsaw.sif apptainer.def
 ```
 
-jigsaw itself still goes through the venv. Alternatively, add
-`pip install -e /opt/jigsaw` to `%post` with the repo bind-mounted.
+jigsaw itself still goes through the venv. To bake it in as well, copy the checkout
+into the image with a `%files` section (`/path/to/jigsaw /opt/jigsaw`) and add
+`pip install --no-deps /opt/jigsaw einops` to `%post`; `--no-deps` keeps the image's
+torch.
