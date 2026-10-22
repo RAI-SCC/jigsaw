@@ -10,18 +10,18 @@ loss.backward()  # outside the autocast region
 ```
 
 _jigsaw_'s layers are custom `torch.autograd.Function`s, which `torch.autocast` does **not**
-descend into automatically, so each opts in by hand. Behaviour:
+descend into automatically, so each opts in by hand. Behavior:
 
-- **Matmul family** — `DistributedLinear`, attention (plain + ring), `DistributedConv*` /
-  `DistributedConv*Transpose`: the forward runs in the autocast dtype and the output carries
+- **Matmul family**: `DistributedLinear`, attention (plain + ring), `DistributedConv*` /
+  `DistributedConvTranspose*`: the forward runs in the autocast dtype and the output carries
   it (bias included); gradients are reconciled to the **fp32 (parameter) dtype** in backward,
   i.e. you keep fp32 master gradients for free.
-- **`DistributedLayerNorm` (with or without `elementwise_affine`) / `DistributedSoftmax`**
-  follow stock-AMP "fp32 list" semantics: computed and emitted in fp32 even when fed bf16/fp16.
-- **Attention core (SDPA / TransformerEngine)**: under autocast it uses the autocast dtype
+- **`DistributedLayerNorm` (with or without `elementwise_affine`) / `DistributedGroupNorm` /
+  `DistributedSoftmax`** follow stock-AMP "fp32 list" semantics: computed and emitted in fp32 even when fed bf16/fp16.
+- **Attention core (`sdpa` / `math` / `te`)**: under autocast it uses the autocast dtype
   (so `autocast(bfloat16)` stays bf16 and `autocast(float16)` fp16). With no autocast it uses
-  the input dtype, except that fp32 inputs on CUDA run the core in bf16 — the flash kernel
-  rejects fp32, and fp16 would underflow small gradients without a loss scaler. On CPU fp32
+  the input dtype, except that fp32 and fp64 inputs on CUDA run the core in bf16: the flash
+  kernel rejects fp32, and fp16 would underflow small gradients without a loss scaler. On CPU fp32
   stays fp32 (SDPA math backend). A float `attn_mask` is cast to the core dtype for you.
 
 Only `float16` and `bfloat16` are autocast dtypes. `float64` params work for the matmul,

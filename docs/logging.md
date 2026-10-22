@@ -14,10 +14,12 @@ log.at(2).debug("q shard %s", q.shape)  # only rank 2 (accepts an int, a list, o
 
 Every record is stamped with `[rank/world]` and an elapsed-time marker. Other helpers:
 
-- `log.assert_all_agree("seed", seed)` — collective check that a value matches across ranks.
-- `with log.timed("forward", barrier=True, cuda_sync=True): ...` — time a block, log it from the print rank.
-- `log.log_ranks("loss=%.4f", loss)` — gather one line per rank and print them in order from rank 0.
-- `log.die("bad shard %s", shape)` — log on the calling rank, tear down the process group, exit (no hang).
+- `log.assert_all_agree("seed", seed)`: collective check that a value matches across ranks;
+  calls `log.die` on a mismatch unless `fatal=False`.
+- `with log.timed("forward", barrier=True, cuda_sync=True): ...`: time a block, log it from the print rank.
+- `log.log_ranks("loss=%.4f", loss, level=logging.INFO)`: gather one line per rank and print
+  them in order from rank 0. The default level is `DEBUG`, hidden at the default log level.
+- `log.die("bad shard %s", shape)`: log on the calling rank, tear down the process group, exit (no hang).
 - `configure_logging()` also installs `faulthandler` (`kill -USR1 <pid>` dumps stacks) and a rank-aware
   `excepthook` so a crashing rank fails the job instead of deadlocking its peers.
 

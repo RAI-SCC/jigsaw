@@ -100,7 +100,7 @@ before DDP's reducer reads `p.grad`. DDP then averages over `dp` as usual.
 - **Cost:** a replicated gradient is reduced twice: once over its replica groups in the
   backward, and again over `dp` by DDP. The first sum is a blocking collective on the
   backward's critical path. After it, every replica holds the same gradient, so DDP sends
-  that gradient over the (typically inter-node) `dp` links once per replica.
+  that gradient over `dp` once per replica.
 
 ## Mode 2: joint comm hook (faster)
 
@@ -125,8 +125,8 @@ group* `dp x R`: every rank that holds a copy of the parameter. Then:
    the backward like any DDP bucket. Unmarked parameters are averaged over `dp` as usual.
 
 Averaging `|R|` times the local gradient over `dp x R` gives
-`AVG_dp(SUM_R(local))`, the same as mode 1, but in one collective that NCCL can reduce
-within a node before crossing nodes, and off the critical path.
+`AVG_dp(SUM_R(local))`, the same as mode 1, but in one collective that overlaps the
+backward instead of blocking it.
 
 **Properties:**
 
@@ -134,8 +134,9 @@ within a node before crossing nodes, and off the critical path.
   `gradient_as_bucket_view` and `static_graph` keep working.
 - The hook takes DDP's comm-hook slot, so it can't be combined with another hook such as
   PowerSGD. fp16/bf16 compression works through the `wrapper` argument.
-- It creates one extra process group per distinct replica-group set, created collectively
-  when you register the hook. With NCCL each group is a communicator that costs GPU memory,
+- It creates at most one extra process group per distinct replica-group set, collectively
+  when you register the hook. Sets that join the same ranks share a group, and none is
+  created when the joint group spans every rank. With NCCL each group is a communicator that costs GPU memory,
   so check peak memory on your configuration.
 - Works with DDP's Python reducer (compiled autograd,
   `torch._dynamo.config.optimize_ddp = "python_reducer"`). That reducer has no buckets: the
@@ -144,17 +145,18 @@ within a node before crossing nodes, and off the critical path.
   groups, so they are kept out of it). Since that reducer reduces after every backward,
   `sync_grad` scales the reduced parameters wherever they are used, not only inside DDP's
   forward.
-- Every rank must build the model the same way; ranks that disagree on the replica groups
-  raise at registration.
+- Every rank must build the model the same way. Registration raises RuntimeError if the
+  ranks disagree on the number of distinct replica-group sets; other mismatches are not
+  detected.
 - Scaling only replaces the sum where it is safe: for `sync_grad` calls *inside* this DDP's
-  forward (anywhere, under the Python reducer), on parameters DDP actually reduces. Everywhere else (frozen or ignored parameters,
+  forward (anywhere, under the Python reducer), on parameters DDP actually reduces.
+  Everywhere else (parameters that were frozen or ignored when the hook was registered,
   calls outside the forward), `sync_grad` falls back to the in-graph sum, which is still
   correct.
 
 **When it pays off.** The gain grows with the share of parameters that are replicated and
-with how much of the `dp` traffic crosses nodes. On 8 A100s over two nodes (`dp=2`, 2x2
-spatial split), a 14M-parameter conv net trained about 8% faster. For a model dominated by
-sharded parameters, expect little difference.
+with the cost of the `dp` traffic. For a model dominated by sharded parameters, expect
+little difference.
 
 ## Choosing a mode
 
@@ -164,12 +166,8 @@ sharded parameters, expect little difference.
 | Collectives per replicated gradient | sum over `R` in backward, then DDP average over `dp` | one average over `dp x R`, in DDP's buckets |
 | Other DDP comm hooks (PowerSGD, ...) | yes | only compression wrappers |
 | DDP's Python reducer (compiled autograd) | yes | yes, without compression wrappers |
-| Extra process groups | none | one per distinct replica-group set |
+| Extra process groups | none | at most one per distinct replica-group set |
 | Gradient accumulation / `no_sync()` | yes | yes |
-
-Under compiled autograd, the channel-parallel matmul (`DistributedLinear` and attention with a
-`col` axis larger than 1) does not compile yet: its backward uses `dist.isend`/`irecv`, which
-dynamo cannot trace. This holds for both modes.
 
 ## Replicating your own layers
 
@@ -219,8 +217,8 @@ training.
 
 ## Checking a setup
 
-- `check_ddp` runs automatically in the first jigsaw forward inside any DDP, and in
-  `wrap_ddp`. It catches a wrong DDP group and replicas that differ before training.
+- `check_ddp` runs automatically in the first jigsaw forward inside any DDP (except under
+  `torch.compile`), and in `wrap_ddp`. It catches a wrong DDP group and replicas that differ before training.
 - `jigsaw.debug.assert_replica_consistency(model, mesh)` after `optimizer.step()` finds the
   step at which replicas drift apart, e.g. from a parameter you forgot to mark. Pass
   `unmarked=True` to also compare unmarked parameters of non-jigsaw modules over every mesh
