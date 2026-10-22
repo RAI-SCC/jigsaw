@@ -107,7 +107,7 @@ class TestRingAttnCore:
         rank, world = ring.rank(), ring.size()
         d = DIM // HEADS
         ring_config = cfg.RingAttentionConfig(
-            device=device, attn_backend="math", gpus_per_node=world
+            device=device, attn_backend="math", intra_size=world
         )
 
         torch.manual_seed(0)  # same weights and data on every rank

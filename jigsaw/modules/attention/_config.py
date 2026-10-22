@@ -353,9 +353,9 @@ class RingAttentionConfig:
         Communication operation used by the ring. ``ALLTOALL`` (default)
         runs the ring exchange as one all-to-all collective per step and
         works for any ring size. The ``HYBRID_*`` ops split the ring into
-        intra groups of ``gpus_per_node`` ranks (typically, but not
-        necessarily, one node) joined by an outer ring, and need the ring
-        size to be a multiple of ``gpus_per_node``.
+        intra groups of ``intra_size`` consecutive ranks joined by an outer
+        ring, and need the ring
+        size to be a multiple of ``intra_size``.
     save_for_backward : SaveBackward or str
         Tensor representation saved for the backward pass.
     save_scope : SaveScope or str
@@ -364,8 +364,8 @@ class RingAttentionConfig:
         Strategy used to communicate backward gradients.
     offload : Offload or str
         Activation offloading policy.
-    gpus_per_node : int
-        Number of ranks assigned to each node for hybrid communication.
+    intra_size : int
+        Number of consecutive ring ranks in each intra group.
         Only used by the ``HYBRID_*`` send ops.
     attn_backend : AttnBackend or str
         Inner per-chunk attention core. ``SDPA`` (default) keeps the
@@ -393,7 +393,7 @@ class RingAttentionConfig:
         save_scope: SaveScope | str = SaveScope.GLOBAL,
         send_backward: SendBackward | str = SendBackward.SEND_DKV,
         offload: Offload | str = Offload.DISABLED,
-        gpus_per_node: int = 4,
+        intra_size: int = 4,
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
         overlap_comm: bool = False,
     ):
@@ -403,8 +403,8 @@ class RingAttentionConfig:
         case (``send_op="hybrid_p2p"``); ``attn_backend`` also takes its value
         (``"te"``). Unknown names raise :class:`ValueError`.
         """
-        if gpus_per_node <= 0:
-            raise ValueError("gpus_per_node must be positive")
+        if intra_size <= 0:
+            raise ValueError("intra_size must be positive")
         send_in_forward = _coerce_enum(SendForward, send_in_forward, "send_in_forward")
         save_for_backward = _coerce_enum(
             SaveBackward, save_for_backward, "save_for_backward"
@@ -419,7 +419,7 @@ class RingAttentionConfig:
         self.save_scope = save_scope
         self.send_backward = send_backward
         self.offload = offload
-        self.gpus_per_node = gpus_per_node
+        self.intra_size = intra_size
         self.device = device
         self.attn_backend = _coerce_enum(AttnBackend, attn_backend, "attn_backend")
 

@@ -46,19 +46,19 @@ def _local_scope_global_chunk_idx(
     """Return the global chunk index held at backward ``step`` for ``SaveScope.LOCAL``."""
     match ring_config.send_op:
         case SendOp.HYBRID_P2P | SendOp.HYBRID_BROADCAST | SendOp.HYBRID_ALLTOALL:
-            # The chunk sits on intra group `node_idx - step // gpn` (the outer
+            # The chunk sits on intra group `group_idx - step // intra_size` (the outer
             # ring runs backwards relative to the forward). HYBRID_P2P and
             # HYBRID_ALLTOALL also rotate it within the intra group, so its
             # local index is `local_idx + step`. HYBRID_BROADCAST doesn't:
-            # local rank `step % gpn` was the broadcast source.
-            topo = get_hybrid_topology(group, ring_config.gpus_per_node)
-            node_step = step // topo.gpus_per_node
+            # local rank `step % intra_size` was the broadcast source.
+            topo = get_hybrid_topology(group, ring_config.intra_size)
+            group_step = step // topo.intra_size
             local = (
                 topo.local_idx + step
                 if ring_config.send_op in _INTRA_ROTATING_HYBRIDS
                 else step
             )
-            return topo.rank_at(topo.node_idx - node_step, local)
+            return topo.rank_at(topo.group_idx - group_step, local)
         case SendOp.BROADCAST:
             # `_LocalChunkProviderBroadcast.get(step)` broadcasts from rank
             # `step` (its *own* local chunk, i.e. global chunk `step`) to
@@ -471,7 +471,7 @@ def _hybrid_dkv_relay_peers(topo: HybridTopology, step: int) -> tuple[int, int]:
     """(send_to, recv_from) for relaying a dK/dV partial to its home rank.
 
     At backward ``step`` this rank holds the gradient for the chunk owned by
-    ``rank_at(node_idx - step // gpn, local_idx + step)``. Hand it straight to
+    ``rank_at(group_idx - step // intra_size, local_idx + step)``. Hand it straight to
     that owner, and receive (from the mirror-image rank) the partial destined
     for this rank's own chunk.
 
@@ -479,9 +479,9 @@ def _hybrid_dkv_relay_peers(topo: HybridTopology, step: int) -> tuple[int, int]:
     index at once, so neither sub-group can address it and it uses ranks of
     the full ring group.
     """
-    node_step = step // topo.gpus_per_node
-    send_to = topo.rank_at(topo.node_idx - node_step, topo.local_idx + step)
-    recv_from = topo.rank_at(topo.node_idx + node_step, topo.local_idx - step)
+    group_step = step // topo.intra_size
+    send_to = topo.rank_at(topo.group_idx - group_step, topo.local_idx + step)
+    recv_from = topo.rank_at(topo.group_idx + group_step, topo.local_idx - step)
     return send_to, recv_from
 
 
@@ -527,7 +527,7 @@ def _accumulate_dkv_send(
     # Hybrid rings relay the partial straight to its owner, which is addressed
     # by full-ring-group rank; the other send ops shift it by ``step``.
     if ring_config.send_op in _INTRA_ROTATING_HYBRIDS:
-        topo = get_hybrid_topology(group, ring_config.gpus_per_node)
+        topo = get_hybrid_topology(group, ring_config.intra_size)
         send_recv_ranks = _hybrid_dkv_relay_peers(topo, step)
         recv_buf, _ = ring_config.p2p_fn(
             dkv,
@@ -580,7 +580,7 @@ class _DkvRelay:
         self.group = group
         self.cs = ring_config.comm_stream
         self._topo = (
-            get_hybrid_topology(group, ring_config.gpus_per_node)
+            get_hybrid_topology(group, ring_config.intra_size)
             if ring_config.send_op in _INTRA_ROTATING_HYBRIDS
             else None
         )
@@ -665,17 +665,17 @@ def _accumulate_dkv_hybrid_broadcast(
     group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Accumulate dK and dV of a hybrid broadcast step into local-sized buffers."""
-    topo = get_hybrid_topology(group, ring_config.gpus_per_node)
-    node_step, phase = divmod(step, topo.gpus_per_node)
+    topo = get_hybrid_topology(group, ring_config.intra_size)
+    group_step, phase = divmod(step, topo.intra_size)
     is_owner = topo.local_idx == phase
 
     dkv = torch.cat([dk_j, dv_j], dim=0).contiguous()
-    dist.all_reduce(dkv, op=dist.ReduceOp.SUM, group=topo.intranode_group)
+    dist.all_reduce(dkv, op=dist.ReduceOp.SUM, group=topo.intra_group)
 
-    if node_step != 0:
-        # Outer-ring exchange as a permutation of `internode_group`: every rank
+    if group_step != 0:
+        # Outer-ring exchange as a permutation of `inter_group`: every rank
         # sends its intra-group sum to its counterpart in intra group
-        # ``node_idx - node_step`` and receives from ``node_idx + node_step``.
+        # ``group_idx - group_step`` and receives from ``group_idx + group_step``.
         # Only local rank ``phase`` gets the partial for a chunk it owns; the
         # rest take part to keep the collective whole and discard what they
         # receive.
@@ -684,10 +684,10 @@ def _accumulate_dkv_hybrid_broadcast(
             dkv,
             recv,
             send_recv_ranks=(
-                topo.internode_peer(-node_step),
-                topo.internode_peer(node_step),
+                topo.inter_group_peer(-group_step),
+                topo.inter_group_peer(group_step),
             ),
-            group=topo.internode_group,
+            group=topo.inter_group,
             async_op=False,
             step=step,
         )
