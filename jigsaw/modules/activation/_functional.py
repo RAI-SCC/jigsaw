@@ -27,19 +27,16 @@ class _Softmax(torch.autograd.Function):
     def forward(x: torch.Tensor, dim: int, group: dist.ProcessGroup) -> torch.Tensor:
         """Compute the softmax over a dimension sharded across ``group``."""
         (x,) = promote_to_fp32_under_autocast(x)
-        # local exponentials
         local_max = x.amax(dim=dim, keepdim=True)
         dist.all_reduce(local_max, op=dist.ReduceOp.MAX, group=group)
 
         y = torch.exp(x - local_max)
 
         local_sum = y.sum(dim=dim, keepdim=True)
-        # global sum
         global_sum = local_sum.clone()
 
         dist.all_reduce(global_sum, op=dist.ReduceOp.SUM, group=group)
 
-        # final softmax
         out = y / global_sum
         return out
 
@@ -67,10 +64,8 @@ class _Softmax(torch.autograd.Function):
         dim = ctx.dim
         group = ctx.group
 
-        # local grad numerator
         local_grad = grad_out * out
         local_sum = local_grad.sum(dim=dim, keepdim=True)
-        # global sum for gradient
         global_grad_sum = local_sum.clone()
         dist.all_reduce(global_grad_sum, op=dist.ReduceOp.SUM, group=group)
 

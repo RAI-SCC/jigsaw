@@ -78,7 +78,7 @@ def _compute_kv(
     d : int
         Embedding dimension per head.
     layout : str
-        ``"bhsd"`` (default) or ``"bshd"`` -- the layout of the returned
+        ``"bhsd"`` (default) or ``"bshd"``: the layout of the returned
         ``kj`` / ``vj`` (and the stacked ``kv``, minus its leading pair axis).
 
     Returns

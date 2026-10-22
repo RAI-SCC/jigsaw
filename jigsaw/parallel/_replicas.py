@@ -164,7 +164,8 @@ def replica_divergence(
     Returns
     -------
     torch.Tensor
-        One float64 entry per parameter; ``inf`` where they differ in a NaN.
+        One float64 entry per parameter; ``inf`` if an element is NaN on only
+        one of the two ranks. NaN on both counts as equal.
     """
     device = params[0][0].device if params else torch.device("cpu")
     div = torch.zeros(len(params), dtype=torch.float64, device=device)

@@ -144,7 +144,7 @@ def make_process_mesh(
     """
     if not dist.is_initialized():
         raise RuntimeError(
-            "make_process_mesh needs an initialised default process group; call "
+            "make_process_mesh needs an initialized default process group; call "
             "torch.distributed.init_process_group first"
         )
     # Anything but nccl/gloo would silently take the NCCL comm paths and hang.

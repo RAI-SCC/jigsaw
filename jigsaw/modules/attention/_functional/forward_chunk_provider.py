@@ -89,7 +89,6 @@ class _ForwardChunkProvider(ABC):
             # the rest.
             self.chunks_to_save = [ring_config.save_for_backward_fn(x, self.kv)]
 
-    # -- helpers --------------------------------------------------------- #
     def _kv_from_x(self) -> None:
         """Recompute the key and value from the current input chunk."""
         self.kv_j, self.kj, self.vj = _compute_kv(
@@ -102,7 +101,6 @@ class _ForwardChunkProvider(ABC):
             recv_buf, self.x_j, self.kv_j, self.kj, self.vj
         )
 
-    # -- interface ----------------------------------------------------- #
     @abstractmethod
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the key and value of chunk ``step``."""
@@ -321,7 +319,7 @@ class _HybridForwardChunkProvider(_ForwardChunkProvider):
         Sends ``x_j`` / ``kv_j``: this rank's own chunk at round 0, then
         whatever the previous round's outer-ring receive delivered. Relaying
         the held chunk, not the original ``x`` / ``kv``, is what lets chunks
-        travel past the neighbouring intra group when ``n_nodes > 2``. The source is never
+        travel past the neighboring intra group when ``n_nodes > 2``. The source is never
         written in place afterwards, so it is sent without a clone.
         """
         src = self.x_j if self.send_x else self.kv_j

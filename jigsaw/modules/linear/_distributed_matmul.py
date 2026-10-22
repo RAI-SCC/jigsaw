@@ -74,9 +74,8 @@ def fused_xw_xtw_twoway(
     """
     mod = local_rank % 2
     w0, w1 = torch.split(weight, weight.shape[-2] // 2, dim=-2)
-    # ``grad_output`` is sent verbatim through ``all_to_all`` below, which
-    # rejects non-contiguous tensors; autograd routinely hands us a strided
-    # gradient (e.g. through a preceding transpose / rearrange).
+    # ``all_to_all`` rejects non-contiguous tensors, and autograd can pass a
+    # strided ``grad_output``, e.g. after a transpose or rearrange.
     grad_output = grad_output.contiguous()
     # Fresh, not a cached ``get_preallocated_buffer`` slot: a cached recv buffer
     # this size stays resident for the whole run (and is zero-filled every call,
@@ -2387,10 +2386,10 @@ def fused_xw_xtw_eightway(
                 empty,
             ]
 
-    # Post the exchanges of both operations up front. NCCL serialises the four
+    # Post the exchanges of both operations up front. NCCL serializes the four
     # collectives on its stream in submission order, so ``xw_w_handle`` still
     # completes first and waiting on a later handle transitively covers the
-    # earlier ones -- the standalone kernels rely on the same ordering.
+    # earlier ones. The standalone kernels rely on the same ordering.
     xw_w_handle = all_to_all_async(xw_w_recv, xw_w_send, group=model_group)
     xw_x_handle = all_to_all_async(xw_x_recv, xw_x_send, group=model_group)
     xtw_x_handle = all_to_all_async(xtw_x_recv, xtw_x_send, group=model_group)

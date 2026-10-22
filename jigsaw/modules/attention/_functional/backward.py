@@ -62,7 +62,7 @@ def _local_scope_global_chunk_idx(
         case SendOp.BROADCAST:
             # `_LocalChunkProviderBroadcast.get(step)` broadcasts from rank
             # `step` (its *own* local chunk, i.e. global chunk `step`) to
-            # everyone -- the receiving rank's identity doesn't matter, mirroring
+            # everyone; the receiving rank's identity doesn't matter, mirroring
             # the forward `_BroadcastForwardChunkProvider.global_chunk_idx(step) == step`.
             return step
         case _:
@@ -178,9 +178,9 @@ def ring_backward(
     core_dtype = q.dtype
     dout, q = dout.to(core_dtype), q.to(core_dtype)
     out = out.to(core_dtype)
-    # ``lse`` is *not* folded into ``core_dtype``: it is a softmax normaliser,
+    # ``lse`` is *not* folded into ``core_dtype``: it is a softmax normalizer,
     # never matmul'd against a chunk, and the fused SDPA/TE backward kernels
-    # read it as fp32 -- a 16-bit ``lse`` makes them recompute the softmax
+    # read it as fp32; a 16-bit ``lse`` makes them recompute the softmax
     # wrong. Each core casts it to what its kernel wants (the ``math`` core
     # keeps whatever precision the forward produced).
     dq = torch.zeros_like(q, dtype=core_dtype)
@@ -471,7 +471,7 @@ def _hybrid_dkv_relay_peers(topo: HybridTopology, step: int) -> tuple[int, int]:
     """(send_to, recv_from) for relaying a dK/dV partial to its home rank.
 
     At backward ``step`` this rank holds the gradient for the chunk owned by
-    ``rank_at(node_idx - step // gpn, local_idx + step)`` -- hand it straight to
+    ``rank_at(node_idx - step // gpn, local_idx + step)``. Hand it straight to
     that owner, and receive (from the mirror-image rank) the partial destined
     for our own chunk.
 

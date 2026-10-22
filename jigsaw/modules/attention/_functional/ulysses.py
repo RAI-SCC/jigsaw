@@ -40,7 +40,7 @@ def _a2a_heads_to_seq(x: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor
 
 
 def _a2a_seq_to_heads(x: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor:
-    """``[..., s_full, h_p, d] -> [..., s_full // P, h_p * P, d]`` -- inverse of :func:`_a2a_heads_to_seq`.
+    """``[..., s_full, h_p, d] -> [..., s_full // P, h_p * P, d]``; inverse of :func:`_a2a_heads_to_seq`.
 
     Scatters the sequence axis (``-3``) across ``group`` and gathers the head
     axis (``-2``): the heads come back in source-rank order, reconstructing the
@@ -114,7 +114,7 @@ def ulysses_attention(
         Local, sequence-sharded projections, ``bshd``
         ``[b, seq // P, local_heads, head_dim]`` (``P = group.size()``).
     group : dist.ProcessGroup
-        The all-to-all group to gather the sequence over -- the whole spatial
+        The all-to-all group to gather the sequence over: the whole spatial
         group for flat Ulysses, or the intra group for the hierarchical
         scheme.
     core : callable
@@ -128,7 +128,7 @@ def ulysses_attention(
     Returns
     -------
     torch.Tensor
-        ``bshd`` ``[b, seq // P, local_heads, head_dim]`` -- same layout and
+        ``bshd`` ``[b, seq // P, local_heads, head_dim]``, the same layout and
         sharding as ``q``.
     """
     # One all-to-all for all three shards: [3, b, s, h, d] -> a2a. Reuse the

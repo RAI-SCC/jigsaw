@@ -1,7 +1,7 @@
 """Unfused reference attention core for the ring's inner attention.
 
 Runs on any device, shape and dtype, and is the SDPA selectors' fallback on
-CPU. The backward recomputes ``dQ/dK/dV`` from the ring's globally normalised
+CPU. The backward recomputes ``dQ/dK/dV`` from the ring's globally normalized
 ``out`` and ``logsumexp``.
 
 Dropout is inverted dropout applied after the softmax, as in

@@ -89,9 +89,9 @@ def sync_grad(*tensors: Optional[torch.Tensor]) -> tuple[Optional[torch.Tensor],
     Unmarked tensors, ``None`` and tensors not requiring grad pass through
     unchanged, as does everything when grad mode is off. Marked tensors are
     bucketed by ``(groups, dtype)``, one flat collective per bucket and group.
-    Inside the forward of a DDP with :func:`register_joint_comm_hook` (anywhere,
-    under DDP's Python reducer), the parameters DDP reduces are only scaled;
-    the hook does the sum.
+    Parameters that a DDP with :func:`register_joint_comm_hook` reduces are only
+    scaled; the hook does the sum. This applies inside that DDP's forward or, if
+    DDP uses its Python reducer (compiled autograd), wherever this is called.
 
     Parameters
     ----------
@@ -111,10 +111,7 @@ def sync_grad(*tensors: Optional[torch.Tensor]) -> tuple[Optional[torch.Tensor],
     joint = active_joint_state()
     # (groups, dtype, joint state if only scaled) -> indices
     buckets: "dict[tuple[Groups, torch.dtype, Optional[JointCommHookState]], list[int]]"
-    # Buckets will hold the parameters that need sync., that also share an autograd node.
-    # Examples include weight and bias of Conv layers and layer norms
-    # Only bias term over a distributed linear
-
+    # Each bucket becomes one autograd node, e.g. a conv or layer norm's weight and bias.
     buckets = {}
     for i, t in enumerate(tensors):
         groups = replica_groups(t)

@@ -75,8 +75,8 @@ class DistributedRoll(torch.nn.Module):
     ------
     ValueError
         If ``distributed_dims`` and ``spatial_groups`` differ in length, or an entry
-        of ``distributed_dims`` is not in ``dims``. If the two count from different
-        ends, that is only known, and raised, in the forward pass.
+        of ``distributed_dims`` is not in ``dims``. If one of the two is negative
+        and the other is not, this is checked in the forward pass instead.
     """
 
     def __init__(
@@ -113,9 +113,7 @@ class DistributedRoll(torch.nn.Module):
         Returns
         -------
         int
-            Global (unsharded) count of this layer's parameters, including plain
-            ``torch.nn`` children; children with ``get_parameter_count`` report
-            their own. No communication.
+            ``0``; the layer has no parameters.
         """
         return 0
 

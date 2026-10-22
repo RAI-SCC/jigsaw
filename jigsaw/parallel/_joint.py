@@ -244,7 +244,7 @@ def joint_comm_hook(
         _reduce_param_grad(*bucket)
         return None  # type: ignore[return-value]
     buf = bucket.buffer()
-    # Parameters lie back to back in the buffer; merge neighbours with the same
+    # Parameters lie back to back in the buffer; merge neighbors with the same
     # joint group into (group, start, end) runs.
     runs: list[tuple[dist.ProcessGroup, int, int]] = []
     off = 0

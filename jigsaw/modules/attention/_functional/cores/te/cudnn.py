@@ -293,7 +293,7 @@ def backward(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """TE fused attention backward from the saved (global) ``out`` / ``logsumexp``.
 
-    With the ring's globally normalised ``out`` / ``logsumexp`` this yields the
+    With the ring's globally normalized ``out`` / ``logsumexp`` this yields the
     correct per-chunk ``dQ/dK/dV``.
 
     Parameters
@@ -303,7 +303,7 @@ def backward(
     q, k, v : torch.Tensor
         Query, key and value, in ``layout``.
     out : torch.Tensor
-        Saved (globally normalised) attention output, in ``layout``.
+        Saved (globally normalized) attention output, in ``layout``.
     logsumexp : torch.Tensor
         Saved (global) log-sum-exp, ``(b, h, s)``.
     scale : float

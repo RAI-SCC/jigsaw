@@ -45,12 +45,17 @@ def to_front(
 
 
 def check_not_vmapped(config: object) -> None:
-    """Raise if ``config`` is already the vmapped config (nested ``vmap``).
+    """Check that ``config`` is not already the vmapped config (nested ``vmap``).
 
     Parameters
     ----------
     config : object
         Layer config to check.
+
+    Raises
+    ------
+    NotImplementedError
+        If ``config`` is the vmapped config.
     """
     if getattr(config, "vmapped", False):
         raise NotImplementedError(
