@@ -60,20 +60,14 @@ class SendOp(Enum):
 
 
 class AttnBackend(str, Enum):
-    """Attention core implementation.
+    """Attention core implementation, with or without ``ring``.
 
-    Applies to both the plain :class:`~jigsaw.modules.DistributedAttention` core and
-    the ring's per-chunk inner attention.
-
-    - ``TE``: whichever kernel TransformerEngine would run on this GPU -- the
-      cuDNN fused kernels on Hopper and newer, the ``flash_attn`` package on
-      Ampere. CUDA only; see :mod:`._functional.cores.te`.
-    - ``SDPA``: PyTorch scaled-dot-product attention -- the flash kernel on CUDA
-      (with a math fallback), the math kernel on CPU. Default.
-    - ``MATH``: the unfused ``softmax(QK^T)V`` reference. Any device/shape/dtype.
-
-    ``ring`` is a separate switch (see ``DistributedAttention``); it composes with
-    every backend here.
+    - ``TE``: cuDNN fused kernels on Hopper and newer, the ``flash_attn``
+      package on Ampere. CUDA only.
+    - ``SDPA``: PyTorch scaled-dot-product attention on CUDA, the math kernel
+      on CPU. Default.
+    - ``MATH``: the unfused ``softmax(QK^T)V`` reference. Any device, shape and
+      dtype.
     """
 
     TE = "te"
@@ -89,8 +83,8 @@ def _coerce_enum(enum_cls: type[_E], value: Any, arg: str) -> _E:
 
     Accepts the member itself or its name as a string in any case
     (``send_op="hybrid_p2p"``), and for string enums also the value
-    (``attn_backend="te"``). Anything else raises, instead of being stored
-    unchanged and then silently matching none of the policy branches.
+    (``attn_backend="te"``). Anything else raises :class:`ValueError` rather
+    than silently matching none of the policy branches.
 
     Parameters
     ----------
@@ -132,10 +126,8 @@ def _coerce_enum(enum_cls: type[_E], value: Any, arg: str) -> _E:
 # --------------------------------------------------------------------------- #
 # policy -> callable resolution
 #
-# Every `RingAttentionConfig` attribute that holds a strategy-specific callable
-# is produced by one `_select_*` function here, so the forward/backward code
-# only ever calls `config.<thing>()` and never branches on a raw enum. The
-# attention cores themselves live in `functional/cores/{sdpa,math,te}.py`.
+# Each strategy-specific callable on `RingAttentionConfig` comes from one
+# `_select_*` function, so the forward and backward never branch on an enum.
 # --------------------------------------------------------------------------- #
 CommFn = Callable[..., Any]
 AttnCoreFn = Callable[..., Any]
@@ -179,10 +171,8 @@ def _select_attn_core_forward_fn(
 ) -> AttnCoreFn:
     """Pick the ring inner-attention forward core for ``device`` / ``attn_backend``.
 
-    ``SDPA`` keeps the historical device-based pick (flash on CUDA, math on CPU).
-    ``TE`` picks by GPU architecture -- cuDNN on Hopper and newer, ``flash_attn``
-    on Ampere; see :func:`._functional.cores.te.select_core`.
-    Cores live in :mod:`._functional.cores`; each exposes ``forward`` / ``backward``.
+    ``SDPA`` picks by device (SDPA on CUDA, math on CPU), ``TE`` by GPU
+    architecture (see :func:`._functional.cores.te.select_core`).
     """
     from ._functional.cores import math as math_core
     from ._functional.cores import sdpa as sdpa_core
@@ -231,7 +221,7 @@ def _select_attn_core_backward_fn(
 
 
 def _select_p2p_fn(send_op: SendOp) -> CommFn:
-    """Select the communication function for inter-node hops and the dK/dV relay."""
+    """Select the communication function for outer-ring sends and the dK/dV relay."""
     if dist.get_backend() == "gloo":
         return comm.comm_1d_p2p
     alltoall = {SendOp.ALLTOALL, SendOp.BROADCAST, SendOp.HYBRID_ALLTOALL}
@@ -362,8 +352,9 @@ class RingAttentionConfig:
         Communication operation used by the ring. ``ALLTOALL`` (default)
         runs the ring exchange as one all-to-all collective per step and
         works for any ring size. The ``HYBRID_*`` ops split the ring into
-        intra- and inter-node parts and need the ring size to be a
-        multiple of ``gpus_per_node``.
+        intra groups of ``gpus_per_node`` ranks (typically, but not
+        necessarily, one node) joined by an outer ring, and need the ring
+        size to be a multiple of ``gpus_per_node``.
     save_for_backward : SaveBackward or str
         Tensor representation saved for the backward pass.
     save_scope : SaveScope or str

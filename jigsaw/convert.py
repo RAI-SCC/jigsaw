@@ -63,9 +63,9 @@ shard_safe_modules: tuple[type[torch.nn.Module], ...] = (
 # Torch modules (leaves and containers) known to be wrong on a sharded tensor:
 # they reduce over, mix along or reshape a dimension, or hold parameters indexed
 # by one, and jigsaw has no distributed equivalent. Converting a model that
-# contains one raises unless ``non_safe=True``. Matched with ``isinstance``,
-# after the exact-type lookup in ``mapped_modules`` (so ``nn.Softmax`` itself is
-# converted, while a subclass of it is flagged here).
+# contains one raises :class:`ValueError` unless ``non_safe=True``. Matched with
+# ``isinstance`` after the exact-type lookup in ``mapped_modules``, so a
+# subclass of a mapped module is flagged here.
 shard_unsafe_modules: tuple[type[torch.nn.Module], ...] = (
     # softmax-like activations reduce over ``dim``; GLU splits it in half;
     # PReLU's weight is per channel

@@ -22,9 +22,9 @@ from .ring import (
     get_hybrid_topology,
 )
 
-# Hybrid send-ops whose backward chunk provider rotates chunks intra-node as well
-# as inter-node, so a step's dK/dV belongs to local index ``local_idx + step``
-# rather than ``step`` (HYBRID_BROADCAST leaves the chunk put intra-node).
+# Hybrid send-ops whose backward chunk provider also rotates chunks within the
+# intra group, so a step's dK/dV belongs to local index ``local_idx + step``
+# rather than ``step`` (HYBRID_BROADCAST leaves the chunk in place there).
 _INTRA_ROTATING_HYBRIDS = frozenset({SendOp.HYBRID_P2P, SendOp.HYBRID_ALLTOALL})
 
 
@@ -635,7 +635,7 @@ class _DkvRelay:
         send[b:].copy_(dv_j)
         # Same routing as `_accumulate_dkv_send`: HYBRID_P2P/HYBRID_ALLTOALL
         # hand the partial to `_hybrid_dkv_relay_peers` (moves along both the
-        # node and node-local axes); everything else sends `step` ranks along
+        # outer ring and the intra group); everything else sends `step` ranks along
         # the ring toward the chunk's home rank.
         if self._topo is not None:
             send_recv_ranks = _hybrid_dkv_relay_peers(self._topo, step)

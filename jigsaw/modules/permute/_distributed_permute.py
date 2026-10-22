@@ -282,9 +282,8 @@ def x_transpose_eightway(
     return cij
 
 
-# Fast path for `distributed_permute`: a pure swap of the trailing two axes on a mesh
-# shape one of the kernels above already handles with direct peer exchange, instead of
-# the general path's all-gather.
+# Fast path for `distributed_permute`: swapping the last two axes on these mesh shapes
+# uses direct peer exchange instead of an all-gather.
 _SWAP_KERNELS: dict[tuple[int, int], Callable[..., torch.Tensor]] = {
     (1, 2): x_transpose_twoway,
     (2, 2): x_transpose_fourway,
@@ -303,14 +302,10 @@ def distributed_permute(
 ) -> torch.Tensor:
     """Permute ``x`` by ``dims``, resharding ``row_dim``/``col_dim`` if ``dims`` swaps them.
 
-    ``mesh["row"]`` shards ``row_dim`` and ``mesh["col"]`` shards ``col_dim`` of both the
-    input and the output: these two axis *positions* are fixed, not tracked by identity.
-    Every other axis is only ever repositioned by ``dims``, never read or resharded by its
-    own identity -- but when ``dims`` swaps ``row_dim``/``col_dim``, the data that moves
-    between ranks is whatever is attached to it along every other axis too, so those other
-    axes must be uniform across ``mesh["row"]`` x ``mesh["col"]`` itself (they may still be
-    sharded by some other, orthogonal mesh axis -- e.g. data-parallel -- that's held fixed
-    for this call, just not by ``row_dim``/``col_dim``'s own mesh).
+    ``mesh["row"]`` shards axis position ``row_dim`` and ``mesh["col"]`` shards
+    ``col_dim``, in both the input and the output. Every other axis must not be
+    sharded over ``mesh["row"]`` or ``mesh["col"]``; sharding over another mesh
+    axis (e.g. data-parallel) is fine.
 
     Parameters
     ----------

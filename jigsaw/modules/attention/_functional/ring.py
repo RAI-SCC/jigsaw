@@ -145,7 +145,7 @@ class HybridTopology:
         return self._grid[node % self.n_nodes][local % self.gpus_per_node]
 
     def intra_peer(self, offset: int) -> int:
-        """Return the ring position ``offset`` steps along the intra-node ring.
+        """Return the ring position ``offset`` steps along the intra-group ring.
 
         Parameters
         ----------
@@ -160,7 +160,7 @@ class HybridTopology:
         return self.rank_at(self.node_idx, self.local_idx + offset)
 
     def inter_peer(self, offset: int) -> int:
-        """Return the ring position ``offset`` steps along the inter-node ring.
+        """Return the ring position ``offset`` steps along the outer ring.
 
         Parameters
         ----------

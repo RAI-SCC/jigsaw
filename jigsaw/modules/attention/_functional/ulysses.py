@@ -115,11 +115,12 @@ def ulysses_attention(
         ``[b, seq // P, local_heads, head_dim]`` (``P = group.size()``).
     group : dist.ProcessGroup
         The all-to-all group to gather the sequence over -- the whole spatial
-        group for flat Ulysses, or the intra-node sub-group for the
-        hierarchical scheme.
+        group for flat Ulysses, or the intra group for the hierarchical
+        scheme.
     core : callable
         ``core(q, k, v) -> out`` on ``bshd`` tensors with ``local_heads // P``
-        heads: a dense kernel (flat) or an inter-node ring (hierarchical).
+        heads: a dense kernel (flat) or a ring across the all-to-all groups
+        (hierarchical).
     qkv_stack : torch.Tensor, optional
         The ``[3, b, seq // P, local_heads, head_dim]`` tensor ``q``/``k``/``v``
         were unbound from; skips re-stacking them.

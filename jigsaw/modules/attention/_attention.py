@@ -316,7 +316,7 @@ class DistributedAttention(torch.nn.Module):
         ):
             warnings.warn(
                 "ulysses_inter_overlap with ulysses_inter_save_scope=GLOBAL "
-                "overlaps only the forward inter-node K/V ring: GLOBAL keeps "
+                "overlaps only the forward outer K/V ring: GLOBAL keeps "
                 "every arrived chunk and all-reduces dK/dV, so the backward has "
                 "no re-ringing relay to hide. Use ulysses_inter_save_scope=LOCAL "
                 "to overlap the backward too.",
@@ -357,12 +357,12 @@ class DistributedAttention(torch.nn.Module):
                     spatial_group.size() % a == 0 and spatial_group.size() // a >= 2
                 ), (
                     f"hierarchical ulysses needs spatial ({spatial_group.size()}) "
-                    f"to split into an intra-node a2a group of {a} and an "
-                    f"inter-node ring of >= 2; use ulysses_gpus_per_node=0 for "
+                    f"to split into an intra a2a group of {a} and an "
+                    f"outer ring of >= 2; use ulysses_gpus_per_node=0 for "
                     f"the flat scheme"
                 )
                 assert self.heads % a == 0, (
-                    f"hierarchical ulysses scatters heads over the intra-node "
+                    f"hierarchical ulysses scatters heads over the intra "
                     f"group: heads // channel ({self.heads}) must be divisible by "
                     f"ulysses_gpus_per_node ({a})"
                 )

@@ -25,7 +25,7 @@ ConvTransposeFn = Callable[..., torch.Tensor]
 # reduce: ``fn(y_raw) -> y``.
 PostFn = Callable[[torch.Tensor], torch.Tensor]
 
-# ``_HopFn`` (per-hop transport type), ``_resolve_channel_hop`` (streaming
+# ``_HopFn`` (per-step send type), ``_resolve_channel_hop`` (streaming
 # ``channel_comm`` -> transport) and ``_in_channel_block`` (weight input-channel
 # slice) are identical to the plain-conv versions and imported from there.
 
@@ -78,7 +78,7 @@ def _over_channels_streaming(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Circulate the channel slices in a ring and apply the transpose convolution to each.
 
-    ``hop_fn`` is the communication function of one hop. ``post_fn`` and the bias
+    ``hop_fn`` sends the slice of one ring step. ``post_fn`` and the bias
     are applied to the accumulated output.
 
     Returns
@@ -131,7 +131,7 @@ def _over_channels_streaming(
 
         block = (rank - step) % group_size
 
-        # Relay before the partial conv so it overlaps the next hop.
+        # Relay before the partial conv so it overlaps the next send.
         if step < group_size - 1:
             recv_buf, handle = hop_fn(
                 slab, recv_buf, direction=1, group=channel_group, async_op=True

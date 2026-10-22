@@ -302,12 +302,8 @@ def comm_1d_alltoall(
     else:
         send_to, recv_from = send_recv_ranks
 
-    # ``dist.all_to_all`` requires every tensor it touches to be contiguous.
-    # Callers can hand this a view with a non-standard memory layout (e.g. a
-    # permute+reshape that happened to avoid a copy) without ever noticing --
-    # the shape checks out, only the strides are wrong. ``.contiguous()`` is a
-    # no-op when the tensor already satisfies that, so this costs nothing on
-    # the common path.
+    # ``dist.all_to_all`` needs contiguous tensors, and callers may pass a
+    # strided view; ``.contiguous()`` is a no-op otherwise.
     data = data.contiguous()
     buffer = buffer.contiguous()
 
@@ -451,17 +447,9 @@ def broadcast_params_(
 ) -> None:
     """Broadcast every tensor in ``params`` from ``src``, in one call per dtype.
 
-    Model construction commonly needs to replicate a handful of freshly
-    initialized tensors (weights, biases) from rank 0 across a group -- e.g.
-    once per transformer block, times however many tensors that block owns.
-    Issuing that as ``for p in params: dist.broadcast(p.data, ...)`` makes
-    every tensor its own blocking round trip: with many blocks, each
-    contributing several tensors, that is dozens of sequential
-    cross-rank synchronizations even though each payload is tiny, and setup
-    time ends up scaling with model depth instead of being dominated by the
-    (fast) actual compute. Flattening same-dtype tensors into one contiguous
-    buffer before broadcasting collapses that to a single round trip per
-    dtype present in ``params``, regardless of how many tensors there are.
+    Flattening same-dtype tensors into one buffer replaces one blocking
+    broadcast per tensor with one per dtype, so setup time does not grow with
+    model depth.
 
     Parameters
     ----------

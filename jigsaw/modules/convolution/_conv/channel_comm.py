@@ -6,7 +6,7 @@ The input channels are split over the channel group. The strategy
 * ``"all_gather"`` gathers all slices at once.
 * ``"p2p"`` circulates the slices in a ring with batched ``isend`` and
   ``irecv``, overlapping each partial convolution with the next transfer.
-* ``"all_to_all"`` uses the same ring with masked all-to-all hops (NCCL only).
+* ``"all_to_all"`` uses the same ring with a masked all-to-all per step (NCCL only).
 """
 
 from typing import Any, Callable, Optional
@@ -67,7 +67,7 @@ def _over_channels_streaming(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Circulate the channel slices in a ring and convolve each one.
 
-    ``hop_fn`` is the communication function of one hop.
+    ``hop_fn`` sends the slice of one ring step.
 
     Returns
     -------
@@ -119,7 +119,7 @@ def _over_channels_streaming(
         block = (rank - step) % group_size
 
         # Relay before the (possibly collective) halo + partial conv, so they
-        # overlap the next hop.
+        # overlap the next send.
         if step < group_size - 1:
             recv_buf, handle = hop_fn(
                 slab, recv_buf, direction=1, group=channel_group, async_op=True
