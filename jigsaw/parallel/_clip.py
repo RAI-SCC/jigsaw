@@ -33,6 +33,15 @@ def clip_grad_norm_(
     Collective over ``group``: call it on every rank, also one without
     gradients.
 
+    An unmarked parameter is taken to be a shard held by this rank alone.
+    Every parameter replicated within ``group`` must be marked with
+    :func:`mark_replicated`, as jigsaw's modules do for their own; an unmarked
+    replica (e.g. a plain ``torch.nn`` layer left in the model) is counted once
+    per rank holding it, which inflates the norm and over-clips.
+
+    Each gradient's norm is computed in at least float32, so half-precision
+    gradients do not overflow or round before they are summed.
+
     Parameters
     ----------
     parameters : torch.Tensor | Iterable[torch.Tensor]
@@ -73,8 +82,9 @@ def clip_grad_norm_(
     dtype = grads[0].dtype if grads else torch.get_default_dtype()
 
     with torch.no_grad():
-        # Each gradient's norm is in its own dtype; the sum over gradients is in
-        # float64 so many large shards neither overflow nor lose the small ones.
+        # Each gradient's norm is in at least float32 (see _norms); the sum over
+        # gradients is in float64 so many large shards neither overflow nor lose
+        # the small ones.
         total = torch.zeros((), dtype=torch.float64, device=device)
         if math.isinf(norm_type):
             if grads:
@@ -123,6 +133,10 @@ def _norms(
 ) -> torch.Tensor:
     """Return the per-gradient norms as one float64 vector on ``device``.
 
+    Each norm is accumulated and returned in its gradient's dtype promoted to
+    at least float32: a float16 norm overflows above 65504 and a bfloat16 one
+    keeps three significant digits, even when every element is representable.
+
     Parameters
     ----------
     grads : list[torch.Tensor]
@@ -135,10 +149,20 @@ def _norms(
     Returns
     -------
     torch.Tensor
-        Norm of each gradient, in order.
+        Norm of each gradient, grouped by dtype (callers only sum or max it).
     """
-    norms = torch._foreach_norm(grads, norm_type)
-    return torch.stack([n.to(device) for n in norms]).double()
+    # foreach's ``dtype`` applies to the whole list and stack needs one device,
+    # so one call per (device, dtype); each bucket is then stacked and cast as a
+    # whole, a few kernels instead of one cast per gradient.
+    buckets: dict[tuple[torch.device, torch.dtype], list[torch.Tensor]] = {}
+    for grad in grads:
+        buckets.setdefault((grad.device, grad.dtype), []).append(grad)
+    norms: list[torch.Tensor] = []
+    for (_, dt), gs in buckets.items():
+        acc = torch.promote_types(dt, torch.float32)
+        stacked = torch.stack(torch._foreach_norm(gs, norm_type, dtype=acc))
+        norms.append(stacked.to(device, torch.float64))
+    return torch.cat(norms)
 
 
 def _copies(groups: Groups, group: dist.ProcessGroup) -> int:

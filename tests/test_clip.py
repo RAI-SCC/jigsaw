@@ -5,6 +5,10 @@ ranks (rank ``r`` holds ``(r + 1) * [1, 2, 3]``), one replicated over ``a``
 (its copy depends only on the rank's ``b`` coordinate), and one replicated over
 both axes. The expected norm treats them as one vector with every shard and
 every replica counted once.
+
+The model tests convert a serial model with every kind of jigsaw parameter on
+several meshes and compare against ``torch.nn.utils.clip_grad_norm_`` on the
+serial model, which fails if a module leaves a replicated parameter unmarked.
 """
 
 import math
@@ -14,7 +18,9 @@ import torch
 import torch.distributed as dist
 
 from jigsaw import parallel
+from jigsaw.convert import convert_to_jigsaw
 from jigsaw.mesh import make_process_mesh
+from jigsaw.modules.attention import Attention
 from tests.parity import assert_close
 
 NORM_TYPES = [1.0, 2.0, 3.0, math.inf]
@@ -26,13 +32,16 @@ F64_ATOL, F64_RTOL = 1e-7, 1e-7
 _MESH_CACHE: dict = {}
 
 
-def _mesh_2x2(device: torch.device) -> dict:
+def _mesh(device: torch.device, **axes: int) -> dict:
     # Every mesh opens new communicators and nothing frees them; build it once.
-    if device.type not in _MESH_CACHE:
-        _MESH_CACHE[device.type] = make_process_mesh(
-            {"a": 2, "b": 2}, device_type=device.type
-        )
-    return _MESH_CACHE[device.type]
+    key = (device.type, tuple(axes.items()))
+    if key not in _MESH_CACHE:
+        _MESH_CACHE[key] = make_process_mesh(axes, device_type=device.type)
+    return _MESH_CACHE[key]
+
+
+def _mesh_2x2(device: torch.device) -> dict:
+    return _mesh(device, a=2, b=2)
 
 
 def _with_grad(grad: torch.Tensor) -> torch.nn.Parameter:
@@ -144,3 +153,66 @@ def test_error_if_nonfinite(device: torch.device) -> None:
     p = _with_grad(torch.tensor([1.0, math.inf], device=device))
     with pytest.raises(RuntimeError, match="non-finite"):
         parallel.clip_grad_norm_([p], 1.0, dist.group.WORLD, error_if_nonfinite=True)
+
+
+def test_half_precision_norm_does_not_overflow(device: torch.device) -> None:
+    """A float16 gradient whose norm exceeds float16's range still clips."""
+    # norm 1000 * sqrt(10000) = 1e5 > 65504; each element and the clipped
+    # result (1000 / 1e5 = 0.01) are representable
+    p = _with_grad(torch.full((10000,), 1000.0, dtype=torch.float16, device=device))
+    parallel.mark_replicated(p, dist.group.WORLD)
+
+    parallel.clip_grad_norm_([p], 1.0, dist.group.WORLD)
+
+    expected = torch.full_like(p.grad, 0.01)
+    assert_close("grad", p.grad, expected, 0.0, 1e-3, device, dist.group.WORLD)
+
+
+class _Model(torch.nn.Module):
+    """Every kind of jigsaw parameter: sharded, col-sharded, and replicated."""
+
+    def __init__(self, device: torch.device) -> None:
+        super().__init__()
+        self.linear = torch.nn.Linear(16, 32, device=device)
+        self.norm = torch.nn.LayerNorm(32, device=device)
+        self.attn = Attention(32, 32, 32, 4, device, qk_norm=True)
+        self.conv = torch.nn.Conv2d(8, 8, 3, device=device)
+        self.group_norm = torch.nn.GroupNorm(4, 8, device=device)
+
+
+@pytest.mark.dist(4)
+@pytest.mark.parametrize("shape", [(2, 2), (4, 1), (1, 4)], ids=str)
+@pytest.mark.parametrize("norm_type", [1.0, 2.0, math.inf])
+def test_converted_model_matches_serial(
+    shape: tuple[int, int], norm_type: float, device: torch.device
+) -> None:
+    """The norm of a converted model is the serial model's on every mesh.
+
+    Each gradient is set to its parameter's value, so the converter's weight
+    shards are also the gradient shards and no forward pass is needed.
+    """
+    mesh = _mesh(device, row=shape[0], col=shape[1])
+    torch.manual_seed(0)
+    serial = _Model(device)
+    with torch.no_grad():
+        for p in serial.parameters():
+            p.normal_()
+            p.grad = p.detach().clone()
+    max_norm = 1.0
+    expected = torch.nn.utils.clip_grad_norm_(serial.parameters(), max_norm, norm_type)
+
+    # ring attention splits the sequence over rows, so needs more than one
+    kwargs = {} if shape[0] > 1 else {"ring": False}
+    model = convert_to_jigsaw(serial, mesh, device, **kwargs)
+    params = list(model.parameters())
+    for p in params:
+        p.grad = p.detach().clone()
+    total = parallel.clip_grad_norm_(params, max_norm, mesh["model"], norm_type)
+
+    group = mesh["model"]
+    assert_close("norm", total, expected, 0.0, 1e-5, device, group)
+    coef = min(max_norm / (expected.item() + 1e-6), 1.0)
+    for i, p in enumerate(params):
+        assert_close(
+            f"grad {i}", p.grad, p.detach() * coef, F32_ATOL, 1e-5, device, group
+        )
