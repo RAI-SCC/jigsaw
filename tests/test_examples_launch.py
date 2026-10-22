@@ -63,9 +63,22 @@ def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 def test_scripts_found() -> None:
     assert len(SCRIPTS) >= 6, SCRIPTS
+    assert _LAUNCH_DEFAULT in SCRIPTS
 
 
-@pytest.mark.parametrize("name", SCRIPTS)
+# Each launch is a fresh 4-process job (~8-18 s). ``test_examples.py`` already runs
+# every tutorial in-process, so the default run launches only the cheapest one to
+# cover the torchrun path; the rest are ``slow`` (``--runslow``, before a release).
+_LAUNCH_DEFAULT = "dataloader"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param(n, marks=[] if n == _LAUNCH_DEFAULT else [pytest.mark.slow])
+        for n in SCRIPTS
+    ],
+)
 def test_runs_under_torchrun(name: str) -> None:
     """``torchrun --nproc-per-node 4 examples/<name>.py`` finishes without an error.
 
