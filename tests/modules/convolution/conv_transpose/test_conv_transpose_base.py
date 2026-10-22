@@ -55,14 +55,21 @@ class TestConvTransposeChannelSizes:
         assert conv.local_out_channels == 3 == conv.weight.shape[1]
 
 
+def _reference_count(n_spatial: int, *args: int, bias: bool) -> int:
+    ref = _REF_CLS[n_spatial](*args, bias=bias)
+    return sum(p.numel() for p in ref.parameters())
+
+
 class TestConvTransposeParameterCount:
+    """``get_parameter_count`` is the global count, the same on every rank."""
+
     @pytest.mark.dist(4)
     @pytest.mark.parametrize("n_spatial", [1, 2, 3])
-    def test_count_divides_by_spatial_replicas(
+    def test_count_is_global_with_spatial_replicas(
         self, device: torch.device, process_mesh_dict_2x2: dict, n_spatial: int
     ) -> None:
-        """2 (spatial) x 2 (channel) mesh: params are replicated over the two
-        spatial ranks, so the effective count halves them."""
+        """2 (spatial) x 2 (channel) mesh: replicated over the two spatial ranks,
+        split over the two channel ranks; neither changes the count."""
         mesh = process_mesh_dict_2x2
         conv = _CONV_CLS[n_spatial](
             8,
@@ -76,17 +83,17 @@ class TestConvTransposeParameterCount:
         ).to(device)
 
         assert conv.spatial_world_size == mesh["row"].size() == 2
-        replicas = conv.spatial_world_size
-        expected = conv.weight.numel() // replicas + conv.bias.numel() // replicas
-        assert conv.get_parameter_count() == expected
+        assert conv.get_parameter_count() == _reference_count(
+            n_spatial, 8, 12, 2, bias=True
+        )
 
     @pytest.mark.dist(4)
-    def test_pure_channel_split_has_no_spatial_replicas(
+    def test_count_is_global_with_pure_channel_split(
         self, device: torch.device, process_mesh_dict_1x4: dict
     ) -> None:
-        """No split spatial axis -> ``spatial_world_size == 1`` and nothing is divided."""
+        """No split spatial axis: ``spatial_world_size == 1``, the count is global."""
         mesh = process_mesh_dict_1x4
-        conv = convolution.DistributedConvTranspose2d(
+        conv = _CONV_CLS[2](
             8,
             16,
             2,
@@ -98,7 +105,7 @@ class TestConvTransposeParameterCount:
         ).to(device)
 
         assert conv.spatial_world_size == 1
-        assert conv.get_parameter_count() == conv.weight.numel() + conv.bias.numel()
+        assert conv.get_parameter_count() == _reference_count(2, 8, 16, 2, bias=True)
 
     @pytest.mark.dist(4)
     def test_bias_false_is_excluded_from_the_count(
@@ -106,7 +113,7 @@ class TestConvTransposeParameterCount:
     ) -> None:
         """With ``bias=False`` only the weight contributes."""
         mesh = process_mesh_dict_2x2
-        conv = convolution.DistributedConvTranspose2d(
+        conv = _CONV_CLS[2](
             8,
             12,
             2,
@@ -118,9 +125,7 @@ class TestConvTransposeParameterCount:
         ).to(device)
 
         assert conv.bias is None
-        assert (
-            conv.get_parameter_count() == conv.weight.numel() // conv.spatial_world_size
-        )
+        assert conv.get_parameter_count() == _reference_count(2, 8, 12, 2, bias=False)
 
 
 class TestConvTransposeConvertToTorch:
