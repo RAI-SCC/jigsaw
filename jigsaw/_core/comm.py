@@ -198,7 +198,6 @@ def comm_2way_alltoall(
 def comm_2way_p2p(
     data: torch.Tensor,
     buffer: torch.Tensor,
-    empty: torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = True,
 ) -> tuple[torch.Tensor, list[Optional[dist.Work]]]:
@@ -210,8 +209,6 @@ def comm_2way_p2p(
         Data to send.
     buffer : torch.Tensor
         Buffer to receive.
-    empty : torch.Tensor
-        Placeholder tensor for ranks that exchange no data.
     group : dist.ProcessGroup
         Process group within which to send data.
     async_op : bool
