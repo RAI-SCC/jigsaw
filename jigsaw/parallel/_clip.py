@@ -74,16 +74,23 @@ def clip_grad_norm_(
     """
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
-    params: list[torch.Tensor] = []
     grads: list[torch.Tensor] = []
+    copies: list[int] = []
     # From every parameter, with a gradient or not: ranks holding the same
     # parameters then return the same dtype.
     dtype = torch.float32
+    # Check every parameter's replica groups, also those without a gradient, so
+    # a rank without gradients raises with the others instead of waiting in the
+    # all-reduce. One check per distinct replica-group tuple, not per parameter.
+    cache: dict[Groups, int] = {}
     for p in parameters:
         dtype = torch.promote_types(dtype, p.dtype)
+        g = replica_groups(p)
+        if g not in cache:
+            cache[g] = _copies(g, group)
         if p.grad is not None:
-            params.append(p)
             grads.append(p.grad)
+            copies.append(cache[g])
     norm_type = float(norm_type)
     device = grads[0].device if grads else get_device_of_process_group(group)
 
@@ -100,19 +107,12 @@ def clip_grad_norm_(
         else:
             # Bucket by number of copies (few distinct values) and divide by a
             # Python int: a per-parameter copies tensor would need a blocking
-            # host-to-device copy every step. One check per distinct
-            # replica-group tuple, not per parameter.
-            cache: dict[Groups, int] = {}
+            # host-to-device copy every step.
             by_copies: dict[int, list[torch.Tensor]] = {}
-            for p, grad in zip(params, grads):
-                g = replica_groups(p)
-                if g not in cache:
-                    cache[g] = _copies(g, group)
-                by_copies.setdefault(cache[g], []).append(grad)
-            for copies, gs in by_copies.items():
-                total = (
-                    total + _norms(gs, norm_type, device).pow(norm_type).sum() / copies
-                )
+            for grad, n in zip(grads, copies):
+                by_copies.setdefault(n, []).append(grad)
+            for n, gs in by_copies.items():
+                total = total + _norms(gs, norm_type, device).pow(norm_type).sum() / n
             dist.all_reduce(total, op=dist.ReduceOp.SUM, group=group)
             total = total.pow(1.0 / norm_type)
 

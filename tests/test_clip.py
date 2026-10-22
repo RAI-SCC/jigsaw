@@ -141,12 +141,18 @@ def test_rank_without_gradients(device: torch.device) -> None:
 
 
 @pytest.mark.dist(4)
-def test_replica_group_outside_clipping_group_raises(device: torch.device) -> None:
+@pytest.mark.parametrize("norm_type", [2.0, math.inf])
+def test_replica_group_outside_clipping_group_raises(
+    norm_type: float, device: torch.device
+) -> None:
+    """Every rank raises, also rank 0 without a gradient, so none hangs."""
     mesh = _mesh_2x2(device)
-    p = _with_grad(torch.ones(2, device=device))
+    p = torch.nn.Parameter(torch.ones(2, device=device))
+    if dist.get_rank() != 0:
+        p.grad = torch.ones_like(p)
     parallel.mark_replicated(p, mesh["a"])
     with pytest.raises(ValueError, match="model-parallel group"):
-        parallel.clip_grad_norm_([p], 1.0, mesh["b"])
+        parallel.clip_grad_norm_([p], 1.0, mesh["b"], norm_type)
 
 
 def test_error_if_nonfinite(device: torch.device) -> None:
