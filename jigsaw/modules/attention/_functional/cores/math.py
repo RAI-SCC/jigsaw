@@ -11,7 +11,7 @@ the pre-dropout scores, which the ring's online-softmax merge
 
 The dropout mask is rebuilt from ``seed``, which the ring recomputes
 identically in forward and backward (see
-:func:`.._functional._combine_dropout_seed`). A dedicated ``torch.Generator``
+:func:`..ring._combine_dropout_seed`). A dedicated ``torch.Generator``
 keeps the draw from disturbing the default RNG stream.
 """
 

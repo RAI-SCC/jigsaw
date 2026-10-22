@@ -125,7 +125,7 @@ def ring_forward(
     Parameters
     ----------
     q, k, v : torch.Tensor
-        Local query, key, and value tensors, shaped ``(b, h, n_local, d)``.
+        Local query, key, and value tensors in ``ring_config.core_layout``.
     x : torch.Tensor
         Local input sequence chunk.
     w_qkv : torch.Tensor
@@ -149,8 +149,8 @@ def ring_forward(
         Output, log-sum-exp, chunks saved for backward, dropout base seed
         (``None`` without dropout) and per-chunk RNG states.
     """
-    # Build the provider first: it starts the first KV send, overlapping it with
-    # the setup below.
+    # Build the provider first: the plain ring starts its first send here,
+    # overlapping it with the setup below.
     provider = build_forward_chunk_provider(
         ring_config, q, k, v, x, w_qkv, group, local_rank, ring_group_size
     )

@@ -133,9 +133,9 @@ class HybridTopology:
         Parameters
         ----------
         node : int
-            Node index.
+            Intra-group index along the outer ring.
         local : int
-            Index within the node.
+            Index within the intra group.
 
         Returns
         -------
@@ -341,7 +341,7 @@ class _RingAttention(torch.autograd.Function):
 
         Returns
         -------
-        tuple[torch.Tensor, torch.Tensor, tuple]
+        tuple[torch.Tensor, torch.Tensor, tuple, int | None, tuple]
             Output, log-sum-exp, saved chunks, dropout base seed (``None``
             without dropout) and per-chunk RNG states.
         """
@@ -393,22 +393,16 @@ class _RingAttention(torch.autograd.Function):
             q,
             out,
             x,
-            # `(b, h, s)`, exactly as `ring_forward` produced it and as every
-            # inner core's backward expects it. (Was saved `.mT`'d to `(b, s, h)`
-            # here; `ring_backward` passes it straight through, so the cores got
-            # the transposed tensor -- a silent stride error for SDPA/TE, a hard
-            # shape error for the math core, whenever heads != seq_local.)
+            # `(b, h, s)` as the inner cores' backward expects; don't transpose.
             lse,
             w_qkv,
-            *chunks_to_save,  # *[t for pair in chunks_to_save for t in pair]
+            *chunks_to_save,
             *rng_states,
         )
         c.scale = scale
         c.local_rank = local_rank
         c.group = group
-        c.ring_group_size = dist.get_world_size(
-            group
-        )  # This is recomputed in forward and in setup context
+        c.ring_group_size = dist.get_world_size(group)
         c.config = config
         c.dropout_p = dropout_p
         c.base_seed = base_seed

@@ -84,7 +84,9 @@ def _te_call(
     """Call a TE fused-attn entry point by keyword, across TE versions.
 
     ``required`` must exist in the installed signature (under one of its
-    :data:`_TE_ALIASES`); ``optional`` is filtered to what it accepts.
+    :data:`_TE_ALIASES`); ``optional`` is filtered to what it accepts. Raises
+    :class:`RuntimeError` if the signature lacks a required argument or needs
+    one not supplied.
     """
     accepted = _te_params(fn)
 
@@ -157,6 +159,7 @@ def _fused_attn_backend(
 
     Cached on its arguments: the ring calls it once per chunk per ring step, and
     the answer only depends on the (shape, dtype, dropout) problem description.
+    Raises :class:`RuntimeError` if no sub-backend serves it.
     """
     backend = tex.get_fused_attn_backend(
         is_training,
@@ -194,7 +197,7 @@ def forward(
     v: torch.Tensor,
     scale: float,
     dropout_p: float,
-    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
+    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see ..math)
     *,
     layout: Layout = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
@@ -283,7 +286,7 @@ def backward(
     scale: float,
     *_: object,
     dropout_p: float = 0.0,
-    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
+    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see ..math)
     rng_state: Optional[torch.Tensor] = None,
     layout: Layout = "bhsd",
     **__: object,

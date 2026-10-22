@@ -1,4 +1,4 @@
-"""The ``flash_attn`` (FA2) attention core (``te.flash``), for sm80-89.
+"""The ``flash_attn`` (FA2) attention core (``te.flash``), for sm80-89 and ROCm.
 
 Calls the ``flash_attn`` package's private ``_flash_attn_forward``/``_backward``
 ops directly, since TE's wrapper and the public ``flash_attn_func`` do not

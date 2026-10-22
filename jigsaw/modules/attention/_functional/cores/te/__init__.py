@@ -40,9 +40,9 @@ def _available(core: ModuleType) -> bool:
 def select_core(device: torch.device) -> ModuleType:
     """Pick the TE core for ``device``: :mod:`.cudnn` on sm90+, :mod:`.flash` below.
 
-    Falls back to the other core if the preferred one is not importable.
-    ``JIGSAW_TE_CORE`` overrides the rule. Non-CUDA devices get :mod:`.cudnn`,
-    whose kernel call then fails.
+    Falls back to the other core if the preferred one is not importable. ROCm
+    always gets :mod:`.flash`. ``JIGSAW_TE_CORE`` overrides the rule. Non-CUDA
+    devices get :mod:`.cudnn`, whose kernel call then fails.
 
     Parameters
     ----------
@@ -53,6 +53,13 @@ def select_core(device: torch.device) -> ModuleType:
     -------
     ModuleType
         The :mod:`.cudnn` or :mod:`.flash` core module.
+
+    Raises
+    ------
+    ValueError
+        If ``JIGSAW_TE_CORE`` names no core.
+    RuntimeError
+        If no suitable core is importable.
     """
     override = os.environ.get(_ENV_OVERRIDE)
     if override is not None:

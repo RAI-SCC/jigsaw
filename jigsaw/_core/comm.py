@@ -363,7 +363,7 @@ def comm_1d_p2p(
     async_op : bool
         Whether to communicate asynchronously.
     tag : int
-        Tag for P2P operations.
+        Unused; P2P ops between a rank pair are matched in post order.
     group_size : int, optional
         Size of the process group.
     *args : Any

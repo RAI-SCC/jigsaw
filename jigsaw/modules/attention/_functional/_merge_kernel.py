@@ -3,7 +3,7 @@
 Computes, in place on ``o1``::
 
     w = sigmoid(l2 - l1)
-    o1 < -o1 + w * (o2 - o1)
+    o1 = o1 + w * (o2 - o1)
     l_new = logaddexp(l1, l2)
 
 in one launch instead of four eager kernels.
@@ -93,7 +93,7 @@ def fused_online_softmax_merge_(
     l2: torch.Tensor,
     layout: str,
 ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
-    """Triton fast path for :func:`..forward._online_softmax_merge_`.
+    """Triton fast path for :func:`.forward._online_softmax_merge_`.
 
     Mutates ``o1`` in place; ``l_new`` is a fresh fp32 ``(b, h, n)`` tensor.
 

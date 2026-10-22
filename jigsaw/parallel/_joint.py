@@ -237,7 +237,8 @@ def joint_comm_hook(
     Returns
     -------
     torch.futures.Future[torch.Tensor]
-        Resolves to the reduced bucket buffer; ``None`` for ``(grad, param)``.
+        Resolves to the reduced bucket buffer. ``None`` itself for
+        ``(grad, param)``.
     """
     if isinstance(bucket, tuple):  # DDP's Python reducer
         _reduce_param_grad(*bucket)
@@ -343,6 +344,12 @@ def active_joint_state() -> Optional[JointCommHookState]:
     -------
     JointCommHookState or None
         State of the running DDP's joint hook, or ``None``.
+
+    Raises
+    ------
+    RuntimeError
+        If the running DDP has a state but :func:`joint_comm_hook` is not
+        registered with it.
     """
     ddp = getattr(DistributedDataParallel, "_active_ddp_module", None)
     state = getattr(ddp, _JOINT, None) if ddp is not None else None
@@ -369,6 +376,11 @@ def joint_state_of(
     JointCommHookState or None
         With a running DDP, ``active`` if its hook reduces ``param``; otherwise
         (the Python reducer) the state ``param`` is marked with. ``None`` if neither.
+
+    Raises
+    ------
+    RuntimeError
+        If the marked state's :func:`joint_comm_hook` is not registered.
     """
     if active is not None:
         return active if active.reduces(param) else None

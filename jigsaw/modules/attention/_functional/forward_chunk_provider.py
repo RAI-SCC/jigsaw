@@ -49,7 +49,7 @@ class _ForwardChunkProvider(ABC):
         ring_config : RingAttentionConfig
             Ring-attention configuration.
         q, k, v : torch.Tensor
-            Local query, key, and value tensors, shaped ``(b, h, n_local, d)``.
+            Local query, key, and value tensors in ``ring_config.core_layout``.
         x : torch.Tensor
             Local input sequence chunk.
         w_qkv : torch.Tensor
@@ -188,7 +188,7 @@ class _RingForwardChunkProvider(_ForwardChunkProvider):
 
 
 class _RingForwardChunkProviderOverlap(_RingForwardChunkProvider):
-    """:class:`_RingForwardChunkProvider` with the K/V send on a dedicated stream.
+    """:class:`_RingForwardChunkProvider` with the ring send on a dedicated stream.
 
     Two receive buffers alternate. ``get(step)`` issues the send of chunk
     ``step + 1`` on ``ring_config.comm_stream`` before the step's attention core
@@ -339,7 +339,7 @@ class _HybridForwardChunkProvider(_ForwardChunkProvider):
 # hybrid: intra-group ring + outer-ring P2P
 # --------------------------------------------------------------------------- #
 class _HybridP2PForwardChunkProvider(_HybridForwardChunkProvider):
-    """Hybrid ring with P2P rotation within the intra group."""
+    """Hybrid ring rotating chunks within the intra group (P2P on the outer ring)."""
 
     def __init__(self, *args: object) -> None:
         """Resolve the intra-group peers."""
@@ -423,7 +423,7 @@ class _HybridP2PForwardChunkProviderOverlap(_HybridP2PForwardChunkProvider):
     """:class:`_HybridP2PForwardChunkProvider` with both sends on the comm stream.
 
     Prefetches both transfers on the comm stream: the send within the intra
-    group and the send to the next intra group around the ring. Each is started
+    group and the send to the previous intra group around the ring. Each is started
     in ``get(step)``, before the step's attention core runs, and waited on only
     when its chunk is needed: the intra-group one in ``advance``, the other at
     the start of the next round. Used only when
@@ -440,7 +440,7 @@ class _HybridP2PForwardChunkProviderOverlap(_HybridP2PForwardChunkProvider):
         self._inter_buf = PrefetchBuffer(cs, like)
 
     def _launch_inter_forward(self, node_step: int) -> None:
-        """Prefetch this round's send to the next intra group on the comm stream."""
+        """Prefetch this round's outer-ring send on the comm stream."""
         src = self.x_j if self.send_x else self.kv_j
 
         def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
@@ -575,7 +575,7 @@ class _HybridBroadcastForwardChunkProviderOverlap(_HybridBroadcastForwardChunkPr
     """:class:`_HybridBroadcastForwardChunkProvider` with its transfers on the comm stream.
 
     Prefetches both transfers on the comm stream: the broadcasts within the
-    intra group and the send to the next intra group around the ring, which
+    intra group and the send to the previous intra group around the ring, which
     works as in :class:`_HybridP2PForwardChunkProviderOverlap`. A round's
     broadcasts depend only on the chunk each rank contributes to that round,
     so each ``get`` waits on the broadcast started by the previous call and
@@ -593,7 +593,7 @@ class _HybridBroadcastForwardChunkProviderOverlap(_HybridBroadcastForwardChunkPr
         self._inter_buf = PrefetchBuffer(cs, like)
 
     def _launch_inter_forward(self, node_step: int) -> None:
-        """Prefetch this round's send to the next intra group on the comm stream."""
+        """Prefetch this round's outer-ring send on the comm stream."""
         src = self.x_j if self.send_x else self.kv_j
 
         def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
@@ -631,7 +631,7 @@ class _HybridBroadcastForwardChunkProviderOverlap(_HybridBroadcastForwardChunkPr
         self._bc_buf.kick(produce, extra_keep_alive=(own,) if is_src else ())
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Broadcast the chunk for inner step ``inner`` and return its ``(kj, vj)``."""
+        """Wait on the broadcast of chunk ``step``, start the next one, and return its key and value."""
         node_step, inner = divmod(step, self.gpn)
         if inner == 0:
             if node_step > 0:

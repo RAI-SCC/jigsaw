@@ -1,4 +1,4 @@
-"""Helpers for running the ring's point-to-point comm on a dedicated CUDA stream.
+"""Helpers for running the ring's communication on a dedicated CUDA stream.
 
 Gated by :attr:`~jigsaw.modules.RingAttentionConfig.overlap_comm`. Each
 transfer runs on a side stream, its buffers are ``record_stream``'d so the

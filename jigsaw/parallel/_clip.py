@@ -132,7 +132,8 @@ def _norms(
     Returns
     -------
     torch.Tensor
-        Norm of each gradient, grouped by dtype (callers only sum or max it).
+        Norm of each gradient, grouped by device and dtype (callers only sum
+        or max it).
     """
     # foreach and stack need one (device, dtype) per call.
     buckets: dict[tuple[torch.device, torch.dtype], list[torch.Tensor]] = {}
@@ -147,7 +148,7 @@ def _norms(
 
 
 def _copies(groups: Groups, group: dist.ProcessGroup) -> int:
-    """Return the number of ranks of ``group`` holding one copy of a parameter.
+    """Return how many ranks hold a copy of a parameter replicated over ``groups``.
 
     Parameters
     ----------
@@ -160,6 +161,11 @@ def _copies(groups: Groups, group: dist.ProcessGroup) -> int:
     -------
     int
         Product of the sizes of ``groups``; 1 for an unmarked parameter.
+
+    Raises
+    ------
+    ValueError
+        If a replica group has ranks outside ``group``.
     """
     if groups:
         ranks = set(dist.get_process_group_ranks(group))

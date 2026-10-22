@@ -60,7 +60,7 @@ class SendOp(Enum):
 
 
 class AttnBackend(str, Enum):
-    """Attention core implementation, with or without ``ring``.
+    """Attention core implementation, used both with and without ``ring``.
 
     - ``TE``: cuDNN fused kernels on Hopper and newer, the ``flash_attn``
       package on Ampere. CUDA only.
@@ -162,7 +162,8 @@ def _te_core_or_raise() -> None:
 
     if not TE_CORE_AVAILABLE:
         raise RuntimeError(
-            "attn_backend=te needs transformer_engine (run inside the container)."
+            "attn_backend=te needs transformer_engine or flash_attn "
+            "(run inside the container)."
         )
 
 

@@ -357,7 +357,7 @@ class DistributedAttention(torch.nn.Module):
                     spatial_group.size() % a == 0 and spatial_group.size() // a >= 2
                 ), (
                     f"hierarchical ulysses needs spatial ({spatial_group.size()}) "
-                    f"to split into an intra a2a group of {a} and an "
+                    f"to split into all-to-all intra groups of {a} and an "
                     f"outer ring of >= 2; use ulysses_gpus_per_node=0 for "
                     f"the flat scheme"
                 )
@@ -498,11 +498,12 @@ class DistributedAttention(torch.nn.Module):
 
     @staticmethod
     def _resolve_backend(attn_backend: AttnBackend) -> AttnBackend:
-        """Fall back from ``TE`` to ``SDPA`` if transformer_engine is unavailable."""
+        """Fall back from ``TE`` to ``SDPA`` if neither TE core is importable."""
         if attn_backend is AttnBackend.TE and not JIGSAW_TE_AVAILABLE:
             warnings.warn(
-                "attn_backend='te' but transformer_engine is unavailable; "
-                "falling back to 'sdpa'. Install it or update your container.",
+                "attn_backend='te' but neither transformer_engine nor flash_attn "
+                "is importable; "
+                "falling back to 'sdpa'. Install one or update your container.",
                 stacklevel=3,  # past __init__, to the module's construction
             )
             return AttnBackend.SDPA
@@ -512,8 +513,8 @@ class DistributedAttention(torch.nn.Module):
         """Resolve ``self.attn_backend`` to its non-ring attention core."""
         match self.attn_backend:
             case AttnBackend.TE:
-                # cuDNN on Hopper+, flash_attn on Ampere -- resolved once here so
-                # nothing branches per call. See `functional.cores.te`.
+                # Resolved once here so nothing branches per call; see
+                # `_functional.cores.te.select_core`.
                 self.te_core = te_core.select_core(self.device)
                 return self._transformer_attn_core
             case AttnBackend.MATH:
@@ -739,7 +740,7 @@ class DistributedAttention(torch.nn.Module):
     def _inter_node_ring_core(
         self, dropout_p: float
     ) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
-        """Build the outer P2P ring of hierarchical Ulysses on ``bshd`` ``q``/``k``/``v``.
+        """Build the outer ring of hierarchical Ulysses on ``bshd`` ``q``/``k``/``v``.
 
         Rings the projected K/V across the all-to-all groups, after the
         all-to-all within each group.

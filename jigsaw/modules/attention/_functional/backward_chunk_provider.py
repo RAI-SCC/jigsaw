@@ -189,8 +189,9 @@ class _GlobalChunkProvider(_BackwardChunkProvider):
 
         Returns
         -------
-        tuple[torch.Tensor, torch.cuda.Event | None]
-            Prefetched chunk and its completion event.
+        tuple[torch.Tensor | None, torch.cuda.Event | None]
+            Prefetched chunk and its completion event, or ``(None, None)``
+            without an offloader or past the last chunk.
         """
         if self.config.offloader is None or idx >= len(self.chunks):
             return None, None
@@ -238,7 +239,7 @@ class _GlobalChunkProvider(_BackwardChunkProvider):
 
 
 class _LocalChunkProvider(_BackwardChunkProvider):
-    """Provider re-circulating chunks around the ring with one P2P send and receive per step.
+    """Provider re-circulating chunks around the ring with one send and receive per step.
 
     Only the local chunk was saved in the forward pass.
     """
@@ -405,7 +406,7 @@ class _LocalChunkProvider(_BackwardChunkProvider):
         return self._kv_from(self._recv_buf)
 
     def maybe_forward(self, step: int, ring_group_size: int) -> None:
-        """Send the current chunk to the next peer, except at the first and last step.
+        """Send the current chunk to the previous rank, except at the first and last step.
 
         Parameters
         ----------
@@ -525,7 +526,7 @@ class _LocalChunkProviderBroadcast(_LocalChunkProvider):
         """
         kv = self._kv0()
 
-        # Kick off the first ring send of whichever buffer is configured.
+        # Rank ``step`` broadcasts its own buffer; the others receive into scratch.
         send_buf = self.x if self.config.send_in_forward == SendForward.X else kv
         self._recv_buf = (
             send_buf if self.local_rank == step else torch.empty_like(send_buf)
@@ -639,7 +640,7 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
 
 
 class _LocalChunkProviderHybridP2P(_LocalChunkProviderHybrid):
-    """Hybrid provider with P2P rotation within the intra group."""
+    """Hybrid provider rotating chunks within the intra group (P2P on the outer ring)."""
 
     def __init__(self, *args: object) -> None:
         """Resolve the intra-group peers."""
@@ -737,9 +738,9 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProviderHybrid):
 
         if inner + 1 < self._gpn:
             # Skip the round's last step: the next `get` reads only the outer
-            # ring. `comm_1d_p2p` matches P2P ops by post order (the tag is
-            # unused), so an unwaited send here would shift every later
-            # intra-group receive by one step.
+            # ring. Sends are matched in post order (tags are unused), so an
+            # unwaited send here would shift every later intra-group receive by
+            # one step.
             self._launch_intra_backward(self._recv_buf, step)
 
 

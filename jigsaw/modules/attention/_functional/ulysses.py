@@ -3,7 +3,7 @@
 An all-to-all trades each rank's sequence shard for a head shard, so attention
 runs head-parallel over the full sequence; a second all-to-all reverses it.
 Needs the local head count divisible by the group size.
-:func:`hierarchical_ulysses_attention` nests it in a P2P ring. All
+:func:`hierarchical_ulysses_attention` nests it in a K/V ring. All
 tensors are ``bshd``.
 """
 
@@ -147,7 +147,7 @@ def hierarchical_ulysses_attention(
     ring_core: AttnCore,
     qkv_stack: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Run Ulysses over ``intra_group``, nested in a P2P ring across those groups.
+    """Run Ulysses over ``intra_group``, nested in a K/V ring across those groups.
 
     ``intra_group`` can be node-local, keeping the all-to-all on the fast fabric.
 

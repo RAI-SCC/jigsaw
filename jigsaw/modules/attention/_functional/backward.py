@@ -24,7 +24,8 @@ from .ring import (
 
 # Hybrid send-ops whose backward chunk provider also rotates chunks within the
 # intra group, so a step's dK/dV belongs to local index ``local_idx + step``
-# rather than ``step`` (HYBRID_BROADCAST leaves the chunk in place there).
+# rather than ``step``. HYBRID_BROADCAST broadcasts within the intra group
+# instead of rotating.
 _INTRA_ROTATING_HYBRIDS = frozenset({SendOp.HYBRID_P2P, SendOp.HYBRID_ALLTOALL})
 
 
@@ -348,19 +349,10 @@ def get_dkv_buffer(
     tuple[torch.Tensor, torch.Tensor]
         Zero-initialized dk and dv buffers. They span the full sequence if the
         strategy gathers the gradients and the local sequence otherwise.
-
-        These intentionally do *not* share storage (e.g. as two views into one
-        stacked buffer): `ring_backward` runs outside `torch.no_grad()` (its
-        autograd-function caller saves q/k/v and replays the cores to get
-        dq/dk/dv, so these buffers accumulate genuinely grad-tracked partials),
-        and accumulation mutates them in place (`+=`/`.add_()`). The first
-        in-place write onto a `requires_grad=False` buffer from a
-        grad-requiring operand quietly promotes that *tensor* to require grad;
-        if dk_buf and dv_buf were sibling views of one base, promoting one
-        view poisons the other's write (now "a view of a leaf Variable that
-        requires grad"). Keeping them independent leaves each one free to make
-        that same-tensor transition on its own.
     """
+    # Two tensors, not views of one: an in-place add of a grad-tracked partial
+    # makes the written tensor require grad, which would break in-place writes
+    # to a sibling view ("a view of a leaf Variable that requires grad").
     shape = list(q.shape)
     if _use_global_dkv_buffer(ring_config):
         # Global buffer spans every rank's chunk along the sequence axis.
@@ -424,8 +416,6 @@ def accumulate_dkv(
             ring_config, dk_buf, dv_buf, dk_j, dv_j, step, group
         )
 
-    # See `global_chunk_idx_backward` for GLOBAL vs LOCAL scope; ring_group_size
-    # is unused for GLOBAL scope's `step`-is-the-index shortcut but harmless.
     global_chunk_idx = global_chunk_idx_backward(
         ring_config, local_rank, step, ring_group_size, group
     )
@@ -740,10 +730,8 @@ def postprocess_dkv(
         Local dk and dv.
     """
     if _use_global_dkv_buffer(ring_config):
-        # Stack into one buffer so the all-reduce is a single collective
-        # instead of two. This is built fresh here, *after* the accumulation
-        # loop is done mutating dk_buf/dv_buf in place -- see `get_dkv_buffer`
-        # for why they can't share storage any earlier than this.
+        # One stacked buffer for a single all-reduce; safe now that the
+        # in-place accumulation is done (see `get_dkv_buffer`).
         dkv_buf = torch.stack((dk_buf, dv_buf), dim=0)
         dist.all_reduce(dkv_buf, op=dist.ReduceOp.SUM, group=group)
         dk_buf, dv_buf = dkv_buf[0], dkv_buf[1]
