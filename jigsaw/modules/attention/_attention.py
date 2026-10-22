@@ -188,8 +188,9 @@ class DistributedAttention(torch.nn.Module):
     """Distributed multi-head attention, parallelized over ``spatial_group``.
 
     Three mutually exclusive schemes, selected by ``ring`` / ``ulysses``: plain
-    (each rank attends to its own local sequence shard), ring (K/V circulate
-    around ``spatial_group``), or Ulysses (a single all-to-all trades sequence
+    (each rank attends to its own local sequence shard), ring (the input ``x``
+    circulates around ``spatial_group``, or K/V with a channel group > 1 or
+    ``qk_norm``), or Ulysses (a single all-to-all trades sequence
     shard for head shard; flat, or hierarchical when ``ulysses_gpus_per_node``
     is also set: Ulysses within groups of ranks, nested in a ring across them).
 
