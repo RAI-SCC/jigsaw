@@ -149,7 +149,7 @@ def hierarchical_ulysses_attention(
 ) -> torch.Tensor:
     """Run Ulysses over ``intra_group``, nested in a K/V ring across those groups.
 
-    ``intra_group`` can be node-local, keeping the all-to-all on the fast fabric.
+    Placing each ``intra_group`` on one node keeps the all-to-all on the fast fabric.
 
     The all-to-all runs over ``intra_group`` (``A`` ranks); ``ring_core`` then
     rings K/V over the ``spatial // A`` remaining peers, receiving

@@ -1,6 +1,7 @@
 import gc
 import importlib.util
 import os
+import socket
 import sys
 import warnings
 from collections.abc import Generator
@@ -115,6 +116,13 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
             )
 
 
+def _free_port() -> int:
+    """Return a TCP port that is free on this host right now."""
+    with socket.socket() as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
 @pytest.fixture(autouse=True, scope="session")
 def dist_env(
     request: pytest.FixtureRequest, device: torch.device
@@ -146,7 +154,14 @@ def dist_env(
     # must win here or a multi-node run can never actually rendezvous:
     # "localhost" resolves to a different loopback on every node.
     os.environ.setdefault("MASTER_ADDR", "localhost")
-    os.environ.setdefault("MASTER_PORT", "12355")
+    # Likewise an exported MASTER_PORT wins. Otherwise rank 0 (which hosts the
+    # store) picks a free port, so two test runs on one machine don't collide on
+    # a fixed one. Rank 0 decides and every rank takes its answer: bcast is a
+    # collective, so all ranks must reach it whatever their environment says.
+    port = None
+    if mpi_rank == 0:
+        port = os.environ.get("MASTER_PORT") or str(_free_port())
+    os.environ["MASTER_PORT"] = comm.bcast(port, root=0)
 
     dist.init_process_group(
         backend="nccl" if device.type == "cuda" else "gloo",

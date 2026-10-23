@@ -22,73 +22,71 @@ class TestHybridTopology:
     ) -> None:
         """The sub-group peer accessors must name the same ranks as the ring ones.
 
-        Every hybrid hop addresses its peer with ``intranode_peer`` /
-        ``internode_peer`` inside the matching sub-group; the chunk-index
+        Every hybrid hop addresses its peer with ``intra_group_peer`` /
+        ``inter_group_peer`` inside the matching sub-group; the chunk-index
         bookkeeping still reasons in ring positions via ``intra_peer`` /
         ``inter_peer``. Resolving both through the sub-group's global rank list
         pins the two spellings to the same physical rank.
         """
-        intra = dist.get_process_group_ranks(topo.intranode_group)
-        inter = dist.get_process_group_ranks(topo.internode_group)
+        intra = dist.get_process_group_ranks(topo.intra_group)
+        inter = dist.get_process_group_ranks(topo.inter_group)
         for off in range(-2, 3):
             assert (
-                intra[topo.intranode_peer(off)]
+                intra[topo.intra_group_peer(off)]
                 == ring_global_ranks[topo.intra_peer(off)]
             )
             assert (
-                inter[topo.internode_peer(off)]
+                inter[topo.inter_group_peer(off)]
                 == ring_global_ranks[topo.inter_peer(off)]
             )
 
     @pytest.mark.dist(8)
-    @pytest.mark.parametrize("gpus_per_node", [1, 2, 4, 8])
-    def test_get_hybrid_topology(
-        self, device: torch.device, gpus_per_node: int
-    ) -> None:
-        """Split the world ring into intra-/inter-node sub-groups.
+    @pytest.mark.parametrize("intra_size", [1, 2, 4, 8])
+    def test_get_hybrid_topology(self, device: torch.device, intra_size: int) -> None:
+        """Split the world ring into intra and inter sub-groups.
 
         Parameters
         ----------
         device : torch.device
             Device used to initialize the process group.
-        gpus_per_node : int
-            Number of consecutive ring ranks that share a node.
+        intra_size : int
+            Number of consecutive ring ranks in each intra group.
         """
         group = dist.group.WORLD
         assert group is not None
         world_size = dist.get_world_size(group)
         rank = dist.get_rank(group)
 
-        ring._HYBRID_TOPOLOGY_CACHE.pop((group, gpus_per_node), None)
-        topo = ring.get_hybrid_topology(group, gpus_per_node)
+        ring._HYBRID_TOPOLOGY_CACHE.pop((group, intra_size), None)
+        topo = ring.get_hybrid_topology(group, intra_size)
 
-        assert topo.gpus_per_node == gpus_per_node
-        assert topo.n_nodes == world_size // gpus_per_node
-        assert (topo.node_idx, topo.local_idx) == divmod(rank, gpus_per_node)
+        assert topo.intra_size == intra_size
+        assert topo.n_groups == world_size // intra_size
+        assert (topo.group_idx, topo.local_idx) == divmod(rank, intra_size)
         assert topo.ring_rank == rank
 
-        assert dist.get_world_size(topo.intranode_group) == gpus_per_node
-        assert dist.get_world_size(topo.internode_group) == topo.n_nodes
+        assert dist.get_world_size(topo.intra_group) == intra_size
+        assert dist.get_world_size(topo.inter_group) == topo.n_groups
 
-        # Intra-node peers are the contiguous chunk; inter-node peers share the
-        # local offset across nodes.
-        node_start = topo.node_idx * gpus_per_node
-        assert sorted(dist.get_process_group_ranks(topo.intranode_group)) == list(
-            range(node_start, node_start + gpus_per_node)
+        # Intra-group peers are the contiguous chunk; inter-group peers share the
+        # local offset across intra groups.
+        group_start = topo.group_idx * intra_size
+        assert sorted(dist.get_process_group_ranks(topo.intra_group)) == list(
+            range(group_start, group_start + intra_size)
         )
-        assert sorted(dist.get_process_group_ranks(topo.internode_group)) == list(
-            range(topo.local_idx, world_size, gpus_per_node)
+        assert sorted(dist.get_process_group_ranks(topo.inter_group)) == list(
+            range(topo.local_idx, world_size, intra_size)
         )
 
         self._assert_subgroup_peers_agree(topo, dist.get_process_group_ranks(group))
 
         # Cached: same object on the second call.
-        assert ring.get_hybrid_topology(group, gpus_per_node) is topo
+        assert ring.get_hybrid_topology(group, intra_size) is topo
 
     @pytest.mark.dist(8)
-    @pytest.mark.parametrize("gpus_per_node", [1, 2, 4])
+    @pytest.mark.parametrize("intra_size", [1, 2, 4])
     def test_get_hybrid_topology_on_mesh_subgroup(
-        self, device: torch.device, gpus_per_node: int
+        self, device: torch.device, intra_size: int
     ) -> None:
         """Run the ring over one mesh dimension, not the global world.
 
@@ -100,8 +98,8 @@ class TestHybridTopology:
         ----------
         device : torch.device
             Device used to initialize the process mesh.
-        gpus_per_node : int
-            Number of consecutive ring ranks that share a node.
+        intra_size : int
+            Number of consecutive ring ranks in each intra group.
         """
         mesh = dist.device_mesh.init_device_mesh(
             device_type=device.type,
@@ -113,37 +111,36 @@ class TestHybridTopology:
         world_size = len(ring_global_ranks)
         assert world_size == 4  # ring size == size(row), not the global world size
 
-        ring._HYBRID_TOPOLOGY_CACHE.pop((group, gpus_per_node), None)
-        topo = ring.get_hybrid_topology(group, gpus_per_node)
+        ring._HYBRID_TOPOLOGY_CACHE.pop((group, intra_size), None)
+        topo = ring.get_hybrid_topology(group, intra_size)
 
         ring_pos = dist.get_rank(group)
-        node_idx, local_idx = divmod(ring_pos, gpus_per_node)
-        n_nodes = world_size // gpus_per_node
+        group_idx, local_idx = divmod(ring_pos, intra_size)
+        n_groups = world_size // intra_size
 
-        assert (topo.n_nodes, topo.node_idx, topo.local_idx) == (
-            n_nodes,
-            node_idx,
+        assert (topo.n_groups, topo.group_idx, topo.local_idx) == (
+            n_groups,
+            group_idx,
             local_idx,
         )
-        assert dist.get_world_size(topo.intranode_group) == gpus_per_node
-        assert dist.get_world_size(topo.internode_group) == n_nodes
+        assert dist.get_world_size(topo.intra_group) == intra_size
+        assert dist.get_world_size(topo.inter_group) == n_groups
 
-        node_start = node_idx * gpus_per_node
-        assert sorted(dist.get_process_group_ranks(topo.intranode_group)) == sorted(
-            ring_global_ranks[node_start : node_start + gpus_per_node]
+        group_start = group_idx * intra_size
+        assert sorted(dist.get_process_group_ranks(topo.intra_group)) == sorted(
+            ring_global_ranks[group_start : group_start + intra_size]
         )
-        assert sorted(dist.get_process_group_ranks(topo.internode_group)) == sorted(
-            ring_global_ranks[node * gpus_per_node + local_idx]
-            for node in range(n_nodes)
+        assert sorted(dist.get_process_group_ranks(topo.inter_group)) == sorted(
+            ring_global_ranks[g * intra_size + local_idx] for g in range(n_groups)
         )
         self._assert_subgroup_peers_agree(topo, ring_global_ranks)
 
         # Every member of a sub-group lands on the same underlying group.
-        assert ring.get_hybrid_topology(group, gpus_per_node) is topo
+        assert ring.get_hybrid_topology(group, intra_size) is topo
 
     @pytest.mark.dist(4)
     def test_get_hybrid_topology_rejects_bad_args(self, device: torch.device) -> None:
-        """Reject a non-positive or non-dividing ``gpus_per_node``.
+        """Reject a non-positive or non-dividing ``intra_size``.
 
         Parameters
         ----------
@@ -153,9 +150,9 @@ class TestHybridTopology:
         group = dist.group.WORLD
         assert group is not None
 
-        with pytest.raises(ValueError, match="gpus_per_node must be positive"):
+        with pytest.raises(ValueError, match="intra_size must be positive"):
             ring.get_hybrid_topology(group, 0)
-        with pytest.raises(ValueError, match="divisible by gpus_per_node"):
+        with pytest.raises(ValueError, match="divisible by intra_size"):
             ring.get_hybrid_topology(group, 3)
 
 
@@ -586,15 +583,15 @@ def _check_ring_hybrid(
     save_scope: config.SaveScope,
     send_backward: config.SendBackward,
     offloader: config.Offload,
-    gpus_per_node: int,
+    intra_size: int,
 ) -> None:
     """Forward+backward parity check for one hybrid ring topology.
 
-    Shared body for :func:`test_ring_hybrid` (8 ranks, ``2 nodes x 4 GPUs``)
-    and :func:`test_ring_hybrid_single_node` (4 ranks, ``2 nodes x 2 GPUs``).
-    The hybrid node split is driven purely by ``gpus_per_node``, so both keep
-    ``n_nodes == 2`` and every ``HYBRID_*`` send op exercises a real intra-node
-    and a real inter-node sub-group.
+    Shared body for :func:`test_ring_hybrid` (8 ranks, 2 intra groups of 4)
+    and :func:`test_ring_hybrid_two_groups_of_two` (4 ranks, 2 intra groups of
+    2). The split is driven purely by ``intra_size``, so both keep
+    ``n_groups == 2`` and every ``HYBRID_*`` send op exercises a real intra
+    and a real inter sub-group.
     """
     if (
         send_in_forward == config.SendForward.KV
@@ -612,7 +609,7 @@ def _check_ring_hybrid(
         save_scope=save_scope,
         send_backward=send_backward,
         offload=offloader,
-        gpus_per_node=gpus_per_node,
+        intra_size=intra_size,
     )
 
     ring_forward = forward.ring_forward
@@ -779,7 +776,7 @@ def test_ring_hybrid(
     """Verify forward-backward parity for the hybrid ring on 8 ranks.
 
     The ring spans the full ``2 x 4`` model mesh and splits into
-    ``2 nodes x 4 GPUs`` (``gpus_per_node=4``).
+    2 intra groups of 4 (``intra_size=4``).
     """
     _check_ring_hybrid(
         device,
@@ -790,13 +787,13 @@ def test_ring_hybrid(
         save_scope,
         send_backward,
         offloader,
-        gpus_per_node=4,
+        intra_size=4,
     )
 
 
 @pytest.mark.dist(6)
 @_apply_ring_hybrid_parametrize
-def test_ring_hybrid_three_nodes(
+def test_ring_hybrid_three_groups(
     device: torch.device,
     process_mesh_dict_2x3: dict,
     send_in_forward: config.SendForward,
@@ -808,9 +805,9 @@ def test_ring_hybrid_three_nodes(
 ) -> None:
     """Verify forward-backward parity for the hybrid ring on 6 ranks.
 
-    Runs the ring as ``3 nodes x 2 GPUs`` (``gpus_per_node=2``). Two nodes are not
-    enough to exercise the inter-node relay (a chunk hopped on to a further node),
-    which only happens while ``node_step < n_nodes - 1``.
+    Runs the ring as 3 intra groups of 2 (``intra_size=2``). Two groups are not
+    enough to exercise the inter-group relay (a chunk hopped on to a further group),
+    which only happens while ``group_step < n_groups - 1``.
     """
     _check_ring_hybrid(
         device,
@@ -821,13 +818,13 @@ def test_ring_hybrid_three_nodes(
         save_scope,
         send_backward,
         offloader,
-        gpus_per_node=2,
+        intra_size=2,
     )
 
 
 @pytest.mark.dist(8)
 @_apply_ring_hybrid_parametrize
-def test_ring_hybrid_four_nodes(
+def test_ring_hybrid_four_groups(
     device: torch.device,
     process_mesh_dict_2x4: dict,
     send_in_forward: config.SendForward,
@@ -837,12 +834,12 @@ def test_ring_hybrid_four_nodes(
     send_backward: config.SendBackward,
     offloader: config.Offload,
 ) -> None:
-    """Verify forward-backward parity for the hybrid ring with >2 inter-node hops.
+    """Verify forward-backward parity for the hybrid ring with >2 inter-group hops.
 
-    Same 8-rank mesh as :func:`test_ring_hybrid`, but ``gpus_per_node=2`` ->
-    ``4 nodes x 2 GPUs``, so the inter-node ring takes 3 hops instead of 1. At
-    ``n_nodes == 2`` (every other hybrid test) ``internode_peer(1)`` and
-    ``internode_peer(-1)`` name the same rank, so a provider that keeps
+    Same 8-rank mesh as :func:`test_ring_hybrid`, but ``intra_size=2`` ->
+    4 intra groups of 2, so the outer ring takes 3 hops instead of 1. At
+    ``n_groups == 2`` (every other hybrid test) ``inter_group_peer(1)`` and
+    ``inter_group_peer(-1)`` name the same rank, so a provider that keeps
     re-sending its *original* chunk every round instead of relaying the chunk
     it just received is indistinguishable from a correct one; this is the
     smallest topology where the two diverge.
@@ -856,13 +853,13 @@ def test_ring_hybrid_four_nodes(
         save_scope,
         send_backward,
         offloader,
-        gpus_per_node=2,
+        intra_size=2,
     )
 
 
 @pytest.mark.dist(4)
 @_apply_ring_hybrid_parametrize
-def test_ring_hybrid_single_node(
+def test_ring_hybrid_two_groups_of_two(
     device: torch.device,
     process_mesh_dict_4x1: dict,
     send_in_forward: config.SendForward,
@@ -874,9 +871,9 @@ def test_ring_hybrid_single_node(
 ) -> None:
     """Verify forward-backward parity for the hybrid ring on 4 ranks.
 
-    Runs the 4-rank ring as ``2 nodes x 2 GPUs`` (``gpus_per_node=2``) so every
-    hybrid send op still exercises both its intra-node (2 members) and
-    inter-node (2 members) paths while fitting on a single 2-GPU node.
+    Runs the 4-rank ring as 2 intra groups of 2 (``intra_size=2``) so every
+    hybrid send op still exercises both its intra-group (2 members) and
+    inter-group (2 members) paths.
     """
     _check_ring_hybrid(
         device,
@@ -887,7 +884,7 @@ def test_ring_hybrid_single_node(
         save_scope,
         send_backward,
         offloader,
-        gpus_per_node=2,
+        intra_size=2,
     )
 
 
@@ -926,7 +923,7 @@ def test_ring_autograd_function_matches_full_attention(
     x = torch.randn(b, n_local, d, device=device)
     w_qkv = torch.randn(3 * h * d, d, device=device)
     ring_config = config.RingAttentionConfig(
-        device=device, gpus_per_node=world, send_in_forward=config.SendForward.KV
+        device=device, intra_size=world, send_in_forward=config.SendForward.KV
     )
     out = ring._RingAttention.apply(
         q, k, v, x, w_qkv, d**-0.5, 0.0, group, rank, ring_config
@@ -1060,9 +1057,9 @@ def test_ring_overlap_comm_parity_hybrid(
     """``overlap_comm`` parity for the hybrid send ops.
 
     The hybrid twin of :func:`test_ring_overlap_comm_parity`: runs the hybrid
-    ring (``2 nodes x 2 GPUs``, ``gpus_per_node=2``) forward+backward with the
+    ring (2 intra groups of 2, ``intra_size=2``) forward+backward with the
     comm-stream overlap off and then on and asserts identical results. Covers
-    the intra-/inter-node K/V hop overlap
+    the intra-/inter-group K/V hop overlap
     (``_HybridP2PForwardChunkProviderOverlap`` /
     ``_HybridBroadcastForwardChunkProviderOverlap`` and their backward twins)
     for all three hybrid send ops, and (for ``HYBRID_P2P`` /
@@ -1098,7 +1095,7 @@ def test_ring_overlap_comm_parity_hybrid(
             save_for_backward=config.SaveBackward.KV,
             save_scope=save_scope,
             send_backward=config.SendBackward.SEND_DKV,
-            gpus_per_node=2,
+            intra_size=2,
             overlap_comm=overlap,
         )
         assert cfg.overlap_active == overlap  # CUDA build => stream created

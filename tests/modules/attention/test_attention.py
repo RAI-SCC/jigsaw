@@ -138,7 +138,7 @@ class TestDistributedAttention:
         assert defaulted.config.save_for_backward is attn_config.SaveBackward.KV
 
         # P2P ring (the 2-rank spatial group is not divisible by the default
-        # HYBRID `gpus_per_node`); KV in/out so `_compute_kv` is never reached.
+        # HYBRID `intra_size`); KV in/out so `_compute_kv` is never reached.
         cfg = attn_config.RingAttentionConfig(
             device=device,
             send_op=attn_config.SendOp.P2P,

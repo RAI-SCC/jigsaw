@@ -100,20 +100,23 @@ def _compute_kv(
 class HybridTopology:
     """Layout of a 1-D ring split into equal intra groups.
 
-    Each ``intranode_group`` has ``gpus_per_node`` ranks (typically, but not
-    necessarily, one node). Ring position ``p`` owns sequence chunk ``p`` and
-    sits at ``(p // gpus_per_node, p % gpus_per_node)``. :meth:`intranode_peer`
-    / :meth:`internode_peer` return ranks within the sub-groups;
-    :meth:`intra_peer`, :meth:`inter_peer` and :meth:`rank_at` return ring
-    positions over the full group.
+    Each ``intra_group`` has ``intra_size`` consecutive ring ranks, and
+    ``inter_group`` joins the ranks at the same local index across the
+    ``n_groups`` intra groups. Ring position ``p`` owns sequence chunk ``p`` and
+    sits at ``(p // intra_size, p % intra_size)``.
+
+    The peer methods take ``offset``, the number of steps along a ring (negative
+    goes backwards). :meth:`intra_peer`, :meth:`inter_peer` and :meth:`rank_at`
+    return ring positions over the full group; :meth:`intra_group_peer` and
+    :meth:`inter_group_peer` return ranks within the sub-groups.
     """
 
-    n_nodes: int
-    gpus_per_node: int
-    node_idx: int
+    n_groups: int
+    intra_size: int
+    group_idx: int
     local_idx: int
-    intranode_group: dist.ProcessGroup
-    internode_group: dist.ProcessGroup
+    intra_group: dist.ProcessGroup
+    inter_group: dist.ProcessGroup
     _grid: tuple[tuple[int, ...], ...]
 
     @property
@@ -123,16 +126,16 @@ class HybridTopology:
         Returns
         -------
         int
-            Ring position, ``node_idx * gpus_per_node + local_idx``.
+            Ring position, ``group_idx * intra_size + local_idx``.
         """
-        return self.node_idx * self.gpus_per_node + self.local_idx
+        return self.group_idx * self.intra_size + self.local_idx
 
-    def rank_at(self, node: int, local: int) -> int:
-        """Return the ring position at ``(node, local)``, both taken modulo their extent.
+    def rank_at(self, group_idx: int, local: int) -> int:
+        """Return the ring position at ``(group_idx, local)``, both taken modulo their extent.
 
         Parameters
         ----------
-        node : int
+        group_idx : int
             Intra-group index along the outer ring.
         local : int
             Index within the intra group.
@@ -142,81 +145,37 @@ class HybridTopology:
         int
             Ring position over the full group.
         """
-        return self._grid[node % self.n_nodes][local % self.gpus_per_node]
+        return self._grid[group_idx % self.n_groups][local % self.intra_size]
 
-    def intra_peer(self, offset: int) -> int:
-        """Return the ring position ``offset`` steps along the intra-group ring.
+    def intra_peer(self, offset: int) -> int:  # numpydoc ignore=PR01,RT01
+        """Return the ring position ``offset`` steps along the intra-group ring."""
+        return self.rank_at(self.group_idx, self.local_idx + offset)
 
-        Parameters
-        ----------
-        offset : int
-            Steps along the ring; negative goes backwards.
+    def inter_peer(self, offset: int) -> int:  # numpydoc ignore=PR01,RT01
+        """Return the ring position ``offset`` steps along the outer ring."""
+        return self.rank_at(self.group_idx + offset, self.local_idx)
 
-        Returns
-        -------
-        int
-            Ring position over the full group.
-        """
-        return self.rank_at(self.node_idx, self.local_idx + offset)
+    def intra_group_peer(self, offset: int) -> int:  # numpydoc ignore=PR01,RT01
+        """Return the rank in ``intra_group`` ``offset`` steps along its ring."""
+        return (self.local_idx + offset) % self.intra_size
 
-    def inter_peer(self, offset: int) -> int:
-        """Return the ring position ``offset`` steps along the outer ring.
-
-        Parameters
-        ----------
-        offset : int
-            Steps along the ring; negative goes backwards.
-
-        Returns
-        -------
-        int
-            Ring position over the full group.
-        """
-        return self.rank_at(self.node_idx + offset, self.local_idx)
-
-    def intranode_peer(self, offset: int) -> int:
-        """Rank *within* ``intranode_group``, ``offset`` steps along its ring.
-
-        Parameters
-        ----------
-        offset : int
-            Steps along the ring; negative goes backwards.
-
-        Returns
-        -------
-        int
-            Group rank in ``intranode_group``.
-        """
-        return (self.local_idx + offset) % self.gpus_per_node
-
-    def internode_peer(self, offset: int) -> int:
-        """Rank *within* ``internode_group``, ``offset`` steps along its ring.
-
-        Parameters
-        ----------
-        offset : int
-            Steps along the ring; negative goes backwards.
-
-        Returns
-        -------
-        int
-            Group rank in ``internode_group``.
-        """
-        return (self.node_idx + offset) % self.n_nodes
+    def inter_group_peer(self, offset: int) -> int:  # numpydoc ignore=PR01,RT01
+        """Return the rank in ``inter_group`` ``offset`` steps along its ring."""
+        return (self.group_idx + offset) % self.n_groups
 
 
 _HYBRID_TOPOLOGY_CACHE: dict[tuple[dist.ProcessGroup, int], HybridTopology] = {}
 
 
-def get_hybrid_topology(group: dist.ProcessGroup, gpus_per_node: int) -> HybridTopology:
+def get_hybrid_topology(group: dist.ProcessGroup, intra_size: int) -> HybridTopology:
     """Build and cache the :class:`HybridTopology` of a ring.
 
     Parameters
     ----------
     group : dist.ProcessGroup
         Process group of the ring.
-    gpus_per_node : int
-        Size of each intra group (typically one node).
+    intra_size : int
+        Size of each intra group.
 
     Returns
     -------
@@ -226,57 +185,57 @@ def get_hybrid_topology(group: dist.ProcessGroup, gpus_per_node: int) -> HybridT
     Raises
     ------
     ValueError
-        If ``gpus_per_node`` is not positive or does not divide the ring size.
+        If ``intra_size`` is not positive or does not divide the ring size.
     """
-    key = (group, gpus_per_node)
+    key = (group, intra_size)
     cached = _HYBRID_TOPOLOGY_CACHE.get(key)
     if cached is not None:
         return cached
 
-    if gpus_per_node <= 0:
-        raise ValueError("gpus_per_node must be positive")
+    if intra_size <= 0:
+        raise ValueError("intra_size must be positive")
     # Global ranks of this ring's members, ordered by ring position.
     ring_global_ranks = dist.get_process_group_ranks(group)
     ring_group_size = len(ring_global_ranks)
-    if ring_group_size % gpus_per_node:
-        raise ValueError("ring size must be divisible by gpus_per_node")
-    n_nodes = ring_group_size // gpus_per_node
+    if ring_group_size % intra_size:
+        raise ValueError("ring size must be divisible by intra_size")
+    n_groups = ring_group_size // intra_size
 
     # `grid` is in ring-position space (0 .. ring_group_size - 1); the P2P paths
     # address peers by ring position over `group`. Ring position p lives at
-    # (p // gpus_per_node, p % gpus_per_node).
+    # (p // intra_size, p % intra_size).
     grid = tuple(
-        tuple(node * gpus_per_node + local for local in range(gpus_per_node))
-        for node in range(n_nodes)
+        tuple(g * intra_size + local for local in range(intra_size))
+        for g in range(n_groups)
     )
 
-    node_idx, local_idx = divmod(dist.get_rank(group), gpus_per_node)
+    group_idx, local_idx = divmod(dist.get_rank(group), intra_size)
 
     # Build only the two sub-groups this rank belongs to; local synchronization
     # keeps rings at other mesh coordinates independent.
     #
-    # Member order matters: rank i of `intranode_group` is local index i, and
-    # rank i of `internode_group` is group i. That is why `intranode_peer` /
-    # `internode_peer` can compute a peer's sub-group rank as
-    # `(local_idx + offset) % gpus_per_node` / `(node_idx + offset) % n_nodes`.
-    intranode_group = dist.new_group(
-        ranks=[ring_global_ranks[p] for p in grid[node_idx]],
+    # Member order matters: rank i of `intra_group` is local index i, and
+    # rank i of `inter_group` is group i. That is why `intra_group_peer` /
+    # `inter_group_peer` can compute a peer's sub-group rank as
+    # `(local_idx + offset) % intra_size` / `(group_idx + offset) % n_groups`.
+    intra_group = dist.new_group(
+        ranks=[ring_global_ranks[p] for p in grid[group_idx]],
         use_local_synchronization=True,
     )
-    internode_group = dist.new_group(
-        ranks=[ring_global_ranks[grid[node][local_idx]] for node in range(n_nodes)],
+    inter_group = dist.new_group(
+        ranks=[ring_global_ranks[grid[g][local_idx]] for g in range(n_groups)],
         use_local_synchronization=True,
     )
     # This rank is a member of both sub-groups, so neither is NON_GROUP_MEMBER.
-    assert isinstance(intranode_group, dist.ProcessGroup)
-    assert isinstance(internode_group, dist.ProcessGroup)
+    assert isinstance(intra_group, dist.ProcessGroup)
+    assert isinstance(inter_group, dist.ProcessGroup)
     topo = HybridTopology(
-        n_nodes=n_nodes,
-        gpus_per_node=gpus_per_node,
-        node_idx=node_idx,
+        n_groups=n_groups,
+        intra_size=intra_size,
+        group_idx=group_idx,
         local_idx=local_idx,
-        intranode_group=intranode_group,
-        internode_group=internode_group,
+        intra_group=intra_group,
+        inter_group=inter_group,
         _grid=grid,
     )
     _HYBRID_TOPOLOGY_CACHE[key] = topo

@@ -258,7 +258,7 @@ def process_mesh_dict_2x4(device: torch.Tensor) -> dict:
     return make_process_mesh(
         device_type=device.type,
         mesh_shape=[2, 4],
-        mesh_dim_names=["internode", "intranode"],
+        mesh_dim_names=["inter", "intra"],
     )
 
 

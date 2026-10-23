@@ -608,15 +608,18 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
         )
         self._handle: Optional[dist.Work] = None
         self.local_rank = int(local_rank)
-        self.topo = get_hybrid_topology(group, ring_config.gpus_per_node)
-        self._gpn = self.topo.gpus_per_node
+        self.topo = get_hybrid_topology(group, ring_config.intra_size)
+        self._intra_size = self.topo.intra_size
         # Outer ring: send to the next intra group and receive from the
-        # previous (opposite the forward), addressed inside `internode_group`
+        # previous (opposite the forward), addressed inside `inter_group`
         # so the intra group's communicator can progress alongside.
-        self._inter_group = self.topo.internode_group
-        self._inter_ranks = [self.topo.internode_peer(1), self.topo.internode_peer(-1)]
-        self._internode_handle: Optional[dist.Work] = None
-        self._internode_recv_buf: Optional[torch.Tensor] = None
+        self._inter_group = self.topo.inter_group
+        self._inter_ranks = [
+            self.topo.inter_group_peer(1),
+            self.topo.inter_group_peer(-1),
+        ]
+        self._inter_handle: Optional[dist.Work] = None
+        self._inter_recv_buf: Optional[torch.Tensor] = None
 
     def _launch_inter_backward(self, data: torch.Tensor, step: int) -> None:
         """Start the send of ``data`` to the next intra group around the ring.
@@ -629,13 +632,13 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
             Current ring step.
         """
         buf = torch.empty_like(data)
-        self._internode_recv_buf, self._internode_handle = self.config.p2p_fn(
+        self._inter_recv_buf, self._inter_handle = self.config.p2p_fn(
             data=data,
             buffer=buf,
             send_recv_ranks=self._inter_ranks,
             group=self._inter_group,
             async_op=True,
-            tag=step % self._gpn,
+            tag=step % self._intra_size,
         )
 
 
@@ -646,9 +649,12 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProviderHybrid):
         """Resolve the intra-group peers."""
         super().__init__(*args)  # type: ignore[arg-type]
         # Intra-group ring: send to the previous local rank, receive from the
-        # next, addressed inside `intranode_group`.
-        self._intra_group = self.topo.intranode_group
-        self._intra_ranks = [self.topo.intranode_peer(-1), self.topo.intranode_peer(1)]
+        # next, addressed inside `intra_group`.
+        self._intra_group = self.topo.intra_group
+        self._intra_ranks = [
+            self.topo.intra_group_peer(-1),
+            self.topo.intra_group_peer(1),
+        ]
 
     def _launch_intra_backward(self, src: torch.Tensor, step: int) -> None:
         """Start the intra-group send of ``src``."""
@@ -700,11 +706,11 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProviderHybrid):
 
         # The first step of a round receives from the previous intra group;
         # every other step from the intra-group ring.
-        if step % self._gpn == 0:
-            assert self._internode_handle is not None
-            assert self._internode_recv_buf is not None
-            self._internode_handle.wait()
-            recv_buf = self._internode_recv_buf
+        if step % self._intra_size == 0:
+            assert self._inter_handle is not None
+            assert self._inter_recv_buf is not None
+            self._inter_handle.wait()
+            recv_buf = self._inter_recv_buf
         else:
             assert self._handle is not None
             self._handle.wait()
@@ -725,18 +731,18 @@ class _LocalChunkProviderHybridP2P(_LocalChunkProviderHybrid):
         if step == 0 or step >= ring_group_size - 1:
             return
 
-        node_step, inner = divmod(step, self._gpn)
+        group_step, inner = divmod(step, self._intra_size)
         if inner == 0:
-            assert self._internode_recv_buf is not None
+            assert self._inter_recv_buf is not None
             # Capture before `_launch_inter_backward` rebinds
-            # `_internode_recv_buf` to the next round's empty buffer.
-            arrived = self._internode_recv_buf
-            if node_step < self.topo.n_nodes - 1:
+            # `_inter_recv_buf` to the next round's empty buffer.
+            arrived = self._inter_recv_buf
+            if group_step < self.topo.n_groups - 1:
                 self._launch_inter_backward(arrived, step)
             # The intra-group ring restarts from the chunk that just arrived.
             self._recv_buf = arrived
 
-        if inner + 1 < self._gpn:
+        if inner + 1 < self._intra_size:
             # Skip the round's last step: the next `get` reads only the outer
             # ring. Sends are matched in post order (tags are unused), so an
             # unwaited send here would shift every later intra-group receive by
@@ -776,7 +782,7 @@ class _LocalChunkProviderHybridP2POverlap(_LocalChunkProviderHybridP2P):
                     send_recv_ranks=self._inter_ranks,
                     group=self._inter_group,
                     async_op=True,
-                    tag=step % self._gpn,
+                    tag=step % self._intra_size,
                 ),
             )
 
@@ -824,7 +830,7 @@ class _LocalChunkProviderHybridP2POverlap(_LocalChunkProviderHybridP2P):
 
         # The first step of a round receives from the previous intra group;
         # every other step from the intra-group ring.
-        if step % self._gpn == 0:
+        if step % self._intra_size == 0:
             self._raw_recv_buf = self._inter_buf.wait()
         else:
             self._raw_recv_buf = self._intra_buf.wait()
@@ -835,16 +841,16 @@ class _LocalChunkProviderHybridP2POverlap(_LocalChunkProviderHybridP2P):
         if step == 0 or step >= ring_group_size - 1:
             return
 
-        node_step, inner = divmod(step, self._gpn)
+        group_step, inner = divmod(step, self._intra_size)
         if inner == 0:
             assert self._raw_recv_buf is not None
             # Captured as in the base class.
             arrived = self._raw_recv_buf
-            if node_step < self.topo.n_nodes - 1:
+            if group_step < self.topo.n_groups - 1:
                 self._launch_inter_backward(arrived, step)
             self._relay_src = arrived
 
-        if inner + 1 < self._gpn:
+        if inner + 1 < self._intra_size:
             # Skip the round's last step, as in the base class.
             src = self._relay_src if inner == 0 else self._raw_recv_buf
             assert src is not None
@@ -857,8 +863,8 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProviderHybrid):
     def __init__(self, *args: object) -> None:
         """Resolve the intra-group broadcast group."""
         super().__init__(*args)  # type: ignore[arg-type]
-        self.intranode_group = self.topo.intranode_group
-        self._node_chunk: Optional[torch.Tensor] = None
+        self.intra_group = self.topo.intra_group
+        self._group_chunk: Optional[torch.Tensor] = None
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return the key, value and fused key-value tensors of a ring step.
@@ -875,31 +881,31 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProviderHybrid):
         """
         if step == 0:
             kv = self._kv0()
-            self._node_chunk = (
+            self._group_chunk = (
                 self.x if self.config.send_in_forward == SendForward.X else kv
             )
-            # Round 0's outer-ring send, waited on at step == gpus_per_node.
-            # `_node_chunk` is only read during the round, so it is sent in place.
-            self._launch_inter_backward(self._node_chunk, step)
+            # Round 0's outer-ring send, waited on at step == intra_size.
+            # `_group_chunk` is only read during the round, so it is sent in place.
+            self._launch_inter_backward(self._group_chunk, step)
 
-        elif step % self._gpn == 0:
+        elif step % self._intra_size == 0:
             # New round: take the chunk received from the previous intra group.
-            assert self._internode_handle is not None
-            self._internode_handle.wait()
-            self._node_chunk = self._internode_recv_buf
+            assert self._inter_handle is not None
+            self._inter_handle.wait()
+            self._group_chunk = self._inter_recv_buf
 
-        assert self._node_chunk is not None
+        assert self._group_chunk is not None
 
         # The source broadcasts its own buffer in place; the others receive
-        # into scratch. `step % gpn` is the source's rank inside
-        # `intranode_group`: hence `group_src`, not the global `src`, which a
+        # into scratch. `step % intra_size` is the source's rank inside
+        # `intra_group`: hence `group_src`, not the global `src`, which a
         # ring that is a mesh sub-group would get wrong.
-        phase = step % self._gpn
+        phase = step % self._intra_size
         is_src = self.topo.local_idx == phase
         self._recv_buf = (
-            self._node_chunk if is_src else torch.empty_like(self._node_chunk)
+            self._group_chunk if is_src else torch.empty_like(self._group_chunk)
         )
-        dist.broadcast(self._recv_buf, group_src=phase, group=self.intranode_group)
+        dist.broadcast(self._recv_buf, group_src=phase, group=self.intra_group)
 
         return self._kv_from(self._recv_buf)
 
@@ -915,15 +921,15 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProviderHybrid):
         """
         if step == 0 or step >= ring_group_size - 1:
             return
-        if step % self._gpn != 0:
+        if step % self._intra_size != 0:
             return
-        if step // self._gpn >= self.topo.n_nodes - 1:
+        if step // self._intra_size >= self.topo.n_groups - 1:
             return
 
-        assert self._node_chunk is not None
-        # `_node_chunk` is read-only for the rest of the round (broadcast source
+        assert self._group_chunk is not None
+        # `_group_chunk` is read-only for the rest of the round (broadcast source
         # or idle), so it can be sent without a copy.
-        self._launch_inter_backward(self._node_chunk, step)
+        self._launch_inter_backward(self._group_chunk, step)
 
 
 class _LocalChunkProviderHybridBroadcastOverlap(_LocalChunkProviderHybridBroadcast):
@@ -931,7 +937,7 @@ class _LocalChunkProviderHybridBroadcastOverlap(_LocalChunkProviderHybridBroadca
 
     Prefetches both transfers on the comm stream: the broadcasts within the
     intra group and the send to the next intra group around the ring. A
-    round's broadcasts depend only on ``_node_chunk``, so each ``get`` waits on
+    round's broadcasts depend only on ``_group_chunk``, so each ``get`` waits on
     the broadcast started by the previous call and starts the next one. A
     round's first broadcast is started and waited on in the same call.
     """
@@ -956,7 +962,7 @@ class _LocalChunkProviderHybridBroadcastOverlap(_LocalChunkProviderHybridBroadca
                     send_recv_ranks=self._inter_ranks,
                     group=self._inter_group,
                     async_op=True,
-                    tag=step % self._gpn,
+                    tag=step % self._intra_size,
                 ),
             )
 
@@ -965,38 +971,38 @@ class _LocalChunkProviderHybridBroadcastOverlap(_LocalChunkProviderHybridBroadca
     def _kick_broadcast(self, phase: int) -> None:
         """Prefetch this round's intra-group broadcast from local index ``phase``."""
         is_src = self.topo.local_idx == phase
-        node_chunk = self._node_chunk
-        assert node_chunk is not None
+        group_chunk = self._group_chunk
+        assert group_chunk is not None
 
         def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
             if is_src:
                 # Broadcast reads the source's own tensor in place; the
                 # persistent buffer has to hold that content before the
                 # collective fires.
-                buf.copy_(node_chunk)
+                buf.copy_(group_chunk)
             work = dist.broadcast(
-                buf, group_src=phase, group=self.intranode_group, async_op=True
+                buf, group_src=phase, group=self.intra_group, async_op=True
             )
             return buf, work
 
-        self._bc_buf.kick(produce, extra_keep_alive=(node_chunk,) if is_src else ())
+        self._bc_buf.kick(produce, extra_keep_alive=(group_chunk,) if is_src else ())
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return the tensors for the requested ring step."""
         if step == 0:
             kv = self._kv0()
-            self._node_chunk = (
+            self._group_chunk = (
                 self.x if self.config.send_in_forward == SendForward.X else kv
             )
-            self._launch_inter_backward(self._node_chunk, step)
+            self._launch_inter_backward(self._group_chunk, step)
             self._kick_broadcast(0)
-        elif step % self._gpn == 0:
-            self._node_chunk = self._inter_buf.wait()
+        elif step % self._intra_size == 0:
+            self._group_chunk = self._inter_buf.wait()
             self._kick_broadcast(0)
 
-        phase = step % self._gpn
+        phase = step % self._intra_size
         recv_buf = self._bc_buf.wait()
-        if phase + 1 < self._gpn:
+        if phase + 1 < self._intra_size:
             self._kick_broadcast(phase + 1)
 
         self._recv_buf = recv_buf
@@ -1006,10 +1012,10 @@ class _LocalChunkProviderHybridBroadcastOverlap(_LocalChunkProviderHybridBroadca
         """Prefetch the next outer-ring send at the first step of a round."""
         if step == 0 or step >= ring_group_size - 1:
             return
-        if step % self._gpn != 0:
+        if step % self._intra_size != 0:
             return
-        if step // self._gpn >= self.topo.n_nodes - 1:
+        if step // self._intra_size >= self.topo.n_groups - 1:
             return
 
-        assert self._node_chunk is not None
-        self._launch_inter_backward(self._node_chunk, step)
+        assert self._group_chunk is not None
+        self._launch_inter_backward(self._group_chunk, step)
