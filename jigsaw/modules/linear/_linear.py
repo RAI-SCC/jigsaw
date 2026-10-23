@@ -89,7 +89,6 @@ class DistributedLinear(torch.nn.Module):
         self.weight = torch.nn.Parameter(
             torch.zeros(out_dim, in_dim, dtype=self.dtype, device=self.device)
         )
-        self.parallelism = model_group.size()
 
         self.bias = (
             torch.nn.Parameter(
@@ -109,7 +108,7 @@ class DistributedLinear(torch.nn.Module):
         self.col_group = col_group
         self.config = (
             LinearConfig(
-                self.parallelism,
+                self.model_group,
                 linear_layer=True,
                 device=self.device,
             )
@@ -443,10 +442,9 @@ class DistributedLinear(torch.nn.Module):
         self.col_group = to_process_mesh[pm_col_key]
         self.model_group = to_process_mesh[pm_model_key]
         self.local_rank = self.model_group.rank()
-        self.parallelism = self.model_group.size()
         self.out_dim, self.in_dim = tuple(self.weight.shape)
         self.config = LinearConfig(
-            self.parallelism,
+            self.model_group,
             linear_layer=True,
             device=self.device,
         )
@@ -471,8 +469,7 @@ class _DistributedMatMul(torch.nn.Module):
         self,
         local_rank: int,
         device: torch.device,
-        parallelism: int,
-        model_group: dist.ProcessGroup,
+        model_group: Optional[dist.ProcessGroup],
         config: Optional[LinearConfig] = None,
     ) -> None:
         """Initialize the module.
@@ -483,10 +480,9 @@ class _DistributedMatMul(torch.nn.Module):
             Rank within the model group.
         device : torch.device
             Device of the module.
-        parallelism : int
-            Number of model-parallel processes.
-        model_group : dist.ProcessGroup
-            Process group of one model-parallel instance.
+        model_group : dist.ProcessGroup or None
+            Process group of one model-parallel instance. ``None`` means a
+            single process.
         config : LinearConfig, optional
             Kernel selection. Defaults to a configuration built from the
             arguments.
@@ -494,12 +490,11 @@ class _DistributedMatMul(torch.nn.Module):
         super().__init__()
         self.local_rank = local_rank
         self.device = device
-        self.parallelism = parallelism
         self.model_group = model_group
         self.config = (
             config
             if config is not None
-            else LinearConfig(parallelism, linear_layer=False, device=device)
+            else LinearConfig(model_group, linear_layer=False, device=device)
         )
         self.matmul = self._autograd_fn.apply
 
@@ -574,7 +569,6 @@ class _DistributedMatMul(torch.nn.Module):
         return cls(
             local_rank=process_mesh_dict[model_kw].rank(),
             device=device,
-            parallelism=process_mesh_dict[model_kw].size(),
             model_group=process_mesh_dict[model_kw],
         )
 

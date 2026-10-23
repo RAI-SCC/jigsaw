@@ -53,7 +53,7 @@ class TestCommSelection:
             (SendOp.HYBRID_BROADCAST, comm.comm_1d_p2p),
         ],
     )
-    def test_nccl_inter_node_hop(self, nccl, send_op, expected):
+    def test_nccl_inter_group_hop(self, nccl, send_op, expected):
         assert cfg._select_p2p_fn(send_op) is expected
 
     @pytest.mark.parametrize(
@@ -232,9 +232,9 @@ class TestSaveForBackward:
 
 
 class TestRingAttentionConfig:
-    def test_rejects_non_positive_gpus_per_node(self):
-        with pytest.raises(ValueError, match="gpus_per_node"):
-            RingAttentionConfig(device=CPU, gpus_per_node=0)
+    def test_rejects_non_positive_intra_size(self):
+        with pytest.raises(ValueError, match="intra_size"):
+            RingAttentionConfig(device=CPU, intra_size=0)
 
     def test_wait_offloads_delegates_only_with_an_offloader(self):
         config = RingAttentionConfig(device=CPU)

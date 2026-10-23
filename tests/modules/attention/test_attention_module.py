@@ -45,7 +45,7 @@ class TestRingAttentionFunction:
         ring = mesh["row"]
         rank, world = ring.rank(), ring.size()
         h, d, n_local = self.h, self.d, self.n_local
-        config_kwargs.setdefault("gpus_per_node", world)
+        config_kwargs.setdefault("intra_size", world)
         ring_config = cfg.RingAttentionConfig(
             device=device, attn_backend="math", **config_kwargs
         )
@@ -124,9 +124,9 @@ class TestRingAttentionFunction:
                 save_scope=cfg.SaveScope.LOCAL,
             ),
             dict(send_op=cfg.SendOp.HYBRID_BROADCAST),
-            dict(send_op=cfg.SendOp.HYBRID_BROADCAST, gpus_per_node=1),
+            dict(send_op=cfg.SendOp.HYBRID_BROADCAST, intra_size=1),
         ],
-        ids=["broadcast", "broadcast_gather", "hybrid_one_node", "hybrid_two_nodes"],
+        ids=["broadcast", "broadcast_gather", "hybrid_one_group", "hybrid_two_groups"],
     )
     def test_broadcast_on_replicated_ring(
         self, device, process_mesh_dict_2x2x1, kwargs
@@ -135,9 +135,9 @@ class TestRingAttentionFunction:
         self._run(process_mesh_dict_2x2x1, device, **kwargs)
 
     @pytest.mark.dist(4)
-    def test_hybrid_topology_two_nodes(self, device, process_mesh_dict_4x1):
-        """A 4-ring split into 2 nodes of 2 uses the intra/inter-node hybrid path."""
-        self._run(process_mesh_dict_4x1, device, gpus_per_node=2)
+    def test_hybrid_topology_two_groups(self, device, process_mesh_dict_4x1):
+        """A 4-ring split into 2 intra groups of 2 uses the hybrid path."""
+        self._run(process_mesh_dict_4x1, device, intra_size=2)
 
 
 #: Bound-method attribute each ``attn_backend`` wires ``model.attn_core`` to,

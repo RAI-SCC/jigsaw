@@ -302,24 +302,27 @@ class _HybridForwardChunkProvider(_ForwardChunkProvider):
     def __init__(self, *args: object) -> None:
         """Resolve the topology and the outer-ring peers."""
         super().__init__(*args)  # type: ignore[arg-type]
-        self.topo = get_hybrid_topology(self.group, self.config.gpus_per_node)
-        self.gpn = self.topo.gpus_per_node
-        self.n_nodes = self.topo.n_nodes
+        self.topo = get_hybrid_topology(self.group, self.config.intra_size)
+        self.intra_size = self.topo.intra_size
+        self.n_groups = self.topo.n_groups
         # Outer ring: send to the previous intra group and receive from the
-        # next, addressed inside `internode_group` so the intra group's
+        # next, addressed inside `inter_group` so the intra group's
         # communicator can progress alongside.
-        self._inter_group = self.topo.internode_group
-        self._inter_ranks = [self.topo.internode_peer(-1), self.topo.internode_peer(1)]
+        self._inter_group = self.topo.inter_group
+        self._inter_ranks = [
+            self.topo.inter_group_peer(-1),
+            self.topo.inter_group_peer(1),
+        ]
         self._inter_recv_buf: Optional[torch.Tensor] = None
         self._inter_handle: Optional[dist.Work] = None
 
-    def _launch_inter_forward(self, node_step: int) -> None:
+    def _launch_inter_forward(self, group_step: int) -> None:
         """Start this round's outer-ring send of the chunk in hand.
 
         Sends ``x_j`` / ``kv_j``: this rank's own chunk at round 0, then
         whatever the previous round's outer-ring receive delivered. Relaying
         the held chunk, not the original ``x`` / ``kv``, is what lets chunks
-        travel past the neighboring intra group when ``n_nodes > 2``. The source is never
+        travel past the neighboring intra group when ``n_groups > 2``. The source is never
         written in place afterwards, so it is sent without a clone.
         """
         src = self.x_j if self.send_x else self.kv_j
@@ -329,7 +332,7 @@ class _HybridForwardChunkProvider(_ForwardChunkProvider):
             send_recv_ranks=self._inter_ranks,
             group=self._inter_group,
             async_op=True,
-            tag=node_step,
+            tag=group_step,
         )
 
 
@@ -343,11 +346,14 @@ class _HybridP2PForwardChunkProvider(_HybridForwardChunkProvider):
         """Resolve the intra-group peers."""
         super().__init__(*args)  # type: ignore[arg-type]
         # Intra-group ring: send to the previous local rank, receive from the
-        # next, addressed inside `intranode_group`. For the all-to-all send ops
-        # this limits the all-to-all to the `gpus_per_node` ranks that exchange
+        # next, addressed inside `intra_group`. For the all-to-all send ops
+        # this limits the all-to-all to the `intra_size` ranks that exchange
         # anything, rather than the whole ring.
-        self._intra_group = self.topo.intranode_group
-        self._intra_ranks = [self.topo.intranode_peer(-1), self.topo.intranode_peer(1)]
+        self._intra_group = self.topo.intra_group
+        self._intra_ranks = [
+            self.topo.intra_group_peer(-1),
+            self.topo.intra_group_peer(1),
+        ]
         self._intra_recv_buf: Optional[torch.Tensor] = None
         self._intra_handle: Optional[dist.Work] = None
 
@@ -375,16 +381,16 @@ class _HybridP2PForwardChunkProvider(_HybridForwardChunkProvider):
         tuple[torch.Tensor, torch.Tensor]
             Contiguous key and value tensors for chunk ``step``.
         """
-        node_step, inner = divmod(step, self.gpn)
+        group_step, inner = divmod(step, self.intra_size)
         if inner == 0:
-            if node_step > 0:
+            if group_step > 0:
                 assert self._inter_handle is not None
                 assert self._inter_recv_buf is not None
                 self._inter_handle.wait()
                 self._recv(self._inter_recv_buf)
-            if node_step < self.n_nodes - 1:
-                self._launch_inter_forward(node_step)
-        if inner + 1 < self.gpn:
+            if group_step < self.n_groups - 1:
+                self._launch_inter_forward(group_step)
+        if inner + 1 < self.intra_size:
             self._launch_intra_forward(inner)
 
         if self.send_x:
@@ -403,8 +409,8 @@ class _HybridP2PForwardChunkProvider(_HybridForwardChunkProvider):
         world_size : int
             Number of ranks in the ring.
         """
-        _, inner = divmod(step, self.gpn)
-        if inner + 1 < self.gpn:
+        _, inner = divmod(step, self.intra_size)
+        if inner + 1 < self.intra_size:
             assert self._intra_handle is not None
             assert self._intra_recv_buf is not None
             self._intra_handle.wait()
@@ -412,9 +418,12 @@ class _HybridP2PForwardChunkProvider(_HybridForwardChunkProvider):
 
     def global_chunk_idx(self, step: int) -> int:
         """Return the global index of the chunk held at ``step``."""
-        node_step, inner = divmod(step, self.gpn)
-        cur_node = (self.topo.node_idx + node_step) % self.n_nodes
-        return cur_node * self.gpn + (self.topo.local_idx + inner) % self.gpn
+        group_step, inner = divmod(step, self.intra_size)
+        cur_group = (self.topo.group_idx + group_step) % self.n_groups
+        return (
+            cur_group * self.intra_size
+            + (self.topo.local_idx + inner) % self.intra_size
+        )
 
 
 class _HybridP2PForwardChunkProviderOverlap(_HybridP2PForwardChunkProvider):
@@ -437,7 +446,7 @@ class _HybridP2PForwardChunkProviderOverlap(_HybridP2PForwardChunkProvider):
         self._intra_buf = PrefetchBuffer(cs, like)
         self._inter_buf = PrefetchBuffer(cs, like)
 
-    def _launch_inter_forward(self, node_step: int) -> None:
+    def _launch_inter_forward(self, group_step: int) -> None:
         """Prefetch this round's outer-ring send on the comm stream."""
         src = self.x_j if self.send_x else self.kv_j
 
@@ -450,7 +459,7 @@ class _HybridP2PForwardChunkProviderOverlap(_HybridP2PForwardChunkProvider):
                     send_recv_ranks=self._inter_ranks,
                     group=self._inter_group,
                     async_op=True,
-                    tag=node_step,
+                    tag=group_step,
                 ),
             )
 
@@ -477,13 +486,13 @@ class _HybridP2PForwardChunkProviderOverlap(_HybridP2PForwardChunkProvider):
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Adopt chunk ``step`` off the comm stream, then prefetch what comes next."""
-        node_step, inner = divmod(step, self.gpn)
+        group_step, inner = divmod(step, self.intra_size)
         if inner == 0:
-            if node_step > 0:
+            if group_step > 0:
                 self._recv(self._inter_buf.wait())
-            if node_step < self.n_nodes - 1:
-                self._launch_inter_forward(node_step)
-        if inner + 1 < self.gpn:
+            if group_step < self.n_groups - 1:
+                self._launch_inter_forward(group_step)
+        if inner + 1 < self.intra_size:
             self._launch_intra_forward(inner)
 
         if self.send_x:
@@ -494,8 +503,8 @@ class _HybridP2PForwardChunkProviderOverlap(_HybridP2PForwardChunkProvider):
 
     def advance(self, step: int, world_size: int) -> None:
         """Adopt the intra-group send prefetched in ``get`` so the next inner step is ready."""
-        _, inner = divmod(step, self.gpn)
-        if inner + 1 < self.gpn:
+        _, inner = divmod(step, self.intra_size)
+        if inner + 1 < self.intra_size:
             self._recv(self._intra_buf.wait())
 
 
@@ -508,7 +517,7 @@ class _HybridBroadcastForwardChunkProvider(_HybridForwardChunkProvider):
     def __init__(self, *args: object) -> None:
         """Resolve the intra-group broadcast group."""
         super().__init__(*args)  # type: ignore[arg-type]
-        self._intranode_group = self.topo.intranode_group
+        self._intra_group = self.topo.intra_group
         # The chunk this rank contributes to the current round.
         self._own_kv: Optional[torch.Tensor] = None
         self._own_buf: Optional[torch.Tensor] = None
@@ -526,9 +535,9 @@ class _HybridBroadcastForwardChunkProvider(_HybridForwardChunkProvider):
         tuple[torch.Tensor, torch.Tensor]
             Contiguous key and value tensors for the current chunk.
         """
-        node_step, inner = divmod(step, self.gpn)
+        group_step, inner = divmod(step, self.intra_size)
         if inner == 0:
-            if node_step > 0:
+            if group_step > 0:
                 assert self._inter_handle is not None
                 assert self._inter_recv_buf is not None
                 self._inter_handle.wait()
@@ -537,16 +546,16 @@ class _HybridBroadcastForwardChunkProvider(_HybridForwardChunkProvider):
                     self._kv_from_x()
             self._own_kv = self.kv_j
             self._own_buf = self.x_j if self.send_x else self.kv_j
-            if node_step < self.n_nodes - 1:
-                self._launch_inter_forward(node_step)
+            if group_step < self.n_groups - 1:
+                self._launch_inter_forward(group_step)
 
         assert self._own_buf is not None and self._own_kv is not None
         # `inner` is a local index, i.e. the source's rank inside
-        # `intranode_group`: hence `group_src`, not the global `src`, which a
+        # `intra_group`: hence `group_src`, not the global `src`, which a
         # ring that is a mesh sub-group would get wrong.
         is_src = self.topo.local_idx == inner
         recv_buf = self._own_buf if is_src else torch.empty_like(self._own_buf)
-        dist.broadcast(recv_buf, group_src=inner, group=self._intranode_group)
+        dist.broadcast(recv_buf, group_src=inner, group=self._intra_group)
 
         if self.send_x:
             self.x_j = recv_buf
@@ -564,9 +573,9 @@ class _HybridBroadcastForwardChunkProvider(_HybridForwardChunkProvider):
 
     def global_chunk_idx(self, step: int) -> int:
         """Return the global index of the chunk held at ``step``."""
-        node_step, inner = divmod(step, self.gpn)
-        cur_node = (self.topo.node_idx + node_step) % self.n_nodes
-        return cur_node * self.gpn + inner
+        group_step, inner = divmod(step, self.intra_size)
+        cur_group = (self.topo.group_idx + group_step) % self.n_groups
+        return cur_group * self.intra_size + inner
 
 
 class _HybridBroadcastForwardChunkProviderOverlap(_HybridBroadcastForwardChunkProvider):
@@ -590,7 +599,7 @@ class _HybridBroadcastForwardChunkProviderOverlap(_HybridBroadcastForwardChunkPr
         self._bc_buf = PrefetchBuffer(cs, like)
         self._inter_buf = PrefetchBuffer(cs, like)
 
-    def _launch_inter_forward(self, node_step: int) -> None:
+    def _launch_inter_forward(self, group_step: int) -> None:
         """Prefetch this round's outer-ring send on the comm stream."""
         src = self.x_j if self.send_x else self.kv_j
 
@@ -603,7 +612,7 @@ class _HybridBroadcastForwardChunkProviderOverlap(_HybridBroadcastForwardChunkPr
                     send_recv_ranks=self._inter_ranks,
                     group=self._inter_group,
                     async_op=True,
-                    tag=node_step,
+                    tag=group_step,
                 ),
             )
 
@@ -622,7 +631,7 @@ class _HybridBroadcastForwardChunkProviderOverlap(_HybridBroadcastForwardChunkPr
                 # collective fires.
                 buf.copy_(own)
             work = dist.broadcast(
-                buf, group_src=inner, group=self._intranode_group, async_op=True
+                buf, group_src=inner, group=self._intra_group, async_op=True
             )
             return buf, work
 
@@ -630,20 +639,20 @@ class _HybridBroadcastForwardChunkProviderOverlap(_HybridBroadcastForwardChunkPr
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Wait on the broadcast of chunk ``step``, start the next one, and return its key and value."""
-        node_step, inner = divmod(step, self.gpn)
+        group_step, inner = divmod(step, self.intra_size)
         if inner == 0:
-            if node_step > 0:
+            if group_step > 0:
                 self._recv(self._inter_buf.wait())
                 if self.send_x:
                     self._kv_from_x()
             self._own_kv = self.kv_j
             self._own_buf = self.x_j if self.send_x else self.kv_j
-            if node_step < self.n_nodes - 1:
-                self._launch_inter_forward(node_step)
+            if group_step < self.n_groups - 1:
+                self._launch_inter_forward(group_step)
             self._kick_broadcast(0)
 
         recv_buf = self._bc_buf.wait()
-        if inner + 1 < self.gpn:
+        if inner + 1 < self.intra_size:
             self._kick_broadcast(inner + 1)
 
         is_src = self.topo.local_idx == inner

@@ -188,10 +188,9 @@ class DistributedAttention(torch.nn.Module):
     """Distributed multi-head attention, parallelized over ``spatial_group``.
 
     Three mutually exclusive schemes, selected by ``ring`` / ``ulysses``: plain
-    (each rank attends to its own local sequence shard), ring (the input ``x``
-    circulates around ``spatial_group``, or K/V with a channel group > 1 or
-    ``qk_norm``), or Ulysses (a single all-to-all trades sequence
-    shard for head shard; flat, or hierarchical when ``ulysses_gpus_per_node``
+    (each rank attends to its own local sequence shard), ring (K/V circulate
+    around ``spatial_group``), or Ulysses (a single all-to-all trades sequence
+    shard for head shard; flat, or hierarchical when ``ulysses_intra_size``
     is also set: Ulysses within groups of ranks, nested in a ring across them).
 
     Parameters
@@ -225,7 +224,7 @@ class DistributedAttention(torch.nn.Module):
         ``spatial_group``. Mutually exclusive with ``ring``; needs
         ``heads // channel_group.size()`` divisible by ``spatial_group.size()``.
         See :mod:`._functional.ulysses`.
-    ulysses_gpus_per_node : int
+    ulysses_intra_size : int
         If ``> 0`` (with ``ulysses``), run hierarchical Ulysses: all-to-all
         within groups of this many spatial ranks, nested in a ring across
         them. ``0`` (default) runs flat Ulysses.
@@ -265,7 +264,7 @@ class DistributedAttention(torch.nn.Module):
         qk_norm: bool = False,
         ring: bool = False,
         ulysses: bool = False,
-        ulysses_gpus_per_node: int = 0,
+        ulysses_intra_size: int = 0,
         ulysses_inter_save_scope: attention_config.SaveScope | str = (
             attention_config.SaveScope.LOCAL
         ),
@@ -297,7 +296,7 @@ class DistributedAttention(torch.nn.Module):
         self.dropout_p = dropout_p
         self.ring = ring
         self.ulysses = ulysses
-        self.ulysses_gpn = ulysses_gpus_per_node if ulysses else 0
+        self.ulysses_intra_size = ulysses_intra_size if ulysses else 0
         self.ulysses_inter_save_scope = (
             ulysses_inter_save_scope
             if isinstance(ulysses_inter_save_scope, attention_config.SaveScope)
@@ -311,7 +310,7 @@ class DistributedAttention(torch.nn.Module):
         )
         if (
             self.ulysses_inter_overlap
-            and self.ulysses_gpn
+            and self.ulysses_intra_size
             and self.ulysses_inter_save_scope == attention_config.SaveScope.GLOBAL
         ):
             warnings.warn(
@@ -351,24 +350,24 @@ class DistributedAttention(torch.nn.Module):
             assert spatial_group.size() > 1, (
                 "Cannot perform ulysses attention if spatial size is 1."
             )
-            if self.ulysses_gpn:
-                a = self.ulysses_gpn
+            if self.ulysses_intra_size:
+                a = self.ulysses_intra_size
                 assert (
                     spatial_group.size() % a == 0 and spatial_group.size() // a >= 2
                 ), (
                     f"hierarchical ulysses needs spatial ({spatial_group.size()}) "
                     f"to split into all-to-all intra groups of {a} and an "
-                    f"outer ring of >= 2; use ulysses_gpus_per_node=0 for "
+                    f"outer ring of >= 2; use ulysses_intra_size=0 for "
                     f"the flat scheme"
                 )
                 assert self.heads % a == 0, (
                     f"hierarchical ulysses scatters heads over the intra "
                     f"group: heads // channel ({self.heads}) must be divisible by "
-                    f"ulysses_gpus_per_node ({a})"
+                    f"ulysses_intra_size ({a})"
                 )
                 topo = get_hybrid_topology(spatial_group, a)
-                self._uly_intra_group = topo.intranode_group
-                self._uly_inter_group = topo.internode_group
+                self._uly_intra_group = topo.intra_group
+                self._uly_inter_group = topo.inter_group
                 self._uly_ring_cfg = attention_config.RingAttentionConfig(
                     device=self.device,
                     send_in_forward=attention_config.SendForward.KV,
@@ -461,10 +460,12 @@ class DistributedAttention(torch.nn.Module):
     ) -> Optional[attention_config.RingAttentionConfig]:
         """Pick the ``RingAttentionConfig`` for this module.
 
-        With a sharded ``qkv`` projection (channel group > 1) or ``qk_norm``, the
-        ring cannot rebuild K/V from ``x``, so it needs ``send_in_forward=KV``
-        and ``save_for_backward=KV``. The default config is built that way; an
-        explicit config without them raises.
+        The ring rebuilds K/V from a received ``x`` with a plain local matmul.
+        That would skip the communication of a sharded ``qkv`` projection
+        (channel group > 1) and ``k_norm``, so either one needs
+        ``send_in_forward=KV`` and ``save_for_backward=KV``. The default config
+        is built that way; an explicit config without them raises
+        :class:`ValueError`.
         """
         if not ring:
             return config
@@ -737,7 +738,7 @@ class DistributedAttention(torch.nn.Module):
 
         return core
 
-    def _inter_node_ring_core(
+    def _inter_ring_core(
         self, dropout_p: float
     ) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
         """Build the outer ring of hierarchical Ulysses on ``bshd`` ``q``/``k``/``v``.
@@ -781,13 +782,13 @@ class DistributedAttention(torch.nn.Module):
         """Ulysses (all-to-all, head-parallel) sequence-parallel attention.
 
         ``q``/``k``/``v`` are ``bshd`` ``[b, seq // spatial, local_heads, d]``.
-        Flat when ``ulysses_gpus_per_node == 0``, hierarchical otherwise. A
+        Flat when ``ulysses_intra_size == 0``, hierarchical otherwise. A
         non-``None`` ``attn_mask`` raises :class:`ValueError`.
         """
         if attn_mask is not None:
             raise ValueError(
                 "ulysses attention does not support attn_mask: the inner "
-                "dense core built by _dense_bshd_core/_inter_node_ring_core "
+                "dense core built by _dense_bshd_core/_inter_ring_core "
                 "takes no mask parameter. Use ulysses=False for masked "
                 "attention."
             )
@@ -799,13 +800,13 @@ class DistributedAttention(torch.nn.Module):
         dropout_p = self.dropout_p if self.training else 0.0
         qkv_stack = kwargs.get("qkv_stack")
 
-        if self.ulysses_gpn:
+        if self.ulysses_intra_size:
             return hierarchical_ulysses_attention(
                 q,
                 k,
                 v,
                 self._uly_intra_group,
-                self._inter_node_ring_core(dropout_p),
+                self._inter_ring_core(dropout_p),
                 qkv_stack=qkv_stack,
             )
         return ulysses_attention(
@@ -917,7 +918,7 @@ class DistributedAttention(torch.nn.Module):
 
 
 class Attention(torch.nn.Module):
-    """Multi-head attention that can be converted with :meth:`convert_to_jigsaw`.
+    """Non-distributed multi-head attention, convertible with :meth:`convert_to_jigsaw`.
 
     Parameters
     ----------
@@ -1085,7 +1086,7 @@ class Attention(torch.nn.Module):
         model_kw: str = "model",
         ring: bool = True,
         ulysses: bool = False,
-        ulysses_gpus_per_node: int = 0,
+        ulysses_intra_size: int = 0,
         ulysses_inter_save_scope: attention_config.SaveScope | str = (
             attention_config.SaveScope.LOCAL
         ),
@@ -1125,7 +1126,7 @@ class Attention(torch.nn.Module):
         ulysses : bool
             Run Ulysses (all-to-all, head-parallel) sequence parallelism on the
             "row" dimension instead of the ring. Mutually exclusive with ``ring``.
-        ulysses_gpus_per_node : int
+        ulysses_intra_size : int
             Forwarded to :class:`DistributedAttention`.
         ulysses_inter_save_scope : SaveScope | str
             Forwarded to :class:`DistributedAttention`.
@@ -1167,7 +1168,7 @@ class Attention(torch.nn.Module):
             qk_norm=attention.qk_norm,
             ring=ring,
             ulysses=ulysses,
-            ulysses_gpus_per_node=ulysses_gpus_per_node,
+            ulysses_intra_size=ulysses_intra_size,
             ulysses_inter_save_scope=ulysses_inter_save_scope,
             ulysses_inter_overlap=ulysses_inter_overlap,
             ulysses_inter_offload=ulysses_inter_offload,
