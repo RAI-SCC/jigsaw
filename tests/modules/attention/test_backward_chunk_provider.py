@@ -26,16 +26,16 @@ from jigsaw.modules.attention._functional.forward_chunk_provider import (
     build_forward_chunk_provider,
 )
 
-# (n_nodes, gpus_per_node); the ring has n_nodes * gpus_per_node ranks.
+# (n_groups, intra_size); the ring has n_groups * intra_size ranks.
 TOPOLOGIES = [(2, 2), (2, 4), (3, 2), (4, 2), (2, 3), (2, 1), (3, 1)]
 
 
-def _provider(n_nodes: int, gpn: int):
+def _provider(n_groups: int, intra_size: int):
     """Build a provider that records its launches instead of communicating."""
     provider = object.__new__(_LocalChunkProviderHybridP2P)
-    provider._gpn = gpn
-    provider.topo = SimpleNamespace(n_nodes=n_nodes)
-    provider._internode_recv_buf = torch.zeros(1)
+    provider._intra_size = intra_size
+    provider.topo = SimpleNamespace(n_groups=n_groups)
+    provider._inter_recv_buf = torch.zeros(1)
     provider._recv_buf = torch.zeros(1)
     provider.intra, provider.inter = [], []
     provider._launch_intra_backward = lambda src, step: provider.intra.append(step)
@@ -43,57 +43,61 @@ def _provider(n_nodes: int, gpn: int):
     def launch_inter(data: torch.Tensor, step: int) -> None:
         # The real launch replaces the receive buffer with the next hop's empty one.
         provider.inter.append(step)
-        provider._internode_recv_buf = torch.empty_like(data)
+        provider._inter_recv_buf = torch.empty_like(data)
 
     provider._launch_inter_backward = launch_inter
     return provider
 
 
-@pytest.mark.parametrize("n_nodes, gpn", TOPOLOGIES)
+@pytest.mark.parametrize("n_groups, intra_size", TOPOLOGIES)
 class TestMaybeForwardSchedule:
-    def test_intra_node_sends_are_only_those_the_next_step_consumes(self, n_nodes, gpn):
-        ring = n_nodes * gpn
-        provider = _provider(n_nodes, gpn)
+    def test_intra_sends_are_only_those_the_next_step_consumes(
+        self, n_groups, intra_size
+    ):
+        ring = n_groups * intra_size
+        provider = _provider(n_groups, intra_size)
         for step in range(ring):
             provider.maybe_forward(step, ring)
-        # Step ``s + 1`` reads the intra-node ring unless it starts a node round, in
-        # which case the chunk comes from the inter-node link instead.
-        expected = [s for s in range(1, ring - 1) if (s + 1) % gpn != 0]
+        # Step ``s + 1`` reads the intra-group ring unless it starts a group round,
+        # in which case the chunk comes from the inter-group link instead.
+        expected = [s for s in range(1, ring - 1) if (s + 1) % intra_size != 0]
         assert provider.intra == expected
 
-    def test_inter_node_relay_stops_before_the_last_node_round(self, n_nodes, gpn):
-        ring = n_nodes * gpn
-        provider = _provider(n_nodes, gpn)
+    def test_inter_relay_stops_before_the_last_group_round(self, n_groups, intra_size):
+        ring = n_groups * intra_size
+        provider = _provider(n_groups, intra_size)
         for step in range(ring):
             provider.maybe_forward(step, ring)
         expected = [
-            s for s in range(1, ring - 1) if s % gpn == 0 and s // gpn < n_nodes - 1
+            s
+            for s in range(1, ring - 1)
+            if s % intra_size == 0 and s // intra_size < n_groups - 1
         ]
         assert provider.inter == expected
 
-    def test_node_boundary_restarts_the_intra_ring_from_the_inter_node_chunk(
-        self, n_nodes, gpn
+    def test_group_boundary_restarts_the_intra_ring_from_the_inter_chunk(
+        self, n_groups, intra_size
     ):
-        ring = n_nodes * gpn
-        provider = _provider(n_nodes, gpn)
+        ring = n_groups * intra_size
+        provider = _provider(n_groups, intra_size)
         for step in range(ring):
             arrived = torch.full((1,), float(step))
-            provider._internode_recv_buf = arrived
+            provider._inter_recv_buf = arrived
             provider._recv_buf = torch.zeros(1)
             sent = []
             provider._launch_intra_backward = lambda src, step, sent=sent: sent.append(
                 src
             )
             provider.maybe_forward(step, ring)
-            if 0 < step < ring - 1 and step % gpn == 0 and gpn > 1:
-                # Whatever the relay did to ``_internode_recv_buf``, the intra-node
+            if 0 < step < ring - 1 and step % intra_size == 0 and intra_size > 1:
+                # Whatever the relay did to ``_inter_recv_buf``, the intra-group
                 # ring must restart from the chunk that arrived, not an empty buffer.
                 assert sent == [arrived]
 
 
 @pytest.mark.parametrize("step", [0, 3])
 def test_first_and_last_step_launch_nothing(step):
-    provider = _provider(n_nodes=2, gpn=2)
+    provider = _provider(n_groups=2, intra_size=2)
     provider.maybe_forward(step, ring_group_size=4)
     assert provider.intra == [] and provider.inter == []
 
@@ -146,8 +150,8 @@ def test_dropout_base_seed_is_a_python_int_below_2_31():
     assert isinstance(seed, int) and 0 <= seed < 2**31 - 1
 
 
-class TestForwardInterNodeRelay:
-    """With more than two nodes, later rounds relay the chunk that just arrived."""
+class TestForwardInterRelay:
+    """With more than two intra groups, later rounds relay the chunk that just arrived."""
 
     def _provider(self, send_x: bool):
         provider = object.__new__(_HybridP2PForwardChunkProvider)
@@ -178,7 +182,7 @@ class TestForwardInterNodeRelay:
 
     @pytest.mark.parametrize("send_x", [True, False])
     def test_later_rounds_send_the_chunk_that_arrived(self, send_x):
-        """``_recv`` rebinds ``x_j``/``kv_j`` from the inter-node receive before
+        """``_recv`` rebinds ``x_j``/``kv_j`` from the inter-group receive before
         the next ``_launch_inter_forward`` call, so simulate that directly."""
         provider = self._provider(send_x)
         arrived = torch.full((2,), 7.0)

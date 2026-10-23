@@ -291,22 +291,22 @@ class TestUlyssesAttention:
         inter_offload: attention_config.Offload,
         attn_backend: str,
     ) -> None:
-        """Hierarchical Ulysses (intra-node a2a x inter-node K/V P2P ring)
+        """Hierarchical Ulysses (intra-group a2a x inter-group K/V P2P ring)
         reproduces the same gathered-sequence dense run as the flat scheme.
 
-        ``spatial=4, ulysses_gpus_per_node=2``: a 2-rank intra-node all-to-all
-        nested in a 2-node inter-node P2P ring, with both backward
+        ``spatial=4, ulysses_intra_size=2``: a 2-rank intra-group all-to-all
+        nested in a 2-group outer P2P ring, with both backward
         ``save_scope``s (``LOCAL`` re-rings K/V in the backward, ``GLOBAL``
         keeps it). The ring's per-step online-softmax merge adds a few ULP the
         flat single-kernel path does not. Every ``attn_backend`` (math, sdpa,
-        te) feeds both the intra-node all-to-all's inner dense core
-        (``_dense_bshd_core``) and the inter-node ring's inner core
-        (``_inter_node_ring_core``); ``te`` picks its kernel by GPU
+        te) feeds both the intra-group all-to-all's inner dense core
+        (``_dense_bshd_core``) and the outer ring's inner core
+        (``_inter_ring_core``); ``te`` picks its kernel by GPU
         architecture here rather than forcing a specific core, unlike
         ``test_matches_dense_reference``'s split cases, to keep this grid's
         size in check.
 
-        ``inter_offload=CPU`` additionally routes the inter-node ring's saved
+        ``inter_offload=CPU`` additionally routes the outer ring's saved
         K/V chunk through :class:`.offload.NVLinkActivationOffloader` (pinned
         host memory between forward and backward): same mechanism, same
         parity expectation, as the plain ring's own offload tests.
@@ -333,7 +333,7 @@ class TestUlyssesAttention:
             channel_group=mesh["col"],
             ring=False,
             ulysses=True,
-            ulysses_gpus_per_node=2,
+            ulysses_intra_size=2,
             ulysses_inter_save_scope=inter_save_scope,
             ulysses_inter_offload=inter_offload,
             attn_backend=attn_backend,
