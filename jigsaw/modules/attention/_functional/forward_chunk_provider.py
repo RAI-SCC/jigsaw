@@ -41,6 +41,7 @@ class _ForwardChunkProvider(ABC):
         group: dist.ProcessGroup,
         local_rank: int,
         world_size: int,
+        save_chunks: bool = True,
     ) -> None:
         """Initialize the provider.
 
@@ -60,8 +61,12 @@ class _ForwardChunkProvider(ABC):
             Rank within ``group``.
         world_size : int
             Number of ranks in ``group``.
+        save_chunks : bool
+            Whether to keep chunks for the backward pass. ``False`` when no
+            backward will run, e.g. under ``torch.no_grad()``.
         """
         self.config = ring_config
+        self.save_chunks = save_chunks
         self.q, self.k, self.v, self.x, self.w_qkv = q, k, v, x, w_qkv
         self.group = group
         self.local_rank = local_rank
@@ -79,7 +84,9 @@ class _ForwardChunkProvider(ABC):
         self.kv_j, self.kj, self.vj = self.kv, k, v
 
         self.chunks_to_save: list[torch.Tensor | None]
-        if ring_config.save_scope == SaveScope.GLOBAL:
+        if not save_chunks:
+            self.chunks_to_save = []
+        elif ring_config.save_scope == SaveScope.GLOBAL:
             # Filled per-step, indexed by global chunk id so the backward
             # `_GlobalChunkProvider` (a plain `chunks[step]` lookup) sees
             # ring step == global chunk index.
@@ -111,7 +118,7 @@ class _ForwardChunkProvider(ABC):
 
     def save_for_backward(self, step: int) -> None:
         """Record the current chunk for the backward pass."""
-        if self.config.save_scope != SaveScope.GLOBAL:
+        if not self.save_chunks or self.config.save_scope != SaveScope.GLOBAL:
             return
         self.chunks_to_save[self.global_chunk_idx(step)] = (
             self.config.save_for_backward_fn(self.x_j, self.kv_j)
@@ -685,6 +692,7 @@ def build_forward_chunk_provider(
     group: dist.ProcessGroup,
     local_rank: int,
     world_size: int,
+    save_chunks: bool = True,
 ) -> _ForwardChunkProvider:
     """Build the forward chunk provider of ``ring_config.send_op``.
 
@@ -704,13 +712,15 @@ def build_forward_chunk_provider(
         Rank of the current process within ``group``.
     world_size : int
         Number of ranks in ``group``.
+    save_chunks : bool
+        Whether to keep chunks for the backward pass.
 
     Returns
     -------
     _ForwardChunkProvider
         Chunk provider.
     """
-    args = (ring_config, q, k, v, x, w_qkv, group, local_rank, world_size)
+    args = (ring_config, q, k, v, x, w_qkv, group, local_rank, world_size, save_chunks)
     match ring_config.send_op:
         case SendOp.BROADCAST:
             return _BroadcastForwardChunkProvider(*args)

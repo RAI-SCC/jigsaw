@@ -715,45 +715,65 @@ def x_transpose_w_fourway(
         case 0:
             buffer_x_2 = get_preallocated_buffer(xij.shape, xdtype, mod, device)
             # x: send to 1; recv from 2
-            send_x_1 = dist.isend(xij, dst=local_rank + 1, group=model_group)
-            recv_x_2 = dist.irecv(buffer_x_2, src=local_rank + 2, group=model_group)
+            send_x_1 = dist.isend(xij, group_dst=local_rank + 1, group=model_group)
+            recv_x_2 = dist.irecv(
+                buffer_x_2, group_src=local_rank + 2, group=model_group
+            )
             buffer_w_2 = get_preallocated_buffer(wij.shape, wdtype, mod, device)
             # w: send to 2; recv from 2
-            send_w_2 = dist.isend(wij, dst=local_rank + 2, group=model_group)
-            recv_w_2 = dist.irecv(buffer_w_2, src=local_rank + 2, group=model_group)
+            send_w_2 = dist.isend(wij, group_dst=local_rank + 2, group=model_group)
+            recv_w_2 = dist.irecv(
+                buffer_w_2, group_src=local_rank + 2, group=model_group
+            )
         case 1:
             buffer_x_0 = get_preallocated_buffer(xij.shape, xdtype, mod, device)
             buffer_x_2 = get_preallocated_buffer(xij.shape, xdtype, mod, device)
             # x: send to 2, 3; recv from 0, 2
-            recv_x_0 = dist.irecv(buffer_x_0, src=local_rank - 1, group=model_group)
-            send_x_2 = dist.isend(xij, dst=local_rank + 1, group=model_group)
-            send_x_3 = dist.isend(xij, dst=local_rank + 2, group=model_group)
-            recv_x_2 = dist.irecv(buffer_x_2, src=local_rank + 1, group=model_group)
+            recv_x_0 = dist.irecv(
+                buffer_x_0, group_src=local_rank - 1, group=model_group
+            )
+            send_x_2 = dist.isend(xij, group_dst=local_rank + 1, group=model_group)
+            send_x_3 = dist.isend(xij, group_dst=local_rank + 2, group=model_group)
+            recv_x_2 = dist.irecv(
+                buffer_x_2, group_src=local_rank + 1, group=model_group
+            )
             buffer_w_3 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             # w: send to 3; recv from 3
-            send_w_3 = dist.isend(wij, dst=local_rank + 2, group=model_group)
-            recv_w_3 = dist.irecv(buffer_w_3, src=local_rank + 2, group=model_group)
+            send_w_3 = dist.isend(wij, group_dst=local_rank + 2, group=model_group)
+            recv_w_3 = dist.irecv(
+                buffer_w_3, group_src=local_rank + 2, group=model_group
+            )
         case 2:
             buffer_x_1 = get_preallocated_buffer(xij.shape, xdtype, mod, device)
             buffer_x_3 = get_preallocated_buffer(xij.shape, xdtype, mod, device)
             # x: send to 0, 1; recv from 1, 3
-            recv_x_1 = dist.irecv(buffer_x_1, src=local_rank - 1, group=model_group)
-            send_x_0 = dist.isend(xij, dst=local_rank - 2, group=model_group)
-            recv_x_3 = dist.irecv(buffer_x_3, src=local_rank + 1, group=model_group)
-            send_x_1 = dist.isend(xij, dst=local_rank - 1, group=model_group)
+            recv_x_1 = dist.irecv(
+                buffer_x_1, group_src=local_rank - 1, group=model_group
+            )
+            send_x_0 = dist.isend(xij, group_dst=local_rank - 2, group=model_group)
+            recv_x_3 = dist.irecv(
+                buffer_x_3, group_src=local_rank + 1, group=model_group
+            )
+            send_x_1 = dist.isend(xij, group_dst=local_rank - 1, group=model_group)
             buffer_w_0 = get_preallocated_buffer(wij.shape, wdtype, mod, device)
             # w: send to 0; recv from 0
-            recv_w_0 = dist.irecv(buffer_w_0, src=local_rank - 2, group=model_group)
-            send_w_0 = dist.isend(wij, dst=local_rank - 2, group=model_group)
+            recv_w_0 = dist.irecv(
+                buffer_w_0, group_src=local_rank - 2, group=model_group
+            )
+            send_w_0 = dist.isend(wij, group_dst=local_rank - 2, group=model_group)
         case 3:
             buffer_x_1 = get_preallocated_buffer(xij.shape, xdtype, mod, device)
             # x: send to 2; recv from 1
-            recv_x_1 = dist.irecv(buffer_x_1, src=local_rank - 2, group=model_group)
-            send_x_2 = dist.isend(xij, dst=local_rank - 1, group=model_group)
+            recv_x_1 = dist.irecv(
+                buffer_x_1, group_src=local_rank - 2, group=model_group
+            )
+            send_x_2 = dist.isend(xij, group_dst=local_rank - 1, group=model_group)
             buffer_w_1 = get_preallocated_buffer(wij.shape, wdtype, mod, device)
             # w: send to 1; recv from 1
-            recv_w_1 = dist.irecv(buffer_w_1, src=local_rank - 2, group=model_group)
-            send_w_1 = dist.isend(wij, dst=local_rank - 2, group=model_group)
+            recv_w_1 = dist.irecv(
+                buffer_w_1, group_src=local_rank - 2, group=model_group
+            )
+            send_w_1 = dist.isend(wij, group_dst=local_rank - 2, group=model_group)
 
     match mod:
         case 0:
