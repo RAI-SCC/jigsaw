@@ -30,8 +30,9 @@ repos:
         args: [ --fix ]
       # Run the formatter.
       - id: ruff-format
-  # TorchFix: deprecated or unsafe torch APIs (torch.cuda.amp, torch.load without
-  # weights_only, functorch, ...). A flake8 plugin, so ruff cannot run it.
+  # TorchFix: removed, deprecated or unsafe torch APIs (torch.load without
+  # weights_only, checkpoint without use_reentrant, private torch._* calls, ...).
+  # A flake8 plugin, so ruff cannot run it.
   - repo: https://github.com/pycqa/flake8
     rev: 7.4.1
     hooks:
