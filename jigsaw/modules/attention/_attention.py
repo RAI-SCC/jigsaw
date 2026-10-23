@@ -336,6 +336,10 @@ class DistributedAttention(torch.nn.Module):
             "heads is not divisible by channel group size"
         )
         assert embed_dim % heads == 0, "embed_dim is not divisible by heads"
+        if self.te:
+            te_core.select_core(self.device).check_head_dim(
+                embed_dim // heads, self.device
+            )
 
         self.heads = heads // self.channel_group.size()
         self.scale = (embed_dim // heads) ** -0.5
