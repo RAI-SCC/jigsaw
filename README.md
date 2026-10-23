@@ -131,13 +131,26 @@ mesh = jigsaw.make_process_mesh({"dp": -1, "row": 2, "col": 2},
 For data parallelism, wrap the model with `jigsaw.parallel.wrap_ddp(model, mesh)`, which
 applies DDP over `mesh["dp"]`. See [docs/ddp.md](docs/ddp.md).
 
+## Limitations
+
+- Backends: NCCL, RCCL (tested on AMD MI250X) and Gloo only. Devices: CUDA/ROCm and
+  CPU only; no TPU, NPU, XPU or MPS.
+- Large runs have only been tested on SLURM clusters, so the launcher scripts and
+  cluster docs assume SLURM. `torchrun` works but has not been tested at scale.
+- Not every torch layer has a distributed version. For example, there is none for
+  batch norm, pooling or `nn.MultiheadAttention`.
+- Only fp16 and bf16 mixed precision; no FP8.
+
+[Platforms and limitations](docs/platforms.md) lists the tested architectures and
+the full list of what is not supported.
+
 ## Further reading
 
 - [Data parallelism](docs/ddp.md): DDP over a model-parallel mesh, the joint comm hook, replica checks.
 - [Attention](docs/attention.md): attention backends (`sdpa`, `math`, TransformerEngine), ring vs. Ulysses.
 - [Mixed precision](docs/mixed_precision.md): `torch.autocast` support.
 - [Logging](docs/logging.md): rank-aware logging and debugging helpers (`jigsaw.log`).
-- [Platforms](docs/platforms.md): supported backends and devices, running on a cluster.
+- [Platforms and limitations](docs/platforms.md): supported backends and devices, tested configurations, known limitations, running on a cluster.
 - [Containers](containers/README.md) and the [SLURM launcher](scripts/README.md).
 
 ## Running tests
