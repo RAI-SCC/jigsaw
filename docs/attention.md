@@ -27,9 +27,11 @@ Both schemes parallelize attention over `spatial_group` and work with any
   head shard, runs one dense attention over the full sequence, then an
   all-to-all brings it back. Needs `heads // channel_group.size()` divisible
   by `spatial_group.size()`. Set `ulysses_intra_size > 0` to run the
-  *hierarchical* scheme instead — Ulysses within groups of that many
-  consecutive spatial ranks, nested in a P2P ring across the groups. With one
-  group per node, the all-to-all stays on the fast intra-node fabric.
+  *hierarchical* scheme instead: Ulysses within intra groups of that many
+  consecutive spatial ranks, nested in an outer ring across them. It needs
+  `heads // channel_group.size()` divisible by `ulysses_intra_size`, and at least
+  two intra groups. With one group per node, the all-to-all stays on the fast
+  intra-node fabric.
 
 Ring attention splits the sequence over the mesh rows; the mesh columns split the
 heads, with or without `ring`. With split heads (or `qk_norm`) the ring has to
@@ -40,12 +42,12 @@ slice of the features. Without a `config` this is chosen for you; an explicit
 `ValueError`. [`examples/vit.py`](../examples/vit.py) shows the explicit version.
 
 `RingAttentionConfig.send_op` picks how the ring exchanges chunks. The default,
-`ALLTOALL`, works for any ring size. The `HYBRID_*` ops split the ring into intra groups
-of `intra_size` consecutive ranks joined by an outer ring, and need the ring size to be a multiple of `intra_size`
-(default 4).
+`ALLTOALL`, works for any ring size. The `HYBRID_*` ops split the ring into intra
+groups of `intra_size` consecutive ranks (default 4) joined by an outer ring, and need
+the ring size to be a multiple of `intra_size`.
 
-Both schemes can overlap their K/V communication with the attention core on a
-dedicated CUDA stream: `overlap_comm` on `RingAttentionConfig` for the plain
+The ring and hierarchical Ulysses can overlap their K/V communication with the
+attention core on a dedicated CUDA stream: `overlap_comm` on `RingAttentionConfig` for the plain
 ring, `ulysses_inter_overlap` for the hierarchical scheme's outer ring.
 CUDA only; inert elsewhere. See `RingAttentionConfig.__init__` and
 `DistributedAttention.__init__` for the full parameter reference.
