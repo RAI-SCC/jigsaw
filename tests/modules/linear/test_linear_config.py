@@ -4,6 +4,7 @@ import pytest
 import torch
 
 import jigsaw.modules.linear._distributed_matmul as dist_mm
+import jigsaw.modules.linear._distributed_matmul_batchedp2p as dist_mm_batchedp2p
 import jigsaw.modules.linear._distributed_matmul_p2p as dist_mm_p2p
 from jigsaw.modules.linear._config import LinearConfig
 
@@ -21,8 +22,10 @@ class _Group:
         return self._size
 
 
-def _config(size=1, linear_layer=True, device=CPU):
-    return LinearConfig(_Group(size), linear_layer=linear_layer, device=device)
+def _config(size=1, linear_layer=True, device=CPU, comm="auto"):
+    return LinearConfig(
+        _Group(size), linear_layer=linear_layer, device=device, comm=comm
+    )
 
 
 class TestMatmulKernelSelection:
@@ -38,6 +41,37 @@ class TestMatmulKernelSelection:
         assert xw is getattr(module, f"xw_{way}")
         assert xtw is getattr(module, f"x_transpose_w_{way}")
         assert fused is getattr(module, f"fused_xw_xtw_{way}")
+
+    @pytest.mark.parametrize("dev", [CPU, CUDA], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "comm, module",
+        [
+            ("all_to_all", dist_mm),
+            ("p2p", dist_mm_p2p),
+            ("batched_p2p", dist_mm_batchedp2p),
+        ],
+    )
+    @pytest.mark.parametrize("size, way", WAYS.items())
+    def test_explicit_comm_overrides_the_device_default(
+        self, dev, comm, module, size, way
+    ):
+        cfg = _config(size, device=dev, comm=comm)
+        assert cfg.comm == comm
+        xwt, xw, xtw, fused = cfg.mm_kernels
+        assert xwt is getattr(module, f"xw_transpose_{way}")
+        assert xw is getattr(module, f"xw_{way}")
+        assert xtw is getattr(module, f"x_transpose_w_{way}")
+        assert fused is getattr(module, f"fused_xw_xtw_{way}")
+
+    @pytest.mark.parametrize(
+        "dev, comm", [(CPU, "p2p"), (CUDA, "all_to_all")], ids=["cpu", "cuda"]
+    )
+    def test_auto_comm_resolves_per_device(self, dev, comm):
+        assert _config(2, device=dev).comm == comm
+
+    def test_unknown_comm_is_rejected(self):
+        with pytest.raises(ValueError, match="comm must be 'auto' or one of"):
+            _config(2, comm="nccl")
 
     @pytest.mark.parametrize("dev", [CPU, CUDA], ids=["cpu", "cuda"])
     def test_single_process_kernels_are_plain_matmuls(self, dev):

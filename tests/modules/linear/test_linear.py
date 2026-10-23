@@ -1065,3 +1065,74 @@ class TestParameterCount:
         assert all_ranks_ok(
             layer.get_parameter_count() == expected, device, mesh["model"]
         )
+
+
+class TestComm:
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("comm", ["all_to_all", "p2p", "batched_p2p"])
+    def test_every_comm_matches_torch(
+        self, device: torch.device, process_mesh_dict_2x2: dict, comm: str
+    ) -> None:
+        """Forward and backward parity of each strategy; resharding keeps it."""
+        if comm == "all_to_all" and device.type == "cpu":
+            pytest.skip("gloo has no all-to-all")
+        mesh = process_mesh_dict_2x2
+        model_group = mesh["model"]
+        local_rank = dist.get_rank(group=model_group)
+        torch.manual_seed(local_rank)
+
+        in_dim, out_dim = 6, 4
+        linlayer = linear.DistributedLinear(
+            in_dim,
+            out_dim,
+            local_rank=local_rank,
+            device=device,
+            model_group=model_group,
+            col_group=mesh["col"],
+            row_group=mesh["row"],
+            config=linear.LinearConfig(model_group, device=device, comm=comm),
+        ).to(device)
+        ref_linlayer = torch.nn.Linear(in_dim, out_dim).to(device)
+        ref_linlayer.weight.data = gather_results(
+            linlayer.weight.data, process_mesh_dict=mesh
+        )
+        ref_linlayer.bias.data = gather_1d_results(
+            linlayer.bias.data, mesh, dim=0, pm_key="col"
+        )
+
+        x_in = torch.randn(1, 2, in_dim // 2, device=device, requires_grad=True)
+        x_gathered = gather_results(x_in.detach(), process_mesh_dict=mesh)
+        x_gathered.requires_grad_(True)
+        y = linlayer(x_in)
+        ref_y = ref_linlayer(x_gathered)
+        # Each rank holds a disjoint tile of the output: local sums add up to the global one.
+        y.square().sum().backward()
+        ref_y.square().sum().backward()
+
+        assert isinstance(linlayer.weight.grad, torch.Tensor)
+        assert isinstance(ref_linlayer.weight.grad, torch.Tensor)
+        assert isinstance(x_in.grad, torch.Tensor)
+        assert isinstance(x_gathered.grad, torch.Tensor)
+        y_gathered = gather_results(y.detach(), process_mesh_dict=mesh)
+        assert_close("output", y_gathered, ref_y, 1e-5, 1e-5, device, model_group)
+        assert_close(
+            "weight grad",
+            gather_results(linlayer.weight.grad, process_mesh_dict=mesh),
+            ref_linlayer.weight.grad,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
+        assert_close(
+            "input grad",
+            gather_results(x_in.grad, process_mesh_dict=mesh),
+            x_gathered.grad,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
+        )
+
+        linlayer.reshard_parameters(mesh, mesh)
+        assert all_ranks_ok(linlayer.config.comm == comm, device, model_group)
