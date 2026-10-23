@@ -7,7 +7,8 @@ call.
 
 import contextvars
 import functools
-from typing import Any, Callable, ParamSpec, TypeVar, cast
+from collections.abc import Callable
+from typing import Any, ParamSpec, TypeVar, cast
 
 import torch
 import torch.distributed as dist

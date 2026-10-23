@@ -17,7 +17,7 @@ keeps the draw from disturbing the default RNG stream.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -32,12 +32,12 @@ def forward(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    scale: Optional[float] = 0.0,
+    scale: float | None = 0.0,
     dropout_p: float = 0.0,
-    seed: Optional[int] = None,
+    seed: int | None = None,
     *,
     layout: str = "bhsd",
-) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Compute attention.
 
     Parameters
@@ -88,8 +88,8 @@ def backward(
     scale: float,
     *args: Any,
     dropout_p: float = 0.0,
-    seed: Optional[int] = None,
-    rng_state: Optional[torch.Tensor] = None,  # noqa: ARG001 - unused, interface parity
+    seed: int | None = None,
+    rng_state: torch.Tensor | None = None,  # noqa: ARG001 - unused, interface parity
     **kwargs: Any,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute the attention gradients from the saved output and log-sum-exp.

@@ -1,6 +1,6 @@
 """Distributed classification loss functions."""
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -22,10 +22,10 @@ from .._common import (
 def _nll_terms(
     log_probs: torch.Tensor,
     target: torch.Tensor,
-    weight: Optional[torch.Tensor],
+    weight: torch.Tensor | None,
     ignore_index: int,
     dim: int,
-    channel_group: Optional[dist.ProcessGroup],
+    channel_group: dist.ProcessGroup | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute the per-element NLL, weight and validity mask."""
     n_local = log_probs.shape[dim]
@@ -56,11 +56,11 @@ def distributed_nll_loss(
     log_probs: torch.Tensor,
     target: torch.Tensor,
     *,
-    weight: Optional[torch.Tensor] = None,
+    weight: torch.Tensor | None = None,
     ignore_index: int = -100,
     reduction: str = "mean",
     dim: int = 1,
-    channel_group: Optional[dist.ProcessGroup] = None,
+    channel_group: dist.ProcessGroup | None = None,
     reduce_groups: GroupsArg = None,
 ) -> torch.Tensor:
     """Compute the negative log-likelihood loss of a class-sharded input.
@@ -111,7 +111,7 @@ class _ChannelParallelCrossEntropy(torch.autograd.Function):
         elem_weight: torch.Tensor,
         label_smoothing: float,
         dim: int,
-        channel_group: Optional[dist.ProcessGroup],
+        channel_group: dist.ProcessGroup | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute the per-element loss and the softmax saved for the backward pass."""
         n_global = logits.shape[dim] * _group_size(channel_group)
@@ -172,8 +172,8 @@ class _ChannelParallelCrossEntropy(torch.autograd.Function):
     def backward(
         ctx: torch.autograd.function.FunctionCtx,
         grad_per_element: torch.Tensor,
-        _grad_softmax: Optional[torch.Tensor],
-    ) -> tuple[Optional[torch.Tensor], ...]:
+        _grad_softmax: torch.Tensor | None,
+    ) -> tuple[torch.Tensor | None, ...]:
         """Compute the gradient of the logits."""
         softmax, local_idx, local_hit, elem_weight = ctx.saved_tensors  # type: ignore[attr-defined]
         dim = ctx.dim  # type: ignore[attr-defined]
@@ -192,18 +192,18 @@ class _ChannelParallelCrossEntropy(torch.autograd.Function):
     @staticmethod
     def vmap(
         info: Any,
-        in_dims: tuple[Optional[int], ...],
+        in_dims: tuple[int | None, ...],
         logits: torch.Tensor,
         local_idx: torch.Tensor,
         local_hit: torch.Tensor,
         elem_weight: torch.Tensor,
         label_smoothing: float,
         dim: int,
-        channel_group: Optional[dist.ProcessGroup],
+        channel_group: dist.ProcessGroup | None,
     ) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[int, int]]:
         """Batching rule for ``torch.vmap``."""
 
-        def _front(t: torch.Tensor, bdim: Optional[int]) -> torch.Tensor:
+        def _front(t: torch.Tensor, bdim: int | None) -> torch.Tensor:
             if bdim is None:
                 return t.expand(info.batch_size, *t.shape)
             return t.movedim(bdim, 0)
@@ -231,12 +231,12 @@ def distributed_cross_entropy(
     logits: torch.Tensor,
     target: torch.Tensor,
     *,
-    weight: Optional[torch.Tensor] = None,
+    weight: torch.Tensor | None = None,
     ignore_index: int = -100,
     reduction: str = "mean",
     label_smoothing: float = 0.0,
     dim: int = 1,
-    channel_group: Optional[dist.ProcessGroup] = None,
+    channel_group: dist.ProcessGroup | None = None,
     reduce_groups: GroupsArg = None,
 ) -> torch.Tensor:
     """Compute the cross-entropy loss of a class-sharded input.
@@ -319,7 +319,7 @@ def distributed_binary_cross_entropy(
     probs: torch.Tensor,
     target: torch.Tensor,
     *,
-    weight: Optional[torch.Tensor] = None,
+    weight: torch.Tensor | None = None,
     reduction: str = "mean",
     reduce_groups: GroupsArg = None,
 ) -> torch.Tensor:
@@ -358,8 +358,8 @@ def distributed_binary_cross_entropy_with_logits(
     logits: torch.Tensor,
     target: torch.Tensor,
     *,
-    weight: Optional[torch.Tensor] = None,
-    pos_weight: Optional[torch.Tensor] = None,
+    weight: torch.Tensor | None = None,
+    pos_weight: torch.Tensor | None = None,
     reduction: str = "mean",
     reduce_groups: GroupsArg = None,
 ) -> torch.Tensor:

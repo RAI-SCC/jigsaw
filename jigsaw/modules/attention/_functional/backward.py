@@ -1,7 +1,5 @@
 """Backward implementations for ring attention."""
 
-from typing import Optional
-
 import torch
 import torch.distributed as dist
 
@@ -122,8 +120,8 @@ def ring_backward(
     chunks_to_save: tuple[torch.Tensor, ...],
     ring_config: RingAttentionConfig,
     dropout_p: float = 0.0,
-    base_seed: Optional[int] = None,
-    rng_states: Optional[tuple[Optional[torch.Tensor], ...]] = None,
+    base_seed: int | None = None,
+    rng_states: tuple[torch.Tensor | None, ...] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward pass for ring attention.
 
@@ -591,7 +589,7 @@ class _DkvRelay:
         self._recv = [
             torch.empty(shape, device=like.device, dtype=like.dtype) for _ in range(2)
         ]
-        self._pending: Optional[tuple[torch.cuda.Event, torch.Tensor]] = None
+        self._pending: tuple[torch.cuda.Event, torch.Tensor] | None = None
         self._work: object = None
 
     def _drain(self, dk_buf: torch.Tensor, dv_buf: torch.Tensor) -> None:

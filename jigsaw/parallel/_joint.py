@@ -1,7 +1,7 @@
 """DDP comm hook that averages replicated gradients over their joint groups."""
 
 from collections.abc import Callable
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
@@ -298,7 +298,7 @@ def _reduce_param_grad(grad: torch.Tensor, param: torch.nn.Parameter) -> None:
 
 def register_joint_comm_hook(
     ddp: DistributedDataParallel,
-    wrapper: Optional[Callable[[Callable], Callable]] = None,
+    wrapper: Callable[[Callable], Callable] | None = None,
 ) -> JointCommHookState:
     """Reduce replicated gradients over their joint groups in DDP's buckets.
 
@@ -337,7 +337,7 @@ def register_joint_comm_hook(
     return state
 
 
-def active_joint_state() -> Optional[JointCommHookState]:
+def active_joint_state() -> JointCommHookState | None:
     """Return the joint-hook state of the DDP whose forward is running, if any.
 
     Returns
@@ -360,8 +360,8 @@ def active_joint_state() -> Optional[JointCommHookState]:
 
 
 def joint_state_of(
-    param: torch.nn.Parameter, active: Optional[JointCommHookState]
-) -> Optional[JointCommHookState]:
+    param: torch.nn.Parameter, active: JointCommHookState | None
+) -> JointCommHookState | None:
     """Return the joint-hook state whose hook reduces ``param``, if any.
 
     Parameters

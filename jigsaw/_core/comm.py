@@ -1,8 +1,9 @@
 """Communication primitives."""
 
 from collections import defaultdict
-from functools import lru_cache
-from typing import Any, Iterable, Optional
+from collections.abc import Iterable
+from functools import cache
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -12,7 +13,7 @@ from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 def all_to_all_async(
     output_tensor_list: list[torch.Tensor],
     input_tensor_list: list[torch.Tensor],
-    group: Optional[dist.ProcessGroup] = None,
+    group: dist.ProcessGroup | None = None,
 ) -> dist.Work:
     """Issue an asynchronous ``dist.all_to_all`` and return its work handle.
 
@@ -30,7 +31,7 @@ def all_to_all_async(
     dist.Work
         Handle to wait on.
     """
-    work: Optional[dist.Work] = dist.all_to_all(
+    work: dist.Work | None = dist.all_to_all(
         output_tensor_list, input_tensor_list, group=group, async_op=True
     )
     assert work is not None
@@ -40,7 +41,7 @@ def all_to_all_async(
 _BACKEND_DEVICE_TYPES = {"nccl": "cuda", "gloo": "cpu"}
 
 
-def check_backend(group: Optional[dist.ProcessGroup] = None) -> set[str]:
+def check_backend(group: dist.ProcessGroup | None = None) -> set[str]:
     """Return ``group``'s backend names, raising if jigsaw does not support one.
 
     ``"nccl"`` covers both NVIDIA NCCL and AMD RCCL (ROCm builds of PyTorch
@@ -74,7 +75,7 @@ def check_backend(group: Optional[dist.ProcessGroup] = None) -> set[str]:
 
 
 def get_device_of_process_group(
-    group: Optional[dist.ProcessGroup] = None,
+    group: dist.ProcessGroup | None = None,
 ) -> torch.device:
     """Return the device collectives over ``group`` need their tensors on.
 
@@ -101,7 +102,7 @@ def get_device_of_process_group(
     return torch.device("cpu")
 
 
-@lru_cache(maxsize=None)
+@cache
 def get_empty(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     """Return a cached zero-length tensor for ``(device, dtype)``.
 
@@ -155,7 +156,7 @@ def comm_2way_alltoall(
     empty: torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = True,
-) -> tuple[torch.Tensor, list[Optional[dist.Work]]]:
+) -> tuple[torch.Tensor, list[dist.Work | None]]:
     """Send data to a neighbor process using all-to-all.
 
     Parameters
@@ -200,7 +201,7 @@ def comm_2way_p2p(
     buffer: torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = True,
-) -> tuple[torch.Tensor, list[Optional[dist.Work]]]:
+) -> tuple[torch.Tensor, list[dist.Work | None]]:
     """Send data to a neighbor process using P2P communication.
 
     Parameters
@@ -250,14 +251,14 @@ def comm_2way_p2p(
 def comm_1d_alltoall(
     data: torch.Tensor,
     buffer: torch.Tensor,
-    direction: Optional[int] = None,
-    send_recv_ranks: Optional[list[int]] = None,
-    group: Optional[dist.ProcessGroup] = None,
+    direction: int | None = None,
+    send_recv_ranks: list[int] | None = None,
+    group: dist.ProcessGroup | None = None,
     async_op: bool = True,
-    group_size: Optional[int] = None,
+    group_size: int | None = None,
     *args: Any,
     **kwargs: Any,
-) -> tuple[torch.Tensor, Optional[dist.Work]]:
+) -> tuple[torch.Tensor, dist.Work | None]:
     """Send data to a neighbor process using all-to-all.
 
     Parameters
@@ -336,15 +337,15 @@ class _BatchWork:
 def comm_1d_p2p(
     data: torch.Tensor,
     buffer: torch.Tensor,
-    direction: Optional[int] = None,
-    send_recv_ranks: Optional[list[int]] = None,
-    group: Optional[dist.ProcessGroup] = None,
+    direction: int | None = None,
+    send_recv_ranks: list[int] | None = None,
+    group: dist.ProcessGroup | None = None,
     async_op: bool = True,
     tag: int = 0,
-    group_size: Optional[int] = None,
+    group_size: int | None = None,
     *args: Any,
     **kwargs: Any,
-) -> tuple[torch.Tensor, Optional[dist.Work]]:
+) -> tuple[torch.Tensor, dist.Work | None]:
     """Send data to a neighbor process using P2P communication.
 
     Parameters
@@ -411,7 +412,7 @@ def comm_broadcast(
     async_op: bool = True,
     *args: Any,
     **kwargs: Any,
-) -> tuple[torch.Tensor, Optional[dist.Work]]:
+) -> tuple[torch.Tensor, dist.Work | None]:
     """Broadcast data from a source rank.
 
     Parameters

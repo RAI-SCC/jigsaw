@@ -1,6 +1,7 @@
 """Kernel selection for the distributed transpose convolution."""
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -94,7 +95,7 @@ class ConvTransposeNdConfig(VmapConfig):
             out_dims=(0, 0, None),  # type: ignore[arg-type]
         )
 
-    def _grad_bias_selection(self, bias: Optional[torch.Tensor]) -> Callable:
+    def _grad_bias_selection(self, bias: torch.Tensor | None) -> Callable:
         """Select the grad-bias function."""
         if bias is None:
             return self._no_bias

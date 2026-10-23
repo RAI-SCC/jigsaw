@@ -7,7 +7,7 @@ Each provider implements one communication strategy through the hooks ``get``,
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional, cast
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -78,7 +78,7 @@ class _ForwardChunkProvider(ABC):
         self.x_j = x
         self.kv_j, self.kj, self.vj = self.kv, k, v
 
-        self.chunks_to_save: list[Optional[torch.Tensor]]
+        self.chunks_to_save: list[torch.Tensor | None]
         if ring_config.save_scope == SaveScope.GLOBAL:
             # Filled per-step, indexed by global chunk id so the backward
             # `_GlobalChunkProvider` (a plain `chunks[step]` lookup) sees
@@ -129,7 +129,7 @@ class _ForwardChunkProvider(ABC):
         """
         return
 
-    def result(self) -> tuple[Optional[torch.Tensor], ...]:
+    def result(self) -> tuple[torch.Tensor | None, ...]:
         """Return the chunks saved for the backward pass."""
         return tuple(self.chunks_to_save)
 
@@ -247,7 +247,7 @@ class _BroadcastForwardChunkProvider(_ForwardChunkProvider):
         """Initialize the broadcast state."""
         super().__init__(*args)  # type: ignore[arg-type]
         self._recv_buf: torch.Tensor = get_empty(self.q.device, self.q.dtype)
-        self._handle: Optional[dist.Work] = None
+        self._handle: dist.Work | None = None
 
     def _kick(self, src_rank: int) -> None:
         """Start the broadcast of the chunk of ``src_rank``."""
@@ -313,8 +313,8 @@ class _HybridForwardChunkProvider(_ForwardChunkProvider):
             self.topo.inter_group_peer(-1),
             self.topo.inter_group_peer(1),
         ]
-        self._inter_recv_buf: Optional[torch.Tensor] = None
-        self._inter_handle: Optional[dist.Work] = None
+        self._inter_recv_buf: torch.Tensor | None = None
+        self._inter_handle: dist.Work | None = None
 
     def _launch_inter_forward(self, group_step: int) -> None:
         """Start this round's outer-ring send of the chunk in hand.
@@ -354,8 +354,8 @@ class _HybridP2PForwardChunkProvider(_HybridForwardChunkProvider):
             self.topo.intra_group_peer(-1),
             self.topo.intra_group_peer(1),
         ]
-        self._intra_recv_buf: Optional[torch.Tensor] = None
-        self._intra_handle: Optional[dist.Work] = None
+        self._intra_recv_buf: torch.Tensor | None = None
+        self._intra_handle: dist.Work | None = None
 
     def _launch_intra_forward(self, inner: int) -> None:
         """Start the intra-group send of the current chunk."""
@@ -450,9 +450,9 @@ class _HybridP2PForwardChunkProviderOverlap(_HybridP2PForwardChunkProvider):
         """Prefetch this round's outer-ring send on the comm stream."""
         src = self.x_j if self.send_x else self.kv_j
 
-        def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
+        def produce(buf: torch.Tensor) -> tuple[torch.Tensor, dist.Work | None]:
             return cast(
-                "tuple[torch.Tensor, Optional[dist.Work]]",
+                "tuple[torch.Tensor, dist.Work | None]",
                 self.config.p2p_fn(
                     data=src,
                     buffer=buf,
@@ -469,9 +469,9 @@ class _HybridP2PForwardChunkProviderOverlap(_HybridP2PForwardChunkProvider):
         """Prefetch this step's intra-group send on the comm stream."""
         src = self.x_j if self.send_x else self.kv_j
 
-        def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
+        def produce(buf: torch.Tensor) -> tuple[torch.Tensor, dist.Work | None]:
             return cast(
-                "tuple[torch.Tensor, Optional[dist.Work]]",
+                "tuple[torch.Tensor, dist.Work | None]",
                 self.config.send_op_fn(
                     src,
                     buf,
@@ -519,8 +519,8 @@ class _HybridBroadcastForwardChunkProvider(_HybridForwardChunkProvider):
         super().__init__(*args)  # type: ignore[arg-type]
         self._intra_group = self.topo.intra_group
         # The chunk this rank contributes to the current round.
-        self._own_kv: Optional[torch.Tensor] = None
-        self._own_buf: Optional[torch.Tensor] = None
+        self._own_kv: torch.Tensor | None = None
+        self._own_buf: torch.Tensor | None = None
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Broadcast the chunk of ``step`` and return its key and value.
@@ -603,9 +603,9 @@ class _HybridBroadcastForwardChunkProviderOverlap(_HybridBroadcastForwardChunkPr
         """Prefetch this round's outer-ring send on the comm stream."""
         src = self.x_j if self.send_x else self.kv_j
 
-        def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
+        def produce(buf: torch.Tensor) -> tuple[torch.Tensor, dist.Work | None]:
             return cast(
-                "tuple[torch.Tensor, Optional[dist.Work]]",
+                "tuple[torch.Tensor, dist.Work | None]",
                 self.config.p2p_fn(
                     data=src,
                     buffer=buf,
@@ -624,7 +624,7 @@ class _HybridBroadcastForwardChunkProviderOverlap(_HybridBroadcastForwardChunkPr
         own = self._own_buf
         assert own is not None
 
-        def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
+        def produce(buf: torch.Tensor) -> tuple[torch.Tensor, dist.Work | None]:
             if is_src:
                 # Broadcast reads the source's own tensor in place; the
                 # persistent buffer has to hold that content before the

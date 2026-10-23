@@ -1,6 +1,6 @@
 """Distributed semantic-segmentation metrics based on a confusion matrix."""
 
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 import torch
 import torch.distributed as dist
@@ -15,11 +15,11 @@ def distributed_confusion_matrix(
     target: torch.Tensor,
     num_classes: int,
     *,
-    ignore_index: Optional[int] = None,
+    ignore_index: int | None = None,
     dim: int = 1,
-    channel_group: Optional[dist.ProcessGroup] = None,
+    channel_group: dist.ProcessGroup | None = None,
     reduce_groups: GroupsArg = None,
-    pred_is_logits: Optional[bool] = None,
+    pred_is_logits: bool | None = None,
 ) -> torch.Tensor:
     """Compute the confusion matrix of a sharded prediction.
 
@@ -107,7 +107,7 @@ def _ratio(numerator: torch.Tensor, denominator: torch.Tensor) -> torch.Tensor:
 def confusion_to_metrics(
     confusion: torch.Tensor,
     *,
-    exclude: Optional[Sequence[int]] = None,
+    exclude: Sequence[int] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Derive segmentation metrics from a confusion matrix.
 
@@ -199,12 +199,12 @@ class DistributedSegmentationMetrics(torch.nn.Module):
     def __init__(
         self,
         num_classes: int,
-        channel_group: Optional[dist.ProcessGroup] = None,
+        channel_group: dist.ProcessGroup | None = None,
         reduce_groups: GroupsArg = None,
         *,
-        ignore_index: Optional[int] = None,
+        ignore_index: int | None = None,
         dim: int = 1,
-        exclude: Optional[Sequence[int]] = None,
+        exclude: Sequence[int] | None = None,
     ) -> None:
         """Initialize the accumulator."""
         super().__init__()

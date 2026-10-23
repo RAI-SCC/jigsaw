@@ -1,7 +1,6 @@
 """Normalization of constructor arguments."""
 
-from collections.abc import Sequence
-from typing import Callable, Optional
+from collections.abc import Callable, Sequence
 
 import torch.distributed as dist
 
@@ -23,9 +22,9 @@ def _ntuple(n: int) -> Callable[[int | tuple[int, ...]], tuple[int, ...]]:
 
 
 def _as_spatial_groups(
-    spatial_group: "dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]]",
+    spatial_group: "dist.ProcessGroup | Sequence[dist.ProcessGroup | None]",
     n_spatial: int,
-) -> tuple[Optional[dist.ProcessGroup], ...]:
+) -> tuple[dist.ProcessGroup | None, ...]:
     """Convert ``spatial_group`` to a tuple with one entry per spatial axis.
 
     A single group splits the last axis only. ``None`` or a group of size 1

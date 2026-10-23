@@ -1,7 +1,7 @@
 """Distributed linear layers and matmul modules."""
 
 import math
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
@@ -62,7 +62,7 @@ class DistributedLinear(torch.nn.Module):
         row_group: dist.ProcessGroup,
         col_group: dist.ProcessGroup,
         bias: bool = True,
-        config: Optional[LinearConfig] = None,
+        config: LinearConfig | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         """Initialize the layer."""
@@ -321,7 +321,7 @@ class DistributedLinear(torch.nn.Module):
         row_kw: str = "row",
         col_kw: str = "col",
         model_kw: str = "model",
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Merge the sharded weight and bias into global tensors.
 
         Parameters
@@ -469,8 +469,8 @@ class _DistributedMatMul(torch.nn.Module):
         self,
         local_rank: int,
         device: torch.device,
-        model_group: Optional[dist.ProcessGroup],
-        config: Optional[LinearConfig] = None,
+        model_group: dist.ProcessGroup | None,
+        config: LinearConfig | None = None,
     ) -> None:
         """Initialize the module.
 

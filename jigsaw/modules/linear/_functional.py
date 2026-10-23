@@ -1,6 +1,6 @@
 """Autograd functions of the distributed linear layers."""
 
-from typing import Any, Optional, Protocol, cast
+from typing import Any, Protocol, cast
 
 import torch
 import torch.distributed as dist
@@ -15,13 +15,13 @@ from ._config import LinearConfig
 class LinearCtx(Protocol):
     """Attributes stored on the autograd context."""
 
-    saved_tensors: tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]
+    saved_tensors: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
     local_rank: int
     device: torch.Tensor
     config: LinearConfig
     model_group: dist.ProcessGroup
     spatial_group: dist.ProcessGroup
-    b: Optional[Parameter]
+    b: Parameter | None
 
 
 def _setup_linear_ctx(ctx: torch.autograd.function.FunctionCtx, inputs: Any) -> None:
@@ -39,15 +39,15 @@ def _setup_linear_ctx(ctx: torch.autograd.function.FunctionCtx, inputs: Any) -> 
 def _linear_vmap(
     fn: Any,
     info: Any,
-    in_dims: tuple[Optional[int], ...],
+    in_dims: tuple[int | None, ...],
     x: torch.Tensor,
     w: torch.Tensor,
-    b: Optional[torch.Tensor],
+    b: torch.Tensor | None,
     local_rank: int,
     device: torch.device,
     config: LinearConfig,
     model_group: dist.ProcessGroup,
-) -> tuple[torch.Tensor, Optional[int]]:
+) -> tuple[torch.Tensor, int | None]:
     """Batching rule shared by :class:`_XWT`, :class:`_XW` and :class:`_XTW`.
 
     Makes one un-vmapped ``fn`` call with the vmapped axis as a leading batch
@@ -98,7 +98,7 @@ class _XWT(torch.autograd.Function):
     def forward(
         x: torch.Tensor,
         w: torch.Tensor,
-        b: Optional[torch.Tensor],
+        b: torch.Tensor | None,
         local_rank: int,
         device: torch.device,
         config: LinearConfig,
@@ -150,9 +150,7 @@ class _XWT(torch.autograd.Function):
     @staticmethod
     def backward(
         ctx: LinearCtx, grad_output: torch.Tensor
-    ) -> tuple[
-        torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None, None
-    ]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None, None, None, None]:
         """Compute the gradients of the linear operation.
 
         Parameters
@@ -197,9 +195,9 @@ class _XWT(torch.autograd.Function):
     @staticmethod
     def vmap(
         info: Any,
-        in_dims: tuple[Optional[int], ...],
+        in_dims: tuple[int | None, ...],
         *args: Any,
-    ) -> tuple[torch.Tensor, Optional[int]]:
+    ) -> tuple[torch.Tensor, int | None]:
         """Batching rule for ``torch.vmap``."""
         return _linear_vmap(_XWT.apply, info, in_dims, *args)
 
@@ -211,7 +209,7 @@ class _XW(torch.autograd.Function):
     def forward(
         x: torch.Tensor,
         w: torch.Tensor,
-        b: Optional[torch.Tensor],
+        b: torch.Tensor | None,
         local_rank: int,
         device: torch.device,
         config: LinearConfig,
@@ -260,9 +258,7 @@ class _XW(torch.autograd.Function):
     @staticmethod
     def backward(
         ctx: LinearCtx, grad_output: torch.Tensor
-    ) -> tuple[
-        torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None, None
-    ]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None, None, None, None]:
         """Compute the gradients of the linear operation.
 
         Parameters
@@ -309,9 +305,9 @@ class _XW(torch.autograd.Function):
     @staticmethod
     def vmap(
         info: Any,
-        in_dims: tuple[Optional[int], ...],
+        in_dims: tuple[int | None, ...],
         *args: Any,
-    ) -> tuple[torch.Tensor, Optional[int]]:
+    ) -> tuple[torch.Tensor, int | None]:
         """Batching rule for ``torch.vmap``."""
         return _linear_vmap(_XW.apply, info, in_dims, *args)
 
@@ -323,7 +319,7 @@ class _XTW(torch.autograd.Function):
     def forward(
         x: torch.Tensor,
         w: torch.Tensor,
-        b: Optional[torch.Tensor],
+        b: torch.Tensor | None,
         local_rank: int,
         device: torch.device,
         config: LinearConfig,
@@ -372,9 +368,7 @@ class _XTW(torch.autograd.Function):
     @staticmethod
     def backward(
         ctx: LinearCtx, grad_output: torch.Tensor
-    ) -> tuple[
-        torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None, None, None
-    ]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None, None, None, None]:
         """Compute the gradients of the linear operation.
 
         Parameters
@@ -421,8 +415,8 @@ class _XTW(torch.autograd.Function):
     @staticmethod
     def vmap(
         info: Any,
-        in_dims: tuple[Optional[int], ...],
+        in_dims: tuple[int | None, ...],
         *args: Any,
-    ) -> tuple[torch.Tensor, Optional[int]]:
+    ) -> tuple[torch.Tensor, int | None]:
         """Batching rule for ``torch.vmap``."""
         return _linear_vmap(_XTW.apply, info, in_dims, *args)

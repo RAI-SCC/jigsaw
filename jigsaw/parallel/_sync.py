@@ -1,7 +1,7 @@
 """In-graph gradient synchronization of replicated parameters."""
 
 import os
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
@@ -47,8 +47,8 @@ class _SyncGrad(torch.autograd.Function):
 
     @staticmethod
     def vmap(
-        info: Any, in_dims: tuple[Optional[int], ...], groups: Groups, *tensors: Any
-    ) -> tuple[tuple[torch.Tensor, ...], tuple[Optional[int], ...]]:
+        info: Any, in_dims: tuple[int | None, ...], groups: Groups, *tensors: Any
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[int | None, ...]]:
         """Batching rule: the reduction is elementwise, so reduce the whole batch."""
         return _SyncGrad.apply(groups, *tensors), tuple(in_dims[1:])
 
@@ -77,13 +77,13 @@ class _ScaleGrad(torch.autograd.Function):
 
     @staticmethod
     def vmap(
-        info: Any, in_dims: tuple[Optional[int], ...], factor: float, *tensors: Any
-    ) -> tuple[tuple[torch.Tensor, ...], tuple[Optional[int], ...]]:
+        info: Any, in_dims: tuple[int | None, ...], factor: float, *tensors: Any
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[int | None, ...]]:
         """Batching rule: the scaling is elementwise, so scale the whole batch."""
         return _ScaleGrad.apply(factor, *tensors), tuple(in_dims[1:])
 
 
-def sync_grad(*tensors: Optional[torch.Tensor]) -> tuple[Optional[torch.Tensor], ...]:
+def sync_grad(*tensors: torch.Tensor | None) -> tuple[torch.Tensor | None, ...]:
     """Route marked parameters through an in-graph gradient all-reduce.
 
     Unmarked tensors, ``None`` and tensors not requiring grad pass through
@@ -110,7 +110,7 @@ def sync_grad(*tensors: Optional[torch.Tensor]) -> tuple[Optional[torch.Tensor],
     # Joint-hook state of the DDP whose forward is running, if any.
     joint = active_joint_state()
     # (groups, dtype, joint state if only scaled) -> indices
-    buckets: "dict[tuple[Groups, torch.dtype, Optional[JointCommHookState]], list[int]]"
+    buckets: dict[tuple[Groups, torch.dtype, JointCommHookState | None], list[int]]
     # Each bucket becomes one autograd node, e.g. a conv or layer norm's weight and bias.
     buckets = {}
     for i, t in enumerate(tensors):

@@ -6,8 +6,6 @@ reference built from the module's own weights, composition with a
 channel-sharded ``qkv``, and the construction guards.
 """
 
-from typing import Optional
-
 import pytest
 import torch
 import torch.distributed as dist
@@ -178,7 +176,7 @@ class TestUlyssesAttention:
         device: torch.device,
         process_mesh_dict_4x1: dict,
         attn_backend: str,
-        variant: Optional[str],
+        variant: str | None,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Forward and input-gradient parity vs a gathered-sequence dense run.

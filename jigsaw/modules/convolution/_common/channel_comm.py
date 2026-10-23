@@ -1,6 +1,6 @@
 """Channel-parallel primitives of the convolution kernels."""
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
@@ -15,7 +15,7 @@ ConvFn = Callable[..., torch.Tensor]
 
 # The send of one ring step: ``fn(data, buffer, direction=, group=, async_op=) ->
 # (recv_buffer, wait_handle)``. Satisfied by ``comm_1d_p2p`` / ``comm_1d_alltoall``.
-_HopFn = Callable[..., tuple[torch.Tensor, Optional[dist.Work]]]
+_HopFn = Callable[..., tuple[torch.Tensor, dist.Work | None]]
 
 # The per-step send behind each streaming ``channel_comm``.
 _CHANNEL_HOP_FNS: dict[str, _HopFn] = {

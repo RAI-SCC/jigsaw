@@ -6,8 +6,6 @@ which return the log-sum-exp needed by the ring.
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 
 
@@ -22,10 +20,10 @@ def forward(
     v: torch.Tensor,
     scale: float,
     dropout_p: float,
-    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
+    seed: int | None = None,  # noqa: ARG001 - unused, interface parity (see .math)
     *,
     layout: str = "bhsd",
-) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Compute flash attention.
 
     Parameters
@@ -98,8 +96,8 @@ def backward(
     max_q: float,
     max_k: float,
     dropout_p: float = 0.0,
-    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see .math)
-    rng_state: Optional[torch.Tensor] = None,
+    seed: int | None = None,  # noqa: ARG001 - unused, interface parity (see .math)
+    rng_state: torch.Tensor | None = None,
     layout: str = "bhsd",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute the flash-attention gradients.

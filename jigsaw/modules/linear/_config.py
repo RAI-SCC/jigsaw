@@ -1,6 +1,6 @@
 """Kernel selection for the distributed linear layers."""
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
@@ -41,7 +41,7 @@ class LinearConfig(VmapConfig):
 
     def __init__(
         self,
-        model_group: Optional[dist.ProcessGroup],
+        model_group: dist.ProcessGroup | None,
         *,
         linear_layer: bool = True,
         device: torch.device = torch.device("cuda"),

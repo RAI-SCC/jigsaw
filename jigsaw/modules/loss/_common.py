@@ -4,16 +4,17 @@ The class dimension of a classification input is sharded across a
 ``channel_group`` and the remaining dimensions across ``reduce_groups``.
 """
 
-from typing import Any, Optional, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import torch
 import torch.distributed as dist
 
-Groups = tuple[Optional[dist.ProcessGroup], ...]
-GroupsArg = Optional[Sequence[Optional[dist.ProcessGroup]] | dist.ProcessGroup]
+Groups = tuple[dist.ProcessGroup | None, ...]
+GroupsArg = Sequence[dist.ProcessGroup | None] | dist.ProcessGroup | None
 
 
-def _active(group: Optional[dist.ProcessGroup]) -> bool:
+def _active(group: dist.ProcessGroup | None) -> bool:
     """Return whether ``group`` spans more than one rank."""
     return group is not None and group.size() > 1
 
@@ -27,12 +28,12 @@ def _normalize_groups(groups: GroupsArg) -> Groups:
     return tuple(groups)
 
 
-def _group_size(group: Optional[dist.ProcessGroup]) -> int:
+def _group_size(group: dist.ProcessGroup | None) -> int:
     """Return the size of ``group``, or ``1`` if it is ``None``."""
     return 1 if group is None else group.size()
 
 
-def _group_rank(group: Optional[dist.ProcessGroup]) -> int:
+def _group_rank(group: dist.ProcessGroup | None) -> int:
     """Return the rank in ``group``, or ``0`` if it is ``None``."""
     return 0 if group is None else group.rank()
 
@@ -68,10 +69,10 @@ class _RedundantAllReduce(torch.autograd.Function):
     @staticmethod
     def vmap(
         info: Any,
-        in_dims: tuple[Optional[int], ...],
+        in_dims: tuple[int | None, ...],
         x: torch.Tensor,
         groups: Groups,
-    ) -> tuple[torch.Tensor, Optional[int]]:
+    ) -> tuple[torch.Tensor, int | None]:
         """Batching rule for ``torch.vmap``."""
         return _RedundantAllReduce.apply(x, groups), in_dims[0]
 
@@ -151,7 +152,7 @@ def reduce_scalar_loss(
 
 def reduce_loss(
     per_element: torch.Tensor,
-    denominator: Optional[torch.Tensor],
+    denominator: torch.Tensor | None,
     reduction: str,
     reduce_groups: Groups,
 ) -> torch.Tensor:

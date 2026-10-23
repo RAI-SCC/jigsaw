@@ -1,6 +1,7 @@
 """Autograd functions of the distributed normalization layers."""
 
-from typing import Any, Optional, Protocol, Sequence
+from collections.abc import Sequence
+from typing import Any, Protocol
 
 import torch
 import torch.distributed as dist
@@ -16,7 +17,7 @@ class _LayerNorm(torch.autograd.Function):
     def forward(
         x: torch.Tensor,
         weight: torch.Tensor,
-        bias: Optional[torch.Tensor],
+        bias: torch.Tensor | None,
         channel_group: dist.ProcessGroup,
         eps: float,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -76,13 +77,13 @@ class _LayerNorm(torch.autograd.Function):
     @staticmethod
     def vmap(
         info: Any,
-        in_dims: tuple[Optional[int], ...],
+        in_dims: tuple[int | None, ...],
         x: torch.Tensor,
         weight: torch.Tensor,
-        bias: Optional[torch.Tensor],
+        bias: torch.Tensor | None,
         channel_group: dist.ProcessGroup,
         eps: float,
-    ) -> tuple[tuple[torch.Tensor, ...], tuple[Optional[int], ...]]:
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[int | None, ...]]:
         """Batching rule for ``torch.vmap``.
 
         The vmapped axis of ``x`` is moved to the front; the normalization is
@@ -111,7 +112,7 @@ class _LayerNorm(torch.autograd.Function):
         x_norm_grad: None,
         weight_grad: None,
         var_grad: None,
-    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None, None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None, None]:
         """Compute the gradients of the distributed LayerNorm.
 
         The weight and bias gradients are local; the layer sums them over its
@@ -242,7 +243,7 @@ class _LayerNormNoAffine(torch.autograd.Function):
     @staticmethod
     def vmap(
         info: Any,
-        in_dims: tuple[Optional[int], ...],
+        in_dims: tuple[int | None, ...],
         x: torch.Tensor,
         channel_group: dist.ProcessGroup,
         eps: float,
@@ -320,8 +321,8 @@ class _GroupNorm(torch.autograd.Function):
     def forward(
         x: torch.Tensor,
         num_groups: int,
-        weight: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor],
+        weight: torch.Tensor | None,
+        bias: torch.Tensor | None,
         spatial_groups: Sequence[dist.ProcessGroup],
         eps: float,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -405,8 +406,8 @@ class _GroupNorm(torch.autograd.Function):
     ) -> tuple[
         torch.Tensor,
         None,
-        Optional[torch.Tensor],
-        Optional[torch.Tensor],
+        torch.Tensor | None,
+        torch.Tensor | None,
         None,
         None,
     ]:

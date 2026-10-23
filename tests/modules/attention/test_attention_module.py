@@ -13,8 +13,6 @@ By default the ring recomputes K/V as ``x @ w_qkv.mT`` on the local shard, which
 right when the channel axis is not split, so it then requires a channel group of size 1.
 """
 
-from typing import Optional
-
 import pytest
 import torch
 import torch.distributed as dist
@@ -195,7 +193,7 @@ class TestDistributedAttentionPaths:
         device: torch.device,
         process_mesh_dict_2x1x2: dict,
         attn_backend: str,
-        variant: Optional[str],
+        variant: str | None,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Channel-only split (no ring), every backend/kernel variant, matches a serial reference.

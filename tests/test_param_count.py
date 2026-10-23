@@ -15,7 +15,7 @@ replica-group size (that parameter's gradient would also never be synced), a
 spurious one undercounts.
 """
 
-from typing import Callable
+from collections.abc import Callable
 
 import pytest
 import torch

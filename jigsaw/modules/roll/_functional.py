@@ -1,6 +1,6 @@
 """Autograd function of the distributed roll."""
 
-from typing import Any, Optional, Protocol, cast
+from typing import Any, Protocol, cast
 
 import torch
 import torch.distributed as dist
@@ -12,7 +12,7 @@ from ._config import RollConfig
 class RollCtx(Protocol):
     """Attributes stored on the autograd context."""
 
-    saved_tensors: tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]
+    saved_tensors: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
     local_rank: int
     shifts: tuple[int, ...]
     dims: tuple[int, ...]
@@ -119,7 +119,7 @@ class _Roll(torch.autograd.Function):
     @staticmethod
     def vmap(
         info: Any,
-        in_dims: tuple[Optional[int], ...],
+        in_dims: tuple[int | None, ...],
         x: torch.Tensor,
         shifts: tuple[int, ...],
         dims: tuple[int, ...],

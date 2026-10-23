@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 import torch.distributed as dist
 
@@ -72,8 +70,8 @@ def _attend_step(
     dropout_p: float,
     out: torch.Tensor,
     lse: torch.Tensor,
-    seed: Optional[int],
-) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    seed: int | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Attend to one chunk and merge it into the running output.
 
     Returns
@@ -117,7 +115,7 @@ def ring_forward(
     torch.Tensor,
     torch.Tensor,
     tuple[torch.Tensor | None, ...],
-    Optional[int],
+    int | None,
     tuple[torch.Tensor | None, ...],
 ]:
     """Run the forward pass of ring attention.
@@ -165,7 +163,7 @@ def ring_forward(
     )
 
     base_seed = _draw_base_seed(q.device) if dropout_p > 0.0 else None
-    rng_states: list[Optional[torch.Tensor]] = [None] * ring_group_size
+    rng_states: list[torch.Tensor | None] = [None] * ring_group_size
 
     for step in range(ring_group_size):
         kj, vj = provider.get(step)

@@ -26,8 +26,6 @@ memory-efficient (xFormers-derived) and cuDNN backends, which avoid materializin
   docstring in ``attention.py``.
 """
 
-from typing import Optional
-
 import pytest
 import torch
 import torch.distributed as dist
@@ -80,7 +78,7 @@ def _reference_core(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    attn_mask: Optional[torch.Tensor] = None,
+    attn_mask: torch.Tensor | None = None,
     **kwargs: torch.Tensor,
 ) -> torch.Tensor:
     """Naive softmax attention, computed in double precision.

@@ -1,6 +1,6 @@
 """Distributed LayerNorm."""
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -52,7 +52,7 @@ class DistributedLayerNorm(torch.nn.Module):
         eps: float = 1e-5,
         elementwise_affine: bool = True,
         bias: bool = True,
-        dtype: Optional[torch.dtype] = None,
+        dtype: torch.dtype | None = None,
     ) -> None:
         """Initialize the layer."""
         super().__init__()
@@ -191,7 +191,7 @@ class DistributedLayerNorm(torch.nn.Module):
         row_kw: str = "row",
         col_kw: str = "col",
         model_kw: str = "model",
-    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Merge the sharded weight and bias into global tensors.
 
         Parameters

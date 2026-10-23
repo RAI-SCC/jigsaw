@@ -9,18 +9,18 @@ these helpers apply its dtype policy explicitly.
 
 from __future__ import annotations
 
-from typing import Optional, TypeVar, overload
+from typing import TypeVar, overload
 
 import torch
 
-_T0 = TypeVar("_T0", bound=Optional[torch.Tensor])
-_T1 = TypeVar("_T1", bound=Optional[torch.Tensor])
-_T2 = TypeVar("_T2", bound=Optional[torch.Tensor])
+_T0 = TypeVar("_T0", bound=torch.Tensor | None)
+_T1 = TypeVar("_T1", bound=torch.Tensor | None)
+_T2 = TypeVar("_T2", bound=torch.Tensor | None)
 
 
 def _reference_device_type(
-    tensors: tuple[Optional[torch.Tensor], ...],
-) -> Optional[str]:
+    tensors: tuple[torch.Tensor | None, ...],
+) -> str | None:
     """Device type of the first non-``None`` tensor, or ``None`` if there is none."""
     for t in tensors:
         if t is not None:
@@ -41,8 +41,8 @@ def cast_to_autocast_dtype(
 
 
 def cast_to_autocast_dtype(
-    *tensors: Optional[torch.Tensor],
-) -> tuple[Optional[torch.Tensor], ...]:
+    *tensors: torch.Tensor | None,
+) -> tuple[torch.Tensor | None, ...]:
     """Cast tensors to the active autocast dtype.
 
     ``None`` entries are preserved. Tensors pass through unchanged when autocast
@@ -80,8 +80,8 @@ def promote_to_fp32_under_autocast(  # numpydoc ignore=GL08
 
 
 def promote_to_fp32_under_autocast(
-    *tensors: Optional[torch.Tensor],
-) -> tuple[Optional[torch.Tensor], ...]:
+    *tensors: torch.Tensor | None,
+) -> tuple[torch.Tensor | None, ...]:
     """Promote tensors to at least fp32 while autocast is active.
 
     fp16 and bf16 tensors are cast to fp32, wider dtypes and ``None`` are kept.

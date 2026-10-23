@@ -1,6 +1,6 @@
 """Kernel selection for the distributed roll."""
 
-from typing import Callable
+from collections.abc import Callable
 
 import torch
 

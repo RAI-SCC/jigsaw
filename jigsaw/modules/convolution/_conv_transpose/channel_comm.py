@@ -5,7 +5,8 @@ reduction is applied to the accumulated output through ``post_fn``, and the bias
 is added afterwards.
 """
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -38,13 +39,13 @@ def _bias_view(b: torch.Tensor, n_spatial_dims: int) -> torch.Tensor:
 def _over_channels_all_gather(
     x: torch.Tensor,
     w: torch.Tensor,
-    b: Optional[torch.Tensor],
+    b: torch.Tensor | None,
     conv_kwargs: dict[str, Any],
     channel_group: dist.ProcessGroup,
     conv_func: ConvTransposeFn,
     channel_dim: int,
     n_spatial_dims: int,
-    post_fn: Optional[PostFn],
+    post_fn: PostFn | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Gather all channel slices, then apply the transpose convolution once.
 
@@ -66,14 +67,14 @@ def _over_channels_all_gather(
 def _over_channels_streaming(
     x: torch.Tensor,
     w: torch.Tensor,
-    b: Optional[torch.Tensor],
+    b: torch.Tensor | None,
     conv_kwargs: dict[str, Any],
     channel_group: dist.ProcessGroup,
     conv_func: ConvTransposeFn,
     channel_dim: int,
     in_dim: int,
     n_spatial_dims: int,
-    post_fn: Optional[PostFn],
+    post_fn: PostFn | None,
     hop_fn: _HopFn,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Circulate the channel slices in a ring and apply the transpose convolution to each.
@@ -146,11 +147,11 @@ def _over_channels_streaming(
 def _over_channels_local(
     x: torch.Tensor,
     w: torch.Tensor,
-    b: Optional[torch.Tensor],
+    b: torch.Tensor | None,
     conv_kwargs: dict[str, Any],
     conv_func: ConvTransposeFn,
     n_spatial_dims: int,
-    post_fn: Optional[PostFn],
+    post_fn: PostFn | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply the transpose convolution to the local channel shard without communication.
 
@@ -173,14 +174,14 @@ def _over_channels_local(
 def over_channels_transpose(
     x: torch.Tensor,
     w: torch.Tensor,
-    b: Optional[torch.Tensor],
+    b: torch.Tensor | None,
     conv_kwargs: dict[str, Any],
     *,
     channel_group: dist.ProcessGroup,
     conv_func: ConvTransposeFn,
     n_spatial_dims: int,
     channel_comm: str,
-    post_fn: Optional[PostFn] = None,
+    post_fn: PostFn | None = None,
     local: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply the transpose convolution over the channel-parallel group.

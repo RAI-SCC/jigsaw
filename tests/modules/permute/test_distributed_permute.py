@@ -1,6 +1,6 @@
 """Distributed transpose kernels against a serial permute operation."""
 
-from typing import Callable
+from collections.abc import Callable
 
 import pytest
 import torch
