@@ -11,19 +11,29 @@ CPU, CUDA = torch.device("cpu"), torch.device("cuda")
 WAYS = {2: "twoway", 4: "fourway", 8: "eightway"}
 
 
-def _config(parallelism=1, linear_layer=True, device=CPU):
-    return LinearConfig(parallelism, linear_layer=linear_layer, device=device)
+class _Group:
+    """Stand-in for a process group; kernel selection only reads its size."""
+
+    def __init__(self, size):
+        self._size = size
+
+    def size(self):
+        return self._size
+
+
+def _config(size=1, linear_layer=True, device=CPU):
+    return LinearConfig(_Group(size), linear_layer=linear_layer, device=device)
 
 
 class TestMatmulKernelSelection:
     @pytest.mark.parametrize(
         "dev, module", [(CPU, dist_mm_p2p), (CUDA, dist_mm)], ids=["cpu", "cuda"]
     )
-    @pytest.mark.parametrize("parallelism, way", WAYS.items())
+    @pytest.mark.parametrize("size, way", WAYS.items())
     def test_distributed_kernels_come_from_the_device_backend(
-        self, dev, module, parallelism, way
+        self, dev, module, size, way
     ):
-        xwt, xw, xtw, fused = _config(parallelism, device=dev).mm_kernels
+        xwt, xw, xtw, fused = _config(size, device=dev).mm_kernels
         assert xwt is getattr(module, f"xw_transpose_{way}")
         assert xw is getattr(module, f"xw_{way}")
         assert xtw is getattr(module, f"x_transpose_w_{way}")
@@ -41,15 +51,19 @@ class TestMatmulKernelSelection:
         assert fused is dist_mm.fused_xw_xtw_oneway
 
     @pytest.mark.parametrize("dev", [CPU, CUDA], ids=["cpu", "cuda"])
-    @pytest.mark.parametrize("parallelism", [0, 3, 16])
-    def test_unsupported_parallelism_is_rejected(self, dev, parallelism):
-        with pytest.raises(ValueError, match="Unsupported parallelism"):
-            _config(parallelism, device=dev)
+    @pytest.mark.parametrize("size", [0, 3, 16])
+    def test_unsupported_model_group_size_is_rejected(self, dev, size):
+        with pytest.raises(ValueError, match="Unsupported model group size"):
+            _config(size, device=dev)
 
-    @pytest.mark.parametrize("parallelism", [1, 2])
-    def test_unsupported_device_is_rejected(self, parallelism):
+    def test_no_model_group_means_single_process(self):
+        cfg = LinearConfig(None, device=CPU)
+        assert cfg.mm_kernels[3] is dist_mm.fused_xw_xtw_oneway
+
+    @pytest.mark.parametrize("size", [1, 2])
+    def test_unsupported_device_is_rejected(self, size):
         with pytest.raises(ValueError, match="Unsupported device meta"):
-            _config(parallelism, device=torch.device("meta"))
+            _config(size, device=torch.device("meta"))
 
 
 class TestForVmap:

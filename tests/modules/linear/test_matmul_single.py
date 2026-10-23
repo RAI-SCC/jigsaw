@@ -41,7 +41,7 @@ OPS = {
 
 
 def _distributed(cls):
-    return cls(local_rank=0, device=CPU, parallelism=1, model_group=None)
+    return cls(local_rank=0, device=CPU, model_group=None)
 
 
 def _operands(x_shape, w_shape):
@@ -101,4 +101,4 @@ class TestSingleProcessMatMul:
 
         converted = dist_cls.convert_to_jigsaw(plain_cls(), {"model": Group()}, CPU)
         assert isinstance(converted, dist_cls)
-        assert (converted.local_rank, converted.parallelism) == (0, 1)
+        assert (converted.local_rank, converted.model_group.size()) == (0, 1)
