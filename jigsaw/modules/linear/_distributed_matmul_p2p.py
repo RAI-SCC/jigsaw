@@ -10,7 +10,12 @@ from jigsaw._core.comm import resolve_matmul_dtype
 
 # mypy: disable-error-code="union-attr"
 
+# Every kernel is ``torch.compiler.disable``: dynamo cannot trace ``dist.isend``/
+# ``dist.irecv`` (``ProcessGroup.send`` is an opaque member), so under
+# ``torch.compile`` or compiled autograd the kernels graph-break and run eagerly.
 
+
+@torch.compiler.disable
 def fused_xw_xtw_twoway(
     grad_output: torch.Tensor,
     weight: torch.Tensor,
@@ -79,6 +84,7 @@ def fused_xw_xtw_twoway(
     return grad_input, grad_weight
 
 
+@torch.compiler.disable
 def xw_transpose_twoway(
     xij: torch.Tensor,
     wij: torch.Tensor,
@@ -144,6 +150,7 @@ def xw_transpose_twoway(
     return cij
 
 
+@torch.compiler.disable
 def xw_twoway(
     xij: torch.Tensor,
     wij: torch.Tensor,
@@ -198,6 +205,7 @@ def xw_twoway(
     return cij
 
 
+@torch.compiler.disable
 def x_transpose_w_twoway(
     xij: torch.Tensor,
     wij: torch.Tensor,
@@ -254,6 +262,7 @@ def x_transpose_w_twoway(
     return cij
 
 
+@torch.compiler.disable
 def xw_transpose_fourway(
     xij: torch.Tensor,
     wij: torch.Tensor,
@@ -379,6 +388,7 @@ def xw_transpose_fourway(
     return cij
 
 
+@torch.compiler.disable
 def xw_fourway(
     xij: torch.Tensor,
     wij: torch.Tensor,
@@ -463,6 +473,7 @@ def xw_fourway(
     return cij
 
 
+@torch.compiler.disable
 def fused_xw_xtw_fourway(
     grad_output: torch.Tensor,
     weight: torch.Tensor,
@@ -679,6 +690,7 @@ def fused_xw_xtw_fourway(
     return grad_input, grad_weight
 
 
+@torch.compiler.disable
 def x_transpose_w_fourway(
     xij: torch.Tensor,
     wij: torch.Tensor,
@@ -818,6 +830,7 @@ def x_transpose_w_fourway(
     return cij
 
 
+@torch.compiler.disable
 def xw_transpose_eightway(
     xij: torch.Tensor,
     wij: torch.Tensor,
@@ -1112,6 +1125,7 @@ def xw_transpose_eightway(
     return cij
 
 
+@torch.compiler.disable
 def xw_eightway(
     xij: torch.Tensor,
     wij: torch.Tensor,
@@ -1407,6 +1421,7 @@ def xw_eightway(
     return cij
 
 
+@torch.compiler.disable
 def x_transpose_w_eightway(
     xij: torch.Tensor,
     wij: torch.Tensor,
@@ -1852,6 +1867,7 @@ def x_transpose_w_eightway(
     return cij
 
 
+@torch.compiler.disable
 def fused_xw_xtw_eightway(
     grad_output: torch.Tensor,
     weight: torch.Tensor,
