@@ -925,7 +925,7 @@ def test_ring_autograd_function_matches_full_attention(
         device=device, intra_size=world, send_in_forward=config.SendForward.KV
     )
     out = ring._RingAttention.apply(
-        q, k, v, x, w_qkv, d**-0.5, 0.0, group, rank, ring_config
+        q, k, v, x, w_qkv, d**-0.5, 0.0, group, rank, ring_config, True
     )[0]
     out.backward(g_full[:, :, shard].contiguous())
 

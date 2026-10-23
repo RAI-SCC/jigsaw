@@ -22,6 +22,7 @@ class ConvTransposeNdCtx(Protocol):
     channel_group: dist.ProcessGroup
     config: ConvTransposeNdConfig
     saved_tensors: tuple[torch.Tensor, torch.Tensor]
+    needs_input_grad: tuple[bool, ...]
 
 
 class _ConvTransposeNd(torch.autograd.Function):
@@ -107,8 +108,8 @@ class _ConvTransposeNd(torch.autograd.Function):
         grad_output: torch.Tensor,
         grad_x_aug: None,
     ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
         torch.Tensor | None,
         None,
         None,
@@ -127,8 +128,11 @@ class _ConvTransposeNd(torch.autograd.Function):
         # precision ``grad_output`` is already reconciled to downstream).
         x_aug = x_aug.to(weight.dtype)
 
-        g_b = config.grad_bias(grad_output)
+        need_x, need_w, need_b = c.needs_input_grad[:3]
+        g_b = config.grad_bias(grad_output) if need_b else None
 
+        # needs_input_grad is the same on every rank (all ranks freeze the same
+        # parameters), so every rank skips the same collectives.
         g_x, g_w = config.dist_conv_transpose_backward_fn(
             grad_output,
             x_aug,
@@ -140,6 +144,7 @@ class _ConvTransposeNd(torch.autograd.Function):
             c.spatial_groups,
             c.channel_group,
             config,
+            need=(need_x, need_w),
         )
 
         return (

@@ -71,12 +71,42 @@ def _grad_input_weight_reduced(
     dilation: tuple[int, ...],
     channel_group: dist.ProcessGroup,
     config: Any,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    need: tuple[bool, bool] = (True, True),
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """Compute the input and weight gradients, reducing the input gradient over channels.
 
     The weight gradient is computed after the asynchronous reduction of the
-    input gradient is started, unless the model is vmapped.
+    input gradient is started, unless the model is vmapped. ``need`` selects
+    the input and weight gradients; one that is not needed is ``None``.
     """
+    need_x, need_w = need
+    if not need_x:
+        _, g_w = _grad_input_weight(
+            grad_output,
+            x_full,
+            weight,
+            stride,
+            padding,
+            dilation,
+            config,
+            output_mask=(False, True, False),
+        )
+        return None, g_w
+    if not need_w:
+        g_x, _ = _grad_input_weight(
+            grad_output,
+            x_full,
+            weight,
+            stride,
+            padding,
+            dilation,
+            config,
+            output_mask=(True, False, False),
+        )
+        g_x, handle = _channel_reduce_grad_input(g_x, channel_group, config)
+        if handle is not None:
+            handle.wait()
+        return g_x, None
     reduce_pending = channel_group.size() > 1 and not config.channel_local
     if reduce_pending and not config.vmapped:
         g_x, _ = _grad_input_weight(
@@ -192,7 +222,8 @@ def conv_transpose_nway_backward(
     spatial_groups: tuple[dist.ProcessGroup | None, ...],
     channel_group: dist.ProcessGroup,
     config: Any,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    need: tuple[bool, bool] = (True, True),
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """Compute the gradients of the transpose convolution without halo exchange.
 
     Delegates to :func:`conv_transpose_halo_nway_backward` if a split axis has
@@ -220,10 +251,13 @@ def conv_transpose_nway_backward(
         Process group splitting the channels.
     config : ConvTransposeNdConfig
         Kernel selection.
+    need : tuple[bool, bool]
+        Whether the input and the weight gradient are needed; a gradient
+        that is not needed is ``None`` and its communication is skipped.
 
     Returns
     -------
-    tuple[torch.Tensor, torch.Tensor]
+    tuple[torch.Tensor | None, torch.Tensor | None]
         Gradients of the input and the weight.
     """
     if _needs_halo(spatial_groups, padding, dilation):
@@ -238,10 +272,19 @@ def conv_transpose_nway_backward(
             spatial_groups,
             channel_group,
             config,
+            need,
         )
 
     return _grad_input_weight_reduced(
-        grad_output, x_aug, weight, stride, padding, dilation, channel_group, config
+        grad_output,
+        x_aug,
+        weight,
+        stride,
+        padding,
+        dilation,
+        channel_group,
+        config,
+        need,
     )
 
 
@@ -341,7 +384,8 @@ def conv_transpose_halo_nway_backward(
     spatial_groups: tuple[dist.ProcessGroup | None, ...],
     channel_group: dist.ProcessGroup,
     config: Any,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    need: tuple[bool, bool] = (True, True),
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """Compute the gradients of the transpose convolution with halo reduction.
 
     Parameters
@@ -366,10 +410,13 @@ def conv_transpose_halo_nway_backward(
         Process group splitting the channels.
     config : ConvTransposeNdConfig
         Kernel selection.
+    need : tuple[bool, bool]
+        Whether the input and the weight gradient are needed; a gradient
+        that is not needed is ``None`` and its communication is skipped.
 
     Returns
     -------
-    tuple[torch.Tensor, torch.Tensor]
+    tuple[torch.Tensor | None, torch.Tensor | None]
         Gradients of the input and the weight.
     """
     grad_raw = grad_output
@@ -394,4 +441,5 @@ def conv_transpose_halo_nway_backward(
         dilation,
         channel_group,
         config,
+        need,
     )

@@ -110,7 +110,8 @@ def conv_nway_backward(
     spatial_groups: tuple[dist.ProcessGroup | None, ...],
     channel_group: dist.ProcessGroup,
     config: Any,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    need: tuple[bool, bool] = (True, True),
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """Compute the gradients of the convolution without halo exchange.
 
     Delegates to :func:`conv_halo_nway_backward` if a split axis has padding or
@@ -138,10 +139,13 @@ def conv_nway_backward(
         Process group splitting the channels.
     config : ConvNdConfig
         Kernel selection.
+    need : tuple[bool, bool]
+        Whether the input and the weight gradient are needed; a gradient
+        that is not needed is ``None`` and its communication is skipped.
 
     Returns
     -------
-    tuple[torch.Tensor, torch.Tensor]
+    tuple[torch.Tensor | None, torch.Tensor | None]
         Gradients of the input and the weight.
     """
     if _needs_halo(spatial_groups, padding, dilation):
@@ -156,29 +160,33 @@ def conv_nway_backward(
             spatial_groups,
             channel_group,
             config,
+            need,
         )
 
-    g_x = config.conv_input_fn(
-        x_aug.shape[int(config.vmapped) :],
-        weight,
-        grad_output.to(weight.dtype),  # handles autocast
-        stride=stride,
-        padding=padding,
-        dilation=dilation,
-        groups=config.groups_local,
-    )
+    need_x, need_w = need
+    g_x = g_w = g_x_handle = None
+    if need_x:
+        g_x = config.conv_input_fn(
+            x_aug.shape[int(config.vmapped) :],
+            weight,
+            grad_output.to(weight.dtype),  # handles autocast
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=config.groups_local,
+        )
+        g_x, g_x_handle = _channel_reduce_grad_input(g_x, channel_group, config)
 
-    g_x, g_x_handle = _channel_reduce_grad_input(g_x, channel_group, config)
-
-    g_w = config.conv_weight_fn(
-        x_aug,
-        weight.shape[int(config.vmapped) :],
-        grad_output.to(weight.dtype),
-        stride=stride,
-        padding=padding,
-        dilation=dilation,
-        groups=config.groups_local,
-    )
+    if need_w:
+        g_w = config.conv_weight_fn(
+            x_aug,
+            weight.shape[int(config.vmapped) :],
+            grad_output.to(weight.dtype),
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=config.groups_local,
+        )
 
     if g_x_handle is not None:
         g_x_handle.wait()
@@ -287,7 +295,8 @@ def conv_halo_nway_backward(
     spatial_groups: tuple[dist.ProcessGroup | None, ...],
     channel_group: dist.ProcessGroup,
     config: Any,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    need: tuple[bool, bool] = (True, True),
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """Compute the gradients of the convolution with halo exchange.
 
     Parameters
@@ -312,35 +321,45 @@ def conv_halo_nway_backward(
         Process group splitting the channels.
     config : ConvNdConfig
         Kernel selection.
+    need : tuple[bool, bool]
+        Whether the input and the weight gradient are needed; a gradient
+        that is not needed is ``None`` and its communication is skipped.
 
     Returns
     -------
-    tuple[torch.Tensor, torch.Tensor]
+    tuple[torch.Tensor | None, torch.Tensor | None]
         Gradients of the input and the weight.
     """
     local_padding = _local_padding(padding, spatial_groups)
+    need_x, need_w = need
+    g_w = None
 
-    g_x_need = config.conv_input_fn(
-        x_aug.shape[int(config.vmapped) :],
-        weight,
-        grad_output.to(weight.dtype),  # handles autocast
-        stride=stride,
-        padding=local_padding,
-        dilation=dilation,
-        groups=config.groups_local,
-    ).contiguous()
+    if need_x:
+        g_x_need = config.conv_input_fn(
+            x_aug.shape[int(config.vmapped) :],
+            weight,
+            grad_output.to(weight.dtype),  # handles autocast
+            stride=stride,
+            padding=local_padding,
+            dilation=dilation,
+            groups=config.groups_local,
+        ).contiguous()
 
     # Enqueue grad-weight before the (spatial-group) halo exchange below so the
     # two overlap instead of running back to back.
-    g_w = config.conv_weight_fn(
-        x_aug,
-        weight.shape[int(config.vmapped) :],
-        grad_output.to(weight.dtype),
-        stride=stride,
-        padding=local_padding,
-        dilation=dilation,
-        groups=config.groups_local,
-    )
+    if need_w:
+        g_w = config.conv_weight_fn(
+            x_aug,
+            weight.shape[int(config.vmapped) :],
+            grad_output.to(weight.dtype),
+            stride=stride,
+            padding=local_padding,
+            dilation=dilation,
+            groups=config.groups_local,
+        )
+
+    if not need_x:
+        return None, g_w
 
     # Fold the halo-borrowed positions back onto their owners *before* the
     # channel-group reduce. halo_scatter_add (spatial groups) and the reduce

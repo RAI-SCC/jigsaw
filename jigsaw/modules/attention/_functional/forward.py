@@ -111,6 +111,7 @@ def ring_forward(
     local_rank: int,
     ring_group_size: int,
     ring_config: RingAttentionConfig,
+    save_chunks: bool = True,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -140,6 +141,9 @@ def ring_forward(
         Number of ranks in ``group``.
     ring_config : RingAttentionConfig
         Ring-attention configuration.
+    save_chunks : bool
+        Whether to keep chunks for the backward pass. ``False`` returns no
+        chunks.
 
     Returns
     -------
@@ -150,7 +154,7 @@ def ring_forward(
     # Build the provider first: the plain ring starts its first send here,
     # overlapping it with the setup below.
     provider = build_forward_chunk_provider(
-        ring_config, q, k, v, x, w_qkv, group, local_rank, ring_group_size
+        ring_config, q, k, v, x, w_qkv, group, local_rank, ring_group_size, save_chunks
     )
 
     # Accumulate in >= fp32; the fused backward kernels need an fp32 ``lse``.

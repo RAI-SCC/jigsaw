@@ -690,6 +690,7 @@ class DistributedAttention(torch.nn.Module):
             self.spatial_group,
             self.spatial_group.rank(),
             self.config,
+            torch.is_grad_enabled(),
         )[0]
         out = cast(torch.Tensor, out)
         return out
@@ -763,6 +764,7 @@ class DistributedAttention(torch.nn.Module):
                 self._uly_inter_group,
                 inter_rank,
                 self._uly_ring_cfg,
+                torch.is_grad_enabled(),
             )[0]
             out = cast(torch.Tensor, out)
             if layout == "bhsd":

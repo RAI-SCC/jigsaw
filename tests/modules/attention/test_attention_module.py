@@ -66,7 +66,7 @@ class TestRingAttentionFunction:
         q, k, v = project(x, w_qkv)
         scale = d**-0.5
         out = _RingAttention.apply(
-            q, k, v, x, w_qkv, scale, 0.0, ring, rank, ring_config
+            q, k, v, x, w_qkv, scale, 0.0, ring, rank, ring_config, True
         )[0]
         grad_out = torch.randn(BATCH, h, world * n_local, d, device=device)
         out.backward(grad_out[:, :, rank * n_local : (rank + 1) * n_local])
