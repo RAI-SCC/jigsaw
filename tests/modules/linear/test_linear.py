@@ -75,7 +75,6 @@ class TestForward:
     ) -> None:
         """Test single forward pass of a linear layer."""
         local_rank = dist.get_rank(group=process_mesh_dict_2x1x2["model"])
-        print(f"keys {process_mesh_dict_2x1x2.keys()}")
         torch.manual_seed(local_rank)  # same weights and data on both dp replicas
 
         # global

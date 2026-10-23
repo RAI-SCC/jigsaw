@@ -205,7 +205,6 @@ class TestRingAttention:
             send_backward=send_backward,
             offload=offloader,
         )
-        print(f"R{dist.get_rank()} config {ring_config}")
 
         ring_forward = forward.ring_forward
         local_rank = dist.get_rank(group=process_mesh_dict["row"])
