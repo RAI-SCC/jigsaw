@@ -147,14 +147,53 @@ class TestOneDAllToAll:
         assert call.inp[0] is data  # (2 + 1) % 3
 
 
-class TestOneDP2PValidation:
-    def test_requires_group(self):
-        with pytest.raises(ValueError, match="group is required"):
-            comm.comm_1d_p2p(torch.ones(1), torch.zeros(1), direction=1)
+P2P_1D_FNS = [comm.comm_1d_isend, comm.comm_1d_batch_isend_irecv]
 
-    def test_requires_direction_or_ranks(self):
+
+@pytest.mark.parametrize("fn", P2P_1D_FNS)
+class TestOneDP2PValidation:
+    def test_requires_group(self, fn):
+        with pytest.raises(ValueError, match="group is required"):
+            fn(torch.ones(1), torch.zeros(1), direction=1)
+
+    def test_requires_direction_or_ranks(self, fn):
         with pytest.raises(ValueError, match="direction is required"):
-            comm.comm_1d_p2p(torch.ones(1), torch.zeros(1), group=FakeGroup(0, 2))
+            fn(torch.ones(1), torch.zeros(1), group=FakeGroup(0, 2))
+
+
+class TestResolveCommOp:
+    cpu, cuda = torch.device("cpu"), torch.device("cuda")
+
+    def test_auto_picks_by_device(self):
+        assert comm.resolve_comm_op("auto", self.cuda) is comm.CommOp.ALL_TO_ALL
+        assert comm.resolve_comm_op("auto", self.cpu) is comm.CommOp.BATCH_ISEND_IRECV
+
+    @pytest.mark.parametrize("value", ["isend", "ISEND", comm.CommOp.ISEND])
+    def test_strings_in_any_case_and_members(self, value):
+        assert comm.resolve_comm_op(value, self.cpu) is comm.CommOp.ISEND
+
+    def test_all_to_all_off_cuda_is_rejected(self):
+        with pytest.raises(ValueError, match="needs CUDA"):
+            comm.resolve_comm_op("all_to_all", self.cpu)
+
+    def test_unknown_name_is_rejected(self):
+        with pytest.raises(ValueError, match="comm must be one of"):
+            comm.resolve_comm_op("p2p", self.cpu)
+
+    def test_unknown_device_is_rejected(self):
+        with pytest.raises(ValueError, match="Unsupported device meta"):
+            comm.resolve_comm_op("auto", torch.device("meta"))
+
+    @pytest.mark.parametrize(
+        "op, fn",
+        [
+            (comm.CommOp.ALL_TO_ALL, comm.comm_1d_alltoall),
+            (comm.CommOp.ISEND, comm.comm_1d_isend),
+            (comm.CommOp.BATCH_ISEND_IRECV, comm.comm_1d_batch_isend_irecv),
+        ],
+    )
+    def test_select_comm_1d(self, op, fn):
+        assert comm.select_comm_1d(op) is fn
 
 
 class TestBatchWork:
@@ -206,13 +245,14 @@ class TestTwoRanks:
         assert out is buffer
         assert torch.equal(buffer.cpu(), torch.full((3,), float(2 - rank)))
 
+    @pytest.mark.parametrize("fn", P2P_1D_FNS)
     @pytest.mark.parametrize("async_op", [True, False])
     @pytest.mark.parametrize("direction", [1, -1])
-    def test_1d_p2p_ring_shift(self, device, group, async_op, direction):
+    def test_1d_p2p_ring_shift(self, device, group, fn, async_op, direction):
         rank = dist.get_rank()
         data = torch.full((2,), float(rank), device=device)
         buffer = torch.zeros(2, device=device)
-        out, handle = comm.comm_1d_p2p(
+        out, handle = fn(
             data, buffer, direction=direction, group=group, async_op=async_op
         )
         assert (handle is None) == (not async_op)
@@ -223,10 +263,11 @@ class TestTwoRanks:
             buffer.cpu(), torch.full((2,), float((rank - direction) % 2))
         )
 
-    def test_1d_p2p_explicit_ranks(self, device, group):
+    @pytest.mark.parametrize("fn", P2P_1D_FNS)
+    def test_1d_p2p_explicit_ranks(self, device, group, fn):
         rank = dist.get_rank()
         buffer = torch.zeros(1, device=device)
-        comm.comm_1d_p2p(
+        fn(
             torch.tensor([float(rank)], device=device),
             buffer,
             send_recv_ranks=[1 - rank, 1 - rank],

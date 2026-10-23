@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from jigsaw._core.buffers import clear_preallocated_buffers
+from jigsaw._core.comm import CommOp
 from jigsaw.modules.permute._distributed_permute import (
     distributed_permute,
     x_transpose_eightway,
@@ -18,6 +19,12 @@ pytestmark = [pytest.mark.dist_required]
 
 BATCH_SHAPES = [(), (3,), (2, 3)]
 DTYPES = [torch.float32, torch.float64]
+
+
+def _comms(device: torch.device) -> list[CommOp]:
+    """Return every transport the swap kernels support on ``device``."""
+    comms = [CommOp.ISEND, CommOp.BATCH_ISEND_IRECV]
+    return comms + [CommOp.ALL_TO_ALL] if device.type == "cuda" else comms
 
 
 def _global(
@@ -53,30 +60,32 @@ def _check_transpose(
     dtype: torch.dtype = torch.float32,
     seed: int = 0,
 ) -> torch.Tensor:
-    """Run ``kernel`` on this rank's shard and compare with the serial ``.mT``."""
+    """Run ``kernel`` with every transport and compare with the serial ``.mT``."""
     group = mesh["model"]
     n_rows, n_cols = mesh["row"].size(), mesh["col"].size()
     x_global = _global(shape, dtype, device, seed)
     x = _shard(x_global, n_rows, n_cols, group.rank())
     expected = _shard(x_global.mT, n_rows, n_cols, group.rank())
 
-    # A kernel that raises on one rank only would leave the others waiting in
-    # the all-reduce of ``assert_close``, so agree on the outcome first.
-    error = None
-    try:
-        got = kernel(x, group.rank(), device, group)
-    except Exception as exc:
-        error = exc
-    if not all_ranks_ok(error is None, device, group):
-        raise AssertionError(f"{kernel.__name__} raised on some rank: {error!r}")
+    for comm in _comms(device):
+        name = f"{kernel.__name__}[{comm.value}]"
+        # A kernel that raises on one rank only would leave the others waiting in
+        # the all-reduce of ``assert_close``, so agree on the outcome first.
+        error = None
+        try:
+            got = kernel(x, group.rank(), device, group, comm)
+        except Exception as exc:
+            error = exc
+        if not all_ranks_ok(error is None, device, group):
+            raise AssertionError(f"{name} raised on some rank: {error!r}")
 
-    dtype_ok = got.dtype == dtype and got.device.type == device.type
-    if not all_ranks_ok(dtype_ok, device, group):
-        raise AssertionError(
-            f"{kernel.__name__} returned {got.dtype} on {got.device}, "
-            f"expected {dtype} on {device}"
-        )
-    assert_close(kernel.__name__, got, expected, 0.0, 0.0, device, group)
+        dtype_ok = got.dtype == dtype and got.device.type == device.type
+        if not all_ranks_ok(dtype_ok, device, group):
+            raise AssertionError(
+                f"{name} returned {got.dtype} on {got.device}, "
+                f"expected {dtype} on {device}"
+            )
+        assert_close(name, got, expected, 0.0, 0.0, device, group)
     return got
 
 
@@ -118,9 +127,12 @@ class TestTransposeTwoWay:
         group = mesh["model"]
         x_global = _global((2, 4, 6), torch.float32, device)
         x = _shard(x_global, 1, 2, group.rank())
-        xt = x_transpose_twoway(x, group.rank(), device, group)
-        back = x_transpose_twoway(xt, group.rank(), device, group)
-        assert_close("twoway round trip", back, x, 0.0, 0.0, device, group)
+        for comm in _comms(device):
+            xt = x_transpose_twoway(x, group.rank(), device, group, comm)
+            back = x_transpose_twoway(xt, group.rank(), device, group, comm)
+            assert_close(
+                f"twoway round trip [{comm.value}]", back, x, 0.0, 0.0, device, group
+            )
 
     def test_repeated_calls_reuse_the_buffers(
         self, device: torch.device, process_mesh_dict_1x2: dict
@@ -162,9 +174,12 @@ class TestTransposeFourWay:
         group = mesh["model"]
         x_global = _global((2, 4, 6), torch.float32, device)
         x = _shard(x_global, 2, 2, group.rank())
-        xt = x_transpose_fourway(x, group.rank(), device, group)
-        back = x_transpose_fourway(xt, group.rank(), device, group)
-        assert_close("fourway round trip", back, x, 0.0, 0.0, device, group)
+        for comm in _comms(device):
+            xt = x_transpose_fourway(x, group.rank(), device, group, comm)
+            back = x_transpose_fourway(xt, group.rank(), device, group, comm)
+            assert_close(
+                f"fourway round trip [{comm.value}]", back, x, 0.0, 0.0, device, group
+            )
 
     def test_repeated_calls_reuse_the_buffers(
         self, device: torch.device, process_mesh_dict_2x2: dict
@@ -206,9 +221,12 @@ class TestTransposeEightWay:
         group = mesh["model"]
         x_global = _global((2, 8, 8), torch.float32, device)
         x = _shard(x_global, 4, 2, group.rank())
-        xt = x_transpose_eightway(x, group.rank(), device, group)
-        back = x_transpose_eightway(xt, group.rank(), device, group)
-        assert_close("eightway round trip", back, x, 0.0, 0.0, device, group)
+        for comm in _comms(device):
+            xt = x_transpose_eightway(x, group.rank(), device, group, comm)
+            back = x_transpose_eightway(xt, group.rank(), device, group, comm)
+            assert_close(
+                f"eightway round trip [{comm.value}]", back, x, 0.0, 0.0, device, group
+            )
 
     def test_repeated_calls_reuse_the_buffers(
         self, device: torch.device, process_mesh_dict_4x2: dict

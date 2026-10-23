@@ -48,7 +48,7 @@ def _build(cls, mesh: dict, device: torch.device, conv_kw: dict) -> torch.nn.Mod
         spatial_group=mesh["row"],
         channel_group=mesh["col"],
         bias=True,
-        channel_comm="p2p",
+        channel_comm="batch_isend_irecv",
         **conv_kw,
     ).to(device)
 

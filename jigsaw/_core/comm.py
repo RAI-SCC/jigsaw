@@ -1,7 +1,8 @@
 """Communication primitives."""
 
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from enum import StrEnum
 from functools import cache
 from typing import Any
 
@@ -318,7 +319,7 @@ def comm_1d_alltoall(
 
 
 class _BatchWork:
-    """Wait handle over the works of one ``dist.batch_isend_irecv`` call."""
+    """Wait handle over the works of one send/receive pair."""
 
     def __init__(self, works: list[dist.Work]) -> None:
         self._works = works
@@ -334,7 +335,7 @@ class _BatchWork:
         return all(work.is_completed() for work in self._works)
 
 
-def comm_1d_p2p(
+def comm_1d_batch_isend_irecv(
     data: torch.Tensor,
     buffer: torch.Tensor,
     direction: int | None = None,
@@ -346,7 +347,7 @@ def comm_1d_p2p(
     *args: Any,
     **kwargs: Any,
 ) -> tuple[torch.Tensor, dist.Work | None]:
-    """Send data to a neighbor process using P2P communication.
+    """Send data to a neighbor process using one ``dist.batch_isend_irecv``.
 
     Parameters
     ----------
@@ -403,6 +404,162 @@ def comm_1d_p2p(
         handle.wait()
         return buffer, None
     return buffer, handle  # type: ignore[return-value]
+
+
+def comm_1d_isend(
+    data: torch.Tensor,
+    buffer: torch.Tensor,
+    direction: int | None = None,
+    send_recv_ranks: list[int] | None = None,
+    group: dist.ProcessGroup | None = None,
+    async_op: bool = True,
+    group_size: int | None = None,
+    *args: Any,
+    **kwargs: Any,
+) -> tuple[torch.Tensor, dist.Work | None]:
+    """Send data to a neighbor process using separate ``isend`` and ``irecv``.
+
+    Parameters
+    ----------
+    data : torch.Tensor
+        Data to send.
+    buffer : torch.Tensor
+        Buffer to receive.
+    direction : int, optional
+        Positive sends to the right, negative to the left. Required if
+        ``send_recv_ranks`` is omitted.
+    send_recv_ranks : list[int], optional
+        Explicit send and receive rank pair.
+    group : dist.ProcessGroup
+        Process group within which to send data.
+    async_op : bool
+        Whether to communicate asynchronously.
+    group_size : int, optional
+        Size of the process group.
+    *args : Any
+        Unused.
+    **kwargs : Any
+        Unused.
+
+    Returns
+    -------
+    buffer : torch.Tensor
+        Buffer in which the data is received.
+    handle : dist.Work | None
+        Wait handle if asynchronous.
+
+    Raises
+    ------
+    ValueError
+        If ``group`` is missing, or both ``direction`` and ``send_recv_ranks`` are.
+    """
+    if group is None:
+        raise ValueError("group is required")
+    group_size = group.size() if group_size is None else group_size
+
+    if send_recv_ranks is None:
+        if direction is None:
+            raise ValueError("direction is required when send_recv_ranks is omitted")
+        send_to = (group.rank() + direction) % group_size
+        recv_from = (group.rank() - direction) % group_size
+    else:
+        send_to, recv_from = send_recv_ranks
+
+    send = dist.isend(data, group_dst=send_to, group=group)
+    recv = dist.irecv(buffer, group_src=recv_from, group=group)
+    handle = _BatchWork([w for w in (send, recv) if w is not None])
+    if not async_op:
+        handle.wait()
+        return buffer, None
+    return buffer, handle  # type: ignore[return-value]
+
+
+class CommOp(StrEnum):
+    """Transport of the neighbor exchanges of a distributed layer.
+
+    - ``AUTO``: ``ALL_TO_ALL`` on CUDA, ``BATCH_ISEND_IRECV`` on CPU. Default.
+    - ``ALL_TO_ALL``: one ``dist.all_to_all`` per exchange. CUDA only, since
+      gloo's all-to-all rejects the zero-length entries of the idle peers.
+    - ``ISEND``: separate ``dist.isend`` and ``dist.irecv``.
+    - ``BATCH_ISEND_IRECV``: one ``dist.batch_isend_irecv`` per exchange, which
+      NCCL coalesces into a single launch.
+
+    Strings take the value in any case (``"all_to_all"``).
+    """
+
+    AUTO = "auto"
+    ALL_TO_ALL = "all_to_all"
+    ISEND = "isend"
+    BATCH_ISEND_IRECV = "batch_isend_irecv"
+
+
+def resolve_comm_op(comm: CommOp | str, device: torch.device) -> CommOp:
+    """Resolve ``comm`` to a concrete :class:`CommOp` for ``device``.
+
+    Parameters
+    ----------
+    comm : CommOp or str
+        Requested transport; ``AUTO`` picks by device.
+    device : torch.device
+        Device of the module.
+
+    Returns
+    -------
+    CommOp
+        ``ALL_TO_ALL``, ``ISEND`` or ``BATCH_ISEND_IRECV``.
+
+    Raises
+    ------
+    ValueError
+        If ``comm`` is unknown, ``device`` is neither CUDA nor CPU, or
+        ``ALL_TO_ALL`` is requested off CUDA.
+    """
+    if device.type not in ("cuda", "cpu"):
+        raise ValueError(f"Unsupported device {device.type}")
+    if not isinstance(comm, CommOp):
+        key = str(comm).lower()
+        if key not in {m.value for m in CommOp}:
+            raise ValueError(
+                f"comm must be one of {[m.value for m in CommOp]}, got {comm!r}"
+            )
+        comm = CommOp(key)
+    if comm is CommOp.AUTO:
+        return CommOp.ALL_TO_ALL if device.type == "cuda" else CommOp.BATCH_ISEND_IRECV
+    if comm is CommOp.ALL_TO_ALL and device.type != "cuda":
+        raise ValueError(
+            f"comm='all_to_all' needs CUDA (NCCL), got device {device.type!r}; "
+            "use 'isend' or 'batch_isend_irecv'"
+        )
+    return comm
+
+
+#: Signature shared by the 1-D neighbor exchanges:
+#: ``fn(data, buffer, direction=, send_recv_ranks=, group=, async_op=)``.
+Comm1dFn = Callable[..., tuple[torch.Tensor, dist.Work | None]]
+
+
+def select_comm_1d(comm: CommOp) -> Comm1dFn:
+    """Return the 1-D neighbor exchange of a resolved ``comm``.
+
+    Parameters
+    ----------
+    comm : CommOp
+        Resolved transport (see :func:`resolve_comm_op`).
+
+    Returns
+    -------
+    Comm1dFn
+        :func:`comm_1d_alltoall`, :func:`comm_1d_isend` or
+        :func:`comm_1d_batch_isend_irecv`.
+    """
+    return _COMM_1D_FNS[comm]
+
+
+_COMM_1D_FNS: dict[CommOp, Comm1dFn] = {
+    CommOp.ALL_TO_ALL: comm_1d_alltoall,
+    CommOp.ISEND: comm_1d_isend,
+    CommOp.BATCH_ISEND_IRECV: comm_1d_batch_isend_irecv,
+}
 
 
 def comm_broadcast(

@@ -204,8 +204,8 @@ def over_channels_transpose(
     n_spatial_dims : int
         Number of spatial dimensions.
     channel_comm : str
-        Channel communication strategy: ``"all_gather"``, ``"p2p"`` or
-        ``"all_to_all"``.
+        Resolved channel communication strategy: ``"all_gather"``,
+        ``"all_to_all"``, ``"isend"`` or ``"batch_isend_irecv"``.
     post_fn : PostFn, optional
         Operation applied to the accumulated output, such as the halo reduction.
     local : bool

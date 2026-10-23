@@ -41,13 +41,18 @@ class _BatchedWork:
 
 
 class _Batch:
-    """Collection of ``P2POp`` objects issued together."""
+    """Collection of ``P2POp`` objects issued together.
+
+    Ops queued after a ``wait()`` has issued the earlier ones go out in a new
+    ``batch_isend_irecv`` on the next ``wait()`` or on :meth:`close`.
+    """
 
     __slots__ = ("_ops", "_reqs")
 
     def __init__(self) -> None:
         self._ops: list[dist.P2POp] = []
-        self._reqs: list | None = None
+        # Works to wait on for each issued op, indexed like ``_ops``.
+        self._reqs: list[list[dist.Work]] = []
 
     def add(
         self,
@@ -71,19 +76,22 @@ class _Batch:
         return _BatchedWork(self, len(self._ops) - 1)
 
     def _flush(self) -> None:
-        if self._reqs is None:
-            self._reqs = dist.batch_isend_irecv(self._ops) if self._ops else []
+        pending = self._ops[len(self._reqs) :]
+        if not pending:
+            return
+        reqs = dist.batch_isend_irecv(pending)
+        # Gloo returns one Work per op; a coalescing backend may return a single
+        # grouped Work, which then stands for every op of the batch.
+        if len(reqs) == len(pending):
+            self._reqs.extend([req] for req in reqs)
+        else:
+            self._reqs.extend([reqs] * len(pending))
 
     def wait_at(self, index: int) -> None:
-        self._flush()
-        assert self._reqs is not None
-        # Gloo returns one Work per op (indices line up); a coalescing backend
-        # may return a single grouped Work, in which case wait on everything.
-        if len(self._reqs) == len(self._ops) and index < len(self._reqs):
-            self._reqs[index].wait()
-        else:
-            for req in self._reqs:
-                req.wait()
+        if index >= len(self._reqs):
+            self._flush()
+        for req in self._reqs[index]:
+            req.wait()
 
     def close(self) -> None:
         """Issue the queued operations without waiting for them."""
@@ -241,6 +249,9 @@ def fused_xw_xtw_twoway(
     """
     mod = local_rank % 2
     w0, w1 = torch.split(weight, weight.shape[-2] // 2, dim=-2)
+    # ``isend`` rejects non-contiguous tensors, and autograd can pass a strided
+    # ``grad_output``, e.g. the expanded gradient of a ``sum()`` loss.
+    grad_output = grad_output.contiguous()
     buffer_x = get_preallocated_buffer(
         grad_output.shape, grad_output.dtype, local_rank, device
     )
@@ -915,45 +926,45 @@ def x_transpose_w_fourway(
         case 0:
             buffer_x_2 = get_preallocated_buffer(xij.shape, xdtype, mod, device)
             # x: send to 1; recv from 2
-            send_x_1 = isend(xij, dst=local_rank + 1, group=model_group)
-            recv_x_2 = irecv(buffer_x_2, src=local_rank + 2, group=model_group)
+            send_x_1 = isend(xij, group_dst=local_rank + 1, group=model_group)
+            recv_x_2 = irecv(buffer_x_2, group_src=local_rank + 2, group=model_group)
             buffer_w_2 = get_preallocated_buffer(wij.shape, wdtype, mod, device)
             # w: send to 2; recv from 2
-            send_w_2 = isend(wij, dst=local_rank + 2, group=model_group)
-            recv_w_2 = irecv(buffer_w_2, src=local_rank + 2, group=model_group)
+            send_w_2 = isend(wij, group_dst=local_rank + 2, group=model_group)
+            recv_w_2 = irecv(buffer_w_2, group_src=local_rank + 2, group=model_group)
         case 1:
             buffer_x_0 = get_preallocated_buffer(xij.shape, xdtype, mod, device)
             buffer_x_2 = get_preallocated_buffer(xij.shape, xdtype, mod, device)
             # x: send to 2, 3; recv from 0, 2
-            recv_x_0 = irecv(buffer_x_0, src=local_rank - 1, group=model_group)
-            send_x_2 = isend(xij, dst=local_rank + 1, group=model_group)
-            send_x_3 = isend(xij, dst=local_rank + 2, group=model_group)
-            recv_x_2 = irecv(buffer_x_2, src=local_rank + 1, group=model_group)
+            recv_x_0 = irecv(buffer_x_0, group_src=local_rank - 1, group=model_group)
+            send_x_2 = isend(xij, group_dst=local_rank + 1, group=model_group)
+            send_x_3 = isend(xij, group_dst=local_rank + 2, group=model_group)
+            recv_x_2 = irecv(buffer_x_2, group_src=local_rank + 1, group=model_group)
             buffer_w_3 = get_preallocated_buffer(wij.shape, wdtype, local_rank, device)
             # w: send to 3; recv from 3
-            send_w_3 = isend(wij, dst=local_rank + 2, group=model_group)
-            recv_w_3 = irecv(buffer_w_3, src=local_rank + 2, group=model_group)
+            send_w_3 = isend(wij, group_dst=local_rank + 2, group=model_group)
+            recv_w_3 = irecv(buffer_w_3, group_src=local_rank + 2, group=model_group)
         case 2:
             buffer_x_1 = get_preallocated_buffer(xij.shape, xdtype, mod, device)
             buffer_x_3 = get_preallocated_buffer(xij.shape, xdtype, mod, device)
             # x: send to 0, 1; recv from 1, 3
-            recv_x_1 = irecv(buffer_x_1, src=local_rank - 1, group=model_group)
-            send_x_0 = isend(xij, dst=local_rank - 2, group=model_group)
-            recv_x_3 = irecv(buffer_x_3, src=local_rank + 1, group=model_group)
-            send_x_1 = isend(xij, dst=local_rank - 1, group=model_group)
+            recv_x_1 = irecv(buffer_x_1, group_src=local_rank - 1, group=model_group)
+            send_x_0 = isend(xij, group_dst=local_rank - 2, group=model_group)
+            recv_x_3 = irecv(buffer_x_3, group_src=local_rank + 1, group=model_group)
+            send_x_1 = isend(xij, group_dst=local_rank - 1, group=model_group)
             buffer_w_0 = get_preallocated_buffer(wij.shape, wdtype, mod, device)
             # w: send to 0; recv from 0
-            recv_w_0 = irecv(buffer_w_0, src=local_rank - 2, group=model_group)
-            send_w_0 = isend(wij, dst=local_rank - 2, group=model_group)
+            recv_w_0 = irecv(buffer_w_0, group_src=local_rank - 2, group=model_group)
+            send_w_0 = isend(wij, group_dst=local_rank - 2, group=model_group)
         case 3:
             buffer_x_1 = get_preallocated_buffer(xij.shape, xdtype, mod, device)
             # x: send to 2; recv from 1
-            recv_x_1 = irecv(buffer_x_1, src=local_rank - 2, group=model_group)
-            send_x_2 = isend(xij, dst=local_rank - 1, group=model_group)
+            recv_x_1 = irecv(buffer_x_1, group_src=local_rank - 2, group=model_group)
+            send_x_2 = isend(xij, group_dst=local_rank - 1, group=model_group)
             buffer_w_1 = get_preallocated_buffer(wij.shape, wdtype, mod, device)
             # w: send to 1; recv from 1
-            recv_w_1 = irecv(buffer_w_1, src=local_rank - 2, group=model_group)
-            send_w_1 = isend(wij, dst=local_rank - 2, group=model_group)
+            recv_w_1 = irecv(buffer_w_1, group_src=local_rank - 2, group=model_group)
+            send_w_1 = isend(wij, group_dst=local_rank - 2, group=model_group)
 
     match mod:
         case 0:

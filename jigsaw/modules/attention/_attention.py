@@ -373,7 +373,7 @@ class DistributedAttention(torch.nn.Module):
                     send_in_forward=attention_config.SendForward.KV,
                     save_for_backward=attention_config.SaveBackward.KV,
                     save_scope=self.ulysses_inter_save_scope,
-                    send_op=attention_config.SendOp.ALLTOALL,
+                    send_op=attention_config.SendOp.RING,
                     # Pinned: backward overlap needs LOCAL + SEND_DKV.
                     send_backward=attention_config.SendBackward.SEND_DKV,
                     attn_backend=self.attn_backend,

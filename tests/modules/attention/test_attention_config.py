@@ -1,7 +1,7 @@
 """Policy -> callable resolution in ``RingAttentionConfig`` (no communication issued).
 
-The selectors branch on ``dist.get_backend()`` and the device, so the NCCL/CUDA
-branches are reached by monkeypatching the backend name; nothing is sent.
+The selectors branch on the device only, so the CUDA branches are reached by
+passing a CUDA device; nothing is sent.
 """
 
 import pytest
@@ -23,52 +23,49 @@ from jigsaw.modules.attention._config import (
 from jigsaw.modules.attention._functional.cores import math as math_core
 from jigsaw.modules.attention._functional.cores import sdpa as sdpa_core
 
-CPU = torch.device("cpu")
-
-
-@pytest.fixture
-def nccl(monkeypatch):
-    monkeypatch.setattr(dist, "get_backend", lambda *a, **k: "nccl")
-
-
-@pytest.fixture
-def gloo(monkeypatch):
-    monkeypatch.setattr(dist, "get_backend", lambda *a, **k: "gloo")
+CPU, CUDA = torch.device("cpu"), torch.device("cuda")
 
 
 class TestCommSelection:
-    @pytest.mark.parametrize("send_op", list(SendOp))
-    def test_gloo_always_uses_p2p(self, gloo, send_op):
-        assert cfg._select_p2p_fn(send_op) is comm.comm_1d_p2p
-        assert cfg._select_send_op_fn(send_op) is comm.comm_1d_p2p
+    @pytest.mark.parametrize(
+        "dev, expected",
+        [(CPU, comm.comm_1d_batch_isend_irecv), (CUDA, comm.comm_1d_alltoall)],
+        ids=["cpu", "cuda"],
+    )
+    def test_auto_picks_by_device(self, dev, expected):
+        config = RingAttentionConfig(device=dev)
+        assert config.send_op_fn is expected
+        assert config.p2p_fn is expected
 
     @pytest.mark.parametrize(
-        "send_op, expected",
+        "op, expected",
         [
-            (SendOp.ALLTOALL, comm.comm_1d_alltoall),
-            (SendOp.BROADCAST, comm.comm_1d_alltoall),
-            (SendOp.HYBRID_ALLTOALL, comm.comm_1d_alltoall),
-            (SendOp.P2P, comm.comm_1d_p2p),
-            (SendOp.HYBRID_P2P, comm.comm_1d_p2p),
-            (SendOp.HYBRID_BROADCAST, comm.comm_1d_p2p),
+            ("isend", comm.comm_1d_isend),
+            ("batch_isend_irecv", comm.comm_1d_batch_isend_irecv),
+            ("all_to_all", comm.comm_1d_alltoall),
         ],
     )
-    def test_nccl_inter_group_hop(self, nccl, send_op, expected):
-        assert cfg._select_p2p_fn(send_op) is expected
+    def test_comm_sets_both_hops(self, op, expected):
+        config = RingAttentionConfig(device=CUDA, comm=op)
+        assert config.send_op_fn is expected
+        assert config.p2p_fn is expected
 
-    @pytest.mark.parametrize(
-        "send_op, expected",
-        [
-            (SendOp.BROADCAST, comm.comm_broadcast),
-            (SendOp.ALLTOALL, comm.comm_1d_alltoall),
-            (SendOp.HYBRID_P2P, comm.comm_1d_alltoall),
-            (SendOp.HYBRID_ALLTOALL, comm.comm_1d_alltoall),
-            (SendOp.P2P, comm.comm_1d_p2p),
-            (SendOp.HYBRID_BROADCAST, comm.comm_1d_p2p),
-        ],
-    )
-    def test_nccl_per_step_send(self, nccl, send_op, expected):
-        assert cfg._select_send_op_fn(send_op) is expected
+    def test_outer_comm_overrides_the_outer_hop(self):
+        config = RingAttentionConfig(
+            device=CUDA, send_op="hybrid", comm="all_to_all", outer_comm="isend"
+        )
+        assert config.send_op_fn is comm.comm_1d_alltoall
+        assert config.p2p_fn is comm.comm_1d_isend
+
+    def test_broadcast_broadcasts_each_step(self):
+        config = RingAttentionConfig(device=CPU, send_op="broadcast")
+        assert config.send_op_fn is comm.comm_broadcast
+        assert config.p2p_fn is comm.comm_1d_batch_isend_irecv
+
+    @pytest.mark.parametrize("arg", ["comm", "outer_comm"])
+    def test_alltoall_off_cuda_is_rejected(self, arg):
+        with pytest.raises(ValueError, match="needs CUDA"):
+            RingAttentionConfig(device=CPU, **{arg: "all_to_all"})
 
 
 class TestCoreSelection:
@@ -154,7 +151,7 @@ class TestForwardSendRecv:
 
         x, kv = torch.ones(2), torch.zeros(3)
         for send_in_forward, expected in ((SendForward.X, x), (SendForward.KV, kv)):
-            send = cfg._select_forward_send_fn(SendOp.P2P, send_in_forward, fake)
+            send = cfg._select_forward_send_fn(SendOp.RING, send_in_forward, fake)
             recv, handle = send(x, kv, 1, "group", 7, group_size=4, extra="ignored")
             assert handle == "handle" and recv.shape == expected.shape
             buf, direction, kw = calls[-1]
@@ -251,9 +248,9 @@ class TestRingAttentionConfig:
         "arg, value, expected",
         [
             ("send_in_forward", "kv", SendForward.KV),
-            ("send_op", "hybrid_p2p", SendOp.HYBRID_P2P),
-            ("send_op", "Hybrid_P2P", SendOp.HYBRID_P2P),
-            ("send_op", "ALLTOALL", SendOp.ALLTOALL),
+            ("send_op", "hybrid", SendOp.HYBRID),
+            ("send_op", "Hybrid_Broadcast", SendOp.HYBRID_BROADCAST),
+            ("send_op", "RING", SendOp.RING),
             ("save_for_backward", "x", SaveBackward.X),
             ("save_scope", "local", SaveScope.LOCAL),
             ("send_backward", "gather_dkv", SendBackward.GATHER_DKV),
@@ -266,14 +263,14 @@ class TestRingAttentionConfig:
         config = RingAttentionConfig(device=CPU, **{arg: value})
         assert getattr(config, arg) is expected
 
-    @pytest.mark.parametrize("member", [SendOp.P2P, SendOp.BROADCAST])
+    @pytest.mark.parametrize("member", [SendOp.RING, SendOp.BROADCAST])
     def test_enum_members_pass_through(self, member):
         assert RingAttentionConfig(device=CPU, send_op=member).send_op is member
 
     @pytest.mark.parametrize(
         "arg, value",
         [
-            ("send_op", "ring"),
+            ("send_op", "p2p"),
             ("send_op", 3),
             ("save_scope", "everywhere"),
             ("attn_backend", "flash"),
@@ -285,10 +282,15 @@ class TestRingAttentionConfig:
             RingAttentionConfig(device=CPU, **{arg: value})
 
     def test_error_lists_the_valid_names(self):
-        with pytest.raises(ValueError, match="'hybrid_p2p'"):
-            RingAttentionConfig(device=CPU, send_op="hybrid")
+        with pytest.raises(ValueError, match="'hybrid_broadcast'"):
+            RingAttentionConfig(device=CPU, send_op="hybrid_p2p")
 
     def test_repr_lists_the_policies(self):
         text = repr(RingAttentionConfig(device=CPU, attn_backend="math"))
-        for token in ("send_op=ALLTOALL", "save_scope=GLOBAL", "attn_backend=MATH"):
+        for token in (
+            "send_op=RING",
+            "comm=batch_isend_irecv",
+            "save_scope=GLOBAL",
+            "attn_backend=MATH",
+        ):
             assert token in text

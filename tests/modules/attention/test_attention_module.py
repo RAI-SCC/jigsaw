@@ -97,7 +97,7 @@ class TestRingAttentionFunction:
         "kwargs",
         [
             dict(send_in_forward=cfg.SendForward.KV),
-            dict(send_op=cfg.SendOp.P2P, save_scope=cfg.SaveScope.LOCAL),
+            dict(send_op=cfg.SendOp.RING, save_scope=cfg.SaveScope.LOCAL),
             dict(send_backward=cfg.SendBackward.GATHER_DKV),
             dict(
                 send_op=cfg.SendOp.BROADCAST,

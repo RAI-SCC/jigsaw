@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 
 from jigsaw._core.buffers import get_preallocated_buffer
-from jigsaw._core.comm import all_to_all_async
+from jigsaw._core.comm import CommOp, all_to_all_async, resolve_comm_op
 from jigsaw.modules.convolution._common.channel_comm import gather_full_channels
 
 
@@ -14,6 +14,7 @@ def _exchange(
     recv_list: list[torch.Tensor],
     send_list: list[torch.Tensor],
     group: dist.ProcessGroup,
+    comm: CommOp,
 ) -> list[dist.Work]:
     """Start the exchange of one tensor per peer and return its work handles.
 
@@ -25,23 +26,26 @@ def _exchange(
         Data sent to each rank, empty for no data.
     group : dist.ProcessGroup
         Process group of the exchange.
+    comm : CommOp
+        Resolved transport.
 
     Returns
     -------
     list[dist.Work]
         Handles to wait on.
     """
-    if dist.get_backend(group) != "gloo":
+    if comm is CommOp.ALL_TO_ALL:
         return [all_to_all_async(recv_list, send_list, group=group)]
 
-    # gloo's all-to-all needs equally sized tensors, so talk to each peer directly.
-    works: list[dist.Work | None] = []
-    for peer, data in enumerate(send_list):
-        if data.numel() > 0:
-            works.append(dist.isend(data, group_dst=peer, group=group))
-    for peer, buffer in enumerate(recv_list):
-        if buffer.numel() > 0:
-            works.append(dist.irecv(buffer, group_src=peer, group=group))
+    # Talk to each peer directly; empty entries carry no data.
+    sends = [(peer, t) for peer, t in enumerate(send_list) if t.numel()]
+    recvs = [(peer, t) for peer, t in enumerate(recv_list) if t.numel()]
+    if comm is CommOp.BATCH_ISEND_IRECV:
+        ops = [dist.P2POp(dist.isend, t, group_peer=p, group=group) for p, t in sends]
+        ops += [dist.P2POp(dist.irecv, t, group_peer=p, group=group) for p, t in recvs]
+        return dist.batch_isend_irecv(ops) if ops else []
+    works = [dist.isend(t, group_dst=p, group=group) for p, t in sends]
+    works += [dist.irecv(t, group_src=p, group=group) for p, t in recvs]
     return [work for work in works if work is not None]
 
 
@@ -56,6 +60,7 @@ def x_transpose_twoway(
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
+    comm: CommOp,
 ) -> torch.Tensor:
     """Transpose a batched matrix distributed across two processes.
 
@@ -69,6 +74,8 @@ def x_transpose_twoway(
         Device of the computation.
     model_group : dist.ProcessGroup
         Process group of one model-parallel instance.
+    comm : CommOp
+        Resolved transport.
 
     Returns
     -------
@@ -90,7 +97,7 @@ def x_transpose_twoway(
             x_send_list = [x0, empty]
             x_recv_list = [buffer_x, empty]
 
-    xt_works = _exchange(x_recv_list, x_send_list, model_group)
+    xt_works = _exchange(x_recv_list, x_send_list, model_group, comm)
 
     match mod:
         case 0:
@@ -125,6 +132,7 @@ def x_transpose_fourway(
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
+    comm: CommOp,
 ) -> torch.Tensor:
     """Transpose a batched matrix distributed across four processes.
 
@@ -138,6 +146,8 @@ def x_transpose_fourway(
         Device of the computation.
     model_group : dist.ProcessGroup
         Process group of one model-parallel instance.
+    comm : CommOp
+        Resolved transport.
 
     Returns
     -------
@@ -172,7 +182,7 @@ def x_transpose_fourway(
             x_send_list = [empty, empty, empty, empty]
             x_recv_list = [empty, empty, empty, empty]
 
-    _wait(_exchange(x_recv_list, x_send_list, model_group))
+    _wait(_exchange(x_recv_list, x_send_list, model_group, comm))
 
     match mod:
         case 0:
@@ -192,6 +202,7 @@ def x_transpose_eightway(
     local_rank: int,
     device: torch.device,
     model_group: dist.ProcessGroup,
+    comm: CommOp,
 ) -> torch.Tensor:
     """Transpose a batched matrix distributed across eight processes.
 
@@ -205,6 +216,8 @@ def x_transpose_eightway(
         Device of the computation.
     model_group : dist.ProcessGroup
         Process group of one model-parallel instance.
+    comm : CommOp
+        Resolved transport.
 
     Returns
     -------
@@ -277,7 +290,7 @@ def x_transpose_eightway(
             cij1.copy_(x1)
             x_recv_list = [empty, empty, empty, empty, empty, cij0, empty, empty]
 
-    _wait(_exchange(x_recv_list, x_send_list, model_group))
+    _wait(_exchange(x_recv_list, x_send_list, model_group, comm))
     cij = torch.concat([cij0, cij1], dim=-2).mT.contiguous()
     return cij
 
@@ -299,6 +312,7 @@ def distributed_permute(
     local_rank: int,
     device: torch.device,
     mesh: dict[str, dist.ProcessGroup],
+    comm: CommOp | str = CommOp.AUTO,
 ) -> torch.Tensor:
     """Permute ``x`` by ``dims``, resharding ``row_dim``/``col_dim`` if ``dims`` swaps them.
 
@@ -324,12 +338,16 @@ def distributed_permute(
         Device of the computation.
     mesh : dict[str, dist.ProcessGroup]
         Needs ``"row"`` and ``"col"``; the fast path also needs ``"model"``.
+    comm : CommOp or str
+        Transport of the fast-path kernels. ``"auto"`` picks all-to-all on CUDA
+        and ``batch_isend_irecv`` on CPU.
 
     Returns
     -------
     torch.Tensor
         Local output, permuted and resharded.
     """
+    comm = resolve_comm_op(comm, device)
     n = x.ndim
     if sorted(dims) != list(range(n)):
         raise ValueError(f"dims {dims} is not a permutation of range({n})")
@@ -357,7 +375,9 @@ def distributed_permute(
         # Reorder the batch axes first (free); the kernel below leaves them untouched
         # and swaps the trailing two, so the result already matches `dims`.
         x = x.permute(*dims[:-2], row_dim, col_dim).contiguous()
-        return _SWAP_KERNELS[(n_rows, n_cols)](x, local_rank, device, mesh["model"])
+        return _SWAP_KERNELS[(n_rows, n_cols)](
+            x, local_rank, device, mesh["model"], comm
+        )
 
     # General path: reconstruct each tracked axis in full over the group that currently
     # shards it, then narrow it into the other axis's role.

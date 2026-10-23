@@ -14,6 +14,12 @@
 - **Versions:** Python 3.11 or newer, PyTorch 2.8 or newer.
 - `init_cuda()` always initializes `nccl`; on CPU call
   `dist.init_process_group("gloo")` yourself.
+- **Communication:** `LinearConfig`, `RollConfig` and `RingAttentionConfig` take
+  `comm`, the convolutions take `channel_comm`, and `distributed_permute` takes
+  `comm`. All accept a `jigsaw.modules.CommOp`: `"auto"` (default) picks
+  all-to-all on CUDA and `batch_isend_irecv` on CPU; `"all_to_all"` (CUDA only),
+  `"isend"` and `"batch_isend_irecv"` select one explicitly. The convolutions also
+  accept `"all_gather"`.
 
 ## Tested configurations
 

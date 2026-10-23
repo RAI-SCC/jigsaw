@@ -142,10 +142,10 @@ class _ForwardChunkProvider(ABC):
 
 
 # --------------------------------------------------------------------------- #
-# plain P2P / all-to-all ring
+# plain ring
 # --------------------------------------------------------------------------- #
 class _RingForwardChunkProvider(_ForwardChunkProvider):
-    """Ring with one P2P or all-to-all send and receive per step."""
+    """Ring with one send and receive per step."""
 
     def __init__(self, *args: object) -> None:
         """Start the first ring send."""
@@ -344,10 +344,10 @@ class _HybridForwardChunkProvider(_ForwardChunkProvider):
 
 
 # --------------------------------------------------------------------------- #
-# hybrid: intra-group ring + outer-ring P2P
+# hybrid: intra-group ring + outer ring
 # --------------------------------------------------------------------------- #
 class _HybridP2PForwardChunkProvider(_HybridForwardChunkProvider):
-    """Hybrid ring rotating chunks within the intra group (P2P on the outer ring)."""
+    """Hybrid ring rotating chunks within the intra group, joined by an outer ring."""
 
     def __init__(self, *args: object) -> None:
         """Resolve the intra-group peers."""
@@ -516,7 +516,7 @@ class _HybridP2PForwardChunkProviderOverlap(_HybridP2PForwardChunkProvider):
 
 
 # --------------------------------------------------------------------------- #
-# hybrid: intra-group broadcast + outer-ring P2P
+# hybrid: intra-group broadcast + outer ring
 # --------------------------------------------------------------------------- #
 class _HybridBroadcastForwardChunkProvider(_HybridForwardChunkProvider):
     """Hybrid ring with broadcasts within the intra group."""
@@ -724,11 +724,11 @@ def build_forward_chunk_provider(
     match ring_config.send_op:
         case SendOp.BROADCAST:
             return _BroadcastForwardChunkProvider(*args)
-        case SendOp.P2P | SendOp.ALLTOALL:
+        case SendOp.RING:
             if ring_config.overlap_active:
                 return _RingForwardChunkProviderOverlap(*args)
             return _RingForwardChunkProvider(*args)
-        case SendOp.HYBRID_P2P | SendOp.HYBRID_ALLTOALL:
+        case SendOp.HYBRID:
             if ring_config.overlap_active:
                 return _HybridP2PForwardChunkProviderOverlap(*args)
             return _HybridP2PForwardChunkProvider(*args)

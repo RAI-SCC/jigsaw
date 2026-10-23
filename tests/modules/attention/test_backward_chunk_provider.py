@@ -1,9 +1,9 @@
-"""Transfer schedule of the hybrid-P2P backward chunk provider (no communication issued).
+"""Transfer schedule of the hybrid backward chunk provider (no communication issued).
 
 ``_LocalChunkProviderHybridP2P.maybe_forward`` launches the transfers that deliver
 the *next* step's chunk. Every launched transfer must be consumed by the following
 ``get``; one that is not gets its handle and receive buffer overwritten while still
-in flight, which hangs Gloo (``test_ring_hybrid*[...GATHER_DKV...HYBRID_P2P...]``
+in flight, which hangs Gloo (``test_ring_hybrid*[...GATHER_DKV...HYBRID...]``
 deadlocked intermittently on CPU). The launches are stubbed out here, so the schedule
 is checked without any ranks.
 """
