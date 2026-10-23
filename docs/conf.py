@@ -43,9 +43,7 @@ autodoc_member_order = "bysource"
 
 # GPU/scientific-stack dependencies that aren't installed in the docs build
 # environment. autodoc only needs to import jigsaw's modules far enough to
-# read signatures and docstrings, so these are mocked instead of installed -
-# see containers/README.md for why torch/transformer_engine are kept out of
-# lightweight environments.
+# read signatures and docstrings, so these are mocked instead of installed.
 autodoc_mock_imports = [
     "torch",
     "einops",
@@ -65,7 +63,7 @@ napoleon_google_docstring = False
 # to an *instance* of a dynamically generated mock class, not the class
 # itself (see sphinx.ext.autodoc.mock._MockObject.__getattr__). jigsaw uses
 # PEP 604 unions like ``torch.Tensor | None`` in live (non-deferred) type
-# annotations, which Python evaluates at import time via ``__or__`` - a
+# annotations, which Python evaluates at import time via ``__or__``: a
 # method mock instances don't have, so import crashes without this patch.
 # Real, unmocked modules are unaffected.
 from sphinx.ext.autodoc.mock import _MockObject
@@ -83,12 +81,12 @@ intersphinx_mapping = {
 }
 
 # -- Markdown -----------------------------------------------------------------
-# Anchors for headings down to ``####``, so in-page links like ``#launching``
-# resolve.
+# Anchors for headings down to ``####``, so in-page links like
+# ``#replicating-your-own-layers`` (ddp.md) resolve.
 myst_heading_anchors = 4
 
-# README.md (included by index.md) and ddp.md link to repo files that are not
-# doc pages (examples/, scripts/, jigsaw/launch.py, ...). Those links work on
+# The Markdown pages, and README.md (included by index.md), link to repo files
+# that are not doc pages (examples/, containers/, scripts/, ...). Those links work on
 # GitHub, so the Markdown keeps them; for the docs build they are pointed at the
 # file on GitHub instead. Links into docs/ are doc pages and are left alone.
 _REPO = Path(__file__).resolve().parent.parent

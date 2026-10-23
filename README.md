@@ -31,7 +31,7 @@ spatial = (mesh["sh"], mesh["sw"])  # groups splitting (H, W)
 def conv(cin, cout):
     return jigsaw.modules.DistributedConv2d(
         cin, cout, kernel_size=3, padding=1, device=device,
-        spatial_group=spatial,       # exchanges halos with the neighbouring tiles
+        spatial_group=spatial,       # exchanges halos with the neighboring tiles
         channel_group=mesh["col"],   # size 1: channels not split
     )
 
@@ -52,8 +52,9 @@ Launch one process per GPU: `torchrun --nproc-per-node 4 train.py`, or `srun`.
 ### Converting an existing model
 
 `jigsaw.convert.convert_to_jigsaw` swaps every layer it knows (`nn.Linear`, `nn.Conv*`,
-`nn.ConvTranspose*`, `nn.LayerNorm`, `jigsaw.modules.Attention`, `jigsaw.modules.Roll`)
-for its distributed version and keeps each rank's shard of the weights. For example, a
+`nn.ConvTranspose*`, `nn.LayerNorm`, `nn.GroupNorm`, `nn.Softmax`,
+`jigsaw.modules.Attention`, `jigsaw.modules.Roll`, `jigsaw.modules.MatMul*`) for its
+distributed version and keeps each rank's shard of the weights. For example, a
 small transformer with the tokens split over `row` and the heads/channels over `col`:
 
 ```python
@@ -118,7 +119,8 @@ smooth L1) and segmentation metrics. All live in `jigsaw.modules`.
 
 `jigsaw.make_process_mesh` takes an ordered `{axis name: size}` mapping (one size may be
 `-1`) and returns a `{name: ProcessGroup}` dict, plus a `model` group spanning one full
-model copy. The trailing axes split the model; any leading axes hold data-parallel copies.
+model copy. By default every axis splits the model; with `model_parallel_axes`, those
+trailing axes split it and the leading axes hold data-parallel copies.
 
 ```python
 mesh = jigsaw.make_process_mesh({"row": 4, "col": 2})                    # 8 ranks, one model

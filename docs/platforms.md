@@ -1,7 +1,7 @@
 # Supported platforms
 
-- **Process-group backends:** `nccl` (NVIDIA NCCL, or AMD RCCL — ROCm builds of
-  PyTorch register it under the same name), `gloo` (CPU tensors), or a mix such
+- **Process-group backends:** `nccl` (NVIDIA NCCL, or AMD RCCL, which ROCm builds of
+  PyTorch register under the same name), `gloo` (CPU tensors), or a mix such
   as `"cpu:gloo,cuda:nccl"`. `make_process_mesh` raises on any other backend
   (`mpi`, `ucc`, `xccl`, ...).
 - **Devices:** `cuda` (NVIDIA, or AMD via ROCm/HIP) and `cpu`. Other device types
@@ -9,7 +9,7 @@
 - **ROCm:** expected to work for all comm paths and the `sdpa`/`math` attention
   backends, but not covered by the test suite. For `attn_backend="te"` see
   [Attention](attention.md).
-- `init_cuda()` always initialises `nccl`; on CPU call
+- `init_cuda()` always initializes `nccl`; on CPU call
   `dist.init_process_group("gloo")` yourself.
 
 ## Running on a cluster

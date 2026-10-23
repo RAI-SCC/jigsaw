@@ -100,8 +100,8 @@ export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
 
 # --- Triton / Inductor runtime-build toolchain ------------------------------
 # Triton (and Inductor's C++ wrapper) compile a small shim at runtime the first
-# time a kernel is used -- jigsaw hits this in the ring attention fused merge
-# and in `xw_twoway`. Two things in the NGC image on some clusters break
+# time a kernel is used; jigsaw hits this in the ring attention fused merge
+# (and under torch.compile). Two things in the NGC image on some clusters break
 # that build; fix both unless the caller opted out with JIGSAW_FIX_TOOLCHAIN=0:
 #   * The host shell leaks CC/CXX pointing at an Intel oneAPI `icx`/`icpx` that
 #     is not in the image. Drop them so the build falls back to the image gcc.
@@ -109,7 +109,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
 #     /usr/local/cuda/compat copies are unresolvable in the container mount;
 #     apptainer's `--nv` injects a working driver into /.singularity.d/libs;
 #     point TRITON_LIBCUDA_PATH there. It is an *in-container* path so it
-#     cannot be probed from here -- jigsaw's merge kernel degrades to its eager
+#     cannot be probed from here; jigsaw's merge kernel degrades to its eager
 #     path if the value is ever wrong, and a caller on a non-apptainer runtime
 #     can export the right dir (or JIGSAW_FIX_TOOLCHAIN=0) themselves.
 if [[ "${JIGSAW_FIX_TOOLCHAIN:-1}" == "1" ]]; then
@@ -132,7 +132,7 @@ env_file_args=()
 [[ -n "${JIGSAW_ENV_FILE:-}" ]] && env_file_args=(--env-file "$JIGSAW_ENV_FILE")
 
 # NGC images bake some of these into %environment, which beats plain host-env
-# passthrough - so force them with --env, which wins over the baked values.
+# passthrough, so force them with --env, which wins over the baked values.
 env_args=(
     --env "MASTER_ADDR=$MASTER_ADDR"
     --env "MASTER_PORT=$MASTER_PORT"
@@ -149,7 +149,7 @@ in_container_pythonpath="$repo_root"
 [[ -n "${PYTHONPATH:-}" ]] && in_container_pythonpath="$repo_root:$PYTHONPATH"
 
 # Route bare commands (python, pytest, ...) through the venv when one is set;
-# otherwise honour JIGSAW_PYTHON for a bare "python"/"python3".
+# otherwise honor JIGSAW_PYTHON for a bare "python"/"python3".
 if [[ -n "${JIGSAW_VENV:-}" && "$1" != /* && -x "$JIGSAW_VENV/bin/$1" ]]; then
     cmd="$1"; shift
     set -- "$JIGSAW_VENV/bin/$cmd" "$@"

@@ -2,7 +2,7 @@
 
 Small, runnable scripts that each show one way of using _jigsaw_. Every script is a
 few dozen lines of code with the explanation in its docstring, and every one needs
-exactly **4 ranks** -- a multiple of 4 with data parallelism on top (`--ddp`, `ddp.py`).
+exactly **4 ranks**, or a multiple of 4 with data parallelism on top (`--ddp`, `ddp.py`).
 
 | Script | Shows |
 |---|---|
@@ -48,18 +48,18 @@ described in the [main README](../README.md):
 srun --nodes=1 --ntasks-per-node=4 --gres=gpu:4 python examples/vit.py
 ```
 
-If the node has fewer GPUs than processes -- or none, as on a laptop -- the scripts
+If the node has fewer GPUs than processes (or none, as on a laptop), the scripts
 run on the CPU with gloo, with the very same command. They are small enough to finish in
 seconds to a minute either way.
 
 A few things that are good to know:
 
-* Running `python examples/vit.py` on its own stops with
+* Running `python examples/vit.py` on its own raises a ValueError,
   `needs exactly 4 ranks but the process group has 1`: launch it as above.
 * Only rank 0 prints. (On the CPU, gloo also prints a few `[Gloo] Rank ... is connected`
   lines from every rank; they are harmless.)
-* jigsaw looks at `SLURM_PROCID` before `RANK`. If it is set in your shell -- as it is
-  inside an `sbatch` script -- start the scripts with `srun`, not with `torchrun`.
+* jigsaw looks at `SLURM_PROCID` before `RANK`. If it is set in your shell, as it is
+  inside an `sbatch` script, start the scripts with `srun`, not with `torchrun`.
 
 ### What success looks like
 
@@ -72,7 +72,7 @@ A few things that are good to know:
 | `dataloader.py` | `all checks passed` |
 
 The last three check themselves with `assert`s, so a wrong result is a traceback, not just a
-number. `tests/test_examples.py` runs all seven on every commit, and compares the models of the
+number. `tests/test_examples.py` runs all seven in CI (pushes to `main` and pull requests), and compares the models of the
 first three with their undistributed equivalents (values, loss and gradients).
 `tests/test_examples_ddp.py` runs them with data parallelism on 8 ranks, in every mode, and
 checks that training each copy on part of the batch gives the same model as training on the
