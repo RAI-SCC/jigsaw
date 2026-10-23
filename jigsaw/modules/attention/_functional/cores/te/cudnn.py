@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import functools
 import inspect
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
 
@@ -70,7 +71,7 @@ _TE_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _te_params(fn: Callable) -> frozenset[str]:
     """Return the parameter names of ``fn``."""
     return frozenset(inspect.signature(fn).parameters)
@@ -145,7 +146,7 @@ def _full_cu_seqlens(batch: int, seqlen: int, device: torch.device) -> torch.Ten
     )
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _fused_attn_backend(
     is_training: bool,
     dtype: torch.dtype,
@@ -154,7 +155,7 @@ def _fused_attn_backend(
     seqlen_kv: int,
     head_dim: int,
     dropout_p: float,
-) -> "tex.NVTE_Fused_Attn_Backend":
+) -> tex.NVTE_Fused_Attn_Backend:
     """Ask cuDNN which fused-attention sub-backend serves this problem shape.
 
     Cached on its arguments: the ring calls it once per chunk per ring step, and
@@ -197,10 +198,10 @@ def forward(
     v: torch.Tensor,
     scale: float,
     dropout_p: float,
-    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see ..math)
+    seed: int | None = None,  # noqa: ARG001 - unused, interface parity (see ..math)
     *,
     layout: Layout = "bhsd",
-) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """TE fused attention forward.
 
     Parameters
@@ -286,8 +287,8 @@ def backward(
     scale: float,
     *_: object,
     dropout_p: float = 0.0,
-    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see ..math)
-    rng_state: Optional[torch.Tensor] = None,
+    seed: int | None = None,  # noqa: ARG001 - unused, interface parity (see ..math)
+    rng_state: torch.Tensor | None = None,
     layout: Layout = "bhsd",
     **__: object,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

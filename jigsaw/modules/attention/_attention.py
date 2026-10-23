@@ -1,7 +1,8 @@
 """Distributed attention modules."""
 
 import warnings
-from typing import Any, Callable, Optional, cast
+from collections.abc import Callable
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
@@ -40,7 +41,7 @@ if JIGSAW_TE_AVAILABLE:
             scale: float,
             dropout_p: float,
             core: Any,
-        ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
             """Run TE attention on ``core``.
 
             Parameters
@@ -80,9 +81,9 @@ if JIGSAW_TE_AVAILABLE:
         def backward(  # type: ignore[override]
             ctx: Any,
             grad_out: torch.Tensor,
-            _grad_lse: Optional[torch.Tensor],
-            _grad_rng: Optional[torch.Tensor],
-        ) -> tuple[Optional[torch.Tensor], ...]:
+            _grad_lse: torch.Tensor | None,
+            _grad_rng: torch.Tensor | None,
+        ) -> tuple[torch.Tensor | None, ...]:
             """dq/dk/dv straight from the kernel's backward, with no forward recompute."""
             q, k, v, out, lse, rng_state = ctx.saved_tensors
             bshd = q.shape  # [b, s, h, d]; forward merged (h, d) in its output
@@ -103,14 +104,14 @@ if JIGSAW_TE_AVAILABLE:
         @staticmethod
         def vmap(
             info: Any,
-            in_dims: tuple[Optional[int], ...],
+            in_dims: tuple[int | None, ...],
             q: torch.Tensor,
             k: torch.Tensor,
             v: torch.Tensor,
             scale: float,
             dropout_p: float,
             core: Any,
-        ) -> tuple[tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]], tuple]:
+        ) -> tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor | None], tuple]:
             """Fold the vmapped (samples) axis into the batch, run one plain call, unfold.
 
             The TE kernels have no batching rule; folding is exact because
@@ -175,9 +176,7 @@ def attn_core_dtype(x: torch.Tensor) -> torch.dtype:
     return x.dtype
 
 
-def _mask_to(
-    attn_mask: Optional[torch.Tensor], dtype: torch.dtype
-) -> Optional[torch.Tensor]:
+def _mask_to(attn_mask: torch.Tensor | None, dtype: torch.dtype) -> torch.Tensor | None:
     """Cast an additive (float) mask to the core dtype; SDPA rejects a mismatch."""
     if attn_mask is not None and attn_mask.is_floating_point():
         return attn_mask.to(dtype)
@@ -275,7 +274,7 @@ class DistributedAttention(torch.nn.Module):
         ),
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
         dtype: torch.dtype = torch.float32,
-        config: Optional[attention_config.RingAttentionConfig] = None,
+        config: attention_config.RingAttentionConfig | None = None,
         out_bias: bool = True,
     ) -> None:
         """Initialize the module.
@@ -456,9 +455,9 @@ class DistributedAttention(torch.nn.Module):
     def _resolve_ring_config(
         self,
         ring: bool,
-        config: Optional[attention_config.RingAttentionConfig],
+        config: attention_config.RingAttentionConfig | None,
         device: torch.device,
-    ) -> Optional[attention_config.RingAttentionConfig]:
+    ) -> attention_config.RingAttentionConfig | None:
         """Pick the ``RingAttentionConfig`` for this module.
 
         The ring rebuilds K/V from a received ``x`` with a plain local matmul.
@@ -531,7 +530,7 @@ class DistributedAttention(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None = None,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
         """Compute attention.
@@ -577,7 +576,7 @@ class DistributedAttention(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None = None,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
         """Compute attention with the unfused math backend.
@@ -607,7 +606,7 @@ class DistributedAttention(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None = None,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
         """Attention computation on the TransformerEngine kernels.
@@ -652,7 +651,7 @@ class DistributedAttention(torch.nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None = None,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
         """Compute ring attention.
@@ -777,7 +776,7 @@ class DistributedAttention(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None = None,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
         """Ulysses (all-to-all, head-parallel) sequence-parallel attention.
@@ -820,7 +819,7 @@ class DistributedAttention(torch.nn.Module):
         )
 
     def forward(
-        self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None
+        self, x: torch.Tensor, attn_mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         """Forward pass for distributed multi-head attention.
 
@@ -993,7 +992,7 @@ class Attention(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None = None,
         **kwargs: torch.Tensor,
     ) -> torch.Tensor:
         """Compute attention.
@@ -1035,7 +1034,7 @@ class Attention(torch.nn.Module):
         return out
 
     def forward(
-        self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None
+        self, x: torch.Tensor, attn_mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         """Compute multi-head attention.
 
@@ -1096,7 +1095,7 @@ class Attention(torch.nn.Module):
             attention_config.Offload.DISABLED
         ),
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
-        config: Optional[attention_config.RingAttentionConfig] = None,
+        config: attention_config.RingAttentionConfig | None = None,
         **kwargs: Any,
     ) -> "DistributedAttention":
         """Convert an attention module to a :class:`DistributedAttention`.

@@ -1,6 +1,6 @@
 """Distributed roll modules."""
 
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
@@ -87,7 +87,7 @@ class DistributedRoll(torch.nn.Module):
         spatial_groups: tuple[dist.ProcessGroup, ...],
         device: torch.device,
         dtype: torch.dtype = torch.float32,
-        config: Optional[RollConfig] = None,
+        config: RollConfig | None = None,
     ) -> None:
         """Initialize the module."""
         super().__init__()
@@ -126,7 +126,7 @@ class DistributedRoll(torch.nn.Module):
         row_kw: str = "row",
         col_kw: str = "col",
         model_kw: str = "model",
-        dim_to_mesh_axis: Optional[dict] = None,
+        dim_to_mesh_axis: dict | None = None,
         **kwargs: Any,
     ) -> "DistributedRoll":
         """Convert a :class:`Roll` to a :class:`DistributedRoll`.

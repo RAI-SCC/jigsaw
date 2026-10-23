@@ -8,16 +8,14 @@ the vmapped axis at ``in_dims[i]`` (``None``: that input is not batched).
 from __future__ import annotations
 
 import copy
-from typing import Optional, TypeVar, cast
+from typing import TypeVar, cast
 
 import torch
 
 _C = TypeVar("_C", bound="VmapConfig")
 
 
-def to_front(
-    t: Optional[torch.Tensor], dim: Optional[int], size: int
-) -> Optional[torch.Tensor]:
+def to_front(t: torch.Tensor | None, dim: int | None, size: int) -> torch.Tensor | None:
     """Put the vmapped axis of ``t`` at position 0.
 
     An unbatched ``t`` (``dim is None``) is expanded to ``size`` along a new
@@ -73,7 +71,7 @@ class VmapConfig:
 
     #: Whether this is the config for a vmapped layer weight.
     vmapped: bool = False
-    _vmap_config: Optional[VmapConfig] = None
+    _vmap_config: VmapConfig | None = None
 
     def for_vmap(self: _C) -> _C:
         """Return the config for a vmapped layer weight (cached).

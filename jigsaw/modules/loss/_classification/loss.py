@@ -1,7 +1,5 @@
 """Distributed classification losses as ``torch.nn`` modules."""
 
-from typing import Optional
-
 import torch
 import torch.distributed as dist
 
@@ -30,10 +28,10 @@ class DistributedNLLLoss(torch.nn.Module):
 
     def __init__(
         self,
-        channel_group: Optional[dist.ProcessGroup] = None,
+        channel_group: dist.ProcessGroup | None = None,
         reduce_groups: GroupsArg = None,
         *,
-        weight: Optional[torch.Tensor] = None,
+        weight: torch.Tensor | None = None,
         ignore_index: int = -100,
         reduction: str = "mean",
         dim: int = 1,
@@ -43,7 +41,7 @@ class DistributedNLLLoss(torch.nn.Module):
         self.channel_group = channel_group
         self.reduce_groups = reduce_groups
         self.register_buffer("weight", weight)
-        self.weight: Optional[torch.Tensor]
+        self.weight: torch.Tensor | None
         self.ignore_index = ignore_index
         self.reduction = reduction
         self.dim = dim
@@ -109,10 +107,10 @@ class DistributedCrossEntropyLoss(torch.nn.Module):
 
     def __init__(
         self,
-        channel_group: Optional[dist.ProcessGroup] = None,
+        channel_group: dist.ProcessGroup | None = None,
         reduce_groups: GroupsArg = None,
         *,
-        weight: Optional[torch.Tensor] = None,
+        weight: torch.Tensor | None = None,
         ignore_index: int = -100,
         reduction: str = "mean",
         label_smoothing: float = 0.0,
@@ -123,7 +121,7 @@ class DistributedCrossEntropyLoss(torch.nn.Module):
         self.channel_group = channel_group
         self.reduce_groups = reduce_groups
         self.register_buffer("weight", weight)
-        self.weight: Optional[torch.Tensor]
+        self.weight: torch.Tensor | None
         self.ignore_index = ignore_index
         self.reduction = reduction
         self.label_smoothing = label_smoothing
@@ -184,14 +182,14 @@ class DistributedBCELoss(torch.nn.Module):
         self,
         reduce_groups: GroupsArg = None,
         *,
-        weight: Optional[torch.Tensor] = None,
+        weight: torch.Tensor | None = None,
         reduction: str = "mean",
     ) -> None:
         """Initialize the loss."""
         super().__init__()
         self.reduce_groups = reduce_groups
         self.register_buffer("weight", weight)
-        self.weight: Optional[torch.Tensor]
+        self.weight: torch.Tensor | None
         self.reduction = reduction
 
     def get_parameter_count(self) -> int:
@@ -247,8 +245,8 @@ class DistributedBCEWithLogitsLoss(torch.nn.Module):
         self,
         reduce_groups: GroupsArg = None,
         *,
-        weight: Optional[torch.Tensor] = None,
-        pos_weight: Optional[torch.Tensor] = None,
+        weight: torch.Tensor | None = None,
+        pos_weight: torch.Tensor | None = None,
         reduction: str = "mean",
     ) -> None:
         """Initialize the loss."""
@@ -256,8 +254,8 @@ class DistributedBCEWithLogitsLoss(torch.nn.Module):
         self.reduce_groups = reduce_groups
         self.register_buffer("weight", weight)
         self.register_buffer("pos_weight", pos_weight)
-        self.weight: Optional[torch.Tensor]
-        self.pos_weight: Optional[torch.Tensor]
+        self.weight: torch.Tensor | None
+        self.pos_weight: torch.Tensor | None
         self.reduction = reduction
 
     def get_parameter_count(self) -> int:

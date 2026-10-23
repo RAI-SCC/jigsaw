@@ -1,6 +1,6 @@
 """Functional forms and autograd functions of the distributed activations."""
 
-from typing import Any, Optional, Protocol, cast
+from typing import Any, Protocol, cast
 
 import torch
 import torch.distributed as dist
@@ -8,7 +8,7 @@ import torch.distributed as dist
 from jigsaw._core.autocast import promote_to_fp32_under_autocast
 
 
-def _active(group: Optional[dist.ProcessGroup]) -> bool:
+def _active(group: dist.ProcessGroup | None) -> bool:
     """Return whether ``group`` spans more than one rank."""
     return group is not None and group.size() > 1
 
@@ -76,7 +76,7 @@ class _Softmax(torch.autograd.Function):
     @staticmethod
     def vmap(
         info: Any,
-        in_dims: tuple[Optional[int], ...],
+        in_dims: tuple[int | None, ...],
         x: torch.Tensor,
         dim: int,
         group: dist.ProcessGroup,
@@ -93,7 +93,7 @@ class _LogSoftmax(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        x: torch.Tensor, dim: int, group: Optional[dist.ProcessGroup]
+        x: torch.Tensor, dim: int, group: dist.ProcessGroup | None
     ) -> torch.Tensor:
         """Compute ``log_softmax`` with all-reduces over ``group``."""
         local_max = x.amax(dim=dim, keepdim=True)
@@ -110,7 +110,7 @@ class _LogSoftmax(torch.autograd.Function):
     @staticmethod
     def setup_context(
         ctx: torch.autograd.function.FunctionCtx,
-        inputs: tuple[torch.Tensor, int, Optional[dist.ProcessGroup]],
+        inputs: tuple[torch.Tensor, int, dist.ProcessGroup | None],
         output: torch.Tensor,
     ) -> None:
         """Save the tensors and metadata for the backward pass."""
@@ -138,10 +138,10 @@ class _LogSoftmax(torch.autograd.Function):
     @staticmethod
     def vmap(
         info: Any,
-        in_dims: tuple[Optional[int], ...],
+        in_dims: tuple[int | None, ...],
         x: torch.Tensor,
         dim: int,
-        group: Optional[dist.ProcessGroup],
+        group: dist.ProcessGroup | None,
     ) -> tuple[torch.Tensor, int]:
         """Batching rule for ``torch.vmap``."""
         bdim = in_dims[0]
@@ -153,7 +153,7 @@ class _LogSoftmax(torch.autograd.Function):
 
 
 def distributed_log_softmax(
-    x: torch.Tensor, dim: int = -1, group: Optional[dist.ProcessGroup] = None
+    x: torch.Tensor, dim: int = -1, group: dist.ProcessGroup | None = None
 ) -> torch.Tensor:
     """Compute ``log_softmax`` over a dimension sharded across ``group``.
 
@@ -178,7 +178,7 @@ def distributed_log_softmax(
 def distributed_argmax(
     x: torch.Tensor,
     dim: int,
-    group: Optional[dist.ProcessGroup] = None,
+    group: dist.ProcessGroup | None = None,
 ) -> torch.Tensor:
     """Compute the arg-max along a dimension sharded across ``group``.
 

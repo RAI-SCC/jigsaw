@@ -1,6 +1,6 @@
 """Autograd function of the distributed convolution."""
 
-from typing import Any, Optional, Protocol, cast
+from typing import Any, Protocol, cast
 
 import torch
 import torch.distributed as dist
@@ -31,7 +31,7 @@ class _ConvNd(torch.autograd.Function):
     def forward(
         x: torch.Tensor,
         weight: torch.Tensor,
-        bias: Optional[torch.Tensor],
+        bias: torch.Tensor | None,
         stride: tuple[int, ...],
         padding: tuple[int, ...],
         dilation: tuple[int, ...],
@@ -109,7 +109,7 @@ class _ConvNd(torch.autograd.Function):
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
-        Optional[torch.Tensor],
+        torch.Tensor | None,
         None,
         None,
         None,
@@ -157,7 +157,7 @@ class _ConvNd(torch.autograd.Function):
     @staticmethod
     def vmap(
         info: Any,
-        in_dims: tuple[Optional[int], ...],
+        in_dims: tuple[int | None, ...],
         *args: Any,
     ) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[int, int]]:
         """Batching rule for ``torch.vmap``."""

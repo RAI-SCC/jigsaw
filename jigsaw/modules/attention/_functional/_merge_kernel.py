@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 import warnings
-from typing import Optional
 
 import torch
 
@@ -92,7 +91,7 @@ def fused_online_softmax_merge_(
     o2: torch.Tensor,
     l2: torch.Tensor,
     layout: str,
-) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor] | None:
     """Triton fast path for :func:`.forward._online_softmax_merge_`.
 
     Mutates ``o1`` in place; ``l_new`` is a fresh fp32 ``(b, h, n)`` tensor.

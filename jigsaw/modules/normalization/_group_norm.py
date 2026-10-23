@@ -1,6 +1,7 @@
 """Distributed GroupNorm."""
 
-from typing import Any, Optional, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -13,7 +14,7 @@ from . import _functional as functional
 
 
 def _sync_groups(
-    spatial_group: "dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]] | None",
+    spatial_group: "dist.ProcessGroup | Sequence[dist.ProcessGroup | None] | None",
 ) -> list[dist.ProcessGroup]:
     """Return the spatial groups of size > 1 the statistics are reduced over."""
     if spatial_group is None or isinstance(spatial_group, dist.ProcessGroup):
@@ -60,12 +61,12 @@ class DistributedGroupNorm(torch.nn.Module):
         num_groups: int,
         num_channels: int,
         device: torch.device,
-        channel_group: Optional[dist.ProcessGroup] = None,
+        channel_group: dist.ProcessGroup | None = None,
         eps: float = 1e-5,
         affine: bool = True,
         bias: bool = True,
-        dtype: Optional[torch.dtype] = None,
-        spatial_group: "dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]] | None" = None,
+        dtype: torch.dtype | None = None,
+        spatial_group: "dist.ProcessGroup | Sequence[dist.ProcessGroup | None] | None" = None,
     ) -> None:
         """Initialize the layer."""
         super().__init__()
@@ -183,7 +184,7 @@ class DistributedGroupNorm(torch.nn.Module):
         row_kw: str = "row",
         col_kw: str = "col",
         model_kw: str = "model",
-    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Merge the sharded weight and bias into global tensors.
 
         Parameters

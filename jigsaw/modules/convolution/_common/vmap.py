@@ -1,6 +1,6 @@
 """Batching rule shared by the convolution autograd Functions."""
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -10,10 +10,10 @@ from jigsaw._core.vmap import check_not_vmapped, to_front
 def conv_vmap(
     fn: Any,
     info: Any,
-    in_dims: tuple[Optional[int], ...],
+    in_dims: tuple[int | None, ...],
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: Optional[torch.Tensor],
+    bias: torch.Tensor | None,
     *args: Any,
 ) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[int, int]]:
     """Batching rule of :class:`_ConvNd` and :class:`_ConvTransposeNd`.

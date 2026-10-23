@@ -5,7 +5,7 @@ slice. Otherwise the overlapping raw outputs of neighboring ranks are summed
 along each split axis.
 """
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -52,7 +52,7 @@ def _grad_input_weight(
 
 def _channel_reduce_grad_input(
     g_x: torch.Tensor, channel_group: dist.ProcessGroup, config: Any
-) -> tuple[torch.Tensor, Optional[dist.Work]]:
+) -> tuple[torch.Tensor, dist.Work | None]:
     """Sum the input gradient over the channel group and keep the local shard.
 
     No reduction is needed if each rank owns whole conv-groups.
@@ -123,7 +123,7 @@ def conv_transpose_nway(
     stride: tuple[int, ...],
     padding: tuple[int, ...],
     dilation: tuple[int, ...],
-    spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
+    spatial_groups: tuple[dist.ProcessGroup | None, ...],
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -189,7 +189,7 @@ def conv_transpose_nway_backward(
     padding: tuple[int, ...],
     dilation: tuple[int, ...],
     local_in_spatial: tuple[int, ...],
-    spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
+    spatial_groups: tuple[dist.ProcessGroup | None, ...],
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -260,7 +260,7 @@ def conv_transpose_halo_nway(
     stride: tuple[int, ...],
     padding: tuple[int, ...],
     dilation: tuple[int, ...],
-    spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
+    spatial_groups: tuple[dist.ProcessGroup | None, ...],
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -338,7 +338,7 @@ def conv_transpose_halo_nway_backward(
     padding: tuple[int, ...],
     dilation: tuple[int, ...],
     local_in_spatial: tuple[int, ...],
-    spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
+    spatial_groups: tuple[dist.ProcessGroup | None, ...],
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:

@@ -1,6 +1,7 @@
 """Kernel selection for the distributed convolution."""
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -98,7 +99,7 @@ class ConvNdConfig(VmapConfig):
         self.conv_input_fn = torch.vmap(self.conv_input_fn, in_dims=(None, 0, 0))
         self.conv_weight_fn = torch.vmap(self.conv_weight_fn, in_dims=(0, None, 0))
 
-    def _grad_bias_selection(self, bias: Optional[torch.Tensor]) -> Callable:
+    def _grad_bias_selection(self, bias: torch.Tensor | None) -> Callable:
         """Select the grad-bias function."""
         if bias is None:
             return self._no_bias

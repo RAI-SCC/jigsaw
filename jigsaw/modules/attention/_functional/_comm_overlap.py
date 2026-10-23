@@ -8,21 +8,21 @@ waits on a CUDA event instead of the host blocking on ``Work.wait()``.
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
 
 #: Issues the async comm and returns ``(recv_buf, work)``, as
 #: :func:`jigsaw._core.comm.comm_1d_p2p` does.
-ProduceFn = Callable[[], "tuple[torch.Tensor, Optional[dist.Work]]"]
+ProduceFn = Callable[[], "tuple[torch.Tensor, dist.Work | None]"]
 
 
 def issue_on_comm_stream(
     comm_stream: torch.cuda.Stream,
     produce: ProduceFn,
-    keep_alive: "tuple[torch.Tensor, ...]",
-) -> "tuple[torch.Tensor, Optional[dist.Work], torch.cuda.Event]":
+    keep_alive: tuple[torch.Tensor, ...],
+) -> tuple[torch.Tensor, dist.Work | None, torch.cuda.Event]:
     """Run ``produce`` on ``comm_stream`` and return ``(recv_buf, work, event)``.
 
     ``comm_stream`` first waits on the compute stream so the send source is
@@ -102,13 +102,13 @@ class PrefetchBuffer:
         self._cs = comm_stream
         self._bufs = [torch.empty_like(like), torch.empty_like(like)]
         self._pending = 0
-        self._event: Optional[torch.cuda.Event] = None
+        self._event: torch.cuda.Event | None = None
         self._work: object = None
 
     def kick(
         self,
-        comm_call: "Callable[[torch.Tensor], tuple[torch.Tensor, Optional[dist.Work]]]",
-        extra_keep_alive: "tuple[torch.Tensor, ...]" = (),
+        comm_call: Callable[[torch.Tensor], tuple[torch.Tensor, dist.Work | None]],
+        extra_keep_alive: tuple[torch.Tensor, ...] = (),
     ) -> None:
         """Issue ``comm_call(buf)`` on the comm stream into the free buffer.
 

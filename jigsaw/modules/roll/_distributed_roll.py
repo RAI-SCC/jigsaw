@@ -1,6 +1,6 @@
 """Distributed roll kernels."""
 
-from typing import Callable, Tuple
+from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
@@ -62,8 +62,8 @@ def exchange_halo_1d(
 
 def distributed_roll(
     x: torch.Tensor,
-    shifts: Tuple[int, ...],
-    dims: Tuple[int, ...],
+    shifts: tuple[int, ...],
+    dims: tuple[int, ...],
     distributed_dims: list[int],
     spatial_process_groups: list[dist.ProcessGroup],
     exchange_halo_1d_fn: Callable,

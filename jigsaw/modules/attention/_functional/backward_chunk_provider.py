@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional, cast
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -168,10 +168,10 @@ class _GlobalChunkProvider(_BackwardChunkProvider):
         self.w_qkv = w_qkv
         self.b, self.seq_local, self.h, self.d = b, seq_local, h, d
 
-        self._cur_gpu: Optional[torch.Tensor] = None
-        self._cur_event: Optional[torch.cuda.Event] = None
-        self._next_gpu: Optional[torch.Tensor] = None
-        self._next_event: Optional[torch.cuda.Event] = None
+        self._cur_gpu: torch.Tensor | None = None
+        self._cur_event: torch.cuda.Event | None = None
+        self._next_gpu: torch.Tensor | None = None
+        self._next_event: torch.cuda.Event | None = None
 
         if ring_config.offloader is not None:
             self._cur_gpu, self._cur_event = self._start_prefetch(0)
@@ -179,7 +179,7 @@ class _GlobalChunkProvider(_BackwardChunkProvider):
 
     def _start_prefetch(
         self, idx: int
-    ) -> tuple[Optional[torch.Tensor], Optional[torch.cuda.Event]]:
+    ) -> tuple[torch.Tensor | None, torch.cuda.Event | None]:
         """Start prefetching a chunk.
 
         Parameters
@@ -287,7 +287,7 @@ class _LocalChunkProvider(_BackwardChunkProvider):
         self.group = group
 
         self._recv_buf = get_empty(x.device, x.dtype)
-        self._handle: Optional[dist.Work] = None
+        self._handle: dist.Work | None = None
 
     def _materialize_chunk0(self) -> torch.Tensor:
         """Return the saved local chunk on the device.
@@ -441,10 +441,10 @@ class _LocalChunkProviderOverlap(_LocalChunkProvider):
         """Defer buffer sizing to step 0 (needs the K/V shape)."""
         super().__init__(*args)  # type: ignore[arg-type]
         self._cs = self.config.comm_stream
-        self._bufs: Optional[list[torch.Tensor]] = None
+        self._bufs: list[torch.Tensor] | None = None
         self._pending = 0
         self._work: object = None
-        self._event: Optional[torch.cuda.Event] = None
+        self._event: torch.cuda.Event | None = None
 
     def _kick(self, src: torch.Tensor, into: int, step: int) -> None:
         """Issue a ``direction=-1`` ring send of ``src`` into ``self._bufs[into]``."""
@@ -508,7 +508,7 @@ class _LocalChunkProviderBroadcast(_LocalChunkProvider):
         self._recv_buf = torch.empty_like(
             self.x if self.config.send_in_forward == SendForward.X else self.chunk0
         )
-        self._handle: Optional[dist.Work] = None
+        self._handle: dist.Work | None = None
         self.local_rank = local_rank
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -606,7 +606,7 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
         self._recv_buf = torch.empty(
             template.shape, dtype=template.dtype, device=x.device
         )
-        self._handle: Optional[dist.Work] = None
+        self._handle: dist.Work | None = None
         self.local_rank = int(local_rank)
         self.topo = get_hybrid_topology(group, ring_config.intra_size)
         self._intra_size = self.topo.intra_size
@@ -618,8 +618,8 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
             self.topo.inter_group_peer(1),
             self.topo.inter_group_peer(-1),
         ]
-        self._inter_handle: Optional[dist.Work] = None
-        self._inter_recv_buf: Optional[torch.Tensor] = None
+        self._inter_handle: dist.Work | None = None
+        self._inter_recv_buf: torch.Tensor | None = None
 
     def _launch_inter_backward(self, data: torch.Tensor, step: int) -> None:
         """Start the send of ``data`` to the next intra group around the ring.
@@ -767,15 +767,15 @@ class _LocalChunkProviderHybridP2POverlap(_LocalChunkProviderHybridP2P):
         assert cs is not None
         self._intra_buf = PrefetchBuffer(cs, self._recv_buf)
         self._inter_buf = PrefetchBuffer(cs, self._recv_buf)
-        self._raw_recv_buf: Optional[torch.Tensor] = None
-        self._relay_src: Optional[torch.Tensor] = None
+        self._raw_recv_buf: torch.Tensor | None = None
+        self._relay_src: torch.Tensor | None = None
 
     def _launch_inter_backward(self, data: torch.Tensor, step: int) -> None:
         """Prefetch this round's outer-ring send on the comm stream."""
 
-        def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
+        def produce(buf: torch.Tensor) -> tuple[torch.Tensor, dist.Work | None]:
             return cast(
-                "tuple[torch.Tensor, Optional[dist.Work]]",
+                "tuple[torch.Tensor, dist.Work | None]",
                 self.config.p2p_fn(
                     data=data,
                     buffer=buf,
@@ -791,9 +791,9 @@ class _LocalChunkProviderHybridP2POverlap(_LocalChunkProviderHybridP2P):
     def _launch_intra_backward(self, src: torch.Tensor, step: int) -> None:
         """Prefetch this step's intra-group send on the comm stream."""
 
-        def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
+        def produce(buf: torch.Tensor) -> tuple[torch.Tensor, dist.Work | None]:
             return cast(
-                "tuple[torch.Tensor, Optional[dist.Work]]",
+                "tuple[torch.Tensor, dist.Work | None]",
                 self.config.send_op_fn(
                     src,
                     buf,
@@ -864,7 +864,7 @@ class _LocalChunkProviderHybridBroadcast(_LocalChunkProviderHybrid):
         """Resolve the intra-group broadcast group."""
         super().__init__(*args)  # type: ignore[arg-type]
         self.intra_group = self.topo.intra_group
-        self._group_chunk: Optional[torch.Tensor] = None
+        self._group_chunk: torch.Tensor | None = None
 
     def get(self, step: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return the key, value and fused key-value tensors of a ring step.
@@ -953,9 +953,9 @@ class _LocalChunkProviderHybridBroadcastOverlap(_LocalChunkProviderHybridBroadca
     def _launch_inter_backward(self, data: torch.Tensor, step: int) -> None:
         """Prefetch this round's outer-ring send on the comm stream."""
 
-        def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
+        def produce(buf: torch.Tensor) -> tuple[torch.Tensor, dist.Work | None]:
             return cast(
-                "tuple[torch.Tensor, Optional[dist.Work]]",
+                "tuple[torch.Tensor, dist.Work | None]",
                 self.config.p2p_fn(
                     data=data,
                     buffer=buf,
@@ -974,7 +974,7 @@ class _LocalChunkProviderHybridBroadcastOverlap(_LocalChunkProviderHybridBroadca
         group_chunk = self._group_chunk
         assert group_chunk is not None
 
-        def produce(buf: torch.Tensor) -> "tuple[torch.Tensor, Optional[dist.Work]]":
+        def produce(buf: torch.Tensor) -> tuple[torch.Tensor, dist.Work | None]:
             if is_src:
                 # Broadcast reads the source's own tensor in place; the
                 # persistent buffer has to hold that content before the

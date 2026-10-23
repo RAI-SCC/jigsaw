@@ -1,6 +1,6 @@
 """Distributed permutation kernels."""
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
@@ -35,7 +35,7 @@ def _exchange(
         return [all_to_all_async(recv_list, send_list, group=group)]
 
     # gloo's all-to-all needs equally sized tensors, so talk to each peer directly.
-    works: list[Optional[dist.Work]] = []
+    works: list[dist.Work | None] = []
     for peer, data in enumerate(send_list):
         if data.numel() > 0:
             works.append(dist.isend(data, group_dst=peer, group=group))

@@ -1,7 +1,6 @@
 """Replica marks on parameters, and keeping the marked replicas identical."""
 
 from collections.abc import Sequence
-from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -14,7 +13,7 @@ Groups = tuple[dist.ProcessGroup, ...]
 
 
 def _as_groups(
-    groups: "dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]]",
+    groups: "dist.ProcessGroup | Sequence[dist.ProcessGroup | None]",
 ) -> Groups:
     """Normalize to a tuple of the groups with a real (>1) split."""
     seq = [groups] if isinstance(groups, dist.ProcessGroup) else list(groups)
@@ -23,7 +22,7 @@ def _as_groups(
 
 def mark_replicated(
     param: torch.nn.Parameter,
-    groups: "dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]]",
+    groups: "dist.ProcessGroup | Sequence[dist.ProcessGroup | None]",
     extend: bool = False,
 ) -> None:
     """Mark a parameter as replicated over ``groups``.
@@ -86,7 +85,7 @@ def mark_replicated(
         setattr(param, _ATTR, tuple(new))
 
 
-def replica_groups(param: Optional[torch.Tensor]) -> Groups:
+def replica_groups(param: torch.Tensor | None) -> Groups:
     """Return the groups ``param`` is marked replicated over, or ``()``.
 
     Parameters

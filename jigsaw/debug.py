@@ -1,7 +1,6 @@
 """Debugging and inspection aids for distributed training."""
 
 from collections.abc import Iterator, Mapping
-from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -97,7 +96,7 @@ def assert_replica_consistency(
 
 def count_parameters(
     model: torch.nn.Module,
-    mesh: Optional[Mapping[str, dist.ProcessGroup]] = None,
+    mesh: Mapping[str, dist.ProcessGroup] | None = None,
     model_key: str = "model",
 ) -> int:
     """Count the trainable parameters of a model.

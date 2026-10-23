@@ -1,8 +1,8 @@
 """Base class of the distributed transpose convolutions."""
 
 import math
-from collections.abc import Sequence
-from typing import Any, Callable, Optional, cast
+from collections.abc import Callable, Sequence
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
@@ -30,9 +30,9 @@ class _DistributedConvTransposeNd(torch.nn.Module):
     # spatial rank (1, 2 or 3); pinned by the concrete subclass.
     _n_spatial: int
 
-    bias: Optional[Parameter]
+    bias: Parameter | None
     config: ConvTransposeNdConfig
-    spatial_groups: tuple[Optional[dist.ProcessGroup], ...]
+    spatial_groups: tuple[dist.ProcessGroup | None, ...]
     channel_group: dist.ProcessGroup
     device: torch.device
     kernel_size: tuple[int, ...]
@@ -49,7 +49,7 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         kernel_size: int | tuple[int, ...],
         # --- distributed (required) ---
         device: torch.device,
-        spatial_group: "dist.ProcessGroup | Sequence[Optional[dist.ProcessGroup]]",
+        spatial_group: "dist.ProcessGroup | Sequence[dist.ProcessGroup | None]",
         channel_group: dist.ProcessGroup,
         # --- core ConvTranspose (optional, pytorch-standard-order) ---
         stride: int | tuple[int, ...] = 1,
@@ -60,7 +60,7 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         # --- distributed (optional) ---
         dtype: torch.dtype = torch.float32,
         channel_comm: str = "auto",
-        config: Optional[ConvTransposeNdConfig] = None,
+        config: ConvTransposeNdConfig | None = None,
     ):
         """Initialize the module.
 
@@ -369,7 +369,7 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         self,
         process_mesh_dict: dict,
         col_kw: str = "col",
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Merge the channel-sharded weights and bias into global tensors.
 
         Parameters
@@ -541,7 +541,7 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         )
 
     def _forward_local(
-        self, x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor]
+        self, x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None
     ) -> torch.Tensor:
         """Apply the native transpose convolution to the local shard.
 

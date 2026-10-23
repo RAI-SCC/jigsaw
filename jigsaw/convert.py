@@ -1,7 +1,8 @@
 """Conversion of PyTorch models to jigsaw modules."""
 
 import warnings
-from typing import Any, Callable, Iterator, Literal
+from collections.abc import Callable, Iterator
+from typing import Any, Literal
 
 import torch
 

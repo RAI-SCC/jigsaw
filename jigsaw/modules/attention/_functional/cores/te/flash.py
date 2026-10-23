@@ -8,8 +8,6 @@ fp16/bf16 only; no FP8, bias, mask or GQA.
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 
 from ._layout import Layout
@@ -52,10 +50,10 @@ def forward(
     v: torch.Tensor,
     scale: float,
     dropout_p: float,
-    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see ..math)
+    seed: int | None = None,  # noqa: ARG001 - unused, interface parity (see ..math)
     *,
     layout: Layout = "bhsd",
-) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """FA2 forward.
 
     Parameters
@@ -114,8 +112,8 @@ def backward(
     scale: float,
     *_: object,
     dropout_p: float = 0.0,
-    seed: Optional[int] = None,  # noqa: ARG001 - unused, interface parity (see ..math)
-    rng_state: Optional[torch.Tensor] = None,
+    seed: int | None = None,  # noqa: ARG001 - unused, interface parity (see ..math)
+    rng_state: torch.Tensor | None = None,
     layout: Layout = "bhsd",
     **__: object,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Protocol, cast
+from typing import Any, Protocol, cast
 
 import torch
 import torch.distributed as dist
@@ -251,7 +251,7 @@ class RingCtx(Protocol):
     ring_group_size: int
     config: RingAttentionConfig
     dropout_p: float
-    base_seed: Optional[int]
+    base_seed: int | None
     n_chunks: int
     saved_tensors: tuple[
         torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, tuple
@@ -276,7 +276,7 @@ class _RingAttention(torch.autograd.Function):
         group: dist.ProcessGroup,
         local_rank: int,
         config: RingAttentionConfig,
-    ) -> tuple[torch.Tensor, torch.Tensor, tuple, Optional[int], tuple]:
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple, int | None, tuple]:
         """Run the ring-attention forward pass.
 
         Parameters
@@ -431,7 +431,7 @@ class _RingAttention(torch.autograd.Function):
             ring_config=ctx.config,
             dropout_p=ctx.dropout_p,
             base_seed=ctx.base_seed,
-            rng_states=cast(tuple[Optional[torch.Tensor], ...], rng_states),
+            rng_states=cast(tuple[torch.Tensor | None, ...], rng_states),
         )
 
         return dq, dk, dv, None, None, None, None, None, None, None

@@ -5,7 +5,7 @@ slice. Otherwise a halo exchange along each split axis precedes the
 convolution.
 """
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -22,7 +22,7 @@ from .halo import halo_gather, halo_scatter_add
 
 def _channel_reduce_grad_input(
     g_x: torch.Tensor, channel_group: dist.ProcessGroup, config: Any
-) -> tuple[torch.Tensor, Optional[dist.Work]]:
+) -> tuple[torch.Tensor, dist.Work | None]:
     """Sum the input gradient over the channel group and keep the local shard.
 
     No reduction is needed if each rank owns whole conv-groups.
@@ -42,7 +42,7 @@ def conv_nway(
     stride: tuple[int, ...],
     padding: str | tuple[int, ...],
     dilation: tuple[int, ...],
-    spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
+    spatial_groups: tuple[dist.ProcessGroup | None, ...],
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -107,7 +107,7 @@ def conv_nway_backward(
     padding: tuple[int, ...],
     dilation: tuple[int, ...],
     local_in_spatial: tuple[int, ...],
-    spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
+    spatial_groups: tuple[dist.ProcessGroup | None, ...],
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -201,7 +201,7 @@ def conv_halo_nway(
     stride: tuple[int, ...],
     padding: str | tuple[int, ...],
     dilation: tuple[int, ...],
-    spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
+    spatial_groups: tuple[dist.ProcessGroup | None, ...],
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -284,7 +284,7 @@ def conv_halo_nway_backward(
     padding: tuple[int, ...],
     dilation: tuple[int, ...],
     local_in_spatial: tuple[int, ...],
-    spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
+    spatial_groups: tuple[dist.ProcessGroup | None, ...],
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:

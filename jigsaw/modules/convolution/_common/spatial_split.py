@@ -1,13 +1,13 @@
 """Helpers for domain splits along several spatial axes."""
 
-from typing import Iterator, Optional
+from collections.abc import Iterator
 
 import torch
 import torch.distributed as dist
 
 
 def _split_axes(
-    spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
+    spatial_groups: tuple[dist.ProcessGroup | None, ...],
 ) -> Iterator[tuple[int, int, dist.ProcessGroup]]:
     """Yield ``(spatial_idx, tensor_axis, group)`` for each split axis."""
     n = len(spatial_groups)
@@ -17,7 +17,7 @@ def _split_axes(
 
 
 def _needs_halo(
-    spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
+    spatial_groups: tuple[dist.ProcessGroup | None, ...],
     padding: str | tuple[int, ...],
     dilation: tuple[int, ...],
 ) -> bool:
@@ -30,7 +30,7 @@ def _needs_halo(
 
 def _reduce_scatter_channels(
     g_x: torch.Tensor, channel_group: dist.ProcessGroup, n: int
-) -> tuple[torch.Tensor, Optional[dist.Work]]:
+) -> tuple[torch.Tensor, dist.Work | None]:
     """Sum a full-channel gradient over the channel group and keep the local shard.
 
     The reduce-scatter is asynchronous, so the returned handle must be waited on
@@ -51,7 +51,7 @@ def _reduce_scatter_channels(
 
 def _local_padding(
     padding: tuple[int, ...],
-    spatial_groups: tuple[Optional[dist.ProcessGroup], ...],
+    spatial_groups: tuple[dist.ProcessGroup | None, ...],
 ) -> tuple[int, ...]:
     """Return the padding of the local convolution, zero on split axes."""
     split = {axis for _, axis, _ in _split_axes(spatial_groups)}

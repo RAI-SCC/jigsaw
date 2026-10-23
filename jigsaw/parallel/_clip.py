@@ -2,7 +2,6 @@
 
 import math
 from collections.abc import Iterable
-from typing import Union
 
 import torch
 import torch.distributed as dist
@@ -12,7 +11,7 @@ from ._replicas import Groups, replica_groups
 
 
 def clip_grad_norm_(
-    parameters: Union[torch.Tensor, Iterable[torch.Tensor]],
+    parameters: torch.Tensor | Iterable[torch.Tensor],
     max_norm: float,
     group: dist.ProcessGroup,
     norm_type: float = 2.0,

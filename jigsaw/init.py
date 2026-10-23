@@ -7,7 +7,7 @@ Without these arguments they match their :mod:`torch.nn.init` namesakes.
 
 import math
 from collections.abc import Sequence
-from typing import Any, Optional, Union, cast
+from typing import Any, cast
 
 import torch
 import torch.nn.init as _torch_init
@@ -39,7 +39,7 @@ __all__ = [
     "xavier_normal_",
 ]
 
-ShapeLike = Union[torch.Tensor, torch.Size, Sequence[int]]
+ShapeLike = torch.Tensor | torch.Size | Sequence[int]
 
 
 def _as_shape(shape: ShapeLike) -> tuple[int, ...]:
@@ -80,9 +80,9 @@ def _calculate_fan_in_and_fan_out(shape: ShapeLike) -> tuple[int, int]:
 
 def _resolve_fans(
     tensor: torch.Tensor,
-    global_shape: Optional[ShapeLike],
-    fan_in: Optional[int],
-    fan_out: Optional[int],
+    global_shape: ShapeLike | None,
+    fan_in: int | None,
+    fan_out: int | None,
 ) -> tuple[int, int]:
     """Resolve the fans from explicit arguments, ``global_shape`` or ``tensor``, in that order."""
     if global_shape is not None:
@@ -99,9 +99,9 @@ def _resolve_fans(
 def _calculate_correct_fan(
     tensor: torch.Tensor,
     mode: str,
-    global_shape: Optional[ShapeLike] = None,
-    fan_in: Optional[int] = None,
-    fan_out: Optional[int] = None,
+    global_shape: ShapeLike | None = None,
+    fan_in: int | None = None,
+    fan_out: int | None = None,
 ) -> int:
     """Return the fan selected by ``mode``."""
     mode = mode.lower()
@@ -117,11 +117,11 @@ def kaiming_uniform_(
     a: float = 0.0,
     mode: str = "fan_in",
     nonlinearity: str = "leaky_relu",
-    generator: Optional[torch.Generator] = None,
+    generator: torch.Generator | None = None,
     *,
-    global_shape: Optional[ShapeLike] = None,
-    fan_in: Optional[int] = None,
-    fan_out: Optional[int] = None,
+    global_shape: ShapeLike | None = None,
+    fan_in: int | None = None,
+    fan_out: int | None = None,
 ) -> torch.Tensor:
     """Fill a tensor with the Kaiming-uniform distribution.
 
@@ -163,11 +163,11 @@ def kaiming_normal_(
     a: float = 0.0,
     mode: str = "fan_in",
     nonlinearity: str = "leaky_relu",
-    generator: Optional[torch.Generator] = None,
+    generator: torch.Generator | None = None,
     *,
-    global_shape: Optional[ShapeLike] = None,
-    fan_in: Optional[int] = None,
-    fan_out: Optional[int] = None,
+    global_shape: ShapeLike | None = None,
+    fan_in: int | None = None,
+    fan_out: int | None = None,
 ) -> torch.Tensor:
     """Fill a tensor with the Kaiming-normal distribution.
 
@@ -206,11 +206,11 @@ def kaiming_normal_(
 def xavier_uniform_(
     tensor: torch.Tensor,
     gain: float = 1.0,
-    generator: Optional[torch.Generator] = None,
+    generator: torch.Generator | None = None,
     *,
-    global_shape: Optional[ShapeLike] = None,
-    fan_in: Optional[int] = None,
-    fan_out: Optional[int] = None,
+    global_shape: ShapeLike | None = None,
+    fan_in: int | None = None,
+    fan_out: int | None = None,
 ) -> torch.Tensor:
     """Fill a tensor with the Xavier-uniform distribution.
 
@@ -245,11 +245,11 @@ def xavier_uniform_(
 def xavier_normal_(
     tensor: torch.Tensor,
     gain: float = 1.0,
-    generator: Optional[torch.Generator] = None,
+    generator: torch.Generator | None = None,
     *,
-    global_shape: Optional[ShapeLike] = None,
-    fan_in: Optional[int] = None,
-    fan_out: Optional[int] = None,
+    global_shape: ShapeLike | None = None,
+    fan_in: int | None = None,
+    fan_out: int | None = None,
 ) -> torch.Tensor:
     """Fill a tensor with the Xavier-normal distribution.
 

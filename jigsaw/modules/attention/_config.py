@@ -1,7 +1,8 @@
 """Configuration of ring attention."""
 
-from enum import Enum
-from typing import Any, Callable, Optional, TypeVar, cast
+from collections.abc import Callable
+from enum import Enum, StrEnum
+from typing import Any, TypeVar, cast
 
 import torch
 import torch.distributed as dist
@@ -59,7 +60,7 @@ class SendOp(Enum):
     HYBRID_ALLTOALL = 5
 
 
-class AttnBackend(str, Enum):
+class AttnBackend(StrEnum):
     """Attention core implementation, used both with and without ``ring``.
 
     - ``TE``: cuDNN fused kernels on Hopper and newer, the ``flash_attn``
@@ -131,17 +132,17 @@ def _coerce_enum(enum_cls: type[_E], value: Any, arg: str) -> _E:
 # --------------------------------------------------------------------------- #
 CommFn = Callable[..., Any]
 AttnCoreFn = Callable[..., Any]
-ForwardSendFn = Callable[..., tuple[torch.Tensor, Optional[dist.Work]]]
+ForwardSendFn = Callable[..., tuple[torch.Tensor, dist.Work | None]]
 ForwardRecvFn = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
     tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
 ]
-SaveForBackwardFn = Callable[[torch.Tensor, torch.Tensor], Optional[torch.Tensor]]
+SaveForBackwardFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor | None]
 
 
 def _select_offloader(
     offload: Offload, device: torch.device
-) -> Optional[NVLinkActivationOffloader]:
+) -> NVLinkActivationOffloader | None:
     """Return the activation offloader for a policy, or ``None``."""
     match offload:
         case Offload.DISABLED:
@@ -254,9 +255,9 @@ def _select_forward_send_fn(
         direction: int,
         group: dist.ProcessGroup,
         tag: int,
-        group_size: Optional[int] = None,
+        group_size: int | None = None,
         **_: Any,
-    ) -> tuple[torch.Tensor, Optional[dist.Work]]:
+    ) -> tuple[torch.Tensor, dist.Work | None]:
         buf = kv if send_kv else x
         recv_buf, handle = send_op_fn(
             buf,
@@ -276,7 +277,7 @@ def _select_forward_send_fn(
         group: dist.ProcessGroup,
         src_rank: int,
         **_: Any,
-    ) -> tuple[torch.Tensor, Optional[dist.Work]]:
+    ) -> tuple[torch.Tensor, dist.Work | None]:
         buf = kv if send_kv else x
         recv = buf if src_rank == local_rank else torch.empty_like(buf)
         return recv, dist.broadcast(
@@ -311,7 +312,7 @@ def _select_forward_recv_fn(send_in_forward: SendForward) -> ForwardRecvFn:
 def _select_save_for_backward_fn(
     save_for_backward: SaveBackward,
     save_scope: SaveScope,
-    offloader: Optional[NVLinkActivationOffloader],
+    offloader: NVLinkActivationOffloader | None,
 ) -> SaveForBackwardFn:
     """Select the function that captures the tensor kept for backward.
 
@@ -323,7 +324,7 @@ def _select_save_for_backward_fn(
     if not (want_x or save_for_backward == SaveBackward.KV):
         return lambda x, kv: None
 
-    def save(x: torch.Tensor, kv: torch.Tensor) -> Optional[torch.Tensor]:
+    def save(x: torch.Tensor, kv: torch.Tensor) -> torch.Tensor | None:
         chunk = x if want_x else kv
         if isinstance(offloader, NVLinkActivationOffloader):
             return offloader.offload(chunk)
@@ -429,7 +430,7 @@ class RingAttentionConfig:
         # stream and ``overlap_active`` stays False, so every provider falls back
         # to its synchronous path.
         self.overlap_comm = bool(overlap_comm)
-        self._comm_stream: Optional[torch.cuda.Stream] = (
+        self._comm_stream: torch.cuda.Stream | None = (
             torch.cuda.Stream(device)
             if self.overlap_comm and torch.device(device).type == "cuda"
             else None
@@ -459,7 +460,7 @@ class RingAttentionConfig:
         )
 
     @property
-    def comm_stream(self) -> Optional[torch.cuda.Stream]:
+    def comm_stream(self) -> torch.cuda.Stream | None:
         """Dedicated CUDA stream for ring comm, or ``None`` when overlap is off.
 
         Returns

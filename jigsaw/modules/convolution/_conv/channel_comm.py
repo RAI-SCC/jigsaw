@@ -9,7 +9,8 @@ The input channels are split over the channel group. The strategy
 * ``"all_to_all"`` uses the same ring with a masked all-to-all per step (NCCL only).
 """
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -29,12 +30,12 @@ HaloFn = Callable[[torch.Tensor], torch.Tensor]
 def _over_channels_all_gather(
     x: torch.Tensor,
     w: torch.Tensor,
-    b: Optional[torch.Tensor],
+    b: torch.Tensor | None,
     conv_kwargs: dict[str, Any],
     channel_group: dist.ProcessGroup,
     conv_func: ConvFn,
     channel_dim: int,
-    halo_fn: Optional[HaloFn],
+    halo_fn: HaloFn | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Gather all channel slices, then convolve once.
 
@@ -57,12 +58,12 @@ def _over_channels_all_gather(
 def _over_channels_streaming(
     x: torch.Tensor,
     w: torch.Tensor,
-    b: Optional[torch.Tensor],
+    b: torch.Tensor | None,
     conv_kwargs: dict[str, Any],
     channel_group: dist.ProcessGroup,
     conv_func: ConvFn,
     channel_dim: int,
-    halo_fn: Optional[HaloFn],
+    halo_fn: HaloFn | None,
     hop_fn: _HopFn,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Circulate the channel slices in a ring and convolve each one.
@@ -135,10 +136,10 @@ def _over_channels_streaming(
 def _over_channels_local(
     x: torch.Tensor,
     w: torch.Tensor,
-    b: Optional[torch.Tensor],
+    b: torch.Tensor | None,
     conv_kwargs: dict[str, Any],
     conv_func: ConvFn,
-    halo_fn: Optional[HaloFn],
+    halo_fn: HaloFn | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Convolve the local channel shard without channel communication.
 
@@ -162,14 +163,14 @@ def _over_channels_local(
 def over_channels(
     x: torch.Tensor,
     w: torch.Tensor,
-    b: Optional[torch.Tensor],
+    b: torch.Tensor | None,
     conv_kwargs: dict[str, Any],
     *,
     channel_group: dist.ProcessGroup,
     conv_func: ConvFn,
     n_spatial_dims: int,
     channel_comm: str,
-    halo_fn: Optional[HaloFn] = None,
+    halo_fn: HaloFn | None = None,
     local: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Convolve over the channel-parallel group with the configured strategy.
