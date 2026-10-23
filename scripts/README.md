@@ -40,9 +40,10 @@ cp scripts/train.sbatch.example experiments/train.sbatch  # then edit + sbatch
 
 Point at a preset with `JIGSAW_SITE=<name>` (→ `sites/<name>.env`) or an explicit
 file with `JIGSAW_SITE_FILE=/abs/path.env`. With neither, export the `JIGSAW_*`
-vars directly. `run.sh` sources the preset after the caller's environment, so a plain
-`export` in the preset wins over a value exported before calling `run.sh`. To let such
-a value override the preset, write that line as `export JIGSAW_SIF="${JIGSAW_SIF:-...}"`.
+vars directly. The preset writes each value as `${VAR:-default}`, so a value exported
+before calling `run.sh` overrides it
+(e.g. `JIGSAW_SIF=/other.sif JIGSAW_SITE=cluster_name scripts/run.sh ...`). A line
+written as a plain `export` in a preset wins over the caller's environment instead.
 
 ## The launch contract
 
