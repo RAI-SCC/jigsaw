@@ -58,7 +58,14 @@ jobs:
         # One Python only: the 3.11 floor in requires-python is guarded
         # statically by mypy (python_version = "3.11") in the lint job.
         ranks: [1, 4, 8]
-    name: test (py${{ matrix.python-version }}, ${{ matrix.ranks }} ranks)
+        # "" is the newest torch. The include adds jobs at the torch floor in
+        # pyproject.toml (before 2.8, Gloo rejects ReduceOp.AVG); its torch
+        # value differs from "", so it adds jobs instead of merging into them.
+        torch: [""]
+        include:
+          - { python-version: "3.12", ranks: 1, torch: "2.8.*" }
+          - { python-version: "3.12", ranks: 4, torch: "2.8.*" }
+    name: test (py${{ matrix.python-version }}, ${{ matrix.ranks }} ranks${{ matrix.torch && format(', torch {0}', matrix.torch) || '' }})
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -71,7 +78,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin
       - name: Install package (CPU torch)
         run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install "torch${{ matrix.torch && format('=={0}', matrix.torch) || '' }}" --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev]"
       - name: Tests
         env:

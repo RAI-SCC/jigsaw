@@ -30,7 +30,7 @@ classifiers = [
 # never a pip dependency. Bare-metal install: `pip install -e .`; container
 # install: `pip install --no-deps -e .` on top of the image's torch.
 dependencies = [
-    "torch>=2.6",
+    "torch>=2.8",
     "einops>=0.6",
     "numpy",
 ]
