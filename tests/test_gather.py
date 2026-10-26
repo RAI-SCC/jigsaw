@@ -15,8 +15,9 @@ class TestAveraging:
         ]
         expected = [t.clone() for t in tensors]
         average_weights([tensors[0], None, tensors[1]], dist.group.WORLD)
+        # NCCL computes AVG as sum * (1 / n), not exact for non-power-of-2 n.
         for got, want in zip(tensors, expected, strict=True):
-            assert torch.equal(got, want)
+            assert torch.allclose(got, want)
 
     @pytest.mark.parametrize("bias_only", [False, True])
     def test_average_weights_module(self, device, bias_only):
