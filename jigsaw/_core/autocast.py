@@ -5,6 +5,7 @@ these helpers apply its dtype policy explicitly.
 
 * :func:`cast_to_autocast_dtype` casts down to the autocast dtype.
 * :func:`promote_to_fp32_under_autocast` promotes up to fp32.
+* :func:`resolve_matmul_dtype` gives the dtype a matmul produces.
 """
 
 from __future__ import annotations
@@ -104,3 +105,29 @@ def promote_to_fp32_under_autocast(
         None if t is None else t.to(torch.promote_types(t.dtype, torch.float32))
         for t in tensors
     )
+
+
+def resolve_matmul_dtype(device: torch.device, *operands: torch.Tensor) -> torch.dtype:
+    """Return the dtype a ``matmul`` over ``operands`` produces on ``device``.
+
+    This is the autocast dtype if autocast is active, otherwise the promoted
+    dtype of the operands.
+
+    Parameters
+    ----------
+    device : torch.device
+        Device the matmul runs on.
+    *operands : torch.Tensor
+        Matmul operands.
+
+    Returns
+    -------
+    torch.dtype
+        Result dtype.
+    """
+    if torch.is_autocast_enabled(device.type):
+        return torch.get_autocast_dtype(device.type)
+    dtype = operands[0].dtype
+    for operand in operands[1:]:
+        dtype = torch.promote_types(dtype, operand.dtype)
+    return dtype

@@ -13,8 +13,8 @@ from typing import Any, ParamSpec, TypeVar, cast
 import torch
 import torch.distributed as dist
 
+from jigsaw._core.autocast import resolve_matmul_dtype
 from jigsaw._core.buffers import get_preallocated_buffer
-from jigsaw._core.comm import resolve_matmul_dtype
 
 # mypy: disable-error-code="union-attr"
 
