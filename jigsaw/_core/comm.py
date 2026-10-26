@@ -1,8 +1,4 @@
-"""Communication primitives.
-
-Sections, in order: backend checks, transport selection (:class:`CommOp`), 1-D
-neighbor exchanges, and collectives.
-"""
+"""Communication primitives."""
 
 from collections.abc import Callable, Iterable
 from enum import StrEnum
