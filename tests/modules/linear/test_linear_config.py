@@ -61,6 +61,27 @@ class TestMatmulKernelSelection:
         _assert_kernels_from(cfg, module, way)
 
     @pytest.mark.parametrize("dev", [CPU, CUDA], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "comm, module",
+        [("isend", dist_mm_p2p), ("batch_isend_irecv", dist_mm_batchedp2p)],
+    )
+    @pytest.mark.parametrize("size, way", WAYS.items())
+    def test_explicit_comm_overrides_the_device_default(
+        self, dev, comm, module, size, way
+    ):
+        cfg = _config(size, device=dev, comm=comm)
+        assert cfg.comm == comm
+        _assert_kernels_from(cfg, module, way)
+
+    @pytest.mark.parametrize(
+        "dev, comm",
+        [(CPU, "batch_isend_irecv"), (CUDA, "all_to_all")],
+        ids=["cpu", "cuda"],
+    )
+    def test_auto_comm_resolves_per_device(self, dev, comm):
+        assert _config(2, device=dev).comm == comm
+
+    @pytest.mark.parametrize("dev", [CPU, CUDA], ids=["cpu", "cuda"])
     def test_single_process_kernels_are_plain_matmuls(self, dev):
         xwt, xw, xtw, fused = _config(1, device=dev).mm_kernels
         x, w = torch.randn(2, 4, 5), torch.randn(3, 5)
