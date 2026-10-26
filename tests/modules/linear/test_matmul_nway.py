@@ -68,7 +68,7 @@ SHAPES = {
 }
 
 
-def _impl(device: torch.device, impl):
+def _implementation(device: torch.device, impl):
     """Return ``impl``, skipping the all-to-all one off CUDA."""
     if impl is dist_mm and device.type != "cuda":
         pytest.skip("the all-to-all implementation needs NCCL")
@@ -98,7 +98,7 @@ class TestMatmulNway:
         x_all = gather_results(x, process_mesh_dict=mesh)
         w_all = gather_results(w, process_mesh_dict=mesh)
 
-        result = getattr(_impl(device, impl), f"xw_transpose_{suffix}")(
+        result = getattr(_implementation(device, impl), f"xw_transpose_{suffix}")(
             x, w, rank, device, model_group=mesh["model"]
         )
         result = gather_results(result, process_mesh_dict=mesh)
@@ -120,7 +120,7 @@ class TestMatmulNway:
         x_all = gather_results(x, process_mesh_dict=mesh)
         w_all = gather_results(w, process_mesh_dict=mesh)
 
-        result = getattr(_impl(device, impl), f"xw_{suffix}")(
+        result = getattr(_implementation(device, impl), f"xw_{suffix}")(
             x, w, rank, device, model_group=mesh["model"]
         )
         result = gather_results(result, process_mesh_dict=mesh)
@@ -142,7 +142,7 @@ class TestMatmulNway:
         x_all = gather_results(x, process_mesh_dict=mesh)
         w_all = gather_results(w, process_mesh_dict=mesh)
 
-        result = getattr(_impl(device, impl), f"x_transpose_w_{suffix}")(
+        result = getattr(_implementation(device, impl), f"x_transpose_w_{suffix}")(
             x, w, rank, device, model_group=mesh["model"]
         )
         result = gather_results(result, process_mesh_dict=mesh)
@@ -165,9 +165,9 @@ class TestMatmulNway:
         w1_all = gather_results(w1, process_mesh_dict=mesh)
         w2_all = gather_results(w2, process_mesh_dict=mesh)
 
-        result_xw, result_xtw = getattr(_impl(device, impl), f"fused_xw_xtw_{suffix}")(
-            x, w1, w2, rank, device, model_group=mesh["model"]
-        )
+        result_xw, result_xtw = getattr(
+            _implementation(device, impl), f"fused_xw_xtw_{suffix}"
+        )(x, w1, w2, rank, device, model_group=mesh["model"])
         result_xw = gather_results(result_xw, process_mesh_dict=mesh)
         result_xtw = gather_results(result_xtw, process_mesh_dict=mesh)
 
