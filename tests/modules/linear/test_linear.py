@@ -253,13 +253,13 @@ class TestParameterCount:
 
 class TestComm:
     @pytest.mark.dist(4)
-    @pytest.mark.parametrize("comm", ["all_to_all", "p2p", "batched_p2p"])
+    @pytest.mark.parametrize("comm", ["all_to_all", "isend", "batch_isend_irecv"])
     def test_every_comm_matches_torch(
         self, device: torch.device, process_mesh_dict_2x2: dict, comm: str
     ) -> None:
         """Forward and backward parity of each strategy; resharding keeps it."""
-        if comm == "all_to_all" and device.type == "cpu":
-            pytest.skip("gloo has no all-to-all")
+        if comm == "all_to_all" and device.type != "cuda":
+            pytest.skip("all_to_all needs CUDA")
         mesh = process_mesh_dict_2x2
         model_group = mesh["model"]
         local_rank = dist.get_rank(group=model_group)

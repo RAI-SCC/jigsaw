@@ -72,7 +72,7 @@ def _build_backward_chunk_provider(
         raise NotImplementedError(f"Unknown save_scope: {ring_config.save_scope}")
 
     # Every LOCAL-scope provider takes the same positional args; only the plain
-    # P2P/all-to-all ring has no use for the trailing `local_rank`.
+    # ring has no use for the trailing `local_rank`.
     args = (
         ring_config,
         chunks_to_save,
@@ -86,13 +86,13 @@ def _build_backward_chunk_provider(
         local_rank,
     )
     match ring_config.send_op:
-        case SendOp.P2P | SendOp.ALLTOALL:
+        case SendOp.RING:
             if ring_config.overlap_active:
                 return _LocalChunkProviderOverlap(*args[:-1])
             return _LocalChunkProvider(*args[:-1])
         case SendOp.BROADCAST:
             return _LocalChunkProviderBroadcast(*args)
-        case SendOp.HYBRID_P2P | SendOp.HYBRID_ALLTOALL:
+        case SendOp.HYBRID:
             if ring_config.overlap_active:
                 return _LocalChunkProviderHybridP2POverlap(*args)
             return _LocalChunkProviderHybridP2P(*args)
@@ -643,7 +643,7 @@ class _LocalChunkProviderHybrid(_LocalChunkProvider):
 
 
 class _LocalChunkProviderHybridP2P(_LocalChunkProviderHybrid):
-    """Hybrid provider rotating chunks within the intra group (P2P on the outer ring)."""
+    """Hybrid provider rotating chunks within the intra group, joined by an outer ring."""
 
     def __init__(self, *args: object) -> None:
         """Resolve the intra-group peers."""

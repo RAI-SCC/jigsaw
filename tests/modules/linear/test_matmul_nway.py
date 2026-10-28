@@ -19,11 +19,11 @@ from tests.parity import assert_close
 
 pytestmark = [pytest.mark.dist_required]
 
-# CPU is served by the point-to-point implementations; run every CPU test against
-# both the plain and the batched (`batch_isend_irecv`) variant.
-CPU_IMPLS = [
-    pytest.param(dist_mm_p2p, id="p2p"),
-    pytest.param(dist_mm_batchedp2p, id="batched_p2p"),
+# One implementation per ``CommOp``; the all-to-all one needs NCCL.
+IMPLS = [
+    pytest.param(dist_mm, id="all_to_all"),
+    pytest.param(dist_mm_p2p, id="isend"),
+    pytest.param(dist_mm_batchedp2p, id="batch_isend_irecv"),
 ]
 
 # (kernel-name suffix, mesh fixture), each pinned to the rank count it needs.
@@ -68,13 +68,11 @@ SHAPES = {
 }
 
 
-def _impl(device: torch.device, cpu_impl):
-    """Pick the matmul implementation module for the current device."""
-    if device.type == "cuda":
-        if cpu_impl is not dist_mm_p2p:
-            pytest.skip("CUDA uses the collective implementation, not the p2p ones")
-        return dist_mm
-    return cpu_impl
+def _impl(device: torch.device, impl):
+    """Return ``impl``, skipping the all-to-all one off CUDA."""
+    if impl is dist_mm and device.type != "cuda":
+        pytest.skip("the all-to-all implementation needs NCCL")
+    return impl
 
 
 def _randn(shapes, device: torch.device):
@@ -85,10 +83,10 @@ def _randn(shapes, device: torch.device):
 class TestMatmulNway:
     """XWT / XW / XTW / fused kernels across 2, 4 and 8 ranks."""
 
-    @pytest.mark.parametrize("cpu_impl", CPU_IMPLS)
+    @pytest.mark.parametrize("impl", IMPLS)
     @pytest.mark.parametrize("way", WAYS)
     def test_xwt(
-        self, way, cpu_impl, device: torch.device, request: pytest.FixtureRequest
+        self, way, impl, device: torch.device, request: pytest.FixtureRequest
     ) -> None:
         """XWT (``x @ w.mT``) across the model group."""
         suffix, mesh_name = way
@@ -100,17 +98,17 @@ class TestMatmulNway:
         x_all = gather_results(x, process_mesh_dict=mesh)
         w_all = gather_results(w, process_mesh_dict=mesh)
 
-        result = getattr(_impl(device, cpu_impl), f"xw_transpose_{suffix}")(
+        result = getattr(_impl(device, impl), f"xw_transpose_{suffix}")(
             x, w, rank, device, model_group=mesh["model"]
         )
         result = gather_results(result, process_mesh_dict=mesh)
 
         assert_close("xwt", result, x_all @ w_all.mT, 1e-5, 1e-5, device, mesh["model"])
 
-    @pytest.mark.parametrize("cpu_impl", CPU_IMPLS)
+    @pytest.mark.parametrize("impl", IMPLS)
     @pytest.mark.parametrize("way", WAYS)
     def test_xw(
-        self, way, cpu_impl, device: torch.device, request: pytest.FixtureRequest
+        self, way, impl, device: torch.device, request: pytest.FixtureRequest
     ) -> None:
         """XW (``x @ w``) across the model group."""
         suffix, mesh_name = way
@@ -122,17 +120,17 @@ class TestMatmulNway:
         x_all = gather_results(x, process_mesh_dict=mesh)
         w_all = gather_results(w, process_mesh_dict=mesh)
 
-        result = getattr(_impl(device, cpu_impl), f"xw_{suffix}")(
+        result = getattr(_impl(device, impl), f"xw_{suffix}")(
             x, w, rank, device, model_group=mesh["model"]
         )
         result = gather_results(result, process_mesh_dict=mesh)
 
         assert_close("xw", result, x_all @ w_all, 1e-5, 1e-5, device, mesh["model"])
 
-    @pytest.mark.parametrize("cpu_impl", CPU_IMPLS)
+    @pytest.mark.parametrize("impl", IMPLS)
     @pytest.mark.parametrize("way", WAYS)
     def test_xtw(
-        self, way, cpu_impl, device: torch.device, request: pytest.FixtureRequest
+        self, way, impl, device: torch.device, request: pytest.FixtureRequest
     ) -> None:
         """XTW (``x.mT @ w``) across the model group."""
         suffix, mesh_name = way
@@ -144,17 +142,17 @@ class TestMatmulNway:
         x_all = gather_results(x, process_mesh_dict=mesh)
         w_all = gather_results(w, process_mesh_dict=mesh)
 
-        result = getattr(_impl(device, cpu_impl), f"x_transpose_w_{suffix}")(
+        result = getattr(_impl(device, impl), f"x_transpose_w_{suffix}")(
             x, w, rank, device, model_group=mesh["model"]
         )
         result = gather_results(result, process_mesh_dict=mesh)
 
         assert_close("xtw", result, x_all.mT @ w_all, 1e-5, 1e-5, device, mesh["model"])
 
-    @pytest.mark.parametrize("cpu_impl", CPU_IMPLS)
+    @pytest.mark.parametrize("impl", IMPLS)
     @pytest.mark.parametrize("way", WAYS)
     def test_fused_xw_xtw(
-        self, way, cpu_impl, device: torch.device, request: pytest.FixtureRequest
+        self, way, impl, device: torch.device, request: pytest.FixtureRequest
     ) -> None:
         """Fused kernel returning both ``x @ w1`` and ``x.mT @ w2``."""
         suffix, mesh_name = way
@@ -167,9 +165,9 @@ class TestMatmulNway:
         w1_all = gather_results(w1, process_mesh_dict=mesh)
         w2_all = gather_results(w2, process_mesh_dict=mesh)
 
-        result_xw, result_xtw = getattr(
-            _impl(device, cpu_impl), f"fused_xw_xtw_{suffix}"
-        )(x, w1, w2, rank, device, model_group=mesh["model"])
+        result_xw, result_xtw = getattr(_impl(device, impl), f"fused_xw_xtw_{suffix}")(
+            x, w1, w2, rank, device, model_group=mesh["model"]
+        )
         result_xw = gather_results(result_xw, process_mesh_dict=mesh)
         result_xtw = gather_results(result_xtw, process_mesh_dict=mesh)
 

@@ -11,7 +11,7 @@ pytestmark = [pytest.mark.dist_required]
 
 # Every channel-parallel exchange strategy; "all_to_all" needs a backend with
 # all-to-all support and is skipped on gloo (see _skip_if_unsupported).
-CHANNEL_COMMS = ["all_gather", "p2p", "all_to_all"]
+CHANNEL_COMMS = ["all_gather", "isend", "batch_isend_irecv", "all_to_all"]
 
 Pair = int | tuple[int, int]
 
@@ -77,8 +77,8 @@ def _conv2d_reference_check(
     """Compare a distributed ``DistributedConv2d`` against a single-process conv2d.
 
     Works for any ``row.size()`` (spatial) x ``col.size()`` (channel) mesh, any
-    channel-parallel exchange strategy (``"all_gather"`` / ``"p2p"`` /
-    ``"all_to_all"``), any ``groups`` compatible with the channel group (``1`` or
+    channel-parallel exchange strategy (``"all_gather"`` / ``"isend"`` /
+    ``"batch_isend_irecv"`` / ``"all_to_all"``), any ``groups`` compatible with the channel group (``1`` or
     a multiple of ``col.size()``) and for both the no-halo regime
     (``stride == kernel_size``, the default) and the halo regime (any other
     stride). ``kernel_size`` / ``stride`` / ``padding`` / ``dilation`` accept an
@@ -442,7 +442,9 @@ class TestConv2d:
             channel_comm=channel_comm,
         )
 
-    @pytest.mark.parametrize("channel_comm", ["p2p", "all_to_all"])
+    @pytest.mark.parametrize(
+        "channel_comm", ["isend", "batch_isend_irecv", "all_to_all"]
+    )
     def test_streaming_matches_all_gather(
         self,
         device: torch.device,
@@ -451,7 +453,7 @@ class TestConv2d:
     ) -> None:
         """The streaming exchanges match all-gather up to accumulation order.
 
-        ``p2p`` / ``all_to_all`` sum one ``conv`` per input-channel slice while
+        The streaming exchanges sum one ``conv`` per input-channel slice while
         all-gather runs a single fused ``conv``, so the results differ only by
         float reduction order.
         """
@@ -524,7 +526,7 @@ class TestConv2d:
             channel_group=process_mesh_dict_2x2["col"],
             stride=4,
         ).to(device)
-        expected = "all_to_all" if device.type == "cuda" else "p2p"
+        expected = "all_to_all" if device.type == "cuda" else "batch_isend_irecv"
         assert conv.config.channel_comm == expected
 
     def test_unknown_channel_comm_rejected(
@@ -543,28 +545,26 @@ class TestConv2d:
                 channel_comm="alltoall",
             ).to(device)
 
-    def test_alltoall_rejected_on_gloo(
+    def test_alltoall_rejected_off_cuda(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
-        if dist.get_backend() != "gloo":
-            pytest.skip("only meaningful on the gloo backend")
-        conv = convolution.DistributedConv2d(
-            8,
-            12,
-            4,
-            device=device,
-            spatial_group=process_mesh_dict_2x2["row"],
-            channel_group=process_mesh_dict_2x2["col"],
-            stride=4,
-            padding=(0,),
-            dilation=1,
-            bias=True,
-            channel_comm="all_to_all",
-        ).to(device)
-        x = torch.randn(2, 4, 16, 8, device=device)
-        with pytest.raises(RuntimeError, match="all-to-all"):
-            conv(x)
+        """``all_to_all`` needs NCCL, so a non-CUDA module refuses it at construction."""
+        if device.type == "cuda":
+            pytest.skip("only meaningful off CUDA")
+        with pytest.raises(ValueError, match="needs CUDA"):
+            convolution.DistributedConv2d(
+                8,
+                12,
+                4,
+                device=device,
+                spatial_group=process_mesh_dict_2x2["row"],
+                channel_group=process_mesh_dict_2x2["col"],
+                stride=4,
+                padding=(0,),
+                dilation=1,
+                bias=True,
+                channel_comm="all_to_all",
+            )
 
     def test_int_args_normalized_to_pairs(
         self, device: torch.device, process_mesh_dict_2x2: dict
@@ -957,7 +957,7 @@ class TestConv2dParallel:
         """Halo regime combined with 4-way channel parallelism, every channel comm.
 
         Exercises the halo path's channel-parallel exchange: ``"all_gather"``
-        gathers then halo-gathers once, ``"p2p"`` / ``"all_to_all"`` stream and
+        gathers then halo-gathers once, the streaming exchanges stream and
         halo-gather one channel slab at a time.
         """
         _skip_if_unsupported(channel_comm)

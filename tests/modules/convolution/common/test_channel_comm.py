@@ -12,7 +12,12 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from jigsaw._core.comm import comm_1d_alltoall, comm_1d_p2p
+from jigsaw._core.comm import (
+    CommOp,
+    comm_1d_alltoall,
+    comm_1d_batch_isend_irecv,
+    comm_1d_isend,
+)
 from jigsaw.modules.convolution._common.channel_comm import (
     CHANNEL_COMMS,
     _in_channel_block,
@@ -27,9 +32,9 @@ from tests.parity import assert_close
 
 
 class TestResolveChannelComm:
-    def test_auto_resolves_to_p2p_on_cpu(self) -> None:
-        """``"auto"`` -> ``"p2p"`` on a non-CUDA device."""
-        assert resolve_channel_comm("auto", torch.device("cpu")) == "p2p"
+    def test_auto_resolves_to_batch_isend_irecv_on_cpu(self) -> None:
+        """``"auto"`` -> ``"batch_isend_irecv"`` on a non-CUDA device."""
+        assert resolve_channel_comm("auto", torch.device("cpu")) == "batch_isend_irecv"
 
     def test_auto_resolves_to_all_to_all_on_cuda(self) -> None:
         """``"auto"`` -> ``"all_to_all"`` on CUDA; only the device *type* matters."""
@@ -38,9 +43,18 @@ class TestResolveChannelComm:
     @pytest.mark.parametrize("name", list(CHANNEL_COMMS))
     def test_explicit_names_pass_through(self, name: str) -> None:
         """A concrete, valid strategy name is returned unchanged."""
-        assert resolve_channel_comm(name, torch.device("cpu")) == name
+        assert resolve_channel_comm(name, torch.device("cuda")) == name
 
-    @pytest.mark.parametrize("bad", ["alltoall", "all-gather", "", "AUTO", "ring"])
+    def test_comm_op_is_accepted(self) -> None:
+        """A :class:`CommOp` member resolves like its value."""
+        assert resolve_channel_comm(CommOp.ISEND, torch.device("cpu")) == "isend"
+
+    def test_all_to_all_off_cuda_raises(self) -> None:
+        """All-to-all needs NCCL, so a CPU module refuses it at construction."""
+        with pytest.raises(ValueError, match="needs CUDA"):
+            resolve_channel_comm("all_to_all", torch.device("cpu"))
+
+    @pytest.mark.parametrize("bad", ["alltoall", "all-gather", "", "p2p", "ring"])
     def test_unknown_name_raises(self, bad: str) -> None:
         """Anything that is neither ``"auto"`` nor a known name fails fast."""
         with pytest.raises(ValueError, match="channel_comm must be"):
@@ -77,9 +91,13 @@ def _singleton_group() -> dist.ProcessGroup:
 
 
 class TestResolveChannelHop:
-    def test_p2p_returns_the_p2p_transport(self) -> None:
-        """``"p2p"`` maps to :func:`jigsaw._core.comm.comm_1d_p2p` on any backend."""
-        assert _resolve_channel_hop("p2p", dist.group.WORLD) is comm_1d_p2p
+    @pytest.mark.parametrize(
+        ("name", "fn"),
+        [("isend", comm_1d_isend), ("batch_isend_irecv", comm_1d_batch_isend_irecv)],
+    )
+    def test_p2p_names_return_their_transport(self, name: str, fn) -> None:
+        """The point-to-point strategies map to their exchange on any backend."""
+        assert _resolve_channel_hop(name, dist.group.WORLD) is fn
 
     def test_all_to_all_on_gloo_raises(self) -> None:
         """gloo has no all-to-all, so the hop lookup refuses it (loudly)."""

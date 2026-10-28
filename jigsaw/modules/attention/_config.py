@@ -7,7 +7,7 @@ from typing import Any, TypeVar, cast
 import torch
 import torch.distributed as dist
 
-import jigsaw._core.comm as comm
+import jigsaw._core.comm as comm_lib
 from jigsaw._core.offload import NVLinkActivationOffloader
 
 
@@ -50,14 +50,23 @@ class SendBackward(Enum):
 
 
 class SendOp(Enum):
-    """Communication operation of the ring."""
+    """Topology of the ring exchange.
 
-    ALLTOALL = 0
-    P2P = 1
-    BROADCAST = 2
-    HYBRID_P2P = 3
-    HYBRID_BROADCAST = 4
-    HYBRID_ALLTOALL = 5
+    - ``RING``: each step every rank sends its chunk to its neighbor. Default.
+    - ``BROADCAST``: each step one rank broadcasts its chunk to the ring.
+    - ``HYBRID``: ``RING`` within intra groups of ``intra_size`` consecutive
+      ranks, joined by an outer ring.
+    - ``HYBRID_BROADCAST``: ``BROADCAST`` within the intra groups, joined by an
+      outer ring.
+
+    The transport of the sends is set separately by
+    :class:`~jigsaw.modules.CommOp`.
+    """
+
+    RING = 0
+    BROADCAST = 1
+    HYBRID = 2
+    HYBRID_BROADCAST = 3
 
 
 class AttnBackend(StrEnum):
@@ -83,7 +92,7 @@ def _coerce_enum(enum_cls: type[_E], value: Any, arg: str) -> _E:
     """Return ``value`` as a member of ``enum_cls``.
 
     Accepts the member itself or its name as a string in any case
-    (``send_op="hybrid_p2p"``), and for string enums also the value
+    (``send_op="hybrid"``), and for string enums also the value
     (``attn_backend="te"``). Anything else raises :class:`ValueError` rather
     than silently matching none of the policy branches.
 
@@ -222,22 +231,11 @@ def _select_attn_core_backward_fn(
                     raise ValueError(f"no attention backward core for device '{other}'")
 
 
-def _select_p2p_fn(send_op: SendOp) -> CommFn:
-    """Select the communication function for outer-ring sends and the dK/dV relay."""
-    if dist.get_backend() == "gloo":
-        return comm.comm_1d_p2p
-    alltoall = {SendOp.ALLTOALL, SendOp.BROADCAST, SendOp.HYBRID_ALLTOALL}
-    return comm.comm_1d_alltoall if send_op in alltoall else comm.comm_1d_p2p
-
-
-def _select_send_op_fn(send_op: SendOp) -> CommFn:
+def _select_send_op_fn(send_op: SendOp, ring_comm: comm_lib.CommOp) -> CommFn:
     """Select the communication function for the ring's per-step send."""
-    if dist.get_backend() == "gloo":
-        return comm.comm_1d_p2p
     if send_op == SendOp.BROADCAST:
-        return comm.comm_broadcast
-    alltoall = {SendOp.ALLTOALL, SendOp.HYBRID_P2P, SendOp.HYBRID_ALLTOALL}
-    return comm.comm_1d_alltoall if send_op in alltoall else comm.comm_1d_p2p
+        return comm_lib.comm_broadcast
+    return comm_lib.select_comm_1d(ring_comm)
 
 
 def _select_forward_send_fn(
@@ -351,12 +349,10 @@ class RingAttentionConfig:
     send_in_forward : SendForward or str
         Tensor representation communicated during the forward pass.
     send_op : SendOp or str
-        Communication operation used by the ring. ``ALLTOALL`` (default)
-        runs the ring exchange as one all-to-all collective per step and
-        works for any ring size. The ``HYBRID_*`` ops split the ring into
-        intra groups of ``intra_size`` consecutive ranks joined by an outer
-        ring, and need the ring
-        size to be a multiple of ``intra_size``.
+        Topology of the ring exchange. ``RING`` (default) works for any ring
+        size. The ``HYBRID*`` ops split the ring into intra groups of
+        ``intra_size`` consecutive ranks joined by an outer ring, and need the
+        ring size to be a multiple of ``intra_size``.
     save_for_backward : SaveBackward or str
         Tensor representation saved for the backward pass.
     save_scope : SaveScope or str
@@ -367,7 +363,7 @@ class RingAttentionConfig:
         Activation offloading policy.
     intra_size : int
         Number of consecutive ring ranks in each intra group.
-        Only used by the ``HYBRID_*`` send ops.
+        Only used by the ``HYBRID*`` send ops.
     attn_backend : AttnBackend or str
         Inner per-chunk attention core. ``SDPA`` (default) keeps the
         device-based pick (flash on CUDA, math on CPU); ``TE`` uses the
@@ -383,13 +379,20 @@ class RingAttentionConfig:
         too when ``save_scope=LOCAL`` and ``send_backward=SEND_DKV``,
         except under ``HYBRID_BROADCAST`` whose dK/dV accumulation doesn't
         fit the direct-swap relay. See :attr:`overlap_active`.
+    comm : CommOp or str
+        Transport of the ring's per-step sends (within the intra groups for
+        the ``HYBRID*`` ops). ``"auto"`` picks all-to-all on CUDA and
+        ``batch_isend_irecv`` on CPU. ``BROADCAST`` always broadcasts.
+    outer_comm : CommOp or str, optional
+        Transport of the outer ring of the ``HYBRID*`` ops and of the backward
+        dK/dV relay. Defaults to ``comm``.
     """
 
     def __init__(
         self,
         device: torch.device = torch.device("cuda"),
         send_in_forward: SendForward | str = SendForward.X,
-        send_op: SendOp | str = SendOp.ALLTOALL,
+        send_op: SendOp | str = SendOp.RING,
         save_for_backward: SaveBackward | str = SaveBackward.KV,
         save_scope: SaveScope | str = SaveScope.GLOBAL,
         send_backward: SendBackward | str = SendBackward.SEND_DKV,
@@ -397,11 +400,13 @@ class RingAttentionConfig:
         intra_size: int = 4,
         attn_backend: AttnBackend | str = AttnBackend.SDPA,
         overlap_comm: bool = False,
+        comm: comm_lib.CommOp | str = comm_lib.CommOp.AUTO,
+        outer_comm: comm_lib.CommOp | str | None = None,
     ):
         """Initialize the configuration.
 
         Every enum argument also takes the member's name as a string, in any
-        case (``send_op="hybrid_p2p"``); ``attn_backend`` also takes its value
+        case (``send_op="hybrid"``); ``attn_backend`` also takes its value
         (``"te"``). Unknown names raise :class:`ValueError`.
         """
         if intra_size <= 0:
@@ -423,6 +428,12 @@ class RingAttentionConfig:
         self.intra_size = intra_size
         self.device = device
         self.attn_backend = _coerce_enum(AttnBackend, attn_backend, "attn_backend")
+        self.comm = comm_lib.resolve_comm_op(comm, device)
+        self.outer_comm = (
+            self.comm
+            if outer_comm is None
+            else comm_lib.resolve_comm_op(outer_comm, device)
+        )
 
         # Dedicated CUDA stream for the ring's K/V circulation and backward dK/dV
         # relay. Created once here (the config outlives a single forward/backward)
@@ -443,8 +454,8 @@ class RingAttentionConfig:
 
         # Resolve every policy to its concrete callable, once.
         self.offloader = _select_offloader(offload, device)
-        self.p2p_fn = _select_p2p_fn(send_op)
-        self.send_op_fn = _select_send_op_fn(send_op)
+        self.p2p_fn: CommFn = comm_lib.select_comm_1d(self.outer_comm)
+        self.send_op_fn = _select_send_op_fn(send_op, self.comm)
         self.attn_core_forward_fn = _select_attn_core_forward_fn(
             device, self.attn_backend
         )
@@ -502,6 +513,8 @@ class RingAttentionConfig:
             f"RingAttentionConfig("
             f"send_in_forward={self.send_in_forward.name}, "
             f"send_op={self.send_op.name}, "
+            f"comm={self.comm.value}, "
+            f"outer_comm={self.outer_comm.value}, "
             f"save_for_backward={self.save_for_backward.name}, "
             f"save_scope={self.save_scope.name}, "
             f"send_backward={self.send_backward.name}, "

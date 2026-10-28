@@ -1,8 +1,8 @@
 """Tests for the communication primitives in jigsaw._core.comm.
 
 Gloo's ``all_to_all`` needs equal-sized tensors on every rank, which the zero-length
-placeholders used by the all-to-all halo/ring helpers violate, so those helpers are
-checked against a recording fake of ``dist.all_to_all`` (they are exercised for real
+placeholders used by the all-to-all exchange violate, so that exchange is
+checked against a recording fake of ``dist.all_to_all`` (it is exercised for real
 on NCCL). The p2p and broadcast helpers run for real on two ranks, on the session
 device.
 """
@@ -51,25 +51,6 @@ class TestGetEmpty:
         assert a is not comm.get_empty(torch.device("cpu"), torch.float64)
 
 
-class TestResolveMatmulDtype:
-    cpu = torch.device("cpu")
-
-    def test_single_operand(self):
-        assert comm.resolve_matmul_dtype(self.cpu, torch.zeros(1)) == torch.float32
-
-    def test_promotes_across_operands(self):
-        a = torch.zeros(1, dtype=torch.float16)
-        b = torch.zeros(1, dtype=torch.float32)
-        c = torch.zeros(1, dtype=torch.float64)
-        assert comm.resolve_matmul_dtype(self.cpu, a, b) == torch.float32
-        assert comm.resolve_matmul_dtype(self.cpu, a, b, c) == torch.float64
-
-    def test_autocast_dtype_wins(self):
-        x = torch.zeros(1, dtype=torch.float32)
-        with torch.autocast("cpu", dtype=torch.bfloat16):
-            assert comm.resolve_matmul_dtype(self.cpu, x) == torch.bfloat16
-
-
 class TestAllToAllAsync:
     def test_forwards_arguments_and_returns_work(self, a2a_calls):
         out, inp, group = [torch.empty(1)], [torch.ones(1)], FakeGroup(0, 1)
@@ -82,31 +63,6 @@ class TestAllToAllAsync:
         monkeypatch.setattr(dist, "all_to_all", lambda *a, **k: None)
         with pytest.raises(AssertionError):
             comm.all_to_all_async([], [])
-
-
-class TestTwoWayAllToAll:
-    def _run(self, rank, async_op=True):
-        data, buffer, empty = torch.ones(2), torch.zeros(2), torch.empty(0)
-        result = comm.comm_2way_alltoall(
-            data, buffer, empty, FakeGroup(rank, 2), async_op=async_op
-        )
-        return data, buffer, empty, result
-
-    def test_rank0_sends_to_slot_one(self, a2a_calls):
-        data, buffer, empty, (out, handles) = self._run(0)
-        (call,) = a2a_calls
-        assert call.out == [empty, buffer] and call.inp == [empty, data]
-        assert out is buffer and handles == ["handle"] and call.op is True
-
-    def test_rank1_sends_to_slot_zero(self, a2a_calls):
-        data, buffer, empty, _ = self._run(1, async_op=False)
-        (call,) = a2a_calls
-        assert call.out == [buffer, empty] and call.inp == [data, empty]
-        assert call.op is False
-
-    def test_invalid_rank(self, a2a_calls):
-        with pytest.raises(ValueError, match="not valid"):
-            self._run(2)
 
 
 class TestOneDAllToAll:
@@ -147,14 +103,53 @@ class TestOneDAllToAll:
         assert call.inp[0] is data  # (2 + 1) % 3
 
 
-class TestOneDP2PValidation:
-    def test_requires_group(self):
-        with pytest.raises(ValueError, match="group is required"):
-            comm.comm_1d_p2p(torch.ones(1), torch.zeros(1), direction=1)
+P2P_1D_FNS = [comm.comm_1d_isend, comm.comm_1d_batch_isend_irecv]
 
-    def test_requires_direction_or_ranks(self):
+
+@pytest.mark.parametrize("fn", P2P_1D_FNS)
+class TestOneDP2PValidation:
+    def test_requires_group(self, fn):
+        with pytest.raises(ValueError, match="group is required"):
+            fn(torch.ones(1), torch.zeros(1), direction=1)
+
+    def test_requires_direction_or_ranks(self, fn):
         with pytest.raises(ValueError, match="direction is required"):
-            comm.comm_1d_p2p(torch.ones(1), torch.zeros(1), group=FakeGroup(0, 2))
+            fn(torch.ones(1), torch.zeros(1), group=FakeGroup(0, 2))
+
+
+class TestResolveCommOp:
+    cpu, cuda = torch.device("cpu"), torch.device("cuda")
+
+    def test_auto_picks_by_device(self):
+        assert comm.resolve_comm_op("auto", self.cuda) is comm.CommOp.ALL_TO_ALL
+        assert comm.resolve_comm_op("auto", self.cpu) is comm.CommOp.BATCH_ISEND_IRECV
+
+    @pytest.mark.parametrize("value", ["isend", "ISEND", comm.CommOp.ISEND])
+    def test_strings_in_any_case_and_members(self, value):
+        assert comm.resolve_comm_op(value, self.cpu) is comm.CommOp.ISEND
+
+    def test_all_to_all_off_cuda_is_rejected(self):
+        with pytest.raises(ValueError, match="needs CUDA"):
+            comm.resolve_comm_op("all_to_all", self.cpu)
+
+    def test_unknown_name_is_rejected(self):
+        with pytest.raises(ValueError, match="comm must be one of"):
+            comm.resolve_comm_op("p2p", self.cpu)
+
+    def test_unknown_device_is_rejected(self):
+        with pytest.raises(ValueError, match="Unsupported device meta"):
+            comm.resolve_comm_op("auto", torch.device("meta"))
+
+    @pytest.mark.parametrize(
+        "op, fn",
+        [
+            (comm.CommOp.ALL_TO_ALL, comm.comm_1d_alltoall),
+            (comm.CommOp.ISEND, comm.comm_1d_isend),
+            (comm.CommOp.BATCH_ISEND_IRECV, comm.comm_1d_batch_isend_irecv),
+        ],
+    )
+    def test_select_comm_1d(self, op, fn):
+        assert comm.select_comm_1d(op) is fn
 
 
 class TestBatchWork:
@@ -182,37 +177,20 @@ class TestBatchWork:
         assert batch.is_completed()
 
 
-def test_2way_p2p_invalid_rank():
-    with pytest.raises(ValueError, match="not valid"):
-        comm.comm_2way_p2p(torch.ones(1), torch.zeros(1), FakeGroup(2, 3))
-
-
 @pytest.mark.dist(2)
 class TestTwoRanks:
     @pytest.fixture
     def group(self):
         return dist.group.WORLD
 
-    @pytest.mark.parametrize("async_op", [True, False])
-    def test_2way_p2p_swaps_data(self, device, group, async_op):
-        rank = dist.get_rank()
-        data = torch.full((3,), float(rank + 1), device=device)
-        buffer = torch.zeros(3, device=device)
-        out, handles = comm.comm_2way_p2p(data, buffer, group, async_op=async_op)
-        assert len(handles) == 2
-        for handle in handles:
-            if handle is not None:
-                handle.wait()
-        assert out is buffer
-        assert torch.equal(buffer.cpu(), torch.full((3,), float(2 - rank)))
-
+    @pytest.mark.parametrize("fn", P2P_1D_FNS)
     @pytest.mark.parametrize("async_op", [True, False])
     @pytest.mark.parametrize("direction", [1, -1])
-    def test_1d_p2p_ring_shift(self, device, group, async_op, direction):
+    def test_1d_p2p_ring_shift(self, device, group, fn, async_op, direction):
         rank = dist.get_rank()
         data = torch.full((2,), float(rank), device=device)
         buffer = torch.zeros(2, device=device)
-        out, handle = comm.comm_1d_p2p(
+        out, handle = fn(
             data, buffer, direction=direction, group=group, async_op=async_op
         )
         assert (handle is None) == (not async_op)
@@ -223,10 +201,11 @@ class TestTwoRanks:
             buffer.cpu(), torch.full((2,), float((rank - direction) % 2))
         )
 
-    def test_1d_p2p_explicit_ranks(self, device, group):
+    @pytest.mark.parametrize("fn", P2P_1D_FNS)
+    def test_1d_p2p_explicit_ranks(self, device, group, fn):
         rank = dist.get_rank()
         buffer = torch.zeros(1, device=device)
-        comm.comm_1d_p2p(
+        fn(
             torch.tensor([float(rank)], device=device),
             buffer,
             send_recv_ranks=[1 - rank, 1 - rank],

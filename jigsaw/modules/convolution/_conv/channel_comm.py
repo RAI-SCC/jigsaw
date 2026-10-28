@@ -4,8 +4,9 @@ The input channels are split over the channel group. The strategy
 ``config.channel_comm`` selects how the full-channel input is assembled:
 
 * ``"all_gather"`` gathers all slices at once.
-* ``"p2p"`` circulates the slices in a ring with batched ``isend`` and
-  ``irecv``, overlapping each partial convolution with the next transfer.
+* ``"isend"`` and ``"batch_isend_irecv"`` circulate the slices in a ring with
+  point-to-point sends, overlapping each partial convolution with the next
+  transfer.
 * ``"all_to_all"`` uses the same ring with a masked all-to-all per step (NCCL only).
 """
 
@@ -193,8 +194,8 @@ def over_channels(
     n_spatial_dims : int
         Number of spatial dimensions.
     channel_comm : str
-        Channel communication strategy: ``"all_gather"``, ``"p2p"`` or
-        ``"all_to_all"``.
+        Resolved channel communication strategy: ``"all_gather"``,
+        ``"all_to_all"``, ``"isend"`` or ``"batch_isend_irecv"``.
     halo_fn : HaloFn, optional
         Halo exchange applied to the input.
     local : bool

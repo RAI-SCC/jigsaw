@@ -160,7 +160,7 @@ class TestConvertWithRing:
             device=device,
             send_in_forward=SendForward.KV,
             save_for_backward=SaveBackward.KV,
-            send_op=SendOp.P2P,
+            send_op=SendOp.RING,
             save_scope=SaveScope.LOCAL,
             attn_backend="math",
         )

@@ -198,7 +198,9 @@ class TestConv2dTransposeMultiSpatial:
     """Distributed Conv2dTranspose with the domain split along several spatial axes."""
 
     @pytest.mark.dist(4)
-    @pytest.mark.parametrize("channel_comm", ["all_gather", "p2p"])
+    @pytest.mark.parametrize(
+        "channel_comm", ["all_gather", "isend", "batch_isend_irecv"]
+    )
     @pytest.mark.parametrize(
         ("kernel", "stride", "padding", "dilation"), MULTI_CASES_2D, ids=MULTI_IDS_2D
     )
@@ -349,7 +351,9 @@ class TestConv2dTransposeMultiSpatial:
         )
 
     @pytest.mark.dist(8)
-    @pytest.mark.parametrize("channel_comm", ["all_gather", "p2p"])
+    @pytest.mark.parametrize(
+        "channel_comm", ["all_gather", "isend", "batch_isend_irecv"]
+    )
     def test_hw_split_plus_channel_no_halo(
         self,
         device: torch.device,
@@ -369,7 +373,9 @@ class TestConv2dTransposeMultiSpatial:
         )
 
     @pytest.mark.dist(8)
-    @pytest.mark.parametrize("channel_comm", ["all_gather", "p2p"])
+    @pytest.mark.parametrize(
+        "channel_comm", ["all_gather", "isend", "batch_isend_irecv"]
+    )
     def test_hw_split_plus_channel_halo(
         self,
         device: torch.device,
@@ -419,7 +425,9 @@ class TestConv2dTransposeMultiSpatialGroups:
 
     @pytest.mark.dist(4)
     @pytest.mark.parametrize("groups", [1, 2])
-    @pytest.mark.parametrize("channel_comm", ["all_gather", "p2p"])
+    @pytest.mark.parametrize(
+        "channel_comm", ["all_gather", "isend", "batch_isend_irecv"]
+    )
     def test_h_split_plus_channel(
         self,
         device: torch.device,

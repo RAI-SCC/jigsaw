@@ -28,28 +28,42 @@ def _config(size=1, linear_layer=True, device=CPU, comm="auto"):
     )
 
 
+def _assert_kernels_from(cfg, module, way):
+    xwt, xw, xtw, fused = cfg.mm_kernels
+    assert xwt is getattr(module, f"xw_transpose_{way}")
+    assert xw is getattr(module, f"xw_{way}")
+    assert xtw is getattr(module, f"x_transpose_w_{way}")
+    assert fused is getattr(module, f"fused_xw_xtw_{way}")
+
+
 class TestMatmulKernelSelection:
     @pytest.mark.parametrize(
-        "dev, module", [(CPU, dist_mm_p2p), (CUDA, dist_mm)], ids=["cpu", "cuda"]
+        "dev, module",
+        [(CPU, dist_mm_batchedp2p), (CUDA, dist_mm)],
+        ids=["cpu", "cuda"],
     )
     @pytest.mark.parametrize("size, way", WAYS.items())
-    def test_distributed_kernels_come_from_the_device_backend(
-        self, dev, module, size, way
-    ):
-        xwt, xw, xtw, fused = _config(size, device=dev).mm_kernels
-        assert xwt is getattr(module, f"xw_transpose_{way}")
-        assert xw is getattr(module, f"xw_{way}")
-        assert xtw is getattr(module, f"x_transpose_w_{way}")
-        assert fused is getattr(module, f"fused_xw_xtw_{way}")
+    def test_auto_picks_the_device_backend(self, dev, module, size, way):
+        _assert_kernels_from(_config(size, device=dev), module, way)
 
-    @pytest.mark.parametrize("dev", [CPU, CUDA], ids=["cpu", "cuda"])
     @pytest.mark.parametrize(
         "comm, module",
         [
             ("all_to_all", dist_mm),
-            ("p2p", dist_mm_p2p),
-            ("batched_p2p", dist_mm_batchedp2p),
+            ("isend", dist_mm_p2p),
+            ("batch_isend_irecv", dist_mm_batchedp2p),
         ],
+    )
+    @pytest.mark.parametrize("size, way", WAYS.items())
+    def test_explicit_comm_picks_its_backend(self, comm, module, size, way):
+        cfg = _config(size, device=CUDA, comm=comm)
+        assert cfg.comm == comm
+        _assert_kernels_from(cfg, module, way)
+
+    @pytest.mark.parametrize("dev", [CPU, CUDA], ids=["cpu", "cuda"])
+    @pytest.mark.parametrize(
+        "comm, module",
+        [("isend", dist_mm_p2p), ("batch_isend_irecv", dist_mm_batchedp2p)],
     )
     @pytest.mark.parametrize("size, way", WAYS.items())
     def test_explicit_comm_overrides_the_device_default(
@@ -57,21 +71,15 @@ class TestMatmulKernelSelection:
     ):
         cfg = _config(size, device=dev, comm=comm)
         assert cfg.comm == comm
-        xwt, xw, xtw, fused = cfg.mm_kernels
-        assert xwt is getattr(module, f"xw_transpose_{way}")
-        assert xw is getattr(module, f"xw_{way}")
-        assert xtw is getattr(module, f"x_transpose_w_{way}")
-        assert fused is getattr(module, f"fused_xw_xtw_{way}")
+        _assert_kernels_from(cfg, module, way)
 
     @pytest.mark.parametrize(
-        "dev, comm", [(CPU, "p2p"), (CUDA, "all_to_all")], ids=["cpu", "cuda"]
+        "dev, comm",
+        [(CPU, "batch_isend_irecv"), (CUDA, "all_to_all")],
+        ids=["cpu", "cuda"],
     )
     def test_auto_comm_resolves_per_device(self, dev, comm):
         assert _config(2, device=dev).comm == comm
-
-    def test_unknown_comm_is_rejected(self):
-        with pytest.raises(ValueError, match="comm must be 'auto' or one of"):
-            _config(2, comm="nccl")
 
     @pytest.mark.parametrize("dev", [CPU, CUDA], ids=["cpu", "cuda"])
     def test_single_process_kernels_are_plain_matmuls(self, dev):
@@ -94,10 +102,13 @@ class TestMatmulKernelSelection:
         cfg = LinearConfig(None, device=CPU)
         assert cfg.mm_kernels[3] is dist_mm.fused_xw_xtw_oneway
 
-    @pytest.mark.parametrize("size", [1, 2])
-    def test_unsupported_device_is_rejected(self, size):
-        with pytest.raises(ValueError, match="Unsupported device meta"):
-            _config(size, device=torch.device("meta"))
+    def test_alltoall_off_cuda_is_rejected(self):
+        with pytest.raises(ValueError, match="needs CUDA"):
+            _config(2, device=CPU, comm="all_to_all")
+
+    def test_unknown_comm_is_rejected(self):
+        with pytest.raises(ValueError, match="comm must be one of"):
+            _config(2, comm="p2p")
 
 
 class TestForVmap:

@@ -16,6 +16,7 @@ from torch.nn.grad import (
 )
 from torch.nn.parameter import Parameter
 
+from jigsaw._core.comm import CommOp
 from jigsaw._core.vmap import VmapConfig
 
 from .._common.channel_comm import resolve_channel_comm
@@ -42,9 +43,9 @@ class ConvNdConfig(VmapConfig):
         Stride.
     device : torch.device
         Device of the module.
-    channel_comm : str
-        Channel communication strategy: ``"all_gather"``, ``"p2p"``,
-        ``"all_to_all"`` or ``"auto"``.
+    channel_comm : CommOp or str
+        Channel communication strategy: ``"all_gather"`` or a
+        :class:`~jigsaw.modules.CommOp`.
     groups : int
         Number of convolution groups.
     """
@@ -60,7 +61,7 @@ class ConvNdConfig(VmapConfig):
         kernel_size: tuple[int, ...],
         stride: tuple[int, ...],
         device: torch.device,
-        channel_comm: str = "auto",
+        channel_comm: CommOp | str = "auto",
         groups: int = 1,
     ):
         """Initialize the configuration."""

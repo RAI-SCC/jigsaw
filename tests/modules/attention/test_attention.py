@@ -141,7 +141,7 @@ class TestDistributedAttention:
         # HYBRID `intra_size`); KV in/out so `_compute_kv` is never reached.
         cfg = attn_config.RingAttentionConfig(
             device=device,
-            send_op=attn_config.SendOp.P2P,
+            send_op=attn_config.SendOp.RING,
             send_in_forward=attn_config.SendForward.KV,
             save_for_backward=attn_config.SaveBackward.KV,
         )
@@ -164,7 +164,7 @@ class TestDistributedAttention:
         # silently corrected.
         bad = attn_config.RingAttentionConfig(
             device=device,
-            send_op=attn_config.SendOp.P2P,
+            send_op=attn_config.SendOp.RING,
             send_in_forward=attn_config.SendForward.X,
         )
         with pytest.raises(ValueError, match="channel/tensor parallelism"):

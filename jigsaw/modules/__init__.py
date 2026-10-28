@@ -2,11 +2,13 @@
 
 Every layer, loss and metric module is exported here
 (``from jigsaw.modules import DistributedLinear``), together with the config
-classes that tune them. The functional forms are in
-:mod:`jigsaw.modules.functional`. Enums and other helpers stay in their
-subpackage (``jigsaw.modules.attention.AttnBackend``).
+classes that tune them and :class:`CommOp`, the communication choice shared by
+the configs. The functional forms are in :mod:`jigsaw.modules.functional`.
+Other enums and helpers stay in their subpackage
+(``jigsaw.modules.attention.AttnBackend``).
 """
 
+from jigsaw._core.comm import CommOp
 from jigsaw._core.public import set_module as _set_module
 
 from . import (
@@ -94,6 +96,8 @@ __all__ = [
     "ConvTransposeNdConfig",
     "RingAttentionConfig",
     "RollConfig",
+    # Enums
+    "CommOp",
     # Subpackages
     "activation",
     "attention",

@@ -9,6 +9,7 @@ import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
 from jigsaw import init, parallel
+from jigsaw._core.comm import CommOp
 from jigsaw.gather import gather_1d_results
 
 from .._common.arg_norm import _as_spatial_groups, _ntuple
@@ -39,7 +40,7 @@ class _DistributedConvTransposeNd(torch.nn.Module):
     stride: tuple[int, ...]
     padding: tuple[int, ...]
     dilation: tuple[int, ...]
-    channel_comm: str
+    channel_comm: CommOp | str
 
     def __init__(
         self,
@@ -59,7 +60,7 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         bias: bool = True,
         # --- distributed (optional) ---
         dtype: torch.dtype = torch.float32,
-        channel_comm: str = "auto",
+        channel_comm: CommOp | str = "auto",
         config: ConvTransposeNdConfig | None = None,
     ):
         """Initialize the module.
@@ -94,9 +95,11 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             Whether to add a bias.
         dtype : torch.dtype
             Data type of the parameters.
-        channel_comm : str
-            Channel communication strategy: ``"all_gather"``, ``"p2p"``,
-            ``"all_to_all"`` or ``"auto"``. Ignored if ``config`` is given.
+        channel_comm : CommOp or str
+            Channel communication strategy: ``"all_gather"`` or a
+            :class:`~jigsaw.modules.CommOp` (``"auto"``, ``"all_to_all"``,
+            ``"isend"``, ``"batch_isend_irecv"``). Ignored if ``config`` is
+            given.
         config : ConvTransposeNdConfig, optional
             Kernel selection. Defaults to a configuration built from the
             arguments.
