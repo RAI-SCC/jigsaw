@@ -29,7 +29,13 @@ from jigsaw.modules.attention._config import (
     SendForward,
     SendOp,
 )
-from tests.parity import REPLICATED, ShardSpec, assert_close, check_parity
+from tests.parity import (
+    REPLICATED,
+    ShardSpec,
+    all_ranks_ok,
+    assert_close,
+    check_parity,
+)
 
 IN_DIM, EMBED_DIM, OUT_DIM, HEADS = 16, 16, 16, 4
 BATCH, SEQ = 2, 16
@@ -347,3 +353,62 @@ class TestConvertedWeightsAreReplicated:
         assert_close(
             "qkv weight", model.qkv.weight.detach(), ref_qkv, 1e-6, 1e-6, device, row
         )
+
+
+@pytest.mark.dist_required
+class TestConvertToTorch:
+    """Converting to jigsaw and back restores the serial module."""
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize(
+        "mesh_name", ["process_mesh_dict_4x1", "process_mesh_dict_2x2"]
+    )
+    @pytest.mark.parametrize("out_bias", [False, True])
+    @pytest.mark.parametrize("qk_norm", [False, True])
+    def test_roundtrip(
+        self,
+        request: pytest.FixtureRequest,
+        device: torch.device,
+        mesh_name: str,
+        out_bias: bool,
+        qk_norm: bool,
+    ) -> None:
+        mesh = request.getfixturevalue(mesh_name)
+        torch.manual_seed(0)
+        serial = attention.Attention(
+            IN_DIM,
+            EMBED_DIM,
+            OUT_DIM,
+            HEADS,
+            device,
+            qk_norm=qk_norm,
+            out_bias=out_bias,
+        )
+        if qk_norm:  # non-default norm parameters, so a dropped copy shows
+            with torch.no_grad():
+                for p in (*serial.q_norm.parameters(), *serial.k_norm.parameters()):
+                    p.uniform_(-1.0, 1.0)
+
+        model = attention.Attention.convert_to_jigsaw(
+            serial, mesh, device, ring=False, attn_backend="math"
+        )
+        back = model.convert_to_torch(mesh)
+
+        group = mesh["model"]
+        assert all_ranks_ok(
+            back.heads == HEADS
+            and back.qk_norm == qk_norm
+            and (back.head_concat.bias is not None) == out_bias,
+            device,
+            group,
+        )
+        want = serial.state_dict()
+        got = back.state_dict()
+        assert all_ranks_ok(got.keys() == want.keys(), device, group)
+        for name, value in want.items():
+            assert_close(name, got[name], value, 1e-6, 1e-6, device, group)
+
+        torch.manual_seed(1)
+        x = torch.randn(BATCH, SEQ, IN_DIM, device=device)
+        with torch.no_grad():
+            assert_close("forward", back(x), serial(x), 1e-6, 1e-6, device, group)

@@ -9,6 +9,7 @@ import torch.distributed as dist
 from einops import rearrange
 
 from jigsaw import parallel
+from jigsaw.gather import gather_1d_results
 from jigsaw.modules import linear
 
 from . import _config as attention_config
@@ -894,6 +895,85 @@ class DistributedAttention(torch.nn.Module):
         out = cast(torch.Tensor, self.head_concat(out))
         # Output: [n_batch, seq_length, output_dim]
         return out
+
+    def convert_to_torch(
+        self,
+        process_mesh_dict: dict,
+        row_kw: str = "row",
+        col_kw: str = "col",
+        model_kw: str = "model",
+    ) -> "Attention":
+        """Convert the module to a non-distributed :class:`Attention`.
+
+        Inverse of :meth:`Attention.convert_to_jigsaw`. Collective over the
+        column group, so every rank calls it; each rank gets the full module.
+
+        Parameters
+        ----------
+        process_mesh_dict : dict
+            Process groups keyed by ``row_kw``, ``col_kw`` and ``model_kw``.
+        row_kw : str
+            Key of the row process group. Unused, the weights are replicated
+            over the rows.
+        col_kw : str
+            Key of the column process group.
+        model_kw : str
+            Key of the model process group. Unused.
+
+        Returns
+        -------
+        Attention
+            Module with the merged weights.
+        """
+        channel_size = process_mesh_dict[col_kw].size()
+        heads = self.heads * channel_size
+        head_dim = self.embed_dim // heads
+        head_concat_bias = self.head_concat.bias
+
+        instance = Attention(
+            in_dim=self.in_dim,
+            embed_dim=self.embed_dim,
+            out_dim=self.head_concat.weight.shape[0],
+            heads=heads,
+            device=self.device,
+            dropout_p=self.dropout_p,
+            qk_norm=self.qk_norm,
+            dtype=self.dtype,
+            out_bias=head_concat_bias is not None,
+        )
+
+        # QKV: the columns are sharded over the channel group. Row block ``i`` of
+        # the gathered weight holds the ``[3, heads // C, head_dim]`` rows of head
+        # shard ``i``; move the shard axis back inside the q/k/v axis.
+        qkv_weight = gather_1d_results(
+            self.qkv.weight.data, process_mesh_dict, dim=1, pm_key=col_kw
+        )
+        instance.qkv.weight.data.copy_(
+            qkv_weight.view(channel_size, 3, self.heads, head_dim, self.in_dim)
+            .transpose(0, 1)
+            .reshape(3 * self.embed_dim, self.in_dim)
+        )
+
+        # Head concat: the columns (heads) and the bias are sharded over the
+        # channel group.
+        instance.head_concat.weight.data.copy_(
+            gather_1d_results(
+                self.head_concat.weight.data, process_mesh_dict, dim=1, pm_key=col_kw
+            )
+        )
+        if head_concat_bias is not None and instance.head_concat.bias is not None:
+            instance.head_concat.bias.data.copy_(
+                gather_1d_results(
+                    head_concat_bias.data, process_mesh_dict, dim=0, pm_key=col_kw
+                )
+            )
+
+        # The query/key norms act on the unsharded head dimension.
+        if self.qk_norm:
+            instance.q_norm.load_state_dict(self.q_norm.state_dict())
+            instance.k_norm.load_state_dict(self.k_norm.state_dict())
+
+        return instance
 
     def get_parameter_count(self) -> int:
         """Return the global number of parameters of this layer.
