@@ -176,7 +176,7 @@ def _full_cu_seqlens(batch: int, seqlen: int, device: torch.device) -> torch.Ten
 @functools.cache
 def _fused_attn_backend(
     is_training: bool,
-    dtype: torch.dtype,
+    dtype: torch.dtype | tex.DType,
     n_heads: int,
     seqlen_q: int,
     seqlen_kv: int,
@@ -189,10 +189,13 @@ def _fused_attn_backend(
     the answer only depends on the (shape, dtype, dropout) problem description.
     Raises :class:`RuntimeError` if no sub-backend serves it.
     """
+    # A torch dtype for the F16 kernels, a ``tex.DType`` (FP8 E4M3/E5M2) for
+    # :mod:`.cudnn_fp8`, which asks the same question for the FP8 sub-backend.
+    te_dtype = TE_DType[dtype] if isinstance(dtype, torch.dtype) else dtype
     backend = tex.get_fused_attn_backend(
         is_training,
-        TE_DType[dtype],
-        TE_DType[dtype],
+        te_dtype,
+        te_dtype,
         QKVLayout[_LAYOUT],
         AttnBiasType["no_bias"],
         AttnMaskType["no_mask"],
