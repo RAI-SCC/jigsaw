@@ -29,10 +29,6 @@ def _param(device: torch.device, dtype: torch.dtype = torch.float32):
     return torch.nn.Parameter(torch.zeros(3, device=device, dtype=dtype))
 
 
-def _mesh_2x2(device: torch.device) -> dict:
-    return _get_mesh(device.type, {"a": 2, "b": 2})
-
-
 def _loss(t: torch.Tensor) -> torch.Tensor:
     # d loss / d t == (rank + 1) * [1, 2, 3]
     return (t * BASE.to(t.device, t.dtype) * _scale()).sum()
@@ -63,7 +59,7 @@ class TestMark:
 
     @pytest.mark.dist(4)
     def test_extend_appends_new_groups(self, device):
-        mesh = _mesh_2x2(device)
+        mesh = _get_mesh(device.type, {"a": 2, "b": 2})
         p = _param(device)
         parallel.mark_replicated(p, mesh["a"])
         parallel.mark_replicated(p, mesh["b"], extend=True)
@@ -86,7 +82,7 @@ class TestMark:
 
     @pytest.mark.dist(4)
     def test_overlapping_groups_raise(self, device):
-        mesh = _mesh_2x2(device)
+        mesh = _get_mesh(device.type, {"a": 2, "b": 2})
         p = _param(device)
         parallel.mark_replicated(p, mesh["a"])
         with pytest.raises(ValueError, match="overlaps a replica group"):
@@ -122,7 +118,7 @@ class TestSyncGrad:
 
     @pytest.mark.dist(4)
     def test_group_sequence_sums_over_product(self, device):
-        mesh = _mesh_2x2(device)
+        mesh = _get_mesh(device.type, {"a": 2, "b": 2})
         p = _param(device)
         parallel.mark_replicated(p, [mesh["a"], mesh["b"]])
         (q,) = parallel.sync_grad(p)
@@ -131,7 +127,7 @@ class TestSyncGrad:
 
     @pytest.mark.dist(4)
     def test_sums_only_over_the_marked_group(self, device):
-        mesh = _mesh_2x2(device)
+        mesh = _get_mesh(device.type, {"a": 2, "b": 2})
         p = _param(device)
         parallel.mark_replicated(p, mesh["b"])
         (q,) = parallel.sync_grad(p)

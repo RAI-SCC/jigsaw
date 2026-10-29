@@ -17,10 +17,6 @@ def test_count_parameters_skips_frozen():
     assert debug.count_parameters(model) == 3 * 2
 
 
-def _dp_mesh(device: torch.device) -> dict:
-    return _get_mesh(device.type, {"dp": 2, "row": 2, "col": 1}, ("row", "col"))
-
-
 @pytest.mark.dist(4)
 @pytest.mark.parametrize("data_parallel", [False, True])
 @pytest.mark.parametrize("bias", [True, False])
@@ -28,7 +24,11 @@ def test_count_parameters_with_mesh_is_the_whole_model(
     device: torch.device, process_mesh_dict_2x2: dict, data_parallel: bool, bias: bool
 ) -> None:
     """Shards are summed, the row-replicated bias and dp copies counted once."""
-    mesh = _dp_mesh(device) if data_parallel else process_mesh_dict_2x2
+    mesh = (
+        _get_mesh(device.type, {"dp": 2, "row": 2, "col": 1}, ("row", "col"))
+        if data_parallel
+        else process_mesh_dict_2x2
+    )
     in_dim, out_dim = 6, 8
     layer = linear.DistributedLinear(
         in_dim,

@@ -30,10 +30,6 @@ F32_ATOL, F32_RTOL = 1e-5, 1.3e-6
 F64_ATOL, F64_RTOL = 1e-7, 1e-7
 
 
-def _mesh_2x2(device: torch.device) -> dict:
-    return _get_mesh(device.type, {"a": 2, "b": 2})
-
-
 def _with_grad(grad: torch.Tensor) -> torch.nn.Parameter:
     p = torch.nn.Parameter(torch.zeros_like(grad))
     p.grad = grad.clone()
@@ -88,7 +84,7 @@ def test_matches_torch_on_replicas(norm_type: float, device: torch.device) -> No
 def test_counts_shards_and_replicas_once(
     norm_type: float, device: torch.device
 ) -> None:
-    mesh = _mesh_2x2(device)
+    mesh = _get_mesh(device.type, {"a": 2, "b": 2})
     params = _mixed_params(mesh, device)
     before = [p.grad.clone() for p in params]
     expected = _expected_norm(norm_type)
@@ -105,7 +101,7 @@ def test_counts_shards_and_replicas_once(
 
 @pytest.mark.dist(4)
 def test_no_clipping_below_max_norm(device: torch.device) -> None:
-    mesh = _mesh_2x2(device)
+    mesh = _get_mesh(device.type, {"a": 2, "b": 2})
     params = _mixed_params(mesh, device)
     before = [p.grad.clone() for p in params]
 
@@ -136,7 +132,7 @@ def test_replica_group_outside_clipping_group_raises(
     norm_type: float, device: torch.device
 ) -> None:
     """Every rank raises, also rank 0 without a gradient, so none hangs."""
-    mesh = _mesh_2x2(device)
+    mesh = _get_mesh(device.type, {"a": 2, "b": 2})
     p = torch.nn.Parameter(torch.ones(2, device=device))
     if dist.get_rank() != 0:
         p.grad = torch.ones_like(p)
