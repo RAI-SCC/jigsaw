@@ -347,7 +347,8 @@ def comm_1d_isend(
         If ``group`` is missing, or both ``direction`` and ``send_recv_ranks`` are.
     """
     group, send_to, recv_from = _peers(group, direction, send_recv_ranks, group_size)
-    send = dist.isend(data, group_dst=send_to, group=group)
+    # ``dist.isend`` needs a contiguous tensor, and callers may pass a strided view.
+    send = dist.isend(data.contiguous(), group_dst=send_to, group=group)
     recv = dist.irecv(buffer, group_src=recv_from, group=group)
     return _finish(buffer, [w for w in (send, recv) if w is not None], async_op)
 
@@ -400,7 +401,8 @@ def comm_1d_batch_isend_irecv(
         If ``group`` is missing, or both ``direction`` and ``send_recv_ranks`` are.
     """
     group, send_to, recv_from = _peers(group, direction, send_recv_ranks, group_size)
-    send_op = dist.P2POp(dist.isend, data, group_peer=send_to, group=group)
+    # ``dist.isend`` needs a contiguous tensor, and callers may pass a strided view.
+    send_op = dist.P2POp(dist.isend, data.contiguous(), group_peer=send_to, group=group)
     recv_op = dist.P2POp(dist.irecv, buffer, group_peer=recv_from, group=group)
     # NCCL coalesces the batch into one work; gloo returns one per op. Wait on all
     # of them, or the receive may still be in flight when ``buffer`` is read.

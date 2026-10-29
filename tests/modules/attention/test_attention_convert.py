@@ -455,7 +455,8 @@ class TestConvertToTorch:
             # Without the ring every row attends within its own chunk.
             want_out = serial(x) if ring else _windowed(row.size())(serial, x)
             x_local = x.chunk(row.size(), dim=1)[row.rank()]
-            x_local = x_local.chunk(n_col, dim=2)[col.rank()].contiguous()
+            # Left a strided view: the ring must accept a non-contiguous input.
+            x_local = x_local.chunk(n_col, dim=2)[col.rank()]
             want_local = want_out.chunk(row.size(), dim=1)[row.rank()]
             want_local = want_local.chunk(n_col, dim=2)[col.rank()]
             assert_close(

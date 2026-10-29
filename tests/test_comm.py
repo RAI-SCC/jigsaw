@@ -202,6 +202,19 @@ class TestTwoRanks:
         )
 
     @pytest.mark.parametrize("fn", P2P_1D_FNS)
+    @pytest.mark.parametrize("async_op", [True, False])
+    def test_1d_p2p_sends_a_strided_view(self, device, group, fn, async_op):
+        rank = dist.get_rank()
+        data = torch.arange(6.0, device=device).reshape(2, 3).add(10 * rank)[:, 1]
+        assert not data.is_contiguous()
+        buffer = torch.zeros(2, device=device)
+        _, handle = fn(data, buffer, direction=1, group=group, async_op=async_op)
+        if handle is not None:
+            handle.wait()
+        expected = torch.tensor([1.0, 4.0]) + 10 * (1 - rank)
+        assert torch.equal(buffer.cpu(), expected)
+
+    @pytest.mark.parametrize("fn", P2P_1D_FNS)
     def test_1d_p2p_explicit_ranks(self, device, group, fn):
         rank = dist.get_rank()
         buffer = torch.zeros(1, device=device)
