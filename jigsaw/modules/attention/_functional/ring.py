@@ -276,6 +276,7 @@ class _RingAttention(torch.autograd.Function):
         group: dist.ProcessGroup,
         local_rank: int,
         config: RingAttentionConfig,
+        save_chunks: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, tuple, int | None, tuple]:
         """Run the ring-attention forward pass.
 
@@ -297,6 +298,10 @@ class _RingAttention(torch.autograd.Function):
             Rank within the process group.
         config : RingAttentionConfig
             Ring-attention configuration.
+        save_chunks : bool
+            Whether to keep chunks for the backward pass. Pass
+            ``torch.is_grad_enabled()``: inside :meth:`forward` grad mode is
+            always off, so it cannot tell inference from training itself.
 
         Returns
         -------
@@ -319,6 +324,7 @@ class _RingAttention(torch.autograd.Function):
             local_rank,
             ring_group_size,
             config,
+            save_chunks,
         )
         return out, lse, chunks_to_save, base_seed, rng_states
 
@@ -339,10 +345,11 @@ class _RingAttention(torch.autograd.Function):
         output : Any
             Values returned by :meth:`forward`.
         """
-        q, k, v, x, w_qkv, scale, dropout_p, group, local_rank, config = inputs
+        q, k, v, x, w_qkv, scale, dropout_p, group, local_rank, config, _ = inputs
         out, lse, chunks_to_save, base_seed, rng_states = output
         ctx.mark_non_differentiable(lse)
-        ctx.mark_non_differentiable(*chunks_to_save)
+        if chunks_to_save:
+            ctx.mark_non_differentiable(*chunks_to_save)
         non_none_rng_states = [r for r in rng_states if r is not None]
         if non_none_rng_states:
             ctx.mark_non_differentiable(*non_none_rng_states)
@@ -378,6 +385,7 @@ class _RingAttention(torch.autograd.Function):
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        None,
         None,
         None,
         None,
@@ -434,4 +442,4 @@ class _RingAttention(torch.autograd.Function):
             rng_states=cast(tuple[torch.Tensor | None, ...], rng_states),
         )
 
-        return dq, dk, dv, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None

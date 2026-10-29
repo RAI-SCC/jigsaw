@@ -23,6 +23,7 @@ import jigsaw
 from jigsaw import parallel
 from jigsaw.modules.roll import DistributedRoll
 from tests.parity import assert_close, no_tf32
+from tests.process_mesh import _get_mesh
 from tests.test_examples import _load, _tile, _TorchRoll
 
 pytestmark = pytest.mark.dist(8)
@@ -38,17 +39,6 @@ REL = 1e-4
 PARALLEL = {"dp": 2, "sh": 2, "sw": 2, "col": 1}
 SERIAL = {"dp": 8, "sh": 1, "sw": 1, "col": 1}
 LOSSES = ["distributed_mse", "local_mse_scaled"]
-
-_MESH_CACHE: dict = {}
-
-
-def _mesh(axes: dict, device: torch.device) -> dict:
-    key = (tuple(axes.items()), device.type)
-    if key not in _MESH_CACHE:
-        _MESH_CACHE[key] = jigsaw.make_process_mesh(
-            axes, device_type=device.type, model_parallel_axes=("sh", "sw", "col")
-        )
-    return _MESH_CACHE[key]
 
 
 def _batch(step: int, size: tuple[int, int], device: torch.device):
@@ -77,7 +67,7 @@ def train_parallel(loss_kind: str, device: torch.device, steps: int = STEPS):
     of the parameters.
     """
     module = _load("swin")
-    mesh = _mesh(PARALLEL, device)
+    mesh = _get_mesh(device.type, PARALLEL, ("sh", "sw", "col"))
     dp, model_group = mesh["dp"], mesh["model"]
     torch.manual_seed(0)
     model = module.Swin(mesh, device)
@@ -110,7 +100,7 @@ def train_parallel(loss_kind: str, device: torch.device, steps: int = STEPS):
 def train_serial(init: list, device: torch.device, steps: int = STEPS):
     """Train the undivided Swin tutorial on the whole batch, from ``init``."""
     module = _load("swin")
-    model = module.Swin(_mesh(SERIAL, device), device)
+    model = module.Swin(_get_mesh(device.type, SERIAL, ("sh", "sw", "col")), device)
     for p, q in zip(model.parameters(), init, strict=True):
         p.data.copy_(q)
     for parent in model.modules():

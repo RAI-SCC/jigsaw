@@ -41,10 +41,18 @@ slice of the features. Without a `config` this is chosen for you; an explicit
 `save_for_backward=SaveBackward.KV` (the default), or the module raises a
 `ValueError`. [`examples/vit.py`](../examples/vit.py) shows the explicit version.
 
-`RingAttentionConfig.send_op` picks how the ring exchanges chunks. The default,
-`ALLTOALL`, works for any ring size. The `HYBRID_*` ops split the ring into intra
-groups of `intra_size` consecutive ranks (default 4) joined by an outer ring, and need
-the ring size to be a multiple of `intra_size`.
+`RingAttentionConfig.send_op` picks the topology of the ring exchange. The default,
+`RING`, works for any ring size. `BROADCAST` has one rank broadcast its chunk per
+step. The `HYBRID` and `HYBRID_BROADCAST` ops split the ring into intra groups of
+`intra_size` consecutive ranks (default 4) joined by an outer ring, and need the ring
+size to be a multiple of `intra_size`.
+
+`RingAttentionConfig.comm` picks the transport of the ring's sends, as a `CommOp`:
+`"auto"` (default; all-to-all on CUDA, `batch_isend_irecv` on CPU), `"all_to_all"`
+(CUDA only), `"isend"` or `"batch_isend_irecv"`. `outer_comm` sets the outer ring of
+the hybrid ops and the backward dK/dV relay separately, e.g.
+`send_op="hybrid", outer_comm="isend"` keeps all-to-all within the intra groups and
+point-to-point sends between them.
 
 The ring and hierarchical Ulysses can overlap their K/V communication with the
 attention core on a dedicated CUDA stream: `overlap_comm` on `RingAttentionConfig` for the plain

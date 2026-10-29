@@ -5,35 +5,36 @@ from collections.abc import Callable
 import torch
 import torch.distributed as dist
 
-from jigsaw._core.comm import comm_1d_alltoall, comm_1d_p2p
+from jigsaw._core.comm import CommOp, resolve_comm_op, select_comm_1d
 
-# Valid ``channel_comm`` names, in preference order.
-CHANNEL_COMMS: tuple[str, ...] = ("all_gather", "p2p", "all_to_all")
+# Valid ``channel_comm`` names besides ``"auto"``, in preference order.
+CHANNEL_COMMS: tuple[str, ...] = (
+    "all_gather",
+    *(op.value for op in CommOp if op is not CommOp.AUTO),
+)
 
 # A convolution primitive: ``fn(x, w[, b], stride=, padding=, dilation=) -> y``.
 ConvFn = Callable[..., torch.Tensor]
 
 # The send of one ring step: ``fn(data, buffer, direction=, group=, async_op=) ->
-# (recv_buffer, wait_handle)``. Satisfied by ``comm_1d_p2p`` / ``comm_1d_alltoall``.
+# (recv_buffer, wait_handle)``. Satisfied by the ``jigsaw._core.comm.comm_1d_*``
+# exchanges.
 _HopFn = Callable[..., tuple[torch.Tensor, dist.Work | None]]
 
-# The per-step send behind each streaming ``channel_comm``.
-_CHANNEL_HOP_FNS: dict[str, _HopFn] = {
-    "p2p": comm_1d_p2p,
-    "all_to_all": comm_1d_alltoall,
-}
 
-
-def resolve_channel_comm(channel_comm: str, device: torch.device) -> str:
+def resolve_channel_comm(channel_comm: CommOp | str, device: torch.device) -> str:
     """Resolve the channel communication strategy.
 
-    ``"auto"`` resolves to ``"all_to_all"`` on CUDA and ``"p2p"`` otherwise.
+    ``"all_gather"`` is kept; the streaming strategies are resolved as
+    :class:`~jigsaw._core.comm.CommOp`, so ``"auto"`` becomes ``"all_to_all"``
+    on CUDA and ``"batch_isend_irecv"`` otherwise.
 
     Parameters
     ----------
-    channel_comm : str
-        Channel communication strategy: ``"all_gather"``, ``"p2p"``,
-        ``"all_to_all"`` or ``"auto"``.
+    channel_comm : CommOp or str
+        Channel communication strategy: ``"all_gather"`` or a
+        :class:`~jigsaw._core.comm.CommOp` (``"auto"``, ``"all_to_all"``,
+        ``"isend"``, ``"batch_isend_irecv"``).
     device : torch.device
         Device of the module.
 
@@ -45,16 +46,17 @@ def resolve_channel_comm(channel_comm: str, device: torch.device) -> str:
     Raises
     ------
     ValueError
-        If ``channel_comm`` is not a valid strategy.
+        If ``channel_comm`` is not a valid strategy, or ``"all_to_all"`` is
+        requested off CUDA.
     """
-    if channel_comm == "auto":
-        channel_comm = "all_to_all" if device.type == "cuda" else "p2p"
-    if channel_comm not in CHANNEL_COMMS:
+    if channel_comm == "all_gather":
+        return "all_gather"
+    if str(channel_comm).lower() not in {op.value for op in CommOp}:
         raise ValueError(
             f"channel_comm must be 'auto' or one of {list(CHANNEL_COMMS)}, "
             f"got {channel_comm!r}"
         )
-    return channel_comm
+    return resolve_comm_op(channel_comm, device).value
 
 
 def resolve_conv_groups(
@@ -117,9 +119,10 @@ def _resolve_channel_hop(channel_comm: str, channel_group: dist.ProcessGroup) ->
     if channel_comm == "all_to_all" and dist.get_backend(channel_group) == "gloo":
         raise RuntimeError(
             "channel_comm='all_to_all' needs a backend with all-to-all support "
-            "(e.g. NCCL); gloo has none. Use channel_comm='p2p' instead."
+            "(e.g. NCCL); gloo has none. Use channel_comm='batch_isend_irecv' "
+            "instead."
         )
-    return _CHANNEL_HOP_FNS[channel_comm]
+    return select_comm_1d(CommOp(channel_comm))
 
 
 def gather_full_channels(

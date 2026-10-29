@@ -34,6 +34,7 @@ import torch.distributed as dist
 import jigsaw.modules.activation._activation as activation
 import jigsaw.modules.convolution as convolution
 import jigsaw.modules.normalization as norm
+from jigsaw._core.autocast import resolve_matmul_dtype
 from jigsaw.modules.attention import DistributedAttention
 from jigsaw.modules.linear import DistributedLinear
 from tests.parity import assert_close
@@ -429,3 +430,22 @@ class TestAutocastConv:
         torch.manual_seed(pm["model"].rank())
         x = torch.randn(2, in_ch // nc, 8, 8 // nsp, device=device)
         self._check(model, x, device, autocast_dtype, pm["model"])
+
+
+class TestResolveMatmulDtype:
+    cpu = torch.device("cpu")
+
+    def test_single_operand(self):
+        assert resolve_matmul_dtype(self.cpu, torch.zeros(1)) == torch.float32
+
+    def test_promotes_across_operands(self):
+        a = torch.zeros(1, dtype=torch.float16)
+        b = torch.zeros(1, dtype=torch.float32)
+        c = torch.zeros(1, dtype=torch.float64)
+        assert resolve_matmul_dtype(self.cpu, a, b) == torch.float32
+        assert resolve_matmul_dtype(self.cpu, a, b, c) == torch.float64
+
+    def test_autocast_dtype_wins(self):
+        x = torch.zeros(1, dtype=torch.float32)
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            assert resolve_matmul_dtype(self.cpu, x) == torch.bfloat16

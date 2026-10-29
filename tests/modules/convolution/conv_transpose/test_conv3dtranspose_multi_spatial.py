@@ -265,7 +265,9 @@ class TestConv3dTransposeMultiSpatial:
         )
 
     @pytest.mark.dist(4)
-    @pytest.mark.parametrize("channel_comm", ["all_gather", "p2p"])
+    @pytest.mark.parametrize(
+        "channel_comm", ["all_gather", "isend", "batch_isend_irecv"]
+    )
     def test_dw_split_halo(
         self,
         device: torch.device,
@@ -322,7 +324,9 @@ class TestConv3dTransposeMultiSpatial:
         )
 
     @pytest.mark.dist(8)
-    @pytest.mark.parametrize("channel_comm", ["all_gather", "p2p"])
+    @pytest.mark.parametrize(
+        "channel_comm", ["all_gather", "isend", "batch_isend_irecv"]
+    )
     def test_dh_split_plus_channel_halo(
         self,
         device: torch.device,
@@ -394,7 +398,9 @@ class TestConv3dTransposeMultiSpatialGroups:
 
     @pytest.mark.dist(8)
     @pytest.mark.parametrize("groups", [2, 4])
-    @pytest.mark.parametrize("channel_comm", ["all_gather", "p2p"])
+    @pytest.mark.parametrize(
+        "channel_comm", ["all_gather", "isend", "batch_isend_irecv"]
+    )
     def test_dh_split_plus_channel(
         self,
         device: torch.device,

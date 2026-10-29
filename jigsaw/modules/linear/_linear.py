@@ -447,6 +447,7 @@ class DistributedLinear(torch.nn.Module):
             self.model_group,
             linear_layer=True,
             device=self.device,
+            comm=self.config.comm,
         )
 
         if self.bias is not None:

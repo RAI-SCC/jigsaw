@@ -14,7 +14,7 @@ import torch
 import torch.distributed as dist
 
 #: Issues the async comm and returns ``(recv_buf, work)``, as
-#: :func:`jigsaw._core.comm.comm_1d_p2p` does.
+#: :func:`jigsaw._core.comm.comm_1d_batch_isend_irecv` does.
 ProduceFn = Callable[[], "tuple[torch.Tensor, dist.Work | None]"]
 
 

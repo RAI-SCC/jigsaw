@@ -32,8 +32,8 @@ are reused directly by the convolution reference checks.
 """
 
 import contextlib
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from typing import Any
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
@@ -475,6 +475,8 @@ def _check_parity(
     pm_key_model: str = "model",
     serial_forward: Callable[[torch.nn.Module, torch.Tensor], torch.Tensor]
     | None = None,
+    input_requires_grad: bool = True,
+    frozen: Collection[str] = (),
 ) -> None:
     """
     Compare a distributed module against its serial counterpart, forward and backward.
@@ -514,6 +516,12 @@ def _check_parity(
         the distributed layer is not equivalent to a plain serial call over the whole
         input (e.g. non-ring attention, where each spatial rank attends only within its
         own token shard and the reference has to window the sequence the same way).
+    input_requires_grad: bool
+        Whether the input requires a gradient. Without it, the distributed input
+        must get no gradient.
+    frozen: Collection[str]
+        Parameters frozen (``requires_grad=False``) in both modules; their
+        distributed gradient must stay ``None``.
     """
     grad_atol = atol if grad_atol is None else grad_atol
     grad_rtol = rtol if grad_rtol is None else grad_rtol
@@ -522,7 +530,11 @@ def _check_parity(
 
     # Every rank draws the same global tensors.
     torch.manual_seed(seed)
-    x_global = torch.randn(input_shape, dtype=dtype, device=device, requires_grad=True)
+    for name, p in serial_module.named_parameters():
+        p.requires_grad_(name not in frozen)
+    x_global = torch.randn(
+        input_shape, dtype=dtype, device=device, requires_grad=input_requires_grad
+    )
 
     y_ref = (
         serial_module(x_global)
@@ -532,9 +544,9 @@ def _check_parity(
     g_global = torch.randn_like(y_ref)
     y_ref.backward(g_global)
 
-    assert x_global.grad is not None, "serial backward produced no input gradient"
+    assert (x_global.grad is not None) == input_requires_grad
     ref_output = y_ref.detach().clone()
-    ref_dx = x_global.grad.detach().clone()
+    ref_dx = None if x_global.grad is None else x_global.grad.detach().clone()
     ref_params = {n: p.detach().clone() for n, p in serial_module.named_parameters()}
     ref_grads = {
         n: (None if p.grad is None else p.grad.detach().clone())
@@ -543,13 +555,15 @@ def _check_parity(
 
     # Conversion happens only now: a converter may mutate the serial module.
     dist_module = build_distributed(serial_module)
+    for name, p in dist_module.named_parameters():
+        p.requires_grad_(name not in frozen)
 
     x_local = (
         split_tensor(
             x_global.detach(), input_spec, process_mesh_dict, axes, pm_key_model
         )
         .clone()
-        .requires_grad_(True)
+        .requires_grad_(input_requires_grad)
     )
     g_local = split_tensor(
         g_global, output_spec, process_mesh_dict, axes, pm_key_model
@@ -561,7 +575,12 @@ def _check_parity(
     # Drain the gradient collectives before reading .grad.
     sync_device(device)
 
-    assert x_local.grad is not None, "distributed backward produced no input gradient"
+    if input_requires_grad:
+        assert x_local.grad is not None, (
+            "distributed backward produced no input gradient"
+        )
+    else:
+        assert x_local.grad is None, "the input does not require a gradient"
     assert_close(
         "output",
         gather_tensor(
@@ -581,25 +600,26 @@ def _check_parity(
         device,
         model_group,
     )
-    assert_close(
-        "input gradient",
-        gather_tensor(
-            x_local.grad,
-            input_spec,
-            process_mesh_dict,
-            device,
+    if input_requires_grad:
+        assert_close(
             "input gradient",
+            gather_tensor(
+                cast(torch.Tensor, x_local.grad),
+                input_spec,
+                process_mesh_dict,
+                device,
+                "input gradient",
+                grad_atol,
+                grad_rtol,
+                axes,
+                pm_key_model,
+            ),
+            ref_dx,
             grad_atol,
             grad_rtol,
-            axes,
-            pm_key_model,
-        ),
-        ref_dx,
-        grad_atol,
-        grad_rtol,
-        device,
-        model_group,
-    )
+            device,
+            model_group,
+        )
 
     dist_params = dict(dist_module.named_parameters())
     unspecified = sorted(set(dist_params) - set(param_rules))
@@ -640,6 +660,9 @@ def _check_parity(
                 model_group,
             )
 
+        if pname in frozen:
+            assert param.grad is None, f"{pname} is frozen but got a gradient"
+            continue
         ref_grad = ref_grads.get(pname)
         if ref_grad is None:
             continue

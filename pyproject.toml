@@ -110,7 +110,7 @@ target-version = "py311"
 exclude = ["docs", "examples", "scaling_scripts", "stash"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "D", "D417", "N", "ARG001", "B", "RUF100", "ISC", "PIE", "PERF", "UP"]
+select = ["E", "F", "I", "D", "D417", "N", "ARG001", "B", "RUF100", "ISC", "PIE", "PERF", "UP", "T20"]
 ignore = ["E501", "NPY201", "N812"]
 
 [tool.ruff.lint.per-file-ignores]

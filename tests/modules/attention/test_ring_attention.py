@@ -162,10 +162,8 @@ class TestRingAttention:
         "send_in_forward", [config.SendForward.X, config.SendForward.KV]
     )
     @pytest.mark.parametrize("save_for_backward", [config.SaveBackward.KV])
-    @pytest.mark.parametrize(
-        "send_op",
-        [config.SendOp.ALLTOALL, config.SendOp.P2P, config.SendOp.BROADCAST],
-    )
+    @pytest.mark.parametrize("send_op", [config.SendOp.RING, config.SendOp.BROADCAST])
+    @pytest.mark.parametrize("comm", ["auto", "isend"])
     @pytest.mark.parametrize(
         "save_scope",
         [config.SaveScope.LOCAL, config.SaveScope.GLOBAL],
@@ -182,6 +180,7 @@ class TestRingAttention:
         send_in_forward: config.SendForward,
         save_for_backward: config.SaveBackward,
         send_op: config.SendOp,
+        comm: str,
         save_scope: config.SaveScope,
         send_backward: config.SendBackward,
         offloader: config.Offload,
@@ -204,8 +203,8 @@ class TestRingAttention:
             save_scope=save_scope,
             send_backward=send_backward,
             offload=offloader,
+            comm=comm,
         )
-        print(f"R{dist.get_rank()} config {ring_config}")
 
         ring_forward = forward.ring_forward
         local_rank = dist.get_rank(group=process_mesh_dict["row"])
@@ -397,7 +396,7 @@ def test_ring_forward_backward_te(
     ring_config = config.RingAttentionConfig(
         device=device,
         send_in_forward=config.SendForward.X,
-        send_op=config.SendOp.P2P,
+        send_op=config.SendOp.RING,
         save_for_backward=config.SaveBackward.KV,
         save_scope=save_scope,
         send_backward=send_backward,
@@ -504,7 +503,7 @@ def test_ring_forward_backward_te(
 
 
 # Shared parametrization for the ``test_ring_hybrid*`` variants. The full product
-# of the six options is 192 cases per topology; each costs a ring of collectives,
+# of the six options is 128 cases per topology; each costs a ring of collectives,
 # so the default run takes a pairwise cover (every pair of option values appears
 # in some case) and the rest is ``slow`` (``--runslow``, before a release). The
 # cover is built for each offload mode separately: ``Offload.CPU`` skips without
@@ -513,11 +512,9 @@ _RING_HYBRID_OPTIONS = {
     "send_in_forward": [config.SendForward.X, config.SendForward.KV],
     "save_for_backward": [config.SaveBackward.X, config.SaveBackward.KV],
     "send_op": [
-        config.SendOp.HYBRID_P2P,
-        config.SendOp.HYBRID_ALLTOALL,
+        config.SendOp.HYBRID,
         config.SendOp.HYBRID_BROADCAST,
-        config.SendOp.P2P,
-        config.SendOp.ALLTOALL,
+        config.SendOp.RING,
         config.SendOp.BROADCAST,
     ],
     "save_scope": [config.SaveScope.LOCAL, config.SaveScope.GLOBAL],
@@ -590,7 +587,7 @@ def _check_ring_hybrid(
     Shared body for :func:`test_ring_hybrid` (8 ranks, 2 intra groups of 4)
     and :func:`test_ring_hybrid_two_groups_of_two` (4 ranks, 2 intra groups of
     2). The split is driven purely by ``intra_size``, so both keep
-    ``n_groups == 2`` and every ``HYBRID_*`` send op exercises a real intra
+    ``n_groups == 2`` and every ``HYBRID*`` send op exercises a real intra
     and a real inter sub-group.
     """
     if (
@@ -926,7 +923,7 @@ def test_ring_autograd_function_matches_full_attention(
         device=device, intra_size=world, send_in_forward=config.SendForward.KV
     )
     out = ring._RingAttention.apply(
-        q, k, v, x, w_qkv, d**-0.5, 0.0, group, rank, ring_config
+        q, k, v, x, w_qkv, d**-0.5, 0.0, group, rank, ring_config, True
     )[0]
     out.backward(g_full[:, :, shard].contiguous())
 
@@ -962,7 +959,7 @@ def test_ring_overlap_comm_parity(
 ) -> None:
     """``overlap_comm`` is a pure scheduling change: same out / dq / dk / dv.
 
-    Runs the plain ``SendOp.P2P`` ring forward+backward with the comm-stream
+    Runs the plain ``SendOp.RING`` ring forward+backward with the comm-stream
     overlap off and then on (dedicated CUDA stream + double-buffered K/V
     circulation, hoisted dK/dV relay) and asserts the results are numerically
     identical: the ops and their accumulation order are unchanged, only which
@@ -992,7 +989,7 @@ def test_ring_overlap_comm_parity(
         cfg = config.RingAttentionConfig(
             device=device,
             send_in_forward=send_in_forward,
-            send_op=config.SendOp.P2P,
+            send_op=config.SendOp.RING,
             save_for_backward=config.SaveBackward.KV,
             save_scope=save_scope,
             send_backward=config.SendBackward.SEND_DKV,
@@ -1041,11 +1038,7 @@ def test_ring_overlap_comm_parity(
 )
 @pytest.mark.parametrize(
     "send_op",
-    [
-        config.SendOp.HYBRID_P2P,
-        config.SendOp.HYBRID_ALLTOALL,
-        config.SendOp.HYBRID_BROADCAST,
-    ],
+    [config.SendOp.HYBRID, config.SendOp.HYBRID_BROADCAST],
 )
 def test_ring_overlap_comm_parity_hybrid(
     device: torch.device,
@@ -1062,8 +1055,8 @@ def test_ring_overlap_comm_parity_hybrid(
     the intra-/inter-group K/V hop overlap
     (``_HybridP2PForwardChunkProviderOverlap`` /
     ``_HybridBroadcastForwardChunkProviderOverlap`` and their backward twins)
-    for all three hybrid send ops, and (for ``HYBRID_P2P`` /
-    ``HYBRID_ALLTOALL`` with ``save_scope=LOCAL``) the hybrid-routed dK/dV
+    for both hybrid send ops, and (for ``HYBRID`` with ``save_scope=LOCAL``)
+    the hybrid-routed dK/dV
     relay (``_DkvRelay`` via ``_hybrid_dkv_relay_peers``). ``HYBRID_BROADCAST``
     at ``LOCAL`` scope exercises its (unoverlapped) dK/dV all-reduce path
     alongside the overlapped K/V providers, doubling as a no-regression check

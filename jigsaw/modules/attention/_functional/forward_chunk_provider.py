@@ -41,6 +41,7 @@ class _ForwardChunkProvider(ABC):
         group: dist.ProcessGroup,
         local_rank: int,
         world_size: int,
+        save_chunks: bool = True,
     ) -> None:
         """Initialize the provider.
 
@@ -60,8 +61,12 @@ class _ForwardChunkProvider(ABC):
             Rank within ``group``.
         world_size : int
             Number of ranks in ``group``.
+        save_chunks : bool
+            Whether to keep chunks for the backward pass. ``False`` when no
+            backward will run, e.g. under ``torch.no_grad()``.
         """
         self.config = ring_config
+        self.save_chunks = save_chunks
         self.q, self.k, self.v, self.x, self.w_qkv = q, k, v, x, w_qkv
         self.group = group
         self.local_rank = local_rank
@@ -79,7 +84,9 @@ class _ForwardChunkProvider(ABC):
         self.kv_j, self.kj, self.vj = self.kv, k, v
 
         self.chunks_to_save: list[torch.Tensor | None]
-        if ring_config.save_scope == SaveScope.GLOBAL:
+        if not save_chunks:
+            self.chunks_to_save = []
+        elif ring_config.save_scope == SaveScope.GLOBAL:
             # Filled per-step, indexed by global chunk id so the backward
             # `_GlobalChunkProvider` (a plain `chunks[step]` lookup) sees
             # ring step == global chunk index.
@@ -111,7 +118,7 @@ class _ForwardChunkProvider(ABC):
 
     def save_for_backward(self, step: int) -> None:
         """Record the current chunk for the backward pass."""
-        if self.config.save_scope != SaveScope.GLOBAL:
+        if not self.save_chunks or self.config.save_scope != SaveScope.GLOBAL:
             return
         self.chunks_to_save[self.global_chunk_idx(step)] = (
             self.config.save_for_backward_fn(self.x_j, self.kv_j)
@@ -135,10 +142,10 @@ class _ForwardChunkProvider(ABC):
 
 
 # --------------------------------------------------------------------------- #
-# plain P2P / all-to-all ring
+# plain ring
 # --------------------------------------------------------------------------- #
 class _RingForwardChunkProvider(_ForwardChunkProvider):
-    """Ring with one P2P or all-to-all send and receive per step."""
+    """Ring with one send and receive per step."""
 
     def __init__(self, *args: object) -> None:
         """Start the first ring send."""
@@ -337,10 +344,10 @@ class _HybridForwardChunkProvider(_ForwardChunkProvider):
 
 
 # --------------------------------------------------------------------------- #
-# hybrid: intra-group ring + outer-ring P2P
+# hybrid: intra-group ring + outer ring
 # --------------------------------------------------------------------------- #
 class _HybridP2PForwardChunkProvider(_HybridForwardChunkProvider):
-    """Hybrid ring rotating chunks within the intra group (P2P on the outer ring)."""
+    """Hybrid ring rotating chunks within the intra group, joined by an outer ring."""
 
     def __init__(self, *args: object) -> None:
         """Resolve the intra-group peers."""
@@ -509,7 +516,7 @@ class _HybridP2PForwardChunkProviderOverlap(_HybridP2PForwardChunkProvider):
 
 
 # --------------------------------------------------------------------------- #
-# hybrid: intra-group broadcast + outer-ring P2P
+# hybrid: intra-group broadcast + outer ring
 # --------------------------------------------------------------------------- #
 class _HybridBroadcastForwardChunkProvider(_HybridForwardChunkProvider):
     """Hybrid ring with broadcasts within the intra group."""
@@ -685,6 +692,7 @@ def build_forward_chunk_provider(
     group: dist.ProcessGroup,
     local_rank: int,
     world_size: int,
+    save_chunks: bool = True,
 ) -> _ForwardChunkProvider:
     """Build the forward chunk provider of ``ring_config.send_op``.
 
@@ -704,21 +712,23 @@ def build_forward_chunk_provider(
         Rank of the current process within ``group``.
     world_size : int
         Number of ranks in ``group``.
+    save_chunks : bool
+        Whether to keep chunks for the backward pass.
 
     Returns
     -------
     _ForwardChunkProvider
         Chunk provider.
     """
-    args = (ring_config, q, k, v, x, w_qkv, group, local_rank, world_size)
+    args = (ring_config, q, k, v, x, w_qkv, group, local_rank, world_size, save_chunks)
     match ring_config.send_op:
         case SendOp.BROADCAST:
             return _BroadcastForwardChunkProvider(*args)
-        case SendOp.P2P | SendOp.ALLTOALL:
+        case SendOp.RING:
             if ring_config.overlap_active:
                 return _RingForwardChunkProviderOverlap(*args)
             return _RingForwardChunkProvider(*args)
-        case SendOp.HYBRID_P2P | SendOp.HYBRID_ALLTOALL:
+        case SendOp.HYBRID:
             if ring_config.overlap_active:
                 return _HybridP2PForwardChunkProviderOverlap(*args)
             return _HybridP2PForwardChunkProvider(*args)

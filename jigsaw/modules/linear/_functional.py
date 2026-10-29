@@ -15,25 +15,37 @@ from ._config import LinearConfig
 class LinearCtx(Protocol):
     """Attributes stored on the autograd context."""
 
-    saved_tensors: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
+    saved_tensors: tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]
+    needs_input_grad: tuple[bool, ...]
     local_rank: int
     device: torch.Tensor
     config: LinearConfig
     model_group: dist.ProcessGroup
     spatial_group: dist.ProcessGroup
     b: Parameter | None
+    w_dtype: torch.dtype
+    w_shape: torch.Size
 
 
 def _setup_linear_ctx(ctx: torch.autograd.function.FunctionCtx, inputs: Any) -> None:
-    """Save the tensors and metadata of :class:`_XWT`, :class:`_XW` and :class:`_XTW`."""
+    """Save the tensors and metadata of :class:`_XWT`, :class:`_XW` and :class:`_XTW`.
+
+    The input gradient needs only ``w`` and the weight gradient only ``x``, so
+    an operand is saved only when the other one needs a gradient: a frozen
+    weight does not keep its layer's input alive.
+    """
     x, w, b, local_rank, device, config, model_group = inputs
-    ctx.save_for_backward(x, w, b)
     c = cast(LinearCtx, ctx)
+    need_x, need_w = c.needs_input_grad[:2]
+    # save_for_backward accepts None; torch's stub types only Tensor.
+    ctx.save_for_backward(x if need_w else None, w if need_x else None, b)  # type: ignore[arg-type]
     c.local_rank = local_rank
     c.device = device
     c.config = config
     c.model_group = model_group
     c.b = b
+    c.w_dtype = w.dtype
+    c.w_shape = w.shape
 
 
 def _linear_vmap(
@@ -150,7 +162,15 @@ class _XWT(torch.autograd.Function):
     @staticmethod
     def backward(
         ctx: LinearCtx, grad_output: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None, None, None, None]:
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        None,
+        None,
+        None,
+        None,
+    ]:
         """Compute the gradients of the linear operation.
 
         Parameters
@@ -167,28 +187,35 @@ class _XWT(torch.autograd.Function):
             the non-differentiable arguments.
         """
         input, weight, bias = ctx.saved_tensors
-        local_rank = ctx.local_rank
-        device = ctx.device
-        config = ctx.config
-        model_group = ctx.model_group
+        need_x, need_w, need_b = ctx.needs_input_grad[:3]
+        kwargs = dict(
+            local_rank=ctx.local_rank, device=ctx.device, model_group=ctx.model_group
+        )
+        mm_kernels = ctx.config.mm_kernels
 
         # Under autocast, grad_output comes in the autocast dtype; run the
         # backward in the weight's dtype so grad_weight matches the parameter.
-        grad_output = grad_output.to(weight.dtype)
-        input = input.to(weight.dtype)
-        grad_input, grad_weight = config.mm_kernels[3](
-            grad_output,
-            weight,
-            input,
-            local_rank=local_rank,
-            device=device,
-            model_group=model_group,
-        )
+        grad_output = grad_output.to(ctx.w_dtype)
+        if input is not None:
+            input = input.to(ctx.w_dtype)
+        # needs_input_grad is the same on every rank of the model group (all
+        # ranks freeze the same parameters), so every rank skips the same
+        # collectives.
+        grad_input = grad_weight = grad_b = None
+        if need_x and need_w:
+            grad_input, grad_weight = mm_kernels[3](
+                grad_output, weight, input, **kwargs
+            )
+        elif need_x:
+            grad_input = mm_kernels[1](grad_output, weight, **kwargs)
+        elif need_w:
+            grad_weight = mm_kernels[2](grad_output, input, **kwargs)
         # Sum over the batch axes the weight and bias broadcast over; a
         # vmapped weight/bias keeps its members axis.
-        grad_weight = grad_weight.sum_to_size(weight.shape)
-
-        grad_b = None if bias is None else grad_output.sum_to_size(bias.shape)
+        if grad_weight is not None:
+            grad_weight = grad_weight.sum_to_size(ctx.w_shape)
+        if need_b and bias is not None:
+            grad_b = grad_output.sum_to_size(bias.shape)
 
         return grad_input, grad_weight, grad_b, None, None, None, None
 
@@ -258,7 +285,15 @@ class _XW(torch.autograd.Function):
     @staticmethod
     def backward(
         ctx: LinearCtx, grad_output: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None, None, None, None]:
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        None,
+        None,
+        None,
+        None,
+    ]:
         """Compute the gradients of the linear operation.
 
         Parameters
@@ -275,30 +310,23 @@ class _XW(torch.autograd.Function):
             the non-differentiable arguments.
         """
         input, weight, bias = ctx.saved_tensors
-        local_rank = ctx.local_rank
-        device = ctx.device
-        config = ctx.config
-        model_group = ctx.model_group
-
-        grad_input = config.mm_kernels[0](
-            grad_output,
-            weight,
-            local_rank=local_rank,
-            device=device,
-            model_group=model_group,
+        need_x, need_w, need_b = ctx.needs_input_grad[:3]
+        kwargs = dict(
+            local_rank=ctx.local_rank, device=ctx.device, model_group=ctx.model_group
         )
-        grad_weight = config.mm_kernels[2](
-            input,
-            grad_output,
-            local_rank=local_rank,
-            device=device,
-            model_group=model_group,
-        )
+        mm_kernels = ctx.config.mm_kernels
 
-        # Sum over the batch axes the weight and bias broadcast over; a
-        # vmapped weight/bias keeps its members axis.
-        grad_weight = grad_weight.sum_to_size(weight.shape)
-        grad_b = None if bias is None else grad_output.sum_to_size(bias.shape)
+        # Same skip on every rank of the model group; see _XWT.backward.
+        grad_input = grad_weight = grad_b = None
+        if need_x:
+            grad_input = mm_kernels[0](grad_output, weight, **kwargs)
+        if need_w:
+            grad_weight = mm_kernels[2](input, grad_output, **kwargs)
+            # Sum over the batch axes the weight broadcasts over; a vmapped
+            # weight keeps its members axis.
+            grad_weight = grad_weight.sum_to_size(ctx.w_shape)
+        if need_b and bias is not None:
+            grad_b = grad_output.sum_to_size(bias.shape)
 
         return grad_input, grad_weight, grad_b, None, None, None, None
 
@@ -368,7 +396,15 @@ class _XTW(torch.autograd.Function):
     @staticmethod
     def backward(
         ctx: LinearCtx, grad_output: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None, None, None, None]:
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        None,
+        None,
+        None,
+        None,
+    ]:
         """Compute the gradients of the linear operation.
 
         Parameters
@@ -385,30 +421,23 @@ class _XTW(torch.autograd.Function):
             the non-differentiable arguments.
         """
         input, weight, bias = ctx.saved_tensors
-        local_rank = ctx.local_rank
-        device = ctx.device
-        config = ctx.config
-        model_group = ctx.model_group
-
-        grad_input = config.mm_kernels[0](
-            weight,
-            grad_output,
-            local_rank=local_rank,
-            device=device,
-            model_group=model_group,
+        need_x, need_w, need_b = ctx.needs_input_grad[:3]
+        kwargs = dict(
+            local_rank=ctx.local_rank, device=ctx.device, model_group=ctx.model_group
         )
-        grad_weight = config.mm_kernels[1](
-            input,
-            grad_output,
-            local_rank=local_rank,
-            device=device,
-            model_group=model_group,
-        )
+        mm_kernels = ctx.config.mm_kernels
 
-        # Sum over the batch axes the weight and bias broadcast over; a
-        # vmapped weight/bias keeps its members axis.
-        grad_weight = grad_weight.sum_to_size(weight.shape)
-        grad_b = None if bias is None else grad_output.sum_to_size(bias.shape)
+        # Same skip on every rank of the model group; see _XWT.backward.
+        grad_input = grad_weight = grad_b = None
+        if need_x:
+            grad_input = mm_kernels[0](weight, grad_output, **kwargs)
+        if need_w:
+            grad_weight = mm_kernels[1](input, grad_output, **kwargs)
+            # Sum over the batch axes the weight broadcasts over; a vmapped
+            # weight keeps its members axis.
+            grad_weight = grad_weight.sum_to_size(ctx.w_shape)
+        if need_b and bias is not None:
+            grad_b = grad_output.sum_to_size(bias.shape)
 
         return grad_input, grad_weight, grad_b, None, None, None, None
 

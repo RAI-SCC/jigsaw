@@ -5,8 +5,9 @@ from typing import Any, cast
 import torch
 import torch.distributed as dist
 
+from jigsaw._core.autocast import resolve_matmul_dtype
 from jigsaw._core.buffers import get_preallocated_buffer
-from jigsaw._core.comm import all_to_all_async, get_empty, resolve_matmul_dtype
+from jigsaw._core.comm import all_to_all_async, get_empty
 
 streams = None
 streamz = None

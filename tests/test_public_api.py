@@ -98,6 +98,8 @@ EXPECTED_ALL: dict[str, set[str]] = {
         "LinearConfig",
         "RingAttentionConfig",
         "RollConfig",
+        # Enums
+        "CommOp",
         # Subpackages
         "functional",
         *SUBPACKAGES,

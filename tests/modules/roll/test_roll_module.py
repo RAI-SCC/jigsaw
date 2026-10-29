@@ -28,14 +28,30 @@ def _module(**kwargs) -> roll.DistributedRoll:
 
 class TestConfig:
     def test_cpu_uses_p2p_halo(self):
-        assert RollConfig(CPU).comm_halo_1d_fn is comm.comm_1d_p2p
+        assert RollConfig(CPU).comm_halo_1d_fn is comm.comm_1d_batch_isend_irecv
 
     def test_cuda_uses_alltoall_halo(self):
         assert RollConfig(torch.device("cuda")).comm_halo_1d_fn is comm.comm_1d_alltoall
 
-    def test_unknown_device_is_rejected(self):
-        with pytest.raises(ValueError, match="No halo 1d function"):
-            RollConfig(torch.device("meta"))
+    @pytest.mark.parametrize(
+        ("op", "fn"),
+        [
+            ("isend", comm.comm_1d_isend),
+            ("BATCH_ISEND_IRECV", comm.comm_1d_batch_isend_irecv),
+            (comm.CommOp.ALL_TO_ALL, comm.comm_1d_alltoall),
+        ],
+    )
+    def test_explicit_comm_is_used(self, op, fn):
+        cfg = RollConfig(torch.device("cuda"), comm=op)
+        assert cfg.comm_halo_1d_fn is fn
+
+    def test_unknown_comm_is_rejected(self):
+        with pytest.raises(ValueError, match="comm must be one of"):
+            RollConfig(CPU, comm="nccl")
+
+    def test_alltoall_off_cuda_is_rejected(self):
+        with pytest.raises(ValueError, match="needs CUDA"):
+            RollConfig(CPU, comm="all_to_all")
 
 
 class TestTorchRollWrapper:
@@ -72,7 +88,7 @@ class TestDistributedRollWithoutGroups:
         assert _module(config=config).config is config
 
     def test_default_config_is_built_from_the_device(self):
-        assert _module().config.comm_halo_1d_fn is comm.comm_1d_p2p
+        assert _module().config.comm_halo_1d_fn is comm.comm_1d_batch_isend_irecv
 
     def test_vmap_over_a_leading_batch_matches_a_loop(self):
         x = torch.randn(3, 4, 5, 6)

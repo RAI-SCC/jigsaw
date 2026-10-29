@@ -11,7 +11,7 @@ pytestmark = [pytest.mark.dist_required]
 
 # Every channel-parallel exchange strategy; "all_to_all" needs a backend with
 # all-to-all support and is skipped on gloo (see _skip_if_unsupported).
-CHANNEL_COMMS = ["all_gather", "p2p", "all_to_all"]
+CHANNEL_COMMS = ["all_gather", "isend", "batch_isend_irecv", "all_to_all"]
 
 Pair = int | tuple[int]
 
@@ -269,7 +269,7 @@ class TestConv1dTranspose:
             channel_group=process_mesh_dict_2x2["col"],
             stride=4,
         ).to(device)
-        expected = "all_to_all" if device.type == "cuda" else "p2p"
+        expected = "all_to_all" if device.type == "cuda" else "batch_isend_irecv"
         assert conv.config.channel_comm == expected
 
     def test_unknown_channel_comm_rejected(
@@ -288,28 +288,26 @@ class TestConv1dTranspose:
                 channel_comm="alltoall",
             ).to(device)
 
-    def test_alltoall_rejected_on_gloo(
+    def test_alltoall_rejected_off_cuda(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        """``all_to_all`` refuses to run on gloo, which has no all-to-all."""
-        if dist.get_backend() != "gloo":
-            pytest.skip("only meaningful on the gloo backend")
-        conv = convolution.DistributedConvTranspose1d(
-            8,
-            12,
-            4,
-            device=device,
-            spatial_group=process_mesh_dict_2x2["row"],
-            channel_group=process_mesh_dict_2x2["col"],
-            stride=4,
-            padding=(0,),
-            dilation=1,
-            bias=True,
-            channel_comm="all_to_all",
-        ).to(device)
-        x = torch.randn(2, 4, 16, device=device)
-        with pytest.raises(RuntimeError, match="all-to-all"):
-            conv(x)
+        """``all_to_all`` needs NCCL, so a non-CUDA module refuses it at construction."""
+        if device.type == "cuda":
+            pytest.skip("only meaningful off CUDA")
+        with pytest.raises(ValueError, match="needs CUDA"):
+            convolution.DistributedConvTranspose1d(
+                8,
+                12,
+                4,
+                device=device,
+                spatial_group=process_mesh_dict_2x2["row"],
+                channel_group=process_mesh_dict_2x2["col"],
+                stride=4,
+                padding=(0,),
+                dilation=1,
+                bias=True,
+                channel_comm="all_to_all",
+            )
 
     @pytest.mark.parametrize("padding", ["same", "valid"])
     def test_string_padding_rejected(

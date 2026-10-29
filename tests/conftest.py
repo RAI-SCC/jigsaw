@@ -1,5 +1,6 @@
 import gc
 import importlib.util
+import math
 import os
 import socket
 import sys
@@ -13,6 +14,7 @@ import torch
 import torch.distributed as dist
 
 from tests.process_mesh import *
+from tests.process_mesh import _requested_mesh_axes
 
 comm = MPI.COMM_WORLD
 mpi_size = comm.Get_size()
@@ -88,6 +90,11 @@ def pytest_configure(config):
         "markers",
         "dist(n_ranks): Mark test to run only when running parallel tests, and optionally, only with the specified ranks",
     )
+    config.addinivalue_line(
+        "markers",
+        "mesh(**axes): build the mesh fixture from these axis sizes, e.g. "
+        "mesh(row=2, col=2); skip unless the world size is their product",
+    )
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:
@@ -114,6 +121,22 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
             pytest.skip(
                 f"Skipping distributed test, only {mpi_size} ranks available, but {ranks if ranks else '> 1'} required"
             )
+
+    # Before fixture setup, so a mesh for the wrong world size is never built.
+    axes = _requested_mesh_axes(item)
+    if axes is not None and math.prod(axes.values()) != mpi_size:
+        pytest.skip(
+            f"mesh {axes} needs {math.prod(axes.values())} ranks, running on {mpi_size}"
+        )
+
+
+def pytest_make_parametrize_id(
+    config: pytest.Config, val: object, argname: str
+) -> str | None:
+    """Name an indirect ``mesh`` parameter after its axes, e.g. ``row2-col2``."""
+    if argname == "mesh" and isinstance(val, dict):
+        return "-".join(f"{name}{size}" for name, size in val.items())
+    return None
 
 
 def _free_port() -> int:

@@ -24,7 +24,7 @@ from .ring import (
 # intra group, so a step's dK/dV belongs to local index ``local_idx + step``
 # rather than ``step``. HYBRID_BROADCAST broadcasts within the intra group
 # instead of rotating.
-_INTRA_ROTATING_HYBRIDS = frozenset({SendOp.HYBRID_P2P, SendOp.HYBRID_ALLTOALL})
+_INTRA_ROTATING_HYBRIDS = frozenset({SendOp.HYBRID})
 
 
 # --------------------------------------------------------------------------- #
@@ -43,10 +43,10 @@ def _local_scope_global_chunk_idx(
 ) -> int:
     """Return the global chunk index held at backward ``step`` for ``SaveScope.LOCAL``."""
     match ring_config.send_op:
-        case SendOp.HYBRID_P2P | SendOp.HYBRID_BROADCAST | SendOp.HYBRID_ALLTOALL:
+        case SendOp.HYBRID | SendOp.HYBRID_BROADCAST:
             # The chunk sits on intra group `group_idx - step // intra_size` (the outer
-            # ring runs backwards relative to the forward). HYBRID_P2P and
-            # HYBRID_ALLTOALL also rotate it within the intra group, so its
+            # ring runs backwards relative to the forward). HYBRID also
+            # rotates it within the intra group, so its
             # local index is `local_idx + step`. HYBRID_BROADCAST doesn't:
             # local rank `step % intra_size` was the broadcast source.
             topo = get_hybrid_topology(group, ring_config.intra_size)
@@ -213,20 +213,12 @@ def ring_backward(
     kv_overlap = (
         ring_config.overlap_active
         and ring_config.save_scope == SaveScope.LOCAL
-        and ring_config.send_op
-        in (
-            SendOp.P2P,
-            SendOp.ALLTOALL,
-            SendOp.HYBRID_P2P,
-            SendOp.HYBRID_ALLTOALL,
-            SendOp.HYBRID_BROADCAST,
-        )
+        and ring_config.send_op in (SendOp.RING, SendOp.HYBRID, SendOp.HYBRID_BROADCAST)
     )
     dkv_overlap = (
         kv_overlap
         and not all_reduce_dkv
-        and ring_config.send_op
-        in (SendOp.P2P, SendOp.ALLTOALL, SendOp.HYBRID_P2P, SendOp.HYBRID_ALLTOALL)
+        and ring_config.send_op in (SendOp.RING, SendOp.HYBRID)
         and ring_config.send_backward == SendBackward.SEND_DKV
     )
     dkv_relay = _DkvRelay(ring_config, group, dq) if dkv_overlap else None
@@ -559,9 +551,9 @@ class _DkvRelay:
     so the transfer runs under the next step's core. Two send/receive buffer
     pairs alternate.
 
-    Step 0 stays local, as in :func:`_accumulate_dkv_send`. P2P/all-to-all send
-    the partial ``step`` ranks along the ring; ``HYBRID_P2P`` /
-    ``HYBRID_ALLTOALL`` use :func:`_hybrid_dkv_relay_peers`, which moves along
+    Step 0 stays local, as in :func:`_accumulate_dkv_send`. ``RING`` sends
+    the partial ``step`` ranks along the ring; ``HYBRID`` uses
+    :func:`_hybrid_dkv_relay_peers`, which moves along
     the outer ring and within the intra group at once. ``BROADCAST`` and
     ``HYBRID_BROADCAST`` never reach this class (see ``all_reduce_dkv`` and
     ``dkv_overlap`` in :func:`ring_backward`).
@@ -622,8 +614,8 @@ class _DkvRelay:
         b = dk_j.shape[0]
         send[:b].copy_(dk_j)
         send[b:].copy_(dv_j)
-        # Same routing as `_accumulate_dkv_send`: HYBRID_P2P/HYBRID_ALLTOALL
-        # hand the partial to `_hybrid_dkv_relay_peers` (moves along both the
+        # Same routing as `_accumulate_dkv_send`: HYBRID
+        # hands the partial to `_hybrid_dkv_relay_peers` (moves along both the
         # outer ring and the intra group); everything else sends `step` ranks along
         # the ring toward the chunk's home rank.
         if self._topo is not None:
