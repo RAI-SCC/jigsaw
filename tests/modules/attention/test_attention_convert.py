@@ -369,6 +369,7 @@ class TestConvertToTorch:
     )
     @pytest.mark.parametrize("out_bias", [False, True])
     @pytest.mark.parametrize("qk_norm", [False, True])
+    @pytest.mark.parametrize("ring", [False, True])
     def test_roundtrip(
         self,
         request: pytest.FixtureRequest,
@@ -376,6 +377,7 @@ class TestConvertToTorch:
         mesh_name: str,
         out_bias: bool,
         qk_norm: bool,
+        ring: bool,
     ) -> None:
         mesh = request.getfixturevalue(mesh_name)
         torch.manual_seed(0)
@@ -394,7 +396,7 @@ class TestConvertToTorch:
                     p.uniform_(-1.0, 1.0)
 
         model = attention.Attention.convert_to_jigsaw(
-            serial, mesh, device, ring=False, attn_backend="math"
+            serial, mesh, device, ring=ring, attn_backend="math"
         )
         group = mesh["model"]
         row, col = mesh["row"], mesh["col"]
@@ -450,9 +452,10 @@ class TestConvertToTorch:
         x = torch.randn(BATCH, SEQ, IN_DIM, device=device)
         tols = _tols(device)
         with torch.no_grad():
-            want_out = _windowed(row.size())(serial, x)
+            # Without the ring every row attends within its own chunk.
+            want_out = serial(x) if ring else _windowed(row.size())(serial, x)
             x_local = x.chunk(row.size(), dim=1)[row.rank()]
-            x_local = x_local.chunk(n_col, dim=2)[col.rank()]
+            x_local = x_local.chunk(n_col, dim=2)[col.rank()].contiguous()
             want_local = want_out.chunk(row.size(), dim=1)[row.rank()]
             want_local = want_local.chunk(n_col, dim=2)[col.rank()]
             assert_close(
