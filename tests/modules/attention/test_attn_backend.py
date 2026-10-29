@@ -443,3 +443,90 @@ class TestTeLimits:
         q = torch.empty(2, 1, 4, 8, dtype=torch.bfloat16, device="cuda")
         with pytest.raises(AssertionError, match="seq len > 1"):
             te_cores.cudnn.forward(q, q, q, 1.0, 0.0, layout="bshd")
+
+
+def _is_sm90() -> bool:
+    return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9
+
+
+def _run_core(core, device, batch, s_q, s_kv, heads, head_dim, backward=True):
+    """One bf16 ``bshd`` forward (and backward) through ``core``, synchronized."""
+    q = torch.randn(batch, s_q, heads, head_dim, dtype=torch.bfloat16, device=device)
+    k = torch.randn(batch, s_kv, heads, head_dim, dtype=torch.bfloat16, device=device)
+    v = torch.randn_like(k)
+    scale = head_dim**-0.5
+    out, lse, rng_state = core.forward(q, k, v, scale, 0.0, layout="bshd")
+    if backward:
+        core.backward(
+            torch.ones_like(out), q, k, v, out, lse, scale, 0.0,
+            rng_state=rng_state, layout="bshd",
+        )  # fmt: skip
+    torch.cuda.synchronize(device)
+
+
+# --------------------------------------------------------------------------- #
+# TE core limits on real Hopper hardware: the asserts match what the kernels do
+# --------------------------------------------------------------------------- #
+@pytest.mark.te_required
+@pytest.mark.gpu_required
+@pytest.mark.skipif(not _is_sm90(), reason="needs an sm90+ GPU (H100)")
+class TestTeLimitsOnH100:
+    @pytest.fixture(autouse=True)
+    def _auto_core(self, monkeypatch):
+        monkeypatch.delenv("JIGSAW_TE_CORE", raising=False)
+
+    def test_selects_cudnn(self, device):
+        assert te_cores.select_core(device) is te_cores.cudnn
+
+    @pytest.mark.parametrize("head_dim", [8, 12, 128, 136, 256, 264])
+    def test_cudnn_head_dim_check_matches_kernel(self, device, head_dim):
+        """Head dims the check accepts run; the ones it rejects have no backend.
+
+        136 and 256 pin the sm90 limit: above the pre-Hopper 128, still served.
+        """
+        try:
+            te_cores.cudnn.check_head_dim(head_dim, device)
+        except AssertionError:
+            with pytest.raises(RuntimeError, match="no fused-attention backend"):
+                te_cores.cudnn._fused_attn_backend(
+                    True, torch.bfloat16, 4, 128, 128, head_dim, 0.0
+                )
+        else:
+            _run_core(te_cores.cudnn, device, 2, 128, 128, 4, head_dim)
+
+    @pytest.mark.parametrize("head_dim", [12, 256, 264])
+    def test_flash_head_dim_check_matches_kernel(self, device, head_dim):
+        try:
+            te_cores.flash.check_head_dim(head_dim, device)
+        except AssertionError:
+            with pytest.raises(RuntimeError, match="head dimension at most 256"):
+                _run_core(te_cores.flash, device, 2, 128, 128, 4, head_dim)
+        else:
+            _run_core(te_cores.flash, device, 2, 128, 128, 4, head_dim)
+
+    @pytest.mark.parametrize(
+        "embed_dim,ok", [(48, False), (4 * 136, True), (4 * 264, False)]
+    )
+    def test_distributed_attention_head_dim(self, device, solo_group, embed_dim, ok):
+        """Construction applies the real device's limit, no monkeypatching."""
+        build = lambda: _build_attn(  # noqa: E731
+            "te", device, solo_group, in_dim=embed_dim, embed_dim=embed_dim
+        )
+        if ok:
+            assert build().te_core is te_cores.cudnn
+        else:
+            with pytest.raises(AssertionError, match="cuDNN core"):
+                build()
+
+    @pytest.mark.parametrize("s_q,s_kv", [(1, 64), (64, 1)])
+    def test_cudnn_single_token_one_side_runs(self, device, s_q, s_kv):
+        """The seq-len assert only rejects a single token on *both* sides."""
+        _run_core(te_cores.cudnn, device, 2, s_q, s_kv, 4, 64)
+
+    @pytest.mark.parametrize("core", ["cudnn", "flash"])
+    @pytest.mark.parametrize("batch,heads", [(65535, 1), (1, 65535)])
+    def test_grid_limit_boundary_runs(self, device, core, batch, heads):
+        """``MAX_GRID_DIM`` itself is served; 65536 is rejected by the check."""
+        _run_core(
+            getattr(te_cores, core), device, batch, 2, 2, heads, 8, backward=False
+        )
