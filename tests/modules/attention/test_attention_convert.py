@@ -29,7 +29,13 @@ from jigsaw.modules.attention._config import (
     SendForward,
     SendOp,
 )
-from tests.parity import REPLICATED, ShardSpec, assert_close, check_parity
+from tests.parity import (
+    REPLICATED,
+    ShardSpec,
+    all_ranks_ok,
+    assert_close,
+    check_parity,
+)
 
 IN_DIM, EMBED_DIM, OUT_DIM, HEADS = 16, 16, 16, 4
 BATCH, SEQ = 2, 16
@@ -347,3 +353,136 @@ class TestConvertedWeightsAreReplicated:
         assert_close(
             "qkv weight", model.qkv.weight.detach(), ref_qkv, 1e-6, 1e-6, device, row
         )
+
+
+@pytest.mark.dist_required
+class TestConvertToTorch:
+    """Converting to jigsaw and back restores the serial module.
+
+    The jigsaw module in between must hold the serial shards and match the windowed
+    serial forward, so a pair of matching layout bugs in the two conversions shows.
+    """
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize(
+        "mesh_name", ["process_mesh_dict_4x1", "process_mesh_dict_2x2"]
+    )
+    @pytest.mark.parametrize("out_bias", [False, True])
+    @pytest.mark.parametrize("qk_norm", [False, True])
+    @pytest.mark.parametrize("ring", [False, True])
+    def test_roundtrip(
+        self,
+        request: pytest.FixtureRequest,
+        device: torch.device,
+        mesh_name: str,
+        out_bias: bool,
+        qk_norm: bool,
+        ring: bool,
+    ) -> None:
+        mesh = request.getfixturevalue(mesh_name)
+        torch.manual_seed(0)
+        serial = attention.Attention(
+            IN_DIM,
+            EMBED_DIM,
+            OUT_DIM,
+            HEADS,
+            device,
+            qk_norm=qk_norm,
+            out_bias=out_bias,
+        )
+        if qk_norm:  # non-default norm parameters, so a dropped copy shows
+            with torch.no_grad():
+                for p in (*serial.q_norm.parameters(), *serial.k_norm.parameters()):
+                    p.uniform_(-1.0, 1.0)
+
+        model = attention.Attention.convert_to_jigsaw(
+            serial, mesh, device, ring=ring, attn_backend="math"
+        )
+        group = mesh["model"]
+        row, col = mesh["row"], mesh["col"]
+        n_col = col.size()
+
+        # Intermediate state: the local shards, sliced independently of
+        # convert_to_torch, and the distributed forward.
+        assert all_ranks_ok(model.heads == HEADS // n_col, device, group)
+        assert_close(
+            "jigsaw qkv weight",
+            _unpermute_qkv(mesh, device)(model.qkv.weight.detach()),
+            serial.qkv.weight.detach(),
+            1e-6,
+            1e-6,
+            device,
+            group,
+        )
+        assert_close(
+            "jigsaw head_concat weight",
+            model.head_concat.weight.detach(),
+            serial.head_concat.weight.detach().chunk(n_col, dim=1)[col.rank()],
+            1e-6,
+            1e-6,
+            device,
+            group,
+        )
+        if out_bias:
+            assert_close(
+                "jigsaw head_concat bias",
+                model.head_concat.bias.detach(),
+                serial.head_concat.bias.detach().chunk(n_col, dim=0)[col.rank()],
+                1e-6,
+                1e-6,
+                device,
+                group,
+            )
+        if qk_norm:
+            for norm in ("q_norm", "k_norm"):
+                want_norm = getattr(serial, norm).state_dict()
+                got_norm = getattr(model, norm).state_dict()
+                for name, value in want_norm.items():
+                    assert_close(
+                        f"jigsaw {norm}.{name}",
+                        got_norm[name],
+                        value,
+                        1e-6,
+                        1e-6,
+                        device,
+                        group,
+                    )
+
+        torch.manual_seed(1)
+        x = torch.randn(BATCH, SEQ, IN_DIM, device=device)
+        tols = _tols(device)
+        with torch.no_grad():
+            # Without the ring every row attends within its own chunk.
+            want_out = serial(x) if ring else _windowed(row.size())(serial, x)
+            x_local = x.chunk(row.size(), dim=1)[row.rank()]
+            # Left a strided view: the ring must accept a non-contiguous input.
+            x_local = x_local.chunk(n_col, dim=2)[col.rank()]
+            want_local = want_out.chunk(row.size(), dim=1)[row.rank()]
+            want_local = want_local.chunk(n_col, dim=2)[col.rank()]
+            assert_close(
+                "jigsaw forward",
+                model(x_local),
+                want_local,
+                tols["atol"],
+                tols["rtol"],
+                device,
+                group,
+            )
+
+        back = model.convert_to_torch(mesh)
+
+        assert all_ranks_ok(
+            back.heads == HEADS
+            and back.qk_norm == qk_norm
+            and (back.head_concat.bias is not None) == out_bias,
+            device,
+            group,
+        )
+        want = serial.state_dict()
+        got = back.state_dict()
+        assert all_ranks_ok(got.keys() == want.keys(), device, group)
+        for name, value in want.items():
+            assert_close(name, got[name], value, 1e-6, 1e-6, device, group)
+
+        with torch.no_grad():
+            assert_close("forward", back(x), serial(x), 1e-6, 1e-6, device, group)
