@@ -4,10 +4,10 @@ import pytest
 import torch
 import torch.distributed as dist
 
-import jigsaw
 import jigsaw.modules.linear as linear
 from jigsaw import debug
 from tests.parity import all_ranks_ok
+from tests.process_mesh import _get_mesh
 
 
 def test_count_parameters_skips_frozen():
@@ -17,18 +17,8 @@ def test_count_parameters_skips_frozen():
     assert debug.count_parameters(model) == 3 * 2
 
 
-_MESH_CACHE: dict = {}
-
-
 def _dp_mesh(device: torch.device) -> dict:
-    # Built once per device: nothing frees a mesh's communicators.
-    if device.type not in _MESH_CACHE:
-        _MESH_CACHE[device.type] = jigsaw.make_process_mesh(
-            {"dp": 2, "row": 2, "col": 1},
-            model_parallel_axes=("row", "col"),
-            device_type=device.type,
-        )
-    return _MESH_CACHE[device.type]
+    return _get_mesh(device.type, {"dp": 2, "row": 2, "col": 1}, ("row", "col"))
 
 
 @pytest.mark.dist(4)

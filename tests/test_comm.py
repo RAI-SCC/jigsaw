@@ -14,6 +14,7 @@ import torch
 import torch.distributed as dist
 
 from jigsaw._core import comm
+from tests.parity import all_ranks_ok
 
 
 class FakeGroup:
@@ -237,3 +238,27 @@ class TestTwoRanks:
             handle.wait()
         assert out is data
         assert torch.equal(data.cpu(), torch.full((4,), 5.0))
+
+
+@pytest.fixture(scope="module")
+def fresh_group() -> dist.ProcessGroup:
+    """A world-sized group that no other test sends on, so no peer is connected yet."""
+    return dist.new_group(list(range(dist.get_world_size())))
+
+
+@pytest.mark.dist(4)
+@pytest.mark.parametrize("direction", [1, -1, 2])
+def test_1d_isend_ring_on_a_fresh_group(device, fresh_group, direction):
+    """Every rank sends at once; separate NCCL sends here hang instead of failing.
+
+    ``direction=2`` pairs ranks 0 and 2, which no fixed send-first order by rank
+    parity keeps apart.
+    """
+    rank, size = fresh_group.rank(), fresh_group.size()
+    data = torch.full((2,), float(rank), device=device)
+    buffer = torch.zeros(2, device=device)
+    _, handle = comm.comm_1d_isend(data, buffer, direction=direction, group=fresh_group)
+    if handle is not None:
+        handle.wait()
+    expected = torch.full((2,), float((rank - direction) % size))
+    assert all_ranks_ok(torch.equal(buffer.cpu(), expected), device, fresh_group)

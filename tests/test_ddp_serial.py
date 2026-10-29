@@ -23,6 +23,7 @@ import jigsaw
 from jigsaw import parallel
 from jigsaw.modules.roll import DistributedRoll
 from tests.parity import assert_close, no_tf32
+from tests.process_mesh import _get_mesh
 from tests.test_examples import _load, _tile, _TorchRoll
 
 pytestmark = pytest.mark.dist(8)
@@ -39,16 +40,9 @@ PARALLEL = {"dp": 2, "sh": 2, "sw": 2, "col": 1}
 SERIAL = {"dp": 8, "sh": 1, "sw": 1, "col": 1}
 LOSSES = ["distributed_mse", "local_mse_scaled"]
 
-_MESH_CACHE: dict = {}
-
 
 def _mesh(axes: dict, device: torch.device) -> dict:
-    key = (tuple(axes.items()), device.type)
-    if key not in _MESH_CACHE:
-        _MESH_CACHE[key] = jigsaw.make_process_mesh(
-            axes, device_type=device.type, model_parallel_axes=("sh", "sw", "col")
-        )
-    return _MESH_CACHE[key]
+    return _get_mesh(device.type, axes, ("sh", "sw", "col"))
 
 
 def _batch(step: int, size: tuple[int, int], device: torch.device):

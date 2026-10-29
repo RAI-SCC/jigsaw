@@ -22,7 +22,6 @@ The launcher side (``torchrun --nproc-per-node 4 examples/x.py``) is covered by
 """
 
 import importlib.util
-import math
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -40,6 +39,7 @@ from jigsaw.launch import set_all_seeds
 from jigsaw.modules.roll import DistributedRoll
 from tests.parity import all_ranks_ok, global_parameter_count, no_tf32
 from tests.parity import assert_close as _assert_close
+from tests.process_mesh import _get_mesh
 
 pytestmark = [pytest.mark.dist_required, pytest.mark.dist(4)]
 
@@ -80,22 +80,8 @@ def _load(name: str) -> ModuleType:
     return module
 
 
-_MESHES: dict = {}
-_real_make_process_mesh = jigsaw.make_process_mesh
-
-
 def _mesh(axes: dict, model_parallel_axes, device: torch.device):
-    """A cached mesh: every new one costs NCCL communicators that are never freed."""
-    known = math.prod(s for s in axes.values() if s != -1)
-    axes = {
-        k: dist.get_world_size() // known if s == -1 else s for k, s in axes.items()
-    }
-    key = (tuple(axes.items()), tuple(model_parallel_axes or ()), device.type)
-    if key not in _MESHES:
-        _MESHES[key] = _real_make_process_mesh(
-            axes, device_type=device.type, model_parallel_axes=model_parallel_axes
-        )
-    return _MESHES[key]
+    return _get_mesh(device.type, axes, model_parallel_axes)
 
 
 @pytest.fixture
@@ -149,10 +135,8 @@ class _TorchRoll(nn.Module):
 @pytest.fixture(scope="module")
 def replica_mesh(device: torch.device) -> dict:
     """One full replica per rank: a mesh that does not split anything."""
-    return jigsaw.make_process_mesh(
-        {"dp": 4, "sh": 1, "sw": 1, "col": 1},
-        device_type=device.type,
-        model_parallel_axes=("sh", "sw", "col"),
+    return _get_mesh(
+        device.type, {"dp": 4, "sh": 1, "sw": 1, "col": 1}, ("sh", "sw", "col")
     )
 
 

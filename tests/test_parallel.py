@@ -10,8 +10,8 @@ import torch
 import torch.distributed as dist
 
 from jigsaw import parallel
-from jigsaw.mesh import make_process_mesh
 from jigsaw.parallel import _joint
+from tests.process_mesh import _get_mesh
 
 BASE = torch.arange(1.0, 4.0)
 
@@ -29,17 +29,8 @@ def _param(device: torch.device, dtype: torch.dtype = torch.float32):
     return torch.nn.Parameter(torch.zeros(3, device=device, dtype=dtype))
 
 
-_MESH_CACHE: dict = {}
-
-
 def _mesh_2x2(device: torch.device) -> dict:
-    # Every mesh opens new communicators and nothing frees them, so the
-    # 4-rank GPU suite runs out of memory if each test builds its own.
-    if device.type not in _MESH_CACHE:
-        _MESH_CACHE[device.type] = make_process_mesh(
-            {"a": 2, "b": 2}, device_type=device.type
-        )
-    return _MESH_CACHE[device.type]
+    return _get_mesh(device.type, {"a": 2, "b": 2})
 
 
 def _loss(t: torch.Tensor) -> torch.Tensor:

@@ -19,9 +19,9 @@ import torch.distributed as dist
 
 from jigsaw import parallel
 from jigsaw.convert import convert_to_jigsaw
-from jigsaw.mesh import make_process_mesh
 from jigsaw.modules.attention import Attention
 from tests.parity import assert_close
+from tests.process_mesh import _get_mesh
 
 NORM_TYPES = [1.0, 2.0, 3.0, math.inf]
 
@@ -29,15 +29,9 @@ NORM_TYPES = [1.0, 2.0, 3.0, math.inf]
 F32_ATOL, F32_RTOL = 1e-5, 1.3e-6
 F64_ATOL, F64_RTOL = 1e-7, 1e-7
 
-_MESH_CACHE: dict = {}
-
 
 def _mesh(device: torch.device, **axes: int) -> dict:
-    # Every mesh opens new communicators and nothing frees them; build it once.
-    key = (device.type, tuple(axes.items()))
-    if key not in _MESH_CACHE:
-        _MESH_CACHE[key] = make_process_mesh(axes, device_type=device.type)
-    return _MESH_CACHE[key]
+    return _get_mesh(device.type, axes)
 
 
 def _mesh_2x2(device: torch.device) -> dict:

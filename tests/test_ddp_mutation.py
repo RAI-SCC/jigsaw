@@ -20,6 +20,7 @@ import jigsaw
 from jigsaw import parallel
 from tests import test_ddp_serial
 from tests.parity import all_ranks_ok
+from tests.process_mesh import _get_mesh
 from tests.test_ddp import (
     KINDS,
     MESHES,
@@ -102,20 +103,14 @@ def test_serial_equivalence_catches_unscaled_loss(device) -> None:
 
 # (dp, sh, sw) on 4 ranks: one image cut into 1, 2 and 4 tiles
 TILINGS = [(4, 1, 1), (2, 2, 1), (1, 2, 2)]
-_TILING_MESHES: dict = {}
 
 
 def _grad_norm(tiling: tuple[int, int, int], state: dict, device) -> float:
     """Global gradient norm of the domain-parallel tutorial at a fixed global batch."""
     dp_size, sh, sw = tiling
-    key = (tiling, device.type)
-    if key not in _TILING_MESHES:
-        _TILING_MESHES[key] = jigsaw.make_process_mesh(
-            {"dp": dp_size, "sh": sh, "sw": sw, "col": 1},
-            device_type=device.type,
-            model_parallel_axes=("sh", "sw", "col"),
-        )
-    mesh = _TILING_MESHES[key]
+    mesh = _get_mesh(
+        device.type, {"dp": dp_size, "sh": sh, "sw": sw, "col": 1}, ("sh", "sw", "col")
+    )
     model = _load("domain_parallel").build_model(mesh, device)
     model.load_state_dict(state)
     ddp = parallel.wrap_ddp(model, mesh)
