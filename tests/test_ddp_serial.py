@@ -41,10 +41,6 @@ SERIAL = {"dp": 8, "sh": 1, "sw": 1, "col": 1}
 LOSSES = ["distributed_mse", "local_mse_scaled"]
 
 
-def _mesh(axes: dict, device: torch.device) -> dict:
-    return _get_mesh(device.type, axes, ("sh", "sw", "col"))
-
-
 def _batch(step: int, size: tuple[int, int], device: torch.device):
     g = torch.Generator().manual_seed(step)
     x = torch.randn(BATCH, 1, *size, generator=g)
@@ -71,7 +67,7 @@ def train_parallel(loss_kind: str, device: torch.device, steps: int = STEPS):
     of the parameters.
     """
     module = _load("swin")
-    mesh = _mesh(PARALLEL, device)
+    mesh = _get_mesh(device.type, PARALLEL, ("sh", "sw", "col"))
     dp, model_group = mesh["dp"], mesh["model"]
     torch.manual_seed(0)
     model = module.Swin(mesh, device)
@@ -104,7 +100,7 @@ def train_parallel(loss_kind: str, device: torch.device, steps: int = STEPS):
 def train_serial(init: list, device: torch.device, steps: int = STEPS):
     """Train the undivided Swin tutorial on the whole batch, from ``init``."""
     module = _load("swin")
-    model = module.Swin(_mesh(SERIAL, device), device)
+    model = module.Swin(_get_mesh(device.type, SERIAL, ("sh", "sw", "col")), device)
     for p, q in zip(model.parameters(), init, strict=True):
         p.data.copy_(q)
     for parent in model.modules():

@@ -132,7 +132,10 @@ def _norms(device) -> list[float]:
     # The weights are replicated, so the undivided model's state fits every tiling.
     torch.manual_seed(0)
     model = _load("domain_parallel").build_model(
-        test_ddp_serial._mesh({"dp": 4, "sh": 1, "sw": 1, "col": 1}, device), device
+        _get_mesh(
+            device.type, {"dp": 4, "sh": 1, "sw": 1, "col": 1}, ("sh", "sw", "col")
+        ),
+        device,
     )
     state = {k: v.clone() for k, v in model.state_dict().items()}
     return [_grad_norm(t, state, device) for t in TILINGS]

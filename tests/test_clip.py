@@ -30,12 +30,8 @@ F32_ATOL, F32_RTOL = 1e-5, 1.3e-6
 F64_ATOL, F64_RTOL = 1e-7, 1e-7
 
 
-def _mesh(device: torch.device, **axes: int) -> dict:
-    return _get_mesh(device.type, axes)
-
-
 def _mesh_2x2(device: torch.device) -> dict:
-    return _mesh(device, a=2, b=2)
+    return _get_mesh(device.type, {"a": 2, "b": 2})
 
 
 def _with_grad(grad: torch.Tensor) -> torch.nn.Parameter:
@@ -216,7 +212,7 @@ def test_converted_model_matches_serial(
     Each gradient is set to its parameter's value, so the converter's weight
     shards are also the gradient shards and no forward pass is needed.
     """
-    mesh = _mesh(device, row=shape[0], col=shape[1])
+    mesh = _get_mesh(device.type, {"row": shape[0], "col": shape[1]})
     torch.manual_seed(0)
     serial = _Model(device)
     with torch.no_grad():

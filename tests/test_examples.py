@@ -80,10 +80,6 @@ def _load(name: str) -> ModuleType:
     return module
 
 
-def _mesh(axes: dict, model_parallel_axes, device: torch.device):
-    return _get_mesh(device.type, axes, model_parallel_axes)
-
-
 @pytest.fixture
 def example(
     monkeypatch: pytest.MonkeyPatch, device: torch.device
@@ -91,7 +87,7 @@ def example(
     """Load a tutorial on the test session's process group, with cached meshes."""
 
     def make_process_mesh(axes, device_type=None, model_parallel_axes=None):
-        return _mesh(axes, model_parallel_axes, device)
+        return _get_mesh(device.type, axes, model_parallel_axes)
 
     monkeypatch.setattr(jigsaw, "make_process_mesh", make_process_mesh)
 
