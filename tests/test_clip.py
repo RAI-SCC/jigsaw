@@ -19,29 +19,15 @@ import torch.distributed as dist
 
 from jigsaw import parallel
 from jigsaw.convert import convert_to_jigsaw
-from jigsaw.mesh import make_process_mesh
 from jigsaw.modules.attention import Attention
 from tests.parity import assert_close
+from tests.process_mesh import _get_mesh
 
 NORM_TYPES = [1.0, 2.0, 3.0, math.inf]
 
 # torch.testing.assert_close's defaults per dtype
 F32_ATOL, F32_RTOL = 1e-5, 1.3e-6
 F64_ATOL, F64_RTOL = 1e-7, 1e-7
-
-_MESH_CACHE: dict = {}
-
-
-def _mesh(device: torch.device, **axes: int) -> dict:
-    # Every mesh opens new communicators and nothing frees them; build it once.
-    key = (device.type, tuple(axes.items()))
-    if key not in _MESH_CACHE:
-        _MESH_CACHE[key] = make_process_mesh(axes, device_type=device.type)
-    return _MESH_CACHE[key]
-
-
-def _mesh_2x2(device: torch.device) -> dict:
-    return _mesh(device, a=2, b=2)
 
 
 def _with_grad(grad: torch.Tensor) -> torch.nn.Parameter:
@@ -98,7 +84,7 @@ def test_matches_torch_on_replicas(norm_type: float, device: torch.device) -> No
 def test_counts_shards_and_replicas_once(
     norm_type: float, device: torch.device
 ) -> None:
-    mesh = _mesh_2x2(device)
+    mesh = _get_mesh(device.type, {"a": 2, "b": 2})
     params = _mixed_params(mesh, device)
     before = [p.grad.clone() for p in params]
     expected = _expected_norm(norm_type)
@@ -115,7 +101,7 @@ def test_counts_shards_and_replicas_once(
 
 @pytest.mark.dist(4)
 def test_no_clipping_below_max_norm(device: torch.device) -> None:
-    mesh = _mesh_2x2(device)
+    mesh = _get_mesh(device.type, {"a": 2, "b": 2})
     params = _mixed_params(mesh, device)
     before = [p.grad.clone() for p in params]
 
@@ -146,7 +132,7 @@ def test_replica_group_outside_clipping_group_raises(
     norm_type: float, device: torch.device
 ) -> None:
     """Every rank raises, also rank 0 without a gradient, so none hangs."""
-    mesh = _mesh_2x2(device)
+    mesh = _get_mesh(device.type, {"a": 2, "b": 2})
     p = torch.nn.Parameter(torch.ones(2, device=device))
     if dist.get_rank() != 0:
         p.grad = torch.ones_like(p)
@@ -222,7 +208,7 @@ def test_converted_model_matches_serial(
     Each gradient is set to its parameter's value, so the converter's weight
     shards are also the gradient shards and no forward pass is needed.
     """
-    mesh = _mesh(device, row=shape[0], col=shape[1])
+    mesh = _get_mesh(device.type, {"row": shape[0], "col": shape[1]})
     torch.manual_seed(0)
     serial = _Model(device)
     with torch.no_grad():

@@ -22,10 +22,10 @@ from torch.distributed.algorithms.ddp_comm_hooks import default_hooks
 from torch.nn.parallel import DistributedDataParallel
 
 from jigsaw import parallel
-from jigsaw.mesh import make_process_mesh
 from jigsaw.modules import convolution, linear, normalization
 from jigsaw.modules.attention import _attention as attention
 from jigsaw.parallel import _sync
+from tests.process_mesh import _get_mesh
 
 # (dp, row, col) -> world size
 MESHES = [(2, 2, 2), (2, 2, 1), (4, 1, 1), (1, 2, 2)]
@@ -48,18 +48,10 @@ VARIANTS = [
 ]
 EXACT_KINDS = {"xwt", "conv_halo", "conv_patchify"}
 
-_MESH_CACHE: dict = {}
-
 
 def _mesh(shape: tuple[int, int, int], device: torch.device) -> dict:
-    if shape not in _MESH_CACHE:
-        dp, row, col = shape
-        _MESH_CACHE[shape] = make_process_mesh(
-            {"dp": dp, "row": row, "col": col},
-            device_type=device.type,
-            model_parallel_axes=("row", "col"),
-        )
-    return _MESH_CACHE[shape]
+    dp, row, col = shape
+    return _get_mesh(device.type, {"dp": dp, "row": row, "col": col}, ("row", "col"))
 
 
 def _int_tensor(shape, seed: int, device, dtype=torch.float32) -> torch.Tensor:

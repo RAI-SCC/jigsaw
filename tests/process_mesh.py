@@ -1,13 +1,96 @@
-from collections.abc import Sequence
+import math
+from collections.abc import Mapping, Sequence
 
 import pytest
 import torch
+import torch.distributed as dist
 
-import jigsaw
+from jigsaw.mesh import ProcessMesh
+from jigsaw.mesh import make_process_mesh as _build_process_mesh
 
-# These fixtures are thin wrappers over ``jigsaw.make_process_mesh``; they keep
-# the historical positional signatures and trim the result to the keys the tests
-# have always seen (leading replica axes such as ``dp`` stay out of the dict).
+# Nothing frees a mesh's communicators, so every test mesh comes from this cache.
+# Bound at import since test_examples monkeypatches ``jigsaw.make_process_mesh``.
+_MESHES: dict[tuple, ProcessMesh] = {}
+
+#: Leading axes with these names are data-parallel replicas in the ``mesh`` fixture.
+_REPLICA_AXES = ("dp",)
+
+
+def _get_mesh(
+    device_type: str,
+    axes: Mapping[str, int],
+    model_axes: Sequence[str] | None = None,
+    model_key: str = "model",
+) -> ProcessMesh:
+    """Return the cached mesh for ``axes``, building it on first use.
+
+    A ``-1`` size is resolved first, so it shares the mesh with the explicit sizes.
+    Each call returns a new dict over the cached groups.
+    """
+    world = dist.get_world_size()
+    known = math.prod(s for s in axes.values() if s != -1)
+    sizes = {k: world // known if s == -1 and known else s for k, s in axes.items()}
+    model = tuple(sizes) if model_axes is None else tuple(model_axes)
+    key = (device_type, tuple(sizes.items()), model, model_key)
+    if key not in _MESHES:
+        _MESHES[key] = _build_process_mesh(
+            sizes,
+            device_type=device_type,
+            model_parallel_axes=model,
+            model_key=model_key,
+        )
+    cached = _MESHES[key]
+    return ProcessMesh(cached, cached.device_mesh)
+
+
+def _requested_mesh_axes(item: pytest.Item) -> dict[str, int] | None:
+    """Return the axes ``item`` asks the ``mesh`` fixture for, or ``None``.
+
+    An indirect ``mesh`` parameter wins over the marker, so a module-level marker
+    can set a default.
+
+    Raises
+    ------
+    TypeError
+        If the marker has positional arguments.
+    ValueError
+        If an axis size is not a positive integer.
+    """
+    callspec = getattr(item, "callspec", None)
+    if callspec is not None and "mesh" in callspec.params:
+        axes = dict(callspec.params["mesh"])
+    else:
+        marker = item.get_closest_marker("mesh")
+        if marker is None:
+            return None
+        if marker.args:
+            raise TypeError(
+                "mesh marker takes axis sizes as keywords, e.g. mesh(row=2, col=2)"
+            )
+        axes = dict(marker.kwargs)
+    bad = {k: s for k, s in axes.items() if not isinstance(s, int) or s < 1}
+    if not axes or bad:
+        raise ValueError(f"mesh axes must be positive integers, got {axes}")
+    return axes
+
+
+@pytest.fixture
+def mesh(request: pytest.FixtureRequest, device: torch.device) -> ProcessMesh:
+    """Return the cached mesh from a ``mesh`` marker or indirect parameter.
+
+    Leading ``dp`` axes are replicas; the ``model`` group spans the others.
+    """
+    axes = _requested_mesh_axes(request.node)
+    if axes is None:
+        pytest.fail(
+            "the mesh fixture needs a mesh marker or an indirect mesh parameter",
+            pytrace=False,
+        )
+    names = list(axes)
+    n_replica = next(
+        (i for i, name in enumerate(names) if name not in _REPLICA_AXES), len(names)
+    )
+    return _get_mesh(device.type, axes, names[n_replica:])
 
 
 def make_process_mesh(
@@ -16,15 +99,14 @@ def make_process_mesh(
     mesh_dim_names: Sequence[str] = ("row", "col"),
     model_name: str = "model",
 ) -> dict:
-    """Return process mesh with rows, columns, and model group."""
+    """Return the model axes and model group of a cached mesh.
+
+    The last two axes are model-parallel; leading replica axes such as ``dp``
+    stay out of the dict.
+    """
     axes = dict(zip(mesh_dim_names, mesh_shape, strict=True))
     model_axes = mesh_dim_names[-2:]
-    mesh = jigsaw.make_process_mesh(
-        axes,
-        device_type=device_type,
-        model_parallel_axes=model_axes,
-        model_key=model_name,
-    )
+    mesh = _get_mesh(device_type, axes, model_axes, model_name)
     return {key: mesh[key] for key in (*model_axes, model_name)}
 
 
@@ -47,7 +129,7 @@ def make_multi_spatial_mesh(
         **dict(zip(spatial_names, spatial_sizes, strict=True)),
         channel_name: channel_size,
     }
-    return jigsaw.make_process_mesh(axes, device_type=device_type, model_key=model_name)
+    return _get_mesh(device_type, axes, model_key=model_name)
 
 
 @pytest.fixture(scope="session")

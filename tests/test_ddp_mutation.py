@@ -20,6 +20,7 @@ import jigsaw
 from jigsaw import parallel
 from tests import test_ddp_serial
 from tests.parity import all_ranks_ok
+from tests.process_mesh import _get_mesh
 from tests.test_ddp import (
     KINDS,
     MESHES,
@@ -102,20 +103,14 @@ def test_serial_equivalence_catches_unscaled_loss(device) -> None:
 
 # (dp, sh, sw) on 4 ranks: one image cut into 1, 2 and 4 tiles
 TILINGS = [(4, 1, 1), (2, 2, 1), (1, 2, 2)]
-_TILING_MESHES: dict = {}
 
 
 def _grad_norm(tiling: tuple[int, int, int], state: dict, device) -> float:
     """Global gradient norm of the domain-parallel tutorial at a fixed global batch."""
     dp_size, sh, sw = tiling
-    key = (tiling, device.type)
-    if key not in _TILING_MESHES:
-        _TILING_MESHES[key] = jigsaw.make_process_mesh(
-            {"dp": dp_size, "sh": sh, "sw": sw, "col": 1},
-            device_type=device.type,
-            model_parallel_axes=("sh", "sw", "col"),
-        )
-    mesh = _TILING_MESHES[key]
+    mesh = _get_mesh(
+        device.type, {"dp": dp_size, "sh": sh, "sw": sw, "col": 1}, ("sh", "sw", "col")
+    )
     model = _load("domain_parallel").build_model(mesh, device)
     model.load_state_dict(state)
     ddp = parallel.wrap_ddp(model, mesh)
@@ -137,7 +132,10 @@ def _norms(device) -> list[float]:
     # The weights are replicated, so the undivided model's state fits every tiling.
     torch.manual_seed(0)
     model = _load("domain_parallel").build_model(
-        test_ddp_serial._mesh({"dp": 4, "sh": 1, "sw": 1, "col": 1}, device), device
+        _get_mesh(
+            device.type, {"dp": 4, "sh": 1, "sw": 1, "col": 1}, ("sh", "sw", "col")
+        ),
+        device,
     )
     state = {k: v.clone() for k, v in model.state_dict().items()}
     return [_grad_norm(t, state, device) for t in TILINGS]

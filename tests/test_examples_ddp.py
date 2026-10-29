@@ -34,12 +34,12 @@ import jigsaw
 from jigsaw import debug, parallel
 from jigsaw.launch import set_all_seeds
 from tests.parity import assert_close, no_tf32
+from tests.process_mesh import _get_mesh
 from tests.test_examples import (
     REL,
     REL_FP16_ATTENTION,
     _agree,
     _load,
-    _mesh,
     _tile,
 )
 
@@ -57,7 +57,7 @@ def example(
     """Load a tutorial on the test session's process group, with cached meshes."""
 
     def make_process_mesh(axes, device_type=None, model_parallel_axes=None):
-        return _mesh(axes, model_parallel_axes, device)
+        return _get_mesh(device.type, axes, model_parallel_axes)
 
     monkeypatch.setattr(jigsaw, "make_process_mesh", make_process_mesh)
 
@@ -94,7 +94,7 @@ def test_training_reduces_loss(
     # The copies must draw different images (the losses are per copy here). The
     # tutorial's mesh is the cached one of the parity tests below.
     t = TUTORIALS[name]
-    mesh = _mesh(t.axes, t.model_axes, device)
+    mesh = _get_mesh(device.type, t.axes, t.model_axes)
     seen = torch.tensor([losses[0]], dtype=torch.float64, device=device)
     both = [torch.empty_like(seen) for _ in range(2)]
     dist.all_gather(both, seen, group=mesh["dp"])
@@ -230,7 +230,7 @@ def test_matches_data_serial_training(
     """Each copy on half the batch, under DDP == one copy on the whole batch."""
     t = TUTORIALS[name]
     module = example(name)
-    mesh = _mesh(t.axes, t.model_axes, device)
+    mesh = _get_mesh(device.type, t.axes, t.model_axes)
     dp = mesh["dp"]
     model, ref = t.build(module, mesh, device), t.build(module, mesh, device)
     _assert_same_init(model, ref, device)
@@ -285,7 +285,7 @@ def test_ddp_tutorial_step_matches_full_batch(
     """
     module = example("ddp")
     t = TUTORIALS["vit"]
-    mesh = _mesh(t.axes, t.model_axes, device)
+    mesh = _get_mesh(device.type, t.axes, t.model_axes)
     share = module.GLOBAL_BATCH // mesh["dp"].size()
     assert share // module.MICRO_BATCH == 2, "the test wants two microbatches"
     model, ref = t.build(module, mesh, device), t.build(module, mesh, device)
