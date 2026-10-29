@@ -357,7 +357,11 @@ class TestConvertedWeightsAreReplicated:
 
 @pytest.mark.dist_required
 class TestConvertToTorch:
-    """Converting to jigsaw and back restores the serial module."""
+    """Converting to jigsaw and back restores the serial module.
+
+    The jigsaw module in between must hold the serial shards and match the windowed
+    serial forward, so a pair of matching layout bugs in the two conversions shows.
+    """
 
     @pytest.mark.dist(4)
     @pytest.mark.parametrize(
@@ -392,9 +396,77 @@ class TestConvertToTorch:
         model = attention.Attention.convert_to_jigsaw(
             serial, mesh, device, ring=False, attn_backend="math"
         )
+        group = mesh["model"]
+        row, col = mesh["row"], mesh["col"]
+        n_col = col.size()
+
+        # Intermediate state: the local shards, sliced independently of
+        # convert_to_torch, and the distributed forward.
+        assert all_ranks_ok(model.heads == HEADS // n_col, device, group)
+        assert_close(
+            "jigsaw qkv weight",
+            _unpermute_qkv(mesh, device)(model.qkv.weight.detach()),
+            serial.qkv.weight.detach(),
+            1e-6,
+            1e-6,
+            device,
+            group,
+        )
+        assert_close(
+            "jigsaw head_concat weight",
+            model.head_concat.weight.detach(),
+            serial.head_concat.weight.detach().chunk(n_col, dim=1)[col.rank()],
+            1e-6,
+            1e-6,
+            device,
+            group,
+        )
+        if out_bias:
+            assert_close(
+                "jigsaw head_concat bias",
+                model.head_concat.bias.detach(),
+                serial.head_concat.bias.detach().chunk(n_col, dim=0)[col.rank()],
+                1e-6,
+                1e-6,
+                device,
+                group,
+            )
+        if qk_norm:
+            for norm in ("q_norm", "k_norm"):
+                want_norm = getattr(serial, norm).state_dict()
+                got_norm = getattr(model, norm).state_dict()
+                for name, value in want_norm.items():
+                    assert_close(
+                        f"jigsaw {norm}.{name}",
+                        got_norm[name],
+                        value,
+                        1e-6,
+                        1e-6,
+                        device,
+                        group,
+                    )
+
+        torch.manual_seed(1)
+        x = torch.randn(BATCH, SEQ, IN_DIM, device=device)
+        tols = _tols(device)
+        with torch.no_grad():
+            want_out = _windowed(row.size())(serial, x)
+            x_local = x.chunk(row.size(), dim=1)[row.rank()]
+            x_local = x_local.chunk(n_col, dim=2)[col.rank()]
+            want_local = want_out.chunk(row.size(), dim=1)[row.rank()]
+            want_local = want_local.chunk(n_col, dim=2)[col.rank()]
+            assert_close(
+                "jigsaw forward",
+                model(x_local),
+                want_local,
+                tols["atol"],
+                tols["rtol"],
+                device,
+                group,
+            )
+
         back = model.convert_to_torch(mesh)
 
-        group = mesh["model"]
         assert all_ranks_ok(
             back.heads == HEADS
             and back.qk_norm == qk_norm
@@ -408,7 +480,5 @@ class TestConvertToTorch:
         for name, value in want.items():
             assert_close(name, got[name], value, 1e-6, 1e-6, device, group)
 
-        torch.manual_seed(1)
-        x = torch.randn(BATCH, SEQ, IN_DIM, device=device)
         with torch.no_grad():
             assert_close("forward", back(x), serial(x), 1e-6, 1e-6, device, group)
