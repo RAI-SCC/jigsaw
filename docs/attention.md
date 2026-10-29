@@ -33,6 +33,15 @@ Both schemes parallelize attention over `spatial_group` and work with any
   two intra groups. With one group per node, the all-to-all stays on the fast
   intra-node fabric.
 
+```{figure} figures/parallelism.png
+:alt: QKV projection under context parallelism, Megatron-LM tensor parallelism, both combined, and Jigsaw's domain plus tensor parallelism.
+:width: 90%
+
+The QKV projection under context parallelism (CP), Megatron-LM tensor parallelism
+(TP), both combined, and Jigsaw. Jigsaw also shards the input's features over the TP
+ranks, so no rank holds the full feature dimension of its tile.
+```
+
 Ring attention splits the sequence over the mesh rows; the mesh columns split the
 heads, with or without `ring`. With split heads (or `qk_norm`) the ring has to
 circulate the projected keys and values instead of the input `x`, which is only a
