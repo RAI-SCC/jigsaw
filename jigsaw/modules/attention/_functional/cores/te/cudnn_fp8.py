@@ -168,12 +168,13 @@ def _dequant(t: Any, like: torch.Tensor) -> torch.Tensor:
     """Return a kernel output as a plain tensor of ``like``'s dtype and shape."""
     if hasattr(t, "dequantize"):
         t = t.dequantize(dtype=like.dtype)
-    return t.view(like.shape)
+    out: torch.Tensor = t.view(like.shape)
+    return out
 
 
 def _quantize_qkv(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, device: torch.device
-):
+) -> tuple[Any, Any, Any, Any, Any]:
     qkv_dtype, _ = _fp8_dtypes()
     quantizer = _cs_quantizer(qkv_dtype, device)
     q8, k8, v8, layout, scale_inv_format = combine_and_quantize(
@@ -197,7 +198,7 @@ def forward(
     Parameters
     ----------
     q, k, v : torch.Tensor
-        fp16/bf16 query, key and value in ``layout``. They are quantized to FP8
+        Query, key and value in fp16/bf16 and ``layout``. They are quantized to FP8
         inside the call.
     scale : float
         Softmax scale.
@@ -298,6 +299,36 @@ def backward(
     normalized ``out`` / ``logsumexp`` this yields the per-chunk dQ/dK/dV.
     ``q``/``k``/``v`` are re-quantized, and ``out`` stays in 16 bit (TE's default
     ``NVTE_DPA_FP8CS_O_in_F16=1``; with ``0`` it is quantized like Q/K/V).
+
+    Parameters
+    ----------
+    grad_out : torch.Tensor
+        Gradient of the output, in ``layout``.
+    q, k, v : torch.Tensor
+        Query, key and value in fp16/bf16 and ``layout``.
+    out : torch.Tensor
+        Saved (globally normalized) attention output, in ``layout``.
+    logsumexp : torch.Tensor
+        Saved (global) log-sum-exp, ``(b, h, s)``.
+    scale : float
+        Softmax scale.
+    *_ : object
+        Unused; interface parity with the other cores.
+    dropout_p : float, optional
+        Must be 0.
+    seed : int, optional
+        Unused.
+    rng_state : torch.Tensor, optional
+        Unused: there is no dropout.
+    layout : {"bhsd", "bshd"}, optional
+        Layout of the tensors and of the returned gradients. Default ``"bhsd"``.
+    **__ : object
+        Unused; interface parity with the other cores.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        Gradients ``(dq, dk, dv)`` in ``layout``.
     """
     _check_version()
     assert dropout_p == 0.0, "cudnn_fp8 core does not support dropout."
