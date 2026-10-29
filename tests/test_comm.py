@@ -249,11 +249,7 @@ def fresh_group() -> dist.ProcessGroup:
 @pytest.mark.dist(4)
 @pytest.mark.parametrize("direction", [1, -1, 2])
 def test_1d_isend_ring_on_a_fresh_group(device, fresh_group, direction):
-    """Every rank sends at once; separate NCCL sends here hang instead of failing.
-
-    ``direction=2`` pairs ranks 0 and 2, which no fixed send-first order by rank
-    parity keeps apart.
-    """
+    """Every rank sends at once; a regression hangs instead of failing."""
     rank, size = fresh_group.rank(), fresh_group.size()
     data = torch.full((2,), float(rank), device=device)
     buffer = torch.zeros(2, device=device)

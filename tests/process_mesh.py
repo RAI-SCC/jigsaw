@@ -8,9 +8,8 @@ import torch.distributed as dist
 from jigsaw.mesh import ProcessMesh
 from jigsaw.mesh import make_process_mesh as _build_process_mesh
 
-# Every mesh opens communicators that nothing frees until the session ends, so all
-# test meshes come from the one cache below. ``_build_process_mesh`` is bound at
-# import: tests monkeypatch ``jigsaw.make_process_mesh`` to route examples here.
+# Nothing frees a mesh's communicators, so every test mesh comes from this cache.
+# Bound at import since test_examples monkeypatches ``jigsaw.make_process_mesh``.
 _MESHES: dict[tuple, ProcessMesh] = {}
 
 #: Leading axes with these names are data-parallel replicas in the ``mesh`` fixture.
@@ -23,11 +22,10 @@ def _get_mesh(
     model_axes: Sequence[str] | None = None,
     model_key: str = "model",
 ) -> ProcessMesh:
-    """Return the session's mesh for ``axes``, building it on first use.
+    """Return the cached mesh for ``axes``, building it on first use.
 
-    Takes the arguments of ``jigsaw.make_process_mesh``; a ``-1`` size is resolved
-    before the lookup, so it shares the mesh with the spelled-out sizes. The result
-    is a new dict over the cached groups, so a test may change its keys.
+    A ``-1`` size is resolved first, so it shares the mesh with the explicit sizes.
+    Each call returns a new dict over the cached groups.
     """
     world = dist.get_world_size()
     known = math.prod(s for s in axes.values() if s != -1)
@@ -48,8 +46,8 @@ def _get_mesh(
 def _requested_mesh_axes(item: pytest.Item) -> dict[str, int] | None:
     """Return the axes ``item`` asks the ``mesh`` fixture for, or ``None``.
 
-    An indirect ``mesh`` parameter wins over a ``mesh`` marker, so a module-level
-    marker can set the default for its tests.
+    An indirect ``mesh`` parameter wins over the marker, so a module-level marker
+    can set a default.
 
     Raises
     ------
@@ -78,13 +76,9 @@ def _requested_mesh_axes(item: pytest.Item) -> dict[str, int] | None:
 
 @pytest.fixture
 def mesh(request: pytest.FixtureRequest, device: torch.device) -> ProcessMesh:
-    """Return the cached mesh a ``mesh`` marker or indirect parameter asks for.
+    """Return the cached mesh from a ``mesh`` marker or indirect parameter.
 
-    ``@pytest.mark.mesh(row=2, col=2)`` or
-    ``@pytest.mark.parametrize("mesh", [dict(row=4, col=1)], indirect=True)``.
-    The test is skipped unless the world size is the product of the sizes.
-    Leading ``dp`` axes are data-parallel replicas; every other axis is
-    model-parallel and spanned by the ``model`` group.
+    Leading ``dp`` axes are replicas; the ``model`` group spans the others.
     """
     axes = _requested_mesh_axes(request.node)
     if axes is None:

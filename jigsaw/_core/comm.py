@@ -83,9 +83,8 @@ class CommOp(StrEnum):
     - ``AUTO``: ``ALL_TO_ALL`` on CUDA, ``BATCH_ISEND_IRECV`` on CPU. Default.
     - ``ALL_TO_ALL``: one ``dist.all_to_all`` per exchange. CUDA only, since
       gloo's all-to-all rejects the zero-length entries of the idle peers.
-    - ``ISEND``: separate ``dist.isend`` and ``dist.irecv``. CUDA tensors take
-      ``BATCH_ISEND_IRECV`` instead, since separate NCCL sends around a ring
-      deadlock.
+    - ``ISEND``: separate ``dist.isend`` and ``dist.irecv``. CPU only; CUDA
+      tensors take ``BATCH_ISEND_IRECV``.
     - ``BATCH_ISEND_IRECV``: one ``dist.batch_isend_irecv`` per exchange, which
       NCCL coalesces into a single launch.
 
@@ -314,9 +313,8 @@ def comm_1d_isend(
 ) -> tuple[torch.Tensor, dist.Work | None]:
     """Send data to a neighbor process using separate ``isend`` and ``irecv``.
 
-    CUDA tensors go through :func:`comm_1d_batch_isend_irecv`: an NCCL send
-    outside a group blocks until its peer joins, so a ring of separate sends
-    deadlocks with every rank waiting in its own send.
+    CUDA tensors take :func:`comm_1d_batch_isend_irecv`, since separate NCCL
+    sends around a ring deadlock.
 
     Parameters
     ----------
