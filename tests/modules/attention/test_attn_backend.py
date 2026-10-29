@@ -317,7 +317,8 @@ class TestBackendWithTe:
     def test_distributed_attention_te_is_wired(self, device, solo_group):
         from jigsaw.modules.attention._attention import DistributedAttention
 
-        model = _build_attn("te", device, solo_group)
+        # head_dim 16: the cuDNN core needs a multiple of 8.
+        model = _build_attn("te", device, solo_group, in_dim=64, embed_dim=64)
 
         assert model.attn_backend is AttnBackend.TE
         assert model.te is True
@@ -380,3 +381,152 @@ class TestBackendWithTe:
             .reshape(batch, seq, heads * head_dim)
         )
         torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)
+
+
+# --------------------------------------------------------------------------- #
+# TE core limits: asserts that fire before a kernel would fail or crash
+# --------------------------------------------------------------------------- #
+class TestTeLimits:
+    @pytest.mark.parametrize("head_dim", [4, 12, 260])
+    def test_cudnn_head_dim(self, head_dim):
+        with pytest.raises(AssertionError, match="cuDNN core"):
+            te_cores.cudnn.check_head_dim(head_dim, CPU)
+
+    def test_cudnn_head_dim_ok(self):
+        te_cores.cudnn.check_head_dim(64, CPU)
+
+    def test_flash_head_dim(self):
+        te_cores.flash.check_head_dim(12, CPU)  # padded to 16, fine
+        with pytest.raises(AssertionError, match="flash core"):
+            te_cores.flash.check_head_dim(264, CPU)
+
+    def test_distributed_attention_checks_head_dim(
+        self, monkeypatch, device, solo_group
+    ):
+        """Construction fails on a head dim the selected core cannot serve."""
+        monkeypatch.setattr(attention, "JIGSAW_TE_AVAILABLE", True)
+        monkeypatch.setenv("JIGSAW_TE_CORE", "cudnn")
+        with pytest.raises(AssertionError, match="embed_dim // heads"):
+            _build_attn("te", device, solo_group, in_dim=48, embed_dim=48)
+
+    @pytest.mark.parametrize("core", ["cudnn", "flash"])
+    def test_rejects_extra_leading_dims(self, core):
+        q = torch.empty(2, 3, 16, 4, 8)
+        with pytest.raises(AssertionError, match="4-D q/k/v"):
+            getattr(te_cores, core).forward(q, q, q, 1.0, 0.0, layout="bshd")
+
+    @pytest.mark.parametrize("core", ["cudnn", "flash"])
+    def test_rejects_cpu(self, core):
+        q = torch.empty(2, 16, 4, 8, dtype=torch.bfloat16)
+        with pytest.raises(AssertionError, match="CUDA"):
+            getattr(te_cores, core).forward(q, q, q, 1.0, 0.0, layout="bshd")
+
+    @pytest.mark.gpu_required
+    @pytest.mark.parametrize("core", ["cudnn", "flash"])
+    @pytest.mark.parametrize(
+        "shape,dtype,match",
+        [
+            ((2, 16, 4, 8), torch.float32, "fp16/bf16"),
+            ((0, 16, 4, 8), torch.bfloat16, "non-empty"),
+            # FA2 would hit the CUDA grid limit and poison the context.
+            ((65536, 2, 1, 8), torch.bfloat16, "batch=65536"),
+            ((1, 2, 65536, 8), torch.bfloat16, "heads=65536"),
+        ],
+    )
+    def test_rejects_on_gpu(self, core, shape, dtype, match):
+        q = torch.empty(shape, dtype=dtype, device="cuda")
+        with pytest.raises(AssertionError, match=match):
+            getattr(te_cores, core).forward(q, q, q, 1.0, 0.0, layout="bshd")
+
+    @pytest.mark.gpu_required
+    def test_cudnn_rejects_single_token(self):
+        q = torch.empty(2, 1, 4, 8, dtype=torch.bfloat16, device="cuda")
+        with pytest.raises(AssertionError, match="seq len > 1"):
+            te_cores.cudnn.forward(q, q, q, 1.0, 0.0, layout="bshd")
+
+
+def _is_sm90() -> bool:
+    return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9
+
+
+def _run_core(core, device, batch, s_q, s_kv, heads, head_dim, backward=True):
+    """One bf16 ``bshd`` forward (and backward) through ``core``, synchronized."""
+    q = torch.randn(batch, s_q, heads, head_dim, dtype=torch.bfloat16, device=device)
+    k = torch.randn(batch, s_kv, heads, head_dim, dtype=torch.bfloat16, device=device)
+    v = torch.randn_like(k)
+    scale = head_dim**-0.5
+    out, lse, rng_state = core.forward(q, k, v, scale, 0.0, layout="bshd")
+    if backward:
+        core.backward(
+            torch.ones_like(out), q, k, v, out, lse, scale, 0.0,
+            rng_state=rng_state, layout="bshd",
+        )  # fmt: skip
+    torch.cuda.synchronize(device)
+
+
+# --------------------------------------------------------------------------- #
+# TE core limits on real Hopper hardware: the asserts match what the kernels do
+# --------------------------------------------------------------------------- #
+@pytest.mark.te_required
+@pytest.mark.gpu_required
+@pytest.mark.skipif(not _is_sm90(), reason="needs an sm90+ GPU (H100)")
+class TestTeLimitsOnH100:
+    @pytest.fixture(autouse=True)
+    def _auto_core(self, monkeypatch):
+        monkeypatch.delenv("JIGSAW_TE_CORE", raising=False)
+
+    def test_selects_cudnn(self, device):
+        assert te_cores.select_core(device) is te_cores.cudnn
+
+    @pytest.mark.parametrize("head_dim", [8, 12, 128, 136, 256, 264])
+    def test_cudnn_head_dim_check_matches_kernel(self, device, head_dim):
+        """Head dims the check accepts run; the ones it rejects have no backend.
+
+        136 and 256 pin the sm90 limit: above the pre-Hopper 128, still served.
+        """
+        try:
+            te_cores.cudnn.check_head_dim(head_dim, device)
+        except AssertionError:
+            with pytest.raises(RuntimeError, match="no fused-attention backend"):
+                te_cores.cudnn._fused_attn_backend(
+                    True, torch.bfloat16, 4, 128, 128, head_dim, 0.0
+                )
+        else:
+            _run_core(te_cores.cudnn, device, 2, 128, 128, 4, head_dim)
+
+    @pytest.mark.parametrize("head_dim", [12, 256, 264])
+    def test_flash_head_dim_check_matches_kernel(self, device, head_dim):
+        try:
+            te_cores.flash.check_head_dim(head_dim, device)
+        except AssertionError:
+            with pytest.raises(RuntimeError, match="head dimension at most 256"):
+                _run_core(te_cores.flash, device, 2, 128, 128, 4, head_dim)
+        else:
+            _run_core(te_cores.flash, device, 2, 128, 128, 4, head_dim)
+
+    @pytest.mark.parametrize(
+        "embed_dim,ok", [(48, False), (4 * 136, True), (4 * 264, False)]
+    )
+    def test_distributed_attention_head_dim(self, device, solo_group, embed_dim, ok):
+        """Construction applies the real device's limit, no monkeypatching."""
+        build = lambda: _build_attn(  # noqa: E731
+            "te", device, solo_group, in_dim=embed_dim, embed_dim=embed_dim
+        )
+        if ok:
+            assert build().te_core is te_cores.cudnn
+        else:
+            with pytest.raises(AssertionError, match="cuDNN core"):
+                build()
+
+    @pytest.mark.parametrize("s_q,s_kv", [(1, 64), (64, 1)])
+    def test_cudnn_single_token_one_side_runs(self, device, s_q, s_kv):
+        """The seq-len assert only rejects a single token on *both* sides."""
+        _run_core(te_cores.cudnn, device, 2, s_q, s_kv, 4, 64)
+
+    @pytest.mark.parametrize("core", ["cudnn", "flash"])
+    @pytest.mark.parametrize("batch,heads", [(65535, 1), (1, 65535)])
+    def test_grid_limit_boundary_runs(self, device, core, batch, heads):
+        """``MAX_GRID_DIM`` itself is served; 65536 is rejected by the check."""
+        _run_core(
+            getattr(te_cores, core), device, batch, 2, 2, heads, 8, backward=False
+        )

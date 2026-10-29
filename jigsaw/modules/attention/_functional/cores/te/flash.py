@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import torch
 
+from ._checks import check_inputs as _check_inputs
 from ._layout import Layout
 from ._layout import from_bshd as _from_bshd
 
@@ -28,6 +29,23 @@ except Exception:  # pragma: no cover - flash_attn not installed (no container)
 #: FA2 needs the head dim to be a multiple of 8 and at most 256; zero-padding
 #: up to the next multiple is exact.
 _HEAD_DIM_MULTIPLE = 8
+_MAX_HEAD_DIM = 256
+
+
+def check_head_dim(head_dim: int, device: torch.device) -> None:  # noqa: ARG001
+    """Assert FA2 can serve ``head_dim``; ``device`` is for parity with :mod:`.cudnn`.
+
+    Parameters
+    ----------
+    head_dim : int
+        Per-head embedding dimension.
+    device : torch.device
+        Unused.
+    """
+    assert head_dim <= _MAX_HEAD_DIM, (
+        f"attn_backend='te' (flash core) needs embed_dim // heads to be at most "
+        f"{_MAX_HEAD_DIM}, got {head_dim}."
+    )
 
 
 def _pad_head_dim(t: torch.Tensor, head_dim: int) -> torch.Tensor:
@@ -78,6 +96,7 @@ def forward(
     rng_state : torch.Tensor or None
         Kernel dropout RNG state for :func:`backward`; ``None`` without dropout.
     """
+    _check_inputs(q, k, layout)
     head_dim = q.shape[-1]
     q_b, k_b, v_b = (_pad_head_dim(_to_bshd(t, layout), head_dim) for t in (q, k, v))
 
