@@ -2,7 +2,9 @@
 
 :mod:`.cudnn` (TE's fused kernels) on sm90+, :mod:`.flash` (``flash_attn``) on
 sm80-89; see :func:`select_core`. Both implement the core contract in :mod:`..`.
-Set ``JIGSAW_TE_CORE=cudnn|flash`` to override the choice.
+Set ``JIGSAW_TE_CORE=cudnn|flash|cudnn_fp8`` to override the choice;
+``cudnn_fp8`` (:mod:`.cudnn_fp8`) is the cuDNN core with FP8 attention GEMMs and is
+only ever picked this way.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from types import ModuleType
 
 import torch
 
-from . import cudnn, flash
+from . import cudnn, cudnn_fp8, flash
 
 #: Per-core availability: ``cudnn`` needs ``transformer_engine``, ``flash`` needs
 #: ``flash_attn``.
@@ -23,7 +25,11 @@ FLASH_CORE_AVAILABLE = flash.FLASH_CORE_AVAILABLE
 TE_CORE_AVAILABLE = CUDNN_CORE_AVAILABLE or FLASH_CORE_AVAILABLE
 
 _ENV_OVERRIDE = "JIGSAW_TE_CORE"
-_CORES: dict[str, ModuleType] = {"cudnn": cudnn, "flash": flash}
+_CORES: dict[str, ModuleType] = {
+    "cudnn": cudnn,
+    "flash": flash,
+    "cudnn_fp8": cudnn_fp8,
+}
 
 #: First SM major version that gets the cuDNN core (9 = Hopper and newer).
 _CUDNN_MIN_MAJOR = 9
@@ -35,6 +41,20 @@ def _available(core: ModuleType) -> bool:
         if core is cudnn
         else core.FLASH_CORE_AVAILABLE  # type: ignore[attr-defined]
     )
+
+
+def _require_fp8(device: torch.device) -> None:
+    """Raise unless the FP8 core can run: TE's FP8 path importable, sm90+, no ROCm."""
+    if not cudnn_fp8.CUDNN_FP8_CORE_AVAILABLE:
+        raise RuntimeError(
+            f"{_ENV_OVERRIDE}=cudnn_fp8 needs a transformer_engine whose FP8 "
+            "fused-attention API imports (see cudnn_fp8.TE_FP8_VERSION)."
+        )
+    if device.type == "cuda" and (
+        torch.version.hip is not None
+        or torch.cuda.get_device_capability(device)[0] < _CUDNN_MIN_MAJOR
+    ):
+        raise RuntimeError(f"{_ENV_OVERRIDE}=cudnn_fp8 needs an NVIDIA sm90+ GPU.")
 
 
 def select_core(device: torch.device) -> ModuleType:
@@ -67,6 +87,8 @@ def select_core(device: torch.device) -> ModuleType:
             raise ValueError(
                 f"{_ENV_OVERRIDE}={override!r}; expected one of {sorted(_CORES)}."
             )
+        if override == "cudnn_fp8":
+            _require_fp8(device)
         return _CORES[override]
 
     if device.type != "cuda":

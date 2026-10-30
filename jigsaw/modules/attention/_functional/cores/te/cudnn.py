@@ -14,6 +14,7 @@ from typing import Any
 
 import torch
 
+from ._checks import check_inputs as _check_inputs
 from ._layout import Layout
 from ._layout import from_bshd as _from_bshd
 
@@ -37,6 +38,32 @@ except Exception:  # pragma: no cover - TE not installed (no container)
 
 
 _LAYOUT = "bshd_bshd_bshd"
+
+#: cuDNN's fused kernels need a head dim that is a multiple of 8, up to 256 on
+#: sm90+ and up to 128 below.
+_HEAD_DIM_MULTIPLE = 8
+
+
+def check_head_dim(head_dim: int, device: torch.device) -> None:
+    """Assert cuDNN's fused kernels can serve ``head_dim`` on ``device``.
+
+    Fails at module construction; :func:`_fused_attn_backend` remains the
+    definitive check at the first call.
+
+    Parameters
+    ----------
+    head_dim : int
+        Per-head embedding dimension.
+    device : torch.device
+        Device the attention runs on.
+    """
+    sm90 = device.type != "cuda" or torch.cuda.get_device_capability(device)[0] >= 9
+    max_head_dim = 256 if sm90 else 128
+    assert head_dim % _HEAD_DIM_MULTIPLE == 0 and head_dim <= max_head_dim, (
+        f"attn_backend='te' (cuDNN core) needs embed_dim // heads to be a "
+        f"multiple of {_HEAD_DIM_MULTIPLE} and at most {max_head_dim} on this "
+        f"GPU, got {head_dim}."
+    )
 
 
 # --- transformer-engine ABI compatibility ---------------------------------
@@ -149,7 +176,7 @@ def _full_cu_seqlens(batch: int, seqlen: int, device: torch.device) -> torch.Ten
 @functools.cache
 def _fused_attn_backend(
     is_training: bool,
-    dtype: torch.dtype,
+    dtype: torch.dtype | tex.DType,
     n_heads: int,
     seqlen_q: int,
     seqlen_kv: int,
@@ -162,10 +189,13 @@ def _fused_attn_backend(
     the answer only depends on the (shape, dtype, dropout) problem description.
     Raises :class:`RuntimeError` if no sub-backend serves it.
     """
+    # A torch dtype for the F16 kernels, a ``tex.DType`` (FP8 E4M3/E5M2) for
+    # :mod:`.cudnn_fp8`, which asks the same question for the FP8 sub-backend.
+    te_dtype = TE_DType[dtype] if isinstance(dtype, torch.dtype) else dtype
     backend = tex.get_fused_attn_backend(
         is_training,
-        TE_DType[dtype],
-        TE_DType[dtype],
+        te_dtype,
+        te_dtype,
         QKVLayout[_LAYOUT],
         AttnBiasType["no_bias"],
         AttnMaskType["no_mask"],
@@ -226,7 +256,9 @@ def forward(
     rng_state : torch.Tensor or None
         Kernel dropout RNG state for :func:`backward`; ``None`` without dropout.
     """
+    _check_inputs(q, k, layout)
     b, h, s_q, s_kv, d = _shape(q, k, layout)
+    assert s_q > 1 or s_kv > 1, "attn_backend='te' (cuDNN core) needs seq len > 1."
     q_b, k_b, v_b = (_to_bshd(t, layout) for t in (q, k, v))
     backend = _fused_attn_backend(True, q_b.dtype, h, s_q, s_kv, d, dropout_p)
     cu_q = _full_cu_seqlens(b, s_q, q.device)
