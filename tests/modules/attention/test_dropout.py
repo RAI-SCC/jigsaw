@@ -20,17 +20,37 @@ skipped where the hardware or ``transformer_engine`` is missing):
 * ``TestTeAttnDropoutReplay``: the non-ring ``_TransformerEngineAttention``
   wrapper, which drives those same cores in ``bshd`` and replays their mask
   through the same kernel-supplied ``rng_state``.
+
+The distributed checks (4 ranks, any device; the TE ones need a GPU):
+
+* ``TestDistributedDropoutReplay``: ring attention over every send/save/backward
+  policy, and flat and hierarchical Ulysses, match an autograd reference through
+  the mask recovered over the *global* sequence. A mismatch here means a chunk's
+  backward replayed another chunk's ``seed`` / ``rng_state``.
 """
+
+import itertools
 
 import pytest
 import torch
+import torch.distributed as dist
 
+from jigsaw.gather import gather_1d_results
 from jigsaw.modules.attention import Attention, DistributedAttention
+from jigsaw.modules.attention import _config as config
 from jigsaw.modules.attention._functional.cores import math as math_core
 from jigsaw.modules.attention._functional.cores import sdpa as sdpa_core
 from jigsaw.modules.attention._functional.cores.te import cudnn as te_cudnn_core
 from jigsaw.modules.attention._functional.cores.te import flash as te_flash_core
-from jigsaw.modules.attention._functional.ring import _combine_dropout_seed
+from jigsaw.modules.attention._functional.ring import (
+    _combine_dropout_seed,
+    _RingAttention,
+)
+from jigsaw.modules.attention._functional.ulysses import (
+    hierarchical_ulysses_attention,
+    ulysses_attention,
+)
+from tests.parity import all_ranks_ok, assert_close, no_tf32
 
 
 class TestMathCoreDropout:
@@ -441,3 +461,358 @@ class TestTeAttnDropoutReplay:
         assert not torch.allclose(
             q.grad.float().transpose(1, 2), qg.grad, atol=self.TOL, rtol=self.TOL
         )
+
+
+# --------------------------------------------------------------------------- #
+# Distributed paths: ring and Ulysses, checked over the global sequence
+# --------------------------------------------------------------------------- #
+_P = 0.3
+_B, _H, _S_LOCAL = 2, 2, 16
+
+
+def _pairwise_cover(combos: list[tuple]) -> set[tuple]:
+    """Greedy (deterministic) subset of ``combos`` covering every value pair."""
+
+    def pairs(c: tuple) -> set[tuple]:
+        return {(i, c[i], j, c[j]) for i, j in itertools.combinations(range(len(c)), 2)}
+
+    uncovered = set().union(*map(pairs, combos))
+    chosen = set()
+    while uncovered:
+        best = max(combos, key=lambda c: len(pairs(c) & uncovered))
+        chosen.add(best)
+        uncovered -= pairs(best)
+    return chosen
+
+
+def _ring_dropout_cases() -> list:
+    """Every supported ring policy; the pairwise cover runs by default, the rest is slow."""
+    combos = [
+        c
+        for c in itertools.product(
+            config.SendOp,
+            config.SendForward,
+            config.SaveBackward,
+            config.SaveScope,
+            config.SendBackward,
+            (False, True),
+        )
+        if not (c[1] == config.SendForward.KV and c[2] == config.SaveBackward.X)
+    ]
+    default = _pairwise_cover(combos)
+    return [
+        pytest.param(
+            *c,
+            id="-".join([*(e.name for e in c[:5]), "overlap" if c[5] else "sync"]),
+            marks=() if c in default else pytest.mark.slow,
+        )
+        for c in combos
+    ]
+
+
+_RING_BACKENDS = [
+    pytest.param("sdpa", id="sdpa"),
+    pytest.param(
+        "te", id="te", marks=[pytest.mark.gpu_required, pytest.mark.te_required]
+    ),
+    pytest.param("math", id="math"),
+]
+_ULYSSES_BACKENDS = _RING_BACKENDS[:2]
+
+
+def _dtype_tol(device: torch.device, backend: str) -> tuple[torch.dtype, float]:
+    """The fused CUDA kernels need 16 bit; everything else runs (TF32-free) fp32."""
+    if device.type == "cuda" and backend != "math":
+        return torch.bfloat16, 2e-2
+    return torch.float32, 1e-4
+
+
+def _identity_v_inputs(
+    mesh: dict,
+    layout: str,
+    heads: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> tuple[torch.Tensor, ...]:
+    """This rank's ``q, k, v, x, w_qkv, dout`` with ``V`` the identity over ``row``.
+
+    ``head_dim`` equals the global sequence, so each attention output row is that
+    query's post-dropout probability row and the opaque kernel mask is ``out > 0``.
+    ``x`` holds this rank's rows of the identity and ``w_qkv``'s value block is the
+    identity per head, so the ring's recompute of K/V from ``x`` sees the same V.
+    Each ``col`` rank holds its own heads, as under channel parallelism.
+    """
+    rank, s = mesh["row"].rank(), _S_LOCAL * mesh["row"].size()
+    g = torch.Generator().manual_seed(1234 + mesh["col"].rank())
+    w_q, w_k = (torch.randn(heads * s, s, generator=g) * 0.3 for _ in range(2))
+    w_v = torch.eye(s).repeat(heads, 1)
+    w_qkv = torch.cat([w_q, w_k, w_v]).to(device, dtype)
+    x = torch.eye(s, device=device, dtype=dtype)[
+        rank * _S_LOCAL : (rank + 1) * _S_LOCAL
+    ]
+    x = x.expand(_B, -1, -1).contiguous()
+    qkv = (x @ w_qkv.mT).reshape(_B, _S_LOCAL, 3, heads, s)
+    perm = (2, 0, 1, 3, 4) if layout == "bshd" else (2, 0, 3, 1, 4)
+    q, k, v = (t.contiguous().requires_grad_(True) for t in qkv.permute(*perm))
+    seed = 100 + dist.get_rank()
+    dout = torch.randn(q.shape, generator=torch.Generator().manual_seed(seed))
+    return q, k, v, x, w_qkv, dout.to(device, dtype)
+
+
+def _check_against_recovered_mask(
+    mesh: dict,
+    layout: str,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    dout: torch.Tensor,
+    tol: float,
+    device: torch.device,
+) -> torch.Tensor:
+    """Compare ``out`` and the q/k/v grads with autograd through the recovered mask.
+
+    Returns the ``(b, heads, s, s)`` keep mask of every head on the mesh. Verdicts
+    are reduced over the whole model group, so a mismatch in one ``col`` rank's
+    ring fails every rank instead of hanging the others.
+    """
+    group = mesh["model"]
+
+    def bhsd(t: torch.Tensor) -> torch.Tensor:
+        return t.transpose(1, 2) if layout == "bshd" else t
+
+    q_g, k_g, out_g, dout_g = (
+        gather_1d_results(bhsd(t.detach()).contiguous(), mesh, dim=2, pm_key="row")
+        for t in (q, k, out, dout)
+    )
+    keep = (out_g.float() > 0).float()
+    dropped = 1.0 - keep.mean().item()
+    if not all_ranks_ok(abs(dropped - _P) < 0.05, device, group):
+        raise AssertionError(f"dropped fraction {dropped:.3f}, expected {_P}")
+
+    b, h, s, _ = q_g.shape
+    q_ref, k_ref = (t.float().requires_grad_(True) for t in (q_g, k_g))
+    v_ref = torch.eye(s, device=device).expand(b, h, s, s).clone().requires_grad_(True)
+    p = torch.softmax((q_ref @ k_ref.mT) * s**-0.5, dim=-1)
+    out_ref = (p * keep / (1 - _P)) @ v_ref
+    out_ref.backward(dout_g.float())
+
+    rank = mesh["row"].rank()
+    local = slice(rank * _S_LOCAL, (rank + 1) * _S_LOCAL)
+    for name, got, ref in (
+        ("out", out, out_ref.detach()),
+        ("dq", q.grad, q_ref.grad),
+        ("dk", k.grad, k_ref.grad),
+        ("dv", v.grad, v_ref.grad),
+    ):
+        assert got is not None and ref is not None, f"no {name}"
+        ref = ref[:, :, local]
+        assert_close(
+            name,
+            bhsd(got).float(),
+            ref,
+            atol=tol * ref.abs().max().item(),
+            rtol=tol,
+            device=device,
+            group=group,
+        )
+    return gather_1d_results(keep, mesh, dim=1, pm_key="col")
+
+
+def _n_identical(blocks: list[torch.Tensor]) -> int:
+    return sum(torch.equal(a, b) for a, b in itertools.combinations(blocks, 2))
+
+
+_SHARED_SEED_XFAIL = pytest.mark.xfail(
+    strict=True,
+    reason="masks are drawn from the ambient generator (SDPA/TE kernels, the "
+    "dense Ulysses core) or seeded from the ring rank only (math core), so ranks "
+    "in the same RNG state draw the same mask for different blocks or heads",
+)
+
+
+@pytest.mark.dist_required
+@pytest.mark.dist(4)
+@pytest.mark.parametrize(
+    "mesh", [dict(row=4, col=1), dict(row=2, col=2)], indirect=True, ids=["4x1", "2x2"]
+)
+class TestDistributedDropoutReplay:
+    """Ring and Ulysses dropout against autograd through the global recovered mask.
+
+    Same observability trick as :class:`TestSdpaTeCoreDropoutReplay`, over the
+    global sequence: ``head_dim`` equals the global sequence length and ``V`` is the
+    identity across the ``row`` (sequence) group. On the 2x2 mesh each ``col`` rank
+    runs its own ring over its own heads.
+    """
+
+    def _ring(
+        self,
+        device: torch.device,
+        mesh: dict,
+        backend: str,
+        cfg_kwargs: dict,
+    ) -> torch.Tensor:
+        group = mesh["row"]
+        # Two intra groups, so the HYBRID* ops have a real outer ring.
+        cfg = config.RingAttentionConfig(
+            device=device,
+            intra_size=group.size() // 2,
+            attn_backend=backend,
+            **cfg_kwargs,
+        )
+        dtype, tol = _dtype_tol(device, backend)
+        q, k, v, x, w_qkv, dout = _identity_v_inputs(
+            mesh, cfg.core_layout, _H, dtype, device
+        )
+        out = _RingAttention.apply(
+            q, k, v, x, w_qkv, q.shape[-1] ** -0.5, _P, group, group.rank(), cfg, True
+        )[0]
+        out.backward(dout)
+        return _check_against_recovered_mask(
+            mesh, cfg.core_layout, q, k, v, out, dout, tol, device
+        )
+
+    def _ulysses(
+        self, device: torch.device, mesh: dict, backend: str, hierarchical: bool
+    ) -> torch.Tensor:
+        spatial, channel = mesh["row"].size(), mesh["col"].size()
+        heads = spatial  # local heads; flat Ulysses splits them over the ring
+        dtype, tol = _dtype_tol(device, backend)
+        s = _S_LOCAL * spatial
+        model = DistributedAttention(
+            in_dim=s,
+            embed_dim=heads * channel * s,
+            out_dim=s,
+            heads=heads * channel,
+            local_rank=mesh["col"].rank(),
+            device=device,
+            spatial_group=mesh["row"],
+            channel_group=mesh["col"],
+            dropout_p=_P,
+            ulysses=True,
+            ulysses_intra_size=spatial // 2 if hierarchical else 0,
+            attn_backend=backend,
+            dtype=dtype,
+        )
+        q, k, v, _x, _w, dout = _identity_v_inputs(mesh, "bshd", heads, dtype, device)
+        if hierarchical:
+            out = hierarchical_ulysses_attention(
+                q, k, v, model._uly_intra_group, model._inter_ring_core(_P)
+            )
+        else:
+            out = ulysses_attention(q, k, v, mesh["row"], model._dense_bshd_core(_P))
+        out.backward(dout)
+        return _check_against_recovered_mask(
+            mesh, "bshd", q, k, v, out, dout, tol, device
+        )
+
+    @pytest.mark.parametrize("backend", _RING_BACKENDS)
+    @pytest.mark.parametrize(
+        "send_op, send_in_forward, save_for_backward, save_scope, send_backward, "
+        "overlap",
+        _ring_dropout_cases(),
+    )
+    def test_ring_replays_each_chunk_mask(
+        self,
+        request: pytest.FixtureRequest,
+        device: torch.device,
+        mesh: dict,
+        backend: str,
+        send_op: config.SendOp,
+        send_in_forward: config.SendForward,
+        save_for_backward: config.SaveBackward,
+        save_scope: config.SaveScope,
+        send_backward: config.SendBackward,
+        overlap: bool,
+    ) -> None:
+        if overlap and device.type != "cuda":
+            pytest.skip("overlap_comm is inert off CUDA")
+        if (
+            device.type == "cpu"
+            and send_op == config.SendOp.HYBRID
+            and save_scope == config.SaveScope.LOCAL
+            and mesh["row"].size() == 2
+        ):
+            request.applymarker(
+                pytest.mark.xfail(
+                    strict=True,
+                    reason="gloo 'Pair is not connected' in the HYBRID LOCAL "
+                    "backward with intra groups of 1; fails with dropout_p=0 too",
+                )
+            )
+        torch.manual_seed(dist.get_rank())
+        with no_tf32():
+            self._ring(
+                device,
+                mesh,
+                backend,
+                dict(
+                    send_op=send_op,
+                    send_in_forward=send_in_forward,
+                    save_for_backward=save_for_backward,
+                    save_scope=save_scope,
+                    send_backward=send_backward,
+                    overlap_comm=overlap,
+                ),
+            )
+
+    @pytest.mark.parametrize("backend", _ULYSSES_BACKENDS)
+    @pytest.mark.parametrize("hierarchical", [False, True], ids=["flat", "hier"])
+    def test_ulysses_replays_the_mask(
+        self, device: torch.device, mesh: dict, backend: str, hierarchical: bool
+    ) -> None:
+        torch.manual_seed(dist.get_rank())
+        with no_tf32():
+            self._ulysses(device, mesh, backend, hierarchical)
+
+    @pytest.mark.parametrize("backend", _RING_BACKENDS)
+    def test_ring_masks_independent_under_a_shared_seed(
+        self,
+        request: pytest.FixtureRequest,
+        device: torch.device,
+        mesh: dict,
+        backend: str,
+    ) -> None:
+        """With the same RNG state on every rank, no two (head shard, block) share a mask."""
+        kernel_core = device.type == "cuda" and backend != "math"
+        if kernel_core or mesh["col"].size() > 1:
+            request.applymarker(_SHARED_SEED_XFAIL)
+        torch.manual_seed(0)
+        with no_tf32():
+            keep = self._ring(
+                device,
+                mesh,
+                backend,
+                dict(
+                    send_in_forward=config.SendForward.KV,
+                    save_scope=config.SaveScope.LOCAL,
+                ),
+            )
+        n = mesh["row"].size()
+        blocks = [
+            keep[
+                :,
+                c * _H : (c + 1) * _H,
+                i * _S_LOCAL : (i + 1) * _S_LOCAL,
+                j * _S_LOCAL : (j + 1) * _S_LOCAL,
+            ]
+            for c in range(mesh["col"].size())
+            for i in range(n)
+            for j in range(n)
+        ]
+        identical = _n_identical(blocks)
+        if not all_ranks_ok(identical == 0, device, mesh["model"]):
+            raise AssertionError(f"{identical} pairs of blocks share a dropout mask")
+
+    @pytest.mark.parametrize("backend", _ULYSSES_BACKENDS)
+    @_SHARED_SEED_XFAIL
+    def test_ulysses_masks_independent_under_a_shared_seed(
+        self, device: torch.device, mesh: dict, backend: str
+    ) -> None:
+        """With the same RNG state on every rank, no two heads share a mask."""
+        torch.manual_seed(0)
+        with no_tf32():
+            keep = self._ulysses(device, mesh, backend, False)
+        identical = _n_identical(list(keep.unbind(1)))
+        if not all_ranks_ok(identical == 0, device, mesh["model"]):
+            raise AssertionError(f"{identical} pairs of heads share a dropout mask")
