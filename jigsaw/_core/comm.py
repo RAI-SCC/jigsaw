@@ -8,6 +8,8 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
+from jigsaw._core import comm_trace
+
 # --- Backend checks ---------------------------------------------------------------
 
 _BACKEND_DEVICE_TYPES = {"nccl": "cuda", "gloo": "cpu"}
@@ -431,6 +433,7 @@ def all_to_all_async(
     output_tensor_list: list[torch.Tensor],
     input_tensor_list: list[torch.Tensor],
     group: dist.ProcessGroup | None = None,
+    kind: str | None = None,
 ) -> dist.Work:
     """Issue an asynchronous ``dist.all_to_all`` and return its work handle.
 
@@ -442,12 +445,15 @@ def all_to_all_async(
         Data sent to each rank.
     group : dist.ProcessGroup, optional
         Process group of the exchange.
+    kind : str, optional
+        Payload label for :mod:`jigsaw._core.comm_trace`.
 
     Returns
     -------
     dist.Work
         Handle to wait on.
     """
+    comm_trace.record_all_to_all(input_tensor_list, kind, group)
     work: dist.Work | None = dist.all_to_all(
         output_tensor_list, input_tensor_list, group=group, async_op=True
     )

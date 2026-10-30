@@ -5,6 +5,7 @@ from typing import Any, cast
 import torch
 import torch.distributed as dist
 
+from jigsaw._core import comm_trace
 from jigsaw._core.autocast import resolve_matmul_dtype
 from jigsaw._core.buffers import get_preallocated_buffer
 from jigsaw._core.comm import all_to_all_async, get_empty
@@ -41,6 +42,7 @@ def fused_xw_xtw_oneway(
     return grad_input, grad_weight
 
 
+@comm_trace.kernel
 def fused_xw_xtw_twoway(
     grad_output: torch.Tensor,
     weight: torch.Tensor,
@@ -93,7 +95,9 @@ def fused_xw_xtw_twoway(
             xw_send_list = [grad_output, empty]
             xw_recv_list = [buffer_x, empty]
 
-    xw_handle = all_to_all_async(xw_recv_list, xw_send_list, group=model_group)
+    xw_handle = all_to_all_async(
+        xw_recv_list, xw_send_list, group=model_group, kind="grad_output"
+    )
 
     match mod:
         case 0:
@@ -113,6 +117,7 @@ def fused_xw_xtw_twoway(
     return grad_input, grad_weight
 
 
+@comm_trace.kernel
 def xw_transpose_twoway(
     xij: torch.Tensor,
     wij: torch.Tensor,
@@ -164,7 +169,9 @@ def xw_transpose_twoway(
             xw_send_list = [xw, empty]
             xw_recv_list = [buffer_xw, empty]
 
-    xw_handle = all_to_all_async(xw_recv_list, xw_send_list, group=model_group)
+    xw_handle = all_to_all_async(
+        xw_recv_list, xw_send_list, group=model_group, kind="partial"
+    )
 
     match mod:
         case 0:
@@ -179,6 +186,7 @@ def xw_transpose_twoway(
     return cij
 
 
+@comm_trace.kernel
 def xw_twoway(
     xij: torch.Tensor,
     wij: torch.Tensor,
@@ -219,7 +227,9 @@ def xw_twoway(
             xw_send_list = [xij, empty]
             xw_recv_list = [buffer_x, empty]
 
-    xw_handle = all_to_all_async(xw_recv_list, xw_send_list, group=model_group)
+    xw_handle = all_to_all_async(
+        xw_recv_list, xw_send_list, group=model_group, kind="x"
+    )
 
     match mod:
         case 0:
@@ -234,6 +244,7 @@ def xw_twoway(
     return cij
 
 
+@comm_trace.kernel
 def x_transpose_w_twoway(
     xij: torch.Tensor,
     wij: torch.Tensor,
@@ -274,7 +285,9 @@ def x_transpose_w_twoway(
             xtw_send_list = [xij, empty]
             xtw_recv_list = [buffer_x, empty]
 
-    xtw_handle = all_to_all_async(xtw_recv_list, xtw_send_list, group=model_group)
+    xtw_handle = all_to_all_async(
+        xtw_recv_list, xtw_send_list, group=model_group, kind="x"
+    )
 
     match mod:
         case 0:

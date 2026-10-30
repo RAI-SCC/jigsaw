@@ -13,6 +13,7 @@ from typing import Any, ParamSpec, TypeVar, cast
 import torch
 import torch.distributed as dist
 
+from jigsaw._core import comm_trace
 from jigsaw._core.autocast import resolve_matmul_dtype
 from jigsaw._core.buffers import get_preallocated_buffer
 
@@ -104,6 +105,7 @@ def isend(
     group: dist.ProcessGroup | None = None,
     tag: int = 0,
     group_dst: int | None = None,
+    kind: str | None = None,
 ) -> _BatchedWork:
     """Queue an ``isend`` on the active batch.
 
@@ -121,6 +123,8 @@ def isend(
         Tag to match sends with receives.
     group_dst : int, optional
         Destination rank within ``group``, instead of ``dst``.
+    kind : str, optional
+        Payload label for :mod:`jigsaw._core.comm_trace`.
 
     Returns
     -------
@@ -135,6 +139,7 @@ def isend(
     batch = _active_batch.get()
     if batch is None:
         raise RuntimeError("isend() called outside a @_batched function")
+    comm_trace.record_send(tensor, kind, group, group_dst=group_dst, dst=dst)
     return batch.add(
         dist.isend,
         tensor,
@@ -214,6 +219,7 @@ def _batched(fn: Callable[P, R]) -> Callable[P, R]:
     return wrapper
 
 
+@comm_trace.kernel
 @_batched
 def fused_xw_xtw_twoway(
     grad_output: torch.Tensor,
@@ -257,11 +263,15 @@ def fused_xw_xtw_twoway(
     )
     match mod:
         case 0:
-            send = isend(grad_output, group_dst=1, group=model_group)
+            send = isend(
+                grad_output, group_dst=1, group=model_group, kind="grad_output"
+            )
             recv = irecv(buffer_x, group_src=1, group=model_group)
         case 1:
             recv = irecv(buffer_x, group_src=0, group=model_group)
-            send = isend(grad_output, group_dst=0, group=model_group)
+            send = isend(
+                grad_output, group_dst=0, group=model_group, kind="grad_output"
+            )
 
     match mod:
         case 0:
@@ -283,6 +293,7 @@ def fused_xw_xtw_twoway(
     return grad_input, grad_weight
 
 
+@comm_trace.kernel
 @_batched
 def xw_transpose_twoway(
     xij: torch.Tensor,
@@ -327,12 +338,12 @@ def xw_transpose_twoway(
     match mod:
         case 0:
             xw = torch.matmul(xij, w1.mT)
-            send = isend(xw, group_dst=1, group=model_group)
+            send = isend(xw, group_dst=1, group=model_group, kind="partial")
             recv = irecv(buffer_xw, group_src=1, group=model_group)
         case 1:
             xw = torch.matmul(xij, w0.mT)
             recv = irecv(buffer_xw, group_src=0, group=model_group)
-            send = isend(xw, group_dst=0, group=model_group)
+            send = isend(xw, group_dst=0, group=model_group, kind="partial")
 
     match mod:
         case 0:
@@ -349,6 +360,7 @@ def xw_transpose_twoway(
     return cij
 
 
+@comm_trace.kernel
 @_batched
 def xw_twoway(
     xij: torch.Tensor,
@@ -383,11 +395,11 @@ def xw_twoway(
 
     match mod:
         case 0:
-            send = isend(xij, group_dst=1, group=model_group)
+            send = isend(xij, group_dst=1, group=model_group, kind="x")
             recv = irecv(buffer_x, group_src=1, group=model_group)
         case 1:
             recv = irecv(buffer_x, group_src=0, group=model_group)
-            send = isend(xij, group_dst=0, group=model_group)
+            send = isend(xij, group_dst=0, group=model_group, kind="x")
 
     match mod:
         case 0:
@@ -404,6 +416,7 @@ def xw_twoway(
     return cij
 
 
+@comm_trace.kernel
 @_batched
 def x_transpose_w_twoway(
     xij: torch.Tensor,
@@ -438,11 +451,11 @@ def x_transpose_w_twoway(
 
     match mod:
         case 0:
-            send = isend(xij, group_dst=1, group=model_group)
+            send = isend(xij, group_dst=1, group=model_group, kind="x")
             recv = irecv(buffer_x, group_src=1, group=model_group)
         case 1:
             recv = irecv(buffer_x, group_src=0, group=model_group)
-            send = isend(xij, group_dst=0, group=model_group)
+            send = isend(xij, group_dst=0, group=model_group, kind="x")
 
     match mod:
         case 0:

@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
+from jigsaw._core import comm_trace
 from jigsaw._core.autocast import cast_to_autocast_dtype
 from jigsaw._core.vmap import check_not_vmapped, to_front
 
@@ -25,6 +26,7 @@ class LinearCtx(Protocol):
     b: Parameter | None
     w_dtype: torch.dtype
     w_shape: torch.Size
+    comm_layer: str | None
 
 
 def _setup_linear_ctx(ctx: torch.autograd.function.FunctionCtx, inputs: Any) -> None:
@@ -46,6 +48,8 @@ def _setup_linear_ctx(ctx: torch.autograd.function.FunctionCtx, inputs: Any) -> 
     c.b = b
     c.w_dtype = w.dtype
     c.w_shape = w.shape
+    # Runs inside ``forward``'s trace scope; ``backward`` reuses the layer label.
+    c.comm_layer = comm_trace.current_layer()
 
 
 def _linear_vmap(
@@ -202,14 +206,15 @@ class _XWT(torch.autograd.Function):
         # ranks freeze the same parameters), so every rank skips the same
         # collectives.
         grad_input = grad_weight = grad_b = None
-        if need_x and need_w:
-            grad_input, grad_weight = mm_kernels[3](
-                grad_output, weight, input, **kwargs
-            )
-        elif need_x:
-            grad_input = mm_kernels[1](grad_output, weight, **kwargs)
-        elif need_w:
-            grad_weight = mm_kernels[2](grad_output, input, **kwargs)
+        with comm_trace.scope(ctx.comm_layer, "backward"):
+            if need_x and need_w:
+                grad_input, grad_weight = mm_kernels[3](
+                    grad_output, weight, input, **kwargs
+                )
+            elif need_x:
+                grad_input = mm_kernels[1](grad_output, weight, **kwargs)
+            elif need_w:
+                grad_weight = mm_kernels[2](grad_output, input, **kwargs)
         # Sum over the batch axes the weight and bias broadcast over; a
         # vmapped weight/bias keeps its members axis.
         if grad_weight is not None:
@@ -318,10 +323,12 @@ class _XW(torch.autograd.Function):
 
         # Same skip on every rank of the model group; see _XWT.backward.
         grad_input = grad_weight = grad_b = None
-        if need_x:
-            grad_input = mm_kernels[0](grad_output, weight, **kwargs)
-        if need_w:
-            grad_weight = mm_kernels[2](input, grad_output, **kwargs)
+        with comm_trace.scope(ctx.comm_layer, "backward"):
+            if need_x:
+                grad_input = mm_kernels[0](grad_output, weight, **kwargs)
+            if need_w:
+                grad_weight = mm_kernels[2](input, grad_output, **kwargs)
+        if grad_weight is not None:
             # Sum over the batch axes the weight broadcasts over; a vmapped
             # weight keeps its members axis.
             grad_weight = grad_weight.sum_to_size(ctx.w_shape)
@@ -429,10 +436,12 @@ class _XTW(torch.autograd.Function):
 
         # Same skip on every rank of the model group; see _XWT.backward.
         grad_input = grad_weight = grad_b = None
-        if need_x:
-            grad_input = mm_kernels[0](weight, grad_output, **kwargs)
-        if need_w:
-            grad_weight = mm_kernels[1](input, grad_output, **kwargs)
+        with comm_trace.scope(ctx.comm_layer, "backward"):
+            if need_x:
+                grad_input = mm_kernels[0](weight, grad_output, **kwargs)
+            if need_w:
+                grad_weight = mm_kernels[1](input, grad_output, **kwargs)
+        if grad_weight is not None:
             # Sum over the batch axes the weight broadcasts over; a vmapped
             # weight keeps its members axis.
             grad_weight = grad_weight.sum_to_size(ctx.w_shape)

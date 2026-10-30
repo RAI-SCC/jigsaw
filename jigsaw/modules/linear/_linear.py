@@ -8,6 +8,7 @@ import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
 from jigsaw import init, parallel
+from jigsaw._core import comm_trace
 from jigsaw.gather import gather_1d_results, gather_results
 
 from ._config import LinearConfig
@@ -161,15 +162,16 @@ class DistributedLinear(torch.nn.Module):
                 f"merge_weights / reshard_parameters still work on this mesh."
             )
         weight, bias = parallel.sync_grad(self.weight, self.bias)
-        cij = self.XWT(
-            x,
-            weight,
-            bias,
-            self.local_rank,
-            self.device,
-            self.config,
-            self.model_group,
-        )
+        with comm_trace.scope(comm_trace.layer_name(self), "forward"):
+            cij = self.XWT(
+                x,
+                weight,
+                bias,
+                self.local_rank,
+                self.device,
+                self.config,
+                self.model_group,
+            )
         cij = cast(torch.Tensor, cij)
         return cij
 
@@ -520,15 +522,16 @@ class _DistributedMatMul(torch.nn.Module):
         torch.Tensor
             Local output.
         """
-        cij = self.matmul(
-            x,
-            w,
-            None,
-            self.local_rank,
-            self.device,
-            self.config,
-            self.model_group,
-        )
+        with comm_trace.scope(comm_trace.layer_name(self), "forward"):
+            cij = self.matmul(
+                x,
+                w,
+                None,
+                self.local_rank,
+                self.device,
+                self.config,
+                self.model_group,
+            )
         return cast(torch.Tensor, cij)
 
     @classmethod
