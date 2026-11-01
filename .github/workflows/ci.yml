@@ -107,7 +107,7 @@ jobs:
       # The venv (CPU torch + dev deps) is shared by every rank-count job and
       # only rebuilt when pyproject.toml, the Python patch version or the runner
       # image changes. ImageOS is in the key because mpi4py links the apt OpenMPI.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         id: venv
         with:
           path: ~/venv
