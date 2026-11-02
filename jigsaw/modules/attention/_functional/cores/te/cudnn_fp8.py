@@ -220,7 +220,7 @@ def forward(
     """
     _check_version()
     assert dropout_p == 0.0, "cudnn_fp8 core does not support dropout."
-    _check_inputs(q, k, layout)
+    _check_inputs(q, k, v, layout)
     b, h, s_q, s_kv, d = cudnn._shape(q, k, layout)
     assert s_q > 1 or s_kv > 1, "attn_backend='te' (cuDNN core) needs seq len > 1."
     q_b, k_b, v_b = (cudnn._to_bshd(t, layout) for t in (q, k, v))

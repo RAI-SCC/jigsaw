@@ -564,7 +564,7 @@ class DistributedAttention(torch.nn.Module):
                 torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
                 torch.nn.attention.SDPBackend.MATH,
             ],
-            set_priority=True
+            set_priority=True,
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
                 q,
@@ -607,7 +607,7 @@ class DistributedAttention(torch.nn.Module):
         return out
 
     def _transformer_attn_core(
-        self,
+        self: "DistributedAttention | Attention",
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
@@ -1119,9 +1119,9 @@ class Attention(torch.nn.Module):
             [
                 torch.nn.attention.SDPBackend.FLASH_ATTENTION,
                 torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
-                torch.nn.attention.SDPBackend.MATH,                
+                torch.nn.attention.SDPBackend.MATH,
             ],
-            set_priority=True
+            set_priority=True,
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
                 q,
