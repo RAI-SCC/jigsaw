@@ -14,6 +14,7 @@ from typing import Any
 
 import torch
 
+from ._checks import check_backward as _check_backward
 from ._checks import check_inputs as _check_inputs
 from ._layout import Layout
 from ._layout import from_bshd as _from_bshd
@@ -253,9 +254,11 @@ def forward(
     rng_state : torch.Tensor or None
         Kernel dropout RNG state for :func:`backward`; ``None`` without dropout.
     """
-    _check_inputs(q, k, layout)
+    _check_inputs(q, k, v, layout)
     b, h, s_q, s_kv, d = _shape(q, k, layout)
-    assert s_q > 1 or s_kv > 1, "attn_backend='te' (cuDNN core) needs seq len > 1."
+    assert s_q > 1 or s_kv > 1, (
+        "attn_backend='te' (cuDNN core) needs seq len > 1 for q or k, got 1 for both."
+    )
     q_b, k_b, v_b = (_to_bshd(t, layout) for t in (q, k, v))
     backend = _fused_attn_backend(True, q_b.dtype, h, s_q, s_kv, d, dropout_p)
     cu_q = _full_cu_seqlens(b, s_q, q.device)
@@ -356,6 +359,7 @@ def backward(
     tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         Gradients ``(dq, dk, dv)`` in ``layout``.
     """
+    _check_backward(q, logsumexp, dropout_p, rng_state, layout)
     b, h, s_q, s_kv, d = _shape(q, k, layout)
     q_b, k_b, v_b, o_b, do_b = (_to_bshd(t, layout) for t in (q, k, v, out, grad_out))
     backend = _fused_attn_backend(True, q_b.dtype, h, s_q, s_kv, d, dropout_p)

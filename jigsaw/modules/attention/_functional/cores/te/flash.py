@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import torch
 
+from ._checks import check_backward as _check_backward
 from ._checks import check_inputs as _check_inputs
 from ._layout import Layout
 from ._layout import from_bshd as _from_bshd
@@ -96,7 +97,7 @@ def forward(
     rng_state : torch.Tensor or None
         Kernel dropout RNG state for :func:`backward`; ``None`` without dropout.
     """
-    _check_inputs(q, k, layout)
+    _check_inputs(q, k, v, layout)
     head_dim = q.shape[-1]
     q_b, k_b, v_b = (_pad_head_dim(_to_bshd(t, layout), head_dim) for t in (q, k, v))
 
@@ -171,6 +172,7 @@ def backward(
     tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         Gradients ``(dq, dk, dv)`` in ``layout``.
     """
+    _check_backward(q, logsumexp, dropout_p, rng_state, layout)
     head_dim = q.shape[-1]
     q_b, k_b, v_b, o_b, do_b = (
         _pad_head_dim(_to_bshd(t, layout), head_dim) for t in (q, k, v, out, grad_out)

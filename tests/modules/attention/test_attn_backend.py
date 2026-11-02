@@ -416,6 +416,63 @@ class TestTeLimits:
             getattr(te_cores, core).forward(q, q, q, 1.0, 0.0, layout="bshd")
 
     @pytest.mark.parametrize("core", ["cudnn", "flash"])
+    def test_names_the_bad_tensor(self, core):
+        q = torch.empty(2, 16, 4, 8)
+        with pytest.raises(AssertionError, match=r"got k of shape \(16, 4, 8\)"):
+            getattr(te_cores, core).forward(q, q[0], q, 1.0, 0.0, layout="bshd")
+
+    @pytest.mark.parametrize("core", ["cudnn", "flash"])
+    @pytest.mark.parametrize(
+        "k_shape,v_shape,layout",
+        [
+            ((1, 16, 4, 8), (1, 16, 4, 8), "bshd"),  # batch
+            ((2, 16, 2, 8), (2, 16, 2, 8), "bshd"),  # heads (GQA)
+            ((2, 16, 4, 4), (2, 16, 4, 4), "bshd"),  # head dim
+            ((2, 16, 4, 8), (2, 8, 4, 8), "bshd"),  # v shorter than k
+            ((2, 16, 4, 8), (2, 16, 4, 16), "bshd"),  # v head dim
+            ((2, 4, 16, 8), (2, 2, 16, 8), "bhsd"),  # v heads, other layout
+        ],
+    )
+    def test_rejects_kv_mismatch(self, core, k_shape, v_shape, layout):
+        """The kernels read past a mismatched k/v instead of failing."""
+        q = torch.empty((2, 16, 4, 8) if layout == "bshd" else (2, 4, 16, 8))
+        k, v = torch.empty(k_shape), torch.empty(v_shape)
+        with pytest.raises(AssertionError, match="no GQA"):
+            getattr(te_cores, core).forward(q, k, v, 1.0, 0.0, layout=layout)
+
+    @pytest.mark.parametrize("core", ["cudnn", "flash"])
+    def test_kv_seq_len_may_differ(self, core):
+        """Only the seq len may differ from q: the checks get as far as the device."""
+        q = torch.empty(2, 16, 4, 8, dtype=torch.bfloat16)
+        kv = torch.empty(2, 32, 4, 8, dtype=torch.bfloat16)
+        with pytest.raises(AssertionError, match="CUDA"):
+            getattr(te_cores, core).forward(q, kv, kv, 1.0, 0.0, layout="bshd")
+
+    @pytest.mark.parametrize("core", ["cudnn", "flash"])
+    def test_rejects_mixed_dtypes(self, core):
+        q = torch.empty(2, 16, 4, 8, dtype=torch.bfloat16)
+        k = torch.empty(2, 16, 4, 8, dtype=torch.float16)
+        with pytest.raises(AssertionError, match="one dtype"):
+            getattr(te_cores, core).forward(q, k, q, 1.0, 0.0, layout="bshd")
+
+    @pytest.mark.parametrize("core", ["cudnn", "flash"])
+    @pytest.mark.parametrize(
+        "lse_shape,rng_state,match",
+        [
+            # Without rng_state the kernel replays another dropout mask.
+            ((2, 4, 16), None, "rng_state"),
+            ((2, 2, 16), torch.zeros(2, dtype=torch.int64), "logsumexp"),
+        ],
+    )
+    def test_backward_rejects_bad_saved_state(self, core, lse_shape, rng_state, match):
+        q = torch.empty(2, 16, 4, 8, dtype=torch.bfloat16)
+        with pytest.raises(AssertionError, match=match):
+            getattr(te_cores, core).backward(
+                q, q, q, q, q, torch.empty(lse_shape), 1.0,
+                dropout_p=0.1, rng_state=rng_state, layout="bshd",
+            )  # fmt: skip
+
+    @pytest.mark.parametrize("core", ["cudnn", "flash"])
     def test_rejects_cpu(self, core):
         q = torch.empty(2, 16, 4, 8, dtype=torch.bfloat16)
         with pytest.raises(AssertionError, match="CUDA"):
@@ -530,3 +587,40 @@ class TestTeLimitsOnH100:
         _run_core(
             getattr(te_cores, core), device, batch, 2, 2, heads, 8, backward=False
         )
+
+    @pytest.mark.parametrize("core", ["cudnn", "flash"])
+    @pytest.mark.parametrize(
+        "k_kw,v_kw,match",
+        [
+            # Each of these ran on the H100 without the checks: OOB reads / NaNs.
+            ({"batch": 1}, {"batch": 1}, "no GQA"),
+            ({"head_dim": 32}, {}, "no GQA"),
+            ({}, {"s": 32}, "no GQA"),
+            ({}, {"dtype": torch.float32}, "one dtype"),
+            ({"device": "cpu"}, {}, "one device"),
+        ],
+    )
+    def test_rejects_silently_wrong_inputs(self, device, core, k_kw, v_kw, match):
+        def make(batch=2, s=64, head_dim=64, dtype=torch.bfloat16, device=device):
+            return torch.randn(batch, s, 4, head_dim, dtype=dtype, device=device)
+
+        q, k, v = make(), make(**k_kw), make(**v_kw)
+        with pytest.raises(AssertionError, match=match):
+            getattr(te_cores, core).forward(q, k, v, 0.125, 0.0, layout="bshd")
+
+    @pytest.mark.parametrize("core", ["cudnn", "flash"])
+    @pytest.mark.parametrize("layout", ["bshd", "bhsd"])
+    def test_dropout_round_trip_passes_backward_checks(self, device, core, layout):
+        """The forward's own LSE and rng_state satisfy the backward's checks."""
+        core = getattr(te_cores, core)
+        q, k, v = (
+            torch.randn(2, 64, 4, 64, dtype=torch.bfloat16, device=device)
+            for _ in range(3)
+        )
+        out, lse, rng_state = core.forward(q, k, v, 0.125, 0.1, layout=layout)
+        assert rng_state is not None
+        core.backward(
+            torch.ones_like(out), q, k, v, out, lse, 0.125,
+            dropout_p=0.1, rng_state=rng_state, layout=layout,
+        )  # fmt: skip
+        torch.cuda.synchronize(device)
