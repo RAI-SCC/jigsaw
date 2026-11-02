@@ -150,6 +150,7 @@ def _fp8_dtypes() -> tuple[Any, Any]:
     ``e4m3``: E4M3 for the gradients too.
     """
     fmt = os.environ.get("JIGSAW_TE_FP8_FORMAT", "hybrid")
+    print(f'I')
     if fmt == "hybrid":
         return tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2
     if fmt == "e4m3":
@@ -177,6 +178,11 @@ def _quantize_qkv(
 ) -> tuple[Any, Any, Any, Any, Any]:
     qkv_dtype, _ = _fp8_dtypes()
     quantizer = _cs_quantizer(qkv_dtype, device)
+    if "used_in_backward" not in cudnn._te_params(combine_and_quantize):
+        # TE <= 2.14 returns only the tensors: the layout is kept and there is
+        # no scale-inv format (fused_attn_fwd/bwd take no such argument there).
+        q8, k8, v8 = combine_and_quantize(_LAYOUT, q, k, v, quantizer)
+        return q8, k8, v8, _LAYOUT, None
     q8, k8, v8, layout, scale_inv_format = combine_and_quantize(
         _LAYOUT, q, k, v, quantizer, used_in_backward=True
     )
@@ -232,7 +238,6 @@ def forward(
     backend = cudnn._fused_attn_backend(True, qkv_dtype, h, s_q, s_kv, d, dropout_p)
     cu_q = cudnn._full_cu_seqlens(b, s_q, device)
     cu_kv = cudnn._full_cu_seqlens(b, s_kv, device)
-
     out, aux, *_ = cudnn._te_call(
         fused_attn_fwd,
         required={

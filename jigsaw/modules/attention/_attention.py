@@ -329,6 +329,11 @@ class DistributedAttention(torch.nn.Module):
             attention_config._coerce_enum(AttnBackend, attn_backend, "attn_backend")
         )
         self.te = self.attn_backend == AttnBackend.TE
+        if self.te and te_core.dpa_fp8_requested() and (ring or ulysses):
+            raise ValueError(
+                "JIGSAW_TE_CORE=dpa_fp8 only serves the plain attention path; "
+                "ring and ulysses need a core that returns the softmax LSE."
+            )
         # ``_te_bshd``: the plain TE core returns heads already folded.
         self._bshd_qkv = self.te or self.ulysses
         self._te_bshd = self.te and not ring and not ulysses
@@ -519,6 +524,8 @@ class DistributedAttention(torch.nn.Module):
         """Resolve ``self.attn_backend`` to its non-ring attention core."""
         match self.attn_backend:
             case AttnBackend.TE:
+                if te_core.dpa_fp8_requested():
+                    return self._build_te_dpa_fp8()
                 # Resolved once here so nothing branches per call; see
                 # `_functional.cores.te.select_core`.
                 self.te_core = te_core.select_core(self.device)
@@ -648,6 +655,76 @@ class DistributedAttention(torch.nn.Module):
         out, _lse, _rng_state = _TransformerEngineAttention.apply(
             q, k, v, self.scale, self.dropout_p if self.training else 0.0, self.te_core
         )
+        return cast(torch.Tensor, out)
+
+    def _build_te_dpa_fp8(self) -> Callable[..., torch.Tensor]:
+        """Build ``te.DotProductAttention`` with an FP8 delayed-scaling recipe.
+
+        TE keeps the amax history per module, so every layer has its own scales.
+        Delayed scaling writes O and dQ/dK/dV in FP8, which cuDNN also serves on
+        sm90 (current scaling needs sm100). ``reduce_amax=False`` keeps the scales
+        local: no collective per call.
+
+        Returns
+        -------
+        Callable[..., torch.Tensor]
+            :meth:`_te_dpa_fp8_core`.
+        """
+        import transformer_engine.pytorch as te
+        from transformer_engine.common.recipe import DelayedScaling
+
+        self._te_fp8_recipe = DelayedScaling(fp8_dpa=True, reduce_amax=False)
+        self._te_dpa = te.DotProductAttention(
+            self.heads,
+            self.embed_dim // (self.heads * self.channel_group.size()),
+            attention_dropout=self.dropout_p,
+            qkv_format="bshd",
+            attn_mask_type="no_mask",
+            softmax_scale=self.scale,
+        )
+        return self._te_dpa_fp8_core
+
+    def _te_dpa_fp8_core(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn_mask: torch.Tensor | None = None,
+        **kwargs: torch.Tensor,
+    ) -> torch.Tensor:
+        """Attention on ``te.DotProductAttention`` in FP8.
+
+        Parameters
+        ----------
+        q : torch.Tensor
+            Query tensor, ``bshd`` (``[batch, seq, heads, head_dim]``).
+        k : torch.Tensor
+            Keys tensor, ``bshd``.
+        v : torch.Tensor
+            Values tensor, ``bshd``.
+        attn_mask : torch.Tensor, optional
+            Not supported; a non-``None`` mask raises :class:`ValueError`.
+        **kwargs : torch.Tensor
+            Unused.
+
+        Returns
+        -------
+        torch.Tensor
+            Output of attention computation, ``[batch, seq, heads * head_dim]``.
+        """
+        import transformer_engine.pytorch as te
+        from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+            META_S,
+        )
+
+        if attn_mask is not None:
+            raise ValueError("JIGSAW_TE_CORE=dpa_fp8 does not support attn_mask.")
+        with te.fp8_autocast(enabled=True, fp8_recipe=self._te_fp8_recipe):
+            out = self._te_dpa(q, k, v)
+        # cuDNN quantizes the unnormalized exp(s - rowmax), which reaches 1, but
+        # TE scales S from the amax of the normalized softmax: S saturates and
+        # the output shrinks. Pin S's scale at the E4M3 maximum instead.
+        self._te_dpa.fp8_meta["scaling_fwd"].scale[META_S] = 448.0
         return cast(torch.Tensor, out)
 
     def _ring_attn_core(

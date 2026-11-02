@@ -2,9 +2,11 @@
 
 :mod:`.cudnn` (TE's fused kernels) on sm90+, :mod:`.flash` (``flash_attn``) on
 sm80-89; see :func:`select_core`. Both implement the core contract in :mod:`..`.
-Set ``JIGSAW_TE_CORE=cudnn|flash|cudnn_fp8`` to override the choice;
+Set ``JIGSAW_TE_CORE=cudnn|flash|cudnn_fp8|dpa_fp8`` to override the choice;
 ``cudnn_fp8`` (:mod:`.cudnn_fp8`) is the cuDNN core with FP8 attention GEMMs and is
-only ever picked this way.
+only ever picked this way. ``dpa_fp8`` makes the plain (non-ring, non-Ulysses) path
+call ``te.DotProductAttention`` under FP8 delayed scaling, which also runs on sm90;
+see :func:`dpa_fp8_requested`.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ FLASH_CORE_AVAILABLE = flash.FLASH_CORE_AVAILABLE
 TE_CORE_AVAILABLE = CUDNN_CORE_AVAILABLE or FLASH_CORE_AVAILABLE
 
 _ENV_OVERRIDE = "JIGSAW_TE_CORE"
+_DPA_FP8 = "dpa_fp8"
 _CORES: dict[str, ModuleType] = {
     "cudnn": cudnn,
     "flash": flash,
@@ -57,6 +60,18 @@ def _require_fp8(device: torch.device) -> None:
         raise RuntimeError(f"{_ENV_OVERRIDE}=cudnn_fp8 needs an NVIDIA sm90+ GPU.")
 
 
+def dpa_fp8_requested() -> bool:
+    """Return whether ``JIGSAW_TE_CORE=dpa_fp8`` asks for TE's own FP8 attention.
+
+    Returns
+    -------
+    bool
+        Whether the plain TE path uses ``te.DotProductAttention`` under
+        ``fp8_autocast`` with a delayed-scaling recipe.
+    """
+    return os.environ.get(_ENV_OVERRIDE) == _DPA_FP8
+
+
 def select_core(device: torch.device) -> ModuleType:
     """Pick the TE core for ``device``: :mod:`.cudnn` on sm90+, :mod:`.flash` below.
 
@@ -82,10 +97,15 @@ def select_core(device: torch.device) -> ModuleType:
         If no suitable core is importable.
     """
     override = os.environ.get(_ENV_OVERRIDE)
+    if override == _DPA_FP8:
+        # te.DotProductAttention runs TE's cuDNN kernels; this module only serves
+        # the head-dim check.
+        return cudnn
     if override is not None:
         if override not in _CORES:
             raise ValueError(
-                f"{_ENV_OVERRIDE}={override!r}; expected one of {sorted(_CORES)}."
+                f"{_ENV_OVERRIDE}={override!r}; expected one of "
+                f"{sorted([*_CORES, _DPA_FP8])}."
             )
         if override == "cudnn_fp8":
             _require_fp8(device)
