@@ -154,6 +154,88 @@ if JIGSAW_TE_AVAILABLE:
             return (out, lse, rng_state), (0, 0, None)
 
 
+class _TEDotProductAttentionFP8(torch.autograd.Function):
+    """One autograd node around a ``te.DotProductAttention`` call.
+
+    TE's module reads tensor storage, which ``torch.vmap`` (torch-blue's weight
+    samples) forbids; :meth:`vmap` folds the vmapped axis into the batch instead.
+    The forward builds TE's own graph on detached inputs and the backward runs
+    it with :func:`torch.autograd.grad`.
+    """
+
+    @staticmethod
+    def forward(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn: Callable[..., torch.Tensor],
+        stash: list,
+        need_grad: bool,
+    ) -> torch.Tensor:
+        """Run ``attn(q, k, v)``; with ``need_grad``, keep its graph in ``stash``.
+
+        Parameters
+        ----------
+        q, k, v : torch.Tensor
+            Query/key/value tensors in ``bshd`` format.
+        attn : Callable[..., torch.Tensor]
+            The FP8 ``te.DotProductAttention`` call.
+        stash : list
+            Fresh per call; receives the inputs and output of TE's graph.
+        need_grad : bool
+            Whether the caller records gradients.
+
+        Returns
+        -------
+        torch.Tensor
+            Attention output, ``[batch, seq, heads * head_dim]``.
+        """
+        if not need_grad:
+            return attn(q, k, v)
+        with torch.enable_grad():
+            leaves = [t.detach().requires_grad_() for t in (q, k, v)]
+            out = attn(*leaves)
+        stash.append((leaves, out))
+        return out.detach()
+
+    @staticmethod
+    def setup_context(ctx: Any, inputs: tuple, output: torch.Tensor) -> None:
+        """Keep TE's graph for :meth:`backward`."""
+        stash = inputs[4]
+        if stash:
+            ctx.leaves, ctx.out = stash.pop()
+
+    @staticmethod
+    def backward(  # type: ignore[override]
+        ctx: Any, grad_out: torch.Tensor
+    ) -> tuple[torch.Tensor | None, ...]:
+        """dq/dk/dv from TE's own backward."""
+        dq, dk, dv = torch.autograd.grad(ctx.out, ctx.leaves, grad_out)
+        return dq, dk, dv, None, None, None
+
+    @staticmethod
+    def vmap(
+        info: Any,
+        in_dims: tuple[int | None, ...],
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn: Callable[..., torch.Tensor],
+        stash: list,
+        need_grad: bool,
+    ) -> tuple[torch.Tensor, int]:
+        """Fold the vmapped (samples) axis into the batch, run one call, unfold."""
+        q, k, v = (
+            t.movedim(d, 0) if d is not None else t.expand(info.batch_size, *t.shape)
+            for t, d in zip((q, k, v), in_dims[:3], strict=True)
+        )
+        samples = q.shape[0]
+        out = _TEDotProductAttentionFP8.apply(
+            q.flatten(0, 1), k.flatten(0, 1), v.flatten(0, 1), attn, stash, need_grad
+        )
+        return out.unflatten(0, (samples, -1)), 0
+
+
 def attn_core_dtype(x: torch.Tensor) -> torch.dtype:
     """Return the dtype of the attention core.
 
@@ -719,8 +801,14 @@ class DistributedAttention(torch.nn.Module):
 
         if attn_mask is not None:
             raise ValueError("JIGSAW_TE_CORE=dpa_fp8 does not support attn_mask.")
-        with te.fp8_autocast(enabled=True, fp8_recipe=self._te_fp8_recipe):
-            out = self._te_dpa(q, k, v)
+
+        def attn(qc: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor) -> torch.Tensor:
+            with te.fp8_autocast(enabled=True, fp8_recipe=self._te_fp8_recipe):
+                return cast(torch.Tensor, self._te_dpa(qc, kc, vc))
+
+        out = _TEDotProductAttentionFP8.apply(
+            q, k, v, attn, [], torch.is_grad_enabled()
+        )
         # cuDNN quantizes the unnormalized exp(s - rowmax), which reaches 1, but
         # TE scales S from the amax of the normalized softmax: S saturates and
         # the output shrinks. Pin S's scale at the E4M3 maximum instead.
