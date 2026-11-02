@@ -1,0 +1,184 @@
+% Domain + tensor parallelism compared with CP and Megatron-LM TP.
+% Rebuild the PNG from docs/figures/:
+%   pdflatex parallelism.tex && pdftoppm -png -r 300 -singlefile parallelism.pdf parallelism
+\documentclass[tikz, border=4pt]{standalone}
+\usetikzlibrary{arrows.meta}
+
+\begin{document}
+% ---------------------------------------------------------------
+% Colours (colour-blind friendly: blues for CP, oranges for TP)
+% ---------------------------------------------------------------
+\definecolor{cp0}{HTML}{C6DBEF}      % light blue
+\definecolor{cp1}{HTML}{4292C6}      % medium blue
+\definecolor{tp0}{HTML}{F9A03F}      % light orange
+\definecolor{tp1}{HTML}{C2500A}      % dark orange
+\definecolor{neutral}{HTML}{E4E4E4}  % replicated (not sharded)
+\definecolor{band}{HTML}{F4F4F4}     % column background bands
+
+% ---------------------------------------------------------------
+% Geometry.  Every matrix is 4x4 cells in total.
+% ---------------------------------------------------------------
+\newcommand{\cellsz}{0.4}   % cell size (cm)
+\newcommand{\gp}{0.16}      % gap between sub-blocks (cm)
+% vertical position (y0) of each section; sections 1-3 can sit close together,
+% section 4 needs a bit more room below section 3 for the TP arrow
+\newcommand{\yTwo}{-2.3}
+\newcommand{\yThree}{-4.7}
+\newcommand{\yFour}{-7.6}
+\newcommand{\bw}{2.8}       % column band width
+
+% Column origins (left edge of each matrix) and operator positions
+\newcommand{\xX}{1.22}      % data sample
+\newcommand{\xW}{4.77}      % weights
+\newcommand{\xO}{8.32}      % outputs
+\newcommand{\xMul}{3.875}   % multiplication sign
+\newcommand{\xEq}{7.425}    % equals sign
+\newcommand{\xCm}{11.0}     % CP communication arrow
+
+% \mat{fill}{edge style}{x}{y}{#cols}{#rows}   (x,y = lower-left)
+\newcommand{\mat}[6]{%
+  \pgfmathsetmacro{\xe}{#3+#5*\cellsz}%
+  \pgfmathsetmacro{\ye}{#4+#6*\cellsz}%
+  \fill[#1] (#3,#4) rectangle (\xe,\ye);%
+  \foreach \i in {1,...,\numexpr#5-1\relax}{%
+    \draw[black, opacity=0.35, line width=0.4pt] (#3+\i*\cellsz,#4) -- (#3+\i*\cellsz,\ye);}%
+  \foreach \j in {1,...,\numexpr#6-1\relax}{%
+    \draw[black, opacity=0.35, line width=0.4pt] (#3,#4+\j*\cellsz) -- (\xe,#4+\j*\cellsz);}%
+  \draw[#2] (#3,#4) rectangle (\xe,\ye);%
+}
+\tikzset{
+  edge0/.style={black!80, line width=0.8pt},
+  edgeTP0/.style={tp0, line width=1.8pt},
+  edgeTP1/.style={tp1, line width=1.8pt},
+}
+
+\newcommand{\fullm}[3]{%   fill, x, y0            (replicated 4x4)
+  \pgfmathsetmacro{\px}{#2+\gp/2}\pgfmathsetmacro{\py}{#3+\gp/2}%
+  \mat{#1}{edge0}{\px}{\py}{4}{4}}
+\newcommand{\cpblk}[4]{%   fill, x, y0, r         (row shard: 4x2 cells)
+  \pgfmathsetmacro{\px}{#2+\gp/2}\pgfmathsetmacro{\py}{#3+(1-#4)*(\bs+\gp)}%
+  \mat{#1}{edge0}{\px}{\py}{4}{2}}
+\newcommand{\tpblk}[4]{%   fill, x, y0, c         (column shard: 2x4 cells)
+  \pgfmathsetmacro{\px}{#2+#4*(\bs+\gp)}\pgfmathsetmacro{\py}{#3+\gp/2}%
+  \mat{#1}{edge0}{\px}{\py}{2}{4}}
+\newcommand{\qblk}[5]{%    x, y0, r, c, fill      (2x2 cells; fill=CP, outline=TP)
+  \pgfmathsetmacro{\px}{#1+#4*(\bs+\gp)}\pgfmathsetmacro{\py}{#2+(1-#3)*(\bs+\gp)}%
+  \mat{#5}{edgeTP#4}{\px}{\py}{2}{2}}
+
+\tikzset{
+  rowlab/.style={anchor=east, font=\footnotesize},
+  sectitle/.style={rotate=90, align=center, font=\bfseries\footnotesize, text width=3.3cm},
+  tplab/.style={font=\footnotesize},
+  op/.style={font=\large, text=black!80},
+  note/.style={font=\scriptsize\itshape, text=black!60},
+  comm/.style={{Stealth[length=1.6mm]}-{Stealth[length=1.6mm]}, thick, black!75},
+  clab/.style={anchor=west, font=\footnotesize},
+}
+
+% header: big title + small subtitle (x-centre, title, subtitle)
+\newcommand{\hdrtxt}[3]{%
+  \node[font=\normalsize\bfseries\boldmath] at (#1,{\tot+0.85}) {#2};%
+  \node[font=\scriptsize] at (#1,{\tot+0.4}) {#3};}
+% derived sizes
+\pgfmathsetmacro{\bs}{2*\cellsz}       % one 2x2-cell block
+\pgfmathsetmacro{\tot}{2*\bs+\gp}      % total matrix size incl. gap
+\pgfmathsetmacro{\yc}{\tot/2}          % vertical centre
+\pgfmathsetmacro{\yA}{\bs+\gp+\bs/2}   % centre of CP 0 row
+\pgfmathsetmacro{\yB}{\bs/2}           % centre of CP 1 row
+\pgfmathsetmacro{\ytp}{\tot+0.22}      % TP labels
+\pgfmathsetmacro{\hA}{\bs/2}           % centre of TP 0 column
+\pgfmathsetmacro{\hB}{\bs+\gp+\bs/2}   % centre of TP 1 column
+
+\begin{tikzpicture}[line width=0.8pt, >=Stealth]
+
+% Column bands + headers (apply to every row below)
+\foreach \a in {0.7, 4.25, 7.8}{
+  \fill[band, rounded corners=5pt] (\a,{\yFour-0.6}) rectangle ({\a+\bw},{\tot+1.2});
+}
+\hdrtxt{2.1}{Data sample}{domain parallelism}
+\hdrtxt{5.65}{Weights $W^{QKV}$}{tensor parallelism}
+\hdrtxt{9.2}{$Q,\,K,\,V$}{outputs}
+
+% ---------------- 1) CP-only ----------------
+\begin{scope}[shift={(0,0)}]
+  \node[sectitle] at (-0.75,\yc) {CP};
+  \node[rowlab] at (0.55,\yA) {CP 0};
+  \node[rowlab] at (0.55,\yB) {CP 1};
+
+  \cpblk{cp0}{\xX}{0}{0}   \cpblk{cp1}{\xX}{0}{1}
+  \node[op] at (\xMul,\yc) {$\times$};
+  \fullm{neutral}{\xW}{0}
+  \node[op] at (\xEq,\yc) {$=$};
+  \cpblk{cp0}{\xO}{0}{0}   \cpblk{cp1}{\xO}{0}{1}
+\end{scope}
+
+% ---------------- 2) Megatron-LM TP ----------------
+\begin{scope}[shift={(0,\yTwo)}]
+  \node[sectitle] at (-0.75,\yc) {Megatron-LM\\TP};
+  \node[tplab] at ({\xW+\hA},\ytp) {TP 0};  \node[tplab] at ({\xW+\hB},\ytp) {TP 1};
+  \node[tplab] at ({\xO+\hA},\ytp) {TP 0};  \node[tplab] at ({\xO+\hB},\ytp) {TP 1};
+
+  \fullm{neutral}{\xX}{0}
+  \node[op] at (\xMul,\yc) {$\times$};
+  \tpblk{tp0}{\xW}{0}{0}   \tpblk{tp1}{\xW}{0}{1}
+  \node[op] at (\xEq,\yc) {$=$};
+  \tpblk{tp0}{\xO}{0}{0}   \tpblk{tp1}{\xO}{0}{1}
+\end{scope}
+
+% ---------------- 3) CP + Megatron-LM TP (2 x 2) ----------------
+\begin{scope}[shift={(0,\yThree)}]
+  \node[sectitle] at (-0.75,\yc) {CP + \\ Megatron-LM TP};
+  \node[tplab] at ({\xW+\hA},\ytp) {TP 0};  \node[tplab] at ({\xW+\hB},\ytp) {TP 1};
+  \node[tplab] at ({\xO+\hA},\ytp) {TP 0};  \node[tplab] at ({\xO+\hB},\ytp) {TP 1};
+  \node[rowlab] at (0.55,\yA) {CP 0};
+  \node[rowlab] at (0.55,\yB) {CP 1};
+
+  \cpblk{cp0}{\xX}{0}{0}   \cpblk{cp1}{\xX}{0}{1}
+  \node[op] at (\xMul,\yc) {$\times$};
+  \tpblk{tp0}{\xW}{0}{0}   \tpblk{tp1}{\xW}{0}{1}
+  \node[op] at (\xEq,\yc) {$=$};
+  \qblk{\xO}{0}{0}{0}{cp0}   \qblk{\xO}{0}{0}{1}{cp0}
+  \qblk{\xO}{0}{1}{0}{cp1}   \qblk{\xO}{0}{1}{1}{cp1}
+
+  \draw[comm] (\xCm,\yA) to[bend left=50] (\xCm,\yB);
+  \node[clab, align=left] at ({\xCm+0.35},\yc) {Ring /\\ Ulysses};
+  \draw[comm] ({\xO+\hA},-0.14) to[bend right=50] ({\xO+\hB},-0.14);
+  \node[clab] at ({\xO+\hB+0.3},-0.3) {TP linear layer};
+\end{scope}
+
+% ---------------- 4) Jigsaw: Domain + TP ----------------
+\begin{scope}[shift={(0,\yFour)}]
+  \node[sectitle] at (-0.75,\yc) {Jigsaw:\\Domain + TP};
+  \node[tplab] at ({\xX+\hA},\ytp) {TP 0};  \node[tplab] at ({\xX+\hB},\ytp) {TP 1};
+  \node[tplab] at ({\xW+\hA},\ytp) {TP 0};  \node[tplab] at ({\xW+\hB},\ytp) {TP 1};
+  \node[tplab] at ({\xO+\hA},\ytp) {TP 0};  \node[tplab] at ({\xO+\hB},\ytp) {TP 1};
+  \node[rowlab] at (0.55,\yA) {CP 0};
+  \node[rowlab] at (0.55,\yB) {CP 1};
+
+  \qblk{\xX}{0}{0}{0}{cp0}   \qblk{\xX}{0}{0}{1}{cp0}
+  \qblk{\xX}{0}{1}{0}{cp1}   \qblk{\xX}{0}{1}{1}{cp1}
+  \node[op] at (\xMul,\yc) {$\times$};
+  \tpblk{tp0}{\xW}{0}{0}   \tpblk{tp1}{\xW}{0}{1}
+  \node[op] at (\xEq,\yc) {$=$};
+  \qblk{\xO}{0}{0}{0}{cp0}   \qblk{\xO}{0}{0}{1}{cp0}
+  \qblk{\xO}{0}{1}{0}{cp1}   \qblk{\xO}{0}{1}{1}{cp1}
+
+  \draw[comm] (\xCm,\yA) to[bend left=50] (\xCm,\yB);
+  \node[clab, align=left] at ({\xCm+0.35},\yc) {Ring /\\ Ulysses};
+  \draw[comm] ({\xO+\hA},-0.14) to[bend right=50] ({\xO+\hB},-0.14);
+  \node[clab] at ({\xO+\hB+0.3},-0.3) {Distributed linear layer};
+\end{scope}
+
+% ---------------- Legend ----------------
+\begin{scope}[shift={(0.7,{\yFour-1.05})}, font=\footnotesize]
+  \draw[edge0, fill=cp0]     (0,0)   rectangle (0.28,0.28); \node[anchor=west] at (0.36,0.14) {CP 0};
+  \draw[edge0, fill=cp1]     (1.3,0) rectangle (1.58,0.28); \node[anchor=west] at (1.66,0.14) {CP 1};
+  \draw[edge0, fill=tp0]     (2.6,0) rectangle (2.88,0.28); \node[anchor=west] at (2.96,0.14) {TP 0};
+  \draw[edge0, fill=tp1]     (3.9,0) rectangle (4.18,0.28); \node[anchor=west] at (4.26,0.14) {TP 1};
+  \draw[edge0, fill=neutral] (5.2,0) rectangle (5.48,0.28); \node[anchor=west] at (5.56,0.14) {replicated};
+  \draw[edgeTP1, fill=cp0]   (7.3,0) rectangle (7.58,0.28);
+  \node[anchor=west] at (7.66,0.14) {fill = CP, outline = TP};
+\end{scope}
+
+\end{tikzpicture}
+\end{document}
