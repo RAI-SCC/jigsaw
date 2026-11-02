@@ -250,7 +250,10 @@ def cuda_cleanup():
 
 def pytest_collection_modifyitems(config, items):
     """Skip GPU/distributed tests based on environment."""
-    has_gpu = torch.cuda.is_available()
+    has_gpu = torch.cuda.is_available() and config.getoption("--device") in (
+        "cuda",
+        "gpu",
+    )
     is_distributed = (
         os.environ.get("SLURM_PROCID") is not None
         or os.environ.get("RANK") is not None
@@ -263,7 +266,7 @@ def pytest_collection_modifyitems(config, items):
         if item.get_closest_marker("slow") and not run_slow:
             item.add_marker(pytest.mark.skip(reason="slow: run with --runslow"))
         if item.get_closest_marker("gpu_required") and not has_gpu:
-            item.add_marker(pytest.mark.skip(reason="GPU not available"))
+            item.add_marker(pytest.mark.skip(reason="GPU not available or not selected"))
         if item.get_closest_marker("dist_required") and not is_distributed:
             item.add_marker(
                 pytest.mark.skip(reason="Not running in distributed environment")
