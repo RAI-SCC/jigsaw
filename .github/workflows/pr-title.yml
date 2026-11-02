@@ -1,0 +1,39 @@
+name: PR title
+
+# PRs are squash-merged, so the PR title becomes the commit message on main.
+# The commitlint hook only sees the branch commits, which the squash discards,
+# so the title is checked against Conventional Commits here instead.
+on:
+  # _target so it also runs for PRs from forks; safe as the PR code is never checked out.
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Same types as .commitlintrc.yaml (@commitlint/config-conventional).
+          types: |
+            build
+            chore
+            ci
+            docs
+            feat
+            fix
+            perf
+            refactor
+            revert
+            style
+            test
+          # config-conventional's subject-case: no capitalised description.
+          subjectPattern: ^(?![A-Z]).+$
+          subjectPatternError: |
+            The description "{subject}" in "{title}" must not start with an
+            uppercase letter, e.g. "fix: handle empty input".

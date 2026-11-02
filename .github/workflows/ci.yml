@@ -78,10 +78,9 @@ jobs:
           pip install "torch${{ matrix.torch && format('=={0}', matrix.torch) || '' }}" --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev]"
       - name: Tests
-        env:
-          OMPI_MCA_rmaps_base_oversubscribe: "1"
-          OMPI_MCA_hwloc_base_binding_policy: none
-        run: mpirun -n ${{ matrix.ranks }} pytest tests --device cpu ${{ inputs.full && '--runslow' || '' }}
+        # Flags rather than OMPI_MCA_* env vars: Open MPI 5 (ubuntu-24.04) moved
+        # mapping/binding into PRRTE, which ignores the OMPI_MCA_ prefix.
+        run: mpirun -n ${{ matrix.ranks }} --oversubscribe --bind-to none pytest tests --device cpu ${{ inputs.full && '--runslow' || '' }}
 
   # Remaining hosted-runner rank counts (non-power-of-two meshes etc.); only in a
   # full run (manual dispatch with "full" ticked, or a release), to keep PR CI cheap.
@@ -107,7 +106,7 @@ jobs:
       # The venv (CPU torch + dev deps) is shared by every rank-count job and
       # only rebuilt when pyproject.toml, the Python patch version or the runner
       # image changes. ImageOS is in the key because mpi4py links the apt OpenMPI.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         id: venv
         with:
           path: ~/venv
@@ -123,10 +122,9 @@ jobs:
           ~/venv/bin/pip install --no-deps -e .
           echo "$HOME/venv/bin" >> "$GITHUB_PATH"
       - name: Tests
-        env:
-          OMPI_MCA_rmaps_base_oversubscribe: "1"
-          OMPI_MCA_hwloc_base_binding_policy: none
-        run: mpirun -n ${{ matrix.ranks }} pytest tests --device cpu --runslow
+        # Flags rather than OMPI_MCA_* env vars: Open MPI 5 (ubuntu-24.04) moved
+        # mapping/binding into PRRTE, which ignores the OMPI_MCA_ prefix.
+        run: mpirun -n ${{ matrix.ranks }} --oversubscribe --bind-to none pytest tests --device cpu --runslow
 
   build:
     runs-on: ubuntu-latest
