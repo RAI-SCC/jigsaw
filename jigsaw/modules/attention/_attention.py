@@ -557,10 +557,10 @@ class DistributedAttention(torch.nn.Module):
         with torch.nn.attention.sdpa_kernel(
             [
                 torch.nn.attention.SDPBackend.FLASH_ATTENTION,
-                torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
                 torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
                 torch.nn.attention.SDPBackend.MATH,
-            ]
+            ],
+            set_priority=True
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
                 q,
@@ -1023,6 +1023,9 @@ class Attention(torch.nn.Module):
         Data type of the parameters.
     out_bias : bool
         Whether the output projection has a bias.
+    attn_backend : AttnBackend | str
+        Attention core, ``"sdpa"`` (default) or ``"te"``. ``"te"`` falls back
+        to ``"sdpa"`` with a warning if no TE core is importable.
     """
 
     def __init__(
@@ -1036,6 +1039,7 @@ class Attention(torch.nn.Module):
         qk_norm: bool = False,
         dtype: torch.dtype = torch.float32,
         out_bias: bool = True,
+        attn_backend: AttnBackend | str = AttnBackend.SDPA,
     ):
         """Initialize the module."""
         super().__init__()
@@ -1060,7 +1064,18 @@ class Attention(torch.nn.Module):
         self.head_dim = self.embed_dim // self.heads
         self.out_dim = out_dim
         self.dropout_p = dropout_p
-        self.attn_core = self._attn_core
+        self.scale = self.head_dim**-0.5
+        self.attn_backend = DistributedAttention._resolve_backend(
+            attention_config._coerce_enum(AttnBackend, attn_backend, "attn_backend")
+        )
+        if self.attn_backend == AttnBackend.MATH:
+            raise ValueError("Attention supports attn_backend 'sdpa' or 'te' only")
+        self.te = self.attn_backend == AttnBackend.TE
+        if self.te:
+            self.te_core = te_core.select_core(torch.device(device or "cuda"))
+            self.attn_core = self._transformer_attn_core
+        else:
+            self.attn_core = self._attn_core
         self.qk_norm = qk_norm
         self.dtype = dtype
         if qk_norm:
@@ -1099,10 +1114,10 @@ class Attention(torch.nn.Module):
         with torch.nn.attention.sdpa_kernel(
             [
                 torch.nn.attention.SDPBackend.FLASH_ATTENTION,
-                torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
                 torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
-                torch.nn.attention.SDPBackend.MATH,
-            ]
+                torch.nn.attention.SDPBackend.MATH,                
+            ],
+            set_priority=True
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
                 q,
@@ -1114,6 +1129,9 @@ class Attention(torch.nn.Module):
             )
 
         return out
+
+    # Same TE core as the distributed module: bshd in, ``[b, s, h * d]`` out.
+    _transformer_attn_core = DistributedAttention._transformer_attn_core
 
     def forward(
         self, x: torch.Tensor, attn_mask: torch.Tensor | None = None
@@ -1139,19 +1157,23 @@ class Attention(torch.nn.Module):
         qkv = qkv.reshape(qkv.shape[0], qkv.shape[1], 3, self.heads, self.head_dim)
 
         core_dtype = attn_core_dtype(x)
+        # TE takes bshd, SDPA takes bhsd.
+        perm = (2, 0, 1, 3, 4) if self.te else (2, 0, 3, 1, 4)
         if self.qk_norm:
-            q, k, v = qkv.permute(2, 0, 3, 1, 4)
+            q, k, v = qkv.permute(*perm)
             q = self.q_norm(q).to(core_dtype)
             k = self.k_norm(k).to(core_dtype)
             v = v.to(core_dtype)
         else:
-            q, k, v = qkv.permute(2, 0, 3, 1, 4).to(core_dtype)
+            q, k, v = qkv.permute(*perm).to(core_dtype)
         out = self.attn_core(
             q=q, k=k, v=v, x=x, attn_mask=_mask_to(attn_mask, core_dtype)
         )
 
-        # out has shape [B, h, N, d]
-        out = rearrange(out, "... h s d -> ... s (h d)").to(x.dtype)
+        # TE out is [B, N, h * d]; SDPA out is [B, h, N, d]
+        if not self.te:
+            out = rearrange(out, "... h s d -> ... s (h d)")
+        out = out.to(x.dtype)
 
         out = cast(torch.Tensor, self.head_concat(out))
 
