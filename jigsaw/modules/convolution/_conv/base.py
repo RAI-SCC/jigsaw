@@ -15,6 +15,7 @@ from jigsaw.gather import gather_1d_results
 
 from .._common.arg_norm import _as_spatial_groups, _ntuple, _resolve_padding_str
 from .._common.channel_comm import resolve_conv_groups
+from .._common.config import check_config, layer_key
 from .._common.spatial_split import _check_stride_aligned
 from .config import ConvNdConfig
 from .functional import _ConvNd
@@ -24,7 +25,63 @@ _TORCH_CONV_CLS = {1: torch.nn.Conv1d, 2: torch.nn.Conv2d, 3: torch.nn.Conv3d}
 
 
 class _DistributedConvNd(torch.nn.Module):
-    """Distributed N-D convolution. Subclasses set ``_n_spatial``."""
+    """Distributed N-D convolution.
+
+    Subclasses set ``_n_spatial``.
+
+    Parameters
+    ----------
+    in_channels : int
+        Global number of input channels.
+    out_channels : int
+        Global number of output channels.
+    kernel_size : int | tuple[int, ...]
+        Kernel size.
+    device : torch.device
+        Device of the module.
+    spatial_group : dist.ProcessGroup | Sequence[dist.ProcessGroup | None]
+        Process groups splitting the spatial axes. A single group splits
+        the last axis. In a sequence, ``None`` or a group of size 1 marks an
+        axis that is not split. Every rank holds an equally sized slice of a
+        split axis.
+    channel_group : dist.ProcessGroup
+        Process group splitting the channels.
+    stride : int | tuple[int, ...]
+        Stride in the convolution.
+    padding : str | tuple[int, ...]
+        Padding, or ``"valid"`` or ``"same"``. ``"same"`` with an odd
+        ``dilation * (kernel_size - 1)`` pads asymmetrically and needs an
+        unsplit layer.
+    dilation : int | tuple[int, ...]
+        Dilation.
+    groups : int
+        Number of groups. Must be ``1`` or a multiple of
+        ``channel_group.size()``.
+    bias : bool
+        Whether to add a bias.
+    dtype : torch.dtype
+        Data type of the parameters.
+    channel_comm : CommOp or str
+        Channel communication strategy: ``"all_gather"`` or a
+        :class:`~jigsaw.modules.CommOp` (``"auto"``, ``"all_to_all"``,
+        ``"isend"``, ``"batch_isend_irecv"``). Ignored if ``config`` is
+        given.
+    config : ConvNdConfig, optional
+        Kernel selection. Defaults to a configuration built from the
+        arguments.
+
+    Raises
+    ------
+    ValueError
+        If ``groups`` or ``channel_group.size()`` does not divide the channel
+        counts, a tuple argument has the wrong length, ``padding`` is an
+        invalid string or ``"same"`` with a stride, or ``config`` was built for
+        a layer with another spatial rank, bias, ``kernel_size == stride``,
+        ``groups`` or channel group size.
+    NotImplementedError
+        If ``groups > 1`` is not a multiple of ``channel_group.size()``, or
+        asymmetric ``"same"`` padding is used on a split layer.
+    """
 
     # spatial rank (1, 2 or 3); pinned by the concrete subclass.
     _n_spatial: int
@@ -61,59 +118,7 @@ class _DistributedConvNd(torch.nn.Module):
         channel_comm: CommOp | str = "auto",
         config: ConvNdConfig | None = None,
     ):
-        """Initialize the module.
-
-        Parameters
-        ----------
-        in_channels : int
-            Global number of input channels.
-        out_channels : int
-            Global number of output channels.
-        kernel_size : int | tuple[int, ...]
-            Kernel size.
-        device : torch.device
-            Device of the module.
-        spatial_group : dist.ProcessGroup | Sequence[dist.ProcessGroup | None]
-            Process groups splitting the spatial axes. A single group splits
-            the last axis. In a sequence, ``None`` or a group of size 1 marks an
-            axis that is not split. Every rank holds an equally sized slice of a
-            split axis.
-        channel_group : dist.ProcessGroup
-            Process group splitting the channels.
-        stride : int | tuple[int, ...]
-            Stride in the convolution.
-        padding : str | tuple[int, ...]
-            Padding, or ``"valid"`` or ``"same"``. ``"same"`` with an odd
-            ``dilation * (kernel_size - 1)`` pads asymmetrically and needs an
-            unsplit layer.
-        dilation : int | tuple[int, ...]
-            Dilation.
-        groups : int
-            Number of groups. Must be ``1`` or a multiple of
-            ``channel_group.size()``.
-        bias : bool
-            Whether to add a bias.
-        dtype : torch.dtype
-            Data type of the parameters.
-        channel_comm : CommOp or str
-            Channel communication strategy: ``"all_gather"`` or a
-            :class:`~jigsaw.modules.CommOp` (``"auto"``, ``"all_to_all"``,
-            ``"isend"``, ``"batch_isend_irecv"``). Ignored if ``config`` is
-            given.
-        config : ConvNdConfig, optional
-            Kernel selection. Defaults to a configuration built from the
-            arguments.
-
-        Raises
-        ------
-        ValueError
-            If ``groups`` or ``channel_group.size()`` does not divide the channel
-            counts, a tuple argument has the wrong length, or ``padding`` is an
-            invalid string or ``"same"`` with a stride.
-        NotImplementedError
-            If ``groups > 1`` is not a multiple of ``channel_group.size()``, or
-            asymmetric ``"same"`` padding is used on a split layer.
-        """
+        """Initialize the module."""
         super().__init__()
         to_ntuple = _ntuple(self._n_spatial)
 
@@ -184,6 +189,17 @@ class _DistributedConvNd(torch.nn.Module):
         )
         self.reset_parameters()
 
+        if config is not None:
+            check_config(
+                config,
+                layer_key(
+                    self.channel_group,
+                    self.bias,
+                    self.kernel_size,
+                    self.stride,
+                    self.groups,
+                ),
+            )
         self.config = (
             ConvNdConfig(
                 self.channel_group,
@@ -614,19 +630,22 @@ class _DistributedConvNd(torch.nn.Module):
         Parameters
         ----------
         x : torch.Tensor
-            Local input of shape ``(N, Cin / n_channel, *spatial / n_spatial)``.
-            Every rank of a spatial group holds an equally sized slice.
+            Local input of shape ``(N, Cin / n_channel, *spatial / n_spatial)``,
+            or ``(Cin / n_channel, *spatial / n_spatial)`` unbatched. Every rank
+            of a spatial group holds an equally sized slice.
 
         Returns
         -------
         torch.Tensor
-            Local output of shape ``(N, Cout / n_channel, *spatial' / n_spatial)``.
+            Local output of shape ``(N, Cout / n_channel, *spatial' / n_spatial)``,
+            without ``N`` for an unbatched input.
 
         Raises
         ------
         ValueError
-            If ``kernel_size == stride`` and the local size of a split axis is not
-            a multiple of the stride.
+            If ``x`` is neither batched nor unbatched, or ``kernel_size ==
+            stride`` and the local size of a split axis is not a multiple of the
+            stride.
         NotImplementedError
             If a halo exchange is needed and the global output size of a split
             axis is not divisible by its group size.
@@ -636,23 +655,33 @@ class _DistributedConvNd(torch.nn.Module):
         # Sync before the branch: a patchify conv (kernel == stride, no padding)
         # takes ``_forward_local`` even when spatially split, and its replicated
         # weight and bias still need their gradients summed.
+        n = self._n_spatial
+        if x.dim() not in (n + 1, n + 2):
+            raise ValueError(
+                f"expected a {n + 1}-D (unbatched) or {n + 2}-D (batched) input, "
+                f"got {x.dim()}-D input of shape {tuple(x.shape)}"
+            )
+        # An unbatched input runs as a batch of one, as in torch.
+        unbatched = x.dim() == n + 1
+        if unbatched:
+            x = x.unsqueeze(0)
+
         weight, bias = parallel.sync_grad(self.weight, self.bias)
         weight = cast(torch.Tensor, weight)
         if self._channel_local and not (
             self._spatial_sync_groups and self._needs_halo()
         ):
-            return self._forward_local(x, weight, bias)
-
-        out = self._conv_apply(
-            x,
-            weight,
-            bias,
-            self.stride,
-            self.padding,
-            self.dilation,
-            self.spatial_groups,
-            self.channel_group,
-            self.config,
-        )
-
-        return out[0]
+            y = self._forward_local(x, weight, bias)
+        else:
+            y = self._conv_apply(
+                x,
+                weight,
+                bias,
+                self.stride,
+                self.padding,
+                self.dilation,
+                self.spatial_groups,
+                self.channel_group,
+                self.config,
+            )[0]
+        return y.squeeze(0) if unbatched else y
