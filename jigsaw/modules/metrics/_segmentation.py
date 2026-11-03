@@ -5,6 +5,8 @@ from collections.abc import Sequence
 import torch
 import torch.distributed as dist
 
+from jigsaw._core.shard_repr import shard_repr
+
 from ..activation._functional import distributed_argmax
 from ..loss._common import GroupsArg, _active, _normalize_groups
 
@@ -225,6 +227,16 @@ class DistributedSegmentationMetrics(torch.nn.Module):
             ``0``; the metric has no parameters.
         """
         return 0
+
+    def extra_repr(self) -> str:
+        """Return the sizes of the groups the reduction spans.
+
+        Returns
+        -------
+        str
+            ``reduce_groups``, one size per group if a sequence was given.
+        """
+        return shard_repr(reduce_groups=self.reduce_groups)
 
     def reset(self) -> None:
         """Zero the running confusion matrix."""

@@ -5,6 +5,8 @@ from typing import Any, cast
 import torch
 import torch.distributed as dist
 
+from jigsaw._core.shard_repr import shard_repr
+
 from ._config import RollConfig
 from ._functional import _Roll
 
@@ -33,6 +35,16 @@ class Roll(torch.nn.Module):
         self.shifts = shifts
         self.dims = dims
         self.dtype = dtype
+
+    def extra_repr(self) -> str:
+        """Return the roll arguments.
+
+        Returns
+        -------
+        str
+            ``shifts`` and ``dims``.
+        """
+        return f"shifts={self.shifts}, dims={self.dims}"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Roll the input.
@@ -116,6 +128,21 @@ class DistributedRoll(torch.nn.Module):
             ``0``; the layer has no parameters.
         """
         return 0
+
+    def extra_repr(self) -> str:
+        """Return the :class:`Roll` fields and the shard sizes.
+
+        Returns
+        -------
+        str
+            ``shifts``, ``dims`` and ``distributed_dims``, then ``spatial`` (one
+            size per entry of ``distributed_dims``).
+        """
+        return (
+            f"shifts={self.shifts}, dims={self.dims}, "
+            f"distributed_dims={self.distributed_dims}, "
+            + shard_repr(spatial=self.spatial_groups)
+        )
 
     @classmethod
     def convert_to_jigsaw(

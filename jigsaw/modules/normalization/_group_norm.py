@@ -1,5 +1,6 @@
 """Distributed GroupNorm."""
 
+import math
 from collections.abc import Sequence
 from typing import Any
 
@@ -8,6 +9,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 from jigsaw import parallel
+from jigsaw._core.shard_repr import shard_repr
 from jigsaw.gather import gather_1d_results
 
 from . import _functional as functional
@@ -354,3 +356,22 @@ class DistributedGroupNorm(torch.nn.Module):
         Computed from ``num_channels``, not from the local shards.
         """
         return sum(self.num_channels for p in (self.weight, self.bias) if p is not None)
+
+    def extra_repr(self) -> str:
+        """Return the ``torch.nn.GroupNorm`` fields and the shard sizes.
+
+        Returns
+        -------
+        str
+            Global ``num_groups`` and ``num_channels``, ``eps``, ``affine`` and
+            ``bias``, then ``spatial`` (the product of the spatial splits) and
+            ``channel``.
+        """
+        return (
+            f"{self.num_groups}, {self.num_channels}, eps={self.eps}, "
+            f"affine={self.affine}, bias={self.bias is not None}, "
+            + shard_repr(
+                spatial=math.prod(g.size() for g in self._spatial_sync_groups),
+                channel=self.channel_group,
+            )
+        )

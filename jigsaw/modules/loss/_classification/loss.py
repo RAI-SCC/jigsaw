@@ -3,6 +3,8 @@
 import torch
 import torch.distributed as dist
 
+from jigsaw._core.shard_repr import shard_repr
+
 from .._common import GroupsArg
 from . import functional as F
 
@@ -55,6 +57,16 @@ class DistributedNLLLoss(torch.nn.Module):
             ``0``; the loss has no parameters.
         """
         return 0
+
+    def extra_repr(self) -> str:
+        """Return the sizes of the groups the reduction spans.
+
+        Returns
+        -------
+        str
+            ``reduce_groups``, one size per group if a sequence was given.
+        """
+        return shard_repr(reduce_groups=self.reduce_groups)
 
     def forward(self, log_probs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute the loss of the local shard.
@@ -137,6 +149,16 @@ class DistributedCrossEntropyLoss(torch.nn.Module):
         """
         return 0
 
+    def extra_repr(self) -> str:
+        """Return the sizes of the groups the reduction spans.
+
+        Returns
+        -------
+        str
+            ``reduce_groups``, one size per group if a sequence was given.
+        """
+        return shard_repr(reduce_groups=self.reduce_groups)
+
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute the loss of the local shard.
 
@@ -201,6 +223,16 @@ class DistributedBCELoss(torch.nn.Module):
             ``0``; the loss has no parameters.
         """
         return 0
+
+    def extra_repr(self) -> str:
+        """Return the sizes of the groups the reduction spans.
+
+        Returns
+        -------
+        str
+            ``reduce_groups``, one size per group if a sequence was given.
+        """
+        return shard_repr(reduce_groups=self.reduce_groups)
 
     def forward(self, probs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute the loss of the local shard.
@@ -267,6 +299,16 @@ class DistributedBCEWithLogitsLoss(torch.nn.Module):
             ``0``; the loss has no parameters.
         """
         return 0
+
+    def extra_repr(self) -> str:
+        """Return the sizes of the groups the reduction spans.
+
+        Returns
+        -------
+        str
+            ``reduce_groups``, one size per group if a sequence was given.
+        """
+        return shard_repr(reduce_groups=self.reduce_groups)
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute the loss of the local shard.
