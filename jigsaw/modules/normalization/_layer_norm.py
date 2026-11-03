@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 
 from jigsaw import parallel
+from jigsaw._core.shard_repr import shard_repr
 from jigsaw.gather import gather_1d_results
 
 from . import _functional as functional
@@ -105,6 +106,22 @@ class DistributedLayerNorm(torch.nn.Module):
         """
         return sum(
             self.normalized_dim for p in (self.weight, self.bias) if p is not None
+        )
+
+    def extra_repr(self) -> str:
+        """Return the ``torch.nn.LayerNorm`` fields and the shard sizes.
+
+        Returns
+        -------
+        str
+            Global normalized shape, ``eps``, ``elementwise_affine`` and
+            ``bias``, then ``row`` and ``col``.
+        """
+        return (
+            f"{(self.normalized_dim,)}, eps={self.eps}, "
+            f"elementwise_affine={self.elementwise_affine}, "
+            f"bias={self.bias is not None}, "
+            + shard_repr(row=self.spatial_group, col=self.channel_group)
         )
 
     @classmethod

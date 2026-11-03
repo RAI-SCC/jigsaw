@@ -8,6 +8,7 @@ import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
 from jigsaw import init, parallel
+from jigsaw._core.shard_repr import shard_repr
 from jigsaw.gather import gather_1d_results, gather_results
 
 from ._config import LinearConfig
@@ -191,6 +192,29 @@ class DistributedLinear(torch.nn.Module):
             0 if self.global_bias_shape is None else math.prod(self.global_bias_shape)
         )
         return num_bias_param + math.prod(self.global_weight_shape)
+
+    def extra_repr(self) -> str:
+        """Return the ``torch.nn.Linear`` fields and the shard sizes.
+
+        ``row`` is the factor splitting the weight,
+        ``model_group.size() // col_group.size()``, which is 1 when the weight
+        is replicated over ``row_group``.
+
+        Returns
+        -------
+        str
+            Global ``in_features``, ``out_features`` and ``bias``, then ``row``
+            and ``col``.
+        """
+        out_features, in_features = self.global_weight_shape
+        return (
+            f"in_features={in_features}, out_features={out_features}, "
+            f"bias={self.bias is not None}, "
+            + shard_repr(
+                row=self.model_group.size() // self.col_group.size(),
+                col=self.col_group,
+            )
+        )
 
     @classmethod
     def convert_to_jigsaw(
@@ -502,6 +526,16 @@ class _DistributedMatMul(torch.nn.Module):
     def get_parameter_count(self) -> int:
         """Return the number of parameters, which is always 0."""
         return 0
+
+    def extra_repr(self) -> str:
+        """Return the model-group size.
+
+        Returns
+        -------
+        str
+            ``model``.
+        """
+        return shard_repr(model=self.model_group)
 
     def forward(self, x: torch.Tensor, w: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         """Apply the distributed matmul.

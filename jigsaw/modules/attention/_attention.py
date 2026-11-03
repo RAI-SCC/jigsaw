@@ -10,6 +10,7 @@ import torch.distributed as dist
 from einops import rearrange
 
 from jigsaw import parallel
+from jigsaw._core.shard_repr import shard_repr
 from jigsaw.gather import gather_1d_results
 from jigsaw.modules import linear
 
@@ -1012,6 +1013,26 @@ class DistributedAttention(torch.nn.Module):
             self.embed_dim // global_heads
         )  # 2 norms (q and k) * 2 parameters (scale and bias) * normalized_dim
 
+    def extra_repr(self) -> str:
+        """Return the :class:`Attention` fields, ``ring`` and the shard sizes.
+
+        Returns
+        -------
+        str
+            Global ``in_dim``, ``embed_dim``, ``out_dim`` and ``heads``,
+            ``dropout_p``, ``qk_norm`` and ``ring``, then ``spatial`` and
+            ``channel``.
+        """
+        # ``head_concat`` splits only its input dimension, so its weight holds
+        # the global ``out_dim`` rows.
+        return (
+            f"in_dim={self.in_dim}, embed_dim={self.embed_dim}, "
+            f"out_dim={self.head_concat.weight.shape[0]}, "
+            f"heads={self.heads * self.channel_group.size()}, "
+            f"dropout_p={self.dropout_p}, qk_norm={self.qk_norm}, ring={self.ring}, "
+            + shard_repr(spatial=self.spatial_group, channel=self.channel_group)
+        )
+
 
 class Attention(torch.nn.Module):
     """Non-distributed multi-head attention, convertible with :meth:`convert_to_jigsaw`.
@@ -1097,6 +1118,21 @@ class Attention(torch.nn.Module):
                 torch.nn.LayerNorm(self.head_dim, device=device, dtype=dtype),
                 torch.nn.LayerNorm(self.head_dim, device=device, dtype=dtype),
             )
+
+    def extra_repr(self) -> str:
+        """Return the attention fields.
+
+        Returns
+        -------
+        str
+            ``in_dim``, ``embed_dim``, ``out_dim``, ``heads``, ``dropout_p`` and
+            ``qk_norm``.
+        """
+        return (
+            f"in_dim={self.in_dim}, embed_dim={self.embed_dim}, "
+            f"out_dim={self.out_dim}, heads={self.heads}, "
+            f"dropout_p={self.dropout_p}, qk_norm={self.qk_norm}"
+        )
 
     def _attn_core(
         self,

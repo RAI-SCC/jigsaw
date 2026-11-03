@@ -2,6 +2,8 @@
 
 import torch
 
+from jigsaw._core.shard_repr import shard_repr
+
 from .._common import GroupsArg
 from . import functional as F
 
@@ -37,6 +39,16 @@ class DistributedMSELoss(torch.nn.Module):
             ``0``; the loss has no parameters.
         """
         return 0
+
+    def extra_repr(self) -> str:
+        """Return the sizes of the groups the reduction spans.
+
+        Returns
+        -------
+        str
+            ``reduce_groups``, one size per group if a sequence was given.
+        """
+        return shard_repr(reduce_groups=self.reduce_groups)
 
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute the loss of the local shard.
@@ -92,6 +104,16 @@ class DistributedL1Loss(torch.nn.Module):
             ``0``; the loss has no parameters.
         """
         return 0
+
+    def extra_repr(self) -> str:
+        """Return the sizes of the groups the reduction spans.
+
+        Returns
+        -------
+        str
+            ``reduce_groups``, one size per group if a sequence was given.
+        """
+        return shard_repr(reduce_groups=self.reduce_groups)
 
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute the loss of the local shard.
@@ -151,6 +173,16 @@ class DistributedSmoothL1Loss(torch.nn.Module):
             ``0``; the loss has no parameters.
         """
         return 0
+
+    def extra_repr(self) -> str:
+        """Return the sizes of the groups the reduction spans.
+
+        Returns
+        -------
+        str
+            ``reduce_groups``, one size per group if a sequence was given.
+        """
+        return shard_repr(reduce_groups=self.reduce_groups)
 
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute the loss of the local shard.
