@@ -21,6 +21,7 @@ from jigsaw.modules import (
     DistributedLinear,
     DistributedMatMulXWT,
     DistributedMSELoss,
+    DistributedNLLLoss,
     DistributedRoll,
     DistributedSegmentationMetrics,
     DistributedSoftmax,
@@ -192,6 +193,7 @@ def test_attention(mesh: dict, device: torch.device) -> None:
 def test_losses_and_metrics(mesh: dict, device: torch.device) -> None:
     row, col = mesh["row"].size(), mesh["col"].size()
     _check(DistributedL1Loss(), "reduce_groups=1", device)
+    _check(DistributedNLLLoss(), "channel=1, reduce_groups=1", device)
     _check(
         DistributedMSELoss((mesh["row"], mesh["col"])),
         f"reduce_groups=({row}, {col})",
@@ -199,12 +201,12 @@ def test_losses_and_metrics(mesh: dict, device: torch.device) -> None:
     )
     _check(
         DistributedCrossEntropyLoss(mesh["col"], mesh["row"]),
-        f"reduce_groups={row}",
+        f"channel={col}, reduce_groups={row}",
         device,
     )
     _check(
         DistributedSegmentationMetrics(3, mesh["col"], [mesh["row"], None]),
-        f"reduce_groups=({row}, 1)",
+        f"channel={col}, reduce_groups=({row}, 1)",
         device,
     )
 

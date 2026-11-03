@@ -59,14 +59,15 @@ class DistributedNLLLoss(torch.nn.Module):
         return 0
 
     def extra_repr(self) -> str:
-        """Return the sizes of the groups the reduction spans.
+        """Return the sizes of the class-sharding group and the reduction groups.
 
         Returns
         -------
         str
-            ``reduce_groups``, one size per group if a sequence was given.
+            ``channel``, then ``reduce_groups`` (one size per group if a sequence
+            was given).
         """
-        return shard_repr(reduce_groups=self.reduce_groups)
+        return shard_repr(channel=self.channel_group, reduce_groups=self.reduce_groups)
 
     def forward(self, log_probs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute the loss of the local shard.
@@ -150,14 +151,15 @@ class DistributedCrossEntropyLoss(torch.nn.Module):
         return 0
 
     def extra_repr(self) -> str:
-        """Return the sizes of the groups the reduction spans.
+        """Return the sizes of the class-sharding group and the reduction groups.
 
         Returns
         -------
         str
-            ``reduce_groups``, one size per group if a sequence was given.
+            ``channel``, then ``reduce_groups`` (one size per group if a sequence
+            was given).
         """
-        return shard_repr(reduce_groups=self.reduce_groups)
+        return shard_repr(channel=self.channel_group, reduce_groups=self.reduce_groups)
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute the loss of the local shard.

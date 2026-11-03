@@ -229,14 +229,15 @@ class DistributedSegmentationMetrics(torch.nn.Module):
         return 0
 
     def extra_repr(self) -> str:
-        """Return the sizes of the groups the reduction spans.
+        """Return the sizes of the class-sharding group and the reduction groups.
 
         Returns
         -------
         str
-            ``reduce_groups``, one size per group if a sequence was given.
+            ``channel``, then ``reduce_groups`` (one size per group if a sequence
+            was given).
         """
-        return shard_repr(reduce_groups=self.reduce_groups)
+        return shard_repr(channel=self.channel_group, reduce_groups=self.reduce_groups)
 
     def reset(self) -> None:
         """Zero the running confusion matrix."""
