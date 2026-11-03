@@ -17,25 +17,27 @@ class SoftmaxCtx(Protocol):
     """Attributes stored on the autograd context."""
 
     dim: int
-    group: dist.ProcessGroup
+    group: dist.ProcessGroup | None
 
 
 class _Softmax(torch.autograd.Function):
     """Autograd function of the distributed softmax."""
 
     @staticmethod
-    def forward(x: torch.Tensor, dim: int, group: dist.ProcessGroup) -> torch.Tensor:
+    def forward(
+        x: torch.Tensor, dim: int, group: dist.ProcessGroup | None
+    ) -> torch.Tensor:
         """Compute the softmax over a dimension sharded across ``group``."""
         (x,) = promote_to_fp32_under_autocast(x)
         local_max = x.amax(dim=dim, keepdim=True)
-        dist.all_reduce(local_max, op=dist.ReduceOp.MAX, group=group)
+        if _active(group):
+            dist.all_reduce(local_max, op=dist.ReduceOp.MAX, group=group)
 
         y = torch.exp(x - local_max)
 
-        local_sum = y.sum(dim=dim, keepdim=True)
-        global_sum = local_sum.clone()
-
-        dist.all_reduce(global_sum, op=dist.ReduceOp.SUM, group=group)
+        global_sum = y.sum(dim=dim, keepdim=True)
+        if _active(group):
+            dist.all_reduce(global_sum, op=dist.ReduceOp.SUM, group=group)
 
         out = y / global_sum
         return out
@@ -64,10 +66,9 @@ class _Softmax(torch.autograd.Function):
         dim = ctx.dim
         group = ctx.group
 
-        local_grad = grad_out * out
-        local_sum = local_grad.sum(dim=dim, keepdim=True)
-        global_grad_sum = local_sum.clone()
-        dist.all_reduce(global_grad_sum, op=dist.ReduceOp.SUM, group=group)
+        global_grad_sum = (grad_out * out).sum(dim=dim, keepdim=True)
+        if _active(group):
+            dist.all_reduce(global_grad_sum, op=dist.ReduceOp.SUM, group=group)
 
         grad_x = out * (grad_out - global_grad_sum)
 
@@ -79,13 +80,15 @@ class _Softmax(torch.autograd.Function):
         in_dims: tuple[int | None, ...],
         x: torch.Tensor,
         dim: int,
-        group: dist.ProcessGroup,
+        group: dist.ProcessGroup | None,
     ) -> tuple[torch.Tensor, int]:
         """Batching rule for ``torch.vmap``."""
-        # The batch dimension is in front, so a non-negative ``dim`` moves by one.
-        out = _Softmax.apply(x, dim + 1 if dim >= 0 else dim, group)
-
-        return out, 0
+        bdim = in_dims[0]
+        assert bdim is not None  # ``x`` is the only tensor input
+        x = x.movedim(bdim, 0)
+        # ``dim`` is logical; the batch dimension now sits in front of it.
+        batched_dim = dim + 1 if dim >= 0 else dim
+        return _Softmax.apply(x, batched_dim, group), 0
 
 
 class _LogSoftmax(torch.autograd.Function):
