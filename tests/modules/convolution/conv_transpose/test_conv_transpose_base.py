@@ -68,6 +68,15 @@ class TestConvTransposeArgumentValidation:
                 **kwargs,
             )
 
+    def test_convert_rejects_output_padding(self, device: torch.device) -> None:
+        """Nonzero ``output_padding`` would silently shrink the output."""
+        group = dist.group.WORLD
+        model = torch.nn.ConvTranspose2d(8, 8, 3, stride=2, padding=1, output_padding=1)
+        with pytest.raises(NotImplementedError, match="output_padding"):
+            convolution.DistributedConvTranspose2d.convert_to_jigsaw(
+                model, {"row": group, "col": group, "model": group}, device
+            )
+
 
 class TestConvTransposeChannelSizes:
     @pytest.mark.dist(4)

@@ -313,27 +313,20 @@ class TestConv1d:
             channel_comm=channel_comm,
         )
 
-    def test_string_padding_rejected_with_halo(
+    def test_asymmetric_same_padding_rejected_when_split(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        """String padding is not supported once a halo exchange is needed."""
-        conv = convolution.DistributedConv1d(
-            8,
-            12,
-            4,
-            device=device,
-            spatial_group=process_mesh_dict_2x2["row"],
-            channel_group=process_mesh_dict_2x2["col"],
-            stride=2,
-            padding="same",
-            dilation=1,
-            groups=1,
-            bias=True,
-            dtype=torch.float32,
-        ).to(device)
-        x = torch.randn(2, 4, 16, device=device)
-        with pytest.raises(NotImplementedError):
-            conv(x)
+        """An even kernel needs asymmetric ``"same"`` padding, which a split rejects."""
+        with pytest.raises(NotImplementedError, match="asymmetrically"):
+            convolution.DistributedConv1d(
+                8,
+                12,
+                4,
+                device=device,
+                spatial_group=process_mesh_dict_2x2["row"],
+                channel_group=process_mesh_dict_2x2["col"],
+                padding="same",
+            )
 
     def test_channel_comm_auto_defaults_by_device(
         self, device: torch.device, process_mesh_dict_2x2: dict

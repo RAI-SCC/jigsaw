@@ -13,7 +13,7 @@ from jigsaw._core.comm import CommOp
 from jigsaw._core.shard_repr import shard_repr
 from jigsaw.gather import gather_1d_results
 
-from .._common.arg_norm import _as_spatial_groups, _ntuple
+from .._common.arg_norm import _as_spatial_groups, _ntuple, _resolve_padding_str
 from .._common.channel_comm import resolve_conv_groups
 from .config import ConvNdConfig
 from .functional import _ConvNd
@@ -81,7 +81,9 @@ class _DistributedConvNd(torch.nn.Module):
         stride : int | tuple[int, ...]
             Stride in the convolution.
         padding : str | tuple[int, ...]
-            Padding. Strings are unsupported if ``stride != kernel_size``.
+            Padding, or ``"valid"`` or ``"same"``. ``"same"`` with an odd
+            ``dilation * (kernel_size - 1)`` pads asymmetrically and needs an
+            unsplit layer.
         dilation : int | tuple[int, ...]
             Dilation.
         groups : int
@@ -104,9 +106,11 @@ class _DistributedConvNd(torch.nn.Module):
         ------
         ValueError
             If ``groups`` or ``channel_group.size()`` does not divide the channel
-            counts, or a tuple argument has the wrong length.
+            counts, a tuple argument has the wrong length, or ``padding`` is an
+            invalid string or ``"same"`` with a stride.
         NotImplementedError
-            If ``groups > 1`` is not a multiple of ``channel_group.size()``.
+            If ``groups > 1`` is not a multiple of ``channel_group.size()``, or
+            asymmetric ``"same"`` padding is used on a split layer.
         """
         super().__init__()
         to_ntuple = _ntuple(self._n_spatial)
@@ -129,13 +133,17 @@ class _DistributedConvNd(torch.nn.Module):
         self.stride = to_ntuple(stride)
         self.dilation = to_ntuple(dilation)
 
+        # The kernels and the backward primitives take integer padding.
         if isinstance(padding, str):
-            self.padding = padding
+            self.padding = _resolve_padding_str(
+                padding, self.kernel_size, self.stride, self.dilation
+            )
         else:
             self.padding = to_ntuple(padding)
 
         self.channel_comm = channel_comm
         self.spatial_groups = _as_spatial_groups(spatial_group, self._n_spatial)
+        self._check_padding(self.spatial_groups, self._channel_local)
         # groups that carry a real (>1) split; the parameters are replicated
         # across their product and their gradients summed back over it.
         self._spatial_sync_groups = [
@@ -213,6 +221,28 @@ class _DistributedConvNd(torch.nn.Module):
             fan_in, _ = init._calculate_fan_in_and_fan_out(self.global_weight_shape)
             bound = 1.0 / math.sqrt(fan_in) if fan_in > 0 else 0.0
             init.uniform_(self.bias, -bound, bound)
+
+    def _check_padding(
+        self,
+        spatial_groups: tuple[dist.ProcessGroup | None, ...],
+        channel_local: bool,
+    ) -> None:
+        """Reject asymmetric ``"same"`` padding unless the native conv runs it.
+
+        Raises
+        ------
+        NotImplementedError
+            If ``self.padding`` is ``"same"`` and a spatial axis is split, or the
+            channels are split without each rank owning whole conv-groups.
+        """
+        split = any(g is not None and g.size() > 1 for g in spatial_groups)
+        if self.padding == "same" and (split or not channel_local):
+            raise NotImplementedError(
+                f"padding='same' with kernel_size={self.kernel_size} and "
+                f"dilation={self.dilation} pads asymmetrically, which is only "
+                "supported without a spatial split and with whole conv-groups per "
+                "channel rank; use an odd kernel_size or explicit padding."
+            )
 
     @property
     def spatial_world_size(self) -> int:
@@ -306,13 +336,20 @@ class _DistributedConvNd(torch.nn.Module):
         ------
         ValueError
             If the channel group size does not divide the channel counts.
+        NotImplementedError
+            If ``model.padding_mode`` is not ``"zeros"``.
         """
+        if model.padding_mode != "zeros":
+            raise NotImplementedError(
+                f"padding_mode={model.padding_mode!r} is not supported; distributed "
+                "convolutions pad with zeros only."
+            )
         instance = cls(
             in_channels=model.in_channels,
             out_channels=model.out_channels,
             kernel_size=model.kernel_size,
             stride=model.stride,
-            padding=cast(tuple[int, ...], model.padding),
+            padding=model.padding,
             dilation=model.dilation,
             groups=model.groups,
             bias=model.bias is not None,
@@ -451,14 +488,19 @@ class _DistributedConvNd(torch.nn.Module):
         ValueError
             If the target channel group size does not divide the channel counts.
         NotImplementedError
-            If ``groups > 1`` is not a multiple of the target channel group size.
+            If ``groups > 1`` is not a multiple of the target channel group size,
+            or asymmetric ``"same"`` padding would run on a split layer.
         """
         # Validate the target mesh before the gather mutates anything.
-        resolve_conv_groups(
+        to_channel_local, _ = resolve_conv_groups(
             self.groups,
             self.in_channels,
             self.out_channels,
             to_process_mesh_dict[pm_col_key].size(),
+        )
+        self._check_padding(
+            _as_spatial_groups(to_process_mesh_dict[pm_row_key], self._n_spatial),
+            to_channel_local,
         )
         from_weight_shape_local = self.weight.shape
         weight_shape_global = (
@@ -547,9 +589,10 @@ class _DistributedConvNd(torch.nn.Module):
         """Return whether the spatial split requires a halo exchange."""
         zero = (0,) * self._n_spatial
         unit = (1,) * self._n_spatial
-        zero_pad = self.padding == zero or self.padding == "valid"
         return not (
-            self.kernel_size == self.stride and zero_pad and self.dilation == unit
+            self.kernel_size == self.stride
+            and self.padding == zero
+            and self.dilation == unit
         )
 
     def _forward_local(

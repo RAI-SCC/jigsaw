@@ -27,6 +27,37 @@ def _ntuple(n: int) -> Callable[[int | tuple[int, ...]], tuple[int, ...]]:
     return parse
 
 
+def _resolve_padding_str(
+    padding: str,
+    kernel_size: tuple[int, ...],
+    stride: tuple[int, ...],
+    dilation: tuple[int, ...],
+) -> str | tuple[int, ...]:
+    """Convert ``"valid"`` or ``"same"`` padding to per-axis integers.
+
+    ``"same"`` stays a string if an axis needs asymmetric padding (odd
+    ``dilation * (kernel_size - 1)``), which only the native convolution supports.
+
+    Raises
+    ------
+    ValueError
+        If ``padding`` is neither ``"valid"`` nor ``"same"``, or ``"same"`` is
+        combined with a stride other than 1, as in :class:`torch.nn.Conv2d`.
+    """
+    if padding == "valid":
+        return (0,) * len(kernel_size)
+    if padding != "same":
+        raise ValueError(
+            f"Invalid padding string {padding!r}, should be one of ('valid', 'same')"
+        )
+    if any(s != 1 for s in stride):
+        raise ValueError("padding='same' is not supported for strided convolutions")
+    total = [d * (k - 1) for k, d in zip(kernel_size, dilation, strict=True)]
+    if any(t % 2 for t in total):
+        return "same"
+    return tuple(t // 2 for t in total)
+
+
 def _as_spatial_groups(
     spatial_group: "dist.ProcessGroup | Sequence[dist.ProcessGroup | None]",
     n_spatial: int,

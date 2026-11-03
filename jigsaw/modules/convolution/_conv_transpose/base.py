@@ -319,7 +319,14 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         ------
         ValueError
             If the channel group size does not divide the channel counts.
+        NotImplementedError
+            If ``model.output_padding`` is nonzero.
         """
+        if any(model.output_padding):
+            raise NotImplementedError(
+                f"output_padding={model.output_padding} is not supported; "
+                "distributed transpose convolutions need output_padding=0."
+            )
         instance = cls(
             in_channels=model.in_channels,
             out_channels=model.out_channels,

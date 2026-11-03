@@ -69,7 +69,7 @@ def _conv2d_reference_check(
     width: int,
     batch: int = 2,
     stride: Pair | None = None,
-    padding: Pair = 0,
+    padding: Pair | str = 0,
     dilation: Pair = 1,
     groups: int = 1,
     channel_comm: str = "all_gather",
@@ -92,7 +92,7 @@ def _conv2d_reference_check(
     model_group = mesh["model"]
     kernel_size = _pair(kernel_size)
     stride = kernel_size if stride is None else _pair(stride)
-    padding = _pair(padding)
+    padding = padding if isinstance(padding, str) else _pair(padding)
     dilation = _pair(dilation)
 
     torch.manual_seed(model_group.rank())
@@ -724,27 +724,71 @@ class TestConv2d:
             padding=(1, 1),
         )
 
-    def test_string_padding_rejected_with_halo(
+    @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)
+    @pytest.mark.parametrize(
+        ("kernel", "stride", "padding", "dilation"),
+        [(2, 2, "valid", 1), (1, 1, "same", 1), (3, 1, "same", 1), (3, 1, "same", 2)],
+        ids=["valid-patchify", "same-k1", "same-k3", "same-k3-d2"],
+    )
+    def test_string_padding(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        kernel: int,
+        stride: int,
+        padding: str,
+        dilation: int,
+        channel_comm: str,
+    ) -> None:
+        """``"valid"`` and symmetric ``"same"`` match torch, backward included."""
+        _skip_if_unsupported(channel_comm)
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_2x2,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=kernel,
+            height=16,
+            width=16,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            channel_comm=channel_comm,
+        )
+
+    def test_asymmetric_same_padding_rejected_when_split(
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
-        """String padding is not supported once a halo exchange is needed."""
-        conv = convolution.DistributedConv2d(
-            8,
-            12,
-            4,
-            device=device,
-            spatial_group=process_mesh_dict_2x2["row"],
-            channel_group=process_mesh_dict_2x2["col"],
-            stride=2,
+        """An even kernel needs asymmetric ``"same"`` padding, which a split rejects."""
+        with pytest.raises(NotImplementedError, match="asymmetrically"):
+            convolution.DistributedConv2d(
+                8,
+                12,
+                4,
+                device=device,
+                spatial_group=process_mesh_dict_2x2["row"],
+                channel_group=process_mesh_dict_2x2["col"],
+                padding="same",
+            )
+
+    @pytest.mark.dist(4)
+    def test_asymmetric_same_padding_channel_local(
+        self, device: torch.device, process_mesh_dict_1x4: dict
+    ) -> None:
+        """Asymmetric ``"same"`` runs natively without a spatial split and with
+        whole conv-groups per channel rank."""
+        _conv2d_reference_check(
+            device,
+            process_mesh_dict_1x4,
+            in_channels=8,
+            out_channels=12,
+            kernel_size=4,
+            height=16,
+            width=16,
+            stride=1,
             padding="same",
-            dilation=1,
-            groups=1,
-            bias=True,
-            dtype=torch.float32,
-        ).to(device)
-        x = torch.randn(2, 4, 16, 8, device=device)
-        with pytest.raises(NotImplementedError):
-            conv(x)
+            groups=4,
+        )
 
 
 class TestConv2dParallel:
