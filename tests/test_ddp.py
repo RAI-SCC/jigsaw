@@ -313,22 +313,29 @@ def test_joint_state_without_hook_raises(device, reducer, request) -> None:
 
 
 @pytest.fixture
-def python_reducer(monkeypatch):
+def python_reducer():
     """Build DDPs with the Python reducer, as for compiled autograd.
 
     Such a DDP also turns on inductor's DDP fusion and inlines DDP into dynamo,
-    process-wide; both are undone afterwards.
+    process-wide; both are undone afterwards. The configs are patched with their own
+    ``patch``, not ``monkeypatch``: since torch 2.15, restoring a config entry with
+    ``setattr`` deletes it.
     """
     import torch._dynamo
     import torch._inductor.config as inductor_config
     from torch._dynamo import trace_rules
 
-    monkeypatch.setattr(torch._dynamo.config, "optimize_ddp", "python_reducer")
-    for name in ("_fuse_ddp_communication", "_fuse_ddp_bucket_size"):
-        monkeypatch.setattr(inductor_config, name, getattr(inductor_config, name))
+    fusion = {
+        name: getattr(inductor_config, name)
+        for name in ("_fuse_ddp_communication", "_fuse_ddp_bucket_size")
+    }
     inline = set(trace_rules.LEGACY_MOD_INLINELIST)
     torch._dynamo.reset()
-    yield
+    with (
+        torch._dynamo.config.patch(optimize_ddp="python_reducer"),
+        inductor_config.patch(fusion),
+    ):
+        yield
     trace_rules.LEGACY_MOD_INLINELIST.clear()
     trace_rules.LEGACY_MOD_INLINELIST.update(inline)
     trace_rules.get_legacy_mod_inlinelist.cache_clear()
