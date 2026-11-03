@@ -73,7 +73,7 @@ class TestConvertContracts:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         conv = torch.nn.Conv2d(3, 4, 2, device=device)  # in=3 not divisible by col=2
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError, match="channel group size"):
             convert.convert_to_jigsaw(conv, process_mesh_dict_2x2, device)
 
     @pytest.mark.dist(4)
@@ -82,7 +82,7 @@ class TestConvertContracts:
     ) -> None:
         # ConvTransposeNd shards out_channels over col; out=3 not divisible by 2.
         convt = torch.nn.ConvTranspose2d(4, 3, 2, device=device)
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError, match="channel group size"):
             convert.convert_to_jigsaw(convt, process_mesh_dict_2x2, device)
 
     @pytest.mark.dist(4)
@@ -181,7 +181,7 @@ class TestReshardContracts:
             torch.nn.Conv2d(2, 2, 2, device=device), process_mesh_dict_2x2, device
         )
         # global out_channels is 2; target col=4 cannot slice it.
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError, match="channel group size"):
             jm.reshard_parameters(process_mesh_dict_2x2, process_mesh_dict_1x4)
 
     @pytest.mark.dist(4)
@@ -196,7 +196,7 @@ class TestReshardContracts:
             process_mesh_dict_2x2,
             device,
         )
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError, match="channel group size"):
             jm.reshard_parameters(process_mesh_dict_2x2, process_mesh_dict_1x4)
 
     @pytest.mark.dist(4)

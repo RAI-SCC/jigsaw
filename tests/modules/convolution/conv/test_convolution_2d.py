@@ -406,7 +406,7 @@ class TestConv2d:
         """Verify initial weights for Conv2d are correctly synchronized."""
         local_rank = dist.get_rank(group=process_mesh_dict_2x2["model"])
         torch.manual_seed(local_rank)  # each process gets a different initial seed
-        in_dim, out_dim = 5, 10
+        in_dim, out_dim = 6, 10
         kernel_size = 4
         conv = convolution.DistributedConv2d(
             in_dim,

@@ -30,11 +30,12 @@ class TestPair:
         """An asymmetric 2-tuple is preserved as-is."""
         assert _pair((3, 5)) == (3, 5)
 
-    def test_longer_tuple_is_truncated(self) -> None:
-        """Tuples longer than 2 are silently truncated to their first two items."""
-        assert _pair((1, 2, 3)) == (1, 2)
+    def test_longer_tuple_raises(self) -> None:
+        """A tuple with more entries than axes is rejected, not truncated."""
+        with pytest.raises(ValueError, match="1 or 2 entries"):
+            _pair((1, 2, 3))
 
     def test_empty_tuple_raises(self) -> None:
-        """An empty tuple has no elements to broadcast and raises ``IndexError``."""
-        with pytest.raises(IndexError):
+        """An empty tuple has no elements to broadcast and raises ``ValueError``."""
+        with pytest.raises(ValueError, match="1 or 2 entries"):
             _pair(())

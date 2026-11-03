@@ -8,7 +8,8 @@ import torch.distributed as dist
 def _ntuple(n: int) -> Callable[[int | tuple[int, ...]], tuple[int, ...]]:
     """Return a parser that converts an ``int`` or tuple to an ``n``-tuple.
 
-    An ``int`` or a length-1 tuple is broadcast to all axes.
+    An ``int`` or a length-1 tuple is broadcast to all axes. Other lengths than
+    1 or ``n`` raise ``ValueError``.
     """
 
     def parse(x: int | tuple[int, ...]) -> tuple[int, ...]:
@@ -16,7 +17,12 @@ def _ntuple(n: int) -> Callable[[int | tuple[int, ...]], tuple[int, ...]]:
             return (x,) * n
         if len(x) == 1:
             return (x[0],) * n
-        return tuple(x[i] for i in range(n))
+        if len(x) != n:
+            raise ValueError(
+                f"expected an int or a tuple of 1 or {n} entries (one per "
+                f"spatial axis); got {tuple(x)!r}."
+            )
+        return tuple(x)
 
     return parse
 

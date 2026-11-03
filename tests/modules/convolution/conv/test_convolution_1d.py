@@ -199,7 +199,7 @@ class TestConv1d:
             process_mesh_dict_2x2["col"].size(),
         )
         conv = convolution.DistributedConv1d(
-            5,
+            6,
             10,
             4,
             device=device,

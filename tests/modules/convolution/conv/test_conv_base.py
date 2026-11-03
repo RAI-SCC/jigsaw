@@ -54,6 +54,47 @@ class TestConvChannelSizes:
         assert conv.local_out_channels == 3 == conv.weight.shape[0]
 
 
+class TestConvArgumentValidation:
+    """Invalid constructor arguments raise on every rank before any collective."""
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize(
+        ("in_channels", "out_channels"), [(3, 4), (4, 3)], ids=["in", "out"]
+    )
+    def test_channels_indivisible_by_channel_group(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        in_channels: int,
+        out_channels: int,
+    ) -> None:
+        """A channel count the channel group (size 2) cannot shard is rejected."""
+        with pytest.raises(ValueError, match="channel group size"):
+            convolution.DistributedConv2d(
+                in_channels,
+                out_channels,
+                3,
+                device=device,
+                spatial_group=process_mesh_dict_2x2["row"],
+                channel_group=process_mesh_dict_2x2["col"],
+            )
+
+    @pytest.mark.parametrize("arg", ["kernel_size", "stride", "padding", "dilation"])
+    def test_tuple_with_wrong_length(self, device: torch.device, arg: str) -> None:
+        """A 3-tuple for a 2-D conv is rejected instead of truncated."""
+        group = dist.group.WORLD
+        kwargs = {"kernel_size": 3, arg: (1, 1, 1)}
+        with pytest.raises(ValueError, match="1 or 2 entries"):
+            convolution.DistributedConv2d(
+                8,
+                8,
+                device=device,
+                spatial_group=group,
+                channel_group=group,
+                **kwargs,
+            )
+
+
 def _reference_count(n_spatial: int, *args: int, bias: bool) -> int:
     ref = _REF_CLS[n_spatial](*args, bias=bias)
     return sum(p.numel() for p in ref.parameters())

@@ -99,12 +99,25 @@ class _DistributedConvNd(torch.nn.Module):
         config : ConvNdConfig, optional
             Kernel selection. Defaults to a configuration built from the
             arguments.
+
+        Raises
+        ------
+        ValueError
+            If ``groups`` or ``channel_group.size()`` does not divide the channel
+            counts, or a tuple argument has the wrong length.
+        NotImplementedError
+            If ``groups > 1`` is not a multiple of ``channel_group.size()``.
         """
         super().__init__()
         to_ntuple = _ntuple(self._n_spatial)
 
-        assert out_channels % channel_group.size() == 0, (
-            "out_channels is not divisible by channel_group size"
+        self.groups = groups
+        # ``channel_local``: every channel-parallel rank owns whole conv-groups,
+        # so the conv runs on this rank's channel shard with ``groups_local``
+        # groups and no channel-group communication. ``groups == 1`` with a real
+        # channel group uses the full-channel-gather path.
+        self._channel_local, self._groups_local = resolve_conv_groups(
+            groups, in_channels, out_channels, channel_group.size()
         )
 
         self.in_channels = in_channels
@@ -121,14 +134,6 @@ class _DistributedConvNd(torch.nn.Module):
         else:
             self.padding = to_ntuple(padding)
 
-        self.groups = groups
-        # ``channel_local``: every channel-parallel rank owns whole conv-groups,
-        # so the conv runs on this rank's channel shard with ``groups_local``
-        # groups and no channel-group communication. ``groups == 1`` with a real
-        # channel group uses the full-channel-gather path.
-        self._channel_local, self._groups_local = resolve_conv_groups(
-            groups, in_channels, out_channels, channel_group.size()
-        )
         self.channel_comm = channel_comm
         self.spatial_groups = _as_spatial_groups(spatial_group, self._n_spatial)
         # groups that carry a real (>1) split; the parameters are replicated
@@ -296,11 +301,12 @@ class _DistributedConvNd(torch.nn.Module):
         -------
         _DistributedConvNd
             Distributed convolution with the weights of ``model``.
-        """
-        assert model.in_channels % process_mesh_dict[col_kw].size() == 0, (
-            "in_channels is not divisible by process mesh cols"
-        )
 
+        Raises
+        ------
+        ValueError
+            If the channel group size does not divide the channel counts.
+        """
         instance = cls(
             in_channels=model.in_channels,
             out_channels=model.out_channels,
@@ -439,7 +445,21 @@ class _DistributedConvNd(torch.nn.Module):
             Key of the channel process group.
         pm_model_key : str
             Key of the model process group.
+
+        Raises
+        ------
+        ValueError
+            If the target channel group size does not divide the channel counts.
+        NotImplementedError
+            If ``groups > 1`` is not a multiple of the target channel group size.
         """
+        # Validate the target mesh before the gather mutates anything.
+        resolve_conv_groups(
+            self.groups,
+            self.in_channels,
+            self.out_channels,
+            to_process_mesh_dict[pm_col_key].size(),
+        )
         from_weight_shape_local = self.weight.shape
         weight_shape_global = (
             from_weight_shape_local[0] * from_process_mesh_dict[pm_col_key].size(),
@@ -448,11 +468,6 @@ class _DistributedConvNd(torch.nn.Module):
         to_weight_shape_local = (
             weight_shape_global[0] // to_process_mesh_dict[pm_col_key].size(),
             *weight_shape_global[1:],
-        )
-
-        assert weight_shape_global[0] % to_process_mesh_dict[pm_col_key].size() == 0, (
-            f"global weight shape[0] is {weight_shape_global[0]} which is not "
-            f"divisible by {to_process_mesh_dict[pm_col_key].size()}"
         )
         global_weights, global_bias = self.merge_weights(
             from_process_mesh_dict, pm_col_key
@@ -465,10 +480,6 @@ class _DistributedConvNd(torch.nn.Module):
             )
             to_bias_shape_local = (
                 bias_shape_global // to_process_mesh_dict[pm_col_key].size()
-            )
-            assert bias_shape_global % to_process_mesh_dict[pm_col_key].size() == 0, (
-                f"global bias shape is {bias_shape_global} which is not "
-                f"divisible by {to_process_mesh_dict[pm_col_key].size()}"
             )
             global_bias = gather_1d_results(
                 self.bias, from_process_mesh_dict, dim=0, pm_key=pm_col_key
