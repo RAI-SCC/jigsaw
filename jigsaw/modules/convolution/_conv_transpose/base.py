@@ -79,7 +79,8 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         spatial_group : dist.ProcessGroup | Sequence[dist.ProcessGroup | None]
             Process groups splitting the spatial axes. A single group splits
             the last axis. In a sequence, ``None`` or a group of size 1 marks an
-            axis that is not split.
+            axis that is not split. Every rank holds an equally sized slice of a
+            split axis.
         channel_group : dist.ProcessGroup
             Process group splitting the channels.
         stride : int | tuple[int, ...]
@@ -104,12 +105,26 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         config : ConvTransposeNdConfig, optional
             Kernel selection. Defaults to a configuration built from the
             arguments.
+
+        Raises
+        ------
+        ValueError
+            If ``groups`` or ``channel_group.size()`` does not divide the channel
+            counts, or a tuple argument has the wrong length.
+        NotImplementedError
+            If ``padding`` is a string, or ``groups > 1`` is not a multiple of
+            ``channel_group.size()``.
         """
         super().__init__()
         to_ntuple = _ntuple(self._n_spatial)
 
-        assert out_channels % channel_group.size() == 0, (
-            "out_channels is not divisible by channel_group size"
+        self.groups = groups
+        # ``channel_local``: every channel-parallel rank owns whole conv-groups,
+        # so the transpose conv runs on this rank's channel shard with
+        # ``groups_local`` groups and no channel-group communication. ``groups ==
+        # 1`` with a real channel group keeps the full-channel-gather path.
+        self._channel_local, self._groups_local = resolve_conv_groups(
+            groups, in_channels, out_channels, channel_group.size()
         )
 
         self.in_channels = in_channels
@@ -128,14 +143,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             )
         self.padding = to_ntuple(padding)
 
-        self.groups = groups
-        # ``channel_local``: every channel-parallel rank owns whole conv-groups,
-        # so the transpose conv runs on this rank's channel shard with
-        # ``groups_local`` groups and no channel-group communication. ``groups ==
-        # 1`` with a real channel group keeps the full-channel-gather path.
-        self._channel_local, self._groups_local = resolve_conv_groups(
-            groups, in_channels, out_channels, channel_group.size()
-        )
         self.channel_comm = channel_comm
         self.spatial_groups = _as_spatial_groups(spatial_group, self._n_spatial)
         # groups that carry a real (>1) split; the parameters are replicated
@@ -232,13 +239,8 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         Returns
         -------
         int
-            Global (unsharded) count of this layer's parameters, including plain
-            ``torch.nn`` children; children with ``get_parameter_count`` report
-            their own. No communication.
-
-        Notes
-        -----
-        This method calculates the number of parameters based on the global weight and bias shape calculated at initialization instead of counting the number of elements of the local parameters and scaling according to the respective communication group sizes.
+            Global (unsharded) count of the weight and bias, computed from their
+            global shapes without communication.
         """
         num_bias_param = (
             0 if self.global_bias_shape is None else math.prod(self.global_bias_shape)
@@ -308,11 +310,19 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         -------
         _DistributedConvTransposeNd
             Distributed transpose convolution with the weights of ``model``.
-        """
-        assert model.out_channels % process_mesh_dict[col_kw].size() == 0, (
-            "out_channels is not divisible by process mesh cols"
-        )
 
+        Raises
+        ------
+        ValueError
+            If the channel group size does not divide the channel counts.
+        NotImplementedError
+            If ``model.output_padding`` is nonzero.
+        """
+        if any(model.output_padding):
+            raise NotImplementedError(
+                f"output_padding={model.output_padding} is not supported; "
+                "distributed transpose convolutions need output_padding=0."
+            )
         instance = cls(
             in_channels=model.in_channels,
             out_channels=model.out_channels,
@@ -457,11 +467,27 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             Key of the channel process group.
         pm_model_key : str
             Key of the model process group.
+
+        Raises
+        ------
+        ValueError
+            If the target channel group size does not divide the channel counts.
+        NotImplementedError
+            If the current or the target channel group owns whole conv-groups,
+            or ``groups > 1`` is not a multiple of the target channel group size.
         """
-        if self._channel_local and self.channel_group.size() > 1:
+        # Validate the target mesh before the gather mutates anything.
+        to_size = to_process_mesh_dict[pm_col_key].size()
+        to_channel_local, _ = resolve_conv_groups(
+            self.groups, self.in_channels, self.out_channels, to_size
+        )
+        if (self._channel_local and self.channel_group.size() > 1) or (
+            to_channel_local and to_size > 1
+        ):
             raise NotImplementedError(
                 "reshard_parameters does not yet support a grouped transpose "
-                "convolution whose channel group owns whole conv-groups."
+                "convolution whose current or target channel group owns whole "
+                "conv-groups."
             )
         from_weight_shape_local = self.weight.shape
         weight_shape_global = (
@@ -474,30 +500,9 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             weight_shape_global[1] // to_process_mesh_dict[pm_col_key].size(),
             *weight_shape_global[2:],
         )
-
-        assert weight_shape_global[1] % to_process_mesh_dict[pm_col_key].size() == 0, (
-            f"global weight shape[1] is {weight_shape_global[1]} which is not "
-            f"divisible by {to_process_mesh_dict[pm_col_key].size()}"
-        )
         global_weights, global_bias = self.merge_weights(
             from_process_mesh_dict, pm_col_key
         )
-
-        if self.bias is not None:
-            from_bias_shape_local = self.bias.shape
-            bias_shape_global = (
-                from_bias_shape_local[0] * from_process_mesh_dict[pm_col_key].size()
-            )
-            to_bias_shape_local = (
-                bias_shape_global // to_process_mesh_dict[pm_col_key].size()
-            )
-            assert bias_shape_global % to_process_mesh_dict[pm_col_key].size() == 0, (
-                f"global bias shape is {bias_shape_global} which is not "
-                f"divisible by {to_process_mesh_dict[pm_col_key].size()}"
-            )
-            global_bias = gather_1d_results(
-                self.bias, from_process_mesh_dict, dim=0, pm_key=pm_col_key
-            )
 
         col_rank, col_shard_size = (
             to_process_mesh_dict[pm_col_key].rank(),
@@ -510,14 +515,13 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         )
         del global_weights
 
-        if isinstance(global_bias, torch.Tensor):
-            col_rank, col_shard_size = (
-                to_process_mesh_dict[pm_col_key].rank(),
-                to_bias_shape_local,
+        if global_bias is not None:
+            bias_shard_size = (
+                global_bias.shape[0] // to_process_mesh_dict[pm_col_key].size()
             )
             self.bias = torch.nn.Parameter(
                 global_bias[
-                    col_rank * col_shard_size : (col_rank + 1) * col_shard_size
+                    col_rank * bias_shard_size : (col_rank + 1) * bias_shard_size
                 ].contiguous()
             )
             del global_bias
@@ -538,18 +542,15 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             self.out_channels,
             self.channel_group.size(),
         )
-        if self._channel_local and self.channel_group.size() > 1:
-            raise NotImplementedError(
-                "reshard_parameters does not yet support a grouped transpose "
-                "convolution whose target channel group owns whole conv-groups."
-            )
-        self.config = ConvTransposeNdConfig(
+        # Rebuild for the new channel group, keeping the config's class and
+        # channel_comm (a config passed to __init__ overrides ``channel_comm``).
+        self.config = type(self.config)(
             self.channel_group,
             self.bias,
             self.kernel_size,
             self.stride,
             self.device,
-            self.channel_comm,
+            self.config.channel_comm,
             self.groups,
         )
 
@@ -605,11 +606,18 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         ----------
         x : torch.Tensor
             Local input of shape ``(N, Cin / n_channel, *spatial / n_spatial)``.
+            Every rank of a spatial group holds an equally sized slice.
 
         Returns
         -------
         torch.Tensor
             Local output of shape ``(N, Cout / n_channel, *spatial' / n_spatial)``.
+
+        Raises
+        ------
+        NotImplementedError
+            If a halo exchange is needed and the global output size of a split
+            axis is not divisible by its group size.
         """
         # Channel-local convs need no channel communication, so they skip the
         # autograd Function unless a spatial split needs a halo exchange.

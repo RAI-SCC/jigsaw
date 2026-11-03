@@ -62,7 +62,7 @@ def resolve_channel_comm(channel_comm: CommOp | str, device: torch.device) -> st
 def resolve_conv_groups(
     groups: int, in_channels: int, out_channels: int, channel_group_size: int
 ) -> tuple[bool, int]:
-    """Validate ``groups`` against the channel group size ``G``.
+    """Validate ``groups`` and the channel counts against the channel group size ``G``.
 
     Parameters
     ----------
@@ -86,7 +86,8 @@ def resolve_conv_groups(
     Raises
     ------
     ValueError
-        If ``groups`` is invalid or does not divide the channel counts.
+        If ``groups`` is invalid, or ``groups`` or ``G`` does not divide the
+        channel counts.
     NotImplementedError
         If ``groups > 1`` is not a multiple of ``G``.
     """
@@ -96,6 +97,12 @@ def resolve_conv_groups(
         raise ValueError(
             f"in_channels ({in_channels}) and out_channels ({out_channels}) must "
             f"both be divisible by groups ({groups})"
+        )
+    # Both channel axes are sharded over the channel group.
+    if in_channels % channel_group_size or out_channels % channel_group_size:
+        raise ValueError(
+            f"in_channels ({in_channels}) and out_channels ({out_channels}) must "
+            f"both be divisible by the channel group size ({channel_group_size})"
         )
     if groups != 1 and groups % channel_group_size != 0:
         raise NotImplementedError(

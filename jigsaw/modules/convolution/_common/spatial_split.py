@@ -28,6 +28,29 @@ def _needs_halo(
     )
 
 
+def _check_stride_aligned(
+    x: torch.Tensor,
+    spatial_groups: tuple[dist.ProcessGroup | None, ...],
+    stride: tuple[int, ...],
+) -> None:
+    """Check that no stride window crosses a shard boundary of a split axis.
+
+    Without a halo exchange each rank convolves only its own slice.
+
+    Raises
+    ------
+    ValueError
+        If the local size of a split axis is not a multiple of its stride.
+    """
+    for idx, axis, _ in _split_axes(spatial_groups):
+        if x.shape[axis] % stride[idx]:
+            raise ValueError(
+                f"spatial axis {idx} has a local size of {x.shape[axis]}, which is "
+                f"not a multiple of its stride ({stride[idx]}); with "
+                "kernel_size == stride every shard must hold whole windows."
+            )
+
+
 def _reduce_scatter_channels(
     g_x: torch.Tensor, channel_group: dist.ProcessGroup, n: int
 ) -> tuple[torch.Tensor, dist.Work | None]:

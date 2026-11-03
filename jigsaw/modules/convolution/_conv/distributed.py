@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 
 from .._common.spatial_split import (
+    _check_stride_aligned,
     _local_padding,
     _needs_halo,
     _reduce_scatter_channels,
@@ -75,12 +76,18 @@ def conv_nway(
     -------
     tuple[torch.Tensor, torch.Tensor]
         Output and the full-channel input kept for the backward pass.
+
+    Raises
+    ------
+    ValueError
+        If the local size of a split axis is not a multiple of its stride.
     """
     if _needs_halo(spatial_groups, padding, dilation):
         return conv_halo_nway(
             x, w, b, stride, padding, dilation, spatial_groups, channel_group, config
         )
 
+    _check_stride_aligned(x, spatial_groups, stride)
     return over_channels(
         x,
         w,
