@@ -384,12 +384,12 @@ class TestBackendWithTe:
 
 
 # --------------------------------------------------------------------------- #
-# TE core limits: asserts that fire before a kernel would fail or crash
+# TE core limits: checks that fire before a kernel would fail or crash
 # --------------------------------------------------------------------------- #
 class TestTeLimits:
     @pytest.mark.parametrize("head_dim", [4, 12, 260])
     def test_cudnn_head_dim(self, head_dim):
-        with pytest.raises(AssertionError, match="cuDNN core"):
+        with pytest.raises(ValueError, match="cuDNN core"):
             te_cores.cudnn.check_head_dim(head_dim, CPU)
 
     def test_cudnn_head_dim_ok(self):
@@ -397,7 +397,7 @@ class TestTeLimits:
 
     def test_flash_head_dim(self):
         te_cores.flash.check_head_dim(12, CPU)  # padded to 16, fine
-        with pytest.raises(AssertionError, match="flash core"):
+        with pytest.raises(ValueError, match="flash core"):
             te_cores.flash.check_head_dim(264, CPU)
 
     def test_distributed_attention_checks_head_dim(
@@ -406,19 +406,19 @@ class TestTeLimits:
         """Construction fails on a head dim the selected core cannot serve."""
         monkeypatch.setattr(attention, "JIGSAW_TE_AVAILABLE", True)
         monkeypatch.setenv("JIGSAW_TE_CORE", "cudnn")
-        with pytest.raises(AssertionError, match="embed_dim // heads"):
+        with pytest.raises(ValueError, match="embed_dim // heads"):
             _build_attn("te", device, solo_group, in_dim=48, embed_dim=48)
 
     @pytest.mark.parametrize("core", ["cudnn", "flash"])
     def test_rejects_extra_leading_dims(self, core):
         q = torch.empty(2, 3, 16, 4, 8)
-        with pytest.raises(AssertionError, match="4-D q/k/v"):
+        with pytest.raises(ValueError, match="4-D q/k/v"):
             getattr(te_cores, core).forward(q, q, q, 1.0, 0.0, layout="bshd")
 
     @pytest.mark.parametrize("core", ["cudnn", "flash"])
     def test_names_the_bad_tensor(self, core):
         q = torch.empty(2, 16, 4, 8)
-        with pytest.raises(AssertionError, match=r"got k of shape \(16, 4, 8\)"):
+        with pytest.raises(ValueError, match=r"got k of shape \(16, 4, 8\)"):
             getattr(te_cores, core).forward(q, q[0], q, 1.0, 0.0, layout="bshd")
 
     @pytest.mark.parametrize("core", ["cudnn", "flash"])
@@ -437,7 +437,7 @@ class TestTeLimits:
         """The kernels read past a mismatched k/v instead of failing."""
         q = torch.empty((2, 16, 4, 8) if layout == "bshd" else (2, 4, 16, 8))
         k, v = torch.empty(k_shape), torch.empty(v_shape)
-        with pytest.raises(AssertionError, match="no GQA"):
+        with pytest.raises(ValueError, match="no GQA"):
             getattr(te_cores, core).forward(q, k, v, 1.0, 0.0, layout=layout)
 
     @pytest.mark.parametrize("core", ["cudnn", "flash"])
@@ -445,14 +445,14 @@ class TestTeLimits:
         """Only the seq len may differ from q: the checks get as far as the device."""
         q = torch.empty(2, 16, 4, 8, dtype=torch.bfloat16)
         kv = torch.empty(2, 32, 4, 8, dtype=torch.bfloat16)
-        with pytest.raises(AssertionError, match="CUDA"):
+        with pytest.raises(ValueError, match="CUDA"):
             getattr(te_cores, core).forward(q, kv, kv, 1.0, 0.0, layout="bshd")
 
     @pytest.mark.parametrize("core", ["cudnn", "flash"])
     def test_rejects_mixed_dtypes(self, core):
         q = torch.empty(2, 16, 4, 8, dtype=torch.bfloat16)
         k = torch.empty(2, 16, 4, 8, dtype=torch.float16)
-        with pytest.raises(AssertionError, match="one dtype"):
+        with pytest.raises(ValueError, match="one dtype"):
             getattr(te_cores, core).forward(q, k, q, 1.0, 0.0, layout="bshd")
 
     @pytest.mark.parametrize("core", ["cudnn", "flash"])
@@ -466,7 +466,7 @@ class TestTeLimits:
     )
     def test_backward_rejects_bad_saved_state(self, core, lse_shape, rng_state, match):
         q = torch.empty(2, 16, 4, 8, dtype=torch.bfloat16)
-        with pytest.raises(AssertionError, match=match):
+        with pytest.raises(ValueError, match=match):
             getattr(te_cores, core).backward(
                 q, q, q, q, q, torch.empty(lse_shape), 1.0,
                 dropout_p=0.1, rng_state=rng_state, layout="bshd",
@@ -475,7 +475,7 @@ class TestTeLimits:
     @pytest.mark.parametrize("core", ["cudnn", "flash"])
     def test_rejects_cpu(self, core):
         q = torch.empty(2, 16, 4, 8, dtype=torch.bfloat16)
-        with pytest.raises(AssertionError, match="CUDA"):
+        with pytest.raises(ValueError, match="CUDA"):
             getattr(te_cores, core).forward(q, q, q, 1.0, 0.0, layout="bshd")
 
     @pytest.mark.gpu_required
@@ -492,13 +492,13 @@ class TestTeLimits:
     )
     def test_rejects_on_gpu(self, core, shape, dtype, match):
         q = torch.empty(shape, dtype=dtype, device="cuda")
-        with pytest.raises(AssertionError, match=match):
+        with pytest.raises(ValueError, match=match):
             getattr(te_cores, core).forward(q, q, q, 1.0, 0.0, layout="bshd")
 
     @pytest.mark.gpu_required
     def test_cudnn_rejects_single_token(self):
         q = torch.empty(2, 1, 4, 8, dtype=torch.bfloat16, device="cuda")
-        with pytest.raises(AssertionError, match="seq len > 1"):
+        with pytest.raises(ValueError, match="seq len > 1"):
             te_cores.cudnn.forward(q, q, q, 1.0, 0.0, layout="bshd")
 
 
@@ -522,7 +522,7 @@ def _run_core(core, device, batch, s_q, s_kv, heads, head_dim, backward=True):
 
 
 # --------------------------------------------------------------------------- #
-# TE core limits on real Hopper hardware: the asserts match what the kernels do
+# TE core limits on real Hopper hardware: the checks match what the kernels do
 # --------------------------------------------------------------------------- #
 @pytest.mark.te_required
 @pytest.mark.gpu_required
@@ -543,7 +543,7 @@ class TestTeLimitsOnH100:
         """
         try:
             te_cores.cudnn.check_head_dim(head_dim, device)
-        except AssertionError:
+        except ValueError:
             with pytest.raises(RuntimeError, match="no fused-attention backend"):
                 te_cores.cudnn._fused_attn_backend(
                     True, torch.bfloat16, 4, 128, 128, head_dim, 0.0
@@ -555,7 +555,7 @@ class TestTeLimitsOnH100:
     def test_flash_head_dim_check_matches_kernel(self, device, head_dim):
         try:
             te_cores.flash.check_head_dim(head_dim, device)
-        except AssertionError:
+        except ValueError:
             with pytest.raises(RuntimeError, match="head dimension at most 256"):
                 _run_core(te_cores.flash, device, 2, 128, 128, 4, head_dim)
         else:
@@ -572,12 +572,12 @@ class TestTeLimitsOnH100:
         if ok:
             assert build().te_core is te_cores.cudnn
         else:
-            with pytest.raises(AssertionError, match="cuDNN core"):
+            with pytest.raises(ValueError, match="cuDNN core"):
                 build()
 
     @pytest.mark.parametrize("s_q,s_kv", [(1, 64), (64, 1)])
     def test_cudnn_single_token_one_side_runs(self, device, s_q, s_kv):
-        """The seq-len assert only rejects a single token on *both* sides."""
+        """The seq-len check only rejects a single token on *both* sides."""
         _run_core(te_cores.cudnn, device, 2, s_q, s_kv, 4, 64)
 
     @pytest.mark.parametrize("core", ["cudnn", "flash"])
@@ -605,7 +605,7 @@ class TestTeLimitsOnH100:
             return torch.randn(batch, s, 4, head_dim, dtype=dtype, device=device)
 
         q, k, v = make(), make(**k_kw), make(**v_kw)
-        with pytest.raises(AssertionError, match=match):
+        with pytest.raises(ValueError, match=match):
             getattr(te_cores, core).forward(q, k, v, 0.125, 0.0, layout="bshd")
 
     @pytest.mark.parametrize("core", ["cudnn", "flash"])

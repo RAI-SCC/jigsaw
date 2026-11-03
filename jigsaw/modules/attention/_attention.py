@@ -257,6 +257,15 @@ class DistributedAttention(torch.nn.Module):
         ``attn_backend``.
     out_bias : bool
         Whether the output projection has a bias.
+
+    Raises
+    ------
+    ValueError
+        If ``ring`` and ``ulysses`` are both set, the group sizes do not divide
+        ``heads``, ``heads`` does not divide ``embed_dim``, ``ring`` or
+        ``ulysses`` runs on a spatial group of size 1, or ``ulysses_intra_size``
+        does not split the spatial group and heads. With ``attn_backend="te"``,
+        also if the head dim is outside the kernel's limits.
     """
 
     qkv: torch.nn.Linear | linear.DistributedLinear
@@ -344,10 +353,10 @@ class DistributedAttention(torch.nn.Module):
         self._bshd_qkv = self.te or self.ulysses
         self._te_bshd = self.te and not ring and not ulysses
 
-        assert heads % self.channel_group.size() == 0, (
-            "heads is not divisible by channel group size"
-        )
-        assert embed_dim % heads == 0, "embed_dim is not divisible by heads"
+        if heads % self.channel_group.size() != 0:
+            raise ValueError("heads is not divisible by channel group size")
+        if embed_dim % heads != 0:
+            raise ValueError("embed_dim is not divisible by heads")
         if self.te:
             te_core.select_core(self.device).check_head_dim(
                 embed_dim // heads, self.device
@@ -358,29 +367,29 @@ class DistributedAttention(torch.nn.Module):
         self.config = self._resolve_ring_config(ring, config, device)
 
         if self.ring:
-            assert spatial_group.size() > 1, (
-                "Cannot perform ring attention if spatial size is 1."
-            )
+            if spatial_group.size() == 1:
+                raise ValueError("Cannot perform ring attention if spatial size is 1.")
             self.attn_core: Callable[..., torch.Tensor] = self._ring_attn_core
         elif self.ulysses:
-            assert spatial_group.size() > 1, (
-                "Cannot perform ulysses attention if spatial size is 1."
-            )
+            if spatial_group.size() == 1:
+                raise ValueError(
+                    "Cannot perform ulysses attention if spatial size is 1."
+                )
             if self.ulysses_intra_size:
                 a = self.ulysses_intra_size
-                assert (
-                    spatial_group.size() % a == 0 and spatial_group.size() // a >= 2
-                ), (
-                    f"hierarchical ulysses needs spatial ({spatial_group.size()}) "
-                    f"to split into all-to-all intra groups of {a} and an "
-                    f"outer ring of >= 2; use ulysses_intra_size=0 for "
-                    f"the flat scheme"
-                )
-                assert self.heads % a == 0, (
-                    f"hierarchical ulysses scatters heads over the intra "
-                    f"group: heads // channel ({self.heads}) must be divisible by "
-                    f"ulysses_intra_size ({a})"
-                )
+                if spatial_group.size() % a != 0 or spatial_group.size() // a < 2:
+                    raise ValueError(
+                        f"hierarchical ulysses needs spatial ({spatial_group.size()}) "
+                        f"to split into all-to-all intra groups of {a} and an "
+                        f"outer ring of >= 2; use ulysses_intra_size=0 for "
+                        f"the flat scheme"
+                    )
+                if self.heads % a != 0:
+                    raise ValueError(
+                        f"hierarchical ulysses scatters heads over the intra "
+                        f"group: heads // channel ({self.heads}) must be divisible "
+                        f"by ulysses_intra_size ({a})"
+                    )
                 topo = get_hybrid_topology(spatial_group, a)
                 self._uly_intra_group = topo.intra_group
                 self._uly_inter_group = topo.inter_group
@@ -397,10 +406,11 @@ class DistributedAttention(torch.nn.Module):
                     offload=self.ulysses_inter_offload,
                 )
             else:
-                assert self.heads % spatial_group.size() == 0, (
-                    f"ulysses attention needs heads // channel ({self.heads}) "
-                    f"divisible by spatial group size ({spatial_group.size()})"
-                )
+                if self.heads % spatial_group.size() != 0:
+                    raise ValueError(
+                        f"ulysses attention needs heads // channel ({self.heads}) "
+                        f"divisible by spatial group size ({spatial_group.size()})"
+                    )
             if self.te:
                 # Same per-GPU-arch kernel the ring's inner core resolves; the
                 # Ulysses path calls it directly on the gathered full sequence.
@@ -1300,14 +1310,22 @@ class Attention(torch.nn.Module):
         -------
         DistributedAttention
             Converted module.
+
+        Raises
+        ------
+        ValueError
+            If the column group size does not divide ``attention.heads``, or the
+            arguments fail the checks of :class:`DistributedAttention`.
         """
         channel_size = process_mesh_dict[col_kw].size()
         channel_rank = process_mesh_dict[col_kw].rank()
         spatial_group = process_mesh_dict[row_kw]
 
-        assert attention.heads % channel_size == 0, (
-            f"num_heads={attention.heads} not divisible by channel size {channel_size}"
-        )
+        if attention.heads % channel_size != 0:
+            raise ValueError(
+                f"num_heads={attention.heads} not divisible by channel size "
+                f"{channel_size}"
+            )
 
         instance = DistributedAttention(
             in_dim=attention.in_dim,

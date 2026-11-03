@@ -56,6 +56,12 @@ class DistributedGroupNorm(torch.nn.Module):
         statistics are reduced over them, and the weight and bias are
         replicated over them. ``None`` means the spatial dimensions are not
         partitioned.
+
+    Raises
+    ------
+    ValueError
+        If ``channel_group.size()`` does not divide ``num_groups`` and
+        ``num_channels``.
     """
 
     def __init__(
@@ -74,10 +80,11 @@ class DistributedGroupNorm(torch.nn.Module):
         super().__init__()
 
         channel_size = channel_group.size() if channel_group is not None else 1
-        assert num_groups % channel_size == 0 and num_channels % channel_size == 0, (
-            f"num_groups={num_groups} and num_channels={num_channels} must both "
-            f"be divisible by the channel group size {channel_size}"
-        )
+        if num_groups % channel_size != 0 or num_channels % channel_size != 0:
+            raise ValueError(
+                f"num_groups={num_groups} and num_channels={num_channels} must both "
+                f"be divisible by the channel group size {channel_size}"
+            )
         self.num_groups = num_groups
         self.num_channels = num_channels
         self.num_local_groups = num_groups // channel_size
@@ -150,7 +157,7 @@ class DistributedGroupNorm(torch.nn.Module):
 
         Raises
         ------
-        AssertionError
+        ValueError
             If ``num_groups`` or ``num_channels`` is not divisible by the
             column group size.
         """
@@ -302,14 +309,22 @@ class DistributedGroupNorm(torch.nn.Module):
             Process groups of the new mesh.
         pm_row_key, pm_col_key : str
             Keys of the row and column process groups in both meshes.
+
+        Raises
+        ------
+        ValueError
+            If the target column group size does not divide ``num_groups`` or
+            ``num_channels``.
         """
         to_channel = to_process_mesh[pm_col_key]
-        assert self.num_groups % to_channel.size() == 0, (
-            "num_groups must be divisible by the target channel group size"
-        )
-        assert self.num_channels % to_channel.size() == 0, (
-            "num_channels must be divisible by the target channel group size"
-        )
+        if self.num_groups % to_channel.size() != 0:
+            raise ValueError(
+                "num_groups must be divisible by the target channel group size"
+            )
+        if self.num_channels % to_channel.size() != 0:
+            raise ValueError(
+                "num_channels must be divisible by the target channel group size"
+            )
 
         new_num_channels = self.num_channels // to_channel.size()
         new_num_local_groups = self.num_groups // to_channel.size()

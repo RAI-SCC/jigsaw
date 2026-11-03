@@ -80,7 +80,7 @@ class TestRingConstruction:
         self, device: torch.device, process_mesh_dict_1x2: dict
     ) -> None:
         mesh = process_mesh_dict_1x2  # row group of one rank, channel axis split
-        with pytest.raises(AssertionError, match="spatial size is 1"):
+        with pytest.raises(ValueError, match="spatial size is 1"):
             attention.DistributedAttention(
                 in_dim=DIM,
                 embed_dim=DIM,

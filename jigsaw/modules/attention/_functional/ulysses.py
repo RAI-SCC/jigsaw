@@ -30,7 +30,10 @@ def _a2a_heads_to_seq(x: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor
         return x
     *lead, s, h, d = x.shape
     nlead = len(lead)
-    assert h % p == 0, f"ulysses all-to-all: heads {h} not divisible by group size {p}"
+    if h % p != 0:
+        raise ValueError(
+            f"ulysses all-to-all: heads {h} not divisible by group size {p}"
+        )
     # [..., s, P, h//P, d] -> [P, ..., s, h//P, d]
     send = x.reshape(*lead, s, p, h // p, d).movedim(nlead + 1, 0).contiguous()
     recv = torch.empty_like(send)
@@ -52,7 +55,8 @@ def _a2a_seq_to_heads(x: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor
         return x
     *lead, s, hp, d = x.shape
     nlead = len(lead)
-    assert s % p == 0, f"ulysses all-to-all: seq {s} not divisible by group size {p}"
+    if s % p != 0:
+        raise ValueError(f"ulysses all-to-all: seq {s} not divisible by group size {p}")
     # [..., P, s//P, h_p, d] -> [P, ..., s//P, h_p, d]
     send = x.reshape(*lead, p, s // p, hp, d).movedim(nlead, 0).contiguous()
     recv = torch.empty_like(send)

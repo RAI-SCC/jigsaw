@@ -31,7 +31,7 @@ def _without_seq(t: torch.Tensor, layout: Layout) -> tuple[int, ...]:
 def check_inputs(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, layout: Layout
 ) -> None:
-    """Assert ``q``/``k``/``v`` are inputs the TE kernels can serve.
+    """Check ``q``/``k``/``v`` are inputs the TE kernels can serve.
 
     Parameters
     ----------
@@ -39,41 +39,52 @@ def check_inputs(
         Query, key and value in ``layout``.
     layout : {"bhsd", "bshd"}
         Layout of ``q``, ``k`` and ``v``.
+
+    Raises
+    ------
+    ValueError
+        If the shapes, dtypes or devices are outside the kernels' limits.
     """
     for name, t in (("q", q), ("k", k), ("v", v)):
-        assert t.dim() == 4, (
-            f"attn_backend='te' needs 4-D q/k/v ({layout}), got {name} of shape "
-            f"{tuple(t.shape)}; pass x as (batch, seq, channels) and fold any "
-            "other leading dims into batch."
-        )
+        if t.dim() != 4:
+            raise ValueError(
+                f"attn_backend='te' needs 4-D q/k/v ({layout}), got {name} of shape "
+                f"{tuple(t.shape)}; pass x as (batch, seq, channels) and fold any "
+                "other leading dims into batch."
+            )
     # The kernels take batch, heads and head dim from q and the kv length from
     # k, and read v with k's: a mismatch reads out of bounds rather than failing.
-    assert k.shape == v.shape and _without_seq(q, layout) == _without_seq(k, layout), (
-        f"attn_backend='te' needs k and v of equal shape, matching q in all but "
-        f"seq len (no GQA), got q {tuple(q.shape)}, k {tuple(k.shape)}, "
-        f"v {tuple(v.shape)} ({layout})."
-    )
-    assert q.dtype in (torch.float16, torch.bfloat16), (
-        f"attn_backend='te' needs fp16/bf16 q/k/v, got {q.dtype}."
-    )
-    assert q.dtype == k.dtype == v.dtype, (
-        f"attn_backend='te' needs q/k/v of one dtype, got {q.dtype}, {k.dtype}, "
-        f"{v.dtype}."
-    )
-    assert q.is_cuda, f"attn_backend='te' needs CUDA tensors, got q on {q.device}."
-    assert q.device == k.device == v.device, (
-        f"attn_backend='te' needs q/k/v on one device, got {q.device}, "
-        f"{k.device}, {v.device}."
-    )
-    assert q.numel() > 0 and k.numel() > 0, (
-        f"attn_backend='te' needs non-empty q/k/v, got q {tuple(q.shape)}, "
-        f"k {tuple(k.shape)}."
-    )
+    if k.shape != v.shape or _without_seq(q, layout) != _without_seq(k, layout):
+        raise ValueError(
+            f"attn_backend='te' needs k and v of equal shape, matching q in all but "
+            f"seq len (no GQA), got q {tuple(q.shape)}, k {tuple(k.shape)}, "
+            f"v {tuple(v.shape)} ({layout})."
+        )
+    if q.dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError(f"attn_backend='te' needs fp16/bf16 q/k/v, got {q.dtype}.")
+    if not q.dtype == k.dtype == v.dtype:
+        raise ValueError(
+            f"attn_backend='te' needs q/k/v of one dtype, got {q.dtype}, "
+            f"{k.dtype}, {v.dtype}."
+        )
+    if not q.is_cuda:
+        raise ValueError(f"attn_backend='te' needs CUDA tensors, got q on {q.device}.")
+    if not q.device == k.device == v.device:
+        raise ValueError(
+            f"attn_backend='te' needs q/k/v on one device, got {q.device}, "
+            f"{k.device}, {v.device}."
+        )
+    if q.numel() == 0 or k.numel() == 0:
+        raise ValueError(
+            f"attn_backend='te' needs non-empty q/k/v, got q {tuple(q.shape)}, "
+            f"k {tuple(k.shape)}."
+        )
     b, h = q.shape[0], q.shape[2 if layout == "bshd" else 1]
-    assert b <= MAX_GRID_DIM and h <= MAX_GRID_DIM, (
-        f"attn_backend='te' supports at most {MAX_GRID_DIM} batch entries and "
-        f"{MAX_GRID_DIM} heads per call, got batch={b}, heads={h}."
-    )
+    if b > MAX_GRID_DIM or h > MAX_GRID_DIM:
+        raise ValueError(
+            f"attn_backend='te' supports at most {MAX_GRID_DIM} batch entries and "
+            f"{MAX_GRID_DIM} heads per call, got batch={b}, heads={h}."
+        )
 
 
 def check_backward(
@@ -83,7 +94,7 @@ def check_backward(
     rng_state: torch.Tensor | None,
     layout: Layout,
 ) -> None:
-    """Assert the saved forward state lets the backward replay it.
+    """Check the saved forward state lets the backward replay it.
 
     Parameters
     ----------
@@ -97,15 +108,22 @@ def check_backward(
         Dropout RNG state from the matching forward.
     layout : {"bhsd", "bshd"}
         Layout of ``q``.
+
+    Raises
+    ------
+    ValueError
+        If dropout lacks ``rng_state`` or ``logsumexp`` has the wrong shape.
     """
     # Without it the kernel replays a different dropout mask: wrong grads, no error.
-    assert dropout_p == 0.0 or rng_state is not None, (
-        "attn_backend='te' backward with dropout needs the forward's rng_state."
-    )
+    if dropout_p != 0.0 and rng_state is None:
+        raise ValueError(
+            "attn_backend='te' backward with dropout needs the forward's rng_state."
+        )
     b, s_q = q.shape[0], q.shape[_seq_dim(layout)]
     h = q.shape[2 if layout == "bshd" else 1]
     lse_shape = tuple(logsumexp.shape)
-    assert lse_shape in ((b, h, s_q), (b, h, s_q, 1)), (
-        f"attn_backend='te' backward needs logsumexp of shape {(b, h, s_q)}, "
-        f"got {lse_shape}."
-    )
+    if lse_shape not in ((b, h, s_q), (b, h, s_q, 1)):
+        raise ValueError(
+            f"attn_backend='te' backward needs logsumexp of shape {(b, h, s_q)}, "
+            f"got {lse_shape}."
+        )
