@@ -14,7 +14,9 @@
   on older GPUs and on ROCm. Needs `transformer_engine` or `flash_attn`, e.g. inside an
   NGC PyTorch container (see [containers/README.md](../containers/README.md)); with
   neither importable it warns and falls back to `sdpa`. `JIGSAW_TE_CORE=cudnn|flash`
-  overrides the choice of core (`cudnn` on ROCm is untested).
+  overrides the choice of core (`cudnn` on ROCm is untested). `JIGSAW_TE_CORE=dpa_fp8`
+  runs the plain path (no ring, no Ulysses) on `te.DotProductAttention` under FP8
+  delayed scaling, with per-layer scales kept by TE; it works on sm90.
 
 ## Sequence parallelism: ring vs. Ulysses
 

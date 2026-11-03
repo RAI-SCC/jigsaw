@@ -156,6 +156,88 @@ if JIGSAW_TE_AVAILABLE:
             return (out, lse, rng_state), (0, 0, None)
 
 
+class _TEDotProductAttentionFP8(torch.autograd.Function):
+    """One autograd node around a ``te.DotProductAttention`` call.
+
+    TE's module reads tensor storage, which ``torch.vmap`` (torch-blue's weight
+    samples) forbids; :meth:`vmap` folds the vmapped axis into the batch instead.
+    The forward builds TE's own graph on detached inputs and the backward runs
+    it with :func:`torch.autograd.grad`.
+    """
+
+    @staticmethod
+    def forward(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn: Callable[..., torch.Tensor],
+        stash: list,
+        need_grad: bool,
+    ) -> torch.Tensor:
+        """Run ``attn(q, k, v)``; with ``need_grad``, keep its graph in ``stash``.
+
+        Parameters
+        ----------
+        q, k, v : torch.Tensor
+            Query/key/value tensors in ``bshd`` format.
+        attn : Callable[..., torch.Tensor]
+            The FP8 ``te.DotProductAttention`` call.
+        stash : list
+            Fresh per call; receives the inputs and output of TE's graph.
+        need_grad : bool
+            Whether the caller records gradients.
+
+        Returns
+        -------
+        torch.Tensor
+            Attention output, ``[batch, seq, heads * head_dim]``.
+        """
+        if not need_grad:
+            return attn(q, k, v)
+        with torch.enable_grad():
+            leaves = [t.detach().requires_grad_() for t in (q, k, v)]
+            out = attn(*leaves)
+        stash.append((leaves, out))
+        return out.detach()
+
+    @staticmethod
+    def setup_context(ctx: Any, inputs: tuple, output: torch.Tensor) -> None:
+        """Keep TE's graph for :meth:`backward`."""
+        stash = inputs[4]
+        if stash:
+            ctx.leaves, ctx.out = stash.pop()
+
+    @staticmethod
+    def backward(  # type: ignore[override]
+        ctx: Any, grad_out: torch.Tensor
+    ) -> tuple[torch.Tensor | None, ...]:
+        """dq/dk/dv from TE's own backward."""
+        dq, dk, dv = torch.autograd.grad(ctx.out, ctx.leaves, grad_out)
+        return dq, dk, dv, None, None, None
+
+    @staticmethod
+    def vmap(
+        info: Any,
+        in_dims: tuple[int | None, ...],
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn: Callable[..., torch.Tensor],
+        stash: list,
+        need_grad: bool,
+    ) -> tuple[torch.Tensor, int]:
+        """Fold the vmapped (samples) axis into the batch, run one call, unfold."""
+        q, k, v = (
+            t.movedim(d, 0) if d is not None else t.expand(info.batch_size, *t.shape)
+            for t, d in zip((q, k, v), in_dims[:3], strict=True)
+        )
+        samples = q.shape[0]
+        out = _TEDotProductAttentionFP8.apply(
+            q.flatten(0, 1), k.flatten(0, 1), v.flatten(0, 1), attn, stash, need_grad
+        )
+        return out.unflatten(0, (samples, -1)), 0
+
+
 def attn_core_dtype(x: torch.Tensor) -> torch.dtype:
     """Return the dtype of the attention core.
 
@@ -340,6 +422,11 @@ class DistributedAttention(torch.nn.Module):
             attention_config._coerce_enum(AttnBackend, attn_backend, "attn_backend")
         )
         self.te = self.attn_backend == AttnBackend.TE
+        if self.te and te_core.dpa_fp8_requested() and (ring or ulysses):
+            raise ValueError(
+                "JIGSAW_TE_CORE=dpa_fp8 only serves the plain attention path; "
+                "ring and ulysses need a core that returns the softmax LSE."
+            )
         # ``_te_bshd``: the plain TE core returns heads already folded.
         self._bshd_qkv = self.te or self.ulysses
         self._te_bshd = self.te and not ring and not ulysses
@@ -530,6 +617,8 @@ class DistributedAttention(torch.nn.Module):
         """Resolve ``self.attn_backend`` to its non-ring attention core."""
         match self.attn_backend:
             case AttnBackend.TE:
+                if te_core.dpa_fp8_requested():
+                    return self._build_te_dpa_fp8()
                 # Resolved once here so nothing branches per call; see
                 # `_functional.cores.te.select_core`.
                 self.te_core = te_core.select_core(self.device)
@@ -575,6 +664,7 @@ class DistributedAttention(torch.nn.Module):
                 torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
                 torch.nn.attention.SDPBackend.MATH,
             ],
+            set_priority=True,
             set_priority=True,
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
@@ -659,6 +749,82 @@ class DistributedAttention(torch.nn.Module):
         out, _lse, _rng_state = _TransformerEngineAttention.apply(
             q, k, v, self.scale, self.dropout_p if self.training else 0.0, self.te_core
         )
+        return cast(torch.Tensor, out)
+
+    def _build_te_dpa_fp8(self) -> Callable[..., torch.Tensor]:
+        """Build ``te.DotProductAttention`` with an FP8 delayed-scaling recipe.
+
+        TE keeps the amax history per module, so every layer has its own scales.
+        Delayed scaling writes O and dQ/dK/dV in FP8, which cuDNN also serves on
+        sm90 (current scaling needs sm100). ``reduce_amax=False`` keeps the scales
+        local: no collective per call.
+
+        Returns
+        -------
+        Callable[..., torch.Tensor]
+            :meth:`_te_dpa_fp8_core`.
+        """
+        import transformer_engine.pytorch as te
+        from transformer_engine.common.recipe import DelayedScaling
+
+        self._te_fp8_recipe = DelayedScaling(fp8_dpa=True, reduce_amax=False)
+        self._te_dpa = te.DotProductAttention(
+            self.heads,
+            self.embed_dim // (self.heads * self.channel_group.size()),
+            attention_dropout=self.dropout_p,
+            qkv_format="bshd",
+            attn_mask_type="no_mask",
+            softmax_scale=self.scale,
+        )
+        return self._te_dpa_fp8_core
+
+    def _te_dpa_fp8_core(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn_mask: torch.Tensor | None = None,
+        **kwargs: torch.Tensor,
+    ) -> torch.Tensor:
+        """Attention on ``te.DotProductAttention`` in FP8.
+
+        Parameters
+        ----------
+        q : torch.Tensor
+            Query tensor, ``bshd`` (``[batch, seq, heads, head_dim]``).
+        k : torch.Tensor
+            Keys tensor, ``bshd``.
+        v : torch.Tensor
+            Values tensor, ``bshd``.
+        attn_mask : torch.Tensor, optional
+            Not supported; a non-``None`` mask raises :class:`ValueError`.
+        **kwargs : torch.Tensor
+            Unused.
+
+        Returns
+        -------
+        torch.Tensor
+            Output of attention computation, ``[batch, seq, heads * head_dim]``.
+        """
+        import transformer_engine.pytorch as te
+        from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+            META_S,
+        )
+
+        if attn_mask is not None:
+            raise ValueError("JIGSAW_TE_CORE=dpa_fp8 does not support attn_mask.")
+
+        def attn(qc: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor) -> torch.Tensor:
+            with te.fp8_autocast(enabled=True, fp8_recipe=self._te_fp8_recipe):
+                return cast(torch.Tensor, self._te_dpa(qc, kc, vc))
+
+        out = _TEDotProductAttentionFP8.apply(
+            q, k, v, attn, [], torch.is_grad_enabled()
+        )
+        # cuDNN quantizes the unnormalized exp(s - rowmax), which reaches 1, but
+        # TE scales S from the amax of the normalized softmax: S saturates and
+        # the output shrinks. Pin S's scale at the E4M3 maximum instead.
+        self._te_dpa.fp8_meta["scaling_fwd"].scale[META_S] = 448.0
         return cast(torch.Tensor, out)
 
     def _ring_attn_core(
