@@ -84,23 +84,23 @@ x = torch.randn(8, 1024 // 2, 64 // 2, device=device)  # this rank's (tokens, ch
 y = model(x)
 ```
 
-[`examples/autoconvert.py`](examples/autoconvert.py) also checks the converted model
+[`examples/autoconvert.py`](https://github.com/RAI-SCC/jigsaw/blob/main/examples/autoconvert.py) also checks the converted model
 against the original.
 
 ## Tutorials
 
-[`examples/`](examples/README.md) contains short, runnable scripts. Each needs 4 ranks
+[`examples/`](https://github.com/RAI-SCC/jigsaw/blob/main/examples/README.md) contains short, runnable scripts. Each needs 4 ranks
 and runs on GPUs or on the CPU (gloo) with the same command:
 
 | Script | Shows |
 |---|---|
-| [`domain_parallel.py`](examples/domain_parallel.py) | Domain parallelism only: a CNN on an image split over a 2x2 grid, weights replicated. **Start here.** |
-| [`vit.py`](examples/vit.py) | A Vision Transformer with domain *and* tensor parallelism. |
-| [`swin.py`](examples/swin.py) | A Swin Transformer: window attention, shifted windows via `DistributedRoll`. |
-| [`ddp.py`](examples/ddp.py) | A data-parallel training loop on top of the model-parallel ViT. |
-| [`dataloader.py`](examples/dataloader.py) | A dataloader where each rank reads only its tile. |
-| [`autoconvert.py`](examples/autoconvert.py) | Converting a plain PyTorch model with `convert_to_jigsaw`. |
-| [`reshard.py`](examples/reshard.py) | Moving a trained model to another mesh, or gathering it into plain PyTorch. |
+| [`domain_parallel.py`](https://github.com/RAI-SCC/jigsaw/blob/main/examples/domain_parallel.py) | Domain parallelism only: a CNN on an image split over a 2x2 grid, weights replicated. **Start here.** |
+| [`vit.py`](https://github.com/RAI-SCC/jigsaw/blob/main/examples/vit.py) | A Vision Transformer with domain *and* tensor parallelism. |
+| [`swin.py`](https://github.com/RAI-SCC/jigsaw/blob/main/examples/swin.py) | A Swin Transformer: window attention, shifted windows via `DistributedRoll`. |
+| [`ddp.py`](https://github.com/RAI-SCC/jigsaw/blob/main/examples/ddp.py) | A data-parallel training loop on top of the model-parallel ViT. |
+| [`dataloader.py`](https://github.com/RAI-SCC/jigsaw/blob/main/examples/dataloader.py) | A dataloader where each rank reads only its tile. |
+| [`autoconvert.py`](https://github.com/RAI-SCC/jigsaw/blob/main/examples/autoconvert.py) | Converting a plain PyTorch model with `convert_to_jigsaw`. |
+| [`reshard.py`](https://github.com/RAI-SCC/jigsaw/blob/main/examples/reshard.py) | Moving a trained model to another mesh, or gathering it into plain PyTorch. |
 
 ```bash
 torchrun --nproc-per-node 4 examples/domain_parallel.py
@@ -129,7 +129,7 @@ mesh = jigsaw.make_process_mesh({"dp": -1, "row": 2, "col": 2},
 ```
 
 For data parallelism, wrap the model with `jigsaw.parallel.wrap_ddp(model, mesh)`, which
-applies DDP over `mesh["dp"]`. See [docs/ddp.md](docs/ddp.md).
+applies DDP over `mesh["dp"]`. See [docs/ddp.md](https://github.com/RAI-SCC/jigsaw/blob/main/docs/ddp.md).
 
 ## Limitations
 
@@ -141,17 +141,17 @@ applies DDP over `mesh["dp"]`. See [docs/ddp.md](docs/ddp.md).
   batch norm, pooling or `nn.MultiheadAttention`.
 - Only fp16 and bf16 mixed precision; no FP8.
 
-[Platforms and limitations](docs/platforms.md) lists the tested architectures and
+[Platforms and limitations](https://github.com/RAI-SCC/jigsaw/blob/main/docs/platforms.md) lists the tested architectures and
 the full list of what is not supported.
 
 ## Further reading
 
-- [Data parallelism](docs/ddp.md): DDP over a model-parallel mesh, the joint comm hook, replica checks.
-- [Attention](docs/attention.md): attention backends (`sdpa`, `math`, TransformerEngine), ring vs. Ulysses.
-- [Mixed precision](docs/mixed_precision.md): `torch.autocast` support.
-- [Logging](docs/logging.md): rank-aware logging and debugging helpers (`jigsaw.log`).
-- [Platforms and limitations](docs/platforms.md): supported backends and devices, tested configurations, known limitations, running on a cluster.
-- [Containers](containers/README.md) and the [SLURM launcher](scripts/README.md).
+- [Data parallelism](https://github.com/RAI-SCC/jigsaw/blob/main/docs/ddp.md): DDP over a model-parallel mesh, the joint comm hook, replica checks.
+- [Attention](https://github.com/RAI-SCC/jigsaw/blob/main/docs/attention.md): attention backends (`sdpa`, `math`, TransformerEngine), ring vs. Ulysses.
+- [Mixed precision](https://github.com/RAI-SCC/jigsaw/blob/main/docs/mixed_precision.md): `torch.autocast` support.
+- [Logging](https://github.com/RAI-SCC/jigsaw/blob/main/docs/logging.md): rank-aware logging and debugging helpers (`jigsaw.log`).
+- [Platforms and limitations](https://github.com/RAI-SCC/jigsaw/blob/main/docs/platforms.md): supported backends and devices, tested configurations, known limitations, running on a cluster.
+- [Containers](https://github.com/RAI-SCC/jigsaw/blob/main/containers/README.md) and the [SLURM launcher](https://github.com/RAI-SCC/jigsaw/blob/main/scripts/README.md).
 
 ## Running tests
 
@@ -166,4 +166,4 @@ CI runs the CPU suite on 1, 4 and 8 ranks. GPU tests are not run in CI.
 
 ## Citation
 
-If you use _jigsaw_, please cite it as described in [CITATION.cff](CITATION.cff).
+If you use _jigsaw_, please cite it as described in [CITATION.cff](https://github.com/RAI-SCC/jigsaw/blob/main/CITATION.cff).
