@@ -11,7 +11,7 @@ pip install torch-jigsaw        # import name: jigsaw
 pip install -e .[dev]           # from a checkout, with the test dependencies
 ```
 
-The only runtime dependencies are `torch` and `einops`.
+The runtime dependencies are `torch`, `einops` and `numpy`.
 
 ## Quickstart
 
