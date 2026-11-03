@@ -79,7 +79,8 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         spatial_group : dist.ProcessGroup | Sequence[dist.ProcessGroup | None]
             Process groups splitting the spatial axes. A single group splits
             the last axis. In a sequence, ``None`` or a group of size 1 marks an
-            axis that is not split.
+            axis that is not split. Every rank holds an equally sized slice of a
+            split axis.
         channel_group : dist.ProcessGroup
             Process group splitting the channels.
         stride : int | tuple[int, ...]
@@ -621,11 +622,18 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         ----------
         x : torch.Tensor
             Local input of shape ``(N, Cin / n_channel, *spatial / n_spatial)``.
+            Every rank of a spatial group holds an equally sized slice.
 
         Returns
         -------
         torch.Tensor
             Local output of shape ``(N, Cout / n_channel, *spatial' / n_spatial)``.
+
+        Raises
+        ------
+        NotImplementedError
+            If a halo exchange is needed and the global output size of a split
+            axis is not divisible by its group size.
         """
         # Channel-local convs need no channel communication, so they skip the
         # autograd Function unless a spatial split needs a halo exchange.

@@ -60,6 +60,12 @@
   RMS norm, pooling, padding, upsampling, flatten and pixel shuffle, embeddings,
   recurrent layers, or `torch.nn.MultiheadAttention` / `torch.nn.Transformer*`.
   `convert_to_jigsaw` raises `ValueError` on these unless `non_safe=True`.
+- **Convolution.** Every rank of a spatial group must hold an equally sized slice;
+  uneven slices are not detected and fail in a collective. With
+  `kernel_size == stride` each slice must be a multiple of the stride; otherwise the
+  global output size along a split axis must be divisible by the group size. Only
+  `padding_mode="zeros"` is supported, `"same"` padding with an even effective kernel
+  only on an unsplit layer, and transposed convolutions need `output_padding=0`.
 - **Attention.** No attention bias, GQA, or FP8. See [Attention](attention.md) for the
   per-backend limits.
 - **Precision.** Only `float16` and `bfloat16` autocast. `float64` works for matmul,

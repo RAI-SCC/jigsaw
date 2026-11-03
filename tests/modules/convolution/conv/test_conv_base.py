@@ -114,6 +114,26 @@ class TestConvArgumentValidation:
                 padding=padding,
             )
 
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("groups", [1, 2], ids=["channel-split", "channel-local"])
+    def test_patchify_rejects_windows_across_shards(
+        self, device: torch.device, process_mesh_dict_2x2: dict, groups: int
+    ) -> None:
+        """With ``kernel_size == stride`` a local size that is not a multiple of the
+        stride would put a window across two ranks."""
+        conv = convolution.DistributedConv1d(
+            4,
+            4,
+            4,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=process_mesh_dict_2x2["col"],
+            stride=4,
+            groups=groups,
+        )
+        with pytest.raises(ValueError, match="multiple of its stride"):
+            conv(torch.randn(1, 2, 5, device=device))
+
     @pytest.mark.parametrize("padding_mode", ["reflect", "replicate", "circular"])
     def test_convert_rejects_non_zero_padding_mode(
         self, device: torch.device, padding_mode: str
