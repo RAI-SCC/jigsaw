@@ -10,6 +10,7 @@ from torch.nn.parameter import Parameter
 
 from jigsaw import init, parallel
 from jigsaw._core.comm import CommOp
+from jigsaw._core.shard_repr import shard_repr
 from jigsaw.gather import gather_1d_results
 
 from .._common.arg_norm import _as_spatial_groups, _ntuple
@@ -243,6 +244,34 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             0 if self.global_bias_shape is None else math.prod(self.global_bias_shape)
         )
         return num_bias_param + math.prod(self.global_weight_shape)
+
+    def extra_repr(self) -> str:
+        """Return the ``torch.nn.ConvTranspose{1,2,3}d`` fields and the shard sizes.
+
+        Returns
+        -------
+        str
+            The fields torch shows, then ``spatial`` (one size per spatial axis)
+            and ``channel``.
+        """
+        # Same fields and defaults as torch's ``_ConvNd.extra_repr``.
+        s = (
+            f"{self.in_channels}, {self.out_channels}, "
+            f"kernel_size={self.kernel_size}, stride={self.stride}"
+        )
+        if self.padding != (0,) * len(self.padding):
+            s += f", padding={self.padding}"
+        if self.dilation != (1,) * len(self.dilation):
+            s += f", dilation={self.dilation}"
+        if self.groups != 1:
+            s += f", groups={self.groups}"
+        if self.bias is None:
+            s += ", bias=False"
+        return (
+            s
+            + ", "
+            + shard_repr(spatial=self.spatial_groups, channel=self.channel_group)
+        )
 
     @classmethod
     def convert_to_jigsaw(

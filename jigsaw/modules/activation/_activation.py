@@ -5,6 +5,8 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
+from jigsaw._core.shard_repr import shard_repr
+
 from . import _functional as functional
 
 
@@ -35,6 +37,16 @@ class DistributedSoftmax(torch.nn.Module):
             ``0``; the layer has no parameters.
         """
         return 0
+
+    def extra_repr(self) -> str:
+        """Return the ``torch.nn.Softmax`` field and the group size.
+
+        Returns
+        -------
+        str
+            ``dim``, then ``group``.
+        """
+        return f"dim={self.dim}, " + shard_repr(group=self.group)
 
     @classmethod
     def convert_to_jigsaw(

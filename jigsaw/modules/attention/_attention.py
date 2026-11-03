@@ -2,13 +2,15 @@
 
 import warnings
 from collections.abc import Callable
-from typing import Any, cast
+from types import ModuleType
+from typing import Any, Protocol, cast
 
 import torch
 import torch.distributed as dist
 from einops import rearrange
 
 from jigsaw import parallel
+from jigsaw._core.shard_repr import shard_repr
 from jigsaw.gather import gather_1d_results
 from jigsaw.modules import linear
 
@@ -264,6 +266,15 @@ def _mask_to(attn_mask: torch.Tensor | None, dtype: torch.dtype) -> torch.Tensor
     if attn_mask is not None and attn_mask.is_floating_point():
         return attn_mask.to(dtype)
     return attn_mask
+
+
+class _TECoreHost(Protocol):
+    """Attributes the TE core reads, so `Attention` can share it with `DistributedAttention`."""
+
+    scale: float
+    dropout_p: float
+    training: bool
+    te_core: ModuleType
 
 
 class DistributedAttention(torch.nn.Module):
@@ -654,6 +665,7 @@ class DistributedAttention(torch.nn.Module):
                 torch.nn.attention.SDPBackend.MATH,
             ],
             set_priority=True,
+            set_priority=True,
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
                 q,
@@ -696,7 +708,7 @@ class DistributedAttention(torch.nn.Module):
         return out
 
     def _transformer_attn_core(
-        self: "DistributedAttention | Attention",
+        self: _TECoreHost,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
@@ -1167,6 +1179,26 @@ class DistributedAttention(torch.nn.Module):
             self.embed_dim // global_heads
         )  # 2 norms (q and k) * 2 parameters (scale and bias) * normalized_dim
 
+    def extra_repr(self) -> str:
+        """Return the :class:`Attention` fields, ``ring`` and the shard sizes.
+
+        Returns
+        -------
+        str
+            Global ``in_dim``, ``embed_dim``, ``out_dim`` and ``heads``,
+            ``dropout_p``, ``qk_norm`` and ``ring``, then ``spatial`` and
+            ``channel``.
+        """
+        # ``head_concat`` splits only its input dimension, so its weight holds
+        # the global ``out_dim`` rows.
+        return (
+            f"in_dim={self.in_dim}, embed_dim={self.embed_dim}, "
+            f"out_dim={self.head_concat.weight.shape[0]}, "
+            f"heads={self.heads * self.channel_group.size()}, "
+            f"dropout_p={self.dropout_p}, qk_norm={self.qk_norm}, ring={self.ring}, "
+            + shard_repr(spatial=self.spatial_group, channel=self.channel_group)
+        )
+
 
 class Attention(torch.nn.Module):
     """Non-distributed multi-head attention, convertible with :meth:`convert_to_jigsaw`.
@@ -1252,6 +1284,21 @@ class Attention(torch.nn.Module):
                 torch.nn.LayerNorm(self.head_dim, device=device, dtype=dtype),
                 torch.nn.LayerNorm(self.head_dim, device=device, dtype=dtype),
             )
+
+    def extra_repr(self) -> str:
+        """Return the attention fields.
+
+        Returns
+        -------
+        str
+            ``in_dim``, ``embed_dim``, ``out_dim``, ``heads``, ``dropout_p`` and
+            ``qk_norm``.
+        """
+        return (
+            f"in_dim={self.in_dim}, embed_dim={self.embed_dim}, "
+            f"out_dim={self.out_dim}, heads={self.heads}, "
+            f"dropout_p={self.dropout_p}, qk_norm={self.qk_norm}"
+        )
 
     def _attn_core(
         self,
