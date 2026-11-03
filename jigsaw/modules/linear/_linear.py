@@ -51,6 +51,11 @@ class DistributedLinear(torch.nn.Module):
         arguments.
     dtype : torch.dtype
         Data type of the parameters and computations.
+
+    Raises
+    ------
+    ValueError
+        If the group sizes do not divide ``in_dim`` and ``out_dim``.
     """
 
     def __init__(
@@ -72,8 +77,22 @@ class DistributedLinear(torch.nn.Module):
         self.dtype = dtype
         self.device = device
 
-        assert in_dim % col_group.size() == 0
-        assert out_dim % (model_group.size() // col_group.size()) == 0
+        if in_dim % col_group.size() != 0:
+            raise ValueError(
+                f"in_dim={in_dim} is not divisible by the column group size "
+                f"{col_group.size()}"
+            )
+        row_size = model_group.size() // col_group.size()
+        if out_dim % row_size != 0:
+            raise ValueError(
+                f"out_dim={out_dim} is not divisible by the row split {row_size} "
+                "(model group size // column group size)"
+            )
+        if bias and out_dim % col_group.size() != 0:
+            raise ValueError(
+                f"out_dim={out_dim} is not divisible by the column group size "
+                f"{col_group.size()}, which shards the bias"
+            )
 
         # Global (unsharded) weight/bias shape, torch.nn.Linear layout ``(out,
         # in)``. ``reset_parameters`` keys the init distribution off these, so a
@@ -251,18 +270,20 @@ class DistributedLinear(torch.nn.Module):
         -------
         DistributedLinear
             Distributed layer with the weights and bias of ``model``.
+
+        Raises
+        ------
+        ValueError
+            If the row and column group sizes do not divide the feature counts.
         """
         # The columns shard the input dimension of the weight and the (output-sized)
         # bias; the rows shard the output dimension of the weight.
-        assert model.in_features % process_mesh_dict[col_kw].size() == 0, (
-            "in_features is not divisible by process mesh columns"
-        )
-        assert model.out_features % process_mesh_dict[row_kw].size() == 0, (
-            "out_features is not divisible by process mesh rows"
-        )
-        assert model.out_features % process_mesh_dict[col_kw].size() == 0, (
-            "out_features is not divisible by process mesh columns"
-        )
+        if model.in_features % process_mesh_dict[col_kw].size() != 0:
+            raise ValueError("in_features is not divisible by process mesh columns")
+        if model.out_features % process_mesh_dict[row_kw].size() != 0:
+            raise ValueError("out_features is not divisible by process mesh rows")
+        if model.out_features % process_mesh_dict[col_kw].size() != 0:
+            raise ValueError("out_features is not divisible by process mesh columns")
 
         instance = cls(
             in_dim=model.in_features,
@@ -398,6 +419,12 @@ class DistributedLinear(torch.nn.Module):
             Process groups of the new mesh.
         pm_row_key, pm_col_key, pm_model_key : str
             Keys of the row, column and model process groups in both meshes.
+
+        Raises
+        ------
+        ValueError
+            If the target row and column group sizes do not divide the global
+            weight and bias shapes.
         """
         # Find the local and global shapes
         from_weight_shape_local = self.weight.shape
@@ -409,12 +436,16 @@ class DistributedLinear(torch.nn.Module):
             weight_shape_global[0] // to_process_mesh[pm_row_key].size(),
             weight_shape_global[1] // to_process_mesh[pm_col_key].size(),
         )
-        assert weight_shape_global[0] % to_process_mesh[pm_row_key].size() == 0, (
-            f"global weight shape[0] is {weight_shape_global[0]} which is not divisible by {to_process_mesh[pm_row_key].size()}"
-        )
-        assert weight_shape_global[1] % to_process_mesh[pm_col_key].size() == 0, (
-            f"global weight shape[1] is {weight_shape_global[1]} which is not divisible by {to_process_mesh[pm_col_key].size()}"
-        )
+        if weight_shape_global[0] % to_process_mesh[pm_row_key].size() != 0:
+            raise ValueError(
+                f"global weight shape[0] is {weight_shape_global[0]} which is not "
+                f"divisible by {to_process_mesh[pm_row_key].size()}"
+            )
+        if weight_shape_global[1] % to_process_mesh[pm_col_key].size() != 0:
+            raise ValueError(
+                f"global weight shape[1] is {weight_shape_global[1]} which is not "
+                f"divisible by {to_process_mesh[pm_col_key].size()}"
+            )
 
         if self.bias is not None:
             from_bias_shape_local = self.bias.shape
@@ -425,9 +456,11 @@ class DistributedLinear(torch.nn.Module):
                 bias_shape_global // to_process_mesh[pm_col_key].size()
             )
 
-            assert bias_shape_global % to_process_mesh[pm_col_key].size() == 0, (
-                f"global bias shape is {bias_shape_global} which is not divisible by {to_process_mesh[pm_col_key].size()}"
-            )
+            if bias_shape_global % to_process_mesh[pm_col_key].size() != 0:
+                raise ValueError(
+                    f"global bias shape is {bias_shape_global} which is not "
+                    f"divisible by {to_process_mesh[pm_col_key].size()}"
+                )
 
         global_weights, global_bias = self.merge_weights(
             from_process_mesh, pm_row_key, pm_col_key, pm_model_key

@@ -34,7 +34,7 @@ _MAX_HEAD_DIM = 256
 
 
 def check_head_dim(head_dim: int, device: torch.device) -> None:  # noqa: ARG001
-    """Assert FA2 can serve ``head_dim``; ``device`` is for parity with :mod:`.cudnn`.
+    """Check FA2 can serve ``head_dim``; ``device`` is for parity with :mod:`.cudnn`.
 
     Parameters
     ----------
@@ -42,11 +42,17 @@ def check_head_dim(head_dim: int, device: torch.device) -> None:  # noqa: ARG001
         Per-head embedding dimension.
     device : torch.device
         Unused.
+
+    Raises
+    ------
+    ValueError
+        If ``head_dim`` exceeds 256.
     """
-    assert head_dim <= _MAX_HEAD_DIM, (
-        f"attn_backend='te' (flash core) needs embed_dim // heads to be at most "
-        f"{_MAX_HEAD_DIM}, got {head_dim}."
-    )
+    if head_dim > _MAX_HEAD_DIM:
+        raise ValueError(
+            f"attn_backend='te' (flash core) needs embed_dim // heads to be at most "
+            f"{_MAX_HEAD_DIM}, got {head_dim}."
+        )
 
 
 def _pad_head_dim(t: torch.Tensor, head_dim: int) -> torch.Tensor:

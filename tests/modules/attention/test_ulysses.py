@@ -441,7 +441,7 @@ class TestUlyssesAttention:
             device=device,
             attn_backend="sdpa",
         )
-        with pytest.raises(AssertionError, match="spatial size is 1"):
+        with pytest.raises(ValueError, match="spatial size is 1"):
             attention.DistributedAttention(
                 local_rank=process_mesh_dict_1x4["col"].rank(),
                 spatial_group=process_mesh_dict_1x4["row"],
@@ -451,7 +451,7 @@ class TestUlyssesAttention:
             )
         # heads=2 over channel=2 leaves 1 head per channel shard, which the 2-way
         # spatial group cannot split.
-        with pytest.raises(AssertionError, match="divisible by spatial group size"):
+        with pytest.raises(ValueError, match="divisible by spatial group size"):
             attention.DistributedAttention(
                 local_rank=process_mesh_dict_2x2["col"].rank(),
                 spatial_group=process_mesh_dict_2x2["row"],
