@@ -239,13 +239,8 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         Returns
         -------
         int
-            Global (unsharded) count of this layer's parameters, including plain
-            ``torch.nn`` children; children with ``get_parameter_count`` report
-            their own. No communication.
-
-        Notes
-        -----
-        This method calculates the number of parameters based on the global weight and bias shape calculated at initialization instead of counting the number of elements of the local parameters and scaling according to the respective communication group sizes.
+            Global (unsharded) count of the weight and bias, computed from their
+            global shapes without communication.
         """
         num_bias_param = (
             0 if self.global_bias_shape is None else math.prod(self.global_bias_shape)
@@ -509,18 +504,6 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             from_process_mesh_dict, pm_col_key
         )
 
-        if self.bias is not None:
-            from_bias_shape_local = self.bias.shape
-            bias_shape_global = (
-                from_bias_shape_local[0] * from_process_mesh_dict[pm_col_key].size()
-            )
-            to_bias_shape_local = (
-                bias_shape_global // to_process_mesh_dict[pm_col_key].size()
-            )
-            global_bias = gather_1d_results(
-                self.bias, from_process_mesh_dict, dim=0, pm_key=pm_col_key
-            )
-
         col_rank, col_shard_size = (
             to_process_mesh_dict[pm_col_key].rank(),
             to_weight_shape_local[1],
@@ -532,14 +515,13 @@ class _DistributedConvTransposeNd(torch.nn.Module):
         )
         del global_weights
 
-        if isinstance(global_bias, torch.Tensor):
-            col_rank, col_shard_size = (
-                to_process_mesh_dict[pm_col_key].rank(),
-                to_bias_shape_local,
+        if global_bias is not None:
+            bias_shard_size = (
+                global_bias.shape[0] // to_process_mesh_dict[pm_col_key].size()
             )
             self.bias = torch.nn.Parameter(
                 global_bias[
-                    col_rank * col_shard_size : (col_rank + 1) * col_shard_size
+                    col_rank * bias_shard_size : (col_rank + 1) * bias_shard_size
                 ].contiguous()
             )
             del global_bias
@@ -560,13 +542,15 @@ class _DistributedConvTransposeNd(torch.nn.Module):
             self.out_channels,
             self.channel_group.size(),
         )
-        self.config = ConvTransposeNdConfig(
+        # Rebuild for the new channel group, keeping the config's class and
+        # channel_comm (a config passed to __init__ overrides ``channel_comm``).
+        self.config = type(self.config)(
             self.channel_group,
             self.bias,
             self.kernel_size,
             self.stride,
             self.device,
-            self.channel_comm,
+            self.config.channel_comm,
             self.groups,
         )
 

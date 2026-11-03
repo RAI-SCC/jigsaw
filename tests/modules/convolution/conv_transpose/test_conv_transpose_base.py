@@ -104,6 +104,35 @@ class TestConvTransposeChannelSizes:
         assert (conv.in_channels, conv.out_channels) == (8, 12)
         assert conv.local_out_channels == 3 == conv.weight.shape[1]
 
+    @pytest.mark.dist(4)
+    def test_reshard_keeps_config_class_and_channel_comm(
+        self,
+        device: torch.device,
+        process_mesh_dict_2x2: dict,
+        process_mesh_dict_1x4: dict,
+    ) -> None:
+        """A config passed to ``__init__`` survives a reshard."""
+
+        class _Config(convolution.ConvTransposeNdConfig):
+            pass
+
+        col = process_mesh_dict_2x2["col"]
+        config = _Config(col, None, (2, 2), (2, 2), device, channel_comm="isend")
+        conv = convolution.DistributedConvTranspose2d(
+            8,
+            12,
+            2,
+            device=device,
+            spatial_group=process_mesh_dict_2x2["row"],
+            channel_group=col,
+            stride=2,
+            bias=False,
+            config=config,
+        )
+        conv.reshard_parameters(process_mesh_dict_2x2, process_mesh_dict_1x4)
+        assert type(conv.config) is _Config
+        assert conv.config.channel_comm == "isend"
+
 
 def _reference_count(n_spatial: int, *args: int, bias: bool) -> int:
     ref = _REF_CLS[n_spatial](*args, bias=bias)
