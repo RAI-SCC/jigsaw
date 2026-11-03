@@ -2,7 +2,8 @@
 
 import warnings
 from collections.abc import Callable
-from typing import Any, cast
+from types import ModuleType
+from typing import Any, Protocol, cast
 
 import torch
 import torch.distributed as dist
@@ -182,6 +183,15 @@ def _mask_to(attn_mask: torch.Tensor | None, dtype: torch.dtype) -> torch.Tensor
     if attn_mask is not None and attn_mask.is_floating_point():
         return attn_mask.to(dtype)
     return attn_mask
+
+
+class _TECoreHost(Protocol):
+    """Attributes the TE core reads, so `Attention` can share it with `DistributedAttention`."""
+
+    scale: float
+    dropout_p: float
+    training: bool
+    te_core: ModuleType
 
 
 class DistributedAttention(torch.nn.Module):
@@ -564,7 +574,7 @@ class DistributedAttention(torch.nn.Module):
                 torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
                 torch.nn.attention.SDPBackend.MATH,
             ],
-            set_priority=True
+            set_priority=True,
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
                 q,
@@ -607,7 +617,7 @@ class DistributedAttention(torch.nn.Module):
         return out
 
     def _transformer_attn_core(
-        self,
+        self: _TECoreHost,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
@@ -1119,9 +1129,9 @@ class Attention(torch.nn.Module):
             [
                 torch.nn.attention.SDPBackend.FLASH_ATTENTION,
                 torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
-                torch.nn.attention.SDPBackend.MATH,                
+                torch.nn.attention.SDPBackend.MATH,
             ],
-            set_priority=True
+            set_priority=True,
         ):
             out = torch.nn.functional.scaled_dot_product_attention(
                 q,

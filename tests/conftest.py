@@ -266,7 +266,9 @@ def pytest_collection_modifyitems(config, items):
         if item.get_closest_marker("slow") and not run_slow:
             item.add_marker(pytest.mark.skip(reason="slow: run with --runslow"))
         if item.get_closest_marker("gpu_required") and not has_gpu:
-            item.add_marker(pytest.mark.skip(reason="GPU not available or not selected"))
+            item.add_marker(
+                pytest.mark.skip(reason="GPU not available or not selected")
+            )
         if item.get_closest_marker("dist_required") and not is_distributed:
             item.add_marker(
                 pytest.mark.skip(reason="Not running in distributed environment")
