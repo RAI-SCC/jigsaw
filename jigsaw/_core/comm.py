@@ -208,6 +208,25 @@ def _peers(
     return group, (group.rank() + direction) % size, (group.rank() - direction) % size
 
 
+def _check_recv_buffer(buffer: torch.Tensor) -> None:
+    """Reject a strided receive buffer.
+
+    Callers may rely on the receive filling ``buffer`` in place, so it cannot be
+    swapped for a contiguous copy. Gloo rejects a strided buffer itself, but NCCL p2p
+    only warns and writes ``numel`` elements linearly from its first element.
+
+    Raises
+    ------
+    ValueError
+        If ``buffer`` is not contiguous.
+    """
+    if not buffer.is_contiguous():
+        raise ValueError(
+            f"receive buffer must be contiguous, got strides {buffer.stride()} "
+            f"for shape {tuple(buffer.shape)}"
+        )
+
+
 class _BatchWork:
     """Wait handle over the works of one send/receive pair."""
 
@@ -281,15 +300,16 @@ def comm_1d_alltoall(
     Raises
     ------
     ValueError
-        If ``group`` is missing, or both ``direction`` and ``send_recv_ranks`` are.
+        If ``group`` is missing, both ``direction`` and ``send_recv_ranks`` are, or
+        ``buffer`` is not contiguous.
     """
+    _check_recv_buffer(buffer)
     group, send_to, recv_from = _peers(group, direction, send_recv_ranks, group_size)
     empty = get_empty(data.device, data.dtype)
 
     # ``dist.all_to_all`` needs contiguous tensors, and callers may pass a
     # strided view; ``.contiguous()`` is a no-op otherwise.
     data = data.contiguous()
-    buffer = buffer.contiguous()
 
     send_list = [empty] * group.size()
     recv_list = [empty] * group.size()
@@ -348,12 +368,14 @@ def comm_1d_isend(
     Raises
     ------
     ValueError
-        If ``group`` is missing, or both ``direction`` and ``send_recv_ranks`` are.
+        If ``group`` is missing, both ``direction`` and ``send_recv_ranks`` are, or
+        ``buffer`` is not contiguous.
     """
     if data.is_cuda:
         return comm_1d_batch_isend_irecv(
             data, buffer, direction, send_recv_ranks, group, async_op, group_size
         )
+    _check_recv_buffer(buffer)
     group, send_to, recv_from = _peers(group, direction, send_recv_ranks, group_size)
     # ``dist.isend`` needs a contiguous tensor, and callers may pass a strided view.
     send = dist.isend(data.contiguous(), group_dst=send_to, group=group)
@@ -406,8 +428,10 @@ def comm_1d_batch_isend_irecv(
     Raises
     ------
     ValueError
-        If ``group`` is missing, or both ``direction`` and ``send_recv_ranks`` are.
+        If ``group`` is missing, both ``direction`` and ``send_recv_ranks`` are, or
+        ``buffer`` is not contiguous.
     """
+    _check_recv_buffer(buffer)
     group, send_to, recv_from = _peers(group, direction, send_recv_ranks, group_size)
     # ``dist.isend`` needs a contiguous tensor, and callers may pass a strided view.
     send_op = dist.P2POp(dist.isend, data.contiguous(), group_peer=send_to, group=group)

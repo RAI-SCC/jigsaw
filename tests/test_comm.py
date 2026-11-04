@@ -75,6 +75,14 @@ class TestOneDAllToAll:
         with pytest.raises(ValueError, match="direction is required"):
             comm.comm_1d_alltoall(torch.ones(1), torch.zeros(1), group=FakeGroup(0, 4))
 
+    def test_rejects_strided_receive_buffer(self, a2a_calls):
+        buffer = torch.zeros(2, 3)[:, 1]
+        with pytest.raises(ValueError, match="receive buffer must be contiguous"):
+            comm.comm_1d_alltoall(
+                torch.ones(2), buffer, direction=1, group=FakeGroup(0, 4)
+            )
+        assert not a2a_calls
+
     @pytest.mark.parametrize("direction", [1, -1, 2])
     def test_direction_picks_ring_neighbours(self, a2a_calls, direction):
         data, buffer = torch.ones(1), torch.zeros(1)
@@ -116,6 +124,11 @@ class TestOneDP2PValidation:
     def test_requires_direction_or_ranks(self, fn):
         with pytest.raises(ValueError, match="direction is required"):
             fn(torch.ones(1), torch.zeros(1), group=FakeGroup(0, 2))
+
+    def test_rejects_strided_receive_buffer(self, fn):
+        buffer = torch.zeros(2, 3)[:, 1]
+        with pytest.raises(ValueError, match="receive buffer must be contiguous"):
+            fn(torch.ones(2), buffer, direction=1, group=FakeGroup(0, 2))
 
 
 class TestResolveCommOp:
