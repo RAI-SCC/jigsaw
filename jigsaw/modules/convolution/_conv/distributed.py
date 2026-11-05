@@ -39,7 +39,7 @@ def _channel_reduce_grad_input(
 def conv_nway(
     x: torch.Tensor,
     w: torch.Tensor,
-    b: torch.Tensor,
+    b: torch.Tensor | None,
     stride: tuple[int, ...],
     padding: str | tuple[int, ...],
     dilation: tuple[int, ...],
@@ -202,7 +202,7 @@ def conv_nway_backward(
 
 
 # ---------------------------------------------------------------------------
-# halo regime (stride != kernel_size)
+# halo regime (kernel_size != stride, or padding or dilation on a split axis)
 #
 # The halo exchange itself is dimension-agnostic and lives in
 # :mod:`jigsaw.modules.convolution._conv.halo`. One halo exchange is run per split axis;
@@ -212,7 +212,7 @@ def conv_nway_backward(
 def conv_halo_nway(
     x: torch.Tensor,
     w: torch.Tensor,
-    b: torch.Tensor,
+    b: torch.Tensor | None,
     stride: tuple[int, ...],
     padding: str | tuple[int, ...],
     dilation: tuple[int, ...],
@@ -220,7 +220,9 @@ def conv_halo_nway(
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Convolve with a halo exchange along each split axis (``stride != kernel_size``).
+    """Convolve with a halo exchange along each split axis.
+
+    Used if ``kernel_size != stride``, or a split axis has padding or dilation.
 
     Parameters
     ----------
@@ -255,7 +257,7 @@ def conv_halo_nway(
     """
     if not isinstance(padding, tuple):
         raise NotImplementedError(
-            "Distributed ConvNd with stride != kernel_size does not support "
+            "Distributed ConvNd with a halo exchange does not support "
             f"string padding ({padding!r}); pass an explicit per-axis padding."
         )
 

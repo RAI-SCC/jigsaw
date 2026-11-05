@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import re
 import sys
@@ -37,6 +38,10 @@ autodoc_default_options = {
     "members": True,
     "undoc-members": True,
     "show-inheritance": True,
+    # Members inherited from jigsaw's private bases (e.g. the conv and matmul
+    # bases), but not those of torch.nn.Module or of builtins the public classes
+    # extend (ProcessMesh is a dict, the enums are StrEnums).
+    "inherited-members": "Module,dict,str,Enum",
 }
 autodoc_typehints = "description"
 autodoc_member_order = "bysource"
@@ -120,10 +125,37 @@ def _on_include_read(
     content[0] = _repo_links_to_github(content[0], included.resolve().parent)
 
 
+# -- Constructor docs of private bases -----------------------------------------
+# Public classes that only pin a detail of a private base (DistributedConv1d/2d/3d
+# set the spatial rank) leave the constructor to the base's class docstring. The
+# subclass page shows the base's sections after the subclass's own summary.
+def _inherit_base_sections(
+    app: object,
+    what: str,
+    name: str,
+    obj: object,
+    options: object,
+    lines: list[str],
+) -> None:
+    if what != "class" or "Parameters" in lines:
+        return
+    for base in getattr(obj, "__mro__", ())[1:]:
+        if not (base.__name__.startswith("_") and base.__module__.startswith("jigsaw")):
+            continue
+        doc = inspect.cleandoc(base.__doc__ or "").splitlines()
+        if "Parameters" in doc:
+            lines += ["", *doc[doc.index("Parameters") :]]
+            return
+
+
 def setup(app: object) -> None:
-    """Register the repo-link rewrite for pages and included files."""
+    """Register the repo-link rewrite and the base-section inheritance."""
     app.connect("source-read", _on_source_read)  # type: ignore[attr-defined]
     app.connect("include-read", _on_include_read)  # type: ignore[attr-defined]
+    # Before napoleon (priority 500) converts the numpydoc sections.
+    app.connect(  # type: ignore[attr-defined]
+        "autodoc-process-docstring", _inherit_base_sections, priority=400
+    )
 
 # -- HTML output --------------------------------------------------------------
 html_theme = "sphinx_rtd_theme"

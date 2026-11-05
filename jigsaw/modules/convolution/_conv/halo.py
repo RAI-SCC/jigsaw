@@ -52,7 +52,7 @@ def needed_input_span(
 
     if global_out % group_size != 0:
         raise NotImplementedError(
-            "Distributed convolution with stride != kernel_size needs the global "
+            "Distributed convolution with a halo exchange needs the global "
             f"output size along the split axis ({global_out}) to be divisible by "
             f"the spatial group size ({group_size})."
         )

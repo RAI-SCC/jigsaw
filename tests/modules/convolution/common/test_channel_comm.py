@@ -153,7 +153,15 @@ class TestGatherFullChannels:
         x_grad = x.clone().requires_grad_(True)
         gather_full_channels(x_grad, col, channel_dim=1).pow(2).sum().backward()
         assert x_grad.grad is not None
-        assert torch.equal(x_grad.grad, 2 * x_grad.detach())
+        assert_close(
+            "gather backward",
+            x_grad.grad,
+            2 * x_grad.detach(),
+            0.0,
+            0.0,
+            device,
+            process_mesh_dict_1x4["model"],
+        )
 
 
 class TestResolveConvGroups:

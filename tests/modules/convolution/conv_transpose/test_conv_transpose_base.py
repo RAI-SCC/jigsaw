@@ -60,8 +60,8 @@ class TestConvTransposeArgumentValidation:
         kwargs = {"kernel_size": 3, arg: (1, 1, 1)}
         with pytest.raises(ValueError, match="1 or 2 entries"):
             convolution.DistributedConvTranspose2d(
-                8,
-                8,
+                24,
+                24,
                 device=device,
                 spatial_group=group,
                 channel_group=group,
@@ -254,7 +254,7 @@ class TestConvTransposeConvertToTorch:
 
         y_ref = torch_conv(x_global)
         assert y_ref.shape == y_global.shape
-        assert torch.allclose(y_global, y_ref, atol=1e-4, rtol=1e-4)
+        assert_close("forward", y_global, y_ref, 1e-4, 1e-4, device, mesh["model"])
 
 
 class TestConvTransposeVmapMembersNoBias:

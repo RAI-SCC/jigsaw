@@ -224,8 +224,14 @@ class TestConv2dTranspose:
 
         weights_gathered = gather_results_as_list(conv.weight, process_mesh_dict_2x2)
         for i in range(process_mesh_dict_2x2["model"].size() // row_comm_size):
-            assert torch.allclose(
-                weights_gathered[i], weights_gathered[i + col_comm_size], atol=1e-5
+            assert_close(
+                f"weight replica {i}",
+                weights_gathered[i],
+                weights_gathered[i + col_comm_size],
+                1e-5,
+                1e-5,
+                device,
+                process_mesh_dict_2x2["model"],
             )
 
     @pytest.mark.parametrize("channel_comm", CHANNEL_COMMS)

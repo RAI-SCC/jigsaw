@@ -20,6 +20,7 @@ from jigsaw._core.comm import CommOp
 from jigsaw._core.vmap import VmapConfig
 
 from .._common.channel_comm import resolve_channel_comm
+from .._common.config import layer_key
 from . import distributed as dist_conv
 
 # native primitives indexed by ``n_spatial - 1``.
@@ -68,6 +69,9 @@ class ConvNdConfig(VmapConfig):
         self.n_spatial = len(kernel_size)
         self.channel_comm = resolve_channel_comm(channel_comm, device)
         self.groups = groups
+        # What the selection below depends on; the layer rejects a config
+        # built for another layer.
+        self._layer_key = layer_key(channel_group, bias, kernel_size, stride, groups)
         # ``channel_local``: this rank owns whole conv-groups -> no channel-group
         # exchange, the native conv is called with ``groups_local`` groups.
         # (base validated the divisibility; recompute the split here so a config
