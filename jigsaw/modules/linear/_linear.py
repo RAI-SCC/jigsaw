@@ -534,6 +534,24 @@ class _DistributedMatMul(torch.nn.Module):
     """Base class of the parameter-free distributed matmul modules.
 
     Subclasses set :attr:`_autograd_fn`.
+
+    Parameters
+    ----------
+    device : torch.device
+        Device of the module.
+    model_group : dist.ProcessGroup or None
+        Process group of one model-parallel instance. ``None`` means a
+        single process.
+    config : LinearConfig, optional
+        Kernel selection. Defaults to a configuration built from the
+        arguments.
+    local_rank : int, optional
+        Deprecated and ignored. The rank is taken from ``model_group``.
+
+    Warns
+    -----
+    DeprecationWarning
+        If ``local_rank`` is given.
     """
 
     #: autograd ``Function`` whose ``.apply`` this module drives; set by subclasses.
@@ -547,26 +565,7 @@ class _DistributedMatMul(torch.nn.Module):
         *,
         local_rank: int | None = None,
     ) -> None:
-        """Initialize the module.
-
-        Parameters
-        ----------
-        device : torch.device
-            Device of the module.
-        model_group : dist.ProcessGroup or None
-            Process group of one model-parallel instance. ``None`` means a
-            single process.
-        config : LinearConfig, optional
-            Kernel selection. Defaults to a configuration built from the
-            arguments.
-        local_rank : int, optional
-            Deprecated and ignored. The rank is taken from ``model_group``.
-
-        Warns
-        -----
-        DeprecationWarning
-            If ``local_rank`` is given.
-        """
+        """Initialize the module."""
         super().__init__()
         _warn_local_rank(local_rank, type(self).__name__)
         self.device = device
