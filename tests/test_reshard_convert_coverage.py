@@ -8,7 +8,7 @@ and between process meshes (``convert_to_jigsaw`` / ``convert_to_torch`` /
 leaves out:
 
 * **Divisibility contracts.** ``convert_to_jigsaw`` and ``reshard_parameters``
-  each assert that the (global) parameter dims divide the target mesh; a mesh
+  each check that the (global) parameter dims divide the target mesh; a mesh
   that does not divide must raise rather than silently mis-shard. Checked for
   linear, ``ConvNd``, ``ConvTransposeNd``, ``DistributedLayerNorm``,
   ``DistributedGroupNorm`` and ``Attention``.
@@ -32,7 +32,7 @@ import torch
 
 import jigsaw.convert as convert
 from jigsaw.gather import gather_1d_results
-from jigsaw.modules import convolution, roll
+from jigsaw.modules import convolution, linear, roll
 from jigsaw.modules import normalization as norm
 from jigsaw.modules.attention import Attention
 from jigsaw.modules.linear._linear import _SUPPORTED_XWT_LAYOUTS
@@ -47,7 +47,7 @@ pytestmark = [pytest.mark.dist_required]
 class TestConvertContracts:
     """A mesh axis that does not divide the parameter must raise on every rank.
 
-    Each assertion lives before the first collective in the respective
+    Each check lives before the first collective in the respective
     ``convert_to_jigsaw``, so every rank raises identically and the job fails
     instead of hanging.
     """
@@ -57,7 +57,7 @@ class TestConvertContracts:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         lin = torch.nn.Linear(3, 4, device=device)  # in=3 not divisible by row=2
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             convert.convert_to_jigsaw(lin, process_mesh_dict_2x2, device)
 
     @pytest.mark.dist(4)
@@ -65,7 +65,7 @@ class TestConvertContracts:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         lin = torch.nn.Linear(4, 3, device=device)  # out=3 not divisible by col=2
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             convert.convert_to_jigsaw(lin, process_mesh_dict_2x2, device)
 
     @pytest.mark.dist(4)
@@ -91,7 +91,7 @@ class TestConvertContracts:
     ) -> None:
         # 2x1x2 -> row=1, col=2; heads=3 is not divisible by the channel size.
         attn = Attention(in_dim=12, embed_dim=12, out_dim=12, heads=3, device=device)
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             Attention.convert_to_jigsaw(attn, process_mesh_dict_2x1x2, device)
 
     @pytest.mark.dist(4)
@@ -99,8 +99,74 @@ class TestConvertContracts:
         self, device: torch.device, process_mesh_dict_2x2: dict
     ) -> None:
         ln = torch.nn.LayerNorm(3, device=device)  # 3 not divisible by col=2
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             convert.convert_to_jigsaw(ln, process_mesh_dict_2x2, device)
+
+
+# --------------------------------------------------------------------------- #
+# constructors: divisibility contracts
+# --------------------------------------------------------------------------- #
+class TestConstructorContracts:
+    """Building a layer directly checks the same contracts as the converter."""
+
+    @pytest.mark.dist(4)
+    def test_linear_in_dim_indivisible_by_col(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        mesh = process_mesh_dict_2x2
+        with pytest.raises(ValueError, match="in_dim=3"):
+            linear.DistributedLinear(
+                3,
+                4,
+                local_rank=mesh["model"].rank(),
+                device=device,
+                model_group=mesh["model"],
+                row_group=mesh["row"],
+                col_group=mesh["col"],
+            )
+
+    @pytest.mark.dist(4)
+    def test_linear_bias_indivisible_by_col(
+        self, device: torch.device, process_mesh_dict_1x4: dict
+    ) -> None:
+        # row split 1 divides out_dim=2, but the col=4 bias shard does not.
+        mesh = process_mesh_dict_1x4
+        with pytest.raises(ValueError, match="shards the bias"):
+            linear.DistributedLinear(
+                4,
+                2,
+                local_rank=mesh["model"].rank(),
+                device=device,
+                model_group=mesh["model"],
+                row_group=mesh["row"],
+                col_group=mesh["col"],
+            )
+
+    @pytest.mark.dist(4)
+    def test_layer_norm_dim_indivisible_by_col(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        mesh = process_mesh_dict_2x2
+        with pytest.raises(ValueError, match="normalized_dim=3"):
+            norm.DistributedLayerNorm(
+                normalized_dim=3,
+                local_rank=mesh["model"].rank(),
+                device=device,
+                row_group=mesh["row"],
+                col_group=mesh["col"],
+            )
+
+    @pytest.mark.dist(4)
+    def test_group_norm_groups_indivisible_by_channel(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        with pytest.raises(ValueError, match="num_groups=3"):
+            norm.DistributedGroupNorm(
+                num_groups=3,
+                num_channels=6,
+                device=device,
+                channel_group=process_mesh_dict_2x2["col"],
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -167,7 +233,7 @@ class TestReshardContracts:
             torch.nn.Linear(2, 2, device=device), process_mesh_dict_2x2, device
         )
         # global weight is (2, 2); target row=4 cannot slice a size-2 axis.
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             jm.reshard_parameters(process_mesh_dict_2x2, process_mesh_dict_4x1)
 
     @pytest.mark.dist(4)
@@ -214,7 +280,7 @@ class TestReshardContracts:
             row_group=process_mesh_dict_2x2["row"],
             col_group=process_mesh_dict_2x2["col"],
         )
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             ln.reshard_parameters(process_mesh_dict_2x2, process_mesh_dict_1x4)
 
     @pytest.mark.dist(4)
@@ -231,7 +297,7 @@ class TestReshardContracts:
             device=device,
             channel_group=process_mesh_dict_2x2["col"],
         )
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             gn.reshard_parameters(process_mesh_dict_2x2, process_mesh_dict_1x4)
 
 
@@ -428,7 +494,7 @@ class TestConvertAxesDevicesOptions:
         assert_close("merged bias", b, ref.bias.data, 1e-6, 1e-6, device, group)
 
         lin = torch.nn.Linear(4, 3, device=device)  # out=3 not divisible by row=4
-        with pytest.raises(AssertionError, match="rows"):
+        with pytest.raises(ValueError, match="rows"):
             convert.convert_to_jigsaw(lin, mesh, device)
 
     @pytest.mark.dist(4)

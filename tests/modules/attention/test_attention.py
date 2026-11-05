@@ -273,7 +273,7 @@ class TestDistributedAttention:
         process_mesh_dict_1x4: dict,
     ) -> None:
         """Construction fails fast on an indivisible head count or ring-without-spatial."""
-        with pytest.raises(AssertionError, match="heads is not divisible"):
+        with pytest.raises(ValueError, match="heads is not divisible"):
             _build_distributed(process_mesh_dict_2x2, device, heads=3)
-        with pytest.raises(AssertionError, match="Cannot perform ring attention"):
+        with pytest.raises(ValueError, match="Cannot perform ring attention"):
             _build_distributed(process_mesh_dict_1x4, device, ring=True)

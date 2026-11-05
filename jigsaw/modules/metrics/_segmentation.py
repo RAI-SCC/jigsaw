@@ -53,6 +53,12 @@ def distributed_confusion_matrix(
     torch.Tensor
         ``int64`` matrix of shape ``(num_classes, num_classes)``, identical on every
         rank of ``reduce_groups``.
+
+    Raises
+    ------
+    ValueError
+        If the sharded class dimension of ``pred`` does not add up to
+        ``num_classes``.
     """
     groups = _normalize_groups(reduce_groups)
 
@@ -61,8 +67,11 @@ def distributed_confusion_matrix(
 
     if pred_is_logits:
         dim = dim % pred.dim()
-        if _active(channel_group):
-            assert pred.shape[dim] * channel_group.size() == num_classes, (  # type: ignore[union-attr]
+        if (
+            _active(channel_group)
+            and pred.shape[dim] * channel_group.size() != num_classes  # type: ignore[union-attr]
+        ):
+            raise ValueError(
                 "num_classes must equal the global size of the sharded class dim"
             )
         pred_idx = distributed_argmax(pred, dim, channel_group)

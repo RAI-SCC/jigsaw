@@ -226,6 +226,20 @@ class TestConfusionMatrix:
             torch.equal(cm, _ref_confusion(logits, target, C)), device, pmd["model"]
         )
 
+    def test_confusion_matrix_rejects_wrong_num_classes(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """A class count that the sharded class dim does not add up to raises."""
+        pmd = process_mesh_dict_2x2
+        with pytest.raises(ValueError, match="num_classes"):
+            seg.distributed_confusion_matrix(
+                _shard(_global_logits(device), pmd, {"col": 1, "row": 2}),
+                _shard(_global_target(device), pmd, {"row": 1}),
+                C + 1,
+                channel_group=pmd["col"],
+                reduce_groups=(pmd["row"],),
+            )
+
 
 # --------------------------------------------------------------------------- #
 # metrics derived from the confusion matrix

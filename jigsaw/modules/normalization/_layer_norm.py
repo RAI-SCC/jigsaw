@@ -41,6 +41,11 @@ class DistributedLayerNorm(torch.nn.Module):
         ``elementwise_affine`` is ``False``.
     dtype : torch.dtype, optional
         Data type of the parameters. Defaults to the torch default dtype.
+
+    Raises
+    ------
+    ValueError
+        If ``col_group.size()`` does not divide ``normalized_dim``.
     """
 
     def __init__(
@@ -57,10 +62,11 @@ class DistributedLayerNorm(torch.nn.Module):
     ) -> None:
         """Initialize the layer."""
         super().__init__()
-        assert normalized_dim % col_group.size() == 0, (
-            f"normalized_dim={normalized_dim} is not divisible by the column "
-            f"group size {col_group.size()}"
-        )
+        if normalized_dim % col_group.size() != 0:
+            raise ValueError(
+                f"normalized_dim={normalized_dim} is not divisible by the column "
+                f"group size {col_group.size()}"
+            )
         local_dim = normalized_dim // col_group.size()
         self.local_rank = local_rank
         self.device = device
@@ -168,6 +174,8 @@ class DistributedLayerNorm(torch.nn.Module):
 
         Raises
         ------
+        ValueError
+            If the column group size does not divide the normalized dimension.
         NotImplementedError
             If ``model`` normalizes more than one dimension.
         """
@@ -298,11 +306,19 @@ class DistributedLayerNorm(torch.nn.Module):
             Process groups of the new mesh.
         pm_row_key, pm_col_key : str
             Keys of the row and column process groups in both meshes.
+
+        Raises
+        ------
+        ValueError
+            If the target column group size does not divide the normalized
+            dimension.
         """
         to_col = to_process_mesh[pm_col_key]
-        assert self.normalized_dim % to_col.size() == 0, (
-            "global normalized dim must be divisible by the target channel group size"
-        )
+        if self.normalized_dim % to_col.size() != 0:
+            raise ValueError(
+                "global normalized dim must be divisible by the target channel "
+                "group size"
+            )
         new_local_dim = self.normalized_dim // to_col.size()
         col_rank = to_col.rank()
 
