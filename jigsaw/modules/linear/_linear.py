@@ -1,6 +1,7 @@
 """Distributed linear layers and matmul modules."""
 
 import math
+import warnings
 from typing import Any, cast
 
 import torch
@@ -22,6 +23,17 @@ from ._functional import _XTW, _XW, _XWT
 _SUPPORTED_XWT_LAYOUTS = frozenset({(1, 1), (1, 2), (2, 2), (4, 2)})
 
 
+def _warn_local_rank(local_rank: int | None, owner: str) -> None:
+    """Warn that ``local_rank`` is ignored; the layer uses ``model_group.rank()``."""
+    if local_rank is not None:
+        warnings.warn(
+            f"{owner}: local_rank is deprecated and ignored; the rank is taken "
+            "from model_group.rank().",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+
+
 class DistributedLinear(torch.nn.Module):
     """Distributed linear layer computing ``x @ w.mT``.
 
@@ -31,8 +43,6 @@ class DistributedLinear(torch.nn.Module):
         Input dimension of the global (unsharded) weight.
     out_dim : int
         Output dimension of the global (unsharded) weight.
-    local_rank : int
-        Rank within the model group.
     device : torch.device
         Device of the module.
     model_group : dist.ProcessGroup
@@ -51,18 +61,24 @@ class DistributedLinear(torch.nn.Module):
         arguments.
     dtype : torch.dtype
         Data type of the parameters and computations.
+    local_rank : int, optional
+        Deprecated and ignored. The rank is taken from ``model_group``.
 
     Raises
     ------
     ValueError
         If the group sizes do not divide ``in_dim`` and ``out_dim``.
+
+    Warns
+    -----
+    DeprecationWarning
+        If ``local_rank`` is given.
     """
 
     def __init__(
         self,
         in_dim: int,
         out_dim: int,
-        local_rank: int,
         device: torch.device,
         model_group: dist.ProcessGroup,
         row_group: dist.ProcessGroup,
@@ -70,9 +86,12 @@ class DistributedLinear(torch.nn.Module):
         bias: bool = True,
         config: LinearConfig | None = None,
         dtype: torch.dtype = torch.float32,
+        *,
+        local_rank: int | None = None,
     ) -> None:
         """Initialize the layer."""
         super().__init__()
+        _warn_local_rank(local_rank, type(self).__name__)
 
         self.dtype = dtype
         self.device = device
@@ -122,7 +141,6 @@ class DistributedLinear(torch.nn.Module):
         self.out_dim = out_dim
         self.in_dim = in_dim
         self.device = device
-        self.local_rank = local_rank
         self.model_group = model_group
         self.row_group = row_group
         self.col_group = col_group
@@ -185,7 +203,7 @@ class DistributedLinear(torch.nn.Module):
             x,
             weight,
             bias,
-            self.local_rank,
+            self.model_group.rank(),
             self.device,
             self.config,
             self.model_group,
@@ -289,7 +307,6 @@ class DistributedLinear(torch.nn.Module):
             in_dim=model.in_features,
             out_dim=model.out_features,
             bias=model.bias is not None,
-            local_rank=process_mesh_dict[model_kw].rank(),
             device=device,
             model_group=process_mesh_dict[model_kw],
             row_group=process_mesh_dict[row_kw],
@@ -493,12 +510,11 @@ class DistributedLinear(torch.nn.Module):
             del global_bias
 
         # Rebind the module to the target mesh so a forward/backward pass on it
-        # is valid: process groups, ranks, the kernel-selection config and the
+        # is valid: process groups, the kernel-selection config and the
         # bias replica mark all key off the new group sizes.
         self.row_group = to_process_mesh[pm_row_key]
         self.col_group = to_process_mesh[pm_col_key]
         self.model_group = to_process_mesh[pm_model_key]
-        self.local_rank = self.model_group.rank()
         self.out_dim, self.in_dim = tuple(self.weight.shape)
         self.config = LinearConfig(
             self.model_group,
@@ -525,17 +541,16 @@ class _DistributedMatMul(torch.nn.Module):
 
     def __init__(
         self,
-        local_rank: int,
         device: torch.device,
         model_group: dist.ProcessGroup | None,
         config: LinearConfig | None = None,
+        *,
+        local_rank: int | None = None,
     ) -> None:
         """Initialize the module.
 
         Parameters
         ----------
-        local_rank : int
-            Rank within the model group.
         device : torch.device
             Device of the module.
         model_group : dist.ProcessGroup or None
@@ -544,9 +559,16 @@ class _DistributedMatMul(torch.nn.Module):
         config : LinearConfig, optional
             Kernel selection. Defaults to a configuration built from the
             arguments.
+        local_rank : int, optional
+            Deprecated and ignored. The rank is taken from ``model_group``.
+
+        Warns
+        -----
+        DeprecationWarning
+            If ``local_rank`` is given.
         """
         super().__init__()
-        self.local_rank = local_rank
+        _warn_local_rank(local_rank, type(self).__name__)
         self.device = device
         self.model_group = model_group
         self.config = (
@@ -591,7 +613,7 @@ class _DistributedMatMul(torch.nn.Module):
             x,
             w,
             None,
-            self.local_rank,
+            0 if self.model_group is None else self.model_group.rank(),
             self.device,
             self.config,
             self.model_group,
@@ -635,7 +657,6 @@ class _DistributedMatMul(torch.nn.Module):
             Distributed matmul module.
         """
         return cls(
-            local_rank=process_mesh_dict[model_kw].rank(),
             device=device,
             model_group=process_mesh_dict[model_kw],
         )

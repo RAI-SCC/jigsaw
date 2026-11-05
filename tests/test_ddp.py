@@ -71,7 +71,6 @@ def _build(kind: str, mesh: dict, device: torch.device, fill: bool = True):
         model = linear.DistributedLinear(
             8,
             8,
-            local_rank=(mesh["model"] if summa else col).rank(),
             device=device,
             model_group=mesh["model"] if summa else col,
             col_group=col,

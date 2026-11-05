@@ -1,3 +1,5 @@
+import warnings
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -38,7 +40,6 @@ def _distributed_from(
     layer = linear.DistributedLinear(
         serial.in_features,
         serial.out_features,
-        local_rank=dist.get_rank(group=mesh["model"]),
         device=device,
         model_group=mesh["model"] if model_group is None else model_group,
         col_group=mesh["col"],
@@ -186,7 +187,6 @@ class TestBiasInit:
         linlayer = linear.DistributedLinear(
             6,
             10,
-            local_rank=local_rank,
             device=device,
             model_group=process_mesh_dict_2x2["model"],
             col_group=process_mesh_dict_2x2["col"],
@@ -237,7 +237,6 @@ class TestParameterCount:
         layer = linear.DistributedLinear(
             in_dim,
             out_dim,
-            local_rank=dist.get_rank(group=mesh["model"]),
             device=device,
             model_group=mesh["model"],
             col_group=mesh["col"],
@@ -249,6 +248,40 @@ class TestParameterCount:
         assert all_ranks_ok(
             layer.get_parameter_count() == expected, device, mesh["model"]
         )
+
+
+class TestDeprecatedLocalRank:
+    @pytest.mark.dist(4)
+    def test_local_rank_is_ignored(
+        self, device: torch.device, process_mesh_dict_2x2: dict
+    ) -> None:
+        """A stale ``local_rank`` warns and does not change the output."""
+        mesh = process_mesh_dict_2x2
+        torch.manual_seed(0)  # identical serial reference on every rank
+        serial = torch.nn.Linear(4, 4, device=device)
+        reference = _distributed_from(serial, mesh, device)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            layer = linear.DistributedLinear(
+                4,
+                4,
+                device=device,
+                model_group=mesh["model"],
+                col_group=mesh["col"],
+                row_group=mesh["row"],
+                local_rank=0,  # wrong on every rank but 0
+            )
+        warned = any(
+            issubclass(w.category, DeprecationWarning)
+            and "local_rank" in str(w.message)
+            for w in caught
+        )
+        layer.load_state_dict(reference.state_dict())
+
+        x = split_tensor(torch.randn(2, 4, 4, device=device), _DATA_SPEC, mesh)
+        assert all_ranks_ok(warned, device, mesh["model"])
+        assert_close("output", layer(x), reference(x), 0.0, 0.0, device, mesh["model"])
 
 
 class TestComm:
@@ -269,7 +302,6 @@ class TestComm:
         linlayer = linear.DistributedLinear(
             in_dim,
             out_dim,
-            local_rank=local_rank,
             device=device,
             model_group=model_group,
             col_group=mesh["col"],

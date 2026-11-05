@@ -33,7 +33,6 @@ def test_count_parameters_with_mesh_is_the_whole_model(
     layer = linear.DistributedLinear(
         in_dim,
         out_dim,
-        local_rank=dist.get_rank(group=mesh["model"]),
         device=device,
         model_group=mesh["model"],
         col_group=mesh["col"],

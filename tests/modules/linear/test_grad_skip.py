@@ -89,7 +89,6 @@ def test_linear_backward_skips_unneeded_grads(
     layer = linear.DistributedLinear(
         in_dim,
         out_dim,
-        local_rank=local_rank,
         device=device,
         model_group=model_group,
         col_group=pm["col"],
@@ -174,9 +173,7 @@ def test_matmul_backward_skips_unneeded_grads(
     module_cls, operands, reference = op
     model_group = pm["model"]
     torch.manual_seed(model_group.rank())
-    model = module_cls(
-        local_rank=model_group.rank(), device=device, model_group=model_group
-    )
+    model = module_cls(device=device, model_group=model_group)
 
     a = torch.randn(10 // 2, 20 // 2, device=device)
     b = torch.randn(20 // 2, 8 // 2, device=device)

@@ -915,7 +915,6 @@ class TestLinearTrainingParity:
         dist_lin = linear.DistributedLinear(
             in_dim,
             out_dim,
-            local_rank=model_rank,
             device=device,
             model_group=pmd["model"],
             col_group=pmd["col"],

@@ -427,7 +427,6 @@ class DistributedAttention(torch.nn.Module):
             self.qkv = linear.DistributedLinear(
                 in_dim,
                 embed_dim * 3,
-                local_rank=self.channel_group.rank(),
                 device=self.device,
                 model_group=self.channel_group,
                 row_group=self.spatial_group,
@@ -445,7 +444,6 @@ class DistributedAttention(torch.nn.Module):
             self.head_concat = linear.DistributedLinear(
                 embed_dim,
                 out_dim,
-                local_rank=self.channel_group.rank(),
                 device=self.device,
                 model_group=self.channel_group,
                 row_group=self.spatial_group,
