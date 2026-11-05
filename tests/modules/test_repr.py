@@ -59,7 +59,6 @@ def test_linear(mesh: dict, device: torch.device) -> None:
     layer = DistributedLinear(
         16,
         32,
-        local_rank=mesh["model"].rank(),
         device=device,
         model_group=mesh["model"],
         row_group=mesh["row"],
@@ -77,7 +76,6 @@ def test_linear_row_is_the_weight_split(mesh: dict, device: torch.device) -> Non
     layer = DistributedLinear(
         16,
         32,
-        local_rank=mesh["col"].rank(),
         device=device,
         model_group=mesh["col"],
         row_group=mesh["row"],
@@ -89,7 +87,7 @@ def test_linear_row_is_the_weight_split(mesh: dict, device: torch.device) -> Non
 
 @meshes
 def test_matmul(mesh: dict, device: torch.device) -> None:
-    module = DistributedMatMulXWT(mesh["model"].rank(), device, mesh["model"])
+    module = DistributedMatMulXWT(device, mesh["model"])
     _check(module, f"model={mesh['model'].size()}", device)
 
 
@@ -217,7 +215,6 @@ def test_reshard_updates_the_shard_sizes(mesh: dict, device: torch.device) -> No
     layer = DistributedLinear(
         16,
         32,
-        local_rank=mesh["model"].rank(),
         device=device,
         model_group=mesh["model"],
         row_group=mesh["row"],

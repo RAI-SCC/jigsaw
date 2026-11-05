@@ -122,7 +122,6 @@ def _mlp(pm: dict, device: torch.device) -> tuple:
         return linear.DistributedLinear(
             in_dim,
             out_dim,
-            local_rank=pm["model"].rank(),
             device=device,
             model_group=pm["model"],
             row_group=pm["row"],

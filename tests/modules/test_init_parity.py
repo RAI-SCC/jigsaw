@@ -49,12 +49,9 @@ class TestLinearInitParity:
     ) -> None:
         mesh = process_mesh_dict_2x2
         in_dim, out_dim = 64, 128
-        local_rank = torch.distributed.get_rank(group=mesh["model"])
-
         layer = linear.DistributedLinear(
             in_dim,
             out_dim,
-            local_rank=local_rank,
             device=device,
             model_group=mesh["model"],
             col_group=mesh["col"],

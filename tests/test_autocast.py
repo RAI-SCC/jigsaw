@@ -103,7 +103,6 @@ class TestAutocastLinear:
         model = DistributedLinear(
             in_dim,
             out_dim,
-            local_rank=pm["model"].rank(),
             device=device,
             model_group=pm["model"],
             col_group=pm["col"],

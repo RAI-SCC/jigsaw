@@ -47,7 +47,6 @@ def main(steps: int = 100) -> None:
         return jigsaw.modules.DistributedLinear(
             in_dim,
             out_dim,
-            local_rank=train_mesh["model"].rank(),
             device=device,
             model_group=train_mesh["model"],
             row_group=row,

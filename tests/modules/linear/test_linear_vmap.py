@@ -22,7 +22,6 @@ def _layer(mesh: dict, device: torch.device) -> linear.DistributedLinear:
     return linear.DistributedLinear(
         IN,
         OUT,
-        local_rank=mesh["model"].rank(),
         device=device,
         model_group=mesh["model"],
         row_group=mesh["row"],

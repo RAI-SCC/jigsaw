@@ -41,7 +41,7 @@ OPS = {
 
 
 def _distributed(cls):
-    return cls(local_rank=0, device=CPU, model_group=None)
+    return cls(device=CPU, model_group=None)
 
 
 def _operands(x_shape, w_shape):
@@ -99,6 +99,14 @@ class TestSingleProcessMatMul:
             def size(self):
                 return 1
 
-        converted = dist_cls.convert_to_jigsaw(plain_cls(), {"model": Group()}, CPU)
+        group = Group()
+        converted = dist_cls.convert_to_jigsaw(plain_cls(), {"model": group}, CPU)
         assert isinstance(converted, dist_cls)
-        assert (converted.local_rank, converted.model_group.size()) == (0, 1)
+        assert converted.model_group is group
+
+    def test_local_rank_is_ignored_with_a_warning(self, op):
+        dist_cls, _, xs, ws, ref = OPS[op]
+        with pytest.warns(DeprecationWarning, match="local_rank"):
+            module = dist_cls(device=CPU, model_group=None, local_rank=3)
+        x, w = _operands(xs, ws)
+        assert torch.allclose(module(x, w), ref(x, w))

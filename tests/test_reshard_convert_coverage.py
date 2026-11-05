@@ -118,7 +118,6 @@ class TestConstructorContracts:
             linear.DistributedLinear(
                 3,
                 4,
-                local_rank=mesh["model"].rank(),
                 device=device,
                 model_group=mesh["model"],
                 row_group=mesh["row"],
@@ -135,7 +134,6 @@ class TestConstructorContracts:
             linear.DistributedLinear(
                 4,
                 2,
-                local_rank=mesh["model"].rank(),
                 device=device,
                 model_group=mesh["model"],
                 row_group=mesh["row"],

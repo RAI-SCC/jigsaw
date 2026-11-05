@@ -80,7 +80,6 @@ class Block(nn.Module):
             return jigsaw.modules.DistributedLinear(
                 in_dim,
                 out_dim,
-                local_rank=model_group.rank(),
                 device=device,
                 model_group=model_group,  # the weight is split over row *and* col
                 row_group=row,
