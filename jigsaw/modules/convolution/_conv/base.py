@@ -48,7 +48,7 @@ class _DistributedConvNd(torch.nn.Module):
         Process group splitting the channels.
     stride : int | tuple[int, ...]
         Stride in the convolution.
-    padding : str | tuple[int, ...]
+    padding : int | str | tuple[int, ...]
         Padding, or ``"valid"`` or ``"same"``. ``"same"`` with an odd
         ``dilation * (kernel_size - 1)`` pads asymmetrically and needs an
         unsplit layer.
@@ -109,7 +109,7 @@ class _DistributedConvNd(torch.nn.Module):
         channel_group: dist.ProcessGroup,
         # --- core conv (optional, pytorch-standard-order) ---
         stride: int | tuple[int, ...] = 1,
-        padding: str | tuple[int, ...] = (0,),
+        padding: int | str | tuple[int, ...] = (0,),
         dilation: int | tuple[int, ...] = 1,
         groups: int = 1,
         bias: bool = True,

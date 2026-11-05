@@ -20,7 +20,13 @@ import torch
 
 import jigsaw.convert as convert
 import jigsaw.modules.convolution as convolution
-from tests.parity import REPLICATED, ShardSpec, _all_gather_uneven, check_parity
+from tests.parity import (
+    REPLICATED,
+    ShardSpec,
+    _all_gather_uneven,
+    assert_close,
+    check_parity,
+)
 
 pytestmark = [pytest.mark.dist_required, pytest.mark.dist(4)]
 
@@ -139,4 +145,4 @@ class TestConvParity:
             [torch.full((2, r + 2), float(r), device=device) for r in range(size)],
             dim=1,
         )
-        assert torch.equal(glued, expected)
+        assert_close("glued shards", glued, expected, 0.0, 0.0, device, world)

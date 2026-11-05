@@ -39,7 +39,7 @@ def _channel_reduce_grad_input(
 def conv_nway(
     x: torch.Tensor,
     w: torch.Tensor,
-    b: torch.Tensor,
+    b: torch.Tensor | None,
     stride: tuple[int, ...],
     padding: str | tuple[int, ...],
     dilation: tuple[int, ...],
@@ -212,7 +212,7 @@ def conv_nway_backward(
 def conv_halo_nway(
     x: torch.Tensor,
     w: torch.Tensor,
-    b: torch.Tensor,
+    b: torch.Tensor | None,
     stride: tuple[int, ...],
     padding: str | tuple[int, ...],
     dilation: tuple[int, ...],

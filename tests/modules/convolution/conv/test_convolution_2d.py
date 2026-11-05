@@ -506,11 +506,23 @@ class TestConv2d:
 
         y_ag.backward(torch.ones_like(y_ag))
         y_stream.backward(torch.ones_like(y_stream))
-        assert torch.allclose(
-            conv_ag.weight.grad, conv_stream.weight.grad, atol=1e-5, rtol=1e-5
+        assert_close(
+            "streaming vs all_gather weight grad",
+            conv_ag.weight.grad,
+            conv_stream.weight.grad,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
         )
-        assert torch.allclose(
-            conv_ag.bias.grad, conv_stream.bias.grad, atol=1e-5, rtol=1e-5
+        assert_close(
+            "streaming vs all_gather bias grad",
+            conv_ag.bias.grad,
+            conv_stream.bias.grad,
+            1e-5,
+            1e-5,
+            device,
+            model_group,
         )
 
     def test_channel_comm_auto_defaults_by_device(
@@ -642,8 +654,24 @@ class TestConv2d:
 
         y_int.backward(torch.ones_like(y_int))
         y_tuple.backward(torch.ones_like(y_tuple))
-        assert torch.allclose(conv_int.weight.grad, conv_tuple.weight.grad, atol=1e-6)
-        assert torch.allclose(conv_int.bias.grad, conv_tuple.bias.grad, atol=1e-6)
+        assert_close(
+            "int args vs tuple args weight grad",
+            conv_int.weight.grad,
+            conv_tuple.weight.grad,
+            1e-6,
+            1e-5,
+            device,
+            model_group,
+        )
+        assert_close(
+            "int args vs tuple args bias grad",
+            conv_int.bias.grad,
+            conv_tuple.bias.grad,
+            1e-6,
+            1e-5,
+            device,
+            model_group,
+        )
 
     def test_int_args_match_reference_conv2d(
         self, device: torch.device, process_mesh_dict_2x2: dict
@@ -1113,13 +1141,16 @@ class TestConv2dChannelGroupOne:
 
         x_dist = x.clone().requires_grad_(True)
         y = conv(x_dist)
-        assert torch.allclose(y, y_ref, atol=1e-5)
+        # Each rank has its own input; the verdict is shared so a failing rank
+        # cannot leave the others in a later test's collective.
+        world = dist.group.WORLD
+        assert_close("forward", y, y_ref, 1e-5, 1e-5, device, world)
 
         y.backward(torch.ones_like(y))
         y_ref.backward(torch.ones_like(y_ref))
-        assert torch.allclose(x_dist.grad, x_ref.grad, atol=1e-5)
-        assert torch.allclose(conv.weight.grad, w.grad, atol=1e-5)
-        assert torch.allclose(conv.bias.grad, b.grad, atol=1e-5)
+        assert_close("input grad", x_dist.grad, x_ref.grad, 1e-5, 1e-5, device, world)
+        assert_close("weight grad", conv.weight.grad, w.grad, 1e-5, 1e-5, device, world)
+        assert_close("bias grad", conv.bias.grad, b.grad, 1e-5, 1e-5, device, world)
 
     @pytest.mark.dist(4)
     def test_tiling_conv_matches_single_process(

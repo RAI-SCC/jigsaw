@@ -149,7 +149,7 @@ def _grad_input_weight_reduced(
 def conv_transpose_nway(
     x: torch.Tensor,
     w: torch.Tensor,
-    b: torch.Tensor,
+    b: torch.Tensor | None,
     stride: tuple[int, ...],
     padding: tuple[int, ...],
     dilation: tuple[int, ...],
@@ -299,7 +299,7 @@ def conv_transpose_nway_backward(
 def conv_transpose_halo_nway(
     x: torch.Tensor,
     w: torch.Tensor,
-    b: torch.Tensor,
+    b: torch.Tensor | None,
     stride: tuple[int, ...],
     padding: tuple[int, ...],
     dilation: tuple[int, ...],
