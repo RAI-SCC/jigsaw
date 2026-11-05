@@ -33,29 +33,19 @@ def set_all_seeds(seed: int = 0) -> None:
 
 @dataclass(frozen=True)
 class LaunchEnv:
-    """Distributed launch parameters.
+    """Distributed launch parameters."""
 
-    Attributes
-    ----------
-    rank : int
-        Global process rank.
-    world_size : int
-        Total number of processes.
-    local_rank : int
-        Rank within the node (selects the local GPU).
-    master_addr : str
-        Rendezvous host.
-    master_port : str
-        Rendezvous port.
-    source : str
-        Detected launcher: ``"slurm"``, ``"torchrun"`` or ``"single"``.
-    """
-
+    #: Global process rank.
     rank: int
+    #: Total number of processes.
     world_size: int
+    #: Rank within the node (selects the local GPU).
     local_rank: int
+    #: Rendezvous host.
     master_addr: str
+    #: Rendezvous port.
     master_port: str
+    #: Detected launcher: ``"slurm"``, ``"torchrun"`` or ``"single"``.
     source: str
 
 

@@ -33,13 +33,9 @@ class ProcessMesh(dict):
         Axis name to process group.
     device_mesh : torch.distributed.device_mesh.DeviceMesh
         The n-d mesh the groups were cut from.
-
-    Attributes
-    ----------
-    device_mesh : torch.distributed.device_mesh.DeviceMesh
-        The n-d mesh over every axis, in the order they were given.
     """
 
+    #: The n-d mesh over every axis, in the order they were given.
     device_mesh: dist.device_mesh.DeviceMesh
 
     def __init__(
