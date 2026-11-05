@@ -39,6 +39,10 @@ _CONFIG_CLS = {
 _CASES = [(1, (32,), 4, 4, 0), (2, (8, 16), 4, 2, 1)]
 _IDS = [f"{n}d_k{k}_s{s}_p{p}" for (n, _, k, s, p) in _CASES]
 
+# Channels of the layers built on the world group, divisible by every CI world
+# size (1, 2, 4, 6, 8).
+_C = 24
+
 
 class TestUnbatchedInput:
     @pytest.mark.dist(4)
@@ -105,7 +109,7 @@ class TestUnbatchedInput:
         """An input that is neither ``(C, L)`` nor ``(N, C, L)`` raises ``ValueError``."""
         group = dist.group.WORLD
         layer = _JIGSAW_CLS[kind, 1](
-            8, 8, 3, device=device, spatial_group=[None], channel_group=group
+            _C, _C, 3, device=device, spatial_group=[None], channel_group=group
         )
         with pytest.raises(ValueError, match="2-D \\(unbatched\\) or 3-D"):
             layer(torch.zeros(2, 2, 2, 8, device=device))
@@ -145,8 +149,8 @@ class TestConfigForAnotherLayer:
         )
         with pytest.raises(ValueError, match=f"{field}="):
             _JIGSAW_CLS[kind, 2](
-                8,
-                8,
+                _C,
+                _C,
                 2,
                 device=device,
                 spatial_group=group,
@@ -163,8 +167,8 @@ class TestConfigForAnotherLayer:
             group, torch.zeros(1), (2, 2), (2, 2), device, channel_comm="all_gather"
         )
         layer = _JIGSAW_CLS[kind, 2](
-            8,
-            8,
+            _C,
+            _C,
             2,
             device=device,
             spatial_group=group,

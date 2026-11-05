@@ -60,8 +60,8 @@ class TestConvTransposeArgumentValidation:
         kwargs = {"kernel_size": 3, arg: (1, 1, 1)}
         with pytest.raises(ValueError, match="1 or 2 entries"):
             convolution.DistributedConvTranspose2d(
-                8,
-                8,
+                24,  # divisible by every CI world size
+                24,
                 device=device,
                 spatial_group=group,
                 channel_group=group,

@@ -289,7 +289,7 @@ def conv_transpose_nway_backward(
 
 
 # ---------------------------------------------------------------------------
-# halo regime (stride != kernel_size)
+# halo regime (kernel_size != stride, or padding or dilation on a split axis)
 #
 # The transpose halo exchange is dimension-agnostic and lives in
 # :mod:`jigsaw.modules.convolution._conv_transpose.halo`. One exchange is run per split
@@ -307,8 +307,9 @@ def conv_transpose_halo_nway(
     channel_group: dist.ProcessGroup,
     config: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply the transpose convolution with halo reduction (``stride != kernel_size``).
+    """Apply the transpose convolution with halo reduction.
 
+    Used if ``kernel_size != stride``, or a split axis has padding or dilation.
     The overlapping raw outputs are summed along each split axis before the bias
     is added.
 

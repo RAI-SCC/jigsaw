@@ -1108,9 +1108,8 @@ class TestConv2dChannelGroupOne:
     ) -> None:
         """No channel *and* no spatial split: any stride / padding / dilation.
 
-        Previously the custom kernel rejected ``stride != kernel_size``
-        unconditionally; with both groups size one it now runs plain autograd
-        ``conv2d`` and must match a single-process reference in fwd and bwd.
+        With both groups of size one the layer runs plain autograd ``conv2d``,
+        which must match a single-process reference in forward and backward.
         """
         mesh = process_mesh_dict_4x1x1
         row, col = mesh["row"], mesh["col"]

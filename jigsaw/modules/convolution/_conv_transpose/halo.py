@@ -58,7 +58,7 @@ def produced_output_span(
 
     if global_out % group_size != 0:
         raise NotImplementedError(
-            "Distributed ConvTranspose with stride != kernel_size needs the "
+            "Distributed ConvTranspose with a halo exchange needs the "
             f"global output size along the split axis ({global_out}) to be "
             f"divisible by the spatial group size ({group_size})."
         )
