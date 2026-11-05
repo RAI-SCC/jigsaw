@@ -72,6 +72,7 @@ napoleon_google_docstring = False
 # method mock instances don't have, so import crashes without this patch.
 # Real, unmocked modules are unaffected.
 from sphinx.ext.autodoc.mock import _MockObject
+from sphinx.util.inspect import stringify_signature
 
 
 def _mock_or(self: _MockObject, other: object) -> _MockObject:
@@ -148,13 +149,46 @@ def _inherit_base_sections(
             return
 
 
+# -- Constructor signatures -----------------------------------------------------
+# With torch mocked, torch.nn.Module is a mock class whose __new__(*args, **kwargs)
+# autodoc finds before the subclass's __init__, so every Module subclass would show
+# ``(*args, **kwargs)``. Such classes get their jigsaw __init__ signature instead,
+# or ``()`` if only the mocked base defines one; the types are left out because
+# the description lists them.
+def _init_signature(
+    app: object,
+    what: str,
+    name: str,
+    obj: object,
+    options: object,
+    signature: str | None,
+    return_annotation: str,
+) -> tuple[str, str] | None:
+    if what != "class" or signature != "(*args, **kwargs)":
+        return None
+    if not (isinstance(obj, type) and issubclass(obj, _MockObject)):
+        return None
+    init = getattr(obj, "__init__", None)
+    if not (inspect.isfunction(init) and init.__module__.startswith("jigsaw")):
+        return "()", return_annotation
+    sig = inspect.signature(init)
+    sig = sig.replace(parameters=list(sig.parameters.values())[1:])  # drop self
+    text = stringify_signature(sig, show_annotation=False, show_return_annotation=False)
+    return text, return_annotation
+
+
 def setup(app: object) -> None:
-    """Register the repo-link rewrite and the base-section inheritance."""
+    """Register the repo-link rewrite, base-section inheritance and signatures."""
     app.connect("source-read", _on_source_read)  # type: ignore[attr-defined]
     app.connect("include-read", _on_include_read)  # type: ignore[attr-defined]
     # Before napoleon (priority 500) converts the numpydoc sections.
     app.connect(  # type: ignore[attr-defined]
         "autodoc-process-docstring", _inherit_base_sections, priority=400
+    )
+    # After autodoc's own handlers (typehints recording, priority 500): the event
+    # stops at the first handler that returns a result.
+    app.connect(  # type: ignore[attr-defined]
+        "autodoc-process-signature", _init_signature, priority=600
     )
 
 # -- HTML output --------------------------------------------------------------
