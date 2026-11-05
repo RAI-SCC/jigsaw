@@ -115,7 +115,7 @@ class TestConvArgumentValidation:
         kwargs = {"kernel_size": 3, arg: (1, 1, 1)}
         with pytest.raises(ValueError, match="1 or 2 entries"):
             convolution.DistributedConv2d(
-                24,  # divisible by every CI world size
+                24,
                 24,
                 device=device,
                 spatial_group=group,
@@ -133,7 +133,7 @@ class TestConvArgumentValidation:
         group = dist.group.WORLD
         with pytest.raises(ValueError, match="padding"):
             convolution.DistributedConv2d(
-                24,  # divisible by every CI world size
+                24,
                 24,
                 3,
                 device=device,
