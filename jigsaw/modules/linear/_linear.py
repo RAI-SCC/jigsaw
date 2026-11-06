@@ -55,6 +55,9 @@ def _row_rank(
 class DistributedLinear(torch.nn.Module):
     """Distributed linear layer computing ``x @ w.mT``.
 
+    ``forward`` supports an effective ``row x col`` layout of 1x1, 1x2, 2x2 or
+    4x2, where ``row`` is ``model_group.size() // col_group.size()``.
+
     Parameters
     ----------
     in_dim : int
@@ -163,7 +166,6 @@ class DistributedLinear(torch.nn.Module):
 
         self.out_dim = out_dim
         self.in_dim = in_dim
-        self.device = device
         self.model_group = model_group
         self.row_group = row_group
         self.col_group = col_group
@@ -221,6 +223,11 @@ class DistributedLinear(torch.nn.Module):
         -------
         torch.Tensor
             Local output.
+
+        Raises
+        ------
+        NotImplementedError
+            If the effective layout is not 1x1, 1x2, 2x2 or 4x2.
         """
         # Check the effective layout, not ``row_group.size()``: with
         # ``model_group == col_group`` (e.g. attention's qkv projection, weights
@@ -253,13 +260,8 @@ class DistributedLinear(torch.nn.Module):
         Returns
         -------
         int
-            Global (unsharded) count of this layer's parameters, including plain
-            ``torch.nn`` children; children with ``get_parameter_count`` report
-            their own. No communication.
-
-        Notes
-        -----
-        This method calculates the number of parameters based on the global weight and bias shape calculated at initialization instead of counting the number of elements of the local parameters and scaling according to the respective communication group sizes.
+            Number of elements of the global (unsharded) weight and bias,
+            taken from the shapes recorded at construction. No communication.
         """
         num_bias_param = (
             0 if self.global_bias_shape is None else math.prod(self.global_bias_shape)
@@ -661,7 +663,7 @@ class _DistributedMatMul(torch.nn.Module):
         """
         return shard_repr(model=self.model_group)
 
-    def forward(self, x: torch.Tensor, w: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
         """Apply the distributed matmul.
 
         Parameters
@@ -670,8 +672,6 @@ class _DistributedMatMul(torch.nn.Module):
             Local input.
         w : torch.Tensor
             Local weight.
-        **kwargs : Any
-            Unused. The operation has no bias.
 
         Returns
         -------

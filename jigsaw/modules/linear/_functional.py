@@ -4,7 +4,6 @@ from typing import Any, Protocol, cast
 
 import torch
 import torch.distributed as dist
-from torch.nn.parameter import Parameter
 
 from jigsaw._core.autocast import cast_to_autocast_dtype
 from jigsaw._core.vmap import check_not_vmapped, to_front
@@ -18,11 +17,9 @@ class LinearCtx(Protocol):
     saved_tensors: tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]
     needs_input_grad: tuple[bool, ...]
     local_rank: int
-    device: torch.Tensor
+    device: torch.device
     config: LinearConfig
     model_group: dist.ProcessGroup
-    spatial_group: dist.ProcessGroup
-    b: Parameter | None
     w_dtype: torch.dtype
     w_shape: torch.Size
 
@@ -54,7 +51,6 @@ def _setup_linear_ctx(ctx: torch.autograd.function.FunctionCtx, inputs: Any) -> 
     c.device = device
     c.config = config
     c.model_group = model_group
-    c.b = b
     c.w_dtype = w.dtype
     c.w_shape = w.shape
 
