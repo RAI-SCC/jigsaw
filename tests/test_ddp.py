@@ -77,10 +77,6 @@ def _build(kind: str, mesh: dict, device: torch.device, fill: bool = True):
             row_group=row,
             bias=True,
         )
-        if not summa:
-            # ``row`` is a pure replication axis here, as in attention.
-            parallel.mark_replicated(model.weight, row)
-            dist.broadcast(model.weight.data, group_src=0, group=row)
         shape = (2, 4 // row.size() if summa else 4, 8 // col.size())
     elif kind == "conv_halo":
         model = convolution.DistributedConv2d(

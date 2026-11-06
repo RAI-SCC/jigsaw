@@ -35,6 +35,22 @@ def _warn_local_rank(local_rank: int | None, owner: str) -> None:
         )
 
 
+def _row_split(mesh: dict[str, dist.ProcessGroup], col_kw: str, model_kw: str) -> int:
+    """Return the number of ways the weight rows are split on ``mesh``.
+
+    1 when the model group is the column group; the weight is then replicated
+    over the row group.
+    """
+    return mesh[model_kw].size() // mesh[col_kw].size()
+
+
+def _row_rank(
+    mesh: dict[str, dist.ProcessGroup], row_kw: str, col_kw: str, model_kw: str
+) -> int:
+    """Return the index of this rank's block of weight rows on ``mesh``."""
+    return 0 if _row_split(mesh, col_kw, model_kw) == 1 else mesh[row_kw].rank()
+
+
 class DistributedLinear(torch.nn.Module):
     """Distributed linear layer computing ``x @ w.mT``.
 
@@ -52,7 +68,8 @@ class DistributedLinear(torch.nn.Module):
         ``model_group.size() // col_group.size()`` ways.
     row_group : dist.ProcessGroup
         Process group splitting the leading (row) dimensions of ``x``. The
-        bias is replicated over it.
+        bias is replicated over it, and so is the weight when ``model_group``
+        is ``col_group``.
     col_group : dist.ProcessGroup
         Process group splitting the last dimension of ``x`` and ``w``.
     bias : bool
@@ -159,11 +176,24 @@ class DistributedLinear(torch.nn.Module):
             else config
         )
 
-        if self.bias is not None:
-            parallel.mark_replicated(self.bias, self.row_group)
-            parallel.broadcast_replicas(self)
+        self._mark_row_replicas()
 
         self.XWT = _XWT.apply
+
+    def _mark_row_replicas(self) -> None:
+        """Mark the parameters replicated over ``row_group`` and broadcast them.
+
+        The bias always is. The weight is too when its rows are not split, i.e.
+        ``model_group`` is ``col_group``; without the mark its gradient would
+        differ between the row ranks.
+        """
+        params = [self.bias] if self.bias is not None else []
+        if self.model_group.size() // self.col_group.size() == 1:
+            params.insert(0, self.weight)
+        for p in params:
+            parallel.mark_replicated(p, self.row_group)
+        if params:
+            parallel.broadcast_replicas(self)
 
     def reset_parameters(self) -> None:
         """Initialize the parameters like ``torch.nn.Linear``.
@@ -297,14 +327,20 @@ class DistributedLinear(torch.nn.Module):
         Raises
         ------
         ValueError
-            If the row and column group sizes do not divide the feature counts.
+            If the row split or the column group size does not divide the
+            feature counts.
         """
         # The columns shard the input dimension of the weight and the (output-sized)
-        # bias; the rows shard the output dimension of the weight.
+        # bias; the rows shard the output dimension of the weight, unless the model
+        # group is the column group.
+        row_split = _row_split(process_mesh_dict, col_kw, model_kw)
         if model.in_features % process_mesh_dict[col_kw].size() != 0:
             raise ValueError("in_features is not divisible by process mesh columns")
-        if model.out_features % process_mesh_dict[row_kw].size() != 0:
-            raise ValueError("out_features is not divisible by process mesh rows")
+        if model.out_features % row_split != 0:
+            raise ValueError(
+                f"out_features is not divisible by the process mesh rows the "
+                f"weight is split over ({row_split})"
+            )
         if model.out_features % process_mesh_dict[col_kw].size() != 0:
             raise ValueError("out_features is not divisible by process mesh columns")
 
@@ -319,8 +355,8 @@ class DistributedLinear(torch.nn.Module):
         )
 
         # Map weights — clone so the original graph is detached
-        row_rank = process_mesh_dict[row_kw].rank()
-        row_shard = model.out_features // process_mesh_dict[row_kw].size()
+        row_rank = _row_rank(process_mesh_dict, row_kw, col_kw, model_kw)
+        row_shard = model.out_features // row_split
         col_rank = process_mesh_dict[col_kw].rank()
         col_shard = model.in_features // process_mesh_dict[col_kw].size()
 
@@ -409,9 +445,15 @@ class DistributedLinear(torch.nn.Module):
         global_bias : torch.Tensor | None
             Merged bias, if any.
         """
-        global_weights = gather_results(
-            self.weight, from_process_mesh, row_kw, col_kw, model_kw
-        )
+        if _row_split(from_process_mesh, col_kw, model_kw) == 1:
+            # Rows replicated over the row group: only the columns are sharded.
+            global_weights = gather_1d_results(
+                self.weight, from_process_mesh, dim=1, pm_key=col_kw
+            )
+        else:
+            global_weights = gather_results(
+                self.weight, from_process_mesh, row_kw, col_kw, model_kw
+            )
 
         global_bias = None
         if self.bias is not None:
@@ -457,20 +499,23 @@ class DistributedLinear(torch.nn.Module):
             device=self.device,
             comm=self.config.comm,
         )
-        # Find the local and global shapes
+        # Find the local and global shapes. The weight rows are split over the
+        # rows only if the model group is not the column group.
+        from_row_split = _row_split(from_process_mesh, pm_col_key, pm_model_key)
+        to_row_split = _row_split(to_process_mesh, pm_col_key, pm_model_key)
         from_weight_shape_local = self.weight.shape
         weight_shape_global = (
-            from_weight_shape_local[0] * from_process_mesh[pm_row_key].size(),
+            from_weight_shape_local[0] * from_row_split,
             from_weight_shape_local[1] * from_process_mesh[pm_col_key].size(),
         )
         to_weight_shape_local = (
-            weight_shape_global[0] // to_process_mesh[pm_row_key].size(),
+            weight_shape_global[0] // to_row_split,
             weight_shape_global[1] // to_process_mesh[pm_col_key].size(),
         )
-        if weight_shape_global[0] % to_process_mesh[pm_row_key].size() != 0:
+        if weight_shape_global[0] % to_row_split != 0:
             raise ValueError(
                 f"global weight shape[0] is {weight_shape_global[0]} which is not "
-                f"divisible by {to_process_mesh[pm_row_key].size()}"
+                f"divisible by {to_row_split}"
             )
         if weight_shape_global[1] % to_process_mesh[pm_col_key].size() != 0:
             raise ValueError(
@@ -498,7 +543,7 @@ class DistributedLinear(torch.nn.Module):
         )
 
         row_rank, row_shard_size = (
-            to_process_mesh[pm_row_key].rank(),
+            _row_rank(to_process_mesh, pm_row_key, pm_col_key, pm_model_key),
             to_weight_shape_local[0],
         )
         col_rank, col_shard_size = (
@@ -532,11 +577,9 @@ class DistributedLinear(torch.nn.Module):
         self.out_dim, self.in_dim = tuple(self.weight.shape)
         self.config = to_config
 
-        if self.bias is not None:
-            # ``self.bias`` is a fresh Parameter, so the __init__ mark is gone;
-            # re-mark it on the new row group and re-broadcast rank 0's slice.
-            parallel.mark_replicated(self.bias, self.row_group)
-            parallel.broadcast_replicas(self)
+        # The parameters are fresh, so the __init__ marks are gone; re-mark them
+        # on the new row group and re-broadcast rank 0's slice.
+        self._mark_row_replicas()
 
 
 class _DistributedMatMul(torch.nn.Module):
