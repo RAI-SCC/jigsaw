@@ -1,4 +1,4 @@
-"""Check that a kernel configuration fits the layer it is passed to."""
+"""Layer properties a convolution config selects its kernels from."""
 
 from typing import Any
 
@@ -41,32 +41,3 @@ def layer_key(
         "groups": groups,
         "channel group size": channel_group.size(),
     }
-
-
-def check_config(config: Any, expected: dict[str, Any]) -> None:
-    """Check that ``config`` was built for a layer with the properties ``expected``.
-
-    A mismatched config selects the wrong kernels; a missing bias, for example,
-    leaves the bias without a gradient.
-
-    Parameters
-    ----------
-    config : ConvNdConfig or ConvTransposeNdConfig
-        Config passed to the layer.
-    expected : dict[str, Any]
-        :func:`layer_key` of the layer.
-
-    Raises
-    ------
-    ValueError
-        If ``config`` was built for a layer with other properties.
-    """
-    diff = [
-        f"{k}={config._layer_key[k]!r} (layer: {v!r})"
-        for k, v in expected.items()
-        if config._layer_key[k] != v
-    ]
-    if diff:
-        raise ValueError(
-            "config was built for a different layer: " + ", ".join(diff) + "."
-        )

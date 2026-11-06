@@ -10,12 +10,13 @@ from torch.nn.parameter import Parameter
 
 from jigsaw import init, parallel
 from jigsaw._core.comm import CommOp
+from jigsaw._core.config import check_config
 from jigsaw._core.shard_repr import shard_repr
 from jigsaw.gather import gather_1d_results
 
 from .._common.arg_norm import _as_spatial_groups, _ntuple
 from .._common.channel_comm import resolve_conv_groups
-from .._common.config import check_config, layer_key
+from .._common.config import layer_key
 from .config import ConvTransposeNdConfig
 from .functional import _ConvTransposeNd
 
