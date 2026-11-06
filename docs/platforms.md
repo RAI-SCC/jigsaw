@@ -60,6 +60,15 @@
   RMS norm, pooling, padding, upsampling, flatten and pixel shuffle, embeddings,
   recurrent layers, or `torch.nn.MultiheadAttention` / `torch.nn.Transformer*`.
   `convert_to_jigsaw` raises `ValueError` on these unless `non_safe=True`.
+- **Linear and matmul.** `DistributedLinear.forward` supports an effective
+  `row x col` layout of 1x1, 1x2, 2x2 or 4x2 and raises `NotImplementedError`
+  otherwise (e.g. 4x1 or 1x4). The effective `row` is
+  `model_group.size() // col_group.size()`, not `row_group.size()`: with
+  `model_group` equal to `col_group` the weight is replicated over `row_group`, so
+  any row group size works. The `DistributedMatMul*` modules take a model group of
+  1, 2, 4 or 8 ranks, split as 1x1, 1x2, 2x2 or 4x2. `LinearConfig` raises
+  `ValueError` on any other size. `merge_weights` works on any mesh, and
+  `reshard_parameters` to any layout of a model group of 1, 2, 4 or 8 ranks.
 - **Convolution.** Every rank of a spatial group must hold an equally sized slice;
   uneven slices are not detected and fail in a collective. With
   `kernel_size == stride` each slice must be a multiple of the stride; otherwise the
