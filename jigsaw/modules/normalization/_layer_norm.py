@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 
 from jigsaw import parallel
+from jigsaw._core.params import replace_parameter
 from jigsaw._core.shard_repr import shard_repr
 from jigsaw.gather import gather_1d_results
 
@@ -298,6 +299,10 @@ class DistributedLayerNorm(torch.nn.Module):
 
         The module is rebound to the new mesh.
 
+        The weight and bias are replaced by new parameters that keep their
+        ``requires_grad``. An optimizer built before the reshard still holds
+        the old parameters and has to be rebuilt.
+
         Parameters
         ----------
         from_process_mesh : dict[str, dist.ProcessGroup]
@@ -328,14 +333,12 @@ class DistributedLayerNorm(torch.nn.Module):
                 global_p = gather_1d_results(
                     p, from_process_mesh, dim=0, pm_key=pm_col_key
                 )
-                setattr(
+                replace_parameter(
                     self,
                     name,
-                    torch.nn.Parameter(
-                        global_p[
-                            col_rank * new_local_dim : (col_rank + 1) * new_local_dim
-                        ].contiguous()
-                    ),
+                    global_p[
+                        col_rank * new_local_dim : (col_rank + 1) * new_local_dim
+                    ].contiguous(),
                 )
 
         self.local_dim = new_local_dim

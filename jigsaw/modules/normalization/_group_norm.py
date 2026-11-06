@@ -9,6 +9,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 from jigsaw import parallel
+from jigsaw._core.params import replace_parameter
 from jigsaw._core.shard_repr import shard_repr
 from jigsaw.gather import gather_1d_results
 
@@ -301,6 +302,10 @@ class DistributedGroupNorm(torch.nn.Module):
         ``to_process_mesh[pm_col_key]`` and its spatial dimensions to
         ``to_process_mesh[pm_row_key]``.
 
+        The affine parameters are replaced by new parameters that keep their
+        ``requires_grad``. An optimizer built before the reshard still holds
+        the old parameters and has to be rebuilt.
+
         Parameters
         ----------
         from_process_mesh : dict[str, dist.ProcessGroup]
@@ -336,15 +341,12 @@ class DistributedGroupNorm(torch.nn.Module):
                 global_p = gather_1d_results(
                     p, from_process_mesh, dim=0, pm_key=pm_col_key
                 )
-                setattr(
+                replace_parameter(
                     self,
                     name,
-                    torch.nn.Parameter(
-                        global_p[
-                            col_rank * new_num_channels : (col_rank + 1)
-                            * new_num_channels
-                        ].contiguous()
-                    ),
+                    global_p[
+                        col_rank * new_num_channels : (col_rank + 1) * new_num_channels
+                    ].contiguous(),
                 )
 
         self.num_local_channels = new_num_channels

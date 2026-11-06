@@ -11,6 +11,7 @@ from torch.nn.parameter import Parameter
 from jigsaw import init, parallel
 from jigsaw._core.comm import CommOp
 from jigsaw._core.config import check_config
+from jigsaw._core.params import replace_parameter
 from jigsaw._core.shard_repr import shard_repr
 from jigsaw.gather import gather_1d_results
 
@@ -484,6 +485,10 @@ class _DistributedConvNd(torch.nn.Module):
 
         The module is rebound to the new mesh.
 
+        The weight and bias are replaced by new parameters that keep their
+        ``requires_grad``. An optimizer built before the reshard still holds
+        the old parameters and has to be rebuilt.
+
         Parameters
         ----------
         from_process_mesh_dict : dict
@@ -533,10 +538,12 @@ class _DistributedConvNd(torch.nn.Module):
             to_process_mesh_dict[pm_col_key].rank(),
             to_weight_shape_local[0],
         )
-        self.weight = torch.nn.Parameter(
+        replace_parameter(
+            self,
+            "weight",
             global_weights[
                 col_rank * col_shard_size : (col_rank + 1) * col_shard_size, ...
-            ].contiguous()
+            ].contiguous(),
         )
         del global_weights
 
@@ -544,10 +551,12 @@ class _DistributedConvNd(torch.nn.Module):
             bias_shard_size = (
                 global_bias.shape[0] // to_process_mesh_dict[pm_col_key].size()
             )
-            self.bias = torch.nn.Parameter(
+            replace_parameter(
+                self,
+                "bias",
                 global_bias[
                     col_rank * bias_shard_size : (col_rank + 1) * bias_shard_size
-                ].contiguous()
+                ].contiguous(),
             )
             del global_bias
 
