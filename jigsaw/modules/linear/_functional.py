@@ -27,6 +27,17 @@ class LinearCtx(Protocol):
     w_shape: torch.Size
 
 
+def _contiguous(t: torch.Tensor | None) -> torch.Tensor | None:
+    """Return ``t`` contiguous, or ``None``.
+
+    The kernels send their operands with ``isend`` / ``batch_isend_irecv`` /
+    ``all_to_all``, which reject strided tensors. Autograd passes strided ones:
+    ``out.sum().backward()`` gives a stride-0 ``grad_output``, and a matmul
+    operand can be a transposed view. A no-op for a contiguous tensor.
+    """
+    return None if t is None else t.contiguous()
+
+
 def _setup_linear_ctx(ctx: torch.autograd.function.FunctionCtx, inputs: Any) -> None:
     """Save the tensors and metadata of :class:`_XWT`, :class:`_XW` and :class:`_XTW`.
 
@@ -144,6 +155,7 @@ class _XWT(torch.autograd.Function):
         # op-level policy. ``_XWT`` casts x/w here (its kernel does not); casting
         # the bias too keeps the bias add from promoting the output back to fp32.
         x, w, b = cast_to_autocast_dtype(x, w, b)
+        x, w = x.contiguous(), w.contiguous()
         xwt = config.mm_kernels[0](x, w, local_rank, device, model_group)
         if b is not None:
             xwt = xwt.add(b)
@@ -195,9 +207,10 @@ class _XWT(torch.autograd.Function):
 
         # Under autocast, grad_output comes in the autocast dtype; run the
         # backward in the weight's dtype so grad_weight matches the parameter.
-        grad_output = grad_output.to(ctx.w_dtype)
+        grad_output = grad_output.to(ctx.w_dtype).contiguous()
         if input is not None:
-            input = input.to(ctx.w_dtype)
+            input = input.to(ctx.w_dtype).contiguous()
+        weight = _contiguous(weight)
         # needs_input_grad is the same on every rank of the model group (all
         # ranks freeze the same parameters), so every rank skips the same
         # collectives.
@@ -269,6 +282,7 @@ class _XW(torch.autograd.Function):
         # Cast the bias to the autocast dtype (the kernel casts x/w itself) so
         # the bias add does not promote the output back to fp32 under autocast.
         (b,) = cast_to_autocast_dtype(b)
+        x, w = x.contiguous(), w.contiguous()
         xw = config.mm_kernels[1](x, w, local_rank, device, model_group)
         if b is not None:
             xw = xw.add(b)
@@ -316,6 +330,8 @@ class _XW(torch.autograd.Function):
         )
         mm_kernels = ctx.config.mm_kernels
 
+        grad_output = grad_output.contiguous()
+        input, weight = _contiguous(input), _contiguous(weight)
         # Same skip on every rank of the model group; see _XWT.backward.
         grad_input = grad_weight = grad_b = None
         if need_x:
@@ -380,6 +396,7 @@ class _XTW(torch.autograd.Function):
         # Cast the bias to the autocast dtype (the kernel casts x/w itself) so
         # the bias add does not promote the output back to fp32 under autocast.
         (b,) = cast_to_autocast_dtype(b)
+        x, w = x.contiguous(), w.contiguous()
         xtw = config.mm_kernels[2](x, w, local_rank, device, model_group)
         if b is not None:
             xtw = xtw.add(b)
@@ -427,6 +444,8 @@ class _XTW(torch.autograd.Function):
         )
         mm_kernels = ctx.config.mm_kernels
 
+        grad_output = grad_output.contiguous()
+        input, weight = _contiguous(input), _contiguous(weight)
         # Same skip on every rank of the model group; see _XWT.backward.
         grad_input = grad_weight = grad_b = None
         if need_x:

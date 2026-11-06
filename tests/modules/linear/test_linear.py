@@ -1,4 +1,5 @@
 import warnings
+from typing import Any
 
 import pytest
 import torch
@@ -35,16 +36,21 @@ def _distributed_from(
     device: torch.device,
     model_group: dist.ProcessGroup | None = None,
     param_rules: dict[str, ShardSpec] = _PARAM_RULES,
+    comm: str | None = None,
 ) -> linear.DistributedLinear:
     """Build a ``DistributedLinear`` holding this rank's shards of ``serial``."""
+    group = mesh["model"] if model_group is None else model_group
     layer = linear.DistributedLinear(
         serial.in_features,
         serial.out_features,
         device=device,
-        model_group=mesh["model"] if model_group is None else model_group,
+        model_group=group,
         col_group=mesh["col"],
         row_group=mesh["row"],
         bias=serial.bias is not None,
+        config=None
+        if comm is None
+        else linear.LinearConfig(group, device=device, comm=comm),
     )
     with torch.no_grad():
         for name, p in layer.named_parameters():
@@ -65,6 +71,8 @@ def _check_linear(
     model_group: dist.ProcessGroup | None = None,
     data_spec: ShardSpec = _DATA_SPEC,
     param_rules: dict[str, ShardSpec] = _PARAM_RULES,
+    comm: str | None = None,
+    **parity_kwargs: Any,
 ) -> None:
     """Forward and backward parity of a ``DistributedLinear`` against ``nn.Linear``."""
     torch.manual_seed(0)  # identical serial reference on every rank
@@ -73,7 +81,7 @@ def _check_linear(
     check_parity(
         serial_module=serial,
         build_distributed=lambda module: _distributed_from(
-            module, mesh, device, model_group, param_rules
+            module, mesh, device, model_group, param_rules, comm
         ),
         input_shape=input_shape,
         input_spec=data_spec,
@@ -81,6 +89,7 @@ def _check_linear(
         param_rules={k: v for k, v in param_rules.items() if bias or k != "bias"},
         process_mesh_dict=mesh,
         device=device,
+        **parity_kwargs,
     )
 
 
@@ -133,6 +142,79 @@ class TestParity:
             model_group=mesh["col"],
             data_spec=ShardSpec(row=0, col=2),
             param_rules={"weight": ShardSpec(col=1), "bias": ShardSpec(col=0)},
+        )
+
+
+class TestSumBackward:
+    """``out.sum().backward()`` hands the kernels an expanded, stride-0 gradient.
+
+    The gradient-path ids name which of input and weight need a gradient, which
+    picks the backward kernel: a frozen first layer or backbone takes the
+    weight-only or input-only kernel instead of the fused one.
+    """
+
+    _MESHES = [
+        pytest.param("process_mesh_dict_1x2", marks=pytest.mark.dist(2), id="1x2"),
+        pytest.param("process_mesh_dict_2x1x2", marks=pytest.mark.dist(4), id="2x1x2"),
+        pytest.param("process_mesh_dict_2x2", marks=pytest.mark.dist(4), id="2x2"),
+        pytest.param("process_mesh_dict_4x2", marks=pytest.mark.dist(8), id="4x2"),
+    ]
+    _GRAD_PATHS = {
+        "weight_only": {"input_requires_grad": False},
+        "input_only": {"frozen": ("weight", "bias")},
+        "both": {},
+    }
+
+    @pytest.mark.parametrize("comm", ["all_to_all", "isend", "batch_isend_irecv"])
+    @pytest.mark.parametrize("path", _GRAD_PATHS)
+    @pytest.mark.parametrize("mesh_name", _MESHES)
+    def test_matches_torch(
+        self,
+        device: torch.device,
+        request: pytest.FixtureRequest,
+        mesh_name: str,
+        path: str,
+        comm: str,
+    ) -> None:
+        """Forward and backward parity with a summed loss."""
+        if comm == "all_to_all" and device.type != "cuda":
+            pytest.skip("all_to_all needs CUDA")
+        mesh = request.getfixturevalue(mesh_name)
+        _check_linear(
+            mesh,
+            device,
+            8,
+            8,
+            (2, 4, 8),
+            bias=True,
+            comm=comm,
+            sum_backward=True,
+            **self._GRAD_PATHS[path],
+        )
+
+    @pytest.mark.dist(4)
+    @pytest.mark.parametrize("comm", ["all_to_all", "isend", "batch_isend_irecv"])
+    @pytest.mark.parametrize("path", _GRAD_PATHS)
+    def test_weight_replicated_over_row(
+        self, device: torch.device, process_mesh_dict_2x2: dict, path: str, comm: str
+    ) -> None:
+        """Attention's ``qkv`` / ``head_concat`` layout: a 2-way layer on 4 ranks."""
+        if comm == "all_to_all" and device.type != "cuda":
+            pytest.skip("all_to_all needs CUDA")
+        mesh = process_mesh_dict_2x2
+        _check_linear(
+            mesh,
+            device,
+            8,
+            8,
+            (2, 4, 8),
+            bias=True,
+            model_group=mesh["col"],
+            data_spec=ShardSpec(row=0, col=2),
+            param_rules={"weight": ShardSpec(col=1), "bias": ShardSpec(col=0)},
+            comm=comm,
+            sum_backward=True,
+            **self._GRAD_PATHS[path],
         )
 
 
