@@ -28,6 +28,14 @@ pytestmark = [pytest.mark.dist_required]
 # over col and replicated over row.
 _DATA_SPEC = ShardSpec(row=1, col=2)
 _PARAM_RULES = {"weight": ShardSpec(row=0, col=1), "bias": ShardSpec(col=0)}
+# ``model_group == col_group``: the batch is split over row, where the weight and
+# bias are replicated (attention's ``qkv`` / ``head_concat`` layout).
+_COL_ONLY_DATA_SPEC = ShardSpec(row=0, col=2)
+_COL_ONLY_PARAM_RULES = {"weight": ShardSpec(col=1), "bias": ShardSpec(col=0)}
+_ROW_MESHES = [
+    pytest.param("process_mesh_dict_2x2", marks=pytest.mark.dist(4), id="2x2"),
+    pytest.param("process_mesh_dict_4x2", marks=pytest.mark.dist(8), id="4x2"),
+]
 
 
 def _distributed_from(
@@ -55,9 +63,6 @@ def _distributed_from(
     with torch.no_grad():
         for name, p in layer.named_parameters():
             p.copy_(split_tensor(getattr(serial, name), param_rules[name], mesh))
-    if model_group is not None:
-        # row is outside the model group, so the weight is a row replica.
-        parallel.mark_replicated(layer.weight, mesh["row"])
     return layer
 
 
@@ -255,6 +260,135 @@ class TestTraining:
                 device,
                 mesh["model"],
             )
+
+    @pytest.mark.parametrize("mesh_name", _ROW_MESHES)
+    def test_row_replicas_stay_in_sync(
+        self, device: torch.device, request: pytest.FixtureRequest, mesh_name: str
+    ) -> None:
+        """With ``model_group == col_group``, different data per row rank."""
+        mesh = request.getfixturevalue(mesh_name)
+        torch.manual_seed(0)
+        serial = torch.nn.Linear(8, 8, device=device)
+        layer = _distributed_from(
+            serial, mesh, device, mesh["col"], _COL_ONLY_PARAM_RULES
+        )
+        opt = torch.optim.Adam(layer.parameters())
+        ref_opt = torch.optim.Adam(serial.parameters())
+        gen = torch.Generator(device=device).manual_seed(1)
+
+        for _ in range(5):
+            x = torch.randn(4, 3, 8, device=device, generator=gen)
+            g = torch.randn(4, 3, 8, device=device, generator=gen)
+            opt.zero_grad()
+            ref_opt.zero_grad()
+            serial(x).backward(g)
+            layer(split_tensor(x, _COL_ONLY_DATA_SPEC, mesh)).backward(
+                split_tensor(g, _COL_ONLY_DATA_SPEC, mesh)
+            )
+            opt.step()
+            ref_opt.step()
+
+        # ``gather_tensor`` also fails if the row replicas differ.
+        for name, p in layer.named_parameters():
+            assert_close(
+                f"{name} after training",
+                gather_tensor(
+                    p.detach(), _COL_ONLY_PARAM_RULES[name], mesh, device, name
+                ),
+                getattr(serial, name).detach(),
+                1e-5,
+                1e-5,
+                device,
+                mesh["model"],
+            )
+
+
+class TestColumnOnlyLayout:
+    """Convert, merge and reshard with ``model_group == col_group``."""
+
+    @staticmethod
+    def _replica_ranks(p: torch.Tensor) -> list[list[int]]:
+        return [dist.get_process_group_ranks(g) for g in parallel.replica_groups(p)]
+
+    def _check_merged(
+        self,
+        layer: linear.DistributedLinear,
+        serial: torch.nn.Linear,
+        mesh: dict,
+        model_kw: str,
+        device: torch.device,
+    ) -> None:
+        group = mesh["model"]
+        weight, bias = layer.merge_weights(mesh, model_kw=model_kw)
+        assert_close("merged weight", weight, serial.weight, 0.0, 0.0, device, group)
+        assert_close("merged bias", bias, serial.bias, 0.0, 0.0, device, group)
+        torch_layer = layer.convert_to_torch(mesh, model_kw=model_kw)
+        assert_close(
+            "converted weight",
+            torch_layer.weight,
+            serial.weight,
+            0.0,
+            0.0,
+            device,
+            group,
+        )
+
+    @pytest.mark.parametrize("mesh_name", _ROW_MESHES)
+    def test_round_trip(
+        self, device: torch.device, request: pytest.FixtureRequest, mesh_name: str
+    ) -> None:
+        """Convert, merge, reshard to the row x col layout and back."""
+        mesh = request.getfixturevalue(mesh_name)
+        col_mesh = {**mesh, "model": mesh["col"]}
+        row_ranks = dist.get_process_group_ranks(mesh["row"])
+        torch.manual_seed(0)
+        serial = torch.nn.Linear(8, 8, device=device).requires_grad_(False)
+
+        layer = linear.DistributedLinear.convert_to_jigsaw(
+            serial, mesh, device, model_kw="col"
+        )
+        for name, p in layer.named_parameters():
+            assert_close(
+                f"converted {name}",
+                p,
+                split_tensor(getattr(serial, name), _COL_ONLY_PARAM_RULES[name], mesh),
+                0.0,
+                0.0,
+                device,
+                mesh["model"],
+            )
+        marked = self._replica_ranks(layer.weight) == [row_ranks]
+        self._check_merged(layer, serial, mesh, "col", device)
+
+        layer.reshard_parameters(col_mesh, mesh)
+        unmarked = self._replica_ranks(layer.weight) == []
+        self._check_merged(layer, serial, mesh, "model", device)
+        x = torch.randn(4, 4, 8, device=device)
+        assert_close(
+            "output on row x col",
+            layer(split_tensor(x, _DATA_SPEC, mesh)),
+            split_tensor(serial(x), _DATA_SPEC, mesh),
+            1e-5,
+            1e-5,
+            device,
+            mesh["model"],
+        )
+
+        layer.reshard_parameters(mesh, col_mesh)
+        remarked = self._replica_ranks(layer.weight) == [row_ranks]
+        self._check_merged(layer, serial, mesh, "col", device)
+        assert_close(
+            "output on col only",
+            layer(split_tensor(x, _COL_ONLY_DATA_SPEC, mesh)),
+            split_tensor(serial(x), _COL_ONLY_DATA_SPEC, mesh),
+            1e-5,
+            1e-5,
+            device,
+            mesh["model"],
+        )
+        assert all_ranks_ok(marked and unmarked and remarked, device, mesh["model"]), (
+            "weight replica mark over row does not follow the layout"
+        )
 
 
 class TestBiasInit:

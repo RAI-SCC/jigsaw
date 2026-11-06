@@ -965,6 +965,9 @@ class DistributedAttention(torch.nn.Module):
             out_bias=head_concat_bias is not None,
         )
 
+        # Gathered here instead of with ``DistributedLinear.merge_weights``: the
+        # qkv rows need reordering by head, and ``process_mesh_dict[model_kw]``
+        # is usually the row x col group, not the channel group of the projections.
         # QKV: the columns are sharded over the channel group. Row block ``i`` of
         # the gathered weight holds the ``[3, heads // C, head_dim]`` rows of head
         # shard ``i``; move the shard axis back inside the q/k/v axis.
