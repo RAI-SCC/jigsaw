@@ -219,7 +219,7 @@ def convert_to_jigsaw(
     convert_layer_norm: bool = True,
     on_unrecognized: Literal["warn", "raise", "ignore"] = "warn",
     non_safe: bool = False,
-    **kwargs: bool,
+    **kwargs: Any,
 ) -> torch.nn.Module | Any:
     """Convert a PyTorch model into a jigsaw distributed model in place.
 
@@ -323,7 +323,7 @@ def _convert(
     col_kw: str,
     model_kw: str,
     convert_layer_norm: bool,
-    **kwargs: bool,
+    **kwargs: Any,
 ) -> torch.nn.Module | Any:
     """Recursive worker of :func:`convert_to_jigsaw`, without the module check."""
     # 1. Container match: hand off entirely, do NOT recurse afterward

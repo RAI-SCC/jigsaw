@@ -5,6 +5,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
+import jigsaw.convert as convert
 import jigsaw.modules.linear as linear
 import jigsaw.parallel as parallel
 from jigsaw.gather import (
@@ -569,3 +570,106 @@ class TestComm:
 
         linlayer.reshard_parameters(mesh, mesh)
         assert all_ranks_ok(linlayer.config.comm == comm, device, model_group)
+
+
+_CONVERT_MESHES = pytest.mark.parametrize(
+    "mesh",
+    [
+        dict(row=1, col=2),
+        dict(row=2, col=2),
+        dict(row=4, col=2),
+    ],
+    indirect=True,
+)
+
+
+class TestConvert:
+    """Options of ``convert_to_jigsaw`` reach the converted layer."""
+
+    @_CONVERT_MESHES
+    @pytest.mark.parametrize(
+        ("dtype", "tol"),
+        [
+            pytest.param(torch.bfloat16, 2e-2, id="bf16"),
+            pytest.param(torch.float64, 1e-12, id="fp64"),
+        ],
+    )
+    def test_round_trip_keeps_dtype(
+        self, device: torch.device, mesh: Any, dtype: torch.dtype, tol: float
+    ) -> None:
+        """Convert and convert back keep the source dtype and values."""
+        group = mesh["model"]
+        torch.manual_seed(0)
+        serial = torch.nn.Linear(8, 8, device=device, dtype=dtype).requires_grad_(False)
+
+        layer = linear.DistributedLinear.convert_to_jigsaw(serial, mesh, device)
+        converted = layer.dtype == dtype and all(
+            p.dtype == dtype for p in layer.parameters()
+        )
+        x = torch.randn(4, 4, 8, device=device, dtype=dtype)
+        out = layer(split_tensor(x, _DATA_SPEC, mesh))
+        assert_close(
+            "output",
+            out,
+            split_tensor(serial(x), _DATA_SPEC, mesh),
+            tol,
+            tol,
+            device,
+            group,
+        )
+
+        back = layer.convert_to_torch(mesh)
+        restored = out.dtype == dtype and all(
+            p.dtype == dtype for p in back.parameters()
+        )
+        assert_close("weight", back.weight, serial.weight, 0.0, 0.0, device, group)
+        assert_close("bias", back.bias, serial.bias, 0.0, 0.0, device, group)
+        assert all_ranks_ok(converted and restored, device, group), (
+            f"dtype not kept: layer {layer.dtype}, output {out.dtype}, "
+            f"converted back {back.weight.dtype}, expected {dtype}"
+        )
+
+    @pytest.mark.parametrize("mesh", [dict(row=2, col=2)], indirect=True)
+    def test_comm_reaches_layers(self, device: torch.device, mesh: Any) -> None:
+        """``comm`` selects the transport, also through the model converter."""
+        group = mesh["model"]
+        # Not the default transport on either device.
+        comm = "isend" if device.type == "cpu" else "batch_isend_irecv"
+        torch.manual_seed(0)
+        serial = torch.nn.Linear(8, 8, device=device).requires_grad_(False)
+
+        layer = linear.DistributedLinear.convert_to_jigsaw(
+            serial, mesh, device, comm=comm
+        )
+        x = torch.randn(4, 4, 8, device=device)
+        assert_close(
+            "output",
+            layer(split_tensor(x, _DATA_SPEC, mesh)),
+            split_tensor(serial(x), _DATA_SPEC, mesh),
+            1e-5,
+            1e-5,
+            device,
+            group,
+        )
+
+        model = torch.nn.ModuleDict(
+            {"proj": torch.nn.Linear(8, 8, device=device), "mm": linear.MatMulXWT()}
+        )
+        model = convert.convert_to_jigsaw(model, mesh, device, comm=comm)
+        comms = [layer.config.comm, model["proj"].config.comm, model["mm"].config.comm]
+        assert all_ranks_ok(comms == [comm] * 3, device, group), (
+            f"transports {comms}, expected {comm}"
+        )
+
+    @pytest.mark.parametrize("mesh", [dict(row=2, col=2)], indirect=True)
+    def test_unknown_comm_raises(self, device: torch.device, mesh: Any) -> None:
+        """An unknown ``comm`` raises on every rank before any communication."""
+        serial = torch.nn.Linear(8, 8, device=device)
+        with pytest.raises(ValueError, match="comm must be one of"):
+            linear.DistributedLinear.convert_to_jigsaw(
+                serial, mesh, device, comm="carrier_pigeon"
+            )
+        with pytest.raises(ValueError, match="comm must be one of"):
+            linear.DistributedMatMulXWT.convert_to_jigsaw(
+                linear.MatMulXWT(), mesh, device, comm="carrier_pigeon"
+            )

@@ -9,6 +9,7 @@ import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
 from jigsaw import init, parallel
+from jigsaw._core.comm import CommOp
 from jigsaw._core.config import check_config
 from jigsaw._core.shard_repr import shard_repr
 from jigsaw.gather import gather_1d_results, gather_results
@@ -297,9 +298,12 @@ class DistributedLinear(torch.nn.Module):
         row_kw: str = "row",
         col_kw: str = "col",
         model_kw: str = "model",
+        comm: CommOp | str = CommOp.AUTO,
         **kwargs: Any,
     ) -> "DistributedLinear":
         """Convert a ``torch.nn.Linear`` to a :class:`DistributedLinear`.
+
+        The converted layer keeps the dtype of ``model``.
 
         Parameters
         ----------
@@ -315,6 +319,8 @@ class DistributedLinear(torch.nn.Module):
             Key of the column process group.
         model_kw : str
             Key of the model process group.
+        comm : CommOp or str
+            Transport of the kernels, see :class:`LinearConfig`.
         **kwargs : Any
             Unused. Accepts the options of the other converters, which
             :func:`jigsaw.convert.convert_to_jigsaw` passes to every layer.
@@ -328,7 +334,7 @@ class DistributedLinear(torch.nn.Module):
         ------
         ValueError
             If the row split or the column group size does not divide the
-            feature counts.
+            feature counts, or ``comm`` is unknown or unavailable on ``device``.
         """
         # The columns shard the input dimension of the weight and the (output-sized)
         # bias; the rows shard the output dimension of the weight, unless the model
@@ -352,6 +358,10 @@ class DistributedLinear(torch.nn.Module):
             model_group=process_mesh_dict[model_kw],
             row_group=process_mesh_dict[row_kw],
             col_group=process_mesh_dict[col_kw],
+            config=LinearConfig(
+                process_mesh_dict[model_kw], linear_layer=True, device=device, comm=comm
+            ),
+            dtype=model.weight.dtype,
         )
 
         # Map weights — clone so the original graph is detached
@@ -688,6 +698,7 @@ class _DistributedMatMul(torch.nn.Module):
         row_kw: str = "row",
         col_kw: str = "col",
         model_kw: str = "model",
+        comm: CommOp | str = CommOp.AUTO,
         **kwargs: Any,
     ) -> "_DistributedMatMul":
         """Build a distributed matmul module from a process mesh.
@@ -707,6 +718,8 @@ class _DistributedMatMul(torch.nn.Module):
             Key of the column process group.
         model_kw : str
             Key of the model process group.
+        comm : CommOp or str
+            Transport of the kernels, see :class:`LinearConfig`.
         **kwargs : Any
             Unused.
 
@@ -714,10 +727,19 @@ class _DistributedMatMul(torch.nn.Module):
         -------
         _DistributedMatMul
             Distributed matmul module.
+
+        Raises
+        ------
+        ValueError
+            If ``comm`` is unknown or unavailable on ``device``.
         """
+        model_group = process_mesh_dict[model_kw]
         return cls(
             device=device,
-            model_group=process_mesh_dict[model_kw],
+            model_group=model_group,
+            config=LinearConfig(
+                model_group, linear_layer=False, device=device, comm=comm
+            ),
         )
 
 
