@@ -477,6 +477,7 @@ def _check_parity(
     | None = None,
     input_requires_grad: bool = True,
     frozen: Collection[str] = (),
+    sum_backward: bool = False,
 ) -> None:
     """
     Compare a distributed module against its serial counterpart, forward and backward.
@@ -522,6 +523,10 @@ def _check_parity(
     frozen: Collection[str]
         Parameters frozen (``requires_grad=False``) in both modules; their
         distributed gradient must stay ``None``.
+    sum_backward: bool
+        Backpropagate ``output.sum()`` instead of a random gradient. Autograd then
+        hands the layer an expanded, stride-0 ``grad_output``, as a scalar loss
+        does in training.
     """
     grad_atol = atol if grad_atol is None else grad_atol
     grad_rtol = rtol if grad_rtol is None else grad_rtol
@@ -541,8 +546,11 @@ def _check_parity(
         if serial_forward is None
         else serial_forward(serial_module, x_global)
     )
-    g_global = torch.randn_like(y_ref)
-    y_ref.backward(g_global)
+    g_global = torch.ones_like(y_ref) if sum_backward else torch.randn_like(y_ref)
+    if sum_backward:
+        y_ref.sum().backward()
+    else:
+        y_ref.backward(g_global)
 
     assert (x_global.grad is not None) == input_requires_grad
     ref_output = y_ref.detach().clone()
@@ -570,7 +578,12 @@ def _check_parity(
     ).clone()
 
     y_local = dist_module(x_local)
-    y_local.backward(g_local)
+    if sum_backward:
+        # Each rank holds a disjoint tile of the output, so the local sums add up
+        # to the global one.
+        y_local.sum().backward()
+    else:
+        y_local.backward(g_local)
 
     # Drain the gradient collectives before reading .grad.
     sync_device(device)
