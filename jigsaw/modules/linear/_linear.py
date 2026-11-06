@@ -9,10 +9,11 @@ import torch.distributed as dist
 from torch.nn.parameter import Parameter
 
 from jigsaw import init, parallel
+from jigsaw._core.config import check_config
 from jigsaw._core.shard_repr import shard_repr
 from jigsaw.gather import gather_1d_results, gather_results
 
-from ._config import LinearConfig
+from ._config import LinearConfig, layer_key
 from ._functional import _XTW, _XW, _XWT
 
 # Effective ``(model_group.size() // col_group.size(), col_group.size())``
@@ -67,7 +68,9 @@ class DistributedLinear(torch.nn.Module):
     Raises
     ------
     ValueError
-        If the group sizes do not divide ``in_dim`` and ``out_dim``.
+        If the group sizes do not divide ``in_dim`` and ``out_dim``, or if
+        ``config`` was built for another model group size or for a matmul
+        module.
 
     Warns
     -----
@@ -112,6 +115,8 @@ class DistributedLinear(torch.nn.Module):
                 f"out_dim={out_dim} is not divisible by the column group size "
                 f"{col_group.size()}, which shards the bias"
             )
+        if config is not None:
+            check_config(config, layer_key(model_group, linear_layer=True))
 
         # Global (unsharded) weight/bias shape, torch.nn.Linear layout ``(out,
         # in)``. ``reset_parameters`` keys the init distribution off these, so a
@@ -441,8 +446,17 @@ class DistributedLinear(torch.nn.Module):
         ------
         ValueError
             If the target row and column group sizes do not divide the global
-            weight and bias shapes.
+            weight and bias shapes, or if no kernels exist for the target model
+            group size.
         """
+        # Built first, so an unsupported target model group size raises before
+        # ``merge_weights`` communicates and before the module changes.
+        to_config = LinearConfig(
+            to_process_mesh[pm_model_key],
+            linear_layer=True,
+            device=self.device,
+            comm=self.config.comm,
+        )
         # Find the local and global shapes
         from_weight_shape_local = self.weight.shape
         weight_shape_global = (
@@ -516,12 +530,7 @@ class DistributedLinear(torch.nn.Module):
         self.col_group = to_process_mesh[pm_col_key]
         self.model_group = to_process_mesh[pm_model_key]
         self.out_dim, self.in_dim = tuple(self.weight.shape)
-        self.config = LinearConfig(
-            self.model_group,
-            linear_layer=True,
-            device=self.device,
-            comm=self.config.comm,
-        )
+        self.config = to_config
 
         if self.bias is not None:
             # ``self.bias`` is a fresh Parameter, so the __init__ mark is gone;
@@ -548,6 +557,12 @@ class _DistributedMatMul(torch.nn.Module):
     local_rank : int, optional
         Deprecated and ignored. The rank is taken from ``model_group``.
 
+    Raises
+    ------
+    ValueError
+        If ``config`` was built for another model group size or for a linear
+        layer.
+
     Warns
     -----
     DeprecationWarning
@@ -570,6 +585,8 @@ class _DistributedMatMul(torch.nn.Module):
         _warn_local_rank(local_rank, type(self).__name__)
         self.device = device
         self.model_group = model_group
+        if config is not None:
+            check_config(config, layer_key(model_group, linear_layer=False))
         self.config = (
             config
             if config is not None

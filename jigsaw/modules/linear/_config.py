@@ -1,6 +1,7 @@
 """Kernel selection for the distributed linear layers."""
 
 from collections.abc import Callable
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -61,6 +62,31 @@ class LinearConfig(VmapConfig):
         self.comm = resolve_comm_op(comm, device)
         size = 1 if model_group is None else model_group.size()
         self.mm_kernels = _select_mm_kernels(size, self.comm)
+        self._layer_key = layer_key(model_group, linear_layer)
+
+
+def layer_key(
+    model_group: dist.ProcessGroup | None, linear_layer: bool
+) -> dict[str, Any]:
+    """Return the layer properties a linear config selects its kernels from.
+
+    Parameters
+    ----------
+    model_group : dist.ProcessGroup or None
+        Process group of one model-parallel instance. ``None`` means a
+        single process.
+    linear_layer : bool
+        Whether the operation belongs to a linear layer.
+
+    Returns
+    -------
+    dict[str, Any]
+        Model group size and ``linear_layer``.
+    """
+    return {
+        "model group size": 1 if model_group is None else model_group.size(),
+        "linear_layer": linear_layer,
+    }
 
 
 def _select_mm_kernels(model_group_size: int, comm: CommOp) -> list[Callable]:
